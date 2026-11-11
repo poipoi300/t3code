@@ -91,6 +91,12 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+alt+shift+t", command: "themeEditor.toggle" },
   { key: "mod+s", command: "composer.stash", when: "!terminalFocus" },
   { key: "mod+shift+enter", command: "thread.steerQueuedMessage", when: "!terminalFocus" },
+  // In the composer, thread.editQueuedMessage sees Alt+Up first and passes it on unless the
+  // caret is at the very start.
+  { key: "alt+arrowup", command: "text.moveLineUp", when: "multilineTextFocus" },
+  { key: "alt+arrowdown", command: "text.moveLineDown", when: "multilineTextFocus" },
+  { key: "alt+shift+arrowup", command: "text.duplicateLineUp", when: "multilineTextFocus" },
+  { key: "alt+shift+arrowdown", command: "text.duplicateLineDown", when: "multilineTextFocus" },
   { key: "alt+arrowup", command: "thread.editQueuedMessage", when: "composerFocus" },
   { key: "mod+enter", command: "composer.sendAlternate", when: "composerFocus && turnRunning" },
   {

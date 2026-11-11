@@ -784,6 +784,24 @@ describe("composer and pull request shortcuts", () => {
       "terminal.splitVertical",
     );
   });
+  it("lets the chat edit a queued message with Alt+Up and line moves take it elsewhere", () => {
+    // Existing configs get the line rules prepended, ahead of their saved queue rule.
+    const savedBeforeLineRules = mergeWithDefaultKeybindings(
+      DEFAULT_RESOLVED_KEYBINDINGS.filter((binding) => !binding.command.startsWith("text.")),
+    );
+    const altUp = event({ key: "ArrowUp", altKey: true });
+    for (const keybindings of [DEFAULT_RESOLVED_KEYBINDINGS, savedBeforeLineRules]) {
+      // The chat's scope declines unless the caret is at the start, so the key reaches the dispatcher.
+      assert.strictEqual(
+        resolveShortcutCommand(altUp, keybindings, { context: { composerFocus: true } }),
+        "thread.editQueuedMessage",
+      );
+      assert.strictEqual(
+        resolveShortcutCommand(altUp, keybindings, { context: { multilineTextFocus: true } }),
+        "text.moveLineUp",
+      );
+    }
+  });
   it("fills missing number shortcuts without replacing the saved URL binding", () => {
     const olderServerBindings = DEFAULT_RESOLVED_KEYBINDINGS.filter(
       (binding) =>

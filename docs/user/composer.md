@@ -80,7 +80,9 @@ action for your draft, move focus outside the composer to steer the queued messa
 `thread.steerQueuedMessage` in **Settings → Keybindings** to use another shortcut.
 
 Press `Option+Up` on macOS or `Alt+Up` on Windows and Linux with the cursor at the
-start of the composer to edit the most recently queued message. Change
+start of the composer to edit the most recently queued message. Elsewhere in the
+composer, the same keys move the current line up; see
+[Keybindings](./keybindings.md#commands-with-special-behavior). Change
 `thread.editQueuedMessage` to use another shortcut.
 
 Mobile has the same choice under **Settings → Chat**. While a turn is

@@ -12,10 +12,17 @@ export function markAsClipboardEdit(tr: Transaction, event: "paste" | "cut"): Tr
   return tr.setMeta("uiEvent", event);
 }
 
+/** Line moves and duplicates stay their own undo step, even when typing follows at once. */
+export function markAsLineEdit(tr: Transaction): Transaction {
+  return tr.setMeta("uiEvent", "lineEdit");
+}
+
 function changeKindOf(tr: Transaction): ComposerChangeKind | null {
   if (!tr.docChanged) return null;
   const uiEvent = tr.getMeta("uiEvent");
-  if (uiEvent === "paste" || uiEvent === "drop" || uiEvent === "cut") return "other";
+  if (uiEvent === "paste" || uiEvent === "drop" || uiEvent === "cut" || uiEvent === "lineEdit") {
+    return "other";
+  }
   // IME input replaces its own range on each keystroke; it is still typing.
   if (tr.getMeta("composition") != null) return "insert";
   let kind: ComposerChangeKind | null = null;

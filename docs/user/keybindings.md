@@ -125,13 +125,15 @@ Join modifiers and a key with `+`, such as `mod+shift+d` or `ctrl+l`.
 
 Available context keys are `terminalFocus`, `terminalOpen`, `previewFocus`,
 `previewOpen`, `rightPanelOpen`, `modelPickerOpen`, `usagePageOpen`, `composerFocus`,
-`draftThreadRoute`, `turnRunning`, `editableFocus`, `isWeb`, and `isDesktop`.
+`draftThreadRoute`, `turnRunning`, `editableFocus`, `multilineTextFocus`, `isWeb`, and
+`isDesktop`.
 `rightPanelOpen` applies only to `rightPanel.new` and is true while the right panel is
 open; the default `mod+t` uses it to open the panel's new-tab menu.
 `draftThreadRoute` is true on a draft thread, including a restored draft, until it is first sent.
 `editableFocus` is true while a text field, the composer, or another editor has
-the keyboard. `isWeb` is true in a browser tab. `isDesktop` is true in the
-desktop app. Unknown keys evaluate to `false`.
+the keyboard. `multilineTextFocus` is true in a field that holds several lines, such as
+the composer or a comment box, but not in a terminal. `isWeb` is true in a browser tab.
+`isDesktop` is true in the desktop app. Unknown keys evaluate to `false`.
 
 `mod+1` through `mod+9` jump to the first nine threads, and to models while the
 model picker is open. The thread jumps do not run while the model picker is open.
@@ -174,6 +176,15 @@ actions of the same kind undo together. The notice remains available for five
 seconds after the latest action. Right after an action, the shortcut works even
 in a text field such as the composer. Once you type or press another key, the
 field gets its own undo back. Terminals always keep their native shortcut.
+
+`text.moveLineUp` (`alt+up`) and `text.moveLineDown` (`alt+down`) move the current
+line, or every line the selection touches, in any multi-line text field.
+`text.duplicateLineUp` (`alt+shift+up`) and `text.duplicateLineDown` (`alt+shift+down`)
+copy those lines above or below, and the cursor moves to the copy. To keep it on the
+original lines, turn off **Settings → Chat → Follow duplicated lines**. In the rich text
+composer, a list item moves with its nested items, and a code block moves line by line
+rather than as a whole. When a message is queued, `alt+up` at the very start of the composer
+edits it instead.
 
 `navigation.back` (`mod+[` by default) and `navigation.forward` (`mod+]`) move
 through the pages you have visited, like a browser's back and forward buttons.

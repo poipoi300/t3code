@@ -533,6 +533,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       ? ["Rich text composer"]
       : []),
     ...(settings.sendShortcut !== DEFAULT_UNIFIED_SETTINGS.sendShortcut ? ["Send shortcut"] : []),
+    ...(settings.duplicateLineFollowsCopy !== DEFAULT_UNIFIED_SETTINGS.duplicateLineFollowsCopy
+      ? ["Follow duplicated lines"]
+      : []),
     ...(settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior
       ? ["Follow-up behavior"]
       : []),
@@ -652,6 +655,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       showSkillsInSlashMenu: DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu,
       composerRichTextEnabled: DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled,
       sendShortcut: DEFAULT_UNIFIED_SETTINGS.sendShortcut,
+      duplicateLineFollowsCopy: DEFAULT_UNIFIED_SETTINGS.duplicateLineFollowsCopy,
       followUpBehavior: DEFAULT_UNIFIED_SETTINGS.followUpBehavior,
       toolCallVisibility: DEFAULT_UNIFIED_SETTINGS.toolCallVisibility,
       environmentIdentificationMode: DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode,
@@ -1131,6 +1135,32 @@ export function ChatSettingsPanel() {
                 ))}
               </SelectPopup>
             </Select>
+          }
+        />
+        <SettingsRow
+          {...searchableSetting("duplicate-line-follows-copy")}
+          description="When you duplicate a line in a text field, move the cursor to the new copy."
+          resetAction={
+            settings.duplicateLineFollowsCopy !==
+            DEFAULT_UNIFIED_SETTINGS.duplicateLineFollowsCopy ? (
+              <SettingResetButton
+                label="follow duplicated lines"
+                onClick={() =>
+                  updateSettings({
+                    duplicateLineFollowsCopy: DEFAULT_UNIFIED_SETTINGS.duplicateLineFollowsCopy,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.duplicateLineFollowsCopy}
+              onCheckedChange={(checked) =>
+                updateSettings({ duplicateLineFollowsCopy: Boolean(checked) })
+              }
+              aria-label="Follow duplicated lines"
+            />
           }
         />
         <AdvancedSettings targetIds={[searchableSetting("skills-in-slash-menu").id]}>

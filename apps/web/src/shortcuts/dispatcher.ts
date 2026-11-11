@@ -1,7 +1,7 @@
 import type { KeybindingCommand, ResolvedKeybindingsConfig } from "@t3tools/contracts";
 
 import { resolveShortcutCommand, type ShortcutMatchContext } from "../keybindings";
-import { isEditableFocused } from "../lib/editableFocus";
+import { focusedMultilineText, isEditableFocused } from "../lib/editableFocus";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { isModelPickerOpen } from "../modelPickerVisibility";
@@ -49,6 +49,7 @@ function readFocusContext(event: KeyboardEvent): Partial<ShortcutMatchContext> {
     terminalFocus: isTerminalFocused(),
     previewFocus: isPreviewFocused(),
     editableFocus: isEditableFocused(event.target),
+    multilineTextFocus: focusedMultilineText(event.target) !== null,
     modelPickerOpen: isModelPickerOpen(),
   };
 }

@@ -726,6 +726,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["enter return command ctrl multiline prompt new line composer"],
   },
   {
+    id: "duplicate-line-follows-copy",
+    title: "Follow duplicated lines",
+    to: "/settings/chat",
+    searchTerms: ["duplicate copy line cursor caret alt shift up down move text field composer"],
+  },
+  {
     id: "follow-up-behavior",
     title: "Follow-up behavior",
     to: "/settings/chat",
