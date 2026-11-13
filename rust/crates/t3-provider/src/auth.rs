@@ -84,6 +84,7 @@ struct State {
     sessions: Vec<CancellationToken>,
 }
 struct Inner {
+    domain: tokio::sync::RwLock<BindingDomain>,
     state: Mutex<State>,
     changes: watch::Sender<u64>,
     cancel: CancellationToken,
@@ -180,7 +181,6 @@ pub struct AuthController {
     backend: Arc<dyn AuthBackend>,
     stopper: Arc<dyn SessionStopper>,
     inner: Arc<Inner>,
-    domain: tokio::sync::RwLock<BindingDomain>,
     timeout: Duration,
 }
 impl Drop for AuthController {
@@ -215,8 +215,8 @@ impl AuthController {
             backend,
             stopper,
             timeout,
-            domain: tokio::sync::RwLock::new(Arc::new(Mutex::new(BindingState::default()))),
             inner: Arc::new(Inner {
+                domain: tokio::sync::RwLock::new(Arc::new(Mutex::new(BindingState::default()))),
                 state: Mutex::new(State {
                     published: Published { owner: None, state },
                     active: None,
@@ -234,8 +234,8 @@ impl AuthController {
     }
     async fn binding_guard(
         &self,
-    ) -> ServiceResult<(BindingDomain, tokio::sync::OwnedMutexGuard<BindingState>)> {
-        let domain = self.domain.read().await;
+    ) -> ServiceResult<tokio::sync::OwnedMutexGuard<BindingState>> {
+        let domain = self.inner.domain.read().await;
         let mut guard = domain.clone().lock_owned().await;
         guard.changing.retain(|owner| owner.strong_count() > 0);
         for owner in &guard.changing {
@@ -249,7 +249,7 @@ impl AuthController {
                 }
             }
         }
-        Ok((domain.clone(), guard))
+        Ok(guard)
     }
     fn claim_binding(&self, domain: &mut BindingState) {
         let owner = Arc::downgrade(&self.inner);
@@ -257,7 +257,8 @@ impl AuthController {
             domain.changing.push(owner);
         }
     }
-    async fn stop_binding(domain: &BindingDomain) {
+    async fn stop_binding(inner: &Inner) {
+        let domain = inner.domain.read().await;
         for session in domain.lock().await.sessions.drain(..) {
             session.cancel();
         }
@@ -298,7 +299,7 @@ impl AuthController {
         if self.inner.cancel.is_cancelled() {
             return Err(ServiceError::Unavailable);
         }
-        let (shared_domain, mut domain) = self.binding_guard().await?;
+        let mut domain = self.binding_guard().await?;
         let mut state = self.inner.state.lock().await;
         if state.active.as_ref().is_some_and(|a| a.owner == owner) {
             return Ok(Sensitive::new(state.published.state.clone()));
@@ -362,8 +363,8 @@ impl AuthController {
                     return Err(ServiceError::Method);
                 }
                 let stopped = stopper.stop(&instance, &binding).await;
-                Self::stop_binding(&shared_domain).await;
                 if let Some(inner) = stop_inner.upgrade() {
+                    Self::stop_binding(&inner).await;
                     Self::stop_owned(&mut *inner.state.lock().await);
                 }
                 stopped?;
@@ -525,7 +526,7 @@ impl AuthController {
             .map_err(|_| ServiceError::Storage)?
     }
     async fn logout_inner(&self) -> ServiceResult<AuthState> {
-        let (shared_domain, mut domain) = self.binding_guard().await?;
+        let mut domain = self.binding_guard().await?;
         {
             let mut state = self.inner.state.lock().await;
             if state.stopping {
@@ -539,7 +540,7 @@ impl AuthController {
         }
         drop(domain);
         let stopped = self.stopper.stop(&self.instance, &self.binding).await;
-        Self::stop_binding(&shared_domain).await;
+        Self::stop_binding(&self.inner).await;
         Self::stop_owned(&mut *self.inner.state.lock().await);
         let result = async {
             stopped?;
@@ -576,7 +577,7 @@ impl AuthController {
         let method = method.to_owned();
         tokio::spawn(async move {
             {
-                let (_, mut domain) = controller.binding_guard().await?;
+                let mut domain = controller.binding_guard().await?;
                 let mut state = controller.inner.state.lock().await;
                 if state.stopping || state.active.is_some() {
                     return Err(ServiceError::Busy);
@@ -625,7 +626,7 @@ impl AuthController {
         if self.inner.cancel.is_cancelled() {
             return Err(ServiceError::Unavailable);
         }
-        let (_, mut domain) = self.binding_guard().await?;
+        let mut domain = self.binding_guard().await?;
         let mut state = self.inner.state.lock().await;
         if state.active.is_some() || state.stopping {
             return Err(ServiceError::Busy);
@@ -644,7 +645,7 @@ impl AuthController {
         let controller = self.clone();
         tokio::spawn(async move {
             controller.backend.validate_profile(&profile).await?;
-            let (shared_domain, mut domain) = controller.binding_guard().await?;
+            let mut domain = controller.binding_guard().await?;
             {
                 let mut state = controller.inner.state.lock().await;
                 if state.active.is_some() || state.stopping {
@@ -660,7 +661,7 @@ impl AuthController {
                     .stopper
                     .stop(&controller.instance, &controller.binding)
                     .await;
-                Self::stop_binding(&shared_domain).await;
+                Self::stop_binding(&controller.inner).await;
                 stopped?;
                 controller.backend.import_profile(profile).await
             }
@@ -785,8 +786,8 @@ impl AuthService {
             .values()
             .find(|other| other.binding == controller.binding)
         {
-            let domain = other.domain.read().await.clone();
-            let mut current = controller.domain.write().await;
+            let domain = other.inner.domain.read().await.clone();
+            let mut current = controller.inner.domain.write().await;
             if !Arc::ptr_eq(&current, &domain) {
                 let mut previous = current.lock().await;
                 let mut shared = domain.lock().await;

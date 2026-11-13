@@ -1,0 +1,1835 @@
+{
+  "t3_attachment_prepare_upload": [
+    {
+      "input": {
+        "upload": {
+          "type": "image",
+          "name": "T",
+          "mimeType": "image/webp",
+          "sizeBytes": 4385134
+        }
+      },
+      "decoded": {
+        "upload": {
+          "type": "image",
+          "name": "T",
+          "mimeType": "image/webp",
+          "sizeBytes": 4385134
+        }
+      }
+    },
+    {
+      "input": {
+        "upload": {
+          "type": "file",
+          "name": "3xCM",
+          "mimeType": "😀",
+          "sizeBytes": 1360766
+        }
+      },
+      "decoded": {
+        "upload": {
+          "type": "file",
+          "name": "3xCM",
+          "mimeType": "😀",
+          "sizeBytes": 1360766
+        }
+      }
+    }
+  ],
+  "t3_attachment_discard": [
+    {
+      "input": {
+        "attachmentId": "Y"
+      },
+      "decoded": {
+        "attachmentId": "Y"
+      }
+    },
+    {
+      "input": {
+        "attachmentId": "😀"
+      },
+      "decoded": {
+        "attachmentId": "😀"
+      }
+    }
+  ],
+  "t3_thread_send_attachments": [
+    {
+      "input": {
+        "threadId": "Y",
+        "message": "Z9",
+        "attachments": [
+          {
+            "type": "file",
+            "id": "I",
+            "name": "N)1j",
+            "mimeType": "\u0000",
+            "sizeBytes": 38458778
+          }
+        ]
+      },
+      "decoded": {
+        "threadId": "Y",
+        "message": "Z9",
+        "attachments": [
+          {
+            "type": "file",
+            "id": "I",
+            "name": "N)1j",
+            "mimeType": "\u0000",
+            "sizeBytes": 38458778
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "attachments": [
+          {
+            "type": "file",
+            "id": "eJ9r",
+            "name": "fD",
+            "mimeType": "😀",
+            "sizeBytes": 36795104
+          }
+        ]
+      },
+      "decoded": {
+        "attachments": [
+          {
+            "type": "file",
+            "id": "eJ9r",
+            "name": "fD",
+            "mimeType": "😀",
+            "sizeBytes": 36795104
+          }
+        ]
+      }
+    }
+  ],
+  "device_list": [
+    {
+      "input": {
+        "hostId": "-1"
+      },
+      "decoded": {
+        "hostId": "-1"
+      }
+    },
+    {
+      "input": {},
+      "decoded": {}
+    }
+  ],
+  "device_open": [
+    {
+      "input": {
+        "deviceId": null
+      },
+      "decoded": {}
+    },
+    {
+      "input": {
+        "deviceId": "%",
+        "platform": null,
+        "hostId": null
+      },
+      "decoded": {
+        "deviceId": "%"
+      }
+    }
+  ],
+  "device_screenshot": [
+    {
+      "input": {
+        "deviceId": null
+      },
+      "decoded": {}
+    },
+    {
+      "input": {
+        "deviceId": "C",
+        "hostId": "😀"
+      },
+      "decoded": {
+        "deviceId": "C",
+        "hostId": "😀"
+      }
+    }
+  ],
+  "device_close": [
+    {
+      "input": {
+        "deviceId": null,
+        "hostId": null,
+        "shutdown": true
+      },
+      "decoded": {
+        "shutdown": true
+      }
+    },
+    {
+      "input": {
+        "deviceId": null
+      },
+      "decoded": {}
+    }
+  ],
+  "t3_environment_read": [
+    {
+      "input": {
+        "environmentId": "-1"
+      },
+      "decoded": {
+        "environmentId": "-1"
+      }
+    },
+    {
+      "input": {},
+      "decoded": {}
+    }
+  ],
+  "t3_environment_preferences_update": [
+    {
+      "input": {
+        "newWorktreesStartFromOrigin": false,
+        "enableProviderUpdateChecks": false,
+        "backgroundActivity": {
+          "profile": "battery-saver"
+        },
+        "sourceControlWritingStyle": {
+          "customInstructions": "-1"
+        }
+      },
+      "decoded": {
+        "newWorktreesStartFromOrigin": false,
+        "enableProviderUpdateChecks": false,
+        "backgroundActivity": {
+          "profile": "battery-saver"
+        },
+        "sourceControlWritingStyle": {
+          "customInstructions": "-1"
+        }
+      }
+    },
+    {
+      "input": {
+        "defaultThreadEnvMode": null,
+        "backgroundActivity": {
+          "profile": "battery-saver"
+        }
+      },
+      "decoded": {
+        "defaultThreadEnvMode": null,
+        "backgroundActivity": {
+          "profile": "battery-saver"
+        }
+      }
+    }
+  ],
+  "html_preview": [
+    {
+      "input": {
+        "path": null,
+        "html": "\u0000",
+        "width": -14,
+        "appearance": null
+      },
+      "decoded": {
+        "html": "\u0000",
+        "width": -14
+      }
+    },
+    {
+      "input": {
+        "path": "G<|",
+        "width": 5
+      },
+      "decoded": {
+        "path": "G<|",
+        "width": 5
+      }
+    }
+  ],
+  "html_render": [
+    {
+      "input": {
+        "path": "",
+        "html": "\t",
+        "title": "-1",
+        "height": 4
+      },
+      "decoded": {
+        "path": "",
+        "html": "\t",
+        "title": "-1",
+        "height": 4
+      }
+    },
+    {
+      "input": {
+        "path": "😀",
+        "title": "T",
+        "height": 4
+      },
+      "decoded": {
+        "path": "😀",
+        "title": "T",
+        "height": 4
+      }
+    }
+  ],
+  "orchestrator_capabilities": [
+    {
+      "input": {
+        "environmentId": null
+      },
+      "decoded": {}
+    },
+    {
+      "input": {
+        "environmentId": "C",
+        "search": "😀"
+      },
+      "decoded": {
+        "environmentId": "C",
+        "search": "😀"
+      }
+    }
+  ],
+  "delegate_task": [
+    {
+      "input": {
+        "task": "😀",
+        "runtimeMode": "auto"
+      },
+      "decoded": {
+        "task": "😀",
+        "runtimeMode": "auto"
+      }
+    },
+    {
+      "input": {
+        "task": "D",
+        "target": null,
+        "role": "design",
+        "isolation": null
+      },
+      "decoded": {
+        "task": "D",
+        "role": "design"
+      }
+    },
+    {
+      "input": {
+        "task": "  Task ﻿",
+        "target": {
+          "options": {
+            "effort": "high",
+            "fast": true
+          }
+        }
+      },
+      "decoded": {
+        "task": "Task",
+        "target": {
+          "options": [
+            {
+              "id": "effort",
+              "value": "high"
+            },
+            {
+              "id": "fast",
+              "value": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "input": {
+        "task": "   "
+      },
+      "invalid": true
+    }
+  ],
+  "task_status": [
+    {
+      "input": {
+        "taskId": "Y"
+      },
+      "decoded": {
+        "taskId": "Y"
+      }
+    },
+    {
+      "input": {
+        "taskId": "😀"
+      },
+      "decoded": {
+        "taskId": "😀"
+      }
+    }
+  ],
+  "task_cancel": [
+    {
+      "input": {
+        "taskId": "-1",
+        "reason": " ",
+        "clientRequestId": "😀"
+      },
+      "decoded": {
+        "taskId": "-1",
+        "reason": " ",
+        "clientRequestId": "😀"
+      }
+    },
+    {
+      "input": {
+        "taskId": "T",
+        "reason": null
+      },
+      "decoded": {
+        "taskId": "T"
+      }
+    }
+  ],
+  "t3_workflow_stop": [
+    {
+      "input": {
+        "environmentId": null,
+        "threadId": "3xCM",
+        "subagentId": "😀"
+      },
+      "decoded": {
+        "threadId": "3xCM",
+        "subagentId": "😀"
+      }
+    },
+    {
+      "input": {
+        "threadId": "😀",
+        "subagentId": "[z"
+      },
+      "decoded": {
+        "threadId": "😀",
+        "subagentId": "[z"
+      }
+    }
+  ],
+  "t3_background_wait": [
+    {
+      "input": {
+        "taskIds": [
+          "u"
+        ],
+        "waiting": false
+      },
+      "decoded": {
+        "taskIds": [
+          "u"
+        ],
+        "waiting": false
+      }
+    },
+    {
+      "input": {
+        "taskIds": [
+          "t[G<",
+          "_",
+          "6"
+        ]
+      },
+      "decoded": {
+        "taskIds": [
+          "t[G<",
+          "_",
+          "6"
+        ]
+      }
+    }
+  ],
+  "schedule_task": [
+    {
+      "input": {
+        "schedule": {
+          "type": "webhook"
+        },
+        "enabled": null,
+        "bindToCurrentThread": true,
+        "scheduledTaskId": null
+      },
+      "decoded": {
+        "schedule": {
+          "type": "webhook"
+        },
+        "bindToCurrentThread": true
+      }
+    },
+    {
+      "input": {
+        "environmentId": "I<6l",
+        "enabled": null
+      },
+      "decoded": {
+        "environmentId": "I<6l"
+      }
+    },
+    {
+      "input": {
+        "prompt": " Prompt ",
+        "schedule": "{\"type\":\"interval\",\"everyMs\":60000}"
+      },
+      "decoded": {
+        "prompt": "Prompt",
+        "schedule": {
+          "type": "interval",
+          "everyMs": 60000
+        }
+      }
+    },
+    {
+      "input": {
+        "prompt": "Prompt",
+        "schedule": "{\"type\":\"interval\",\"everyMs\":1}"
+      },
+      "invalid": true
+    },
+    {
+      "input": {
+        "prompt": "Prompt",
+        "schedule": "invalid-json"
+      },
+      "invalid": true
+    }
+  ],
+  "list_scheduled_tasks": [
+    {
+      "input": {
+        "environmentId": null
+      },
+      "decoded": {}
+    },
+    {
+      "input": {
+        "environmentId": "C",
+        "projectId": "😀"
+      },
+      "decoded": {
+        "environmentId": "C",
+        "projectId": "😀"
+      }
+    }
+  ],
+  "delete_scheduled_task": [
+    {
+      "input": {
+        "scheduledTaskId": "7Tt["
+      },
+      "decoded": {
+        "scheduledTaskId": "7Tt["
+      }
+    },
+    {
+      "input": {
+        "environmentId": "D",
+        "scheduledTaskId": "3xCM"
+      },
+      "decoded": {
+        "environmentId": "D",
+        "scheduledTaskId": "3xCM"
+      }
+    }
+  ],
+  "request_secret": [
+    {
+      "input": {
+        "label": "<|",
+        "reason": "😀",
+        "timeoutMs": null
+      },
+      "decoded": {
+        "label": "<|",
+        "reason": "😀"
+      }
+    },
+    {
+      "input": {
+        "label": "0",
+        "reason": "😀",
+        "delivery": null,
+        "timeoutMs": 1011
+      },
+      "decoded": {
+        "label": "0",
+        "reason": "😀",
+        "timeoutMs": 1011
+      }
+    },
+    {
+      "input": {
+        "label": " Label ",
+        "reason": " Reason ",
+        "value": "  secret  "
+      },
+      "decoded": {
+        "label": "Label",
+        "reason": "Reason",
+        "value": "  secret  "
+      }
+    },
+    {
+      "input": {
+        "label": "Label",
+        "reason": "Reason",
+        "value": ""
+      },
+      "invalid": true
+    },
+    {
+      "input": {
+        "label": "Label",
+        "reason": "Reason",
+        "url": "file:///private"
+      },
+      "invalid": true
+    }
+  ],
+  "create_threads": [
+    {
+      "input": {
+        "threads": [
+          {
+            "prompt": "😀",
+            "target": {
+              "providerInstanceId": null
+            },
+            "runtimeMode": null,
+            "interactionMode": "plan"
+          },
+          {
+            "target": null
+          },
+          {
+            "title": "<*"
+          }
+        ]
+      },
+      "decoded": {
+        "threads": [
+          {
+            "prompt": "😀",
+            "target": {},
+            "interactionMode": "plan"
+          },
+          {},
+          {
+            "title": "<*"
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "threads": [
+          {
+            "prompt": "#",
+            "target": null
+          }
+        ],
+        "clientRequestId": null
+      },
+      "decoded": {
+        "threads": [
+          {
+            "prompt": "#"
+          }
+        ]
+      }
+    }
+  ],
+  "t3_thread_list": [
+    {
+      "input": {
+        "statuses": [
+          "idle",
+          "idle",
+          "idle",
+          "rolled_back"
+        ],
+        "settled": null,
+        "snoozed": true,
+        "limit": 98
+      },
+      "decoded": {
+        "statuses": [
+          "idle",
+          "idle",
+          "idle",
+          "rolled_back"
+        ],
+        "snoozed": true,
+        "limit": 98
+      }
+    },
+    {
+      "input": {
+        "environmentId": "I<6l",
+        "settled": null
+      },
+      "decoded": {
+        "environmentId": "I<6l"
+      }
+    }
+  ],
+  "t3_thread_read": [
+    {
+      "input": {
+        "threadId": "\u0000",
+        "beforePosition": null,
+        "limit": 7,
+        "maxCharsPerItem": null
+      },
+      "decoded": {
+        "threadId": "\u0000",
+        "limit": 7
+      }
+    },
+    {
+      "input": {
+        "threadId": "😀",
+        "runLimit": 34
+      },
+      "decoded": {
+        "threadId": "😀",
+        "runLimit": 34
+      }
+    }
+  ],
+  "t3_thread_update": [
+    {
+      "input": {
+        "action": "regenerate_title",
+        "clientRequestId": "#",
+        "environmentId": "�"
+      },
+      "decoded": {
+        "action": "regenerate_title",
+        "clientRequestId": "#",
+        "environmentId": "�"
+      }
+    },
+    {
+      "input": {
+        "threadId": null,
+        "action": "regenerate_title"
+      },
+      "decoded": {
+        "action": "regenerate_title"
+      }
+    },
+    {
+      "input": {
+        "threadId": " thread ",
+        "action": "rename",
+        "title": " Title "
+      },
+      "decoded": {
+        "threadId": "thread",
+        "action": "rename",
+        "title": "Title"
+      }
+    },
+    {
+      "input": {
+        "action": "rename"
+      },
+      "invalid": true
+    },
+    {
+      "input": {
+        "action": "regenerate_title",
+        "title": "invalid"
+      },
+      "invalid": true
+    }
+  ],
+  "t3_thread_send": [
+    {
+      "input": {
+        "environmentId": "I<6l",
+        "threadId": "0",
+        "message": "<|"
+      },
+      "decoded": {
+        "environmentId": "I<6l",
+        "threadId": "0",
+        "message": "<|"
+      }
+    },
+    {
+      "input": {
+        "threadId": "😀",
+        "message": "0",
+        "mode": "steer",
+        "clientRequestId": "D"
+      },
+      "decoded": {
+        "threadId": "😀",
+        "message": "0",
+        "mode": "steer",
+        "clientRequestId": "D"
+      }
+    }
+  ],
+  "t3_thread_wait": [
+    {
+      "input": {
+        "environmentId": null,
+        "threadId": "0"
+      },
+      "decoded": {
+        "threadId": "0"
+      }
+    },
+    {
+      "input": {
+        "environmentId": "@a5x",
+        "threadId": "😀",
+        "runId": "D",
+        "untilDelegatedWorkSettled": true
+      },
+      "decoded": {
+        "environmentId": "@a5x",
+        "threadId": "😀",
+        "runId": "D",
+        "untilDelegatedWorkSettled": true
+      }
+    }
+  ],
+  "t3_thread_interrupt": [
+    {
+      "input": {
+        "threadId": "😀",
+        "runId": null,
+        "reason": " ",
+        "stop": true
+      },
+      "decoded": {
+        "threadId": "😀",
+        "reason": " ",
+        "stop": true
+      }
+    },
+    {
+      "input": {
+        "threadId": "G<|",
+        "runId": "I<6l"
+      },
+      "decoded": {
+        "threadId": "G<|",
+        "runId": "I<6l"
+      }
+    }
+  ],
+  "t3_environment_links": [
+    {
+      "input": {},
+      "decoded": {}
+    },
+    {
+      "input": {},
+      "decoded": {}
+    }
+  ],
+  "t3_environment_link": [
+    {
+      "input": {
+        "url": null,
+        "requestedAccess": null
+      },
+      "decoded": {}
+    },
+    {
+      "input": {
+        "reason": "E",
+        "requestedAccess": "read-only"
+      },
+      "decoded": {
+        "reason": "E",
+        "requestedAccess": "read-only"
+      }
+    }
+  ],
+  "t3_environment_unlink": [
+    {
+      "input": {
+        "environmentId": "Y"
+      },
+      "decoded": {
+        "environmentId": "Y"
+      }
+    },
+    {
+      "input": {
+        "environmentId": "😀"
+      },
+      "decoded": {
+        "environmentId": "😀"
+      }
+    }
+  ],
+  "preview_dialog": [
+    {
+      "input": {
+        "tabId": "😀",
+        "accept": true,
+        "promptText": null
+      },
+      "decoded": {
+        "tabId": "😀",
+        "accept": true
+      }
+    },
+    {
+      "input": {
+        "tabId": null,
+        "accept": false
+      },
+      "decoded": {
+        "accept": false
+      }
+    }
+  ],
+  "preview_status": [
+    {
+      "input": {
+        "tabId": "-1"
+      },
+      "decoded": {
+        "tabId": "-1"
+      }
+    },
+    {
+      "input": {},
+      "decoded": {}
+    }
+  ],
+  "preview_open": [
+    {
+      "input": {
+        "open": false,
+        "reuseExistingTab": true,
+        "profileId": null,
+        "target": null
+      },
+      "decoded": {
+        "open": false,
+        "reuseExistingTab": true
+      }
+    },
+    {
+      "input": {
+        "open": false,
+        "profileId": null
+      },
+      "decoded": {
+        "open": false
+      }
+    }
+  ],
+  "preview_navigate": [
+    {
+      "input": {
+        "tabId": "3",
+        "url": "'鰠츚尶",
+        "target": null,
+        "readiness": null
+      },
+      "decoded": {
+        "tabId": "3",
+        "url": "'鰠츚尶"
+      }
+    },
+    {
+      "input": {
+        "tabId": null,
+        "url": null,
+        "target": {
+          "kind": "url",
+          "url": "젅혍㌹é"
+        },
+        "timeoutMs": null
+      },
+      "decoded": {
+        "target": {
+          "kind": "url",
+          "url": "젅혍㌹é"
+        }
+      }
+    }
+  ],
+  "preview_resize": [
+    {
+      "input": {
+        "tabId": "�",
+        "mode": "fill",
+        "height": null,
+        "timeoutMs": null
+      },
+      "decoded": {
+        "tabId": "�",
+        "mode": "fill"
+      }
+    },
+    {
+      "input": {
+        "tabId": null,
+        "mode": "fill",
+        "width": null,
+        "timeoutMs": null
+      },
+      "decoded": {
+        "mode": "fill"
+      }
+    }
+  ],
+  "preview_set_appearance": [
+    {
+      "input": {
+        "tabId": "u",
+        "colorScheme": "system"
+      },
+      "decoded": {
+        "tabId": "u",
+        "colorScheme": "system"
+      }
+    },
+    {
+      "input": {
+        "colorScheme": "dark"
+      },
+      "decoded": {
+        "colorScheme": "dark"
+      }
+    }
+  ],
+  "preview_snapshot": [
+    {
+      "input": {
+        "tabId": null,
+        "includeImage": null,
+        "save": true
+      },
+      "decoded": {
+        "save": true
+      }
+    },
+    {
+      "input": {
+        "tabId": null
+      },
+      "decoded": {}
+    }
+  ],
+  "preview_act": [
+    {
+      "input": {
+        "action": "select",
+        "text": "�",
+        "clear": null,
+        "source": null
+      },
+      "decoded": {
+        "action": "select",
+        "text": "�"
+      },
+      "invalidAction": true
+    },
+    {
+      "input": {
+        "action": "press",
+        "button": "middle"
+      },
+      "decoded": {
+        "action": "press",
+        "button": "middle"
+      },
+      "invalidAction": true
+    }
+  ],
+  "preview_evaluate": [
+    {
+      "input": {
+        "tabId": null,
+        "expression": "V髽?⌋"
+      },
+      "decoded": {
+        "expression": "V髽?⌋"
+      }
+    },
+    {
+      "input": {
+        "tabId": "0",
+        "expression": "|Q\u000b٣",
+        "awaitPromise": null
+      },
+      "decoded": {
+        "tabId": "0",
+        "expression": "|Q\u000b٣"
+      }
+    }
+  ],
+  "preview_wait_for": [
+    {
+      "input": {
+        "text": "E",
+        "urlIncludes": "0"
+      },
+      "decoded": {
+        "text": "E",
+        "urlIncludes": "0"
+      }
+    },
+    {
+      "input": {
+        "text": "😀"
+      },
+      "decoded": {
+        "text": "😀"
+      }
+    }
+  ],
+  "preview_recording_start": [
+    {
+      "input": {
+        "tabId": "-1"
+      },
+      "decoded": {
+        "tabId": "-1"
+      }
+    },
+    {
+      "input": {},
+      "decoded": {}
+    }
+  ],
+  "preview_recording_stop": [
+    {
+      "input": {
+        "tabId": "-1"
+      },
+      "decoded": {
+        "tabId": "-1"
+      }
+    },
+    {
+      "input": {},
+      "decoded": {}
+    }
+  ],
+  "t3_preview_list": [
+    {
+      "input": {
+        "cursor": 7,
+        "limit": 18
+      },
+      "decoded": {
+        "cursor": 7,
+        "limit": 18
+      }
+    },
+    {
+      "input": {
+        "cursor": null
+      },
+      "decoded": {}
+    }
+  ],
+  "t3_preview_close": [
+    {
+      "input": {
+        "tabId": "Y"
+      },
+      "decoded": {
+        "tabId": "Y"
+      }
+    },
+    {
+      "input": {
+        "tabId": "😀"
+      },
+      "decoded": {
+        "tabId": "😀"
+      }
+    }
+  ],
+  "t3_thread_launch": [
+    {
+      "input": {
+        "environmentId": null,
+        "title": "4",
+        "modelSelection": {
+          "instanceId": "Sm",
+          "model": "h",
+          "options": []
+        },
+        "runtimeMode": "approval-required"
+      },
+      "decoded": {
+        "title": "4",
+        "modelSelection": {
+          "instanceId": "Sm",
+          "model": "h",
+          "options": []
+        },
+        "runtimeMode": "approval-required"
+      }
+    },
+    {
+      "input": {
+        "scratch": null,
+        "title": "😀"
+      },
+      "decoded": {
+        "title": "😀"
+      }
+    }
+  ],
+  "t3_project_list": [
+    {
+      "input": {
+        "environmentId": "\u0000",
+        "cursor": null,
+        "limit": 97
+      },
+      "decoded": {
+        "environmentId": "\u0000",
+        "limit": 97
+      }
+    },
+    {
+      "input": {
+        "environmentId": null
+      },
+      "decoded": {}
+    }
+  ],
+  "t3_project_read": [
+    {
+      "input": {
+        "projectId": "7Tt["
+      },
+      "decoded": {
+        "projectId": "7Tt["
+      }
+    },
+    {
+      "input": {
+        "environmentId": "D",
+        "projectId": "3xCM"
+      },
+      "decoded": {
+        "environmentId": "D",
+        "projectId": "3xCM"
+      }
+    }
+  ],
+  "t3_project_create": [
+    {
+      "input": {
+        "title": "G<|",
+        "workspaceRoot": "I<6l"
+      },
+      "decoded": {
+        "title": "G<|",
+        "workspaceRoot": "I<6l"
+      }
+    },
+    {
+      "input": {
+        "environmentId": "g",
+        "title": "2"
+      },
+      "decoded": {
+        "environmentId": "g",
+        "title": "2"
+      }
+    }
+  ],
+  "t3_project_update": [
+    {
+      "input": {
+        "environmentId": "j",
+        "projectId": "4",
+        "defaultModelSelection": null,
+        "autoPull": null
+      },
+      "decoded": {
+        "environmentId": "j",
+        "projectId": "4",
+        "defaultModelSelection": null
+      }
+    },
+    {
+      "input": {
+        "projectId": "😀",
+        "workspaceRoot": null
+      },
+      "decoded": {
+        "projectId": "😀"
+      }
+    }
+  ],
+  "t3_project_delete": [
+    {
+      "input": {
+        "environmentId": "+GZ~",
+        "projectId": "-1",
+        "force": true
+      },
+      "decoded": {
+        "environmentId": "+GZ~",
+        "projectId": "-1",
+        "force": true
+      }
+    },
+    {
+      "input": {
+        "environmentId": null,
+        "projectId": "T"
+      },
+      "decoded": {
+        "projectId": "T"
+      }
+    }
+  ],
+  "t3_project_clone": [
+    {
+      "input": {
+        "provider": "l7a",
+        "destinationPath": "G<|"
+      },
+      "decoded": {
+        "provider": "l7a",
+        "destinationPath": "G<|"
+      }
+    },
+    {
+      "input": {
+        "provider": null,
+        "remoteUrl": null,
+        "destinationPath": "%",
+        "protocol": "ssh"
+      },
+      "decoded": {
+        "destinationPath": "%",
+        "protocol": "ssh"
+      }
+    }
+  ],
+  "link_pull_request": [
+    {
+      "input": {
+        "threadId": null,
+        "number": null
+      },
+      "decoded": {}
+    },
+    {
+      "input": {
+        "repository": "E",
+        "number": 4
+      },
+      "decoded": {
+        "repository": "E",
+        "number": 4
+      }
+    }
+  ],
+  "link_pull_requests": [
+    {
+      "input": {
+        "environmentId": null,
+        "urls": [
+          "0",
+          "<|",
+          "😀",
+          "<6"
+        ]
+      },
+      "decoded": {
+        "urls": [
+          "0",
+          "<|",
+          "😀",
+          "<6"
+        ]
+      }
+    },
+    {
+      "input": {
+        "environmentId": null,
+        "threadId": null,
+        "urls": [
+          "😀",
+          "0",
+          "😀",
+          "A"
+        ]
+      },
+      "decoded": {
+        "urls": [
+          "😀",
+          "0",
+          "😀",
+          "A"
+        ]
+      }
+    }
+  ],
+  "unlink_pull_request": [
+    {
+      "input": {
+        "threadId": null,
+        "number": null
+      },
+      "decoded": {}
+    },
+    {
+      "input": {
+        "repository": "E",
+        "number": 4
+      },
+      "decoded": {
+        "repository": "E",
+        "number": 4
+      }
+    }
+  ],
+  "unlink_pull_requests": [
+    {
+      "input": {
+        "environmentId": null,
+        "threadId": "\u0000",
+        "states": [
+          "closed",
+          "open",
+          "merged",
+          "closed"
+        ]
+      },
+      "decoded": {
+        "threadId": "\u0000",
+        "states": [
+          "closed",
+          "open",
+          "merged",
+          "closed"
+        ]
+      }
+    },
+    {
+      "input": {
+        "environmentId": "😀",
+        "states": [
+          "open",
+          "closed",
+          "merged",
+          "closed"
+        ]
+      },
+      "decoded": {
+        "environmentId": "😀",
+        "states": [
+          "open",
+          "closed",
+          "merged",
+          "closed"
+        ]
+      }
+    }
+  ],
+  "list_thread_pull_requests": [
+    {
+      "input": {
+        "environmentId": "G<|",
+        "states": [
+          "merged",
+          "closed",
+          "open"
+        ]
+      },
+      "decoded": {
+        "environmentId": "G<|",
+        "states": [
+          "merged",
+          "closed",
+          "open"
+        ]
+      }
+    },
+    {
+      "input": {
+        "environmentId": "@a5x",
+        "threadId": "D",
+        "states": null,
+        "cursor": ""
+      },
+      "decoded": {
+        "environmentId": "@a5x",
+        "threadId": "D",
+        "cursor": ""
+      }
+    }
+  ],
+  "watch_pull_request": [
+    {
+      "input": {
+        "threadId": null,
+        "number": null
+      },
+      "decoded": {}
+    },
+    {
+      "input": {
+        "repository": "E",
+        "number": 4
+      },
+      "decoded": {
+        "repository": "E",
+        "number": 4
+      }
+    }
+  ],
+  "unwatch_pull_request": [
+    {
+      "input": {
+        "threadId": null,
+        "number": null
+      },
+      "decoded": {}
+    },
+    {
+      "input": {
+        "repository": "E",
+        "number": 4
+      },
+      "decoded": {
+        "repository": "E",
+        "number": 4
+      }
+    }
+  ],
+  "write_pull_request_guides": [
+    {
+      "input": {
+        "environmentId": null,
+        "pullRequests": [
+          {
+            "url": null,
+            "repository": "😀",
+            "number": 3,
+            "host": null
+          }
+        ]
+      },
+      "decoded": {
+        "pullRequests": [
+          {
+            "repository": "😀",
+            "number": 3
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "environmentId": null,
+        "pullRequests": [
+          {
+            "url": "#",
+            "number": null
+          }
+        ]
+      },
+      "decoded": {
+        "pullRequests": [
+          {
+            "url": "#"
+          }
+        ]
+      }
+    }
+  ],
+  "read_pull_request_guide": [
+    {
+      "input": {
+        "url": null,
+        "repository": "+GZ~",
+        "number": 5,
+        "host": "j"
+      },
+      "decoded": {
+        "repository": "+GZ~",
+        "number": 5,
+        "host": "j"
+      }
+    },
+    {
+      "input": {
+        "environmentId": null,
+        "url": null
+      },
+      "decoded": {}
+    }
+  ],
+  "run_scheduled_task_now": [
+    {
+      "input": {
+        "taskId": "7Tt["
+      },
+      "decoded": {
+        "taskId": "7Tt["
+      }
+    },
+    {
+      "input": {
+        "environmentId": "D",
+        "taskId": "3xCM"
+      },
+      "decoded": {
+        "environmentId": "D",
+        "taskId": "3xCM"
+      }
+    }
+  ],
+  "t3_thread_search": [
+    {
+      "input": {
+        "environmentId": null,
+        "query": "uJ",
+        "limit": 3,
+        "projectId": null
+      },
+      "decoded": {
+        "query": "uJ",
+        "limit": 3
+      }
+    },
+    {
+      "input": {
+        "environmentId": null,
+        "query": "t[G<"
+      },
+      "decoded": {
+        "query": "t[G<"
+      }
+    }
+  ],
+  "t3_thread_configure": [
+    {
+      "input": {
+        "environmentId": null,
+        "threadId": null,
+        "modelSelection": {
+          "instanceId": "Gb",
+          "model": "3"
+        }
+      },
+      "decoded": {
+        "modelSelection": {
+          "instanceId": "Gb",
+          "model": "3"
+        }
+      }
+    },
+    {
+      "input": {
+        "environmentId": null
+      },
+      "decoded": {}
+    }
+  ],
+  "t3_thread_transfer": [
+    {
+      "input": {
+        "action": "merge_back",
+        "threadId": null
+      },
+      "decoded": {
+        "action": "merge_back"
+      }
+    },
+    {
+      "input": {
+        "action": "merge_back",
+        "targetThreadId": "E",
+        "title": "0"
+      },
+      "decoded": {
+        "action": "merge_back",
+        "targetThreadId": "E",
+        "title": "0"
+      }
+    }
+  ],
+  "t3_thread_organize": [
+    {
+      "input": {
+        "environmentId": "4",
+        "threadId": "😀",
+        "action": "unsettle",
+        "snoozedUntil": " "
+      },
+      "decoded": {
+        "environmentId": "4",
+        "threadId": "😀",
+        "action": "unsettle",
+        "snoozedUntil": " "
+      }
+    },
+    {
+      "input": {
+        "environmentId": "G<|",
+        "action": "mark_unread"
+      },
+      "decoded": {
+        "environmentId": "G<|",
+        "action": "mark_unread"
+      }
+    }
+  ],
+  "t3_pending_request": [
+    {
+      "input": {
+        "action": "list",
+        "environmentId": null
+      },
+      "decoded": {
+        "action": "list"
+      }
+    },
+    {
+      "input": {
+        "action": "respond",
+        "requestId": "R",
+        "answers": {
+          "0": [],
+          "😀": true,
+          "._9Q": true,
+          "-I?e": "!0"
+        }
+      },
+      "decoded": {
+        "action": "respond",
+        "requestId": "R",
+        "answers": {
+          "0": [],
+          "😀": true,
+          "._9Q": true,
+          "-I?e": "!0"
+        }
+      }
+    }
+  ],
+  "t3_queue": [
+    {
+      "input": {
+        "action": "edit",
+        "environmentId": "_"
+      },
+      "decoded": {
+        "action": "edit",
+        "environmentId": "_"
+      }
+    },
+    {
+      "input": {
+        "action": "list",
+        "environmentId": null,
+        "queuedRunId": null,
+        "limit": 4
+      },
+      "decoded": {
+        "action": "list",
+        "limit": 4
+      }
+    }
+  ],
+  "tool_search": [
+    {
+      "input": {
+        "query": ""
+      },
+      "decoded": {
+        "query": ""
+      }
+    },
+    {
+      "input": {
+        "query": "😀"
+      },
+      "decoded": {
+        "query": "😀"
+      }
+    }
+  ],
+  "t3_worktree_handoff": [
+    {
+      "input": {
+        "branch": "0",
+        "baseRef": null
+      },
+      "decoded": {
+        "branch": "0"
+      }
+    },
+    {
+      "input": {
+        "branch": "r9xE",
+        "runSetupScript": null,
+        "continuationPrompt": "0"
+      },
+      "decoded": {
+        "branch": "r9xE",
+        "continuationPrompt": "0"
+      }
+    }
+  ],
+  "t3_worktree_status": [
+    {
+      "input": {},
+      "decoded": {}
+    },
+    {
+      "input": {},
+      "decoded": {}
+    }
+  ],
+  "t3_worktree_list": [
+    {
+      "input": {
+        "query": "😀",
+        "refKind": null
+      },
+      "decoded": {
+        "query": "😀"
+      }
+    },
+    {
+      "input": {
+        "environmentId": "\u0000",
+        "query": null,
+        "refKind": "all",
+        "includeMatchingRemoteRefs": null
+      },
+      "decoded": {
+        "environmentId": "\u0000",
+        "refKind": "all"
+      }
+    }
+  ]
+}

@@ -1,0 +1,633 @@
+{
+  "t3_attachment_prepare_upload": {
+    "toolkit": "attachment",
+    "feature": "workspace",
+    "adapter": "adapters::attachments::AttachmentAdapter::t3_attachment_prepare_upload",
+    "expectedServiceMethod": "t3-workspace::AttachmentStore::t3_attachment_prepare_upload",
+    "serviceMethods": [
+      "t3-workspace::AttachmentStore::issue_upload"
+    ],
+    "status": "adapter"
+  },
+  "t3_attachment_discard": {
+    "toolkit": "attachment",
+    "feature": "workspace",
+    "adapter": "adapters::attachments::AttachmentAdapter::t3_attachment_discard",
+    "expectedServiceMethod": "t3-workspace::AttachmentStore::t3_attachment_discard",
+    "serviceMethods": [
+      "t3-workspace::AttachmentStore::delete_pending"
+    ],
+    "status": "adapter"
+  },
+  "t3_thread_send_attachments": {
+    "toolkit": "attachment",
+    "feature": "orchestration",
+    "adapter": "adapters::orchestration::OrchestrationAdapter::t3_thread_send_attachments",
+    "expectedServiceMethod": "t3-workspace::AttachmentStore::t3_thread_send_attachments",
+    "serviceMethods": [
+      "t3-orchestration::ThreadMessageIntake::send_to_thread"
+    ],
+    "status": "adapter"
+  },
+  "device_list": {
+    "toolkit": "device",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-device::DeviceService::device_list",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "device_open": {
+    "toolkit": "device",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-device::DeviceService::device_open",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "device_screenshot": {
+    "toolkit": "device",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-device::DeviceService::device_screenshot",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "device_close": {
+    "toolkit": "device",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-device::DeviceService::device_close",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "t3_environment_read": {
+    "toolkit": "environment",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-config::EnvironmentMcpService::t3_environment_read",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "t3_environment_preferences_update": {
+    "toolkit": "environment",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-config::EnvironmentMcpService::t3_environment_preferences_update",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "html_preview": {
+    "toolkit": "html",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-preview::HtmlService::html_preview",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "html_render": {
+    "toolkit": "html",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-preview::HtmlService::html_render",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "orchestrator_capabilities": {
+    "toolkit": "orchestrator",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::orchestrator_capabilities",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "delegate_task": {
+    "toolkit": "orchestrator",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::delegate_task",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "task_status": {
+    "toolkit": "orchestrator",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::task_status",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "task_cancel": {
+    "toolkit": "orchestrator",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::task_cancel",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "t3_workflow_stop": {
+    "toolkit": "orchestrator",
+    "feature": "orchestration",
+    "adapter": "adapters::orchestration::OrchestrationAdapter::t3_workflow_stop",
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::t3_workflow_stop",
+    "serviceMethods": [
+      "t3-orchestration::ThreadStopService::stop_workflow"
+    ],
+    "status": "adapter"
+  },
+  "t3_background_wait": {
+    "toolkit": "orchestrator",
+    "feature": "orchestration",
+    "adapter": "adapters::orchestration::OrchestrationAdapter::t3_background_wait",
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::t3_background_wait",
+    "serviceMethods": [
+      "t3-orchestration::ThreadStopService::await_background_tasks"
+    ],
+    "status": "adapter"
+  },
+  "schedule_task": {
+    "toolkit": "orchestrator",
+    "feature": "scheduler",
+    "adapter": "adapters::scheduler::SchedulerAdapter::schedule_task",
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::schedule_task",
+    "serviceMethods": [
+      "t3-scheduler::ScheduledTaskService::get",
+      "t3-scheduler::ScheduledTaskService::upsert"
+    ],
+    "status": "adapter"
+  },
+  "list_scheduled_tasks": {
+    "toolkit": "orchestrator",
+    "feature": "scheduler",
+    "adapter": "adapters::scheduler::SchedulerAdapter::list_scheduled_tasks",
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::list_scheduled_tasks",
+    "serviceMethods": [
+      "t3-scheduler::ScheduledTaskService::list",
+      "t3-orchestration::ProjectionReader::shell"
+    ],
+    "status": "adapter"
+  },
+  "delete_scheduled_task": {
+    "toolkit": "orchestrator",
+    "feature": "scheduler",
+    "adapter": "adapters::scheduler::SchedulerAdapter::delete_scheduled_task",
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::delete_scheduled_task",
+    "serviceMethods": [
+      "t3-scheduler::ScheduledTaskService::get",
+      "t3-scheduler::ScheduledTaskService::delete"
+    ],
+    "status": "adapter"
+  },
+  "request_secret": {
+    "toolkit": "orchestrator",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::request_secret",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "create_threads": {
+    "toolkit": "orchestrator",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::create_threads",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "t3_thread_list": {
+    "toolkit": "orchestrator",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::t3_thread_list",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "t3_thread_read": {
+    "toolkit": "orchestrator",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::t3_thread_read",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "t3_thread_update": {
+    "toolkit": "orchestrator",
+    "feature": "orchestration",
+    "adapter": "adapters::orchestration::OrchestrationAdapter::t3_thread_update",
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::t3_thread_update",
+    "serviceMethods": [
+      "t3-orchestration::Dispatcher::dispatch_with_limit",
+      "t3-orchestration::ProjectionReader::shell"
+    ],
+    "status": "adapter"
+  },
+  "t3_thread_send": {
+    "toolkit": "orchestrator",
+    "feature": "orchestration",
+    "adapter": "adapters::orchestration::OrchestrationAdapter::t3_thread_send",
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::t3_thread_send",
+    "serviceMethods": [
+      "t3-orchestration::ThreadManagementService::send_to_thread"
+    ],
+    "status": "adapter"
+  },
+  "t3_thread_wait": {
+    "toolkit": "orchestrator",
+    "feature": "orchestration",
+    "adapter": "adapters::orchestration::OrchestrationAdapter::t3_thread_wait",
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::t3_thread_wait",
+    "serviceMethods": [
+      "t3-orchestration::ThreadManagementService::wait_for_thread"
+    ],
+    "status": "adapter"
+  },
+  "t3_thread_interrupt": {
+    "toolkit": "orchestrator",
+    "feature": "orchestration",
+    "adapter": "adapters::orchestration::OrchestrationAdapter::t3_thread_interrupt",
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::t3_thread_interrupt",
+    "serviceMethods": [
+      "t3-orchestration::ThreadManagementService::interrupt_thread",
+      "t3-orchestration::ThreadManagementService::stop_thread",
+      "t3-orchestration::ThreadManagementService::stop_delegated_tasks",
+      "t3-orchestration::EventStore::read"
+    ],
+    "status": "adapter"
+  },
+  "t3_environment_links": {
+    "toolkit": "orchestrator",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::t3_environment_links",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "t3_environment_link": {
+    "toolkit": "orchestrator",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::t3_environment_link",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "t3_environment_unlink": {
+    "toolkit": "orchestrator",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::OrchestratorMcpService::t3_environment_unlink",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "preview_dialog": {
+    "toolkit": "preview",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-preview::PreviewService::preview_dialog",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "preview_status": {
+    "toolkit": "preview",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-preview::PreviewService::preview_status",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "preview_open": {
+    "toolkit": "preview",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-preview::PreviewService::preview_open",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "preview_navigate": {
+    "toolkit": "preview",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-preview::PreviewService::preview_navigate",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "preview_resize": {
+    "toolkit": "preview",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-preview::PreviewService::preview_resize",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "preview_set_appearance": {
+    "toolkit": "preview",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-preview::PreviewService::preview_set_appearance",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "preview_snapshot": {
+    "toolkit": "preview",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-preview::PreviewService::preview_snapshot",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "preview_act": {
+    "toolkit": "preview",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-preview::PreviewService::preview_act",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "preview_evaluate": {
+    "toolkit": "preview",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-preview::PreviewService::preview_evaluate",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "preview_wait_for": {
+    "toolkit": "preview",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-preview::PreviewService::preview_wait_for",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "preview_recording_start": {
+    "toolkit": "preview",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-preview::PreviewService::preview_recording_start",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "preview_recording_stop": {
+    "toolkit": "preview",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-preview::PreviewService::preview_recording_stop",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "t3_preview_list": {
+    "toolkit": "previewControls",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-preview::PreviewControlsService::t3_preview_list",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "t3_preview_close": {
+    "toolkit": "previewControls",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-preview::PreviewControlsService::t3_preview_close",
+    "serviceMethods": [],
+    "status": "host-trait"
+  },
+  "t3_thread_launch": {
+    "toolkit": "project",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::ProjectService::t3_thread_launch",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "t3_project_list": {
+    "toolkit": "project",
+    "feature": "orchestration",
+    "adapter": "adapters::orchestration::OrchestrationAdapter::t3_project_list",
+    "expectedServiceMethod": "t3-orchestration::ProjectService::t3_project_list",
+    "serviceMethods": [
+      "t3-orchestration::stores::projects::list"
+    ],
+    "status": "adapter"
+  },
+  "t3_project_read": {
+    "toolkit": "project",
+    "feature": "orchestration",
+    "adapter": "adapters::orchestration::OrchestrationAdapter::t3_project_read",
+    "expectedServiceMethod": "t3-orchestration::ProjectService::t3_project_read",
+    "serviceMethods": [
+      "t3-orchestration::stores::projects::get"
+    ],
+    "status": "adapter"
+  },
+  "t3_project_create": {
+    "toolkit": "project",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::ProjectService::t3_project_create",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "t3_project_update": {
+    "toolkit": "project",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::ProjectService::t3_project_update",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "t3_project_delete": {
+    "toolkit": "project",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::ProjectService::t3_project_delete",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "t3_project_clone": {
+    "toolkit": "project",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::ProjectService::t3_project_clone",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "link_pull_request": {
+    "toolkit": "pullRequests",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::ThreadPullRequestService::link_pull_request",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "link_pull_requests": {
+    "toolkit": "pullRequests",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::ThreadPullRequestService::link_pull_requests",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "unlink_pull_request": {
+    "toolkit": "pullRequests",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::ThreadPullRequestService::unlink_pull_request",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "unlink_pull_requests": {
+    "toolkit": "pullRequests",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::ThreadPullRequestService::unlink_pull_requests",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "list_thread_pull_requests": {
+    "toolkit": "pullRequests",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::ThreadPullRequestService::list_thread_pull_requests",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "watch_pull_request": {
+    "toolkit": "pullRequests",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::ThreadPullRequestService::watch_pull_request",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "unwatch_pull_request": {
+    "toolkit": "pullRequests",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::ThreadPullRequestService::unwatch_pull_request",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "write_pull_request_guides": {
+    "toolkit": "pullRequests",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::ThreadPullRequestService::write_pull_request_guides",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "read_pull_request_guide": {
+    "toolkit": "pullRequests",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::ThreadPullRequestService::read_pull_request_guide",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "run_scheduled_task_now": {
+    "toolkit": "thread",
+    "feature": "scheduler",
+    "adapter": "adapters::scheduler::SchedulerAdapter::run_scheduled_task_now",
+    "expectedServiceMethod": "t3-orchestration::ThreadManagementService::run_scheduled_task_now",
+    "serviceMethods": [
+      "t3-scheduler::ScheduledTaskService::get",
+      "t3-scheduler::ScheduledTaskService::run_now"
+    ],
+    "status": "adapter"
+  },
+  "t3_thread_search": {
+    "toolkit": "thread",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-orchestration::ThreadManagementService::t3_thread_search",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "t3_thread_configure": {
+    "toolkit": "thread",
+    "feature": "orchestration",
+    "adapter": "adapters::orchestration::OrchestrationAdapter::t3_thread_configure",
+    "expectedServiceMethod": "t3-orchestration::ThreadManagementService::t3_thread_configure",
+    "serviceMethods": [
+      "t3-orchestration::Dispatcher::dispatch_with_limit",
+      "t3-orchestration::ProjectionReader::shell"
+    ],
+    "status": "adapter"
+  },
+  "t3_thread_transfer": {
+    "toolkit": "thread",
+    "feature": "orchestration",
+    "adapter": "adapters::orchestration::OrchestrationAdapter::t3_thread_transfer",
+    "expectedServiceMethod": "t3-orchestration::ThreadManagementService::t3_thread_transfer",
+    "serviceMethods": [
+      "t3-orchestration::ThreadManagementService::records",
+      "t3-orchestration::Dispatcher::dispatch_with_limit"
+    ],
+    "status": "adapter"
+  },
+  "t3_thread_organize": {
+    "toolkit": "thread",
+    "feature": "orchestration",
+    "adapter": "adapters::orchestration::OrchestrationAdapter::t3_thread_organize",
+    "expectedServiceMethod": "t3-orchestration::ThreadManagementService::t3_thread_organize",
+    "serviceMethods": [
+      "t3-orchestration::Dispatcher::dispatch_with_limit"
+    ],
+    "status": "adapter"
+  },
+  "t3_pending_request": {
+    "toolkit": "thread",
+    "feature": "orchestration",
+    "adapter": "adapters::orchestration::OrchestrationAdapter::t3_pending_request",
+    "expectedServiceMethod": "t3-orchestration::ThreadManagementService::t3_pending_request",
+    "serviceMethods": [
+      "t3-orchestration::ThreadManagementService::records",
+      "t3-orchestration::Dispatcher::dispatch_with_limit"
+    ],
+    "status": "adapter"
+  },
+  "t3_queue": {
+    "toolkit": "thread",
+    "feature": "orchestration",
+    "adapter": "adapters::orchestration::OrchestrationAdapter::t3_queue",
+    "expectedServiceMethod": "t3-orchestration::ThreadManagementService::t3_queue",
+    "serviceMethods": [
+      "t3-orchestration::ThreadManagementService::records",
+      "t3-orchestration::queued_runs_in_delivery_order",
+      "t3-orchestration::Dispatcher::dispatch_with_limit"
+    ],
+    "status": "adapter"
+  },
+  "tool_search": {
+    "toolkit": "toolSearch",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-mcp::ToolExposure::tool_search",
+    "serviceMethods": [],
+    "status": "built-in"
+  },
+  "t3_worktree_handoff": {
+    "toolkit": "worktree",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-git::WorktreeMcpService::t3_worktree_handoff",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "t3_worktree_status": {
+    "toolkit": "worktree",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-git::WorktreeMcpService::t3_worktree_status",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "t3_worktree_list": {
+    "toolkit": "worktree",
+    "feature": "git",
+    "adapter": "adapters::worktree::WorktreeAdapter::t3_worktree_list",
+    "expectedServiceMethod": "t3-git::WorktreeMcpService::t3_worktree_list",
+    "serviceMethods": [
+      "t3-git::Git::list_branches"
+    ],
+    "status": "adapter"
+  }
+}

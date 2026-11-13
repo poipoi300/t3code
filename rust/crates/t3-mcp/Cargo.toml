@@ -1,0 +1,52 @@
+[package]
+name = "t3-mcp"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = ["auth"]
+auth = ["dep:t3-auth"]
+orchestration = ["dep:t3-orchestration"]
+workspace = ["dep:t3-workspace"]
+forge = ["dep:t3-forge"]
+scheduler = ["dep:t3-scheduler"]
+git = ["dep:t3-git", "orchestration"]
+
+[dependencies]
+t3-contracts = { path = "../t3-contracts" }
+t3-persistence = { path = "../t3-persistence" }
+t3-auth = { path = "../t3-auth", optional = true }
+t3-orchestration = { path = "../t3-orchestration", optional = true }
+t3-workspace = { path = "../t3-workspace", optional = true }
+t3-forge = { path = "../t3-forge", optional = true }
+t3-scheduler = { path = "../t3-scheduler", optional = true }
+t3-git = { path = "../t3-git", optional = true }
+async-trait = "0.1"
+futures-util = "0.3"
+axum = "0.8"
+base64 = "0.22"
+http = "1"
+getrandom = "0.3"
+jsonschema = { version = "0.33", default-features = false }
+rmcp = { version = "=3.10.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "sync", "time", "rt", "macros"] }
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+percent-encoding = "2"
+tracing = "0.1"
+tokio-util = "0.7"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[lints]
+workspace = true
