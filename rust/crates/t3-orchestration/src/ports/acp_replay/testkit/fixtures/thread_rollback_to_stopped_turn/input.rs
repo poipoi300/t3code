@@ -1,0 +1,7 @@
+use crate::ports::acp_replay::testkit::fixtures::shared::OrchestratorFixtureInput;
+
+pub fn thread_rollback_to_stopped_turn_input() -> crate::error::Result<OrchestratorFixtureInput> {
+    Ok(serde_json::from_str(
+        r#"{"steps":[{"type":"message","text":"Respond with exactly: rollback fixture first turn complete"},{"type":"message","text":"Run this exact local command: `node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"`. Do not answer until it completes, then respond exactly: interrupt fixture should not finish naturally."},{"type":"interrupt","targetRunIndex":2,"waitForTurnItemType":"command_execution"},{"type":"message","text":"Respond with exactly: rollback fixture second turn complete"},{"type":"rollback","checkpointScopeSuffix":"root","checkpointSuffix":"2"},{"type":"message","text":"Repeat the conversation verbatim."}]}"#,
+    )?)
+}
