@@ -436,3 +436,31 @@ async fn state_subscription_contains_initial_snapshot_then_all_revisions() {
     assert!(update.onboarding_completed);
     assert_eq!(update.revision, initial.revision + 1);
 }
+
+#[tokio::test]
+async fn background_host_reconnects_reach_state_subscribers() {
+    let host = FakeHost::new("local", FakeOps::new("local", DevicePlatform::Ios, true), FakeCommands::encoder(), None);
+    let service = service(vec![host.clone()], true, false).await;
+    service.readiness(None).await.unwrap();
+    let mut updates = service.state_stream().await;
+    let initial = updates.recv().await.unwrap();
+    host.phase.lock().unwrap().as_ref().unwrap()(DeviceHostStatus::Starting, Some("Reconnecting".into()));
+    let update = updates.recv().await.unwrap();
+    assert_eq!(update.host_status, DeviceHostStatus::Starting);
+    assert_eq!(update.host_status_detail.flatten().as_deref(), Some("Reconnecting"));
+    assert_eq!(update.revision, initial.revision + 1);
+    host.phase.lock().unwrap().as_ref().unwrap()(DeviceHostStatus::Ready, None);
+    assert_eq!(updates.recv().await.unwrap().host_status, DeviceHostStatus::Ready);
+}
+
+#[tokio::test]
+async fn cloud_summaries_are_split_for_wire_compatibility() {
+    let mut state = service(vec![], false, false).await.state().await;
+    for (id, kind) in [("local", DeviceHostKind::Local), ("ssh", DeviceHostKind::Ssh), ("eas", DeviceHostKind::Eas), ("pool", DeviceHostKind::Simlock)] {
+        state.hosts.push(t3_device::host::summary(id, id, kind, vec![]));
+    }
+    let wire = serde_json::to_value(t3_device::service::wire_state(state)).unwrap();
+    assert_eq!(wire["hosts"].as_array().unwrap().iter().map(|h|h["id"].as_str().unwrap()).collect::<Vec<_>>(), ["local", "ssh"]);
+    assert_eq!(wire["easHosts"][0]["id"], "eas");
+    assert_eq!(wire["simlockHosts"][0]["id"], "pool");
+}
