@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+
+[package]
+name = "t3-ui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+# The authoritative NSH pin. The installer reads nsh-core; keep all NSH crates identical.
+[dependencies]
+nsh-core = { git = "https://github.com/longbridge/nsh", rev = "d6f549d5a85b6b23714249ddd572f922db961254" }
+nsh-base = { git = "https://github.com/longbridge/nsh", rev = "d6f549d5a85b6b23714249ddd572f922db961254", default-features = false, features = ["highlight"] }
+t3-client = { path = "../t3-client" }
+t3-contracts = { path = "../t3-contracts" }
+t3-theme = { path = "../t3-theme" }
+t3-i18n = { path = "../t3-i18n", default-features = false }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+serde_json = "1"
+percent-encoding = "2"
+
+[dev-dependencies]
+futures = { version = "0.3", features = ["executor"] }
+nsh-engine = { git = "https://github.com/longbridge/nsh", rev = "d6f549d5a85b6b23714249ddd572f922db961254" }
+nsh-testing = { git = "https://github.com/longbridge/nsh", rev = "d6f549d5a85b6b23714249ddd572f922db961254", default-features = false }
+
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+
+[profile.dev]
+debug = 0
+
+[profile.dev.package."*"]
+opt-level = 2
