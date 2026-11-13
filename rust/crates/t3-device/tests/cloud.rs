@@ -21,7 +21,7 @@ use t3_device::{
         simlock::{SimlockHost, SimlockOptions},
     },
     host::{AgentEndpoint, DeviceHost, DeviceOperations, OpenContext, Routing, SessionRelease},
-    io::{CommandOutput, Http, HttpRequest, HttpResponse, Secret},
+    io::{Command, CommandOutput, Http, HttpRequest, HttpResponse, Secret},
 };
 use tokio::sync::Mutex;
 
@@ -605,8 +605,7 @@ async fn simlock_stop_during_open_closes_the_partial_session_and_removes_its_sta
     host.stop().await.unwrap();
     assert!(opening.await.unwrap().is_err());
     let calls = commands.calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].args[1], "close");
+    assert_eq!(calls.iter().map(|call|call.args[1].as_str()).collect::<Vec<_>>(), ["connect", "close"]);
     let mut entries = tokio::fs::read_dir(temp.path().join("device/simlock/pool")).await.unwrap();
     assert!(entries.next_entry().await.unwrap().is_none());
 }

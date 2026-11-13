@@ -1,1 +1,298 @@
-//! UI-SELECT: Select. Not built yet; see ui-plan.md and ui-package.md.
+//! Port of apps/web/src/components/ui/select.tsx Select and its slots.
+//!
+//! [`select`] takes [`SelectProps`] and an `on_change(Option<SharedString>)` callback.
+//! Values are opaque IDs; item titles, groups, label and placeholder are English translation
+//! keys. `value` and `open` support controlled bindings; defaults are used only when uncontrolled.
+//! [`Variant`] is `Default | Ghost`; [`Size`] is `Compact | Default | Lg | Sm | Xs`.
+//! Primitives return opaque elements: put layout on their parent, never restyle their surface.
+//!
+//! Slots: `trigger`, `icon`, `render_item`, `render_group` and `empty` are optional factories.
+//! The default trigger contains [`select_value`] then the chevron; custom triggers can compose
+//! [`select_trigger`]. [`select_button`] is the standalone button with that same default look.
+//! NSH owns the portal, positioner, virtual list and group containers; [`select_popup`] applies
+//! their styles through NSH's part props instead of accepting separately mounted children.
+//! `SelectContent` is the web alias of `SelectPopup`: [`select_content`] is the same function.
+//! NSH uses a sheet on touch screens and its own placement/selected-item alignment policy.
+
+use std::rc::Rc;
+
+use nsh_base::select::SelectValue;
+pub use nsh_base::{OpenChangeReason, SelectEntry, SelectGroup, SelectItem};
+use nsh_core::prelude::*;
+
+use crate::i18n::t;
+use crate::theme::{self, Scope, cn, palette, tw, tw_with};
+use crate::ui::icon::{Icon, icon};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Variant {
+    #[default]
+    Default,
+    Ghost,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Size {
+    Compact,
+    #[default]
+    Default,
+    Lg,
+    Sm,
+    Xs,
+}
+
+pub type ElementSlot = Rc<dyn Fn() -> AnyElement>;
+pub type ItemSlot = Rc<dyn Fn(&SelectEntry) -> AnyElement>;
+pub type GroupSlot = Rc<dyn Fn(&SelectGroup) -> AnyElement>;
+pub type OpenChange = Rc<dyn Fn(bool, OpenChangeReason)>;
+pub use nsh_base::select::SelectValue as Value;
+
+/// Popup positioning exposed by NSH. Its list always matches at least the trigger width;
+/// NSH does not expose web's alternate anchor, align offset or `alignItemWithTrigger` override.
+#[derive(Clone, Copy, Debug)]
+pub struct Popup {
+    pub side: Placement,
+    pub align: Align,
+    pub side_offset: f32,
+}
+
+impl Default for Popup {
+    fn default() -> Self {
+        Self { side: Placement::Bottom, align: Align::Start, side_offset: 4.0 }
+    }
+}
+
+/// Create under an NSH owner with [`SelectProps::new`], then replace reactive props with
+/// `signal.into()` or `Prop::bind`. Item values must be unique (the NSH select contract).
+pub struct SelectProps {
+    pub items: Prop<Vec<SelectItem>>,
+    pub value: Prop<Value>,
+    pub default_value: Option<SharedString>,
+    pub open: Prop<Option<bool>>,
+    pub default_open: bool,
+    pub disabled: Prop<bool>,
+    pub invalid: Prop<bool>,
+    pub label: Prop<SharedString>,
+    pub placeholder: Prop<SharedString>,
+    pub variant: Variant,
+    pub size: Size,
+    pub popup: Popup,
+    pub trigger: Option<ElementSlot>,
+    pub icon: Option<ElementSlot>,
+    pub render_item: Option<ItemSlot>,
+    pub render_group: Option<GroupSlot>,
+    pub empty: Option<ElementSlot>,
+    pub on_open_change: Option<OpenChange>,
+}
+
+impl SelectProps {
+    pub fn new(label: impl Into<SharedString>) -> Self {
+        Self {
+            items: Vec::new().into(), value: Value::Uncontrolled.into(), default_value: None,
+            open: None.into(), default_open: false, disabled: false.into(), invalid: false.into(),
+            label: label.into().into(), placeholder: SharedString::default().into(),
+            variant: Variant::Default, size: Size::Default, popup: Popup::default(),
+            trigger: None, icon: None, render_item: None, render_group: None, empty: None,
+            on_open_change: None,
+        }
+    }
+}
+
+pub fn select(props: SelectProps, on_change: impl Fn(Option<SharedString>) + 'static) -> impl IntoElement {
+    select_popup(props, on_change)
+}
+
+pub use select_popup as select_content;
+
+/// NSH combines Portal/Positioner/Popup/List and scroll controls in one select component.
+/// Its native scrolling replaces the web's two gradient scroll arrows (no arrow slots in NSH).
+pub fn select_popup(props: SelectProps, on_change: impl Fn(Option<SharedString>) + 'static) -> impl IntoElement {
+    let SelectProps { items, value, default_value, open, default_open, disabled, invalid, label,
+        placeholder, variant, size, popup, trigger, icon: custom_icon, render_item, render_group,
+        empty, on_open_change } = props;
+    let own_value = signal(default_value.clone());
+    let own_open = signal(default_open);
+    let current = computed(move || match value.get() {
+        Value::Uncontrolled => own_value.get(),
+        Value::Controlled(value) => value,
+    });
+    let pressed = Prop::bind(move || open.get().unwrap_or_else(|| own_open.get()));
+    let translated = computed(move || items.get().into_iter().map(|mut item| {
+        item.title = t(&item.title).into();
+        item.group = item.group.map(|group| t(&group).into());
+        item
+    }).collect::<Vec<_>>());
+    let trigger = trigger.map_or_else(|| {
+        select_trigger(
+            select_value(translated.into(), current.into(), placeholder),
+            variant, size, disabled, invalid, pressed,
+            custom_icon.map(|render| render()),
+        ).into_element()
+    }, |render| render());
+    let change = Rc::new(on_change);
+    let rendered_item = render_item.clone();
+    let rendered_group = render_group.clone();
+    let empty = empty.map(|render| render());
+    nsh_base::select()
+        .items(translated)
+        .value(value)
+        .default_value(default_value)
+        .open(open)
+        .default_open(default_open)
+        .disabled(disabled)
+        .accessibility_label(move || Some(SharedString::from(t(&label.get()))))
+        .placeholder(move || Some(SharedString::from(t(&placeholder.get()))))
+        .trigger(trigger)
+        .placement(popup.side)
+        .align(popup.align)
+        .offset(px(popup.side_offset))
+        // `dropdown-glass` (index.css): the 18% outer mix gives 83.6% opacity at 80% glass.
+        // NSH combines the glass wrapper with Popup; Electron no-drag and transform-origin
+        // have no meaning in this shared native/DOM tree and are omitted.
+        .popup_class(tw("relative rounded-lg text-foreground outline-none border border-foreground/10 bg-popover/[0.836] backdrop-blur-(--glass-blur) shadow-[0_16px_40px_-18px_rgb(0_0_0/55%)] dark:shadow-[0_18px_44px_-18px_rgb(0_0_0/80%)]"))
+        .list_class(tw("p-1"))
+        // NSH projects data-selected/highlighted/disabled into selected:/focus:/disabled:.
+        // `in-data-[side=none]` width is NSH's selected-item cover geometry, not a CSS token.
+        .item_class(tw("group flex min-h-8 cursor-pointer items-center rounded-sm px-2 py-1 text-base outline-none selected:bg-foreground/[0.08] disabled:pointer-events-none disabled:cursor-not-allowed focus:bg-accent focus:text-accent-foreground disabled:opacity-64 sm:min-h-7 sm:text-sm"))
+        .group_class(tw(""))
+        .render_item(move |entry: &SelectEntry| {
+            select_item(rendered_item.as_ref().map_or_else(
+                || text(entry.title.clone()).into_element(), |render| render(entry)
+            ), false)
+        })
+        .render_group(move |group: &SelectGroup| {
+            select_group(rendered_group.as_ref().map_or_else(
+                || select_group_label(group.title.clone()).into_element(), |render| render(group)
+            ))
+        })
+        .empty(empty)
+        .on_change(move |next: &Option<SharedString>| {
+            if disabled.get_untracked() { return; }
+            if matches!(value.get_untracked(), Value::Uncontrolled) { own_value.set(next.clone()); }
+            change(next.clone());
+        })
+        .on_open_change(move |next: &bool, reason: &OpenChangeReason| {
+            own_open.set(*next);
+            if let Some(callback) = &on_open_change { callback(*next, *reason); }
+        })
+}
+
+fn trigger_classes(variant: Variant, size: Size, disabled: bool, invalid: bool, pressed: bool) -> SharedString {
+    // Selector utilities are applied to the icon below. `before:` becomes the first child;
+    // coarse pointer `after:` hit area is `hit_slop`, and spacing calculations are 4px units.
+    let classes = cn([
+        Some("relative inline-flex cursor-pointer select-none items-center justify-between gap-2 border rounded-lg text-left text-base outline-none transition-[color,box-shadow,background-color] data-disabled:pointer-events-none data-disabled:opacity-64 sm:text-sm"),
+        Some(match variant {
+            Variant::Default => "w-full min-w-36 border-input bg-background text-foreground shadow-xs/5 ring-ring/24 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-inset aria-invalid:border-destructive/36 focus-visible:aria-invalid:border-destructive/64 focus-visible:aria-invalid:ring-destructive/16 dark:bg-input/32 dark:aria-invalid:ring-destructive/24",
+            Variant::Ghost => "border-transparent text-secondary-label focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring data-pressed:bg-accent hover:bg-accent hover:text-foreground data-pressed:text-foreground",
+        }),
+        Some(match size {
+            Size::Compact => "h-7 gap-1 rounded-md px-[7px] text-xs",
+            Size::Default => "min-h-9 px-[11px] sm:min-h-8",
+            Size::Lg => "min-h-10 px-[11px] sm:min-h-9",
+            Size::Sm => "min-h-8 gap-1.5 px-[9px] sm:min-h-7",
+            Size::Xs => "h-7 gap-1 rounded-md px-[7px] text-sm sm:h-6 sm:text-xs",
+        }),
+        (variant == Variant::Default).then_some("focus-visible:shadow-none active:shadow-none"),
+        (variant == Variant::Default && (disabled || invalid || pressed)).then_some("shadow-none"),
+    ]);
+    tw_with(Scope::Root, &classes, &[
+        ("data-disabled", if disabled { "true" } else { "false" }),
+        ("aria-invalid", if invalid { "true" } else { "false" }),
+        ("data-pressed", if pressed { "true" } else { "false" }),
+    ])
+}
+
+/// Select's trigger slot. NSH supplies its combobox role, name, expanded state and press handler.
+pub fn select_trigger(
+    children: impl IntoElement, variant: Variant, size: Size, disabled: Prop<bool>,
+    invalid: Prop<bool>, pressed: Prop<bool>, custom_icon: Option<AnyElement>,
+) -> impl IntoElement {
+    trigger_surface(children, variant, size, disabled, invalid, pressed, custom_icon)
+}
+
+fn trigger_surface(
+    children: impl IntoElement, variant: Variant, size: Size, disabled: Prop<bool>,
+    invalid: Prop<bool>, pressed: Prop<bool>, custom_icon: Option<AnyElement>,
+) -> impl IntoElement {
+    nsh_base::button()
+        .disabled(disabled)
+        .accessibility_state(move || AccessibilityState { invalid: invalid.get(), ..Default::default() })
+        .app_class(move || Some(trigger_classes(variant, size, disabled.get(), invalid.get(), pressed.get())))
+        .hit_slop(move || {
+            let m = theme::metrics();
+            EdgeInsets::all(px(((m.hit_target - trigger_height(size, m.control > 32.0)) / 2.0).max(0.0)))
+        })
+        .child((variant == Variant::Default).then(|| {
+            // `before:` relief is visible only in the idle state; focus is projected to children.
+            view().accessible(false).pointer_events(PointerEvents::None)
+                .app_class(tw("absolute inset-0 group-focus-visible:opacity-0 group-active:opacity-0"))
+                .rounded(move || px(if matches!(size, Size::Compact | Size::Xs) { 5.0 } else { 7.0 }))
+                .opacity(move || if disabled.get() || invalid.get() || pressed.get() { 0.0 } else { 1.0 })
+                .app_class(tw("shadow-[0_1px_rgb(0_0_0/4%)] dark:shadow-[0_-1px_rgb(255_255_255/6%)]"))
+        }))
+        .child(children)
+        .child(view().accessible(false).app_class(tw("shrink-0")).child(
+            custom_icon.unwrap_or_else(|| default_icon().into_element())
+        ))
+}
+
+fn default_icon() -> impl IntoElement {
+    view().app_class(tw("-me-1 size-3.5 opacity-70")).child(icon(Icon::ChevronDown, 14.0, move || palette().icon_muted))
+}
+
+fn trigger_height(size: Size, compact: bool) -> f32 {
+    match (size, compact) {
+        (Size::Compact, _) | (Size::Xs, true) | (Size::Sm, false) => 28.0,
+        (Size::Xs, false) => 24.0,
+        (Size::Default, true) | (Size::Lg, false) => 36.0,
+        (Size::Default, false) | (Size::Sm, true) => 32.0,
+        (Size::Lg, true) => 40.0,
+    }
+}
+
+/// Standalone SelectButton. NSH's typed button replaces `useRender`'s arbitrary tag override.
+pub fn select_button(
+    children: impl IntoElement, label: impl Into<SharedString>, size: Size,
+    disabled: Prop<bool>, on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    let label = label.into();
+    let on_press = Rc::new(on_press);
+    nsh_base::button()
+        .accessibility_label(move || Some(SharedString::from(t(&label))))
+        .disabled(disabled)
+        .app_class(move || Some(trigger_classes(Variant::Default, size, disabled.get(), false, false)))
+        .hit_slop(move || {
+            let m = theme::metrics();
+            EdgeInsets::all(px(((m.hit_target - trigger_height(size, m.control > 32.0)) / 2.0).max(0.0)))
+        })
+        .on_press(move || { if !disabled.get_untracked() { on_press(); } })
+        .child(view().app_class(tw("min-w-0 flex-1 truncate text-left")).child(children))
+        .child(default_icon())
+}
+
+pub fn select_value(items: Prop<Vec<SelectItem>>, value: Prop<Option<SharedString>>, placeholder: Prop<SharedString>) -> impl IntoElement {
+    let title = computed(move || value.get().and_then(|value| items.with(|items| {
+        items.iter().find(|item| item.value == value).map(|item| item.title.clone())
+    })));
+    text(move || title.get().unwrap_or_else(|| t(&placeholder.get()).into()))
+        .app_class(move || Some(tw_with(Scope::Root, "flex-1 truncate data-placeholder:text-placeholder", &[
+            ("data-placeholder", if title.get().is_none() { "true" } else { "false" }),
+        ])))
+}
+
+/// NSH supplies the surrounding option's behavior and state. Web's `hideIndicator` is unused.
+pub fn select_item(children: impl IntoElement, _hide_indicator: bool) -> impl IntoElement {
+    view().app_class(tw("min-w-0 flex-1")).child(children)
+}
+
+/// NSH supplies the group container; its renderer mounts this group's label once per section.
+pub fn select_group(children: impl IntoElement) -> impl IntoElement {
+    view().child(children)
+}
+
+pub fn select_group_label(label: impl Into<SharedString>) -> impl IntoElement {
+    let label = label.into();
+    text(move || SharedString::from(t(&label)))
+        .app_class(tw("px-2 py-1.5 font-medium text-muted-foreground text-xs"))
+}
