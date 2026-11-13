@@ -1,0 +1,1 @@
+ALTER TABLE peer_environment_links ADD COLUMN fenced INTEGER NOT NULL DEFAULT 0;

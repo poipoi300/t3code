@@ -1,0 +1,2 @@
+# LF line endings; search predicates also contain intentional lone CR bytes.
+sql/*.sql text eol=lf
