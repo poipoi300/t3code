@@ -196,13 +196,19 @@ pub struct Toolchain {
     pub commands: Arc<dyn Commands>,
     lock: Mutex<()>,
 }
-pub struct ToolchainAgentCli{pub node:String,pub tools:Arc<Toolchain>}
+pub struct ToolchainAgentCli {
+    pub node: String,
+    pub tools: Arc<Toolchain>,
+}
 #[async_trait]
-impl crate::host::AgentCliProvider for ToolchainAgentCli{
-    async fn ensure(&self)->Result<crate::host::AgentCli>{
-        crate::error::validate_arg(&self.node,"Node executable")?;
-        let paths=self.tools.ensure(Tool::Agent).await?;
-        Ok(crate::host::AgentCli{node:self.node.clone(),entry:paths.entry})
+impl crate::host::AgentCliProvider for ToolchainAgentCli {
+    async fn ensure(&self) -> Result<crate::host::AgentCli> {
+        crate::error::validate_arg(&self.node, "Node executable")?;
+        let paths = self.tools.ensure(Tool::Agent).await?;
+        Ok(crate::host::AgentCli {
+            node: self.node.clone(),
+            entry: paths.entry,
+        })
     }
 }
 impl Toolchain {

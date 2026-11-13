@@ -26,23 +26,46 @@ use t3_device::{
 };
 
 #[tokio::test]
-async fn simlock_identity_never_echoes_credentials_from_a_role_error(){
+async fn simlock_identity_never_echoes_credentials_from_a_role_error() {
     use t3_device::service::Accounts;
-    let home=tempfile::tempdir().unwrap();
-    let accounts=t3_device::cloud::AccountService{settings:settings(false,false),secrets:Arc::new(LiteralSecrets),http:FakeHttp::new([(200,json!({"role":"worker-private-token","name":"test"}))]),environment:BTreeMap::new(),expo_home:home.path().into()};
-    let input=serde_json::from_value(json!({"gatewayUrl":"https://pool.test","agentToken":"private-token"})).unwrap();
-    let error=accounts.simlock_identity(input).await.unwrap_err();
+    let home = tempfile::tempdir().unwrap();
+    let accounts = t3_device::cloud::AccountService {
+        settings: settings(false, false),
+        secrets: Arc::new(LiteralSecrets),
+        http: FakeHttp::new([(200, json!({"role":"worker-private-token","name":"test"}))]),
+        environment: BTreeMap::new(),
+        expo_home: home.path().into(),
+    };
+    let input = serde_json::from_value(
+        json!({"gatewayUrl":"https://pool.test","agentToken":"private-token"}),
+    )
+    .unwrap();
+    let error = accounts.simlock_identity(input).await.unwrap_err();
     assert!(!format!("{error:?}").contains("private-token"));
     assert!(error.to_string().contains("--role agent"));
 }
 
 #[tokio::test]
-async fn location_refinements_are_checked_before_any_command(){
-    for(latitude,longitude)in [(json!(90.1),json!(0)),(json!(0),json!(180.1)),(json!("NaN"),json!(0)),(json!(0),json!("Infinity"))]{
-        let commands=FakeCommands::encoder();
-        let host=FakeHost::new("local",FakeOps::new("local",DevicePlatform::Ios,true),commands.clone(),None);
+async fn location_refinements_are_checked_before_any_command() {
+    for (latitude, longitude) in [
+        (json!(90.1), json!(0)),
+        (json!(0), json!(180.1)),
+        (json!("NaN"), json!(0)),
+        (json!(0), json!("Infinity")),
+    ] {
+        let commands = FakeCommands::encoder();
+        let host = FakeHost::new(
+            "local",
+            FakeOps::new("local", DevicePlatform::Ios, true),
+            commands.clone(),
+            None,
+        );
         let input=serde_json::from_value(json!({"type":"setLocation","deviceId":"phone","latitude":latitude,"longitude":longitude})).unwrap();
-        assert!(run_action(&host.ready,DevicePlatform::Ios,&input).await.is_err());
+        assert!(
+            run_action(&host.ready, DevicePlatform::Ios, &input)
+                .await
+                .is_err()
+        );
         assert!(commands.calls.lock().unwrap().is_empty());
     }
 }
@@ -776,12 +799,18 @@ async fn expo_errors_scrub_credential_and_bound_gateway_text() {
 }
 
 #[tokio::test]
-async fn expo_active_sessions_accept_nullable_names_without_losing_owned_sessions(){
-    let home=tempfile::tempdir().unwrap();
-    let response=json!({"data":{"app":{"byId":{"deviceRunSessionsPaginated":{"edges":[{"node":{"id":"unrelated","name":null,"status":"IN_PROGRESS"}},{"node":{"id":"owned","name":"T3 Code – Cloud – abc123","status":"NEW"}}]}}}}});
-    let api=ExpoHttp::new(FakeHttp::new([(200,response)]),resolve_credential("private-token",None,home.path()).await.unwrap());
-    let sessions=api.active("app").await.unwrap();
-    assert_eq!(sessions.len(),2);assert_eq!(sessions[1].id,"owned");
+async fn expo_active_sessions_accept_nullable_names_without_losing_owned_sessions() {
+    let home = tempfile::tempdir().unwrap();
+    let response = json!({"data":{"app":{"byId":{"deviceRunSessionsPaginated":{"edges":[{"node":{"id":"unrelated","name":null,"status":"IN_PROGRESS"}},{"node":{"id":"owned","name":"T3 Code – Cloud – abc123","status":"NEW"}}]}}}}});
+    let api = ExpoHttp::new(
+        FakeHttp::new([(200, response)]),
+        resolve_credential("private-token", None, home.path())
+            .await
+            .unwrap(),
+    );
+    let sessions = api.active("app").await.unwrap();
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[1].id, "owned");
 }
 #[tokio::test]
 async fn simlock_tokens_are_origin_bound_and_unreadable_references_fail_closed() {

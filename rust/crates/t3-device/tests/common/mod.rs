@@ -2,7 +2,7 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::{
-    collections::{VecDeque,BTreeSet},
+    collections::{BTreeSet, VecDeque},
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -336,15 +336,37 @@ pub fn close(thread: &str, shutdown: bool) -> DeviceCloseInput {
 }
 
 pub struct FakeLaunchers {
-    pub bound:Mutex<Vec<(String,Vec<String>)>>,
-    pub released:Mutex<Vec<String>>,
-    pub bind_gate:StdMutex<Option<Arc<Gate>>>,
+    pub bound: Mutex<Vec<(String, Vec<String>)>>,
+    pub released: Mutex<Vec<String>>,
+    pub bind_gate: StdMutex<Option<Arc<Gate>>>,
 }
-impl FakeLaunchers{pub fn new()->Arc<Self>{Arc::new(Self{bound:Mutex::new(vec![]),released:Mutex::new(vec![]),bind_gate:StdMutex::new(None)})}}
+impl FakeLaunchers {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            bound: Mutex::new(vec![]),
+            released: Mutex::new(vec![]),
+            bind_gate: StdMutex::new(None),
+        })
+    }
+}
 #[async_trait]
-impl t3_device::agent::Launchers for FakeLaunchers{
-    async fn configure(&self,_:&str,_:Option<&str>,_:&host::AgentEndpoint)->Result<String>{Ok("/host.json".into())}
-    async fn bind(&self,session:&str,args:&[String])->Result<String>{let gate=self.bind_gate.lock().unwrap().take();if let Some(gate)=gate{gate.wait().await;}self.bound.lock().await.push((session.into(),args.into()));Ok(format!("/managed/{session}"))}
-    async fn release(&self,launcher:&str)->Result<()>{self.released.lock().await.push(launcher.into());Ok(())}
-    async fn prune(&self,_:&BTreeSet<String>)->Result<()>{Ok(())}
+impl t3_device::agent::Launchers for FakeLaunchers {
+    async fn configure(&self, _: &str, _: Option<&str>, _: &host::AgentEndpoint) -> Result<String> {
+        Ok("/host.json".into())
+    }
+    async fn bind(&self, session: &str, args: &[String]) -> Result<String> {
+        let gate = self.bind_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.wait().await;
+        }
+        self.bound.lock().await.push((session.into(), args.into()));
+        Ok(format!("/managed/{session}"))
+    }
+    async fn release(&self, launcher: &str) -> Result<()> {
+        self.released.lock().await.push(launcher.into());
+        Ok(())
+    }
+    async fn prune(&self, _: &BTreeSet<String>) -> Result<()> {
+        Ok(())
+    }
 }

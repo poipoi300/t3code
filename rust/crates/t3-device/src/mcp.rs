@@ -79,7 +79,7 @@ pub fn resolve_host(state: &DeviceServiceState, selector: Option<&str>) -> Resul
     let matches = state
         .hosts
         .iter()
-        .filter(|h| h.label.as_ref().to_lowercase()==selector.to_lowercase())
+        .filter(|h| h.label.as_ref().to_lowercase() == selector.to_lowercase())
         .collect::<Vec<_>>();
     if matches.len() == 1 {
         return Ok(Some(matches[0].id.as_ref().into()));
@@ -101,10 +101,24 @@ pub fn resolve_host(state: &DeviceServiceState, selector: Option<&str>) -> Resul
         })
         .collect::<Vec<_>>()
         .join(", ");
-    if candidates.len()>10{listed.push_str(&format!(", {} more",candidates.len()-10));}
-    let selector=selector.chars().take(128).collect::<String>();
-    let duplicate=state.hosts.iter().filter(|h|h.label.as_ref().to_lowercase()==selector.to_lowercase()).count()>1;
-    Err(Error::Unavailable(if duplicate{format!("Several device hosts are named {selector}; pass one id: {listed}.")}else{format!("No device host {selector}. Known hosts: {}.",if listed.is_empty(){"none"}else{&listed})}))
+    if candidates.len() > 10 {
+        listed.push_str(&format!(", {} more", candidates.len() - 10));
+    }
+    let selector = selector.chars().take(128).collect::<String>();
+    let duplicate = state
+        .hosts
+        .iter()
+        .filter(|h| h.label.as_ref().to_lowercase() == selector.to_lowercase())
+        .count()
+        > 1;
+    Err(Error::Unavailable(if duplicate {
+        format!("Several device hosts are named {selector}; pass one id: {listed}.")
+    } else {
+        format!(
+            "No device host {selector}. Known hosts: {}.",
+            if listed.is_empty() { "none" } else { &listed }
+        )
+    }))
 }
 pub fn png_dimensions(bytes: &[u8]) -> (i64, i64) {
     if bytes.len() < 24
@@ -186,10 +200,37 @@ impl t3_mcp::services::DeviceService for DeviceAdapter {
                 .await
                 .map_err(mapped)?
                 .ok_or_else(|| {
-                    let named=|host:&DeviceHostSummary|format!("'{}' (hostId {})",host.label.as_ref(),host.id.as_ref());
-                    let target=host.as_ref().map(|id|state.hosts.iter().find(|h|h.id.as_ref()==id).map(named).unwrap_or_else(||format!("hostId {id}")));
-                    let failures=state.hosts.iter().filter(|h|host.as_ref().is_none_or(|id|id==h.id.as_ref())).filter_map(|h|state.host_statuses.get(&h.id).filter(|s|s.status==DeviceHostStatus::Failed).and_then(|s|s.detail.as_ref().and_then(|d|d.as_ref())).map(|detail|format!("{} failed to start: {detail}",named(h)))).collect::<Vec<_>>();
-                    let mut parts=vec![format!("No device {} on {}.",id.as_ref(),target.as_deref().unwrap_or("any host"))];parts.extend(failures);parts.push("Call device_list for current ids.".into());
+                    let named = |host: &DeviceHostSummary| {
+                        format!("'{}' (hostId {})", host.label.as_ref(), host.id.as_ref())
+                    };
+                    let target = host.as_ref().map(|id| {
+                        state
+                            .hosts
+                            .iter()
+                            .find(|h| h.id.as_ref() == id)
+                            .map(named)
+                            .unwrap_or_else(|| format!("hostId {id}"))
+                    });
+                    let failures = state
+                        .hosts
+                        .iter()
+                        .filter(|h| host.as_ref().is_none_or(|id| id == h.id.as_ref()))
+                        .filter_map(|h| {
+                            state
+                                .host_statuses
+                                .get(&h.id)
+                                .filter(|s| s.status == DeviceHostStatus::Failed)
+                                .and_then(|s| s.detail.as_ref().and_then(|d| d.as_ref()))
+                                .map(|detail| format!("{} failed to start: {detail}", named(h)))
+                        })
+                        .collect::<Vec<_>>();
+                    let mut parts = vec![format!(
+                        "No device {} on {}.",
+                        id.as_ref(),
+                        target.as_deref().unwrap_or("any host")
+                    )];
+                    parts.extend(failures);
+                    parts.push("Call device_list for current ids.".into());
                     mapped(Error::Unavailable(parts.join(" ")))
                 })?
         } else {

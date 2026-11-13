@@ -125,7 +125,7 @@ pub struct FileLaunchers {
     pub state: PathBuf,
     pub node: String,
     pub entry: PathBuf,
-    pub cli_provider:Option<Arc<dyn crate::host::AgentCliProvider>>,
+    pub cli_provider: Option<Arc<dyn crate::host::AgentCliProvider>>,
     pub commands: Arc<dyn crate::io::Commands>,
 }
 #[async_trait]
@@ -145,7 +145,14 @@ impl Launchers for FileLaunchers {
         {
             return Err(crate::error::invalid("launcher session"));
         }
-        let cli=if let Some(provider)=&self.cli_provider{provider.ensure().await?}else{crate::host::AgentCli{node:self.node.clone(),entry:self.entry.clone()}};
+        let cli = if let Some(provider) = &self.cli_provider {
+            provider.ensure().await?
+        } else {
+            crate::host::AgentCli {
+                node: self.node.clone(),
+                entry: self.entry.clone(),
+            }
+        };
         let dir = self.state.join("device/targets").join(name);
         tokio::fs::create_dir_all(&dir)
             .await
@@ -158,7 +165,7 @@ impl Launchers for FileLaunchers {
             dir.join("agent-device")
         };
         let js = dir.join("agent-device-launcher.mjs");
-        const STALE_RUNTIME:&str="This agent-device command is out of date because T3 Code moved or updated its runtime. Call device_open again for a fresh one.";
+        const STALE_RUNTIME: &str = "This agent-device command is out of date because T3 Code moved or updated its runtime. Call device_open again for a fresh one.";
         let content = if cfg!(windows) {
             if cli.node.contains(['%', '\r', '\n', '"'])
                 || js.to_string_lossy().contains(['%', '\r', '\n', '"'])
@@ -167,14 +174,16 @@ impl Launchers for FileLaunchers {
             }
             format!(
                 "@echo off\r\nsetlocal EnableExtensions DisableDelayedExpansion\r\nif not exist \"{}\" (echo {} 1>&2 & exit /b 1)\r\nset \"ELECTRON_RUN_AS_NODE=1\"\r\n\"{}\" \"{}\" %*\r\n",
-                cli.node,STALE_RUNTIME,
+                cli.node,
+                STALE_RUNTIME,
                 cli.node,
                 js.display()
             )
         } else {
             format!(
                 "#!/bin/sh\n[ -x {} ] || {{ echo {} >&2; exit 1; }}\nexport ELECTRON_RUN_AS_NODE=1\nexec {} {} \"$@\"\n",
-                crate::ssh::quote(&cli.node),crate::ssh::quote(STALE_RUNTIME),
+                crate::ssh::quote(&cli.node),
+                crate::ssh::quote(STALE_RUNTIME),
                 crate::ssh::quote(&cli.node),
                 crate::ssh::quote(&js.to_string_lossy())
             )

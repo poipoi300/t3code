@@ -61,8 +61,11 @@ pub async fn run_action(
     let text = |key| value.get(key).and_then(Value::as_str).unwrap_or("");
     let op = text("type");
     if op == "setLocation" {
-        for(key,limit)in [("latitude",90.0),("longitude",180.0)] {
-            if !value[key].as_f64().is_some_and(|n|n.is_finite()&&(-limit..=limit).contains(&n)) {
+        for (key, limit) in [("latitude", 90.0), ("longitude", 180.0)] {
+            if !value[key]
+                .as_f64()
+                .is_some_and(|n| n.is_finite() && (-limit..=limit).contains(&n))
+            {
                 return Err(crate::error::invalid("location"));
             }
         }

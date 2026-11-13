@@ -201,7 +201,10 @@ impl EasHost {
             for entry in leftovers.iter().filter(|e| e.app_id == app) {
                 let mut found = false;
                 if let Ok(active) = &active {
-                    for session in active.iter().filter(|s| s.name.as_deref() == Some(entry.name.as_str())) {
+                    for session in active
+                        .iter()
+                        .filter(|s| s.name.as_deref() == Some(entry.name.as_str()))
+                    {
                         found = true;
                         if self
                             .stop_session(api, &session.id, &entry.name)
@@ -363,7 +366,10 @@ impl EasHost {
             Err(error) => {
                 let mut found = false;
                 if let Ok(active) = bounded(api.active(&app)).await {
-                    for session in active.iter().filter(|s| s.name.as_deref() == Some(name.as_str())) {
+                    for session in active
+                        .iter()
+                        .filter(|s| s.name.as_deref() == Some(name.as_str()))
+                    {
                         found = true;
                         if self
                             .stop_session(api.as_ref(), &session.id, &name)
@@ -490,7 +496,7 @@ impl EasHost {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| crate::error::invalid("EAS device id"))?
         .to_owned();
-        crate::error::validate_selector(&remote_id,"EAS device id")?;
+        crate::error::validate_selector(&remote_id, "EAS device id")?;
         let mut agent = session
             .agent
             .ok_or_else(|| crate::error::invalid("EAS agent"))?;

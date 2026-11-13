@@ -370,7 +370,16 @@ impl ExpoApi for ExpoHttp {
                         .as_str()
                         .ok_or_else(|| decode_error("list simulator sessions"))?
                         .into(),
-                    name: if node.get("name").is_some_and(Value::is_null){None}else{Some(node["name"].as_str().ok_or_else(||decode_error("list simulator sessions"))?.into())},
+                    name: if node.get("name").is_some_and(Value::is_null) {
+                        None
+                    } else {
+                        Some(
+                            node["name"]
+                                .as_str()
+                                .ok_or_else(|| decode_error("list simulator sessions"))?
+                                .into(),
+                        )
+                    },
                     status: node["status"]
                         .as_str()
                         .ok_or_else(|| decode_error("list simulator sessions"))?

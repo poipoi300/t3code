@@ -102,7 +102,7 @@ pub struct SimlockOptions {
     pub state: PathBuf,
     pub node: String,
     pub agent_entry: PathBuf,
-    pub cli_provider:Option<Arc<dyn crate::host::AgentCliProvider>>,
+    pub cli_provider: Option<Arc<dyn crate::host::AgentCliProvider>>,
     pub commands: Arc<dyn Commands>,
     pub http: Arc<dyn Http>,
     pub secrets: Arc<dyn Secrets>,
@@ -124,7 +124,7 @@ struct State {
     starting: BTreeMap<String, (CancellationToken, watch::Receiver<bool>)>,
     epoch: u64,
     ready: bool,
-    cli:Option<crate::host::AgentCli>,
+    cli: Option<crate::host::AgentCli>,
     catalog: Option<(tokio::time::Instant, Vec<DeviceSummary>)>,
     platforms: Vec<DevicePlatformAvailability>,
 }
@@ -133,7 +133,7 @@ struct Inner {
     gateway: String,
     state: Mutex<State>,
     catalog_lock: Mutex<()>,
-    start_lock:Mutex<()>,
+    start_lock: Mutex<()>,
 }
 #[derive(Clone)]
 pub struct SimlockHost {
@@ -154,12 +154,12 @@ impl SimlockHost {
                     starting: BTreeMap::new(),
                     epoch: 0,
                     ready: false,
-                    cli:None,
+                    cli: None,
                     catalog: None,
                     platforms: vec![],
                 }),
                 catalog_lock: Mutex::new(()),
-                start_lock:Mutex::new(()),
+                start_lock: Mutex::new(()),
             }),
         })
     }
@@ -300,7 +300,14 @@ impl SimlockHost {
         timeout: Duration,
         cwd: Option<PathBuf>,
     ) -> Result<String> {
-        let cli=self.inner.state.lock().await.cli.clone().ok_or_else(||self.unavailable("Agent tools are not ready."))?;
+        let cli = self
+            .inner
+            .state
+            .lock()
+            .await
+            .cli
+            .clone()
+            .ok_or_else(|| self.unavailable("Agent tools are not ready."))?;
         let mut args = [
             vec![cli.entry.to_string_lossy().into_owned()],
             args,
@@ -498,7 +505,7 @@ impl SimlockHost {
                 let deadline = tokio::time::Instant::now()
                     + Duration::from_secs(self.inner.options.config.max_lease_minutes * 60);
                 let renewal = lease.clone();
-                let mut next=tokio::time::Instant::now()+Duration::from_secs(120);
+                let mut next = tokio::time::Instant::now() + Duration::from_secs(120);
                 tokio::spawn(async move {
                     loop {
                         tokio::select! {biased;_=stop.cancelled()=>return,_=tokio::time::sleep_until(next.min(deadline))=>()}
@@ -526,7 +533,7 @@ impl SimlockHost {
                             let _ = tokio::fs::remove_dir_all(&renewal.dir).await;
                             return;
                         }
-                        next=tokio::time::Instant::now()+Duration::from_secs(120);
+                        next = tokio::time::Instant::now() + Duration::from_secs(120);
                     }
                 });
                 Ok(id)
@@ -546,8 +553,15 @@ impl SimlockHost {
         }
     }
     async fn ready(&self) -> Ready {
-        let node = self.inner.state.lock().await.cli.as_ref()
-            .map(|cli| cli.node.clone()).unwrap_or_else(|| self.inner.options.node.clone());
+        let node = self
+            .inner
+            .state
+            .lock()
+            .await
+            .cli
+            .as_ref()
+            .map(|cli| cli.node.clone())
+            .unwrap_or_else(|| self.inner.options.node.clone());
         Ready {
             origin: self.inner.gateway.clone(),
             node_path: node,
@@ -593,12 +607,23 @@ impl DeviceHost for SimlockHost {
             .unwrap_or_else(|| host::available(platform, Some("Pool platform unavailable.".into())))
     }
     async fn ensure_ready(&self, phase: Phase) -> Result<Ready> {
-        let _guard=self.inner.start_lock.lock().await;
-        if self.inner.state.lock().await.ready{return Ok(self.ready().await);}
+        let _guard = self.inner.start_lock.lock().await;
+        if self.inner.state.lock().await.ready {
+            return Ok(self.ready().await);
+        }
         phase(DeviceHostStatus::Installing, None);
-        let cli=if let Some(provider)=&self.inner.options.cli_provider{provider.ensure().await?}else{crate::host::AgentCli{node:self.inner.options.node.clone(),entry:self.inner.options.agent_entry.clone()}};
-        let mut state=self.inner.state.lock().await;
-        state.ready = true;state.cli=Some(cli);drop(state);
+        let cli = if let Some(provider) = &self.inner.options.cli_provider {
+            provider.ensure().await?
+        } else {
+            crate::host::AgentCli {
+                node: self.inner.options.node.clone(),
+                entry: self.inner.options.agent_entry.clone(),
+            }
+        };
+        let mut state = self.inner.state.lock().await;
+        state.ready = true;
+        state.cli = Some(cli);
+        drop(state);
         Ok(self.ready().await)
     }
     async fn ensure_agent_ready(&self, phase: Phase) -> Result<Ready> {
@@ -606,7 +631,11 @@ impl DeviceHost for SimlockHost {
     }
     async fn current(&self) -> Option<Ready> {
         let ready = self.inner.state.lock().await.ready;
-        if ready { Some(self.ready().await) } else { None }
+        if ready {
+            Some(self.ready().await)
+        } else {
+            None
+        }
     }
     async fn stop_agent(&self) -> Result<()> {
         Ok(())
@@ -749,7 +778,10 @@ impl DeviceOperations for SimlockHost {
         Ok(Some(AgentEndpoint {
             base_url: format!("{}/v1/agent-device", self.inner.gateway),
             token: lease.token.clone(),
-            entry_path: state.cli.as_ref().map(|cli| cli.entry.clone())
+            entry_path: state
+                .cli
+                .as_ref()
+                .map(|cli| cli.entry.clone())
                 .unwrap_or_else(|| self.inner.options.agent_entry.clone()),
             agent_device_id: None,
             session: Some(lease.session.clone()),

@@ -30,9 +30,14 @@ pub struct AgentEndpoint {
     pub install_directory: Option<PathBuf>,
 }
 #[derive(Clone)]
-pub struct AgentCli { pub node:String,pub entry:PathBuf }
+pub struct AgentCli {
+    pub node: String,
+    pub entry: PathBuf,
+}
 #[async_trait]
-pub trait AgentCliProvider:Send+Sync{async fn ensure(&self)->Result<AgentCli>;}
+pub trait AgentCliProvider: Send + Sync {
+    async fn ensure(&self) -> Result<AgentCli>;
+}
 impl std::fmt::Debug for AgentEndpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("AgentEndpoint([REDACTED])")

@@ -283,11 +283,20 @@ impl DeviceService {
             while let Some((phase, detail)) = phase_rx.recv().await {
                 let Some(inner) = weak.upgrade() else { break };
                 let service = Self { inner };
-                let entry = service.inner.state.lock().await.hosts.iter()
-                    .find(|e| e.host.id() == id && e.generation == generation).cloned();
+                let entry = service
+                    .inner
+                    .state
+                    .lock()
+                    .await
+                    .hosts
+                    .iter()
+                    .find(|e| e.host.id() == id && e.generation == generation)
+                    .cloned();
                 if let Some(entry) = entry {
                     service.status(&entry, phase, detail).await;
-                } else { break }
+                } else {
+                    break;
+                }
             }
         });
         match result {
@@ -1060,17 +1069,16 @@ impl DeviceService {
         Ok(())
     }
     pub async fn test_host(&self, input: SshDeviceHostConfig) -> Result<DeviceHostSummary> {
-        let factory=self.inner
-            .factory
-            .as_ref()
-            .ok_or_else(|| {
-                Error::host(
-                    input.id.as_ref(),
-                    Some(input.label.as_ref()),
-                    "SSH probing is unavailable in this device service.",
-                )
-            })?;
-        if factory.is_local(&input).await{return Ok(self.host(None).await?.host.summary().await);}
+        let factory = self.inner.factory.as_ref().ok_or_else(|| {
+            Error::host(
+                input.id.as_ref(),
+                Some(input.label.as_ref()),
+                "SSH probing is unavailable in this device service.",
+            )
+        })?;
+        if factory.is_local(&input).await {
+            return Ok(self.host(None).await?.host.summary().await);
+        }
         factory.test(&input).await
     }
     pub async fn eas_account(&self, input: DeviceEasAccountInput) -> Result<DeviceEasAccount> {
@@ -1199,8 +1207,14 @@ pub fn wire_state(mut state: DeviceServiceState) -> DeviceServiceState {
     let mut eas = Vec::new();
     let mut simlock = Vec::new();
     state.hosts.retain(|host| match host.kind {
-        DeviceHostKind::Eas => { eas.push(host.clone()); false }
-        DeviceHostKind::Simlock => { simlock.push(host.clone()); false }
+        DeviceHostKind::Eas => {
+            eas.push(host.clone());
+            false
+        }
+        DeviceHostKind::Simlock => {
+            simlock.push(host.clone());
+            false
+        }
         _ => true,
     });
     state.eas_hosts = Some(Some(eas));

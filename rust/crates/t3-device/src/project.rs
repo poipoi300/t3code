@@ -20,14 +20,25 @@ fn skip_filler(mut source: &str) -> &str {
                 .map(|at| &rest[at..])
                 .unwrap_or("");
         } else if let Some(rest) = source.strip_prefix("/*") {
-            let Some(at) = rest.find("*/") else { return source };
+            let Some(at) = rest.find("*/") else {
+                return source;
+            };
             source = &rest[at + 2..];
         } else {
             return source;
         }
     }
 }
-fn spread_filler(mut source:&str)->&str{loop{source=skip_filler(source);if let Some(rest)=source.strip_prefix('('){source=rest;}else{return source;}}}
+fn spread_filler(mut source: &str) -> &str {
+    loop {
+        source = skip_filler(source);
+        if let Some(rest) = source.strip_prefix('(') {
+            source = rest;
+        } else {
+            return source;
+        }
+    }
+}
 pub fn literal_ids(source: &str) -> Option<Vec<String>> {
     if source.encode_utf16().count() > 256 * 1024 {
         return None;
@@ -72,14 +83,12 @@ pub fn literal_ids(source: &str) -> Option<Vec<String>> {
     if ids.is_empty() {
         let config=regex::Regex::new(r#"^config(?:(?:\s*\??\.\s*extra|\s*(?:\?\.)?\s*\[\s*["'`]extra["'`]\s*\])(?:\s*\??\.\s*eas|\s*(?:\?\.)?\s*\[\s*["'`]eas["'`]\s*\])?)?"#).ok()?;
         let mut spreads = 0;
-        let continuation=regex::Regex::new(r"^[\p{XID_Continue}$\u200c\u200d\\]").ok()?;
+        let continuation = regex::Regex::new(r"^[\p{XID_Continue}$\u200c\u200d\\]").ok()?;
         for (at, _) in source.match_indices("...") {
-            let after = spread_filler(&source[at+3..]);
+            let after = spread_filler(&source[at + 3..]);
             let found = config.find(after)?;
             let tail = &after[found.end()..];
-            if continuation.is_match(tail)
-                || tail.trim_start().starts_with(['.', '[', '('])
-            {
+            if continuation.is_match(tail) || tail.trim_start().starts_with(['.', '[', '(']) {
                 return None;
             }
             spreads += 1;
@@ -101,7 +110,8 @@ pub fn literal_ids(source: &str) -> Option<Vec<String>> {
             let spread = spread_filler(tail.strip_prefix("...")?);
             let found = config.find(spread)?;
             let head = &spread[..found.end()];
-            if name == "extra" && (!head.contains("extra")||head.contains("eas")) || name == "eas" && !head.contains("eas")
+            if name == "extra" && (!head.contains("extra") || head.contains("eas"))
+                || name == "eas" && !head.contains("eas")
             {
                 return None;
             }
@@ -143,10 +153,16 @@ async fn ids_in(directory: &Path) -> Option<Vec<String>> {
                     return None;
                 }
                 let config = value.get("expo").unwrap_or(&value);
-                if !config.is_object(){return None;}
-                if let Some(extra)=config.get("extra"){
-                    if !extra.is_object(){return None;}
-                    if extra.get("eas").is_some_and(|eas|!eas.is_object()){return None;}
+                if !config.is_object() {
+                    return None;
+                }
+                if let Some(extra) = config.get("extra") {
+                    if !extra.is_object() {
+                        return None;
+                    }
+                    if extra.get("eas").is_some_and(|eas| !eas.is_object()) {
+                        return None;
+                    }
                 }
                 if let Some(id) = config.pointer("/extra/eas/projectId") {
                     let id = id.as_str()?;
@@ -167,7 +183,10 @@ pub async fn find_eas_project_id(root: &Path) -> Option<String> {
     for parent in ["apps", "packages"] {
         if let Ok(mut entries) = tokio::fs::read_dir(root.join(parent)).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
-                if tokio::fs::metadata(entry.path()).await.is_ok_and(|m| m.is_dir()) {
+                if tokio::fs::metadata(entry.path())
+                    .await
+                    .is_ok_and(|m| m.is_dir())
+                {
                     directories.push(entry.path());
                 }
             }
