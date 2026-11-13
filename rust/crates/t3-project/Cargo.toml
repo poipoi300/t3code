@@ -1,0 +1,39 @@
+[package]
+name = "t3-project"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+
+
+[dependencies]
+t3-contracts = { path = "../t3-contracts" }
+t3-orchestration = { path = "../t3-orchestration" }
+t3-persistence = { path = "../t3-persistence" }
+t3-workspace = { path = "../t3-workspace" }
+t3-process = { path = "../t3-process" }
+t3-git = { path = "../t3-git" }
+t3-forge = { path = "../t3-forge" }
+t3-scheduler = { path = "../t3-scheduler" }
+t3-config = { path = "../t3-config" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+unicode-segmentation = "1"
+unicode-normalization = "0.1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
