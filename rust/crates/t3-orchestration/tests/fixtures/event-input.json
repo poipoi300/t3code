@@ -1,0 +1,38 @@
+[
+  {
+    "id": "event:one",
+    "threadId": "thread:one",
+    "type": "provider-session.detached",
+    "occurredAt": "2026-09-03T00:00:00.000Z",
+    "payload": {
+      "providerSessionId": "session:one",
+      "detachedAt": "2026-09-03T00:00:00.000Z"
+    }
+  },
+  {
+    "id": "event:two",
+    "threadId": "thread:one",
+    "runId": "run:one",
+    "nodeId": "node:one",
+    "driver": "codex",
+    "providerInstanceId": "codex",
+    "rawEventId": "raw:two",
+    "type": "provider-session.detached",
+    "occurredAt": "2026-09-03T00:00:00.000Z",
+    "payload": {
+      "providerSessionId": "session:two",
+      "detachedAt": "2026-09-03T00:00:00.000Z",
+      "reason": "Quote \" and newline\n and é 🦀"
+    }
+  },
+  {
+    "id": "event:three",
+    "threadId": "thread:two",
+    "type": "provider-session.detached",
+    "occurredAt": "2026-09-03T00:00:00.000Z",
+    "payload": {
+      "providerSessionId": "session:three",
+      "detachedAt": "2026-09-03T00:00:00.000Z"
+    }
+  }
+]

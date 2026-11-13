@@ -1,0 +1,415 @@
+{
+  "inputs": [
+    {
+      "sequence": 999,
+      "eventId": "project:0",
+      "aggregateKind": "project",
+      "aggregateId": "project",
+      "occurredAt": "2026-09-03T00:00:00.000Z",
+      "commandId": null,
+      "causationEventId": null,
+      "correlationId": null,
+      "metadata": {},
+      "type": "project.created",
+      "payload": {
+        "projectId": "project",
+        "title": "Project 🦀",
+        "workspaceRoot": "C:/temporary/project",
+        "defaultModelSelection": null,
+        "scripts": [],
+        "createdAt": "2026-09-03T00:00:00.000Z",
+        "updatedAt": "2026-09-03T00:00:00.000Z"
+      }
+    },
+    {
+      "sequence": 999,
+      "eventId": "project:1",
+      "aggregateKind": "project",
+      "aggregateId": "project",
+      "occurredAt": "2026-09-03T00:00:00.000Z",
+      "commandId": "client:project",
+      "causationEventId": "cause",
+      "correlationId": "correlation",
+      "metadata": {},
+      "type": "project.created",
+      "payload": {
+        "projectId": "project",
+        "title": "Project 🦀",
+        "workspaceRoot": "C:/temporary/project",
+        "defaultModelSelection": {
+          "instanceId": "codex",
+          "model": "model"
+        },
+        "projectIcon": null,
+        "scripts": [],
+        "createdAt": "2026-09-03T00:00:00.000Z",
+        "updatedAt": "2026-09-03T00:00:00.000Z"
+      }
+    },
+    {
+      "sequence": 999,
+      "eventId": "project:2",
+      "aggregateKind": "project",
+      "aggregateId": "project",
+      "occurredAt": "2026-09-03T00:00:00.000Z",
+      "commandId": "provider:project",
+      "causationEventId": "cause",
+      "correlationId": "correlation",
+      "metadata": {},
+      "type": "project.created",
+      "payload": {
+        "projectId": "project",
+        "title": "Project 🦀",
+        "workspaceRoot": "C:/temporary/project",
+        "defaultModelSelection": {
+          "instanceId": "codex",
+          "model": "model"
+        },
+        "projectIcon": {
+          "kind": "emoji",
+          "emoji": "🦀"
+        },
+        "scripts": [],
+        "createdAt": "2026-09-03T00:00:00.000Z",
+        "updatedAt": "2026-09-03T00:00:00.000Z"
+      }
+    },
+    {
+      "sequence": 999,
+      "eventId": "project:3",
+      "aggregateKind": "project",
+      "aggregateId": "project",
+      "occurredAt": "2026-09-03T00:00:00.000Z",
+      "commandId": "server:project",
+      "causationEventId": "cause",
+      "correlationId": "correlation",
+      "metadata": {
+        "adapterKey": "codex"
+      },
+      "type": "project.created",
+      "payload": {
+        "projectId": "project",
+        "title": "Project 🦀",
+        "workspaceRoot": "C:/temporary/project",
+        "defaultModelSelection": {
+          "instanceId": "codex",
+          "model": "model"
+        },
+        "scripts": [],
+        "createdAt": "2026-09-03T00:00:00.000Z",
+        "updatedAt": "2026-09-03T00:00:00.000Z"
+      }
+    },
+    {
+      "sequence": 999,
+      "eventId": "project:4",
+      "aggregateKind": "project",
+      "aggregateId": "project",
+      "occurredAt": "2026-09-03T00:00:00.000Z",
+      "commandId": "client:provider-turn",
+      "causationEventId": "cause",
+      "correlationId": "correlation",
+      "metadata": {
+        "providerTurnId": "turn"
+      },
+      "type": "project.created",
+      "payload": {
+        "projectId": "project",
+        "title": "Project 🦀",
+        "workspaceRoot": "C:/temporary/project",
+        "defaultModelSelection": {
+          "instanceId": "codex",
+          "model": "model"
+        },
+        "scripts": [],
+        "createdAt": "2026-09-03T00:00:00.000Z",
+        "updatedAt": "2026-09-03T00:00:00.000Z"
+      }
+    },
+    {
+      "sequence": 999,
+      "eventId": "project:5",
+      "aggregateKind": "project",
+      "aggregateId": "project",
+      "occurredAt": "2026-09-03T00:00:00.000Z",
+      "commandId": "client:provider-item",
+      "causationEventId": "cause",
+      "correlationId": "correlation",
+      "metadata": {
+        "providerItemId": "item"
+      },
+      "type": "project.created",
+      "payload": {
+        "projectId": "project",
+        "title": "Project 🦀",
+        "workspaceRoot": "C:/temporary/project",
+        "defaultModelSelection": {
+          "instanceId": "codex",
+          "model": "model"
+        },
+        "scripts": [],
+        "createdAt": "2026-09-03T00:00:00.000Z",
+        "updatedAt": "2026-09-03T00:00:00.000Z"
+      }
+    },
+    {
+      "sequence": 999,
+      "eventId": "project:6",
+      "aggregateKind": "project",
+      "aggregateId": "project",
+      "occurredAt": "2026-09-03T00:00:00.000Z",
+      "commandId": null,
+      "causationEventId": "cause",
+      "correlationId": "correlation",
+      "metadata": {
+        "adapterKey": "codex"
+      },
+      "type": "project.created",
+      "payload": {
+        "projectId": "project",
+        "title": "Project 🦀",
+        "workspaceRoot": "C:/temporary/project",
+        "defaultModelSelection": {
+          "instanceId": "codex",
+          "model": "model"
+        },
+        "scripts": [],
+        "createdAt": "2026-09-03T00:00:00.000Z",
+        "updatedAt": "2026-09-03T00:00:00.000Z"
+      }
+    },
+    {
+      "sequence": 999,
+      "eventId": "project:7",
+      "aggregateKind": "project",
+      "aggregateId": "project",
+      "occurredAt": "2026-09-03T00:00:00.000Z",
+      "commandId": "client:metadata",
+      "causationEventId": "cause",
+      "correlationId": "correlation",
+      "metadata": {
+        "deferredTurn": false,
+        "providerTurnId": "turn",
+        "providerItemId": "item",
+        "adapterKey": "codex",
+        "requestId": "request",
+        "ingestedAt": "2026-09-03T00:00:00.000Z",
+        "origin": {
+          "surface": "desktop",
+          "appVersion": "1.0"
+        }
+      },
+      "type": "project.created",
+      "payload": {
+        "projectId": "project",
+        "title": "Project 🦀",
+        "workspaceRoot": "C:/temporary/project",
+        "defaultModelSelection": {
+          "instanceId": "codex",
+          "model": "model"
+        },
+        "scripts": [],
+        "createdAt": "2026-09-03T00:00:00.000Z",
+        "updatedAt": "2026-09-03T00:00:00.000Z"
+      }
+    },
+    {
+      "sequence": 999,
+      "eventId": "project:meta",
+      "aggregateKind": "project",
+      "aggregateId": "project",
+      "occurredAt": "2026-09-03T00:00:00.000Z",
+      "commandId": null,
+      "causationEventId": null,
+      "correlationId": null,
+      "metadata": {},
+      "type": "project.meta-updated",
+      "payload": {
+        "projectId": "project",
+        "defaultModelSelection": null,
+        "projectIcon": null,
+        "pinnedAt": null,
+        "archivedAt": null,
+        "updatedAt": "2026-09-03T00:00:00.000Z"
+      }
+    },
+    {
+      "sequence": 999,
+      "eventId": "project:deleted",
+      "aggregateKind": "project",
+      "aggregateId": "project",
+      "occurredAt": "2026-09-03T00:00:00.000Z",
+      "commandId": null,
+      "causationEventId": null,
+      "correlationId": null,
+      "metadata": {},
+      "type": "project.deleted",
+      "payload": {
+        "projectId": "project",
+        "deletedAt": "2026-09-03T00:00:00.000Z"
+      }
+    }
+  ],
+  "rows": [
+    {
+      "sequence": 1,
+      "event_id": "project:0",
+      "aggregate_kind": "project",
+      "stream_id": "project",
+      "stream_version": 0,
+      "event_type": "project.created",
+      "occurred_at": "2026-09-03T00:00:00.000Z",
+      "command_id": null,
+      "causation_event_id": null,
+      "correlation_id": null,
+      "actor_kind": "server",
+      "payload_json": "{\"projectId\":\"project\",\"title\":\"Project 🦀\",\"workspaceRoot\":\"C:/temporary/project\",\"defaultModelSelection\":null,\"scripts\":[],\"createdAt\":\"2026-09-03T00:00:00.000Z\",\"updatedAt\":\"2026-09-03T00:00:00.000Z\"}",
+      "metadata_json": "{}",
+      "application_event_version": 2
+    },
+    {
+      "sequence": 2,
+      "event_id": "project:1",
+      "aggregate_kind": "project",
+      "stream_id": "project",
+      "stream_version": 1,
+      "event_type": "project.created",
+      "occurred_at": "2026-09-03T00:00:00.000Z",
+      "command_id": "client:project",
+      "causation_event_id": "cause",
+      "correlation_id": "correlation",
+      "actor_kind": "client",
+      "payload_json": "{\"projectId\":\"project\",\"title\":\"Project 🦀\",\"workspaceRoot\":\"C:/temporary/project\",\"defaultModelSelection\":{\"instanceId\":\"codex\",\"model\":\"model\"},\"projectIcon\":null,\"scripts\":[],\"createdAt\":\"2026-09-03T00:00:00.000Z\",\"updatedAt\":\"2026-09-03T00:00:00.000Z\"}",
+      "metadata_json": "{}",
+      "application_event_version": 2
+    },
+    {
+      "sequence": 3,
+      "event_id": "project:2",
+      "aggregate_kind": "project",
+      "stream_id": "project",
+      "stream_version": 2,
+      "event_type": "project.created",
+      "occurred_at": "2026-09-03T00:00:00.000Z",
+      "command_id": "provider:project",
+      "causation_event_id": "cause",
+      "correlation_id": "correlation",
+      "actor_kind": "provider",
+      "payload_json": "{\"projectId\":\"project\",\"title\":\"Project 🦀\",\"workspaceRoot\":\"C:/temporary/project\",\"defaultModelSelection\":{\"instanceId\":\"codex\",\"model\":\"model\"},\"projectIcon\":{\"kind\":\"emoji\",\"emoji\":\"🦀\"},\"scripts\":[],\"createdAt\":\"2026-09-03T00:00:00.000Z\",\"updatedAt\":\"2026-09-03T00:00:00.000Z\"}",
+      "metadata_json": "{}",
+      "application_event_version": 2
+    },
+    {
+      "sequence": 4,
+      "event_id": "project:3",
+      "aggregate_kind": "project",
+      "stream_id": "project",
+      "stream_version": 3,
+      "event_type": "project.created",
+      "occurred_at": "2026-09-03T00:00:00.000Z",
+      "command_id": "server:project",
+      "causation_event_id": "cause",
+      "correlation_id": "correlation",
+      "actor_kind": "server",
+      "payload_json": "{\"projectId\":\"project\",\"title\":\"Project 🦀\",\"workspaceRoot\":\"C:/temporary/project\",\"defaultModelSelection\":{\"instanceId\":\"codex\",\"model\":\"model\"},\"scripts\":[],\"createdAt\":\"2026-09-03T00:00:00.000Z\",\"updatedAt\":\"2026-09-03T00:00:00.000Z\"}",
+      "metadata_json": "{\"adapterKey\":\"codex\"}",
+      "application_event_version": 2
+    },
+    {
+      "sequence": 5,
+      "event_id": "project:4",
+      "aggregate_kind": "project",
+      "stream_id": "project",
+      "stream_version": 4,
+      "event_type": "project.created",
+      "occurred_at": "2026-09-03T00:00:00.000Z",
+      "command_id": "client:provider-turn",
+      "causation_event_id": "cause",
+      "correlation_id": "correlation",
+      "actor_kind": "provider",
+      "payload_json": "{\"projectId\":\"project\",\"title\":\"Project 🦀\",\"workspaceRoot\":\"C:/temporary/project\",\"defaultModelSelection\":{\"instanceId\":\"codex\",\"model\":\"model\"},\"scripts\":[],\"createdAt\":\"2026-09-03T00:00:00.000Z\",\"updatedAt\":\"2026-09-03T00:00:00.000Z\"}",
+      "metadata_json": "{\"providerTurnId\":\"turn\"}",
+      "application_event_version": 2
+    },
+    {
+      "sequence": 6,
+      "event_id": "project:5",
+      "aggregate_kind": "project",
+      "stream_id": "project",
+      "stream_version": 5,
+      "event_type": "project.created",
+      "occurred_at": "2026-09-03T00:00:00.000Z",
+      "command_id": "client:provider-item",
+      "causation_event_id": "cause",
+      "correlation_id": "correlation",
+      "actor_kind": "provider",
+      "payload_json": "{\"projectId\":\"project\",\"title\":\"Project 🦀\",\"workspaceRoot\":\"C:/temporary/project\",\"defaultModelSelection\":{\"instanceId\":\"codex\",\"model\":\"model\"},\"scripts\":[],\"createdAt\":\"2026-09-03T00:00:00.000Z\",\"updatedAt\":\"2026-09-03T00:00:00.000Z\"}",
+      "metadata_json": "{\"providerItemId\":\"item\"}",
+      "application_event_version": 2
+    },
+    {
+      "sequence": 7,
+      "event_id": "project:6",
+      "aggregate_kind": "project",
+      "stream_id": "project",
+      "stream_version": 6,
+      "event_type": "project.created",
+      "occurred_at": "2026-09-03T00:00:00.000Z",
+      "command_id": null,
+      "causation_event_id": "cause",
+      "correlation_id": "correlation",
+      "actor_kind": "provider",
+      "payload_json": "{\"projectId\":\"project\",\"title\":\"Project 🦀\",\"workspaceRoot\":\"C:/temporary/project\",\"defaultModelSelection\":{\"instanceId\":\"codex\",\"model\":\"model\"},\"scripts\":[],\"createdAt\":\"2026-09-03T00:00:00.000Z\",\"updatedAt\":\"2026-09-03T00:00:00.000Z\"}",
+      "metadata_json": "{\"adapterKey\":\"codex\"}",
+      "application_event_version": 2
+    },
+    {
+      "sequence": 8,
+      "event_id": "project:7",
+      "aggregate_kind": "project",
+      "stream_id": "project",
+      "stream_version": 7,
+      "event_type": "project.created",
+      "occurred_at": "2026-09-03T00:00:00.000Z",
+      "command_id": "client:metadata",
+      "causation_event_id": "cause",
+      "correlation_id": "correlation",
+      "actor_kind": "provider",
+      "payload_json": "{\"projectId\":\"project\",\"title\":\"Project 🦀\",\"workspaceRoot\":\"C:/temporary/project\",\"defaultModelSelection\":{\"instanceId\":\"codex\",\"model\":\"model\"},\"scripts\":[],\"createdAt\":\"2026-09-03T00:00:00.000Z\",\"updatedAt\":\"2026-09-03T00:00:00.000Z\"}",
+      "metadata_json": "{\"deferredTurn\":false,\"providerTurnId\":\"turn\",\"providerItemId\":\"item\",\"adapterKey\":\"codex\",\"requestId\":\"request\",\"ingestedAt\":\"2026-09-03T00:00:00.000Z\",\"origin\":{\"surface\":\"desktop\",\"appVersion\":\"1.0\"}}",
+      "application_event_version": 2
+    },
+    {
+      "sequence": 9,
+      "event_id": "project:meta",
+      "aggregate_kind": "project",
+      "stream_id": "project",
+      "stream_version": 8,
+      "event_type": "project.meta-updated",
+      "occurred_at": "2026-09-03T00:00:00.000Z",
+      "command_id": null,
+      "causation_event_id": null,
+      "correlation_id": null,
+      "actor_kind": "server",
+      "payload_json": "{\"projectId\":\"project\",\"defaultModelSelection\":null,\"projectIcon\":null,\"pinnedAt\":null,\"archivedAt\":null,\"updatedAt\":\"2026-09-03T00:00:00.000Z\"}",
+      "metadata_json": "{}",
+      "application_event_version": 2
+    },
+    {
+      "sequence": 10,
+      "event_id": "project:deleted",
+      "aggregate_kind": "project",
+      "stream_id": "project",
+      "stream_version": 9,
+      "event_type": "project.deleted",
+      "occurred_at": "2026-09-03T00:00:00.000Z",
+      "command_id": null,
+      "causation_event_id": null,
+      "correlation_id": null,
+      "actor_kind": "server",
+      "payload_json": "{\"projectId\":\"project\",\"deletedAt\":\"2026-09-03T00:00:00.000Z\"}",
+      "metadata_json": "{}",
+      "application_event_version": 2
+    }
+  ]
+}

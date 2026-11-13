@@ -1,0 +1,50 @@
+[
+  {
+    "sequence": 1,
+    "event_id": "event:one",
+    "aggregate_kind": "thread",
+    "stream_id": "thread:one",
+    "stream_version": 0,
+    "event_type": "provider-session.detached",
+    "occurred_at": "2026-09-03T00:00:00.000Z",
+    "command_id": "command:compat",
+    "causation_event_id": null,
+    "correlation_id": "command:compat",
+    "actor_kind": "server",
+    "payload_json": "{\"providerSessionId\":\"session:one\",\"detachedAt\":\"2026-09-03T00:00:00.000Z\"}",
+    "metadata_json": "{}",
+    "application_event_version": 2
+  },
+  {
+    "sequence": 2,
+    "event_id": "event:two",
+    "aggregate_kind": "thread",
+    "stream_id": "thread:one",
+    "stream_version": 1,
+    "event_type": "provider-session.detached",
+    "occurred_at": "2026-09-03T00:00:00.000Z",
+    "command_id": "command:compat",
+    "causation_event_id": null,
+    "correlation_id": "command:compat",
+    "actor_kind": "provider",
+    "payload_json": "{\"providerSessionId\":\"session:two\",\"detachedAt\":\"2026-09-03T00:00:00.000Z\",\"reason\":\"Quote \\\" and newline\\n and é 🦀\"}",
+    "metadata_json": "{\"runId\":\"run:one\",\"nodeId\":\"node:one\",\"driver\":\"codex\",\"providerInstanceId\":\"codex\",\"rawEventId\":\"raw:two\"}",
+    "application_event_version": 2
+  },
+  {
+    "sequence": 3,
+    "event_id": "event:three",
+    "aggregate_kind": "thread",
+    "stream_id": "thread:two",
+    "stream_version": 0,
+    "event_type": "provider-session.detached",
+    "occurred_at": "2026-09-03T00:00:00.000Z",
+    "command_id": "command:compat",
+    "causation_event_id": null,
+    "correlation_id": "command:compat",
+    "actor_kind": "server",
+    "payload_json": "{\"providerSessionId\":\"session:three\",\"detachedAt\":\"2026-09-03T00:00:00.000Z\"}",
+    "metadata_json": "{}",
+    "application_event_version": 2
+  }
+]
