@@ -50,6 +50,9 @@ recent-history scanner/import service composition are present.
   Latest exact command is blocked by seven foreign dead-code errors at
   t3-forge/src/support.rs:4-10 (decode, encode, text, rows, nodes, sha,
   quote_patch_path). Do not edit sibling files or claim exact clippy passed.
+- cargo clippy -p t3-project --all-targets --no-deps -- -D warnings PASSED
+  after the final source/test edits. This only proves owned lints are clean.
+- No verification command remains running.
 
 ## Blocking sibling APIs
 
@@ -74,7 +77,6 @@ copy sibling filesystem/runtime services, or inspect real provider homes.
 
 ## Next
 
-Finish scoped verification and record actual results. When sibling APIs exist,
-implement their production adapters, native-history import and remaining parity
+When sibling APIs exist, implement their production adapters, native-history import and remaining parity
 matrices. No need to recreate the crate, re-audit its original homes, or restore
 staging. Stop service producers/join tasks before closing temporary databases.

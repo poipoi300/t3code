@@ -248,10 +248,13 @@ pub(super) fn context_label(label: &str, kind: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     let mut units = 0;
-    let clean: String = clean.chars().take_while(|ch| {
-        units += ch.len_utf16();
-        units <= 200
-    }).collect();
+    let clean: String = clean
+        .chars()
+        .take_while(|ch| {
+            units += ch.len_utf16();
+            units <= 200
+        })
+        .collect();
     if clean.is_empty() { kind.into() } else { clean }
 }
 pub(super) fn ensure_reference(prompt: &mut String, kind: &str, id: &str, label: &str) {

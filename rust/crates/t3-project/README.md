@@ -226,5 +226,6 @@ absent-inode versus literal-string regression was also observed red then green.
 The exact required clippy command is blocked by seven sibling dead-code errors
 in t3-forge/src/support.rs:4-10 (decode, encode, text, rows, nodes, sha,
 quote_patch_path). No sibling files were changed. A --no-deps check can diagnose
-owned lints but does not replace this required gate.
+owned lints but does not replace this required gate: that command passed for all
+t3-project targets with -D warnings after the final source/test edits.
 No actual provider home or live T3 database was read, copied or modified.

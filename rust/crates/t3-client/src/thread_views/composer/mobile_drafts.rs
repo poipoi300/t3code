@@ -124,7 +124,8 @@ pub fn restore_file_references(draft: &Value) -> Value {
         .map(|r| text(r, "contextId").into())
         .collect();
     for attachment in array(draft, "attachments") {
-        if attachment["type"] == "image" || super::attachment_files::media_kind(&attachment).is_some()
+        if attachment["type"] == "image"
+            || super::attachment_files::media_kind(&attachment).is_some()
         {
             continue;
         }

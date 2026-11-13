@@ -276,6 +276,20 @@ impl DeviceService {
         while let Ok((phase, detail)) = phase_rx.try_recv() {
             self.status(entry, phase, detail).await;
         }
+        let weak = Arc::downgrade(&self.inner);
+        let id = entry.host.id().to_owned();
+        let generation = entry.generation;
+        tokio::spawn(async move {
+            while let Some((phase, detail)) = phase_rx.recv().await {
+                let Some(inner) = weak.upgrade() else { break };
+                let service = Self { inner };
+                let entry = service.inner.state.lock().await.hosts.iter()
+                    .find(|e| e.host.id() == id && e.generation == generation).cloned();
+                if let Some(entry) = entry {
+                    service.status(&entry, phase, detail).await;
+                } else { break }
+            }
+        });
         match result {
             Ok(ready) => {
                 if !self.unchanged(entry).await {
@@ -1178,6 +1192,20 @@ impl DeviceService {
         .await
         .map(|_| ())
     }
+}
+
+/// Applies the TypeScript contract's cloud-host encoding transform before Serde.
+pub fn wire_state(mut state: DeviceServiceState) -> DeviceServiceState {
+    let mut eas = Vec::new();
+    let mut simlock = Vec::new();
+    state.hosts.retain(|host| match host.kind {
+        DeviceHostKind::Eas => { eas.push(host.clone()); false }
+        DeviceHostKind::Simlock => { simlock.push(host.clone()); false }
+        _ => true,
+    });
+    state.eas_hosts = Some(Some(eas));
+    state.simlock_hosts = Some(Some(simlock));
+    state
 }
 
 fn find_device(state: &DeviceServiceState, host: &str, id: &str) -> Option<DeviceSummary> {

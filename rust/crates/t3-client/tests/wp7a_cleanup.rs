@@ -80,6 +80,26 @@ impl CleanupRemoval for Removal {
     }
 }
 const ROOT: &str = "file:///app/Documents/";
+#[test]
+fn host_resource_removal_uses_the_landed_platform_capability_and_retains_errors() {
+    use t3_client::{platform::HostReply, testing::FakePlatform};
+    block_on(async {
+        let platform = Rc::new(FakePlatform::default());
+        let resources = HostResourceRemoval(platform.clone());
+        platform.push_host(Ok(HostReply::Unit));
+        resources
+            .remove_resource("registered-resource".into())
+            .await
+            .expect("removed");
+        platform.push_host(Err(PlatformError::Closed));
+        assert_eq!(
+            resources
+                .remove_resource("registered-resource".into())
+                .await,
+            Err(PlatformError::Closed)
+        );
+    });
+}
 fn attachment(name: &str) -> Value {
     json!({"fileUri":format!("{ROOT}t3-composer-attachments/{name}"),"uploadEnvironmentId":"env","uploadedAttachmentId":name})
 }

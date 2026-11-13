@@ -1,0 +1,5 @@
+/.nsh/
+/target/
+/*/target/
+/desktop/Cargo.toml
+/gpui/Cargo.toml

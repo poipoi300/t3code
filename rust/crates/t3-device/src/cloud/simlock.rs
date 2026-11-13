@@ -545,10 +545,12 @@ impl SimlockHost {
             }
         }
     }
-    fn ready(&self) -> Ready {
+    async fn ready(&self) -> Ready {
+        let node = self.inner.state.lock().await.cli.as_ref()
+            .map(|cli| cli.node.clone()).unwrap_or_else(|| self.inner.options.node.clone());
         Ready {
             origin: self.inner.gateway.clone(),
-            node_path: self.inner.options.node.clone(),
+            node_path: node,
             devices: Arc::new(self.clone()),
             commands: Arc::new(NoCommands("Simlock")),
             ax_helper: None,
@@ -592,18 +594,19 @@ impl DeviceHost for SimlockHost {
     }
     async fn ensure_ready(&self, phase: Phase) -> Result<Ready> {
         let _guard=self.inner.start_lock.lock().await;
-        if self.inner.state.lock().await.ready{return Ok(self.ready());}
+        if self.inner.state.lock().await.ready{return Ok(self.ready().await);}
         phase(DeviceHostStatus::Installing, None);
         let cli=if let Some(provider)=&self.inner.options.cli_provider{provider.ensure().await?}else{crate::host::AgentCli{node:self.inner.options.node.clone(),entry:self.inner.options.agent_entry.clone()}};
         let mut state=self.inner.state.lock().await;
         state.ready = true;state.cli=Some(cli);drop(state);
-        Ok(self.ready())
+        Ok(self.ready().await)
     }
     async fn ensure_agent_ready(&self, phase: Phase) -> Result<Ready> {
         self.ensure_ready(phase).await
     }
     async fn current(&self) -> Option<Ready> {
-        self.inner.state.lock().await.ready.then(|| self.ready())
+        let ready = self.inner.state.lock().await.ready;
+        if ready { Some(self.ready().await) } else { None }
     }
     async fn stop_agent(&self) -> Result<()> {
         Ok(())
@@ -746,7 +749,8 @@ impl DeviceOperations for SimlockHost {
         Ok(Some(AgentEndpoint {
             base_url: format!("{}/v1/agent-device", self.inner.gateway),
             token: lease.token.clone(),
-            entry_path: self.inner.options.agent_entry.clone(),
+            entry_path: state.cli.as_ref().map(|cli| cli.entry.clone())
+                .unwrap_or_else(|| self.inner.options.agent_entry.clone()),
             agent_device_id: None,
             session: Some(lease.session.clone()),
             state_dir: Some(lease.dir.clone()),

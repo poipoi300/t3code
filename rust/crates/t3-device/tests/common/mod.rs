@@ -217,6 +217,7 @@ pub struct FakeHost {
     pub stops: AtomicUsize,
     pub agent_stops: AtomicUsize,
     pub inspection_fail: AtomicBool,
+    pub phase: StdMutex<Option<Phase>>,
 }
 impl FakeHost {
     pub fn new(
@@ -246,6 +247,7 @@ impl FakeHost {
             stops: AtomicUsize::new(0),
             agent_stops: AtomicUsize::new(0),
             inspection_fail: AtomicBool::new(false),
+            phase: StdMutex::new(None),
         })
     }
 }
@@ -283,6 +285,7 @@ impl DeviceHost for FakeHost {
     async fn ensure_ready(&self, phase: Phase) -> Result<Ready> {
         self.starts.fetch_add(1, Ordering::SeqCst);
         phase(DeviceHostStatus::Starting, None);
+        *self.phase.lock().unwrap() = Some(phase);
         if self.fail.load(Ordering::SeqCst) {
             Err(Error::Unavailable("offline".into()))
         } else {

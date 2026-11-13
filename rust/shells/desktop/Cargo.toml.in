@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+
+[package]
+name = "t3-desktop"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+t3-ui = { path = "../../crates/t3-ui" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nsh-platform-windows = { git = "@NSH_GIT@", rev = "@NSH_REV@", default-features = false, features = ["svg"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos = { git = "@NSH_GIT@", rev = "@NSH_REV@", default-features = false, features = ["svg"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nsh-platform-linux = { git = "@NSH_GIT@", rev = "@NSH_REV@", default-features = false, features = ["svg"] }
+
+[profile.dev]
+debug = 0
+
+[profile.dev.package."*"]
+opt-level = 2
