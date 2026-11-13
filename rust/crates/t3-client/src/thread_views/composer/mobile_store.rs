@@ -101,6 +101,47 @@ impl<P: Platform> MobileDraftStore<P> {
     pub fn snapshot(&self) -> Rc<Value> {
         self.state.borrow().current.clone()
     }
+    pub fn create_new_task(&self, project: &t3_contracts::environment::ScopedProjectRef) -> Result<String,ClientError> {
+        let id=crate::operations::allocate_command_id(self.platform.as_ref(),None)?;
+        let now=super::send_commands::epoch_iso(self.platform.now_epoch_ms());
+        let mut key=String::new();
+        self.update(|current| {
+            let mut document=current.clone();
+            let (drafts,created)=super::mobile_content::new_task(&current["drafts"],&id.0,&project.environment_id.0,&project.project_id.0,&now);
+            document["drafts"]=drafts;key=created;Ok(document)
+        })?;
+        Ok(key)
+    }
+    pub async fn retarget_saved(&self, key:&str, project:&t3_contracts::environment::ScopedProjectRef) -> Result<bool,ClientError> {
+        self.load().await?;
+        let now=super::send_commands::epoch_iso(self.platform.now_epoch_ms());
+        let mut found=false;
+        self.update(|current| {
+            let Some(draft)=current["drafts"].get(key) else { return Ok(current.clone()); };
+            found=true;
+            let mut document=current.clone();
+            document["drafts"][key]=super::mobile_content::retarget(draft,&project.environment_id.0,&project.project_id.0,&now);
+            Ok(document)
+        })?;
+        Ok(found)
+    }
+    pub async fn clear_environment(&self, environment:&str) -> Result<Vec<Value>,ClientError> {
+        self.load().await?;
+        let mut cleanup=vec![];
+        self.update(|current| {
+            let mut next=current.clone();
+            next["drafts"]=super::mobile_content::remove_environment(&current["drafts"],environment);
+            if let Some(drafts)=current["drafts"].as_object() {
+                for (key,draft) in drafts.iter().filter(|(key,_)|next["drafts"].get(*key).is_none()) {
+                    let _=key;
+                    cleanup.extend(draft["attachments"].as_array().into_iter().flatten().cloned());
+                }
+            }
+            Ok(next)
+        })?;
+        self.flush_all().await?;
+        Ok(cleanup)
+    }
     pub fn loaded(&self) -> bool {
         self.loaded.get()
     }

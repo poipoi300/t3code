@@ -69,7 +69,8 @@ fn overflow_preserves_recovery_attachments_but_context_limits_still_apply() {
             .len(),
         102
     );
-    let full = json!({"text":"","attachments":[],"context":{"version":1,"records":(0..t3_contracts::composer_context::COMPOSER_CONTEXT_MAX_RECORDS).map(|id|json!({"contextId":id.to_string()})).collect::<Vec<_>>()}});
+    let count=t3_contracts::composer_context::COMPOSER_CONTEXT_MAX_RECORDS;
+    let full = json!({"text":(0..count).map(|id|format!("[f](t3-context://v1/file/{id})")).collect::<Vec<_>>().join(" "),"attachments":[],"context":{"version":1,"records":(0..count).map(|id|json!({"contextId":id.to_string()})).collect::<Vec<_>>()}});
     assert_eq!(
         append(
             &full,

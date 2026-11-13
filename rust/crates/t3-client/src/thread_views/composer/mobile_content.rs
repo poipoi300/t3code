@@ -216,6 +216,40 @@ pub(super) fn put(current: &Value, key: &str, draft: Value) -> Value {
     }
     next
 }
+pub fn update_settings(current: &Value, key: &str, settings: &serde_json::Map<String,Value>) -> Value {
+    let mut draft=normalize(&current[key]);
+    if let Some(fields)=draft.as_object_mut() {
+        for (key,value) in settings {
+            if value.is_null() { fields.remove(key); } else { fields.insert(key.clone(),value.clone()); }
+        }
+    }
+    put(current,key,draft)
+}
+pub fn set_fresh_context(current: &Value, key: &str, pending: bool) -> Value {
+    if (current[key]["freshContext"] == true) == pending { return current.clone(); }
+    update_settings(current,key,&serde_json::Map::from_iter([("freshContext".into(),if pending {json!(true)}else{Value::Null})]))
+}
+pub fn remove_environment(current: &Value, environment: &str) -> Value {
+    let prefix=format!("{environment}:");
+    let mut next=current.clone();
+    if let Some(drafts)=next.as_object_mut() {
+        drafts.retain(|key,draft|!key.starts_with(&prefix)&&draft["project"]["environmentId"]!=environment);
+    }
+    next
+}
+pub fn new_task(current: &Value, id: &str, environment: &str, project: &str, now: &str) -> (Value,String) {
+    let key=format!("new-task:{id}");
+    let mut next=current.clone();
+    if !next.is_object() { next=json!({}); }
+    next[&key]=json!({"text":"","attachments":[],"project":{"environmentId":environment,"projectId":project,"createdAt":now}});
+    (next,key)
+}
+pub fn new_task_keys(current: &Value, environment: &str, project: &str) -> Vec<String> {
+    let mut entries=current.as_object().into_iter().flat_map(|drafts|drafts.iter())
+        .filter(|(key,draft)|key.starts_with("new-task:")&&draft["project"]["environmentId"]==environment&&draft["project"]["projectId"]==project).collect::<Vec<_>>();
+    entries.sort_by(|(_,a),(_,b)| b["project"]["createdAt"].as_str().unwrap_or_default().cmp(a["project"]["createdAt"].as_str().unwrap_or_default()));
+    entries.into_iter().map(|(key,_)|key.clone()).collect()
+}
 pub fn clear_content(
     current: &Value,
     key: &str,
