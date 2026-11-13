@@ -1,0 +1,1115 @@
+use crate::{ExecuteOptions, Git, GitError, OutputMode, env};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use sha2::{Digest, Sha256};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+use t3_process::{Environment, ProcessOutput};
+
+pub const CHECKPOINT_REF_PREFIX: &str = "refs/t3/orchestration-v2/checkpoints/";
+
+/// Base64url encodes the first 32 ASCII hex digits, not the digest bytes.
+pub fn checkpoint_ref(scope_id: &str, ordinal: u64) -> String {
+    let digest = Sha256::digest(scope_id.as_bytes());
+    let hex: String = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!(
+        "{CHECKPOINT_REF_PREFIX}{}/ordinal/{ordinal}",
+        URL_SAFE_NO_PAD.encode(hex)
+    )
+}
+
+const INDEX_CONFIG: &[&str] = &[
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "sparse.expectFilesOutsideOfPatterns=false",
+    "-c",
+    "core.splitIndex=false",
+    "-c",
+    "splitIndex.sharedIndexExpire=never",
+];
+fn durable_write() -> Vec<&'static str> {
+    let mut args = vec![
+        "-c",
+        "core.fsync=objects,reference",
+        "-c",
+        "core.fsyncMethod=fsync",
+    ];
+    if cfg!(any(windows, target_os = "macos")) {
+        args.extend(["-c", "core.fsyncMethod=batch"]);
+    }
+    args
+}
+fn long_paths() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["-c", "core.longpaths=true"]
+    } else {
+        &[]
+    }
+}
+
+struct ScratchIndex(PathBuf);
+impl ScratchIndex {
+    fn cleanup(&self) {
+        let _ = std::fs::remove_file(&self.0);
+        let mut lock = self.0.as_os_str().to_owned();
+        lock.push(".lock");
+        let _ = std::fs::remove_file(lock);
+    }
+}
+impl Drop for ScratchIndex {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+struct CaptureRepository {
+    common: PathBuf,
+    index: Option<PathBuf>,
+    prefix: String,
+    head: bool,
+}
+
+#[derive(Default)]
+struct IndexScan {
+    pending: Vec<u8>,
+    flagged: Vec<String>,
+    skipped: Vec<String>,
+    flagged_bytes: usize,
+    fallback: bool,
+    sparse: bool,
+    keep: bool,
+    start: bool,
+}
+impl IndexScan {
+    fn feed(&mut self, mut chunk: &[u8]) {
+        while !chunk.is_empty() && !self.fallback {
+            if self.start {
+                let tag = chunk[0];
+                self.keep = tag.is_ascii_lowercase() || tag == b'S';
+                if self.sparse && tag == b's' {
+                    self.fallback = true;
+                    return;
+                }
+                self.start = false;
+            }
+            let end = chunk.iter().position(|byte| *byte == 0);
+            let count = end.unwrap_or(chunk.len());
+            if self.keep {
+                self.pending.extend_from_slice(&chunk[..count]);
+                if self.pending.len() > 1024 * 1024 {
+                    self.fallback = true;
+                    return;
+                }
+            }
+            if let Some(end) = end {
+                if self.keep {
+                    if self.pending.len() < 3 {
+                        self.fallback = true;
+                        return;
+                    }
+                    let skipped = self.sparse && self.pending[0] == b'S';
+                    if !skipped || self.pending.last() != Some(&b'/') {
+                        match std::str::from_utf8(&self.pending[2..]) {
+                            Ok(entry) => {
+                                if skipped {
+                                    self.skipped.push(entry.into());
+                                } else {
+                                    self.flagged_bytes += self.pending.len();
+                                    self.flagged.push(entry.into());
+                                }
+                            }
+                            Err(_) => {
+                                self.fallback = true;
+                                return;
+                            }
+                        }
+                    }
+                    if self.flagged_bytes > 1024 * 1024 {
+                        self.fallback = true;
+                        return;
+                    }
+                }
+                self.pending.clear();
+                self.start = true;
+                chunk = &chunk[end + 1..];
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+fn checkpoint_path_contains(parent: &str, path: &str) -> bool {
+    let (parent, path) = if cfg!(windows) {
+        (parent.to_lowercase(), path.to_lowercase())
+    } else {
+        (parent.to_owned(), path.to_owned())
+    };
+    path == parent || path.starts_with(&format!("{parent}/"))
+}
+
+fn stage_pathspecs(paths: &[String]) -> Vec<u8> {
+    paths
+        .iter()
+        .flat_map(|path| format!(":(literal){path}\0").into_bytes())
+        .collect()
+}
+
+impl Git {
+    async fn capture_execute(
+        &self,
+        args: &[&str],
+        commit_env: &Environment,
+        stdin: Option<Vec<u8>>,
+    ) -> Result<ProcessOutput, GitError> {
+        self.execute(
+            args,
+            ExecuteOptions {
+                capture: true,
+                env: commit_env.clone(),
+                stdin,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+    async fn capture_repository(&self) -> Result<CaptureRepository, GitError> {
+        let output = self
+            .execute(
+                &[
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-common-dir",
+                    "--git-path",
+                    "index",
+                    "--show-prefix",
+                    "--verify",
+                    "--quiet",
+                    "HEAD",
+                ],
+                ExecuteOptions {
+                    capture: true,
+                    allow_nonzero: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let stdout = output.stdout_text();
+        let lines: Vec<_> = stdout.split('\n').collect();
+        let head = output.code == Some(0);
+        let checked = head || output.code == Some(1);
+        if checked && lines.len() == if head { 5 } else { 4 } && lines.last() == Some(&"") {
+            return Ok(CaptureRepository {
+                common: PathBuf::from(lines[0].trim()),
+                index: Some(lines[1].trim().into()),
+                prefix: lines[2].into(),
+                head,
+            });
+        }
+        let common = self.text(&["rev-parse", "--git-common-dir"]).await?;
+        let prefix = self.text(&["rev-parse", "--show-prefix"]).await?;
+        Ok(CaptureRepository {
+            common: self.absolute_git_path(common.trim_end_matches('\n'))?,
+            index: None,
+            prefix: prefix.trim_end_matches('\n').into(),
+            head: if checked {
+                head
+            } else {
+                self.head_commit().await?.is_some()
+            },
+        })
+    }
+
+    async fn reuse_index(
+        &self,
+        repository: &CaptureRepository,
+        scratch: &ScratchIndex,
+        commit_env: &Environment,
+        sparse: bool,
+    ) -> Result<bool, GitError> {
+        let index = match &repository.index {
+            Some(index) => index.clone(),
+            None => PathBuf::from(
+                self.text(&["rev-parse", "--path-format=absolute", "--git-path", "index"])
+                    .await?
+                    .trim(),
+            ),
+        };
+        let modified = std::fs::metadata(&index)?
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| GitError::InvalidOutput("index timestamp before epoch".into()))?;
+        let seconds = modified.as_millis().saturating_sub(1) / 1000;
+        let seconds = i64::try_from(seconds)
+            .map_err(|_| GitError::InvalidOutput("index timestamp".into()))?;
+        if seconds <= 0 {
+            return Ok(false);
+        }
+        let timestamp = filetime::FileTime::from_unix_time(seconds, 0);
+        tokio::fs::copy(&index, &scratch.0).await?;
+        let mut args = INDEX_CONFIG.to_vec();
+        args.extend(["read-tree", "--reset", "HEAD"]);
+        self.capture_execute(&args, commit_env, None).await?;
+        filetime::set_file_times(&scratch.0, timestamp, timestamp)?;
+        let scan = Arc::new(Mutex::new(IndexScan {
+            sparse,
+            start: true,
+            ..Default::default()
+        }));
+        let callback_scan = scan.clone();
+        let mut args = INDEX_CONFIG.to_vec();
+        args.extend(["ls-files", "--full-name", "--sparse", "--stage", "-v", "-z"]);
+        self.execute(
+            &args,
+            ExecuteOptions {
+                capture: true,
+                env: commit_env.clone(),
+                max_output_bytes: 4096,
+                on_stdout_chunk: Some(Arc::new(move |chunk| {
+                    if let Ok(mut scan) = callback_scan.lock() {
+                        scan.feed(chunk);
+                    }
+                })),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let (mut flagged, skipped, fallback) = {
+            let mut scan = scan
+                .lock()
+                .map_err(|_| GitError::InvalidOutput("index scan poisoned".into()))?;
+            (
+                std::mem::take(&mut scan.flagged),
+                std::mem::take(&mut scan.skipped),
+                scan.fallback || !scan.start,
+            )
+        };
+        if fallback {
+            return Ok(false);
+        }
+        if !skipped.is_empty() {
+            let paths: Vec<_> = skipped
+                .iter()
+                .filter_map(|entry| entry.split_once('\t').map(|(_, path)| path))
+                .collect();
+            let stdin = format!("{}\0", paths.join("\0")).into_bytes();
+            let mut args = INDEX_CONFIG.to_vec();
+            args.extend(["sparse-checkout", "check-rules", "-z"]);
+            let output = self
+                .execute(
+                    &args,
+                    ExecuteOptions {
+                        capture: true,
+                        env: commit_env.clone(),
+                        max_output_bytes: stdin.len(),
+                        output_mode: OutputMode::Error,
+                        stdin: Some(stdin),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            let stdout = output.stdout_text();
+            let selected: std::collections::HashSet<_> = stdout.split('\0').collect();
+            for entry in &skipped {
+                if entry
+                    .split_once('\t')
+                    .is_some_and(|(_, path)| selected.contains(path))
+                {
+                    flagged.push(entry.clone());
+                }
+            }
+        }
+        if !flagged.is_empty() {
+            if flagged.iter().any(|entry| entry.starts_with("160000 ")) {
+                return Ok(false);
+            }
+            let mut args = INDEX_CONFIG.to_vec();
+            args.extend([
+                "-c",
+                "core.ignorestat=false",
+                "update-index",
+                "-z",
+                "--index-info",
+            ]);
+            self.capture_execute(
+                &args,
+                commit_env,
+                Some(format!("{}\0", flagged.join("\0")).into_bytes()),
+            )
+            .await?;
+            filetime::set_file_times(&scratch.0, timestamp, timestamp)?;
+        }
+        Ok(true)
+    }
+
+    async fn capture_stage_paths(
+        &self,
+        prefix: &str,
+        exclusions: &[String],
+        commit_env: &Environment,
+        tracked_only: bool,
+    ) -> Result<Vec<String>, GitError> {
+        let mut paths = std::collections::BTreeSet::new();
+        if !tracked_only {
+            paths.extend(crate::safety::checkpoint_files(&self.cwd)?);
+        }
+        let mut args = INDEX_CONFIG.to_vec();
+        args.extend(["ls-files", "--cached", "--full-name", "-v", "-z", "--", "."]);
+        let cached = self
+            .execute(
+                &args,
+                ExecuteOptions {
+                    env: commit_env.clone(),
+                    capture: true,
+                    max_output_bytes: 16 * 1024 * 1024,
+                    output_mode: OutputMode::Error,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let cached = cached.stdout_text();
+        for entry in cached.split('\0').filter(|entry| !entry.is_empty()) {
+            let path = entry
+                .get(2..)
+                .ok_or_else(|| GitError::InvalidOutput("checkpoint cached path".into()))?;
+            if !entry.starts_with(['S', 's']) {
+                paths.insert(path.to_owned());
+            }
+        }
+        paths.retain(|path| {
+            !exclusions
+                .iter()
+                .any(|excluded| checkpoint_path_contains(excluded, path))
+        });
+        let mut paths: Vec<_> = paths
+            .into_iter()
+            .map(|path| {
+                path.strip_prefix(prefix)
+                    .map(str::to_owned)
+                    .ok_or_else(|| GitError::InvalidOutput("checkpoint path outside scope".into()))
+            })
+            .collect::<Result<_, _>>()?;
+        if !paths.is_empty() {
+            let ignored = self
+                .execute(
+                    &["check-ignore", "-z", "--stdin"],
+                    ExecuteOptions {
+                        env: commit_env.clone(),
+                        capture: true,
+                        stdin: Some(format!("{}\0", paths.join("\0")).into_bytes()),
+                        allow_nonzero: true,
+                        max_output_bytes: 16 * 1024 * 1024,
+                        output_mode: OutputMode::Error,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            if !matches!(ignored.code, Some(0 | 1)) {
+                return Err(self.vcs_exit("GitVcsDriver.filterIgnoredPaths", 3, &ignored));
+            }
+            let ignored = ignored.stdout_text();
+            let ignored: std::collections::HashSet<_> = ignored.split('\0').collect();
+            paths.retain(|path| !ignored.contains(path.as_str()));
+        }
+        Ok(paths)
+    }
+
+    pub async fn capture_checkpoint(&self, checkpoint_ref: &str) -> Result<(), GitError> {
+        let checkpoint_ref = checkpoint_ref.to_owned();
+        self.owned_operation(move |git| async move {
+            git.capture_checkpoint_owned(&checkpoint_ref).await
+        })
+        .await
+    }
+
+    async fn capture_checkpoint_owned(&self, checkpoint_ref: &str) -> Result<(), GitError> {
+        validate_checkpoint_ref(checkpoint_ref)?;
+        let exclusions = crate::safety::checkpoint_exclusions(&self.cwd)?;
+        let repository = self.capture_repository().await?;
+        let scratch = ScratchIndex(
+            repository
+                .common
+                .join(format!("t3-checkpoint-index-{}", uuid::Uuid::new_v4())),
+        );
+        let mut commit_env = env(&[
+            ("GIT_AUTHOR_NAME", "T3 Code"),
+            ("GIT_AUTHOR_EMAIL", "t3code@users.noreply.github.com"),
+            ("GIT_COMMITTER_NAME", "T3 Code"),
+            ("GIT_COMMITTER_EMAIL", "t3code@users.noreply.github.com"),
+        ]);
+        commit_env.insert(
+            "GIT_INDEX_FILE".into(),
+            Some(scratch.0.as_os_str().to_owned()),
+        );
+        let sparse = self
+            .execute(
+                &["config", "--bool", "core.sparseCheckout"],
+                ExecuteOptions {
+                    capture: true,
+                    allow_nonzero: true,
+                    ..Default::default()
+                },
+            )
+            .await?
+            .stdout_text()
+            .trim()
+            == "true";
+        let sparse = if sparse {
+            let help = self
+                .execute(
+                    &["add", "-h"],
+                    ExecuteOptions {
+                        capture: true,
+                        allow_nonzero: true,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            let text = format!("{}{}", help.stdout_text(), help.stderr_text());
+            text.contains("--sparse") || text.contains("--[no-]sparse")
+        } else {
+            false
+        };
+        if repository.head {
+            let reused = match self
+                .reuse_index(&repository, &scratch, &commit_env, sparse)
+                .await
+            {
+                Err(GitError::Process(t3_process::ProcessError::Cancelled)) => {
+                    return Err(t3_process::ProcessError::Cancelled.into());
+                }
+                result => result.unwrap_or(false),
+            };
+            if !reused {
+                if sparse
+                    && self
+                        .execute(
+                            &["config", "--bool", "core.sparseCheckoutCone"],
+                            ExecuteOptions {
+                                allow_nonzero: true,
+                                capture: true,
+                                ..Default::default()
+                            },
+                        )
+                        .await?
+                        .stdout_text()
+                        .trim()
+                        != "true"
+                {
+                    return Err(GitError::Unsupported(
+                        "Cannot rebuild a checkpoint index for non-cone sparse checkout.".into(),
+                    ));
+                }
+                scratch.cleanup();
+                let mut args = INDEX_CONFIG.to_vec();
+                if sparse {
+                    args.extend(["-c", "index.sparse=true", "read-tree", "--reset", "HEAD"]);
+                } else {
+                    args.extend(["read-tree", "HEAD"]);
+                }
+                self.capture_execute(&args, &commit_env, None).await?;
+            }
+        }
+        let ignored = if repository.prefix.is_empty() {
+            false
+        } else {
+            let basename = repository
+                .prefix
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or("");
+            let probe = self
+                .execute(
+                    &[
+                        "-c",
+                        "core.fsmonitor=false",
+                        "-c",
+                        "core.untrackedCache=false",
+                        "check-ignore",
+                        "--no-index",
+                        "-z",
+                        "--stdin",
+                    ],
+                    ExecuteOptions {
+                        stdin: Some(format!("../{basename}\0").into_bytes()),
+                        allow_nonzero: true,
+                        max_output_bytes: 16 * 1024 * 1024,
+                        output_mode: OutputMode::Error,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            if !matches!(probe.code, Some(0 | 1)) {
+                return Err(self.vcs_exit("GitVcsDriver.filterIgnoredPaths", 6, &probe));
+            }
+            !probe.stdout.is_empty()
+        };
+        if ignored {
+            let additions = self
+                .execute(
+                    &[
+                        "-c",
+                        "core.quotePath=true",
+                        "diff",
+                        "--cached",
+                        "--raw",
+                        "--no-abbrev",
+                        "--no-renames",
+                        "--no-relative",
+                        "--ignore-submodules=none",
+                        "--no-color",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--ita-visible-in-index",
+                        "--diff-filter=A",
+                        "--",
+                        ".",
+                    ],
+                    ExecuteOptions {
+                        capture: true,
+                        max_output_bytes: 16 * 1024 * 1024,
+                        output_mode: OutputMode::Error,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            if !additions.stdout.is_empty() {
+                let mut stdin = String::new();
+                for line in additions.stdout_text().lines() {
+                    let (metadata, path) = line
+                        .split_once('\t')
+                        .ok_or_else(|| GitError::InvalidOutput("staged addition".into()))?;
+                    let fields: Vec<_> = metadata.split(' ').collect();
+                    if fields.len() != 5 || fields[0] != ":000000" || fields[4] != "A" {
+                        return Err(GitError::InvalidOutput("staged addition metadata".into()));
+                    }
+                    stdin.push_str(&format!("{} {}\t{}\n", fields[1], fields[3], path));
+                }
+                let mut args = INDEX_CONFIG.to_vec();
+                args.extend(["-c", "index.sparse=false", "update-index", "--index-info"]);
+                self.capture_execute(&args, &commit_env, Some(stdin.into_bytes()))
+                    .await?;
+            }
+            let mut args = INDEX_CONFIG.to_vec();
+            args.extend(["ls-files", "--cached", "-z", "--", "."]);
+            if self
+                .execute(
+                    &args,
+                    ExecuteOptions {
+                        env: commit_env.clone(),
+                        max_output_bytes: 1,
+                        capture: true,
+                        ..Default::default()
+                    },
+                )
+                .await?
+                .stdout
+                .is_empty()
+            {
+                return Err(GitError::Unsupported(
+                    "The workspace directory is ignored by its Git repository.".into(),
+                ));
+            }
+        }
+        if !exclusions.is_empty() {
+            let specs: Vec<_> = exclusions
+                .iter()
+                .map(|path| {
+                    format!(
+                        ":(top,literal{}){path}",
+                        if cfg!(windows) { ",icase" } else { "" }
+                    )
+                })
+                .collect();
+            let mut args = INDEX_CONFIG.to_vec();
+            args.extend(["ls-files", "--cached", "-z", "--"]);
+            args.extend(specs.iter().map(String::as_str));
+            let paths = self
+                .execute(
+                    &args,
+                    ExecuteOptions {
+                        env: commit_env.clone(),
+                        max_output_bytes: 16 * 1024 * 1024,
+                        output_mode: OutputMode::Error,
+                        ..Default::default()
+                    },
+                )
+                .await?
+                .stdout;
+            if !paths.is_empty() {
+                let mut args = INDEX_CONFIG.to_vec();
+                args.extend(["update-index", "--force-remove", "-z", "--stdin"]);
+                self.capture_execute(&args, &commit_env, Some(paths))
+                    .await?;
+            }
+        }
+        // A fixed file list cannot expose a scanned link when ignore rules change during staging.
+        let stage_paths = if exclusions.is_empty() {
+            None
+        } else {
+            Some(
+                self.capture_stage_paths(&repository.prefix, &exclusions, &commit_env, ignored)
+                    .await?,
+            )
+        };
+        let mut stage_args = INDEX_CONFIG.to_vec();
+        stage_args.extend(durable_write());
+        stage_args.extend(long_paths());
+        stage_args.extend(["-c", "core.safecrlf=false", "add"]);
+        if sparse {
+            stage_args.push("--sparse");
+        }
+        stage_args.push(if ignored { "-u" } else { "-A" });
+        if stage_paths.is_some() {
+            stage_args.extend(["--pathspec-from-file=-", "--pathspec-file-nul"]);
+        } else {
+            stage_args.extend(["--", "."]);
+        }
+        match self
+            .capture_execute(
+                &stage_args,
+                &commit_env,
+                stage_paths.as_deref().map(stage_pathspecs),
+            )
+            .await
+        {
+            Err(original @ GitError::Vcs(_)) => {
+                let recovery = async {
+                    let candidates: Vec<String> = if let Some(paths) = &stage_paths {
+                        paths
+                            .iter()
+                            .filter(|path| path.ends_with('/'))
+                            .cloned()
+                            .collect()
+                    } else {
+                        let mut args = long_paths().to_vec();
+                        args.extend([
+                            "ls-files",
+                            "--others",
+                            "--exclude-standard",
+                            "-z",
+                            "--",
+                            ".",
+                        ]);
+                        let untracked = self
+                            .execute(
+                                &args,
+                                ExecuteOptions {
+                                    env: commit_env.clone(),
+                                    capture: true,
+                                    max_output_bytes: 16 * 1024 * 1024,
+                                    ..Default::default()
+                                },
+                            )
+                            .await?;
+                        if untracked.stdout_truncated {
+                            return Ok(false);
+                        }
+                        untracked
+                            .stdout_text()
+                            .split('\0')
+                            .filter(|path| path.ends_with('/'))
+                            .map(str::to_owned)
+                            .collect()
+                    };
+                    if candidates.len() > 64 {
+                        return Ok(false);
+                    }
+                    let mut exclusions = Vec::new();
+                    for path in candidates {
+                        let nested = self.at(self.cwd.join(&path));
+                        if nested.cwd.join(".git").try_exists()?
+                            && nested.head_commit().await?.is_none()
+                        {
+                            exclusions.push(path);
+                        }
+                    }
+                    if exclusions.is_empty() {
+                        return Ok(false);
+                    }
+                    let args = stage_args.clone();
+                    let stdin = if let Some(paths) = &stage_paths {
+                        let paths: Vec<_> = paths
+                            .iter()
+                            .filter(|path| {
+                                !exclusions.iter().any(|excluded| {
+                                    checkpoint_path_contains(excluded.trim_end_matches('/'), path)
+                                })
+                            })
+                            .cloned()
+                            .collect();
+                        Some(stage_pathspecs(&paths))
+                    } else {
+                        let specs: Vec<_> = exclusions
+                            .iter()
+                            .map(|path| format!(":(exclude,literal){path}"))
+                            .collect();
+                        let mut retry = args.clone();
+                        retry.extend(specs.iter().map(String::as_str));
+                        self.capture_execute(&retry, &commit_env, None).await?;
+                        return Ok(true);
+                    };
+                    self.capture_execute(&args, &commit_env, stdin).await?;
+                    Ok::<_, GitError>(true)
+                };
+                match recovery.await {
+                    Ok(true) => {}
+                    Err(GitError::Process(t3_process::ProcessError::Cancelled)) => {
+                        return Err(t3_process::ProcessError::Cancelled.into());
+                    }
+                    _ => return Err(original),
+                }
+            }
+            result => {
+                result?;
+            }
+        }
+        let mut args = INDEX_CONFIG.to_vec();
+        args.extend(durable_write());
+        args.push("write-tree");
+        let tree = self
+            .capture_execute(&args, &commit_env, None)
+            .await?
+            .stdout_text();
+        let tree = tree.trim();
+        if tree.is_empty() {
+            return Err(GitError::InvalidOutput(
+                "git write-tree returned an empty tree oid".into(),
+            ));
+        }
+        let mut args = durable_write();
+        args.extend(["commit-tree", tree]);
+        if repository.head {
+            args.extend(["-p", "HEAD"]);
+        }
+        let message = format!("t3 checkpoint ref={checkpoint_ref}");
+        args.extend(["-m", &message]);
+        let commit = self
+            .capture_execute(&args, &commit_env, None)
+            .await?
+            .stdout_text();
+        let commit = commit.trim();
+        if commit.is_empty() {
+            return Err(GitError::InvalidOutput(
+                "git commit-tree returned an empty commit oid".into(),
+            ));
+        }
+        let mut args = durable_write();
+        args.extend(["update-ref", "--no-deref", checkpoint_ref, commit]);
+        self.capture_execute(&args, &Environment::new(), None)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn resolve_checkpoint(
+        &self,
+        checkpoint_ref: &str,
+    ) -> Result<Option<String>, GitError> {
+        validate_revision(checkpoint_ref)?;
+        let revision = format!("{checkpoint_ref}^{{commit}}");
+        let output = self
+            .execute(
+                &["rev-parse", "--verify", "--quiet", &revision],
+                ExecuteOptions {
+                    env: env(&[("LC_ALL", "C")]),
+                    allow_nonzero: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        if output.code == Some(1)
+            && !output
+                .stderr_text()
+                .lines()
+                .any(|line| line.starts_with("error:") || line.starts_with("fatal:"))
+        {
+            return Ok(None);
+        }
+        if output.code != Some(0) {
+            return Err(self.vcs_exit(
+                "GitVcsDriver.checkpoints.resolveCheckpointCommit",
+                5,
+                &output,
+            ));
+        }
+        let text = output.stdout_text();
+        Ok((!text.trim().is_empty()).then(|| text.trim().into()))
+    }
+    pub async fn has_checkpoint(&self, checkpoint_ref: &str) -> Result<bool, GitError> {
+        Ok(self.resolve_checkpoint(checkpoint_ref).await?.is_some())
+    }
+    pub(crate) async fn head_commit(&self) -> Result<Option<String>, GitError> {
+        let output = self
+            .execute(
+                &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+                ExecuteOptions {
+                    allow_nonzero: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok((output.code == Some(0) && !output.stdout.is_empty())
+            .then(|| output.stdout_text().trim().to_owned()))
+    }
+    pub async fn delete_checkpoint_refs(&self, refs: &[impl AsRef<str>]) -> Result<(), GitError> {
+        for reference in refs {
+            validate_checkpoint_ref(reference.as_ref())?;
+            self.execute(
+                &["update-ref", "--no-deref", "-d", reference.as_ref()],
+                ExecuteOptions {
+                    allow_nonzero: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        }
+        Ok(())
+    }
+    pub async fn list_checkpoint_refs(&self) -> Result<Vec<crate::GitRef>, GitError> {
+        self.list_refs(&[CHECKPOINT_REF_PREFIX]).await
+    }
+    pub async fn prune_checkpoint_refs(
+        &self,
+        scope_id: &str,
+        keep: &std::collections::HashSet<String>,
+    ) -> Result<Vec<String>, GitError> {
+        let reference = checkpoint_ref(scope_id, 0);
+        let namespace = reference
+            .strip_suffix("ordinal/0")
+            .ok_or_else(|| GitError::InvalidOutput("checkpoint namespace".into()))?;
+        let stale: Vec<_> = self
+            .list_refs(&[namespace])
+            .await?
+            .into_iter()
+            .filter(|reference| !keep.contains(&reference.name))
+            .map(|reference| reference.name)
+            .collect();
+        self.delete_checkpoint_refs(&stale).await?;
+        Ok(stale)
+    }
+
+    /// Mutates this workspace, preserving ignored files and resetting its index to HEAD.
+    /// Call `restore_checkpoint_isolated` when enforcing thread/worktree ownership.
+    pub async fn restore_checkpoint(
+        &self,
+        reference: &str,
+        fallback_to_head: bool,
+    ) -> Result<bool, GitError> {
+        crate::safety::ensure_checkpoint_contained(&self.cwd)?;
+        let commit = match self.resolve_checkpoint(reference).await? {
+            Some(commit) => Some(commit),
+            None if fallback_to_head => self.head_commit().await?,
+            None => None,
+        };
+        let Some(commit) = commit else {
+            return Ok(false);
+        };
+        let with_tree = format!("--with-tree={commit}");
+        let tracked = self
+            .text(&["ls-files", "--cached", &with_tree, "-z", "--", "."])
+            .await?;
+        if !tracked.is_empty() {
+            let mut args = long_paths().to_vec();
+            args.extend([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "restore",
+                "--source",
+                &commit,
+                "--worktree",
+                "--staged",
+                "--",
+                ".",
+            ]);
+            crate::safety::ensure_checkpoint_contained(&self.cwd)?;
+            self.text(&args).await?;
+        }
+        std::fs::create_dir_all(&self.cwd)?;
+        let cleaned = self.clean_checkpoint_workspace().await;
+        // Even a failed clean must leave staged state at HEAD.
+        crate::safety::ensure_checkpoint_contained(&self.cwd)?;
+        std::fs::create_dir_all(&self.cwd)?;
+        let mut args = long_paths().to_vec();
+        args.extend([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "reset",
+            "--quiet",
+            "--",
+            ".",
+        ]);
+        self.text(&args).await?;
+        cleaned?;
+        Ok(true)
+    }
+    async fn clean_checkpoint_workspace(&self) -> Result<(), GitError> {
+        let mut args = long_paths().to_vec();
+        args.extend(["clean", "-fd", "--", "."]);
+        for pass in 0..4 {
+            crate::safety::ensure_checkpoint_contained(&self.cwd)?;
+            std::fs::create_dir_all(&self.cwd)?;
+            let output = self
+                .execute(
+                    &args,
+                    ExecuteOptions {
+                        env: env(&[("LC_ALL", "C")]),
+                        allow_nonzero: true,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            let stderr = output.stderr_text();
+            if output.code != Some(0) {
+                let emptied = output.code == Some(1)
+                    && stderr.trim().starts_with("warning: failed to remove ./: ")
+                    && stderr.trim().lines().count() == 1
+                    && std::fs::read_dir(&self.cwd)
+                        .is_ok_and(|mut entries| entries.next().is_none());
+                if !emptied {
+                    return Err(self.vcs_exit(
+                        "GitVcsDriver.checkpoints.restoreCheckpoint",
+                        args.len(),
+                        &output,
+                    ));
+                }
+                return Ok(());
+            }
+            if !output
+                .stdout_text()
+                .lines()
+                .any(|line| line.starts_with("Removing "))
+            {
+                return Ok(());
+            }
+            // Git for Windows can repeatedly remove a recreated empty "./".
+            match std::fs::read_dir(&self.cwd) {
+                Ok(mut entries) => {
+                    if entries.next().is_none() {
+                        return Ok(());
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error.into()),
+            }
+            if pass == 3 {
+                std::fs::create_dir_all(&self.cwd)?;
+                let mut args = long_paths().to_vec();
+                args.extend(["clean", "-dn", "--", "."]);
+                if self
+                    .text(&args)
+                    .await?
+                    .lines()
+                    .any(|line| line.starts_with("Would remove "))
+                {
+                    return Err(GitError::Unavailable(
+                        "Could not clean the checkpoint workspace: untracked files remain.".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_revision(reference: &str) -> Result<(), GitError> {
+    if reference.is_empty() || reference.starts_with('-') || reference.contains('\0') {
+        return Err(GitError::InvalidArgument(
+            "revision is empty or starts with an option".into(),
+        ));
+    }
+    Ok(())
+}
+fn validate_checkpoint_ref(reference: &str) -> Result<(), GitError> {
+    validate_ref_name(reference)?;
+    if !reference.starts_with("refs/t3/") {
+        return Err(GitError::InvalidArgument(
+            "checkpoint writes require a refs/t3/ reference".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_ref_name(reference: &str) -> Result<(), GitError> {
+    if !reference.starts_with("refs/")
+        || reference.contains("..")
+        || reference.contains("@{")
+        || reference
+            .chars()
+            .any(|c| c.is_control() || " ~^:?*[\\".contains(c))
+        || reference.split('/').any(|part| {
+            part.is_empty()
+                || part.starts_with('.')
+                || part.ends_with('.')
+                || part.ends_with(".lock")
+        })
+    {
+        return Err(GitError::InvalidArgument(
+            "Invalid literal Git reference.".into(),
+        ));
+    }
+    Ok(())
+}
+pub(crate) fn validate_fetch_source(reference: &str) -> Result<(), GitError> {
+    validate_revision(reference)?;
+    validate_ref_name(&format!("refs/source/{reference}"))
+}
+
+pub(crate) fn validate_config_key(key: &str) -> Result<(), GitError> {
+    if key.starts_with('-') || key.contains('\0') || !key.contains('.') {
+        return Err(GitError::InvalidArgument("Invalid Git config key.".into()));
+    }
+    Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod containment_tests {
+    use super::*;
+    #[tokio::test]
+    async fn restore_and_clean_refuse_links_before_even_spawning_git()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for symlink in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("repo");
+            let outside = temp.path().join("outside");
+            std::fs::create_dir_all(root.join(".git"))?;
+            std::fs::create_dir(&outside)?;
+            std::fs::write(outside.join("keep"), b"unchanged\0\xff")?;
+            let link = root.join("link");
+            if symlink {
+                match std::os::windows::fs::symlink_dir(&outside, &link) {
+                    Ok(()) => {}
+                    Err(error) if error.raw_os_error() == Some(1314) => {
+                        eprintln!("symlink unavailable: {error}");
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            } else {
+                junction::create(&outside, &link)?;
+            }
+            let git = Git::new(&root).with_program("nonexistent-git-must-never-spawn");
+            assert!(matches!(
+                git.restore_checkpoint("HEAD", false).await,
+                Err(GitError::UnsafeRestore(_))
+            ));
+            assert!(matches!(
+                git.clean_checkpoint_workspace().await,
+                Err(GitError::UnsafeRestore(_))
+            ));
+            assert_eq!(std::fs::read(outside.join("keep"))?, b"unchanged\0\xff");
+            if symlink {
+                std::fs::remove_dir(link)?;
+            } else {
+                junction::delete(link)?;
+            }
+        }
+        Ok(())
+    }
+}
