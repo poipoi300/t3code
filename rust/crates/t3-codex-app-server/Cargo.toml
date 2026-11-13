@@ -1,0 +1,31 @@
+[package]
+name = "t3-codex-app-server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_path_to_error = "0.1"
+ryu-js = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "sync", "rt", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+futures-core = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["process", "time", "test-util"] }
+tempfile = "3"
+
+[lints]
+workspace = true
+
+[package.metadata.codex-protocol]
+repository = "https://github.com/openai/codex"
+revision = "687a119f0fcaace47e1f1abcc77cec6c813fd6da"
+version = "0.159.0"
+license = "Apache-2.0"
+strategy = "T3-used serde subset; upstream Git dependency fails resolution without upstream workspace patches"

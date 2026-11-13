@@ -1,0 +1,4603 @@
+{
+  "Empty": [
+    {}
+  ],
+  "ClientInfo": [
+    {
+      "name": "probe",
+      "version": "probe"
+    },
+    {
+      "name": "probe",
+      "title": "probe",
+      "version": "probe"
+    },
+    {
+      "name": "probe",
+      "version": "probe",
+      "title": null
+    }
+  ],
+  "InitializeCapabilities": [
+    {},
+    {
+      "experimentalApi": true,
+      "explicitGatewayOauth": true,
+      "extensions": {
+        "probe": {
+          "probe": true
+        }
+      },
+      "mcpServerOpenaiFormElicitation": true,
+      "optOutNotificationMethods": [],
+      "requestAttestation": true
+    },
+    {
+      "extensions": null
+    },
+    {
+      "optOutNotificationMethods": null
+    }
+  ],
+  "InitializeParams": [
+    {
+      "clientInfo": {
+        "name": "probe",
+        "version": "probe"
+      }
+    },
+    {
+      "capabilities": {
+        "experimentalApi": true,
+        "explicitGatewayOauth": true,
+        "extensions": {
+          "probe": {
+            "probe": true
+          }
+        },
+        "mcpServerOpenaiFormElicitation": true,
+        "optOutNotificationMethods": [],
+        "requestAttestation": true
+      },
+      "clientInfo": {
+        "name": "probe",
+        "title": "probe",
+        "version": "probe"
+      }
+    },
+    {
+      "clientInfo": {
+        "name": "probe",
+        "version": "probe"
+      },
+      "capabilities": null
+    }
+  ],
+  "InitializeResponse": [
+    {
+      "codexHome": "probe",
+      "platformFamily": "probe",
+      "platformOs": "probe",
+      "userAgent": "probe"
+    }
+  ],
+  "ThreadStartParams": [
+    {},
+    {
+      "approvalPolicy": "untrusted",
+      "approvalsReviewer": "user",
+      "baseInstructions": "probe",
+      "config": {
+        "probe": {
+          "probe": true
+        }
+      },
+      "cwd": "probe",
+      "developerInstructions": "probe",
+      "ephemeral": true,
+      "model": "probe",
+      "modelProvider": "probe",
+      "personality": "none",
+      "sandbox": "read-only",
+      "serviceName": "probe",
+      "serviceTier": "probe",
+      "sessionStartSource": "startup",
+      "threadSource": "probe"
+    },
+    {
+      "approvalPolicy": null
+    },
+    {
+      "approvalsReviewer": null
+    },
+    {
+      "baseInstructions": null
+    },
+    {
+      "config": null
+    },
+    {
+      "cwd": null
+    },
+    {
+      "developerInstructions": null
+    },
+    {
+      "ephemeral": null
+    },
+    {
+      "model": null
+    },
+    {
+      "modelProvider": null
+    },
+    {
+      "personality": null
+    },
+    {
+      "sandbox": null
+    },
+    {
+      "serviceName": null
+    },
+    {
+      "serviceTier": null
+    },
+    {
+      "sessionStartSource": null
+    },
+    {
+      "threadSource": null
+    }
+  ],
+  "ThreadResumeParams": [
+    {
+      "threadId": "probe"
+    },
+    {
+      "approvalPolicy": "untrusted",
+      "approvalsReviewer": "user",
+      "baseInstructions": "probe",
+      "config": {
+        "probe": {
+          "probe": true
+        }
+      },
+      "cwd": "probe",
+      "developerInstructions": "probe",
+      "excludeTurns": true,
+      "model": "probe",
+      "modelProvider": "probe",
+      "personality": "none",
+      "sandbox": "read-only",
+      "serviceTier": "probe",
+      "threadId": "probe"
+    },
+    {
+      "threadId": "probe",
+      "approvalPolicy": null
+    },
+    {
+      "threadId": "probe",
+      "approvalsReviewer": null
+    },
+    {
+      "threadId": "probe",
+      "baseInstructions": null
+    },
+    {
+      "threadId": "probe",
+      "config": null
+    },
+    {
+      "threadId": "probe",
+      "cwd": null
+    },
+    {
+      "threadId": "probe",
+      "developerInstructions": null
+    },
+    {
+      "threadId": "probe",
+      "model": null
+    },
+    {
+      "threadId": "probe",
+      "modelProvider": null
+    },
+    {
+      "threadId": "probe",
+      "personality": null
+    },
+    {
+      "threadId": "probe",
+      "sandbox": null
+    },
+    {
+      "threadId": "probe",
+      "serviceTier": null
+    }
+  ],
+  "ThreadForkParams": [
+    {
+      "threadId": "probe"
+    },
+    {
+      "approvalPolicy": "untrusted",
+      "approvalsReviewer": "user",
+      "baseInstructions": "probe",
+      "config": {
+        "probe": {
+          "probe": true
+        }
+      },
+      "cwd": "probe",
+      "developerInstructions": "probe",
+      "ephemeral": true,
+      "excludeTurns": true,
+      "lastTurnId": "probe",
+      "model": "probe",
+      "modelProvider": "probe",
+      "sandbox": "read-only",
+      "serviceTier": "probe",
+      "threadId": "probe",
+      "threadSource": "probe"
+    },
+    {
+      "threadId": "probe",
+      "approvalPolicy": null
+    },
+    {
+      "threadId": "probe",
+      "approvalsReviewer": null
+    },
+    {
+      "threadId": "probe",
+      "baseInstructions": null
+    },
+    {
+      "threadId": "probe",
+      "config": null
+    },
+    {
+      "threadId": "probe",
+      "cwd": null
+    },
+    {
+      "threadId": "probe",
+      "developerInstructions": null
+    },
+    {
+      "threadId": "probe",
+      "lastTurnId": null
+    },
+    {
+      "threadId": "probe",
+      "model": null
+    },
+    {
+      "threadId": "probe",
+      "modelProvider": null
+    },
+    {
+      "threadId": "probe",
+      "sandbox": null
+    },
+    {
+      "threadId": "probe",
+      "serviceTier": null
+    },
+    {
+      "threadId": "probe",
+      "threadSource": null
+    }
+  ],
+  "ThreadIdParams": [
+    {
+      "threadId": "probe"
+    }
+  ],
+  "ThreadReadParams": [
+    {
+      "threadId": "probe"
+    },
+    {
+      "includeTurns": true,
+      "threadId": "probe"
+    }
+  ],
+  "ThreadRevertParams": [
+    {
+      "beforeTurnId": "probe",
+      "threadId": "probe"
+    }
+  ],
+  "ThreadTurnsListParams": [
+    {
+      "threadId": "probe"
+    },
+    {
+      "cursor": "probe",
+      "itemsView": "notLoaded",
+      "limit": 7,
+      "sortDirection": "asc",
+      "threadId": "probe"
+    },
+    {
+      "threadId": "probe",
+      "cursor": null
+    },
+    {
+      "threadId": "probe",
+      "itemsView": null
+    },
+    {
+      "threadId": "probe",
+      "limit": null
+    },
+    {
+      "threadId": "probe",
+      "sortDirection": null
+    }
+  ],
+  "ThreadInjectItemsParams": [
+    {
+      "items": [],
+      "threadId": "probe"
+    }
+  ],
+  "ThreadGoalSetParams": [
+    {
+      "threadId": "probe"
+    },
+    {
+      "objective": "probe",
+      "status": "active",
+      "threadId": "probe",
+      "tokenBudget": 7
+    },
+    {
+      "threadId": "probe",
+      "objective": null
+    },
+    {
+      "threadId": "probe",
+      "status": null
+    },
+    {
+      "threadId": "probe",
+      "tokenBudget": null
+    }
+  ],
+  "Thread": [
+    {
+      "cliVersion": "probe",
+      "createdAt": 7,
+      "cwd": "probe",
+      "ephemeral": true,
+      "id": "probe",
+      "modelProvider": "probe",
+      "preview": "probe",
+      "projectId": "probe",
+      "sessionId": "probe",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "turns": [],
+      "updatedAt": 7
+    },
+    {
+      "agentNickname": "probe",
+      "agentRole": "probe",
+      "cliVersion": "probe",
+      "createdAt": 7,
+      "cwd": "probe",
+      "ephemeral": true,
+      "forkedFromId": "probe",
+      "gitInfo": {
+        "branch": "probe",
+        "originUrl": "probe",
+        "sha": "probe"
+      },
+      "historyMode": "legacy",
+      "id": "probe",
+      "model": "probe",
+      "modelProvider": "probe",
+      "name": "probe",
+      "originator": "probe",
+      "parentThreadId": "probe",
+      "path": "probe",
+      "preview": "probe",
+      "projectId": "probe",
+      "reasoningEffort": "probe",
+      "recencyAt": 7,
+      "section": {
+        "appearance": {
+          "color": "probe",
+          "icon": "probe"
+        },
+        "id": "probe",
+        "name": "probe"
+      },
+      "sectionEnteredAt": 7,
+      "sessionId": "probe",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "threadSource": "probe",
+      "turns": [],
+      "updatedAt": 7
+    },
+    {
+      "cliVersion": "probe",
+      "createdAt": 7,
+      "cwd": "probe",
+      "ephemeral": true,
+      "id": "probe",
+      "modelProvider": "probe",
+      "preview": "probe",
+      "projectId": "probe",
+      "sessionId": "probe",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "turns": [],
+      "updatedAt": 7,
+      "agentNickname": null
+    },
+    {
+      "cliVersion": "probe",
+      "createdAt": 7,
+      "cwd": "probe",
+      "ephemeral": true,
+      "id": "probe",
+      "modelProvider": "probe",
+      "preview": "probe",
+      "projectId": "probe",
+      "sessionId": "probe",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "turns": [],
+      "updatedAt": 7,
+      "agentRole": null
+    },
+    {
+      "cliVersion": "probe",
+      "createdAt": 7,
+      "cwd": "probe",
+      "ephemeral": true,
+      "id": "probe",
+      "modelProvider": "probe",
+      "preview": "probe",
+      "projectId": "probe",
+      "sessionId": "probe",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "turns": [],
+      "updatedAt": 7,
+      "forkedFromId": null
+    },
+    {
+      "cliVersion": "probe",
+      "createdAt": 7,
+      "cwd": "probe",
+      "ephemeral": true,
+      "id": "probe",
+      "modelProvider": "probe",
+      "preview": "probe",
+      "projectId": "probe",
+      "sessionId": "probe",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "turns": [],
+      "updatedAt": 7,
+      "gitInfo": null
+    },
+    {
+      "cliVersion": "probe",
+      "createdAt": 7,
+      "cwd": "probe",
+      "ephemeral": true,
+      "id": "probe",
+      "modelProvider": "probe",
+      "preview": "probe",
+      "projectId": "probe",
+      "sessionId": "probe",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "turns": [],
+      "updatedAt": 7,
+      "model": null
+    },
+    {
+      "cliVersion": "probe",
+      "createdAt": 7,
+      "cwd": "probe",
+      "ephemeral": true,
+      "id": "probe",
+      "modelProvider": "probe",
+      "preview": "probe",
+      "projectId": "probe",
+      "sessionId": "probe",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "turns": [],
+      "updatedAt": 7,
+      "name": null
+    },
+    {
+      "cliVersion": "probe",
+      "createdAt": 7,
+      "cwd": "probe",
+      "ephemeral": true,
+      "id": "probe",
+      "modelProvider": "probe",
+      "preview": "probe",
+      "projectId": "probe",
+      "sessionId": "probe",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "turns": [],
+      "updatedAt": 7,
+      "originator": null
+    },
+    {
+      "cliVersion": "probe",
+      "createdAt": 7,
+      "cwd": "probe",
+      "ephemeral": true,
+      "id": "probe",
+      "modelProvider": "probe",
+      "preview": "probe",
+      "projectId": "probe",
+      "sessionId": "probe",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "turns": [],
+      "updatedAt": 7,
+      "parentThreadId": null
+    },
+    {
+      "cliVersion": "probe",
+      "createdAt": 7,
+      "cwd": "probe",
+      "ephemeral": true,
+      "id": "probe",
+      "modelProvider": "probe",
+      "preview": "probe",
+      "projectId": "probe",
+      "sessionId": "probe",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "turns": [],
+      "updatedAt": 7,
+      "path": null
+    },
+    {
+      "cliVersion": "probe",
+      "createdAt": 7,
+      "cwd": "probe",
+      "ephemeral": true,
+      "id": "probe",
+      "modelProvider": "probe",
+      "preview": "probe",
+      "projectId": "probe",
+      "sessionId": "probe",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "turns": [],
+      "updatedAt": 7,
+      "reasoningEffort": null
+    },
+    {
+      "cliVersion": "probe",
+      "createdAt": 7,
+      "cwd": "probe",
+      "ephemeral": true,
+      "id": "probe",
+      "modelProvider": "probe",
+      "preview": "probe",
+      "projectId": "probe",
+      "sessionId": "probe",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "turns": [],
+      "updatedAt": 7,
+      "recencyAt": null
+    },
+    {
+      "cliVersion": "probe",
+      "createdAt": 7,
+      "cwd": "probe",
+      "ephemeral": true,
+      "id": "probe",
+      "modelProvider": "probe",
+      "preview": "probe",
+      "projectId": "probe",
+      "sessionId": "probe",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "turns": [],
+      "updatedAt": 7,
+      "section": null
+    },
+    {
+      "cliVersion": "probe",
+      "createdAt": 7,
+      "cwd": "probe",
+      "ephemeral": true,
+      "id": "probe",
+      "modelProvider": "probe",
+      "preview": "probe",
+      "projectId": "probe",
+      "sessionId": "probe",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "turns": [],
+      "updatedAt": 7,
+      "sectionEnteredAt": null
+    },
+    {
+      "cliVersion": "probe",
+      "createdAt": 7,
+      "cwd": "probe",
+      "ephemeral": true,
+      "id": "probe",
+      "modelProvider": "probe",
+      "preview": "probe",
+      "projectId": "probe",
+      "sessionId": "probe",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "turns": [],
+      "updatedAt": 7,
+      "threadSource": null
+    }
+  ],
+  "ThreadResponse": [
+    {
+      "approvalPolicy": "untrusted",
+      "approvalsReviewer": "user",
+      "cwd": "probe",
+      "model": "probe",
+      "modelProvider": "probe",
+      "sandbox": {
+        "type": "dangerFullAccess"
+      },
+      "thread": {
+        "cliVersion": "probe",
+        "createdAt": 7,
+        "cwd": "probe",
+        "ephemeral": true,
+        "id": "probe",
+        "modelProvider": "probe",
+        "preview": "probe",
+        "projectId": "probe",
+        "sessionId": "probe",
+        "source": "cli",
+        "status": {
+          "type": "notLoaded"
+        },
+        "turns": [],
+        "updatedAt": 7
+      }
+    },
+    {
+      "approvalPolicy": "untrusted",
+      "approvalsReviewer": "user",
+      "cwd": "probe",
+      "disabledPluginIds": [],
+      "instructionSources": [],
+      "model": "probe",
+      "modelProvider": "probe",
+      "reasoningEffort": "probe",
+      "sandbox": {
+        "type": "dangerFullAccess"
+      },
+      "serviceTier": "probe",
+      "thread": {
+        "agentNickname": "probe",
+        "agentRole": "probe",
+        "cliVersion": "probe",
+        "createdAt": 7,
+        "cwd": "probe",
+        "ephemeral": true,
+        "forkedFromId": "probe",
+        "gitInfo": {
+          "branch": "probe",
+          "originUrl": "probe",
+          "sha": "probe"
+        },
+        "historyMode": "legacy",
+        "id": "probe",
+        "model": "probe",
+        "modelProvider": "probe",
+        "name": "probe",
+        "originator": "probe",
+        "parentThreadId": "probe",
+        "path": "probe",
+        "preview": "probe",
+        "projectId": "probe",
+        "reasoningEffort": "probe",
+        "recencyAt": 7,
+        "section": {
+          "appearance": {
+            "color": "probe",
+            "icon": "probe"
+          },
+          "id": "probe",
+          "name": "probe"
+        },
+        "sectionEnteredAt": 7,
+        "sessionId": "probe",
+        "source": "cli",
+        "status": {
+          "type": "notLoaded"
+        },
+        "threadSource": "probe",
+        "turns": [],
+        "updatedAt": 7
+      }
+    },
+    {
+      "approvalPolicy": "untrusted",
+      "approvalsReviewer": "user",
+      "cwd": "probe",
+      "model": "probe",
+      "modelProvider": "probe",
+      "sandbox": {
+        "type": "dangerFullAccess"
+      },
+      "thread": {
+        "cliVersion": "probe",
+        "createdAt": 7,
+        "cwd": "probe",
+        "ephemeral": true,
+        "id": "probe",
+        "modelProvider": "probe",
+        "preview": "probe",
+        "projectId": "probe",
+        "sessionId": "probe",
+        "source": "cli",
+        "status": {
+          "type": "notLoaded"
+        },
+        "turns": [],
+        "updatedAt": 7
+      },
+      "reasoningEffort": null
+    },
+    {
+      "approvalPolicy": "untrusted",
+      "approvalsReviewer": "user",
+      "cwd": "probe",
+      "model": "probe",
+      "modelProvider": "probe",
+      "sandbox": {
+        "type": "dangerFullAccess"
+      },
+      "thread": {
+        "cliVersion": "probe",
+        "createdAt": 7,
+        "cwd": "probe",
+        "ephemeral": true,
+        "id": "probe",
+        "modelProvider": "probe",
+        "preview": "probe",
+        "projectId": "probe",
+        "sessionId": "probe",
+        "source": "cli",
+        "status": {
+          "type": "notLoaded"
+        },
+        "turns": [],
+        "updatedAt": 7
+      },
+      "serviceTier": null
+    }
+  ],
+  "ThreadTurnsListResponse": [
+    {
+      "data": []
+    },
+    {
+      "backwardsCursor": "probe",
+      "data": [],
+      "nextCursor": "probe"
+    },
+    {
+      "data": [],
+      "backwardsCursor": null
+    },
+    {
+      "data": [],
+      "nextCursor": null
+    }
+  ],
+  "ThreadGoal": [
+    {
+      "createdAt": 7,
+      "objective": "probe",
+      "status": "active",
+      "threadId": "probe",
+      "timeUsedSeconds": 7,
+      "tokensUsed": 7,
+      "updatedAt": 7
+    },
+    {
+      "createdAt": 7,
+      "objective": "probe",
+      "status": "active",
+      "threadId": "probe",
+      "timeUsedSeconds": 7,
+      "tokenBudget": 7,
+      "tokensUsed": 7,
+      "updatedAt": 7
+    },
+    {
+      "createdAt": 7,
+      "objective": "probe",
+      "status": "active",
+      "threadId": "probe",
+      "timeUsedSeconds": 7,
+      "tokensUsed": 7,
+      "updatedAt": 7,
+      "tokenBudget": null
+    }
+  ],
+  "ThreadGoalResponse": [
+    {},
+    {
+      "goal": {
+        "createdAt": 7,
+        "objective": "probe",
+        "status": "active",
+        "threadId": "probe",
+        "timeUsedSeconds": 7,
+        "tokenBudget": 7,
+        "tokensUsed": 7,
+        "updatedAt": 7
+      }
+    },
+    {
+      "goal": null
+    }
+  ],
+  "ThreadGoalClearResponse": [
+    {
+      "cleared": true
+    }
+  ],
+  "Turn": [
+    {
+      "id": "probe",
+      "items": [],
+      "status": "completed"
+    },
+    {
+      "completedAt": 7,
+      "durationMs": 7,
+      "error": {
+        "additionalDetails": "probe",
+        "codexErrorInfo": "probe",
+        "message": "probe",
+        "misalignment": {
+          "detailedExplanation": "probe",
+          "errorType": "probe",
+          "steer": {
+            "message": "probe"
+          }
+        }
+      },
+      "id": "probe",
+      "items": [],
+      "itemsView": "notLoaded",
+      "startedAt": 7,
+      "status": "completed"
+    },
+    {
+      "id": "probe",
+      "items": [],
+      "status": "completed",
+      "completedAt": null
+    },
+    {
+      "id": "probe",
+      "items": [],
+      "status": "completed",
+      "durationMs": null
+    },
+    {
+      "id": "probe",
+      "items": [],
+      "status": "completed",
+      "error": null
+    },
+    {
+      "id": "probe",
+      "items": [],
+      "status": "completed",
+      "startedAt": null
+    }
+  ],
+  "TurnError": [
+    {
+      "message": "probe"
+    },
+    {
+      "additionalDetails": "probe",
+      "codexErrorInfo": "probe",
+      "message": "probe",
+      "misalignment": {
+        "detailedExplanation": "probe",
+        "errorType": "probe",
+        "steer": {
+          "message": "probe"
+        }
+      }
+    },
+    {
+      "message": "probe",
+      "additionalDetails": null
+    },
+    {
+      "message": "probe",
+      "codexErrorInfo": null
+    },
+    {
+      "message": "probe",
+      "misalignment": null
+    }
+  ],
+  "TurnResponse": [
+    {
+      "turn": {
+        "id": "probe",
+        "items": [],
+        "status": "completed"
+      }
+    },
+    {
+      "turn": {
+        "completedAt": 7,
+        "durationMs": 7,
+        "error": {
+          "additionalDetails": "probe",
+          "codexErrorInfo": "probe",
+          "message": "probe",
+          "misalignment": {
+            "detailedExplanation": "probe",
+            "errorType": "probe",
+            "steer": {
+              "message": "probe"
+            }
+          }
+        },
+        "id": "probe",
+        "items": [],
+        "itemsView": "notLoaded",
+        "startedAt": 7,
+        "status": "completed"
+      }
+    }
+  ],
+  "CollaborationMode": [
+    {
+      "mode": "plan",
+      "settings": {
+        "model": "probe"
+      }
+    },
+    {
+      "mode": "plan",
+      "settings": {
+        "developer_instructions": "probe",
+        "model": "probe",
+        "reasoning_effort": "probe"
+      }
+    }
+  ],
+  "AdditionalContextEntry": [
+    {
+      "kind": "untrusted",
+      "value": "probe"
+    }
+  ],
+  "TurnStartParams": [
+    {
+      "input": [],
+      "threadId": "probe"
+    },
+    {
+      "approvalPolicy": "untrusted",
+      "approvalsReviewer": "user",
+      "clientUserMessageId": "probe",
+      "cwd": "probe",
+      "disabledPluginIds": [],
+      "effort": "probe",
+      "input": [],
+      "model": "probe",
+      "outputSchema": {
+        "probe": true
+      },
+      "personality": "none",
+      "sandboxPolicy": {
+        "type": "dangerFullAccess"
+      },
+      "serviceTier": "probe",
+      "serviceTierForTurn": "probe",
+      "summary": "auto",
+      "threadId": "probe",
+      "toolOutput": {
+        "name": "probe",
+        "namespace": "probe",
+        "output": "probe"
+      },
+      "turnTrigger": "probe"
+    },
+    {
+      "input": [],
+      "threadId": "probe",
+      "approvalPolicy": null
+    },
+    {
+      "input": [],
+      "threadId": "probe",
+      "approvalsReviewer": null
+    },
+    {
+      "input": [],
+      "threadId": "probe",
+      "clientUserMessageId": null
+    },
+    {
+      "input": [],
+      "threadId": "probe",
+      "cwd": null
+    },
+    {
+      "input": [],
+      "threadId": "probe",
+      "disabledPluginIds": null
+    },
+    {
+      "input": [],
+      "threadId": "probe",
+      "effort": null
+    },
+    {
+      "input": [],
+      "threadId": "probe",
+      "model": null
+    },
+    {
+      "input": [],
+      "threadId": "probe",
+      "outputSchema": null
+    },
+    {
+      "input": [],
+      "threadId": "probe",
+      "personality": null
+    },
+    {
+      "input": [],
+      "threadId": "probe",
+      "sandboxPolicy": null
+    },
+    {
+      "input": [],
+      "threadId": "probe",
+      "serviceTier": null
+    },
+    {
+      "input": [],
+      "threadId": "probe",
+      "serviceTierForTurn": null
+    },
+    {
+      "input": [],
+      "threadId": "probe",
+      "summary": null
+    },
+    {
+      "input": [],
+      "threadId": "probe",
+      "toolOutput": null
+    },
+    {
+      "input": [],
+      "threadId": "probe",
+      "turnTrigger": null
+    }
+  ],
+  "TurnSteerParams": [
+    {
+      "expectedTurnId": "probe",
+      "input": [],
+      "threadId": "probe"
+    },
+    {
+      "clientUserMessageId": "probe",
+      "expectedTurnId": "probe",
+      "input": [],
+      "threadId": "probe"
+    },
+    {
+      "expectedTurnId": "probe",
+      "input": [],
+      "threadId": "probe",
+      "clientUserMessageId": null
+    }
+  ],
+  "TurnSteerResponse": [
+    {
+      "turnId": "probe"
+    }
+  ],
+  "TurnInterruptParams": [
+    {
+      "threadId": "probe",
+      "turnId": "probe"
+    }
+  ],
+  "ConfigReadParams": [
+    {},
+    {
+      "cwd": "probe",
+      "includeLayers": true
+    },
+    {
+      "cwd": null
+    }
+  ],
+  "ConfigReadResponse": [
+    {
+      "config": {
+        "probe": {
+          "probe": true
+        }
+      },
+      "origins": {
+        "probe": {
+          "name": {
+            "file": "probe",
+            "type": "packagedDefaults"
+          },
+          "version": "probe"
+        }
+      }
+    },
+    {
+      "config": {
+        "analytics": {
+          "enabled": true,
+          "probe": {
+            "probe": true
+          }
+        },
+        "approval_policy": "untrusted",
+        "approvals_reviewer": "user",
+        "browser_use": {
+          "allow_history_access": true,
+          "default_origin_policy": {
+            "access": "allow",
+            "downloads": "allow",
+            "full_cdp_access": "allow",
+            "uploads": "allow"
+          },
+          "origins": {
+            "probe": {
+              "access": "allow",
+              "downloads": "allow",
+              "full_cdp_access": "allow",
+              "uploads": "allow"
+            }
+          }
+        },
+        "compact_prompt": "probe",
+        "computer_use": {
+          "default_app_access": "allow",
+          "macos": {
+            "bundle_ids": {
+              "probe": "allow"
+            }
+          },
+          "windows": {
+            "aumids": {
+              "probe": "allow"
+            },
+            "exes": []
+          }
+        },
+        "desktop": {
+          "probe": {
+            "probe": true
+          }
+        },
+        "developer_instructions": "probe",
+        "forced_chatgpt_workspace_id": "probe",
+        "forced_login_method": "chatgpt",
+        "instructions": "probe",
+        "model": "probe",
+        "model_auto_compact_token_limit": 7,
+        "model_auto_compact_token_limit_scope": "total",
+        "model_context_window": 7,
+        "model_provider": "probe",
+        "model_reasoning_effort": "probe",
+        "model_reasoning_summary": "auto",
+        "model_verbosity": "low",
+        "review_model": "probe",
+        "sandbox_mode": "read-only",
+        "sandbox_workspace_write": {
+          "exclude_slash_tmp": true,
+          "exclude_tmpdir_env_var": true,
+          "network_access": true,
+          "writable_roots": []
+        },
+        "service_tier": "probe",
+        "tools": {
+          "web_search": {
+            "allowed_domains": [],
+            "context_size": "low",
+            "location": {
+              "city": "probe",
+              "country": "probe",
+              "region": "probe",
+              "timezone": "probe"
+            }
+          }
+        },
+        "web_search": "disabled",
+        "probe": {
+          "probe": true
+        }
+      },
+      "layers": [],
+      "origins": {
+        "probe": {
+          "name": {
+            "file": "probe",
+            "type": "packagedDefaults"
+          },
+          "version": "probe"
+        }
+      }
+    },
+    {
+      "config": {
+        "probe": {
+          "probe": true
+        }
+      },
+      "origins": {
+        "probe": {
+          "name": {
+            "file": "probe",
+            "type": "packagedDefaults"
+          },
+          "version": "probe"
+        }
+      },
+      "layers": null
+    }
+  ],
+  "FeedbackUploadParams": [
+    {
+      "classification": "probe"
+    },
+    {
+      "classification": "probe",
+      "extraLogFiles": [],
+      "includeLogs": true,
+      "reason": "probe",
+      "tags": {
+        "probe": "probe"
+      },
+      "threadId": "probe"
+    },
+    {
+      "classification": "probe",
+      "extraLogFiles": null
+    },
+    {
+      "classification": "probe",
+      "reason": null
+    },
+    {
+      "classification": "probe",
+      "tags": null
+    },
+    {
+      "classification": "probe",
+      "threadId": null
+    }
+  ],
+  "FeedbackUploadResponse": [
+    {
+      "threadId": "probe"
+    },
+    {
+      "promptHash": "probe",
+      "threadId": "probe"
+    },
+    {
+      "threadId": "probe",
+      "promptHash": null
+    }
+  ],
+  "ModelListParams": [
+    {},
+    {
+      "cursor": "probe",
+      "includeHidden": true,
+      "limit": 7
+    },
+    {
+      "cursor": null
+    },
+    {
+      "includeHidden": null
+    },
+    {
+      "limit": null
+    }
+  ],
+  "ReasoningEffortOption": [
+    {
+      "description": "probe",
+      "reasoningEffort": "probe"
+    }
+  ],
+  "Model": [
+    {
+      "defaultReasoningEffort": "probe",
+      "description": "probe",
+      "displayName": "probe",
+      "hidden": true,
+      "id": "probe",
+      "isDefault": true,
+      "model": "probe",
+      "supportedReasoningEfforts": []
+    },
+    {
+      "additionalSpeedTiers": [],
+      "availabilityNux": {
+        "message": "probe"
+      },
+      "availableAccessPrograms": {
+        "cyber": []
+      },
+      "defaultReasoningEffort": "probe",
+      "defaultServiceTier": "probe",
+      "description": "probe",
+      "displayName": "probe",
+      "hidden": true,
+      "id": "probe",
+      "inputModalities": [],
+      "isDefault": true,
+      "model": "probe",
+      "modelSpecialty": "probe",
+      "multiAgentVersion": "disabled",
+      "serviceTiers": [],
+      "supportedReasoningEfforts": [],
+      "supportsPersonality": true,
+      "upgrade": "probe",
+      "upgradeInfo": {
+        "migrationMarkdown": "probe",
+        "model": "probe",
+        "modelLink": "probe",
+        "retirementAt": 7,
+        "upgradeCopy": "probe"
+      }
+    },
+    {
+      "defaultReasoningEffort": "probe",
+      "description": "probe",
+      "displayName": "probe",
+      "hidden": true,
+      "id": "probe",
+      "isDefault": true,
+      "model": "probe",
+      "supportedReasoningEfforts": [],
+      "availabilityNux": null
+    },
+    {
+      "defaultReasoningEffort": "probe",
+      "description": "probe",
+      "displayName": "probe",
+      "hidden": true,
+      "id": "probe",
+      "isDefault": true,
+      "model": "probe",
+      "supportedReasoningEfforts": [],
+      "availableAccessPrograms": null
+    },
+    {
+      "defaultReasoningEffort": "probe",
+      "description": "probe",
+      "displayName": "probe",
+      "hidden": true,
+      "id": "probe",
+      "isDefault": true,
+      "model": "probe",
+      "supportedReasoningEfforts": [],
+      "defaultServiceTier": null
+    },
+    {
+      "defaultReasoningEffort": "probe",
+      "description": "probe",
+      "displayName": "probe",
+      "hidden": true,
+      "id": "probe",
+      "isDefault": true,
+      "model": "probe",
+      "supportedReasoningEfforts": [],
+      "modelSpecialty": null
+    },
+    {
+      "defaultReasoningEffort": "probe",
+      "description": "probe",
+      "displayName": "probe",
+      "hidden": true,
+      "id": "probe",
+      "isDefault": true,
+      "model": "probe",
+      "supportedReasoningEfforts": [],
+      "multiAgentVersion": null
+    },
+    {
+      "defaultReasoningEffort": "probe",
+      "description": "probe",
+      "displayName": "probe",
+      "hidden": true,
+      "id": "probe",
+      "isDefault": true,
+      "model": "probe",
+      "supportedReasoningEfforts": [],
+      "upgrade": null
+    },
+    {
+      "defaultReasoningEffort": "probe",
+      "description": "probe",
+      "displayName": "probe",
+      "hidden": true,
+      "id": "probe",
+      "isDefault": true,
+      "model": "probe",
+      "supportedReasoningEfforts": [],
+      "upgradeInfo": null
+    }
+  ],
+  "ModelListResponse": [
+    {
+      "data": []
+    },
+    {
+      "data": [],
+      "nextCursor": "probe"
+    },
+    {
+      "data": [],
+      "nextCursor": null
+    }
+  ],
+  "GetAccountParams": [
+    {},
+    {
+      "refreshToken": true
+    }
+  ],
+  "GetAccountResponse": [
+    {
+      "requiresOpenaiAuth": true
+    },
+    {
+      "account": {
+        "type": "apiKey"
+      },
+      "requiresOpenaiAuth": true
+    },
+    {
+      "requiresOpenaiAuth": true,
+      "account": null
+    }
+  ],
+  "RateLimitWindow": [
+    {
+      "usedPercent": 7
+    },
+    {
+      "resetsAt": 7,
+      "usedPercent": 7,
+      "windowDurationMins": 7
+    },
+    {
+      "usedPercent": 7,
+      "resetsAt": null
+    },
+    {
+      "usedPercent": 7,
+      "windowDurationMins": null
+    }
+  ],
+  "GetAccountRateLimitsResponse": [
+    {
+      "rateLimits": {}
+    },
+    {
+      "accountId": "probe",
+      "ordinaryUsageAllowed": true,
+      "rateLimitResetCredits": {
+        "availableCount": 7,
+        "credits": []
+      },
+      "rateLimitUpsell": {
+        "probe": true
+      },
+      "rateLimits": {
+        "credits": {
+          "balance": "probe",
+          "hasCredits": true,
+          "unlimited": true
+        },
+        "individualLimit": {
+          "limit": "probe",
+          "remainingPercent": 7,
+          "resetsAt": 7,
+          "used": "probe"
+        },
+        "limitId": "probe",
+        "limitName": "probe",
+        "normalModelSlug": "probe",
+        "planType": "probe",
+        "primary": {
+          "resetsAt": 7,
+          "usedPercent": 7,
+          "windowDurationMins": 7
+        },
+        "rateLimitReachedType": "rate_limit_reached",
+        "secondary": {
+          "resetsAt": 7,
+          "usedPercent": 7,
+          "windowDurationMins": 7
+        },
+        "spendControlReached": true
+      },
+      "rateLimitsByLimitId": {
+        "probe": {
+          "credits": {
+            "balance": "probe",
+            "hasCredits": true,
+            "unlimited": true
+          },
+          "individualLimit": {
+            "limit": "probe",
+            "remainingPercent": 7,
+            "resetsAt": 7,
+            "used": "probe"
+          },
+          "limitId": "probe",
+          "limitName": "probe",
+          "normalModelSlug": "probe",
+          "planType": "probe",
+          "primary": {
+            "resetsAt": 7,
+            "usedPercent": 7,
+            "windowDurationMins": 7
+          },
+          "rateLimitReachedType": "rate_limit_reached",
+          "secondary": {
+            "resetsAt": 7,
+            "usedPercent": 7,
+            "windowDurationMins": 7
+          },
+          "spendControlReached": true
+        }
+      }
+    },
+    {
+      "rateLimits": {},
+      "accountId": null
+    },
+    {
+      "rateLimits": {},
+      "ordinaryUsageAllowed": null
+    },
+    {
+      "rateLimits": {},
+      "rateLimitResetCredits": null
+    },
+    {
+      "rateLimits": {},
+      "rateLimitUpsell": null
+    },
+    {
+      "rateLimits": {},
+      "rateLimitsByLimitId": null
+    }
+  ],
+  "ConsumeResetCreditParams": [
+    {
+      "idempotencyKey": "probe"
+    },
+    {
+      "creditId": "probe",
+      "idempotencyKey": "probe"
+    },
+    {
+      "idempotencyKey": "probe",
+      "creditId": null
+    }
+  ],
+  "ConsumeResetCreditResponse": [
+    {
+      "outcome": "reset"
+    }
+  ],
+  "SkillsListParams": [
+    {},
+    {
+      "cwds": [],
+      "forceReload": true
+    }
+  ],
+  "Skill": [
+    {
+      "description": "probe",
+      "enabled": true,
+      "name": "probe",
+      "path": "probe",
+      "scope": "user"
+    },
+    {
+      "dependencies": {
+        "tools": []
+      },
+      "description": "probe",
+      "enabled": true,
+      "interface": {
+        "brandColor": "probe",
+        "defaultPrompt": "probe",
+        "displayName": "probe",
+        "iconLarge": "probe",
+        "iconLargeUrl": "probe",
+        "iconSmall": "probe",
+        "iconSmallUrl": "probe",
+        "shortDescription": "probe"
+      },
+      "name": "probe",
+      "path": "probe",
+      "pluginId": "probe",
+      "scope": "user",
+      "shortDescription": "probe"
+    },
+    {
+      "description": "probe",
+      "enabled": true,
+      "name": "probe",
+      "path": "probe",
+      "scope": "user",
+      "dependencies": null
+    },
+    {
+      "description": "probe",
+      "enabled": true,
+      "name": "probe",
+      "path": "probe",
+      "scope": "user",
+      "interface": null
+    },
+    {
+      "description": "probe",
+      "enabled": true,
+      "name": "probe",
+      "path": "probe",
+      "scope": "user",
+      "pluginId": null
+    },
+    {
+      "description": "probe",
+      "enabled": true,
+      "name": "probe",
+      "path": "probe",
+      "scope": "user",
+      "shortDescription": null
+    }
+  ],
+  "SkillsListEntry": [
+    {
+      "cwd": "probe",
+      "errors": [],
+      "skills": []
+    }
+  ],
+  "SkillsListResponse": [
+    {
+      "data": []
+    }
+  ],
+  "ListMcpServerStatusParams": [
+    {},
+    {
+      "cursor": "probe",
+      "detail": "full",
+      "limit": 7,
+      "serverName": "probe",
+      "threadId": "probe"
+    },
+    {
+      "cursor": null
+    },
+    {
+      "detail": null
+    },
+    {
+      "limit": null
+    },
+    {
+      "serverName": null
+    },
+    {
+      "threadId": null
+    }
+  ],
+  "McpServerStatus": [
+    {
+      "authStatus": "unknown",
+      "name": "probe",
+      "resourceTemplates": [],
+      "resources": [],
+      "tools": {
+        "probe": {
+          "inputSchema": {
+            "probe": true
+          },
+          "name": "probe"
+        }
+      }
+    },
+    {
+      "authStatus": "unknown",
+      "httpOrigin": "probe",
+      "name": "probe",
+      "pluginId": "probe",
+      "resourceTemplates": [],
+      "resources": [],
+      "runtimeStatus": "notStarted",
+      "serverCapabilities": {
+        "probe": true
+      },
+      "serverInfo": {
+        "description": "probe",
+        "icons": [],
+        "name": "probe",
+        "title": "probe",
+        "version": "probe",
+        "websiteUrl": "probe"
+      },
+      "tools": {
+        "probe": {
+          "_meta": {
+            "probe": true
+          },
+          "annotations": {
+            "probe": true
+          },
+          "description": "probe",
+          "icons": [],
+          "inputSchema": {
+            "probe": true
+          },
+          "name": "probe",
+          "outputSchema": {
+            "probe": true
+          },
+          "title": "probe"
+        }
+      },
+      "toolsError": "probe"
+    },
+    {
+      "authStatus": "unknown",
+      "name": "probe",
+      "resourceTemplates": [],
+      "resources": [],
+      "tools": {
+        "probe": {
+          "inputSchema": {
+            "probe": true
+          },
+          "name": "probe"
+        }
+      },
+      "httpOrigin": null
+    },
+    {
+      "authStatus": "unknown",
+      "name": "probe",
+      "resourceTemplates": [],
+      "resources": [],
+      "tools": {
+        "probe": {
+          "inputSchema": {
+            "probe": true
+          },
+          "name": "probe"
+        }
+      },
+      "pluginId": null
+    },
+    {
+      "authStatus": "unknown",
+      "name": "probe",
+      "resourceTemplates": [],
+      "resources": [],
+      "tools": {
+        "probe": {
+          "inputSchema": {
+            "probe": true
+          },
+          "name": "probe"
+        }
+      },
+      "runtimeStatus": null
+    },
+    {
+      "authStatus": "unknown",
+      "name": "probe",
+      "resourceTemplates": [],
+      "resources": [],
+      "tools": {
+        "probe": {
+          "inputSchema": {
+            "probe": true
+          },
+          "name": "probe"
+        }
+      },
+      "serverCapabilities": null
+    },
+    {
+      "authStatus": "unknown",
+      "name": "probe",
+      "resourceTemplates": [],
+      "resources": [],
+      "tools": {
+        "probe": {
+          "inputSchema": {
+            "probe": true
+          },
+          "name": "probe"
+        }
+      },
+      "serverInfo": null
+    },
+    {
+      "authStatus": "unknown",
+      "name": "probe",
+      "resourceTemplates": [],
+      "resources": [],
+      "tools": {
+        "probe": {
+          "inputSchema": {
+            "probe": true
+          },
+          "name": "probe"
+        }
+      },
+      "toolsError": null
+    }
+  ],
+  "ListMcpServerStatusResponse": [
+    {
+      "data": []
+    },
+    {
+      "data": [],
+      "nextCursor": "probe"
+    },
+    {
+      "data": [],
+      "nextCursor": null
+    }
+  ],
+  "McpServerToolCallParams": [
+    {
+      "server": "probe",
+      "threadId": "probe",
+      "tool": "probe"
+    },
+    {
+      "_meta": {
+        "probe": true
+      },
+      "arguments": {
+        "probe": true
+      },
+      "server": "probe",
+      "threadId": "probe",
+      "tool": "probe"
+    },
+    {
+      "server": "probe",
+      "threadId": "probe",
+      "tool": "probe",
+      "_meta": null
+    },
+    {
+      "server": "probe",
+      "threadId": "probe",
+      "tool": "probe",
+      "arguments": null
+    }
+  ],
+  "McpServerToolCallResponse": [
+    {
+      "content": []
+    },
+    {
+      "_meta": {
+        "probe": true
+      },
+      "content": [],
+      "isError": true,
+      "structuredContent": {
+        "probe": true
+      }
+    },
+    {
+      "content": [],
+      "_meta": null
+    },
+    {
+      "content": [],
+      "isError": null
+    },
+    {
+      "content": [],
+      "structuredContent": null
+    }
+  ],
+  "McpResourceReadParams": [
+    {
+      "server": "probe",
+      "uri": "probe"
+    },
+    {
+      "connectorId": "probe",
+      "originCallId": "probe",
+      "server": "probe",
+      "target": {
+        "connectorId": "probe",
+        "linkId": "probe"
+      },
+      "threadId": "probe",
+      "uri": "probe"
+    },
+    {
+      "server": "probe",
+      "uri": "probe",
+      "connectorId": null
+    },
+    {
+      "server": "probe",
+      "uri": "probe",
+      "originCallId": null
+    },
+    {
+      "server": "probe",
+      "uri": "probe",
+      "target": null
+    },
+    {
+      "server": "probe",
+      "uri": "probe",
+      "threadId": null
+    }
+  ],
+  "McpResourceReadResponse": [
+    {
+      "contents": []
+    },
+    {
+      "contents": [],
+      "originCallId": "probe"
+    },
+    {
+      "contents": [],
+      "originCallId": null
+    }
+  ],
+  "BackgroundTerminalsListParams": [
+    {
+      "threadId": "t"
+    },
+    {
+      "threadId": "t",
+      "cursor": "next"
+    }
+  ],
+  "BackgroundTerminal": [
+    {
+      "processId": "p"
+    }
+  ],
+  "BackgroundTerminalsListResponse": [
+    {
+      "data": [
+        {
+          "processId": "p"
+        }
+      ],
+      "nextCursor": null
+    },
+    {
+      "data": [],
+      "nextCursor": "next"
+    }
+  ],
+  "BackgroundTerminalsTerminateParams": [
+    {
+      "threadId": "t",
+      "processId": "p"
+    }
+  ],
+  "BackgroundTerminalsTerminateResponse": [
+    {
+      "terminated": true
+    },
+    {
+      "terminated": false
+    }
+  ],
+  "ThreadSampleParams": [
+    {
+      "threadId": "t",
+      "expectedTurnId": "u",
+      "prompt": "sample",
+      "effort": "low"
+    }
+  ],
+  "ThreadSampleResponse": [
+    {
+      "text": null
+    },
+    {
+      "text": "sample"
+    }
+  ],
+  "ToolError": [
+    {
+      "message": "probe"
+    }
+  ],
+  "FileChange": [
+    {
+      "diff": "probe",
+      "kind": {
+        "type": "add"
+      },
+      "path": "probe"
+    }
+  ],
+  "ItemDelta": [
+    {
+      "delta": "probe",
+      "itemId": "probe",
+      "threadId": "probe",
+      "turnId": "probe"
+    }
+  ],
+  "ItemNotification": [
+    {
+      "completedAtMs": 7,
+      "item": {
+        "content": [],
+        "id": "probe",
+        "type": "userMessage"
+      },
+      "threadId": "probe",
+      "turnId": "probe"
+    },
+    {
+      "completedAtMs": 7,
+      "item": {
+        "clientId": "probe",
+        "content": [],
+        "id": "probe",
+        "type": "userMessage"
+      },
+      "threadId": "probe",
+      "turnId": "probe"
+    }
+  ],
+  "TurnNotification": [
+    {
+      "threadId": "probe",
+      "turn": {
+        "id": "probe",
+        "items": [],
+        "status": "completed"
+      }
+    },
+    {
+      "threadId": "probe",
+      "turn": {
+        "completedAt": 7,
+        "durationMs": 7,
+        "error": {
+          "additionalDetails": "probe",
+          "codexErrorInfo": "probe",
+          "message": "probe",
+          "misalignment": {
+            "detailedExplanation": "probe",
+            "errorType": "probe",
+            "steer": {
+              "message": "probe"
+            }
+          }
+        },
+        "id": "probe",
+        "items": [],
+        "itemsView": "notLoaded",
+        "startedAt": 7,
+        "status": "completed"
+      }
+    }
+  ],
+  "ThreadNotification": [
+    {
+      "threadId": "probe"
+    }
+  ],
+  "PlanStep": [
+    {
+      "status": "pending",
+      "step": "probe"
+    }
+  ],
+  "TurnPlanUpdated": [
+    {
+      "plan": [],
+      "threadId": "probe",
+      "turnId": "probe"
+    },
+    {
+      "explanation": "probe",
+      "plan": [],
+      "threadId": "probe",
+      "turnId": "probe"
+    },
+    {
+      "plan": [],
+      "threadId": "probe",
+      "turnId": "probe",
+      "explanation": null
+    }
+  ],
+  "TokenUsageBreakdown": [
+    {
+      "cachedInputTokens": 7,
+      "inputTokens": 7,
+      "outputTokens": 7,
+      "reasoningOutputTokens": 7,
+      "totalTokens": 7
+    },
+    {
+      "cacheWriteInputTokens": 7,
+      "cachedInputTokens": 7,
+      "inputTokens": 7,
+      "outputTokens": 7,
+      "reasoningOutputTokens": 7,
+      "totalTokens": 7
+    }
+  ],
+  "TokenUsage": [
+    {
+      "last": {
+        "cachedInputTokens": 7,
+        "inputTokens": 7,
+        "outputTokens": 7,
+        "reasoningOutputTokens": 7,
+        "totalTokens": 7
+      },
+      "total": {
+        "cachedInputTokens": 7,
+        "inputTokens": 7,
+        "outputTokens": 7,
+        "reasoningOutputTokens": 7,
+        "totalTokens": 7
+      }
+    },
+    {
+      "last": {
+        "cacheWriteInputTokens": 7,
+        "cachedInputTokens": 7,
+        "inputTokens": 7,
+        "outputTokens": 7,
+        "reasoningOutputTokens": 7,
+        "totalTokens": 7
+      },
+      "modelContextWindow": 7,
+      "total": {
+        "cacheWriteInputTokens": 7,
+        "cachedInputTokens": 7,
+        "inputTokens": 7,
+        "outputTokens": 7,
+        "reasoningOutputTokens": 7,
+        "totalTokens": 7
+      }
+    },
+    {
+      "last": {
+        "cachedInputTokens": 7,
+        "inputTokens": 7,
+        "outputTokens": 7,
+        "reasoningOutputTokens": 7,
+        "totalTokens": 7
+      },
+      "total": {
+        "cachedInputTokens": 7,
+        "inputTokens": 7,
+        "outputTokens": 7,
+        "reasoningOutputTokens": 7,
+        "totalTokens": 7
+      },
+      "modelContextWindow": null
+    }
+  ],
+  "ThreadTokenUsageUpdated": [
+    {
+      "threadId": "probe",
+      "tokenUsage": {
+        "last": {
+          "cachedInputTokens": 7,
+          "inputTokens": 7,
+          "outputTokens": 7,
+          "reasoningOutputTokens": 7,
+          "totalTokens": 7
+        },
+        "total": {
+          "cachedInputTokens": 7,
+          "inputTokens": 7,
+          "outputTokens": 7,
+          "reasoningOutputTokens": 7,
+          "totalTokens": 7
+        }
+      },
+      "turnId": "probe"
+    },
+    {
+      "threadId": "probe",
+      "tokenUsage": {
+        "last": {
+          "cacheWriteInputTokens": 7,
+          "cachedInputTokens": 7,
+          "inputTokens": 7,
+          "outputTokens": 7,
+          "reasoningOutputTokens": 7,
+          "totalTokens": 7
+        },
+        "modelContextWindow": 7,
+        "total": {
+          "cacheWriteInputTokens": 7,
+          "cachedInputTokens": 7,
+          "inputTokens": 7,
+          "outputTokens": 7,
+          "reasoningOutputTokens": 7,
+          "totalTokens": 7
+        }
+      },
+      "turnId": "probe"
+    }
+  ],
+  "ThreadSettings": [
+    {
+      "approvalPolicy": "untrusted",
+      "approvalsReviewer": "user",
+      "collaborationMode": {
+        "mode": "plan",
+        "settings": {
+          "model": "probe"
+        }
+      },
+      "cwd": "probe",
+      "model": "probe",
+      "modelProvider": "probe",
+      "sandboxPolicy": {
+        "type": "dangerFullAccess"
+      }
+    },
+    {
+      "activePermissionProfile": {
+        "extends": "probe",
+        "id": "probe"
+      },
+      "approvalPolicy": "untrusted",
+      "approvalsReviewer": "user",
+      "collaborationMode": {
+        "mode": "plan",
+        "settings": {
+          "developer_instructions": "probe",
+          "model": "probe",
+          "reasoning_effort": "probe"
+        }
+      },
+      "cwd": "probe",
+      "disabledPluginIds": [],
+      "effort": "probe",
+      "model": "probe",
+      "modelProvider": "probe",
+      "personality": "none",
+      "sandboxPolicy": {
+        "type": "dangerFullAccess"
+      },
+      "serviceTier": "probe",
+      "summary": "auto"
+    },
+    {
+      "approvalPolicy": "untrusted",
+      "approvalsReviewer": "user",
+      "collaborationMode": {
+        "mode": "plan",
+        "settings": {
+          "model": "probe"
+        }
+      },
+      "cwd": "probe",
+      "model": "probe",
+      "modelProvider": "probe",
+      "sandboxPolicy": {
+        "type": "dangerFullAccess"
+      },
+      "activePermissionProfile": null
+    },
+    {
+      "approvalPolicy": "untrusted",
+      "approvalsReviewer": "user",
+      "collaborationMode": {
+        "mode": "plan",
+        "settings": {
+          "model": "probe"
+        }
+      },
+      "cwd": "probe",
+      "model": "probe",
+      "modelProvider": "probe",
+      "sandboxPolicy": {
+        "type": "dangerFullAccess"
+      },
+      "effort": null
+    },
+    {
+      "approvalPolicy": "untrusted",
+      "approvalsReviewer": "user",
+      "collaborationMode": {
+        "mode": "plan",
+        "settings": {
+          "model": "probe"
+        }
+      },
+      "cwd": "probe",
+      "model": "probe",
+      "modelProvider": "probe",
+      "sandboxPolicy": {
+        "type": "dangerFullAccess"
+      },
+      "personality": null
+    },
+    {
+      "approvalPolicy": "untrusted",
+      "approvalsReviewer": "user",
+      "collaborationMode": {
+        "mode": "plan",
+        "settings": {
+          "model": "probe"
+        }
+      },
+      "cwd": "probe",
+      "model": "probe",
+      "modelProvider": "probe",
+      "sandboxPolicy": {
+        "type": "dangerFullAccess"
+      },
+      "serviceTier": null
+    },
+    {
+      "approvalPolicy": "untrusted",
+      "approvalsReviewer": "user",
+      "collaborationMode": {
+        "mode": "plan",
+        "settings": {
+          "model": "probe"
+        }
+      },
+      "cwd": "probe",
+      "model": "probe",
+      "modelProvider": "probe",
+      "sandboxPolicy": {
+        "type": "dangerFullAccess"
+      },
+      "summary": null
+    }
+  ],
+  "ThreadSettingsUpdated": [
+    {
+      "threadId": "probe",
+      "threadSettings": {
+        "approvalPolicy": "untrusted",
+        "approvalsReviewer": "user",
+        "collaborationMode": {
+          "mode": "plan",
+          "settings": {
+            "model": "probe"
+          }
+        },
+        "cwd": "probe",
+        "model": "probe",
+        "modelProvider": "probe",
+        "sandboxPolicy": {
+          "type": "dangerFullAccess"
+        }
+      }
+    },
+    {
+      "threadId": "probe",
+      "threadSettings": {
+        "activePermissionProfile": {
+          "extends": "probe",
+          "id": "probe"
+        },
+        "approvalPolicy": "untrusted",
+        "approvalsReviewer": "user",
+        "collaborationMode": {
+          "mode": "plan",
+          "settings": {
+            "developer_instructions": "probe",
+            "model": "probe",
+            "reasoning_effort": "probe"
+          }
+        },
+        "cwd": "probe",
+        "disabledPluginIds": [],
+        "effort": "probe",
+        "model": "probe",
+        "modelProvider": "probe",
+        "personality": "none",
+        "sandboxPolicy": {
+          "type": "dangerFullAccess"
+        },
+        "serviceTier": "probe",
+        "summary": "auto"
+      }
+    }
+  ],
+  "ModelRerouted": [
+    {
+      "fromModel": "probe",
+      "reason": "highRiskCyberActivity",
+      "threadId": "probe",
+      "toModel": "probe",
+      "turnId": "probe"
+    }
+  ],
+  "McpStartupStatusUpdated": [
+    {
+      "name": "probe",
+      "status": "starting"
+    },
+    {
+      "error": "probe",
+      "failureReason": "reauthenticationRequired",
+      "name": "probe",
+      "status": "starting",
+      "threadId": "probe"
+    },
+    {
+      "name": "probe",
+      "status": "starting",
+      "error": null
+    },
+    {
+      "name": "probe",
+      "status": "starting",
+      "failureReason": null
+    },
+    {
+      "name": "probe",
+      "status": "starting",
+      "threadId": null
+    }
+  ],
+  "HookRun": [
+    {
+      "displayOrder": 7,
+      "entries": [],
+      "eventName": "probe",
+      "executionMode": "sync",
+      "handlerType": "command",
+      "id": "probe",
+      "scope": "thread",
+      "sourcePath": "probe",
+      "startedAt": 7,
+      "status": "running"
+    },
+    {
+      "completedAt": 7,
+      "displayOrder": 7,
+      "durationMs": 7,
+      "entries": [],
+      "eventName": "probe",
+      "executionMode": "sync",
+      "handlerType": "command",
+      "id": "probe",
+      "scope": "thread",
+      "source": "system",
+      "sourcePath": "probe",
+      "startedAt": 7,
+      "status": "running",
+      "statusMessage": "probe"
+    },
+    {
+      "displayOrder": 7,
+      "entries": [],
+      "eventName": "probe",
+      "executionMode": "sync",
+      "handlerType": "command",
+      "id": "probe",
+      "scope": "thread",
+      "sourcePath": "probe",
+      "startedAt": 7,
+      "status": "running",
+      "completedAt": null
+    },
+    {
+      "displayOrder": 7,
+      "entries": [],
+      "eventName": "probe",
+      "executionMode": "sync",
+      "handlerType": "command",
+      "id": "probe",
+      "scope": "thread",
+      "sourcePath": "probe",
+      "startedAt": 7,
+      "status": "running",
+      "durationMs": null
+    },
+    {
+      "displayOrder": 7,
+      "entries": [],
+      "eventName": "probe",
+      "executionMode": "sync",
+      "handlerType": "command",
+      "id": "probe",
+      "scope": "thread",
+      "sourcePath": "probe",
+      "startedAt": 7,
+      "status": "running",
+      "statusMessage": null
+    }
+  ],
+  "HookCompleted": [
+    {
+      "run": {
+        "displayOrder": 7,
+        "entries": [],
+        "eventName": "probe",
+        "executionMode": "sync",
+        "handlerType": "command",
+        "id": "probe",
+        "scope": "thread",
+        "sourcePath": "probe",
+        "startedAt": 7,
+        "status": "running"
+      },
+      "threadId": "probe"
+    },
+    {
+      "run": {
+        "completedAt": 7,
+        "displayOrder": 7,
+        "durationMs": 7,
+        "entries": [],
+        "eventName": "probe",
+        "executionMode": "sync",
+        "handlerType": "command",
+        "id": "probe",
+        "scope": "thread",
+        "source": "system",
+        "sourcePath": "probe",
+        "startedAt": 7,
+        "status": "running",
+        "statusMessage": "probe"
+      },
+      "threadId": "probe",
+      "turnId": "probe"
+    },
+    {
+      "run": {
+        "displayOrder": 7,
+        "entries": [],
+        "eventName": "probe",
+        "executionMode": "sync",
+        "handlerType": "command",
+        "id": "probe",
+        "scope": "thread",
+        "sourcePath": "probe",
+        "startedAt": 7,
+        "status": "running"
+      },
+      "threadId": "probe",
+      "turnId": null
+    }
+  ],
+  "ThreadGoalUpdated": [
+    {
+      "goal": {
+        "createdAt": 7,
+        "objective": "probe",
+        "status": "active",
+        "threadId": "probe",
+        "timeUsedSeconds": 7,
+        "tokensUsed": 7,
+        "updatedAt": 7
+      },
+      "threadId": "probe"
+    },
+    {
+      "goal": {
+        "createdAt": 7,
+        "objective": "probe",
+        "status": "active",
+        "threadId": "probe",
+        "timeUsedSeconds": 7,
+        "tokenBudget": 7,
+        "tokensUsed": 7,
+        "updatedAt": 7
+      },
+      "threadId": "probe",
+      "turnId": "probe"
+    },
+    {
+      "goal": {
+        "createdAt": 7,
+        "objective": "probe",
+        "status": "active",
+        "threadId": "probe",
+        "timeUsedSeconds": 7,
+        "tokensUsed": 7,
+        "updatedAt": 7
+      },
+      "threadId": "probe",
+      "turnId": null
+    }
+  ],
+  "ErrorNotification": [
+    {
+      "error": {
+        "message": "probe"
+      },
+      "threadId": "probe",
+      "turnId": "probe",
+      "willRetry": true
+    },
+    {
+      "error": {
+        "additionalDetails": "probe",
+        "codexErrorInfo": "probe",
+        "message": "probe",
+        "misalignment": {
+          "detailedExplanation": "probe",
+          "errorType": "probe",
+          "steer": {
+            "message": "probe"
+          }
+        }
+      },
+      "threadId": "probe",
+      "turnId": "probe",
+      "willRetry": true
+    }
+  ],
+  "AccountRateLimitsUpdated": [
+    {
+      "rateLimits": {}
+    },
+    {
+      "rateLimits": {
+        "credits": {
+          "balance": "probe",
+          "hasCredits": true,
+          "unlimited": true
+        },
+        "individualLimit": {
+          "limit": "probe",
+          "remainingPercent": 7,
+          "resetsAt": 7,
+          "used": "probe"
+        },
+        "limitId": "probe",
+        "limitName": "probe",
+        "normalModelSlug": "probe",
+        "planType": "probe",
+        "primary": {
+          "resetsAt": 7,
+          "usedPercent": 7,
+          "windowDurationMins": 7
+        },
+        "rateLimitReachedType": "rate_limit_reached",
+        "secondary": {
+          "resetsAt": 7,
+          "usedPercent": 7,
+          "windowDurationMins": 7
+        },
+        "spendControlReached": true
+      }
+    }
+  ],
+  "CommandApprovalParams": [
+    {
+      "itemId": "probe",
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe"
+    },
+    {
+      "approvalId": "probe",
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "environmentId": "probe",
+      "itemId": "probe",
+      "kind": "command",
+      "networkApprovalContext": {
+        "host": "probe",
+        "protocol": "http"
+      },
+      "proposedExecpolicyAmendment": [],
+      "proposedNetworkPolicyAmendments": [],
+      "reason": "probe",
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe"
+    },
+    {
+      "itemId": "probe",
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe",
+      "approvalId": null
+    },
+    {
+      "itemId": "probe",
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe",
+      "command": null
+    },
+    {
+      "itemId": "probe",
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe",
+      "commandActions": null
+    },
+    {
+      "itemId": "probe",
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe",
+      "cwd": null
+    },
+    {
+      "itemId": "probe",
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe",
+      "environmentId": null
+    },
+    {
+      "itemId": "probe",
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe",
+      "networkApprovalContext": null
+    },
+    {
+      "itemId": "probe",
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe",
+      "proposedExecpolicyAmendment": null
+    },
+    {
+      "itemId": "probe",
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe",
+      "proposedNetworkPolicyAmendments": null
+    },
+    {
+      "itemId": "probe",
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe",
+      "reason": null
+    }
+  ],
+  "FileChangeApprovalParams": [
+    {
+      "itemId": "probe",
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe"
+    },
+    {
+      "grantRoot": "probe",
+      "itemId": "probe",
+      "reason": "probe",
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe"
+    },
+    {
+      "itemId": "probe",
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe",
+      "grantRoot": null
+    },
+    {
+      "itemId": "probe",
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe",
+      "reason": null
+    }
+  ],
+  "PermissionsApprovalParams": [
+    {
+      "cwd": "probe",
+      "itemId": "probe",
+      "permissions": {},
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe"
+    },
+    {
+      "cwd": "probe",
+      "environmentId": "probe",
+      "itemId": "probe",
+      "permissions": {
+        "fileSystem": {
+          "entries": [],
+          "globScanMaxDepth": 7,
+          "read": [],
+          "write": []
+        },
+        "network": {
+          "enabled": true
+        }
+      },
+      "reason": "probe",
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe"
+    },
+    {
+      "cwd": "probe",
+      "itemId": "probe",
+      "permissions": {},
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe",
+      "environmentId": null
+    },
+    {
+      "cwd": "probe",
+      "itemId": "probe",
+      "permissions": {},
+      "startedAtMs": 7,
+      "threadId": "probe",
+      "turnId": "probe",
+      "reason": null
+    }
+  ],
+  "ApprovalResponse": [
+    {
+      "decision": "accept"
+    }
+  ],
+  "PermissionsApprovalResponse": [
+    {
+      "permissions": {}
+    },
+    {
+      "permissions": {
+        "fileSystem": {
+          "entries": [],
+          "globScanMaxDepth": 7,
+          "read": [],
+          "write": []
+        },
+        "network": {
+          "enabled": true
+        }
+      },
+      "scope": "turn",
+      "strictAutoReview": true
+    },
+    {
+      "permissions": {},
+      "strictAutoReview": null
+    }
+  ],
+  "UserInputOption": [
+    {
+      "description": "probe",
+      "label": "probe"
+    }
+  ],
+  "UserInputQuestion": [
+    {
+      "header": "probe",
+      "id": "probe",
+      "question": "probe"
+    },
+    {
+      "header": "probe",
+      "id": "probe",
+      "isOther": true,
+      "isSecret": true,
+      "options": [],
+      "question": "probe"
+    },
+    {
+      "header": "probe",
+      "id": "probe",
+      "question": "probe",
+      "options": null
+    }
+  ],
+  "UserInputParams": [
+    {
+      "isBlocking": true,
+      "itemId": "probe",
+      "questions": [],
+      "threadId": "probe",
+      "turnId": "probe"
+    },
+    {
+      "autoResolutionMs": 7,
+      "isBlocking": true,
+      "itemId": "probe",
+      "questions": [],
+      "threadId": "probe",
+      "turnId": "probe"
+    },
+    {
+      "isBlocking": true,
+      "itemId": "probe",
+      "questions": [],
+      "threadId": "probe",
+      "turnId": "probe",
+      "autoResolutionMs": null
+    }
+  ],
+  "UserInputAnswer": [
+    {
+      "answers": []
+    }
+  ],
+  "UserInputResponse": [
+    {
+      "answers": {
+        "probe": {
+          "answers": []
+        }
+      }
+    }
+  ],
+  "ElicitationResponse": [
+    {
+      "action": "accept"
+    },
+    {
+      "_meta": {
+        "probe": true
+      },
+      "action": "accept",
+      "content": {
+        "probe": true
+      }
+    },
+    {
+      "action": "accept",
+      "_meta": null
+    },
+    {
+      "action": "accept",
+      "content": null
+    }
+  ],
+  "LegacyExecApprovalParams": [
+    {
+      "callId": "probe",
+      "command": [],
+      "conversationId": "probe",
+      "cwd": "probe",
+      "parsedCmd": []
+    },
+    {
+      "approvalId": "probe",
+      "callId": "probe",
+      "command": [],
+      "conversationId": "probe",
+      "cwd": "probe",
+      "parsedCmd": [],
+      "reason": "probe"
+    },
+    {
+      "callId": "probe",
+      "command": [],
+      "conversationId": "probe",
+      "cwd": "probe",
+      "parsedCmd": [],
+      "approvalId": null
+    },
+    {
+      "callId": "probe",
+      "command": [],
+      "conversationId": "probe",
+      "cwd": "probe",
+      "parsedCmd": [],
+      "reason": null
+    }
+  ],
+  "LegacyPatchApprovalParams": [
+    {
+      "callId": "probe",
+      "conversationId": "probe",
+      "fileChanges": {
+        "probe": {
+          "content": "probe",
+          "type": "add"
+        }
+      }
+    },
+    {
+      "callId": "probe",
+      "conversationId": "probe",
+      "fileChanges": {
+        "probe": {
+          "content": "probe",
+          "type": "add"
+        }
+      },
+      "grantRoot": "probe",
+      "reason": "probe"
+    },
+    {
+      "callId": "probe",
+      "conversationId": "probe",
+      "fileChanges": {
+        "probe": {
+          "content": "probe",
+          "type": "add"
+        }
+      },
+      "grantRoot": null
+    },
+    {
+      "callId": "probe",
+      "conversationId": "probe",
+      "fileChanges": {
+        "probe": {
+          "content": "probe",
+          "type": "add"
+        }
+      },
+      "reason": null
+    }
+  ],
+  "FileChangeApprovalResponse": [
+    {
+      "decision": "accept"
+    }
+  ],
+  "LegacyExecApprovalResponse": [
+    {
+      "decision": "approved"
+    }
+  ],
+  "LegacyPatchApprovalResponse": [
+    {
+      "decision": "approved"
+    }
+  ],
+  "UserInput": [
+    {
+      "text": "probe",
+      "type": "text"
+    },
+    {
+      "text": "probe",
+      "text_elements": [],
+      "type": "text"
+    },
+    {
+      "type": "image",
+      "url": "probe"
+    },
+    {
+      "detail": "auto",
+      "type": "image",
+      "url": "probe"
+    },
+    {
+      "type": "image",
+      "url": "probe",
+      "detail": null
+    },
+    {
+      "type": "image",
+      "fileId": "probe"
+    },
+    {
+      "detail": "auto",
+      "type": "image",
+      "fileId": "probe"
+    },
+    {
+      "type": "image",
+      "fileId": "probe",
+      "detail": null
+    },
+    {
+      "path": "probe",
+      "type": "localImage"
+    },
+    {
+      "detail": "auto",
+      "path": "probe",
+      "type": "localImage"
+    },
+    {
+      "path": "probe",
+      "type": "localImage",
+      "detail": null
+    },
+    {
+      "type": "audio",
+      "url": "probe"
+    },
+    {
+      "path": "probe",
+      "type": "localAudio"
+    },
+    {
+      "name": "probe",
+      "path": "probe",
+      "type": "skill"
+    },
+    {
+      "name": "probe",
+      "path": "probe",
+      "type": "mention"
+    }
+  ],
+  "ItemBody": [
+    {
+      "content": [],
+      "type": "userMessage"
+    },
+    {
+      "clientId": "probe",
+      "content": [],
+      "type": "userMessage"
+    },
+    {
+      "content": [],
+      "type": "userMessage",
+      "clientId": null
+    },
+    {
+      "fragments": [],
+      "type": "hookPrompt"
+    },
+    {
+      "text": "probe",
+      "type": "agentMessage"
+    },
+    {
+      "delivery": "async",
+      "memoryCitation": {
+        "entries": [],
+        "threadIds": []
+      },
+      "phase": "commentary",
+      "questions": [],
+      "text": "probe",
+      "type": "agentMessage"
+    },
+    {
+      "text": "probe",
+      "type": "agentMessage",
+      "delivery": null
+    },
+    {
+      "text": "probe",
+      "type": "agentMessage",
+      "memoryCitation": null
+    },
+    {
+      "text": "probe",
+      "type": "agentMessage",
+      "phase": null
+    },
+    {
+      "text": "probe",
+      "type": "agentMessage",
+      "questions": null
+    },
+    {
+      "name": "probe",
+      "output": "probe",
+      "type": "functionCallOutput"
+    },
+    {
+      "name": "probe",
+      "namespace": "probe",
+      "output": "probe",
+      "type": "functionCallOutput"
+    },
+    {
+      "name": "probe",
+      "output": "probe",
+      "type": "functionCallOutput",
+      "namespace": null
+    },
+    {
+      "text": "probe",
+      "type": "plan"
+    },
+    {
+      "type": "reasoning"
+    },
+    {
+      "content": [],
+      "summary": [],
+      "type": "reasoning"
+    },
+    {
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "status": "inProgress",
+      "type": "commandExecution"
+    },
+    {
+      "aggregatedOutput": "probe",
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "durationMs": 7,
+      "exitCode": 7,
+      "pluginId": "probe",
+      "processId": "probe",
+      "scriptPath": "probe",
+      "source": "agent",
+      "status": "inProgress",
+      "type": "commandExecution"
+    },
+    {
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "status": "inProgress",
+      "type": "commandExecution",
+      "aggregatedOutput": null
+    },
+    {
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "status": "inProgress",
+      "type": "commandExecution",
+      "durationMs": null
+    },
+    {
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "status": "inProgress",
+      "type": "commandExecution",
+      "exitCode": null
+    },
+    {
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "status": "inProgress",
+      "type": "commandExecution",
+      "pluginId": null
+    },
+    {
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "status": "inProgress",
+      "type": "commandExecution",
+      "processId": null
+    },
+    {
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "status": "inProgress",
+      "type": "commandExecution",
+      "scriptPath": null
+    },
+    {
+      "changes": [],
+      "status": "inProgress",
+      "type": "fileChange"
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall"
+    },
+    {
+      "appContext": {
+        "actionName": "probe",
+        "appName": "probe",
+        "connectorId": "probe",
+        "linkId": "probe",
+        "resourceUri": "probe"
+      },
+      "arguments": {
+        "probe": true
+      },
+      "durationMs": 7,
+      "error": {
+        "message": "probe"
+      },
+      "mcpAppResourceUri": "probe",
+      "mcpAppUi": {
+        "preferredModelDisplayMode": "inline",
+        "resourceUri": "probe"
+      },
+      "pluginId": "probe",
+      "readOnlyHint": true,
+      "result": {
+        "_meta": {
+          "probe": true
+        },
+        "content": [],
+        "structuredContent": {
+          "probe": true
+        }
+      },
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall"
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall",
+      "appContext": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall",
+      "durationMs": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall",
+      "error": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall",
+      "mcpAppResourceUri": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall",
+      "mcpAppUi": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall",
+      "pluginId": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall",
+      "readOnlyHint": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall",
+      "result": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "dynamicToolCall"
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "contentItems": [],
+      "durationMs": 7,
+      "namespace": "probe",
+      "status": "inProgress",
+      "success": true,
+      "tool": "probe",
+      "type": "dynamicToolCall"
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "dynamicToolCall",
+      "contentItems": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "dynamicToolCall",
+      "durationMs": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "dynamicToolCall",
+      "namespace": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "dynamicToolCall",
+      "success": null
+    },
+    {
+      "agentsStates": {
+        "probe": {
+          "status": "pendingInit"
+        }
+      },
+      "receiverThreadIds": [],
+      "senderThreadId": "probe",
+      "status": "inProgress",
+      "tool": "spawnAgent",
+      "type": "collabAgentToolCall"
+    },
+    {
+      "agentsStates": {
+        "probe": {
+          "message": "probe",
+          "status": "pendingInit"
+        }
+      },
+      "model": "probe",
+      "prompt": "probe",
+      "reasoningEffort": "probe",
+      "receiverThreadIds": [],
+      "senderThreadId": "probe",
+      "status": "inProgress",
+      "tool": "spawnAgent",
+      "type": "collabAgentToolCall"
+    },
+    {
+      "agentsStates": {
+        "probe": {
+          "status": "pendingInit"
+        }
+      },
+      "receiverThreadIds": [],
+      "senderThreadId": "probe",
+      "status": "inProgress",
+      "tool": "spawnAgent",
+      "type": "collabAgentToolCall",
+      "model": null
+    },
+    {
+      "agentsStates": {
+        "probe": {
+          "status": "pendingInit"
+        }
+      },
+      "receiverThreadIds": [],
+      "senderThreadId": "probe",
+      "status": "inProgress",
+      "tool": "spawnAgent",
+      "type": "collabAgentToolCall",
+      "prompt": null
+    },
+    {
+      "agentsStates": {
+        "probe": {
+          "status": "pendingInit"
+        }
+      },
+      "receiverThreadIds": [],
+      "senderThreadId": "probe",
+      "status": "inProgress",
+      "tool": "spawnAgent",
+      "type": "collabAgentToolCall",
+      "reasoningEffort": null
+    },
+    {
+      "agentPath": "probe",
+      "agentThreadId": "probe",
+      "kind": "started",
+      "type": "subAgentActivity"
+    },
+    {
+      "query": "probe",
+      "type": "webSearch"
+    },
+    {
+      "action": {
+        "queries": [],
+        "query": "probe",
+        "type": "search"
+      },
+      "query": "probe",
+      "results": [],
+      "type": "webSearch"
+    },
+    {
+      "query": "probe",
+      "type": "webSearch",
+      "action": null
+    },
+    {
+      "query": "probe",
+      "type": "webSearch",
+      "results": null
+    },
+    {
+      "path": "probe",
+      "type": "imageView"
+    },
+    {
+      "durationMs": 7,
+      "type": "sleep"
+    },
+    {
+      "status": "probe",
+      "type": "imageGeneration"
+    },
+    {
+      "failure": {
+        "limitId": "probe",
+        "resetsAt": 7,
+        "type": "usageLimitExceeded"
+      },
+      "result": "probe",
+      "revisedPrompt": "probe",
+      "savedPath": "probe",
+      "status": "probe",
+      "transparentBackground": true,
+      "type": "imageGeneration",
+      "fileId": "probe"
+    },
+    {
+      "status": "probe",
+      "type": "imageGeneration",
+      "failure": null
+    },
+    {
+      "status": "probe",
+      "type": "imageGeneration",
+      "revisedPrompt": null
+    },
+    {
+      "status": "probe",
+      "type": "imageGeneration",
+      "savedPath": null
+    },
+    {
+      "status": "probe",
+      "type": "imageGeneration",
+      "transparentBackground": null
+    },
+    {
+      "review": "probe",
+      "type": "enteredReviewMode"
+    },
+    {
+      "review": "probe",
+      "type": "exitedReviewMode"
+    },
+    {
+      "type": "contextCompaction"
+    }
+  ],
+  "FileChangeKind": [
+    {
+      "type": "add"
+    },
+    {
+      "type": "delete"
+    },
+    {
+      "type": "update"
+    },
+    {
+      "move_path": "probe",
+      "type": "update"
+    },
+    {
+      "type": "update",
+      "move_path": null
+    }
+  ],
+  "ElicitationParams": [
+    {
+      "serverName": "probe",
+      "threadId": "probe",
+      "message": "probe",
+      "mode": "form",
+      "requestedSchema": {
+        "properties": {
+          "probe": {
+            "enum": [],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "serverName": "probe",
+      "threadId": "probe",
+      "turnId": "probe",
+      "_meta": {
+        "probe": true
+      },
+      "message": "probe",
+      "mode": "form",
+      "requestedSchema": {
+        "$schema": "probe",
+        "properties": {
+          "probe": {
+            "default": "probe",
+            "description": "probe",
+            "enum": [],
+            "title": "probe",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      }
+    },
+    {
+      "serverName": "probe",
+      "threadId": "probe",
+      "message": "probe",
+      "mode": "form",
+      "requestedSchema": {
+        "properties": {
+          "probe": {
+            "enum": [],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "turnId": null
+    },
+    {
+      "serverName": "probe",
+      "threadId": "probe",
+      "message": "probe",
+      "mode": "form",
+      "requestedSchema": {
+        "properties": {
+          "probe": {
+            "enum": [],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "_meta": null
+    },
+    {
+      "serverName": "probe",
+      "threadId": "probe",
+      "message": "probe",
+      "mode": "openai/form",
+      "requestedSchema": {
+        "probe": true
+      }
+    },
+    {
+      "serverName": "probe",
+      "threadId": "probe",
+      "turnId": "probe",
+      "_meta": {
+        "probe": true
+      },
+      "message": "probe",
+      "mode": "openai/form",
+      "requestedSchema": {
+        "probe": true
+      }
+    },
+    {
+      "serverName": "probe",
+      "threadId": "probe",
+      "message": "probe",
+      "mode": "openai/form",
+      "requestedSchema": {
+        "probe": true
+      },
+      "turnId": null
+    },
+    {
+      "serverName": "probe",
+      "threadId": "probe",
+      "message": "probe",
+      "mode": "openai/form",
+      "requestedSchema": {
+        "probe": true
+      },
+      "_meta": null
+    },
+    {
+      "serverName": "probe",
+      "threadId": "probe",
+      "message": "probe",
+      "mode": "openaiForm",
+      "requestedSchema": {
+        "probe": true
+      }
+    },
+    {
+      "serverName": "probe",
+      "threadId": "probe",
+      "turnId": "probe",
+      "_meta": {
+        "probe": true
+      },
+      "message": "probe",
+      "mode": "openaiForm",
+      "requestedSchema": {
+        "probe": true
+      }
+    },
+    {
+      "serverName": "probe",
+      "threadId": "probe",
+      "message": "probe",
+      "mode": "openaiForm",
+      "requestedSchema": {
+        "probe": true
+      },
+      "turnId": null
+    },
+    {
+      "serverName": "probe",
+      "threadId": "probe",
+      "message": "probe",
+      "mode": "openaiForm",
+      "requestedSchema": {
+        "probe": true
+      },
+      "_meta": null
+    },
+    {
+      "serverName": "probe",
+      "threadId": "probe",
+      "elicitationId": "probe",
+      "message": "probe",
+      "mode": "url",
+      "url": "probe"
+    },
+    {
+      "serverName": "probe",
+      "threadId": "probe",
+      "turnId": "probe",
+      "_meta": {
+        "probe": true
+      },
+      "elicitationId": "probe",
+      "message": "probe",
+      "mode": "url",
+      "url": "probe"
+    },
+    {
+      "serverName": "probe",
+      "threadId": "probe",
+      "elicitationId": "probe",
+      "message": "probe",
+      "mode": "url",
+      "url": "probe",
+      "turnId": null
+    },
+    {
+      "serverName": "probe",
+      "threadId": "probe",
+      "elicitationId": "probe",
+      "message": "probe",
+      "mode": "url",
+      "url": "probe",
+      "_meta": null
+    }
+  ],
+  "Account": [
+    {
+      "type": "apiKey"
+    },
+    {
+      "email": "probe",
+      "planType": "probe",
+      "type": "chatgpt"
+    },
+    {
+      "type": "amazonBedrock"
+    },
+    {
+      "type": "amazonBedrock",
+      "usesCodexManagedCredentials": true
+    }
+  ],
+  "ThreadStatus": [
+    {
+      "type": "notLoaded"
+    },
+    {
+      "type": "idle"
+    },
+    {
+      "type": "systemError"
+    },
+    {
+      "activeFlags": [],
+      "type": "active"
+    }
+  ],
+  "CollaborationSettings": [
+    {
+      "model": "probe"
+    },
+    {
+      "developer_instructions": "probe",
+      "model": "probe",
+      "reasoning_effort": "probe"
+    },
+    {
+      "model": "probe",
+      "developer_instructions": null
+    },
+    {
+      "model": "probe",
+      "reasoning_effort": null
+    }
+  ],
+  "RateLimitSnapshot": [
+    {},
+    {
+      "credits": {
+        "balance": "probe",
+        "hasCredits": true,
+        "unlimited": true
+      },
+      "individualLimit": {
+        "limit": "probe",
+        "remainingPercent": 7,
+        "resetsAt": 7,
+        "used": "probe"
+      },
+      "limitId": "probe",
+      "limitName": "probe",
+      "normalModelSlug": "probe",
+      "planType": "probe",
+      "primary": {
+        "resetsAt": 7,
+        "usedPercent": 7,
+        "windowDurationMins": 7
+      },
+      "rateLimitReachedType": "rate_limit_reached",
+      "secondary": {
+        "resetsAt": 7,
+        "usedPercent": 7,
+        "windowDurationMins": 7
+      },
+      "spendControlReached": true
+    },
+    {
+      "credits": null
+    },
+    {
+      "individualLimit": null
+    },
+    {
+      "limitId": null
+    },
+    {
+      "limitName": null
+    },
+    {
+      "normalModelSlug": null
+    },
+    {
+      "planType": null
+    },
+    {
+      "primary": null
+    },
+    {
+      "rateLimitReachedType": null
+    },
+    {
+      "secondary": null
+    },
+    {
+      "spendControlReached": null
+    }
+  ],
+  "ThreadItem": [
+    {
+      "content": [],
+      "id": "probe",
+      "type": "userMessage"
+    },
+    {
+      "clientId": "probe",
+      "content": [],
+      "id": "probe",
+      "type": "userMessage"
+    },
+    {
+      "content": [],
+      "id": "probe",
+      "type": "userMessage",
+      "clientId": null
+    },
+    {
+      "fragments": [],
+      "id": "probe",
+      "type": "hookPrompt"
+    },
+    {
+      "id": "probe",
+      "text": "probe",
+      "type": "agentMessage"
+    },
+    {
+      "delivery": "async",
+      "id": "probe",
+      "memoryCitation": {
+        "entries": [],
+        "threadIds": []
+      },
+      "phase": "commentary",
+      "questions": [],
+      "text": "probe",
+      "type": "agentMessage"
+    },
+    {
+      "id": "probe",
+      "text": "probe",
+      "type": "agentMessage",
+      "delivery": null
+    },
+    {
+      "id": "probe",
+      "text": "probe",
+      "type": "agentMessage",
+      "memoryCitation": null
+    },
+    {
+      "id": "probe",
+      "text": "probe",
+      "type": "agentMessage",
+      "phase": null
+    },
+    {
+      "id": "probe",
+      "text": "probe",
+      "type": "agentMessage",
+      "questions": null
+    },
+    {
+      "id": "probe",
+      "name": "probe",
+      "output": "probe",
+      "type": "functionCallOutput"
+    },
+    {
+      "id": "probe",
+      "name": "probe",
+      "namespace": "probe",
+      "output": "probe",
+      "type": "functionCallOutput"
+    },
+    {
+      "id": "probe",
+      "name": "probe",
+      "output": "probe",
+      "type": "functionCallOutput",
+      "namespace": null
+    },
+    {
+      "id": "probe",
+      "text": "probe",
+      "type": "plan"
+    },
+    {
+      "id": "probe",
+      "type": "reasoning"
+    },
+    {
+      "content": [],
+      "id": "probe",
+      "summary": [],
+      "type": "reasoning"
+    },
+    {
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "id": "probe",
+      "status": "inProgress",
+      "type": "commandExecution"
+    },
+    {
+      "aggregatedOutput": "probe",
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "durationMs": 7,
+      "exitCode": 7,
+      "id": "probe",
+      "pluginId": "probe",
+      "processId": "probe",
+      "scriptPath": "probe",
+      "source": "agent",
+      "status": "inProgress",
+      "type": "commandExecution"
+    },
+    {
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "id": "probe",
+      "status": "inProgress",
+      "type": "commandExecution",
+      "aggregatedOutput": null
+    },
+    {
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "id": "probe",
+      "status": "inProgress",
+      "type": "commandExecution",
+      "durationMs": null
+    },
+    {
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "id": "probe",
+      "status": "inProgress",
+      "type": "commandExecution",
+      "exitCode": null
+    },
+    {
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "id": "probe",
+      "status": "inProgress",
+      "type": "commandExecution",
+      "pluginId": null
+    },
+    {
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "id": "probe",
+      "status": "inProgress",
+      "type": "commandExecution",
+      "processId": null
+    },
+    {
+      "command": "probe",
+      "commandActions": [],
+      "cwd": "probe",
+      "id": "probe",
+      "status": "inProgress",
+      "type": "commandExecution",
+      "scriptPath": null
+    },
+    {
+      "changes": [],
+      "id": "probe",
+      "status": "inProgress",
+      "type": "fileChange"
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "id": "probe",
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall"
+    },
+    {
+      "appContext": {
+        "actionName": "probe",
+        "appName": "probe",
+        "connectorId": "probe",
+        "linkId": "probe",
+        "resourceUri": "probe"
+      },
+      "arguments": {
+        "probe": true
+      },
+      "durationMs": 7,
+      "error": {
+        "message": "probe"
+      },
+      "id": "probe",
+      "mcpAppResourceUri": "probe",
+      "mcpAppUi": {
+        "preferredModelDisplayMode": "inline",
+        "resourceUri": "probe"
+      },
+      "pluginId": "probe",
+      "readOnlyHint": true,
+      "result": {
+        "_meta": {
+          "probe": true
+        },
+        "content": [],
+        "structuredContent": {
+          "probe": true
+        }
+      },
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall"
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "id": "probe",
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall",
+      "appContext": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "id": "probe",
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall",
+      "durationMs": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "id": "probe",
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall",
+      "error": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "id": "probe",
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall",
+      "mcpAppResourceUri": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "id": "probe",
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall",
+      "mcpAppUi": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "id": "probe",
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall",
+      "pluginId": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "id": "probe",
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall",
+      "readOnlyHint": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "id": "probe",
+      "server": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "mcpToolCall",
+      "result": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "id": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "dynamicToolCall"
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "contentItems": [],
+      "durationMs": 7,
+      "id": "probe",
+      "namespace": "probe",
+      "status": "inProgress",
+      "success": true,
+      "tool": "probe",
+      "type": "dynamicToolCall"
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "id": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "dynamicToolCall",
+      "contentItems": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "id": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "dynamicToolCall",
+      "durationMs": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "id": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "dynamicToolCall",
+      "namespace": null
+    },
+    {
+      "arguments": {
+        "probe": true
+      },
+      "id": "probe",
+      "status": "inProgress",
+      "tool": "probe",
+      "type": "dynamicToolCall",
+      "success": null
+    },
+    {
+      "agentsStates": {
+        "probe": {
+          "status": "pendingInit"
+        }
+      },
+      "id": "probe",
+      "receiverThreadIds": [],
+      "senderThreadId": "probe",
+      "status": "inProgress",
+      "tool": "spawnAgent",
+      "type": "collabAgentToolCall"
+    },
+    {
+      "agentsStates": {
+        "probe": {
+          "message": "probe",
+          "status": "pendingInit"
+        }
+      },
+      "id": "probe",
+      "model": "probe",
+      "prompt": "probe",
+      "reasoningEffort": "probe",
+      "receiverThreadIds": [],
+      "senderThreadId": "probe",
+      "status": "inProgress",
+      "tool": "spawnAgent",
+      "type": "collabAgentToolCall"
+    },
+    {
+      "agentsStates": {
+        "probe": {
+          "status": "pendingInit"
+        }
+      },
+      "id": "probe",
+      "receiverThreadIds": [],
+      "senderThreadId": "probe",
+      "status": "inProgress",
+      "tool": "spawnAgent",
+      "type": "collabAgentToolCall",
+      "model": null
+    },
+    {
+      "agentsStates": {
+        "probe": {
+          "status": "pendingInit"
+        }
+      },
+      "id": "probe",
+      "receiverThreadIds": [],
+      "senderThreadId": "probe",
+      "status": "inProgress",
+      "tool": "spawnAgent",
+      "type": "collabAgentToolCall",
+      "prompt": null
+    },
+    {
+      "agentsStates": {
+        "probe": {
+          "status": "pendingInit"
+        }
+      },
+      "id": "probe",
+      "receiverThreadIds": [],
+      "senderThreadId": "probe",
+      "status": "inProgress",
+      "tool": "spawnAgent",
+      "type": "collabAgentToolCall",
+      "reasoningEffort": null
+    },
+    {
+      "agentPath": "probe",
+      "agentThreadId": "probe",
+      "id": "probe",
+      "kind": "started",
+      "type": "subAgentActivity"
+    },
+    {
+      "id": "probe",
+      "query": "probe",
+      "type": "webSearch"
+    },
+    {
+      "action": {
+        "queries": [],
+        "query": "probe",
+        "type": "search"
+      },
+      "id": "probe",
+      "query": "probe",
+      "results": [],
+      "type": "webSearch"
+    },
+    {
+      "id": "probe",
+      "query": "probe",
+      "type": "webSearch",
+      "action": null
+    },
+    {
+      "id": "probe",
+      "query": "probe",
+      "type": "webSearch",
+      "results": null
+    },
+    {
+      "id": "probe",
+      "path": "probe",
+      "type": "imageView"
+    },
+    {
+      "durationMs": 7,
+      "id": "probe",
+      "type": "sleep"
+    },
+    {
+      "id": "probe",
+      "status": "probe",
+      "type": "imageGeneration"
+    },
+    {
+      "failure": {
+        "limitId": "probe",
+        "resetsAt": 7,
+        "type": "usageLimitExceeded"
+      },
+      "id": "probe",
+      "result": "probe",
+      "revisedPrompt": "probe",
+      "savedPath": "probe",
+      "status": "probe",
+      "transparentBackground": true,
+      "type": "imageGeneration",
+      "fileId": "probe"
+    },
+    {
+      "id": "probe",
+      "status": "probe",
+      "type": "imageGeneration",
+      "failure": null
+    },
+    {
+      "id": "probe",
+      "status": "probe",
+      "type": "imageGeneration",
+      "revisedPrompt": null
+    },
+    {
+      "id": "probe",
+      "status": "probe",
+      "type": "imageGeneration",
+      "savedPath": null
+    },
+    {
+      "id": "probe",
+      "status": "probe",
+      "type": "imageGeneration",
+      "transparentBackground": null
+    },
+    {
+      "id": "probe",
+      "review": "probe",
+      "type": "enteredReviewMode"
+    },
+    {
+      "id": "probe",
+      "review": "probe",
+      "type": "exitedReviewMode"
+    },
+    {
+      "id": "probe",
+      "type": "contextCompaction"
+    }
+  ],
+  "RequestResolved": [
+    {
+      "requestId": "probe",
+      "threadId": "probe"
+    }
+  ],
+  "FunctionCallOutputBody": [
+    "probe",
+    []
+  ]
+}
