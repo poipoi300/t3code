@@ -392,12 +392,30 @@ async fn export_signals(protocol: &str) {
         tracing::warn!("safe operational message");
     });
     use tracing::instrument::WithSubscriber;
-    fn nested_span(phase:&str) {let _span=tracing::info_span!("diagnostic.nested",phase).entered();}
+    fn nested_span(phase: &str) {
+        let _span = tracing::info_span!("diagnostic.nested", phase).entered();
+    }
     async {
-        t3_telemetry::rpc::poll("server.getTraceDiagnostics",async {nested_span("disabled");},tracing::Span::none()).await;
-        let span=t3_telemetry::rpc::request_span("server.probe");
-        t3_telemetry::rpc::poll("server.probe",async {nested_span("enabled");},span).await;
-    }.with_subscriber(dispatch.clone()).await;
+        t3_telemetry::rpc::poll(
+            "server.getTraceDiagnostics",
+            async {
+                nested_span("disabled");
+            },
+            tracing::Span::none(),
+        )
+        .await;
+        let span = t3_telemetry::rpc::request_span("server.probe");
+        t3_telemetry::rpc::poll(
+            "server.probe",
+            async {
+                nested_span("enabled");
+            },
+            span,
+        )
+        .await;
+    }
+    .with_subscriber(dispatch.clone())
+    .await;
     let meter = handle
         .meter_provider
         .as_ref()
@@ -410,8 +428,13 @@ async fn export_signals(protocol: &str) {
     handle.force_flush().await.expect("flush");
     let trace = std::fs::read_to_string(dir.path().join("server.trace.ndjson")).expect("trace");
     assert!(trace.contains("TraceDiagnostics.read"));
-    let nested:Vec<Value>=trace.lines().filter_map(|line|serde_json::from_str::<Value>(line).ok()).filter(|record|record["name"]=="diagnostic.nested").collect();
-    assert_eq!(nested.len(),1);assert_eq!(nested[0]["attributes"]["phase"],"enabled");
+    let nested: Vec<Value> = trace
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|record| record["name"] == "diagnostic.nested")
+        .collect();
+    assert_eq!(nested.len(), 1);
+    assert_eq!(nested[0]["attributes"]["phase"], "enabled");
     assert!(trace.contains("ws.rpc.server.probe"));
     for secret in [
         "VERY_SECRET",

@@ -696,15 +696,17 @@ pub async fn build(options: LoggingOptions) -> Result<(tracing::Dispatch, Teleme
         .with_target(false)
         .with_tracked_inactivity(false)
         .with_error_events_to_status(false)
-        .with_filter(tracing_subscriber::filter::dynamic_filter_fn(move |metadata,_context| {
-            !metadata.target().starts_with("opentelemetry")
-                && !crate::rpc::tracing_suppressed()
-                && if metadata.is_event() {
-                    !logs_exported && metadata.level() <= &log_level
-                } else {
-                    metadata.level() <= &trace_level
-                }
-        }));
+        .with_filter(tracing_subscriber::filter::dynamic_filter_fn(
+            move |metadata, _context| {
+                !metadata.target().starts_with("opentelemetry")
+                    && !crate::rpc::tracing_suppressed()
+                    && if metadata.is_event() {
+                        !logs_exported && metadata.level() <= &log_level
+                    } else {
+                        metadata.level() <= &trace_level
+                    }
+            },
+        ));
     let subscriber = tracing_subscriber::registry()
         .with(telemetry)
         .with(LogLayer {

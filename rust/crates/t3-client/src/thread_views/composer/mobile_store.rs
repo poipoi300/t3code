@@ -72,6 +72,8 @@ struct State {
 }
 pub struct MobileDraftStore<P: Platform> {
     pub(super) platform: Rc<P>,
+    pub operations: super::mobile_operations::DraftOperations,
+    pub selections: RefCell<super::mobile_selection::SelectionRegistry>,
     state: RefCell<State>,
     loaded: Cell<bool>,
     loading: Mutex<()>,
@@ -85,6 +87,8 @@ impl<P: Platform> MobileDraftStore<P> {
         let empty = Rc::new(json!({"schemaVersion":1,"drafts":{}}));
         Self {
             platform,
+            operations: Default::default(),
+            selections: Default::default(),
             state: RefCell::new(State {
                 current: empty.clone(),
                 baseline: empty,
@@ -101,45 +105,131 @@ impl<P: Platform> MobileDraftStore<P> {
     pub fn snapshot(&self) -> Rc<Value> {
         self.state.borrow().current.clone()
     }
-    pub fn create_new_task(&self, project: &t3_contracts::environment::ScopedProjectRef) -> Result<String,ClientError> {
-        let id=crate::operations::allocate_command_id(self.platform.as_ref(),None)?;
-        let now=super::send_commands::epoch_iso(self.platform.now_epoch_ms());
-        let mut key=String::new();
+    pub fn create_new_task(
+        &self,
+        project: &t3_contracts::environment::ScopedProjectRef,
+    ) -> Result<String, ClientError> {
+        let id = crate::operations::allocate_command_id(self.platform.as_ref(), None)?;
+        let now = super::send_commands::epoch_iso(self.platform.now_epoch_ms());
+        let mut key = String::new();
         self.update(|current| {
-            let mut document=current.clone();
-            let (drafts,created)=super::mobile_content::new_task(&current["drafts"],&id.0,&project.environment_id.0,&project.project_id.0,&now);
-            document["drafts"]=drafts;key=created;Ok(document)
+            let mut document = current.clone();
+            let (drafts, created) = super::mobile_content::new_task(
+                &current["drafts"],
+                &id.0,
+                &project.environment_id.0,
+                &project.project_id.0,
+                &now,
+            );
+            document["drafts"] = drafts;
+            key = created;
+            Ok(document)
         })?;
         Ok(key)
     }
-    pub async fn retarget_saved(&self, key:&str, project:&t3_contracts::environment::ScopedProjectRef) -> Result<bool,ClientError> {
+    pub async fn retarget_saved(
+        &self,
+        key: &str,
+        project: &t3_contracts::environment::ScopedProjectRef,
+    ) -> Result<bool, ClientError> {
         self.load().await?;
-        let now=super::send_commands::epoch_iso(self.platform.now_epoch_ms());
-        let mut found=false;
+        let now = super::send_commands::epoch_iso(self.platform.now_epoch_ms());
+        let mut found = false;
         self.update(|current| {
-            let Some(draft)=current["drafts"].get(key) else { return Ok(current.clone()); };
-            found=true;
-            let mut document=current.clone();
-            document["drafts"][key]=super::mobile_content::retarget(draft,&project.environment_id.0,&project.project_id.0,&now);
+            let Some(draft) = current["drafts"].get(key) else {
+                return Ok(current.clone());
+            };
+            found = true;
+            let mut document = current.clone();
+            document["drafts"][key] = super::mobile_content::retarget(
+                draft,
+                &project.environment_id.0,
+                &project.project_id.0,
+                &now,
+            );
             Ok(document)
         })?;
         Ok(found)
     }
-    pub async fn clear_environment(&self, environment:&str) -> Result<Vec<Value>,ClientError> {
+    pub async fn clear_environment(&self, environment: &str) -> Result<Vec<Value>, ClientError> {
         self.load().await?;
-        let mut cleanup=vec![];
+        let mut cleanup = vec![];
+        let snapshot = self.snapshot();
+        let retained = super::mobile_content::remove_environment(&snapshot["drafts"], environment);
+        self.operations.abort_where(|key| {
+            key.starts_with(&format!("{environment}:"))
+                || snapshot["drafts"].get(key).is_some() && retained.get(key).is_none()
+        });
         self.update(|current| {
-            let mut next=current.clone();
-            next["drafts"]=super::mobile_content::remove_environment(&current["drafts"],environment);
-            if let Some(drafts)=current["drafts"].as_object() {
-                for (key,draft) in drafts.iter().filter(|(key,_)|next["drafts"].get(*key).is_none()) {
-                    let _=key;
-                    cleanup.extend(draft["attachments"].as_array().into_iter().flatten().cloned());
+            let mut next = current.clone();
+            next["drafts"] =
+                super::mobile_content::remove_environment(&current["drafts"], environment);
+            if let Some(drafts) = current["drafts"].as_object() {
+                for (_, draft) in drafts
+                    .iter()
+                    .filter(|(key, _)| next["drafts"].get(*key).is_none())
+                {
+                    cleanup.extend(
+                        draft["attachments"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .cloned(),
+                    );
                 }
             }
             Ok(next)
         })?;
         self.flush_all().await?;
+        Ok(cleanup)
+    }
+    pub fn clear_draft(&self, key: &str) -> Result<Vec<Value>, ClientError> {
+        self.operations.abort(key);
+        self.selections.borrow_mut().reset(key)?;
+        let mut cleanup = vec![];
+        self.update(|current| {
+            let mut next = current.clone();
+            if let Some(draft) = next["drafts"]
+                .as_object_mut()
+                .and_then(|drafts| drafts.remove(key))
+            {
+                cleanup.extend(
+                    draft["attachments"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                );
+            }
+            Ok(next)
+        })?;
+        Ok(cleanup)
+    }
+    pub fn clear_content(
+        &self,
+        key: &str,
+        clear_model: bool,
+        clear_workspace: bool,
+    ) -> Result<Vec<Value>, ClientError> {
+        self.selections.borrow_mut().reset(key)?;
+        let mut cleanup = vec![];
+        self.update(|current| {
+            cleanup.extend(
+                current["drafts"][key]["attachments"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+            let mut next = current.clone();
+            next["drafts"] = super::mobile_content::clear_content(
+                &current["drafts"],
+                key,
+                clear_model,
+                clear_workspace,
+            );
+            Ok(next)
+        })?;
         Ok(cleanup)
     }
     pub fn loaded(&self) -> bool {
@@ -292,6 +382,7 @@ impl<P: Platform> MobileDraftStore<P> {
         Ok(())
     }
     pub fn dispose(&self) {
+        self.operations.abort_where(|_| true);
         self.disposed.set(true);
         self.changes.notify();
     }

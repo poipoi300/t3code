@@ -333,28 +333,57 @@ pub fn clear_project(state: &mut Value, project: &ScopedProjectRef) -> Vec<Strin
     ids.iter().flat_map(|id| clear(state, id)).collect()
 }
 pub fn checkout_pull_request_url(draft: &Value) -> Option<&str> {
-    let checkout=draft.get("checkoutPullRequest")?;
-    (draft["branch"]==checkout["branch"]).then(||checkout["url"].as_str()).flatten()
+    let checkout = draft.get("checkoutPullRequest")?;
+    (draft["branch"] == checkout["branch"])
+        .then(|| checkout["url"].as_str())
+        .flatten()
 }
 pub fn clear_environment(state: &mut Value, environment: &str) -> Vec<String> {
-    let scoped=|key:&str|key.split_once(':').is_some_and(|(env,id)|env==environment&&!env.is_empty()&&!id.is_empty());
-    let mut removed=BTreeSet::new();
-    for (key,session) in state["draftThreadsByThreadKey"].as_object().into_iter().flatten() {
-        if session["environmentId"]==environment {removed.insert(key.clone());}
+    let scoped = |key: &str| {
+        key.split_once(':')
+            .is_some_and(|(env, id)| env == environment && !env.is_empty() && !id.is_empty())
+    };
+    let mut removed = BTreeSet::new();
+    for (key, session) in state["draftThreadsByThreadKey"]
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        if session["environmentId"] == environment {
+            removed.insert(key.clone());
+        }
     }
-    for key in state["draftsByThreadKey"].as_object().into_iter().flat_map(|map|map.keys()) {
-        if scoped(key) {removed.insert(key.clone());}
+    for key in state["draftsByThreadKey"]
+        .as_object()
+        .into_iter()
+        .flat_map(|map| map.keys())
+    {
+        if scoped(key) {
+            removed.insert(key.clone());
+        }
     }
-    for (project,key) in state["logicalProjectDraftThreadKeyByLogicalProjectKey"].as_object().into_iter().flatten() {
-        if scoped(project)&&let Some(key)=key.as_str() {removed.insert(key.into());}
+    for (project, key) in state["logicalProjectDraftThreadKeyByLogicalProjectKey"]
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        if scoped(project)
+            && let Some(key) = key.as_str()
+        {
+            removed.insert(key.into());
+        }
     }
-    let previews=removed.iter().flat_map(|id|clear(state,id)).collect();
-    for field in ["backgroundSubmissionThreadKeys","rewindingThreadKeys"] {
-        if let Some(map)=state[field].as_object_mut() {map.retain(|key,_|!scoped(key));}
-        if let Some(keys)=state[field].as_array_mut() {keys.retain(|key|!key.as_str().is_some_and(scoped));}
+    let previews = removed.iter().flat_map(|id| clear(state, id)).collect();
+    for field in ["backgroundSubmissionThreadKeys", "rewindingThreadKeys"] {
+        if let Some(map) = state[field].as_object_mut() {
+            map.retain(|key, _| !scoped(key));
+        }
+        if let Some(keys) = state[field].as_array_mut() {
+            keys.retain(|key| !key.as_str().is_some_and(scoped));
+        }
     }
-    if let Some(map)=state["promotedDraftRedirects"].as_object_mut() {
-        map.retain(|_,target|target["environmentId"]!=environment);
+    if let Some(map) = state["promotedDraftRedirects"].as_object_mut() {
+        map.retain(|_, target| target["environmentId"] != environment);
     }
     previews
 }

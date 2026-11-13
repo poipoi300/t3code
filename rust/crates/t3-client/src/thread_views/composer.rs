@@ -12,6 +12,7 @@ pub mod mobile_attachments;
 pub mod mobile_content;
 pub mod mobile_drafts;
 pub mod mobile_models;
+pub mod mobile_operations;
 pub mod mobile_selection;
 pub mod mobile_store;
 pub mod policy;

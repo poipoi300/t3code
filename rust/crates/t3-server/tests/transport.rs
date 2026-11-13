@@ -397,6 +397,19 @@ async fn real_http_pairing_effect_rpc_scopes_revocation_static_and_shutdown() {
             CallKind::Unary,
         ),
         ("subscribeAuthAccess", json!({}), CallKind::Stream),
+        ("server.getProcessDiagnostics", json!({}), CallKind::Unary),
+        ("server.getHostResources", json!({}), CallKind::Unary),
+        ("subscribeResourceTelemetry", json!({}), CallKind::Stream),
+        (
+            "server.signalProcess",
+            json!({"pid":std::process::id(),"startTimeMs":0,"signal":"SIGKILL"}),
+            CallKind::Unary,
+        ),
+        (
+            "server.checkOtlpEndpoint",
+            json!({"signal":"traces","url":format!("{base}/healthz")}),
+            CallKind::Unary,
+        ),
     ] {
         let mut request = t3_rpc::Request::new(100u64.into(), tag, payload);
         request.discard = Some(t3_rpc::True);

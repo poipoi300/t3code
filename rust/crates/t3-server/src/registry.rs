@@ -262,9 +262,39 @@ impl HandlerRegistry {
         tag: &str,
         payload: Value,
     ) -> std::result::Result<Work, Exit> {
-        match self.entries.get(tag) {
-            Some(entry) => (entry.handler)(ctx, payload),
-            None => Err(Exit::die("Unknown RPC method")),
+        let Some((&method, entry)) = self.entries.get_key_value(tag) else {
+            return Err(Exit::die("Unknown RPC method"));
+        };
+        #[cfg(feature = "local-services")]
+        {
+            use t3_telemetry::rpc::{self, Outcome, RequestMeasurement};
+            let mut measurement = RequestMeasurement::new(method);
+            let span = rpc::request_span(method);
+            let mut work = match (entry.handler)(ctx, payload) {
+                Ok(work) => work,
+                Err(error) => {
+                    measurement.complete(Outcome::Failure);
+                    return Err(error);
+                }
+            };
+            Ok(async_stream::stream! {
+                while let Some(response)=rpc::poll(method,work.next(),span.clone()).await {
+                    if let Response::Exit(exit)=&response {
+                        let outcome=match exit {
+                            Exit::Success {..}=>Outcome::Success,
+                            Exit::Failure {cause} if !cause.is_empty()&&cause.iter().all(|c|matches!(c,t3_rpc::Cause::Interrupt{..}))=>Outcome::Interrupt,
+                            _=>Outcome::Failure,
+                        };
+                        measurement.complete(outcome);
+                    }
+                    yield response;
+                }
+            }.boxed())
+        }
+        #[cfg(not(feature = "local-services"))]
+        {
+            let _ = method;
+            (entry.handler)(ctx, payload)
         }
     }
     /// Every contract method is registered or explicitly unsupported exactly once, with the
