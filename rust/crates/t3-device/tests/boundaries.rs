@@ -812,6 +812,22 @@ async fn expo_active_sessions_accept_nullable_names_without_losing_owned_session
     assert_eq!(sessions.len(), 2);
     assert_eq!(sessions[1].id, "owned");
 }
+
+#[tokio::test]
+async fn expo_refuses_malformed_session_shapes_and_unknown_statuses() {
+    let home = tempfile::tempdir().unwrap();
+    for session in [
+        json!({"id":"s","status":"UNKNOWN","remoteConfig":null}),
+        json!({"id":"s","status":"NEW"}),
+        json!({"id":"s","status":"NEW","remoteConfig":{}}),
+        json!({"id":"s","status":"IN_PROGRESS","remoteConfig":{"__typename":"AgentDeviceRunSessionRemoteConfig","agentDeviceRemoteSessionUrl":"https://agent.test","agentDeviceRemoteSessionToken":"secret","previewApiUrl":42,"webPreviewToken":null}}),
+    ] {
+        let api = ExpoHttp::new(FakeHttp::new([(200, json!({"data":{"deviceRunSessions":{"byId":session}}}))]), resolve_credential("private-token", None, home.path()).await.unwrap());
+        let error = api.session("s").await.err().expect("schema refusal");
+        assert!(!error.rejected);
+        assert!(!format!("{error:?}").contains("secret"));
+    }
+}
 #[tokio::test]
 async fn simlock_tokens_are_origin_bound_and_unreadable_references_fail_closed() {
     let env = BTreeMap::from([

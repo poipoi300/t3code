@@ -8,6 +8,8 @@ pub mod http;
 pub mod link_requests;
 pub mod managed;
 pub mod oauth;
+#[cfg(feature = "orchestration")]
+pub mod orchestration;
 pub mod peer;
 pub mod reachability;
 pub mod remote;

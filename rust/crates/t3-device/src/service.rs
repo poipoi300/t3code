@@ -14,12 +14,22 @@ use std::{
 use t3_contracts::{base_schemas::ThreadId, device::*};
 use tokio::sync::{Mutex, mpsc};
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct DeviceSettings {
     pub enabled: bool,
     pub agent_access_enabled: bool,
     pub onboarding_completed: bool,
     pub hosts: Vec<DeviceHostConfig>,
+}
+impl std::fmt::Debug for DeviceSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceSettings")
+            .field("enabled", &self.enabled)
+            .field("agent_access_enabled", &self.agent_access_enabled)
+            .field("onboarding_completed", &self.onboarding_completed)
+            .field("hosts", &self.hosts.len())
+            .finish()
+    }
 }
 #[async_trait]
 pub trait Settings: Send + Sync {
@@ -211,6 +221,9 @@ impl DeviceService {
     }
     async fn status(&self, entry: &HostEntry, status: DeviceHostStatus, detail: Option<String>) {
         let mut state = self.inner.state.lock().await;
+        if state.wire.host_status == DeviceHostStatus::Disabled && status != DeviceHostStatus::Disabled {
+            return;
+        }
         if !state
             .hosts
             .iter()
@@ -422,7 +435,7 @@ impl DeviceService {
         Ok(self.state().await)
     }
     pub async fn list_request(&self, input: DeviceListInput) -> Result<DeviceServiceState> {
-        if input.inspect_only.flatten() == Some(true) && input.update_tool.is_none() {
+        if input.inspect_only.flatten() == Some(true) && input.update_tool.as_ref().and_then(|v| v.as_ref()).is_none() {
             return self.inspect().await;
         }
         if let Some(tool) = input.update_tool.flatten() {

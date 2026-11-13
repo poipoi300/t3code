@@ -79,7 +79,7 @@ impl ExpoApi for FakeExpo {
         let id = format!("session-{}", self.creates.lock().await.len());
         self.active.lock().await.push(Active {
             id: id.clone(),
-            name:Some(name),
+            name: Some(name),
             status: "IN_PROGRESS".into(),
         });
         Ok(id)
@@ -160,7 +160,12 @@ impl Http for Preview {
             serde_json::to_vec(&json!({"serial":"emulator-5554"})).unwrap()
         } else {
             assert_eq!(r.url.path(), "/api");
-            let id=self.device_override.lock().await.clone().unwrap_or_else(||"UDID-1".into());
+            let id = self
+                .device_override
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(|| "UDID-1".into());
             serde_json::to_vec(&json!({"device":id})).unwrap()
         };
         self.requests.lock().await.push(r);
@@ -201,13 +206,13 @@ async fn eas_fixture(
 }
 
 #[tokio::test]
-async fn eas_refuses_option_like_remote_selector_and_stops_created_session(){
-    let(_temp,host,api,_provider,http)=eas_fixture(1).await;
-    *http.device_override.lock().await=Some("--config".into());
-    let device=host.list().await.unwrap().devices[0].clone();
-    assert!(host.boot(&device,&OpenContext::default()).await.is_err());
-    assert_eq!(api.stops.lock().await.as_slice(),["session-1"]);
-    assert!(host.list().await.unwrap().devices.iter().all(|d|!d.booted));
+async fn eas_refuses_option_like_remote_selector_and_stops_created_session() {
+    let (_temp, host, api, _provider, http) = eas_fixture(1).await;
+    *http.device_override.lock().await = Some("--config".into());
+    let device = host.list().await.unwrap().devices[0].clone();
+    assert!(host.boot(&device, &OpenContext::default()).await.is_err());
+    assert_eq!(api.stops.lock().await.as_slice(), ["session-1"]);
+    assert!(host.list().await.unwrap().devices.iter().all(|d| !d.booted));
 }
 
 #[tokio::test]
@@ -421,8 +426,8 @@ struct Pool {
     requests: Mutex<Vec<HttpRequest>>,
     catalog: Mutex<Value>,
     renew_404: AtomicBool,
-    renewed:tokio::sync::Notify,
-    closed:Arc<tokio::sync::Notify>,
+    renewed: tokio::sync::Notify,
+    closed: Arc<tokio::sync::Notify>,
 }
 #[async_trait]
 impl Http for Pool {
@@ -446,9 +451,11 @@ impl Http for Pool {
         } else {
             panic!("unexpected pool route")
         };
-        let renew=r.url.path().ends_with("/renew");
+        let renew = r.url.path().ends_with("/renew");
         self.requests.lock().await.push(r);
-        if renew{self.renewed.notify_one();}
+        if renew {
+            self.renewed.notify_one();
+        }
         Ok(HttpResponse::bytes(
             status,
             serde_json::to_vec(&body).unwrap(),
@@ -462,13 +469,18 @@ async fn simlock_fixture(
     limit: u64,
     failed: bool,
 ) -> (tempfile::TempDir, SimlockHost, Arc<FakeCommands>, Arc<Pool>) {
-    simlock_fixture_with_minutes(limit,failed,60).await
+    simlock_fixture_with_minutes(limit, failed, 60).await
 }
-async fn simlock_fixture_with_minutes(limit:u64,failed:bool,minutes:u64)->(tempfile::TempDir,SimlockHost,Arc<FakeCommands>,Arc<Pool>){
+async fn simlock_fixture_with_minutes(
+    limit: u64,
+    failed: bool,
+    minutes: u64,
+) -> (tempfile::TempDir, SimlockHost, Arc<FakeCommands>, Arc<Pool>) {
     let temp = tempfile::tempdir().unwrap();
     let leases = Arc::new(AtomicUsize::new(0));
     let count = leases.clone();
-    let closed=Arc::new(tokio::sync::Notify::new());let closing=closed.clone();
+    let closed = Arc::new(tokio::sync::Notify::new());
+    let closing = closed.clone();
     let commands = FakeCommands::new(move |c| {
         let args = &c.args;
         let config = &args[args.iter().position(|a| a == "--config").unwrap() + 1];
@@ -492,7 +504,9 @@ async fn simlock_fixture_with_minutes(limit:u64,failed:bool,minutes:u64)->(tempf
         if args[1] == "screenshot" {
             std::fs::write(&args[2], [1, 2, 3]).unwrap();
         }
-        if args[1]=="close"{closing.notify_one();}
+        if args[1] == "close" {
+            closing.notify_one();
+        }
         Ok(CommandOutput {
             stdout: "{}".into(),
             ..Default::default()
@@ -502,7 +516,8 @@ async fn simlock_fixture_with_minutes(limit:u64,failed:bool,minutes:u64)->(tempf
         requests: Mutex::new(vec![]),
         catalog: Mutex::new(pool_catalog()),
         renew_404: AtomicBool::new(false),
-        renewed:tokio::sync::Notify::new(),closed,
+        renewed: tokio::sync::Notify::new(),
+        closed,
     });
     let config:SimlockDeviceHostConfig=serde_json::from_value(json!({"kind":"simlock","id":"pool","label":"Pool","gatewayUrl":"https://simlock.test:4700/","agentToken":"agent-token","maxLeases":limit,"maxLeaseMinutes":minutes})).unwrap();
     let host = SimlockHost::new(SimlockOptions {
@@ -510,7 +525,7 @@ async fn simlock_fixture_with_minutes(limit:u64,failed:bool,minutes:u64)->(tempf
         state: temp.path().into(),
         node: "node".into(),
         agent_entry: "/tools/agent-device.mjs".into(),
-        cli_provider:None,
+        cli_provider: None,
         commands: commands.clone(),
         http: pool.clone(),
         secrets: Arc::new(LiteralSecrets),
@@ -533,6 +548,67 @@ async fn simlock_catalog_filters_unavailable_workers_and_non_mobile_models() {
     host.list().await.unwrap();
     assert_eq!(pool.requests.lock().await.len(), 1);
     host.stop().await.unwrap();
+}
+
+struct InstalledCli { calls: AtomicUsize, fail: AtomicBool }
+#[async_trait]
+impl t3_device::host::AgentCliProvider for InstalledCli {
+    async fn ensure(&self) -> Result<t3_device::host::AgentCli> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail.load(Ordering::SeqCst) { return Err(Error::Unavailable("install failed".into())); }
+        Ok(t3_device::host::AgentCli { node: "bound-node".into(), entry: "/installed/agent.mjs".into() })
+    }
+}
+#[tokio::test]
+async fn simlock_installs_lazily_retries_failures_and_uses_the_installed_cli() {
+    let (temp, previous, commands, pool) = simlock_fixture(1, false).await;
+    previous.stop().await.unwrap();
+    let provider = Arc::new(InstalledCli { calls: AtomicUsize::new(0), fail: AtomicBool::new(true) });
+    let config = serde_json::from_value(json!({"kind":"simlock","id":"pool","label":"Pool","gatewayUrl":"https://simlock.test:4700","agentToken":"agent-token"})).unwrap();
+    let host = SimlockHost::new(SimlockOptions { config, state: temp.path().into(), node: "wrong-node".into(), agent_entry: "/wrong-entry".into(), cli_provider: Some(provider.clone()), commands: commands.clone(), http: pool, secrets: Arc::new(LiteralSecrets), environment: BTreeMap::new() }).unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert!(host.ensure_ready(Arc::new(|_, _| {})).await.is_err());
+    assert!(host.current().await.is_none());
+    assert!(commands.calls.lock().unwrap().is_empty());
+    provider.fail.store(false, Ordering::SeqCst);
+    for _ in 0..2 { assert_eq!(host.ensure_ready(Arc::new(|_, _| {})).await.unwrap().node_path, "bound-node"); }
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    let device = host.list().await.unwrap().devices[0].clone();
+    let id = host.boot(&device, &OpenContext::default()).await.unwrap();
+    assert_eq!(host.agent_endpoint(&id).await.unwrap().unwrap().entry_path, PathBuf::from("/installed/agent.mjs"));
+    let call = commands.calls.lock().unwrap()[0].clone();
+    assert_eq!(call.program, "bound-node");
+    assert_eq!(call.args[0], "/installed/agent.mjs");
+    host.stop().await.unwrap();
+}
+
+struct GatedOpen { commands: Arc<FakeCommands>, gate: Arc<Gate> }
+#[async_trait]
+impl t3_device::io::Commands for GatedOpen {
+    async fn run(&self, command: Command) -> Result<CommandOutput> {
+        if command.args.get(1).is_some_and(|arg| arg == "open") { self.gate.wait().await; }
+        t3_device::io::Commands::run(self.commands.as_ref(), command).await
+    }
+}
+#[tokio::test]
+async fn simlock_stop_during_open_closes_the_partial_session_and_removes_its_state() {
+    let (temp, previous, commands, pool) = simlock_fixture(1, false).await;
+    previous.stop().await.unwrap();
+    let gate = Gate::new();
+    let config = serde_json::from_value(json!({"kind":"simlock","id":"pool","label":"Pool","gatewayUrl":"https://simlock.test:4700","agentToken":"agent-token"})).unwrap();
+    let host = SimlockHost::new(SimlockOptions { config, state: temp.path().into(), node: "node".into(), agent_entry: "/entry".into(), cli_provider: None, commands: Arc::new(GatedOpen { commands: commands.clone(), gate: gate.clone() }), http: pool, secrets: Arc::new(LiteralSecrets), environment: BTreeMap::new() }).unwrap();
+    host.ensure_ready(Arc::new(|_, _| {})).await.unwrap();
+    let device = host.list().await.unwrap().devices[0].clone();
+    let copy = host.clone();
+    let opening = tokio::spawn(async move { copy.boot(&device, &OpenContext::default()).await });
+    gate.entered.notified().await;
+    host.stop().await.unwrap();
+    assert!(opening.await.unwrap().is_err());
+    let calls = commands.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].args[1], "close");
+    let mut entries = tokio::fs::read_dir(temp.path().join("device/simlock/pool")).await.unwrap();
+    assert!(entries.next_entry().await.unwrap().is_none());
 }
 #[tokio::test]
 async fn simlock_open_uses_shared_session_routes_only_lease_stream_and_returns_it() {
@@ -644,23 +720,70 @@ async fn simlock_empty_platform_catalog_is_not_cached() {
 }
 
 #[tokio::test]
-async fn simlock_renews_without_overriding_gateway_ttl_and_forgets_a_lost_lease(){
-    let(_temp,host,commands,pool)=simlock_fixture(1,false).await;
-    let device=host.list().await.unwrap().devices[0].clone();let id=host.boot(&device,&OpenContext::default()).await.unwrap();
-    tokio::time::pause();tokio::time::advance(std::time::Duration::from_secs(120)).await;pool.renewed.notified().await;
-    assert!(host.list().await.unwrap().devices.iter().any(|d|d.id.as_ref()==id));
-    pool.renew_404.store(true,Ordering::SeqCst);tokio::time::advance(std::time::Duration::from_secs(120)).await;pool.renewed.notified().await;
-    assert!(host.list().await.unwrap().devices.iter().all(|d|!d.booted));host.stop().await.unwrap();
-    assert_eq!(commands.calls.lock().unwrap().iter().filter(|c|c.args[1]=="close").count(),0);
+async fn simlock_renews_without_overriding_gateway_ttl_and_forgets_a_lost_lease() {
+    let (_temp, host, commands, pool) = simlock_fixture(1, false).await;
+    let device = host.list().await.unwrap().devices[0].clone();
+    let id = host.boot(&device, &OpenContext::default()).await.unwrap();
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(120)).await;
+    pool.renewed.notified().await;
+    assert!(
+        host.list()
+            .await
+            .unwrap()
+            .devices
+            .iter()
+            .any(|d| d.id.as_ref() == id)
+    );
+    pool.renew_404.store(true, Ordering::SeqCst);
+    tokio::time::advance(std::time::Duration::from_secs(120)).await;
+    pool.renewed.notified().await;
+    assert!(host.list().await.unwrap().devices.iter().all(|d| !d.booted));
+    host.stop().await.unwrap();
+    assert_eq!(
+        commands
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.args[1] == "close")
+            .count(),
+        0
+    );
 }
 #[tokio::test]
-async fn simlock_lease_releases_at_its_maximum_age(){
-    let(_temp,host,commands,pool)=simlock_fixture_with_minutes(1,false,5).await;
-    let device=host.list().await.unwrap().devices[0].clone();host.boot(&device,&OpenContext::default()).await.unwrap();
+async fn simlock_lease_releases_at_its_maximum_age() {
+    let (_temp, host, commands, pool) = simlock_fixture_with_minutes(1, false, 5).await;
+    let device = host.list().await.unwrap().devices[0].clone();
+    host.boot(&device, &OpenContext::default()).await.unwrap();
     tokio::time::pause();
-    for _ in 0..2{tokio::time::advance(std::time::Duration::from_secs(120)).await;pool.renewed.notified().await;}
-    tokio::time::advance(std::time::Duration::from_secs(59)).await;assert_eq!(commands.calls.lock().unwrap().iter().filter(|c|c.args[1]=="close").count(),0);
-    tokio::time::advance(std::time::Duration::from_secs(1)).await;pool.closed.notified().await;
-    assert!(host.list().await.unwrap().devices.iter().all(|d|!d.booted));host.stop().await.unwrap();
-    assert_eq!(commands.calls.lock().unwrap().iter().filter(|c|c.args[1]=="close").count(),1);
+    for _ in 0..2 {
+        tokio::time::advance(std::time::Duration::from_secs(120)).await;
+        pool.renewed.notified().await;
+    }
+    tokio::time::advance(std::time::Duration::from_secs(59)).await;
+    assert_eq!(
+        commands
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.args[1] == "close")
+            .count(),
+        0
+    );
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    pool.closed.notified().await;
+    assert!(host.list().await.unwrap().devices.iter().all(|d| !d.booted));
+    host.stop().await.unwrap();
+    assert_eq!(
+        commands
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.args[1] == "close")
+            .count(),
+        1
+    );
 }

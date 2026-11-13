@@ -390,29 +390,105 @@ async fn still_frame_repeats_once_and_preserves_pending_input() {
     assert!(stream.next().await.is_none());
 }
 #[tokio::test]
-async fn real_loopback_proxy_preserves_binary_admission_and_input_frames(){
+async fn real_loopback_proxy_preserves_binary_admission_and_input_frames() {
     use futures_util::SinkExt;
     use tokio_tungstenite::tungstenite::Message;
-    let upstream=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let upstream_addr=upstream.local_addr().unwrap();
-    let hub=tokio::spawn(async move{let(socket,_)=upstream.accept().await.unwrap();let mut socket=tokio_tungstenite::accept_async(socket).await.unwrap();socket.send(Message::Binary(Bytes::from_static(&[0x83]))).await.unwrap();for expected in [[3,1],[3,2]]{let frame=socket.next().await.unwrap().unwrap();assert_eq!(frame.into_data().as_ref(),expected);socket.send(Message::Binary(Bytes::copy_from_slice(&expected))).await.unwrap();}let _=socket.close(None).await;});
-    let mut host=FakeHost::new("local",FakeOps::new("local",DevicePlatform::Ios,true),FakeCommands::encoder(),None);
-    Arc::get_mut(&mut host).unwrap().ready.origin=format!("http://{upstream_addr}");
-    let service=service(vec![host],true,false).await;
-    let router=DeviceHubProxy{service,http:FakeHttp::new([]),auth:Arc::new(Auth{operate:true,requests:Mutex::new(vec![])}),sockets:Arc::new(t3_device::proxy::NativeSocketConnector)}.router();
-    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();let(stop,stopping)=tokio::sync::oneshot::channel();
-    let server=tokio::spawn(async move{axum::serve(listener,router).with_graceful_shutdown(async{let _=stopping.await;}).await.unwrap();});
-    let(mut client,_)=tokio_tungstenite::connect_async(format!("ws://{address}/api/device-hub/vendor/serve-sim/helper/ws?device=phone&wsTicket=private")).await.unwrap();
-    assert_eq!(client.next().await.unwrap().unwrap().into_data().as_ref(),[0x83]);
-    for frame in [[3,1],[3,2]]{client.send(Message::Binary(Bytes::copy_from_slice(&frame))).await.unwrap();assert_eq!(client.next().await.unwrap().unwrap().into_data().as_ref(),frame);}
-    let _=client.close(None).await;drop(client);hub.await.unwrap();let _=stop.send(());server.await.unwrap();
+    let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let hub = tokio::spawn(async move {
+        let (socket, _) = upstream.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+        socket
+            .send(Message::Binary(Bytes::from_static(&[0x83])))
+            .await
+            .unwrap();
+        for expected in [[3, 1], [3, 2]] {
+            let frame = socket.next().await.unwrap().unwrap();
+            assert_eq!(frame.into_data().as_ref(), expected);
+            socket
+                .send(Message::Binary(Bytes::copy_from_slice(&expected)))
+                .await
+                .unwrap();
+        }
+        let _ = socket.close(None).await;
+    });
+    let mut host = FakeHost::new(
+        "local",
+        FakeOps::new("local", DevicePlatform::Ios, true),
+        FakeCommands::encoder(),
+        None,
+    );
+    Arc::get_mut(&mut host).unwrap().ready.origin = format!("http://{upstream_addr}");
+    let service = service(vec![host], true, false).await;
+    let router = DeviceHubProxy {
+        service,
+        http: FakeHttp::new([]),
+        auth: Arc::new(Auth {
+            operate: true,
+            requests: Mutex::new(vec![]),
+        }),
+        sockets: Arc::new(t3_device::proxy::NativeSocketConnector),
+    }
+    .router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopping) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = stopping.await;
+            })
+            .await
+            .unwrap();
+    });
+    let (mut client, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{address}/api/device-hub/vendor/serve-sim/helper/ws?device=phone&wsTicket=private"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        client.next().await.unwrap().unwrap().into_data().as_ref(),
+        [0x83]
+    );
+    for frame in [[3, 1], [3, 2]] {
+        client
+            .send(Message::Binary(Bytes::copy_from_slice(&frame)))
+            .await
+            .unwrap();
+        assert_eq!(
+            client.next().await.unwrap().unwrap().into_data().as_ref(),
+            frame
+        );
+    }
+    let _ = client.close(None).await;
+    drop(client);
+    hub.await.unwrap();
+    let _ = stop.send(());
+    server.await.unwrap();
 }
 
 #[tokio::test]
-async fn cancelling_connecting_websocket_drops_owned_tcp_connection(){
+async fn cancelling_connecting_websocket_drops_owned_tcp_connection() {
     use tokio::io::AsyncReadExt;
-    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
-    let connecting=tokio::spawn(async move{t3_device::proxy::NativeSocketConnector.connect(format!("ws://{address}"),BTreeMap::from([("authorization".into(),Secret::new("Bearer fixture"))]),vec![]).await});
-    let(mut accepted,_)=listener.accept().await.unwrap();let mut request=[0u8;4096];let count=accepted.read(&mut request).await.unwrap();assert!(count>0);
-    connecting.abort();let Err(error)=connecting.await else{panic!("connection completed before cancellation")};assert!(error.is_cancelled());
-    assert_eq!(accepted.read(&mut request).await.unwrap(),0);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let connecting = tokio::spawn(async move {
+        t3_device::proxy::NativeSocketConnector
+            .connect(
+                format!("ws://{address}"),
+                BTreeMap::from([("authorization".into(), Secret::new("Bearer fixture"))]),
+                vec![],
+            )
+            .await
+    });
+    let (mut accepted, _) = listener.accept().await.unwrap();
+    let mut request = [0u8; 4096];
+    let count = accepted.read(&mut request).await.unwrap();
+    assert!(count > 0);
+    connecting.abort();
+    let Err(error) = connecting.await else {
+        panic!("connection completed before cancellation")
+    };
+    assert!(error.is_cancelled());
+    assert_eq!(accepted.read(&mut request).await.unwrap(), 0);
 }

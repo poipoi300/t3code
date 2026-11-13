@@ -31,10 +31,11 @@ pub fn panel<E: IntoElement + 'static>(
     let on_close = Rc::new(on_close);
     let children = Rc::new(children);
     dynamic(move || {
+        let presentation = presentation.get();
         let on_close = on_close.clone();
         let children = children.clone();
         // Only the presentation changes this subtree; content bindings track their own data.
-        untracked(|| match presentation.get() {
+        untracked(|| match presentation {
             LayoutClass::Wide => when(open, move || {
                 view()
                     .app_class(tw("flex min-h-0 min-w-0 h-full flex-col"))
@@ -132,9 +133,11 @@ pub fn right_panel_sheet<E: IntoElement + 'static>(
                     .w(move || px(sheet_width(window().width.0)))
                     // wco insets are supplied by the shared shell, not a browser CSS variant.
                     // will-change-transform is dropped: native animation bindings own scheduling.
-                    .app_class(tw("flex max-h-full min-h-0 min-w-0 flex-col bg-popover text-popover-foreground border-s"))
+                    .app_class(tw("flex max-h-full min-h-0 min-w-0 flex-col bg-popover not-dark:bg-clip-padding text-popover-foreground shadow-lg/5 border-s"))
                     .bind_opacity(&progress)
                     .bind_translate_x(&translate_x)
+                    // SheetPopup's before shadow is an explicit first child; max-sm hides it.
+                    .child(view().app_class(tw("pointer-events-none absolute inset-0 shadow-[0_1px_rgb(0_0_0/4%)] dark:shadow-[0_-1px_rgb(255_255_255/6%)] max-sm:hidden")))
                     // SheetHeader's sr-only SheetTitle becomes the dialog's accessible label.
                     .child(untracked(|| children())),
             )

@@ -88,17 +88,36 @@ async fn unreadable_static_config_cannot_be_ignored() {
 }
 
 #[tokio::test]
-async fn project_inheritance_refuses_wrong_holders_identifiers_and_malformed_static_objects(){
-    for source in ["export default ({config})=>({...config,extra:{...config.extra.eas}})","export default ({config})=>({...config\u{301}})"]{
-        let temp=tempfile::tempdir().unwrap();write(temp.path(),"app.config.js",source).await;
-        write(temp.path(),"app.json",json!({"extra":{"eas":{"projectId":A}}}).to_string()).await;
-        assert!(find_eas_project_id(temp.path()).await.is_none(),"{source}");
+async fn project_inheritance_refuses_wrong_holders_identifiers_and_malformed_static_objects() {
+    for source in [
+        "export default ({config})=>({...config,extra:{...config.extra.eas}})",
+        "export default ({config})=>({...config\u{301}})",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        write(temp.path(), "app.config.js", source).await;
+        write(
+            temp.path(),
+            "app.json",
+            json!({"extra":{"eas":{"projectId":A}}}).to_string(),
+        )
+        .await;
+        assert!(find_eas_project_id(temp.path()).await.is_none(), "{source}");
     }
     assert!(literal_ids(&format!("export default {{projectId:'{A}' /*unterminated")).is_none());
-    for bad in [json!({"expo":null}),json!({"extra":[]}),json!({"extra":{"eas":[]}})]{
-        let temp=tempfile::tempdir().unwrap();write(temp.path(),"app.json",json!({"extra":{"eas":{"projectId":A}}}).to_string()).await;
-        write(temp.path(),"apps/unknown/app.json",bad.to_string()).await;
-        assert!(find_eas_project_id(temp.path()).await.is_none(),"{bad}");
+    for bad in [
+        json!({"expo":null}),
+        json!({"extra":[]}),
+        json!({"extra":{"eas":[]}}),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            "app.json",
+            json!({"extra":{"eas":{"projectId":A}}}).to_string(),
+        )
+        .await;
+        write(temp.path(), "apps/unknown/app.json", bad.to_string()).await;
+        assert!(find_eas_project_id(temp.path()).await.is_none(), "{bad}");
     }
 }
 #[tokio::test]
