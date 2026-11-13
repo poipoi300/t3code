@@ -1,0 +1,317 @@
+//! Native host: Windows, macOS, Linux, Android and iOS on tokio.
+//!
+//! Open it inside a tokio runtime and poll the client's futures on that runtime (a
+//! current-thread runtime driving them, or any executor while a multi-thread runtime runs).
+//! Network work runs as runtime tasks and storage on its blocking pool; dropping a returned
+//! future cancels the request, and a dropped storage call still commits or rolls back whole.
+mod host;
+mod http;
+mod secret;
+mod socket;
+mod store;
+
+pub use secret::{EphemeralSecretStore, SecretKeyStore, SecretStoreError};
+pub use store::{OpenError, OpenReport};
+
+use crate::common::{EventSender, HostExtension};
+use futures::{FutureExt, channel::oneshot, future::LocalBoxFuture, stream::LocalBoxStream};
+use std::{
+    future::Future,
+    path::PathBuf,
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use t3_client::platform::{
+    HostAction, HostFuture, HostReply, HttpRequest, HttpResponse, LegacyStorage, Platform,
+    PlatformError, PlatformEvent, SocketRequest, Storage, StorageArea, StorageKey,
+    StorageTransaction, StorageWrite, WebSocket,
+};
+use t3_contracts::auth::AuthClientPresentationMetadata;
+use tokio::runtime::Handle;
+
+#[derive(Debug, Clone, Copy)]
+pub struct Timeouts {
+    /// TCP, TLS and WebSocket handshake.
+    pub connect: Duration,
+    /// Whole HTTP exchange, body included; the client also races its own shorter timers.
+    pub http: Duration,
+    /// Waiting for the peer's close frame before the socket is dropped.
+    pub close: Duration,
+}
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(15),
+            http: Duration::from_secs(120),
+            close: Duration::from_secs(5),
+        }
+    }
+}
+
+pub struct NativeConfig {
+    /// App-private data directory chosen by the shell (app data on desktop, the sandbox's
+    /// files directory on Android and iOS).
+    pub data_dir: PathBuf,
+    pub secrets: Box<dyn SecretKeyStore>,
+    /// Surface, app version and device details only the shell knows.
+    pub presentation: Option<AuthClientPresentationMetadata>,
+    /// Read-only access to the previous app's stores, when the shell can reach them.
+    pub legacy: Option<Rc<dyn LegacyStorage>>,
+    pub extension: Option<Rc<dyn HostExtension>>,
+    pub timeouts: Timeouts,
+}
+impl NativeConfig {
+    pub fn new(data_dir: impl Into<PathBuf>, secrets: Box<dyn SecretKeyStore>) -> Self {
+        Self {
+            data_dir: data_dir.into(),
+            secrets,
+            presentation: None,
+            legacy: None,
+            extension: None,
+            timeouts: Timeouts::default(),
+        }
+    }
+    /// Desktop default: the storage key lives in the OS credential store.
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    pub fn desktop(data_dir: impl Into<PathBuf>) -> Self {
+        Self::new(data_dir, <dyn SecretKeyStore>::os_default())
+    }
+}
+
+struct Inner {
+    store: Arc<store::Store>,
+    http: http::HttpClient,
+    tls: Arc<rustls::ClientConfig>,
+    runtime: Handle,
+    events: EventSender,
+    epoch: tokio::time::Instant,
+    timeouts: Timeouts,
+    presentation: Option<AuthClientPresentationMetadata>,
+    legacy: Option<Rc<dyn LegacyStorage>>,
+    extension: Option<Rc<dyn HostExtension>>,
+    host: host::HostState,
+    report: OpenReport,
+}
+
+#[derive(Clone)]
+pub struct NativePlatform {
+    inner: Rc<Inner>,
+}
+impl std::fmt::Debug for NativePlatform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativePlatform")
+            .field("report", &self.inner.report)
+            .finish_non_exhaustive()
+    }
+}
+
+fn tls_config() -> Result<rustls::ClientConfig, OpenError> {
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| OpenError::Network(e.to_string()))?
+    .with_root_certificates(roots)
+    .with_no_client_auth())
+}
+
+/// Runs on the runtime even when the caller polls from another executor; drop aborts it.
+pub(crate) fn spawn_abortable<T: Send + 'static>(
+    runtime: &Handle,
+    work: impl Future<Output = Result<T, PlatformError>> + Send + 'static,
+) -> impl Future<Output = Result<T, PlatformError>> + 'static {
+    struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+    impl<T> Drop for AbortOnDrop<T> {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let mut task = AbortOnDrop(runtime.spawn(work));
+    async move { (&mut task.0).await.map_err(|_| PlatformError::Cancelled)? }
+}
+
+impl NativePlatform {
+    pub async fn open(config: NativeConfig) -> Result<Self, OpenError> {
+        let runtime = Handle::try_current().map_err(|_| OpenError::NoRuntime)?;
+        let NativeConfig {
+            data_dir,
+            secrets,
+            presentation,
+            legacy,
+            extension,
+            timeouts,
+        } = config;
+        // A plain thread: OS key stores may block, and some start their own async runtime.
+        let (tx, rx) = oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(store::Store::open(&data_dir, secrets.as_ref()));
+        });
+        let (store, report) = rx.await.map_err(|_| OpenError::Worker)??;
+        let tls = Arc::new(tls_config()?);
+        let http = http::HttpClient::new(tls.clone(), &timeouts)
+            .map_err(|e| OpenError::Network(e.to_string()))?;
+        Ok(Self {
+            inner: Rc::new(Inner {
+                store: Arc::new(store),
+                http,
+                tls,
+                runtime,
+                events: EventSender::default(),
+                epoch: tokio::time::Instant::now(),
+                timeouts,
+                presentation,
+                legacy,
+                extension,
+                host: host::HostState::default(),
+                report,
+            }),
+        })
+    }
+
+    /// The shell feeds network reachability, foreground/background and credential changes here.
+    pub fn event_sender(&self) -> EventSender {
+        self.inner.events.clone()
+    }
+
+    pub fn open_report(&self) -> OpenReport {
+        self.inner.report
+    }
+
+    async fn blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&store::Store, &EventSender) -> Result<T, PlatformError> + Send + 'static,
+    ) -> Result<T, PlatformError> {
+        let store = self.inner.store.clone();
+        let events = self.inner.events.clone();
+        self.inner
+            .runtime
+            .spawn_blocking(move || work(&store, &events))
+            .await
+            .map_err(|_| PlatformError::Storage("storage worker stopped".into()))?
+    }
+}
+
+impl Storage for NativePlatform {
+    fn get(&self, area: StorageArea, key: StorageKey) -> HostFuture<'_, Option<Vec<u8>>> {
+        self.blocking(move |store, _| store.get(area, &key))
+            .boxed_local()
+    }
+
+    fn write(&self, area: StorageArea, writes: Vec<StorageWrite>) -> HostFuture<'_, ()> {
+        self.blocking(move |store, events| {
+            events.storage_changed(store.write(area, writes)?);
+            Ok(())
+        })
+        .boxed_local()
+    }
+
+    fn list(&self, area: StorageArea, namespace: String) -> HostFuture<'_, Vec<StorageKey>> {
+        self.blocking(move |store, _| store.list(area, &namespace))
+            .boxed_local()
+    }
+
+    fn transaction(&self, transaction: StorageTransaction) -> HostFuture<'_, bool> {
+        self.blocking(move |store, events| match store.transaction(transaction)? {
+            Some(changed) => {
+                events.storage_changed(changed);
+                Ok(true)
+            }
+            None => Ok(false),
+        })
+        .boxed_local()
+    }
+}
+
+impl LegacyStorage for NativePlatform {
+    fn list_legacy(&self, source: String, namespace: String) -> HostFuture<'_, Vec<String>> {
+        match &self.inner.legacy {
+            Some(legacy) => legacy.list_legacy(source, namespace),
+            None => futures::future::ready(Err(no_legacy())).boxed_local(),
+        }
+    }
+    fn read_legacy(
+        &self,
+        source: String,
+        namespace: String,
+        key: String,
+    ) -> HostFuture<'_, Option<Vec<u8>>> {
+        match &self.inner.legacy {
+            Some(legacy) => legacy.read_legacy(source, namespace, key),
+            None => futures::future::ready(Err(no_legacy())).boxed_local(),
+        }
+    }
+    fn read_legacy_resource(
+        &self,
+        source: String,
+        reference: String,
+    ) -> HostFuture<'_, Option<Vec<u8>>> {
+        match &self.inner.legacy {
+            Some(legacy) => legacy.read_legacy_resource(source, reference),
+            None => futures::future::ready(Err(no_legacy())).boxed_local(),
+        }
+    }
+}
+fn no_legacy() -> PlatformError {
+    PlatformError::Unsupported(
+        "legacy stores are not reachable on this host; the shell must provide them".into(),
+    )
+}
+
+impl Platform for NativePlatform {
+    fn now_epoch_ms(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as u64)
+    }
+
+    fn monotonic_ms(&self) -> u64 {
+        self.inner.epoch.elapsed().as_millis() as u64
+    }
+
+    fn random_bytes(&self, length: usize) -> Result<Vec<u8>, PlatformError> {
+        use ring::rand::SecureRandom;
+        let mut bytes = vec![0; length];
+        ring::rand::SystemRandom::new()
+            .fill(&mut bytes)
+            .map_err(|_| PlatformError::Unsupported("OS randomness is unavailable".into()))?;
+        Ok(bytes)
+    }
+
+    fn sleep(&self, milliseconds: u64) -> LocalBoxFuture<'_, ()> {
+        let _runtime = self.inner.runtime.enter();
+        tokio::time::sleep(Duration::from_millis(milliseconds)).boxed_local()
+    }
+
+    fn yield_to_host(&self) -> LocalBoxFuture<'_, ()> {
+        tokio::task::yield_now().boxed_local()
+    }
+
+    fn events(&self) -> LocalBoxStream<'static, PlatformEvent> {
+        self.inner.events.subscribe()
+    }
+
+    fn http(&self, request: HttpRequest) -> HostFuture<'_, HttpResponse> {
+        let client = self.inner.http.clone();
+        spawn_abortable(
+            &self.inner.runtime,
+            async move { client.send(request).await },
+        )
+        .boxed_local()
+    }
+
+    fn websocket(&self, request: SocketRequest) -> HostFuture<'_, Box<dyn WebSocket>> {
+        let connect = spawn_abortable(
+            &self.inner.runtime,
+            socket::connect(request, self.inner.tls.clone(), self.inner.timeouts),
+        );
+        async move { Ok(Box::new(connect.await?) as Box<dyn WebSocket>) }.boxed_local()
+    }
+
+    fn host(&self, action: HostAction) -> HostFuture<'_, HostReply> {
+        host::dispatch(self, action).boxed_local()
+    }
+}

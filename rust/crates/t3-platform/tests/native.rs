@@ -1,0 +1,736 @@
+//! Native host against loopback servers on ephemeral ports and temp directories.
+#![cfg(not(target_arch = "wasm32"))]
+#![allow(clippy::unwrap_used)]
+
+use futures::{FutureExt, SinkExt, StreamExt};
+use serde_json::{Value, json};
+use std::{collections::BTreeMap, rc::Rc, sync::Arc, time::Duration};
+use t3_client::platform::*;
+use t3_platform::{EphemeralSecretStore, HostExtension, NativeConfig, NativePlatform, Timeouts};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::oneshot,
+};
+use tokio_tungstenite::tungstenite::{
+    Message,
+    handshake::server::{Request as Upgrade, Response as UpgradeResponse},
+    http::HeaderValue,
+};
+
+struct SharedSecrets(Arc<EphemeralSecretStore>);
+impl t3_platform::SecretKeyStore for SharedSecrets {
+    fn load(
+        &self,
+        id: &str,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, t3_platform::SecretStoreError> {
+        self.0.load(id)
+    }
+    fn store(&self, id: &str, secret: &[u8]) -> Result<(), t3_platform::SecretStoreError> {
+        self.0.store(id, secret)
+    }
+}
+
+fn config(dir: &std::path::Path, secrets: &Arc<EphemeralSecretStore>) -> NativeConfig {
+    let mut config = NativeConfig::new(dir, Box::new(SharedSecrets(secrets.clone())));
+    config.timeouts = Timeouts {
+        connect: Duration::from_secs(5),
+        http: Duration::from_millis(400),
+        close: Duration::from_millis(200),
+    };
+    config
+}
+
+async fn platform() -> (NativePlatform, tempfile::TempDir, Arc<EphemeralSecretStore>) {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(EphemeralSecretStore::default());
+    let platform = NativePlatform::open(config(dir.path(), &secrets))
+        .await
+        .unwrap();
+    (platform, dir, secrets)
+}
+
+fn key(namespace: &str, record: &str) -> StorageKey {
+    StorageKey::new(
+        namespace,
+        Some(serde_json::from_value(json!("env-1")).unwrap()),
+        record,
+    )
+}
+fn put(key: &StorageKey, value: &[u8]) -> StorageWrite {
+    StorageWrite {
+        key: key.clone(),
+        value: Some(value.to_vec()),
+    }
+}
+
+#[tokio::test]
+async fn storage_round_trips_both_areas_and_survives_reopen() {
+    let (platform, dir, secrets) = platform().await;
+    let token = key("connection-credential", "route");
+    let cache = key("cache.shell", "current");
+    platform
+        .write(StorageArea::Secure, vec![put(&token, b"secret-bearer")])
+        .await
+        .unwrap();
+    platform
+        .write(StorageArea::Ordinary, vec![put(&cache, b"{}")])
+        .await
+        .unwrap();
+    assert_eq!(
+        platform
+            .get(StorageArea::Ordinary, token.clone())
+            .await
+            .unwrap(),
+        None,
+        "areas are separate"
+    );
+    drop(platform);
+    let reopened = NativePlatform::open(config(dir.path(), &secrets))
+        .await
+        .unwrap();
+    assert_eq!(reopened.open_report().discarded_secure_records, 0);
+    assert_eq!(
+        reopened
+            .get(StorageArea::Secure, token.clone())
+            .await
+            .unwrap(),
+        Some(b"secret-bearer".to_vec())
+    );
+    assert_eq!(
+        reopened
+            .list(StorageArea::Ordinary, "cache.shell".into())
+            .await
+            .unwrap(),
+        vec![cache]
+    );
+    assert!(!format!("{reopened:?}").contains("secret-bearer"));
+}
+
+#[tokio::test]
+async fn committed_writes_announce_their_keys_and_failed_transactions_announce_nothing() {
+    let (platform, _dir, _) = platform().await;
+    let mut events = platform.events();
+    let guard = key("routing-grant", "current");
+    let other = key("query", "a");
+    let stale = StorageTransaction {
+        conditions: vec![StorageCondition {
+            area: StorageArea::Ordinary,
+            key: guard.clone(),
+            expected: Some(b"never".to_vec()),
+        }],
+        ordinary: vec![put(&other, b"1")],
+        secure: vec![put(&guard, b"2")],
+    };
+    assert!(!platform.transaction(stale).await.unwrap());
+    assert_eq!(
+        platform
+            .get(StorageArea::Ordinary, other.clone())
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        platform
+            .get(StorageArea::Secure, guard.clone())
+            .await
+            .unwrap(),
+        None
+    );
+    let fresh = StorageTransaction {
+        conditions: vec![StorageCondition {
+            area: StorageArea::Ordinary,
+            key: guard.clone(),
+            expected: None,
+        }],
+        ordinary: vec![put(&guard, b"g")],
+        secure: vec![put(&other, b"s")],
+    };
+    assert!(platform.transaction(fresh).await.unwrap());
+    platform.event_sender().emit(PlatformEvent::Foreground);
+    let mut seen = Vec::new();
+    while let Some(event) = events.next().await {
+        if event == PlatformEvent::Foreground {
+            break;
+        }
+        seen.push(event);
+    }
+    assert_eq!(
+        seen,
+        vec![
+            PlatformEvent::StorageChanged(guard),
+            PlatformEvent::StorageChanged(other)
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn sleep_and_monotonic_time_follow_the_runtime_clock() {
+    let (platform, _dir, _) = platform().await;
+    let before = platform.monotonic_ms();
+    platform.sleep(60_000).await;
+    assert!(platform.monotonic_ms() - before >= 60_000);
+    assert!(platform.now_epoch_ms() > 1_600_000_000_000);
+    let a = platform.random_bytes(32).unwrap();
+    let b = platform.random_bytes(32).unwrap();
+    assert_eq!(a.len(), 32);
+    assert_ne!(a, b);
+}
+
+/// Reads one HTTP/1.1 request head and its fixed-length body.
+async fn read_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let head_end = loop {
+        let read = stream.read(&mut chunk).await.unwrap();
+        assert!(read > 0, "client closed before sending a request");
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+            break end + 4;
+        }
+    };
+    let head = String::from_utf8(buffer[..head_end].to_vec()).unwrap();
+    let length = head
+        .lines()
+        .find_map(|line| {
+            line.to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .map(|v| v.trim().parse::<usize>().unwrap())
+        })
+        .unwrap_or(0);
+    let mut body = buffer[head_end..].to_vec();
+    while body.len() < length {
+        let read = stream.read(&mut chunk).await.unwrap();
+        body.extend_from_slice(&chunk[..read]);
+    }
+    (head, body)
+}
+
+async fn bind() -> (TcpListener, String) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    (listener, format!("127.0.0.1:{port}"))
+}
+
+fn request(url: String, max: usize) -> HttpRequest {
+    HttpRequest {
+        method: "POST".into(),
+        url,
+        headers: BTreeMap::from([("x-probe".into(), "1".into())]),
+        body: b"payload".to_vec(),
+        credentials: Credentials::Omit,
+        max_response_bytes: max,
+    }
+}
+
+#[tokio::test]
+async fn http_sends_method_headers_and_body_and_returns_status_headers_and_body() {
+    let (platform, _dir, _) = platform().await;
+    let (listener, address) = bind().await;
+    let server = async {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (head, body) = read_request(&mut stream).await;
+        stream
+            .write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 5\r\nX-Reply: a\r\nX-Reply: b\r\n\r\nhello")
+            .await
+            .unwrap();
+        (head, body)
+    };
+    let (response, (head, body)) = tokio::join!(
+        platform.http(request(format!("http://{address}/api/x?y=1"), 1024)),
+        server
+    );
+    let response = response.unwrap();
+    assert!(head.starts_with("POST /api/x?y=1 HTTP/1.1\r\n"));
+    assert!(head.to_ascii_lowercase().contains("x-probe: 1\r\n"));
+    assert_eq!(body, b"payload");
+    assert_eq!(response.status, 201);
+    assert_eq!(response.body, b"hello");
+    assert_eq!(
+        response.headers.get("x-reply").map(String::as_str),
+        Some("a, b")
+    );
+}
+
+#[tokio::test]
+async fn http_does_not_follow_redirects() {
+    let (platform, _dir, _) = platform().await;
+    let (listener, address) = bind().await;
+    let server = async {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_request(&mut stream).await;
+        stream
+            .write_all(format!("HTTP/1.1 302 Found\r\nLocation: http://{address}/elsewhere\r\nContent-Length: 0\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        // A followed redirect would arrive as a second request on this listener.
+        tokio::time::timeout(Duration::from_millis(300), listener.accept())
+            .await
+            .is_err()
+    };
+    let (response, no_second_request) = tokio::join!(
+        platform.http(request(format!("http://{address}/"), 1024)),
+        server
+    );
+    assert_eq!(response.unwrap().status, 302);
+    assert!(no_second_request);
+}
+
+#[tokio::test]
+async fn http_bodies_over_the_cap_fail_with_and_without_a_length() {
+    let (platform, _dir, _) = platform().await;
+    for declared in [true, false] {
+        let (listener, address) = bind().await;
+        let server = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_request(&mut stream).await;
+            let head = if declared {
+                "HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n"
+            } else {
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"
+            };
+            stream.write_all(head.as_bytes()).await.unwrap();
+            // The client may hang up mid-body; that is the point.
+            let _ = stream.write_all(&[b'x'; 4096]).await;
+        };
+        let (response, ()) = tokio::join!(
+            platform.http(request(format!("http://{address}/"), 1000)),
+            server
+        );
+        assert_eq!(
+            response,
+            Err(PlatformError::TooLarge),
+            "declared={declared}"
+        );
+    }
+    // The cap is inclusive.
+    let (listener, address) = bind().await;
+    let server = async {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_request(&mut stream).await;
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n0123456789")
+            .await
+            .unwrap();
+    };
+    let (response, ()) = tokio::join!(
+        platform.http(request(format!("http://{address}/"), 10)),
+        server
+    );
+    assert_eq!(response.unwrap().body, b"0123456789");
+}
+
+#[tokio::test]
+async fn http_to_a_silent_server_times_out_instead_of_hanging() {
+    let (platform, _dir, _) = platform().await;
+    let (listener, address) = bind().await;
+    let (hold, held) = oneshot::channel::<()>();
+    let server = async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_request(&mut stream).await;
+        let _ = held.await;
+        drop(stream);
+    };
+    let client = async move {
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            platform.http(request(format!("http://{address}/"), 10)),
+        )
+        .await
+        .expect("the HTTP timeout did not fire");
+        drop(hold);
+        result
+    };
+    let (result, ()) = tokio::join!(client, server);
+    assert!(
+        matches!(result, Err(PlatformError::Network(_))),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn dropping_an_http_request_closes_its_connection() {
+    // A long HTTP timeout, so only cancellation can close the connection within the bound.
+    let dir = tempfile::tempdir().unwrap();
+    let mut patient = config(dir.path(), &Arc::new(EphemeralSecretStore::default()));
+    patient.timeouts.http = Duration::from_secs(600);
+    let platform = NativePlatform::open(patient).await.unwrap();
+    let (listener, address) = bind().await;
+    let (received, request_seen) = oneshot::channel();
+    let server = async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_request(&mut stream).await;
+        received.send(()).unwrap();
+        let mut rest = [0_u8; 16];
+        // Bounded so a request that keeps running fails the test instead of hanging it.
+        tokio::time::timeout(Duration::from_secs(5), stream.read(&mut rest))
+            .await
+            .expect("the dropped request kept its connection open")
+            .unwrap_or(0)
+    };
+    let client = async move {
+        let mut pending = platform.http(request(format!("http://{address}/"), 10));
+        tokio::select! {
+            _ = &mut pending => panic!("server never answers"),
+            _ = request_seen => {}
+        }
+        drop(pending);
+    };
+    let ((), eof) = tokio::join!(client, server);
+    assert_eq!(eof, 0, "the aborted request's socket reaches EOF");
+}
+
+#[tokio::test]
+async fn http_rejects_non_http_urls_and_invalid_headers_before_sending() {
+    let (platform, _dir, _) = platform().await;
+    for url in ["file:///etc/hosts", "ws://127.0.0.1:1/"] {
+        assert!(matches!(
+            platform.http(request(url.into(), 10)).await,
+            Err(PlatformError::InvalidData(_))
+        ));
+    }
+    let mut bad = request("http://127.0.0.1:1/".into(), 10);
+    bad.headers.insert("x-bad".into(), "line\nbreak".into());
+    assert!(matches!(
+        platform.http(bad).await,
+        Err(PlatformError::InvalidData(_))
+    ));
+}
+
+type ServerSocket = tokio_tungstenite::WebSocketStream<TcpStream>;
+
+#[allow(
+    clippy::result_large_err,
+    reason = "the handshake callback's error type is tungstenite's"
+)]
+async fn accept(listener: &TcpListener, protocol: Option<&'static str>) -> ServerSocket {
+    let (stream, _) = listener.accept().await.unwrap();
+    tokio_tungstenite::accept_hdr_async(
+        stream,
+        move |_: &Upgrade, mut response: UpgradeResponse| {
+            if let Some(protocol) = protocol {
+                response
+                    .headers_mut()
+                    .insert("sec-websocket-protocol", HeaderValue::from_static(protocol));
+            }
+            Ok(response)
+        },
+    )
+    .await
+    .unwrap()
+}
+
+fn socket_request(address: &str, protocols: &[&str]) -> SocketRequest {
+    SocketRequest {
+        url: format!("ws://{address}/ws?wsTicket=secret"),
+        protocols: protocols.iter().map(|p| (*p).to_owned()).collect(),
+    }
+}
+
+struct Echo;
+impl t3_rpc::Handler for Echo {
+    fn handle(&mut self, request: t3_rpc::Request) -> t3_rpc::HandlerOutput {
+        let payload = request.payload;
+        t3_rpc::HandlerOutput::Unary(
+            async move { t3_rpc::Exit::success(json!({ "echo": payload })) }.boxed_local(),
+        )
+    }
+}
+
+#[tokio::test]
+async fn websocket_carries_effect_rpc_to_a_real_t3_rpc_server() {
+    let (platform, _dir, _) = platform().await;
+    let (listener, address) = bind().await;
+    let server = async {
+        let socket = accept(&listener, None).await;
+        let (sink, stream) = socket.split();
+        let sink = sink.with(|frame: t3_rpc::Frame| {
+            futures::future::ready(Ok::<_, tokio_tungstenite::tungstenite::Error>(
+                match frame {
+                    t3_rpc::Frame::Text(text) => Message::text(text),
+                    t3_rpc::Frame::Binary(bytes) => Message::binary(bytes),
+                },
+            ))
+        });
+        let stream = stream.filter_map(|message| {
+            futures::future::ready(match message {
+                Ok(Message::Text(text)) => Some(Ok(t3_rpc::Frame::Text(text.as_str().to_owned()))),
+                Ok(Message::Binary(bytes)) => Some(Ok(t3_rpc::Frame::Binary(bytes.to_vec()))),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+        });
+        let mut server = t3_rpc::AsyncServer::new(Box::pin(sink), Box::pin(stream), Echo);
+        server.state.register("echo", t3_rpc::CallKind::Unary);
+        let _ = server.run().await;
+    };
+    let client = async {
+        let mut socket = platform
+            .websocket(socket_request(&address, &[]))
+            .await
+            .unwrap();
+        let request = t3_rpc::ClientMessage::Request(t3_rpc::Request::new(
+            7_u64.into(),
+            "echo",
+            json!({"n": 1}),
+        ));
+        socket
+            .send(t3_rpc::codec::encode(&request).unwrap())
+            .await
+            .unwrap();
+        let reply = socket.receive().await.unwrap().unwrap();
+        let messages: Vec<t3_rpc::ServerMessage> = t3_rpc::codec::decode(&reply).unwrap();
+        socket.close().await.unwrap();
+        assert_eq!(socket.receive().await.unwrap(), None);
+        assert_eq!(
+            socket.send(t3_rpc::Frame::Text("late".into())).await,
+            Err(PlatformError::Closed)
+        );
+        messages
+    };
+    let (messages, ()) = tokio::join!(client, server);
+    let encoded = serde_json::to_value(&messages[0]).unwrap();
+    assert_eq!(encoded["_tag"], "Exit");
+    assert_eq!(
+        encoded["requestId"],
+        serde_json::to_value(t3_rpc::RequestId::from(7_u64)).unwrap()
+    );
+    assert_eq!(encoded["exit"]["value"], json!({"echo": {"n": 1}}));
+}
+
+#[tokio::test]
+async fn a_dropped_receive_loses_no_frame_and_peer_close_ends_the_stream() {
+    let (platform, _dir, _) = platform().await;
+    let (listener, address) = bind().await;
+    let (go, start) = oneshot::channel::<()>();
+    let server = async {
+        let mut socket = accept(&listener, None).await;
+        start.await.unwrap();
+        socket.send(Message::text("one")).await.unwrap();
+        socket.send(Message::binary(vec![2_u8])).await.unwrap();
+        socket.close(None).await.unwrap();
+    };
+    let client = async {
+        let mut socket = platform
+            .websocket(socket_request(&address, &[]))
+            .await
+            .unwrap();
+        assert!(socket.receive().now_or_never().is_none());
+        go.send(()).unwrap();
+        let mut frames = Vec::new();
+        let drain = async {
+            while let Some(frame) = socket.receive().await.unwrap() {
+                frames.push(frame);
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .expect("peer close did not end the stream");
+        frames
+    };
+    let (frames, ()) = tokio::join!(client, server);
+    assert_eq!(
+        frames,
+        vec![
+            t3_rpc::Frame::Text("one".into()),
+            t3_rpc::Frame::Binary(vec![2])
+        ]
+    );
+}
+
+#[tokio::test]
+async fn close_returns_within_its_timeout_when_the_peer_never_answers() {
+    let (platform, _dir, _) = platform().await;
+    let (listener, address) = bind().await;
+    let (done, finished) = oneshot::channel::<()>();
+    let server = async {
+        let socket = accept(&listener, None).await;
+        // Hold the TCP connection open without ever reading the close frame.
+        let _ = finished.await;
+        drop(socket);
+    };
+    let client = async {
+        let mut socket = platform
+            .websocket(socket_request(&address, &[]))
+            .await
+            .unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(5), socket.close()).await;
+        done.send(()).unwrap();
+        closed
+    };
+    let (closed, ()) = tokio::join!(client, server);
+    assert_eq!(
+        closed.expect("close is bounded by the close timeout"),
+        Ok(())
+    );
+}
+
+#[tokio::test]
+async fn a_server_choosing_an_unoffered_protocol_is_rejected() {
+    let (platform, _dir, _) = platform().await;
+    let (listener, address) = bind().await;
+    let server = async {
+        let _socket = accept(&listener, Some("other")).await;
+    };
+    let (result, ()) = tokio::join!(
+        platform.websocket(socket_request(&address, &["t3"])),
+        server
+    );
+    match result {
+        Err(PlatformError::Network(message)) => assert!(!message.contains("secret")),
+        Err(other) => panic!("unexpected error {other:?}"),
+        Ok(_) => panic!("unoffered protocol accepted"),
+    }
+    let (listener, address) = bind().await;
+    let server = async {
+        let _socket = accept(&listener, Some("t3")).await;
+    };
+    let (result, ()) = tokio::join!(
+        platform.websocket(socket_request(&address, &["t3"])),
+        server
+    );
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn a_rejected_upgrade_does_not_leak_the_ticket_url() {
+    let (platform, _dir, _) = platform().await;
+    let (listener, address) = bind().await;
+    let server = async {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_request(&mut stream).await;
+        stream
+            .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(platform.websocket(socket_request(&address, &[])), server);
+    match result {
+        Err(PlatformError::Network(message)) => {
+            assert!(message.contains("401"));
+            assert!(!message.contains("secret"));
+        }
+        Err(other) => panic!("unexpected error {other:?}"),
+        Ok(_) => panic!("upgrade should fail"),
+    }
+}
+
+#[tokio::test]
+async fn dpop_key_signs_verifiable_es256_and_persists_across_reopen() {
+    let (platform, dir, secrets) = platform().await;
+    let platform = Rc::new(platform);
+    let jwk = platform.dpop_public_jwk().await.unwrap();
+    let thumbprint = platform.dpop_thumbprint().await.unwrap().unwrap();
+    // The client's own signer accepts the key and finds the thumbprints equal.
+    let signer = t3_client::relay::PlatformDpopSigner::from_host(platform.clone())
+        .await
+        .unwrap();
+    use t3_client::relay::DpopSigner;
+    assert_eq!(signer.thumbprint().await.unwrap(), thumbprint);
+
+    let message = b"header.payload".to_vec();
+    let signature = platform.dpop_sign(message.clone()).await.unwrap();
+    assert_eq!(signature.len(), 64);
+    use base64::Engine;
+    let decode = |v: &Value| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(v.as_str().unwrap())
+            .unwrap()
+    };
+    let point = [vec![0x04], decode(&jwk["x"]), decode(&jwk["y"])].concat();
+    let public =
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_FIXED, point);
+    public.verify(&message, &signature).unwrap();
+    assert!(public.verify(b"tampered", &signature).is_err());
+    assert!(jwk.get("d").is_none());
+
+    drop(signer);
+    drop(platform);
+    let reopened = NativePlatform::open(config(dir.path(), &secrets))
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened.dpop_thumbprint().await.unwrap().unwrap(),
+        thumbprint
+    );
+}
+
+#[tokio::test]
+async fn device_identity_is_a_persisted_uuid_and_desktop_sends_no_relay_device() {
+    let (platform, dir, secrets) = platform().await;
+    let id = platform.analytics_device_id().await.unwrap().unwrap();
+    assert_eq!(id.len(), 36);
+    assert_eq!(
+        platform.analytics_device_id().await.unwrap(),
+        Some(id.clone())
+    );
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    assert_eq!(platform.relay_device_id().await.unwrap(), None);
+    drop(platform);
+    let reopened = NativePlatform::open(config(dir.path(), &secrets))
+        .await
+        .unwrap();
+    assert_eq!(reopened.analytics_device_id().await.unwrap(), Some(id));
+}
+
+struct Haptics;
+impl HostExtension for Haptics {
+    fn host(&self, action: HostAction) -> HostFuture<'_, HostReply> {
+        async move {
+            match action {
+                HostAction::Haptic(_) => Ok(HostReply::Unit),
+                other => Err(PlatformError::Unsupported(format!("{other:?}"))),
+            }
+        }
+        .boxed_local()
+    }
+}
+
+#[tokio::test]
+async fn unanswerable_host_actions_are_typed_unsupported_or_go_to_the_shell_extension() {
+    let (platform, _dir, _) = platform().await;
+    for action in [
+        HostAction::Haptic(Haptic::Selection),
+        HostAction::NotificationPermission,
+        HostAction::PickResources {
+            mime: vec![],
+            multiple: false,
+        },
+        HostAction::CloudToken,
+        HostAction::Registrations,
+        HostAction::ClientPresentation,
+    ] {
+        let name = format!("{action:?}");
+        match platform.host(action).await {
+            Err(PlatformError::Unsupported(message)) => assert!(message.contains(&name)),
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+    assert!(matches!(
+        platform.open_url("file:///etc/passwd".into()).await,
+        Err(PlatformError::Denied(_))
+    ));
+
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(EphemeralSecretStore::default());
+    let mut configured = config(dir.path(), &secrets);
+    configured.extension = Some(Rc::new(Haptics));
+    configured.presentation = Some(serde_json::from_value(json!({"label": "Smoke"})).unwrap());
+    let extended = NativePlatform::open(configured).await.unwrap();
+    assert_eq!(extended.haptic(Haptic::Impact).await, Ok(()));
+    let presentation = extended.client_presentation().await.unwrap();
+    assert_eq!(presentation.label.map(|l| l.0), Some("Smoke".into()));
+    assert!(matches!(
+        extended.host(HostAction::StopAudio).await,
+        Err(PlatformError::Unsupported(_))
+    ));
+}
+
+#[tokio::test]
+async fn legacy_storage_without_a_shell_source_is_unsupported() {
+    let (platform, _dir, _) = platform().await;
+    assert!(matches!(
+        platform.list_legacy("mobile".into(), "secure".into()).await,
+        Err(PlatformError::Unsupported(_))
+    ));
+}

@@ -1,0 +1,110 @@
+[package]
+name = "t3-platform"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+integration-server = ["dep:t3-server"]
+
+[dependencies]
+t3-client = { path = "../t3-client" }
+t3-contracts = { path = "../t3-contracts" }
+t3-rpc = { path = "../t3-rpc" }
+base64 = "0.22"
+futures = "0.3"
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+url = "2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+t3-server = { path = "../t3-server", optional = true, features = ["orchestration"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider"] }
+ring = "0.17"
+rusqlite = { version = "0.40", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio = { version = "1", features = ["rt", "net", "time", "sync"] }
+tokio-tungstenite = { version = "0.28", features = ["connect", "rustls-tls-webpki-roots"] }
+webpki-roots = "1"
+zeroize = "1"
+
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+arboard = { version = "3", default-features = false }
+open = "5"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["async-secret-service", "tokio", "crypto-rust"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+  "AbortController",
+  "AbortSignal",
+  "BinaryType",
+  "BroadcastChannel",
+  "Clipboard",
+  "CloseEvent",
+  "Crypto",
+  "CryptoKey",
+  "Document",
+  "DomStringList",
+  "DomException",
+  "EcKeyGenParams",
+  "EcdsaParams",
+  "Event",
+  "EventTarget",
+  "Headers",
+  "IdbDatabase",
+  "IdbFactory",
+  "IdbIndex",
+  "IdbIndexParameters",
+  "IdbKeyRange",
+  "IdbObjectStore",
+  "IdbOpenDbRequest",
+  "IdbRequest",
+  "IdbTransaction",
+  "IdbTransactionMode",
+  "MessageEvent",
+  "Navigator",
+  "Performance",
+  "ReadableStream",
+  "ReadableStreamDefaultReader",
+  "Request",
+  "RequestCredentials",
+  "RequestInit",
+  "RequestRedirect",
+  "Response",
+  "Storage",
+  "SubtleCrypto",
+  "VisibilityState",
+  "WebSocket",
+  "Window",
+] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "io-util", "test-util", "process"] }
+
+[[bin]]
+name = "t3-client-test-server"
+path = "tests/support/client_server.rs"
+required-features = ["integration-server"]
+test = false
+
+[[example]]
+name = "smoke"
+path = "examples/smoke.rs"
+
+[lints]
+workspace = true
