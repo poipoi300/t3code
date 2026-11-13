@@ -12,6 +12,8 @@ pub mod claude_skills;
 pub mod codex_installation;
 pub mod credential_lease;
 pub mod cursor_catalog;
+pub mod cursor_auth;
+pub mod cursor_usage;
 pub mod discovery;
 pub mod environment;
 pub mod fx;

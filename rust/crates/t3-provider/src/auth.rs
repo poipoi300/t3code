@@ -28,6 +28,9 @@ pub enum AuthReply {
 
 #[async_trait]
 pub trait AuthBackend: Send + Sync {
+    fn check_start(&self) -> ServiceResult<()> { Ok(()) }
+    fn check_logout(&self) -> ServiceResult<()> { Ok(()) }
+    fn is_logout_prompt(&self, _text: &str, _has_attachments: bool) -> bool { false }
     async fn methods(&self) -> ServiceResult<Vec<ProviderAuthMethod>>;
     async fn authenticate(&self, method: &str, context: AuthContext) -> ServiceResult<()>;
     async fn logout(&self) -> ServiceResult<Option<String>>;
@@ -116,6 +119,30 @@ impl std::fmt::Debug for AuthContext {
     }
 }
 impl AuthContext {
+    pub async fn commit(
+        &self,
+        operation: impl std::future::Future<Output = ServiceResult<()>> + Send + 'static,
+    ) -> ServiceResult<()> {
+        let inner = self.inner.upgrade().ok_or(ServiceError::Inactive)?;
+        let flow = self.flow_id.clone();
+        tokio::spawn(async move {
+            let mut state = inner.state.lock().await;
+            if inner.cancel.is_cancelled() || state.active.as_ref().is_none_or(|active| active.id != flow || active.cancel.is_cancelled()) {
+                return Err(ServiceError::Inactive);
+            }
+            state.published.state.phase = ProviderAuthPhase::Verifying;
+            state.published.state.authorization_url = None;
+            state.published.state.interaction = Some(None);
+            inner.changes.send_modify(|value| *value = value.wrapping_add(1));
+            let result = operation.await;
+            state.active = None;
+            state.published.state.phase = if result.is_ok() { ProviderAuthPhase::Succeeded } else { ProviderAuthPhase::Failed };
+            state.published.state.expires_at = None;
+            state.published.state.message = Some(result.err().map_or_else(|| "Sign-in complete.".into(), |error| error.to_string()));
+            inner.changes.send_modify(|value| *value = value.wrapping_add(1));
+            result
+        }).await.map_err(|_| ServiceError::Storage)?
+    }
     pub async fn interaction(
         &self,
         interaction: ProviderAuthInteraction,
@@ -299,6 +326,7 @@ impl AuthController {
         if self.inner.cancel.is_cancelled() {
             return Err(ServiceError::Unavailable);
         }
+        self.backend.check_start()?;
         let mut domain = self.binding_guard().await?;
         let mut state = self.inner.state.lock().await;
         if state.active.as_ref().is_some_and(|a| a.owner == owner) {
@@ -526,6 +554,7 @@ impl AuthController {
             .map_err(|_| ServiceError::Storage)?
     }
     async fn logout_inner(&self) -> ServiceResult<AuthState> {
+        self.backend.check_logout()?;
         let mut domain = self.binding_guard().await?;
         {
             let mut state = self.inner.state.lock().await;
@@ -780,6 +809,16 @@ impl Default for AuthService {
     }
 }
 impl AuthService {
+    pub async fn try_handle_prompt_command(&self, id: &ProviderInstanceId, text: &str, has_attachments: bool) -> ServiceResult<bool> {
+        let Ok(controller) = self.controller(id).await else { return Ok(false); };
+        if !controller.backend.is_logout_prompt(text, has_attachments) { return Ok(false); }
+        let _gate = self.credential_changes.lock().await;
+        let current = self.controller(id).await?;
+        if !current.backend.is_logout_prompt(text, has_attachments) { return Ok(false); }
+        self.check_binding(&current).await?;
+        current.logout().await?;
+        Ok(true)
+    }
     pub async fn register(&self, id: ProviderInstanceId, controller: Arc<AuthController>) {
         let mut controllers = self.controllers.write().await;
         if let Some(other) = controllers
