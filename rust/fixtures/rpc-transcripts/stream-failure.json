@@ -1,0 +1,49 @@
+{
+  "effectVersion": "4.1.3",
+  "name": "stream-failure",
+  "frameParts": true,
+  "upgradeHeaders": [
+    [
+      "x-upgrade",
+      "fixture"
+    ],
+    [
+      "x-fixture",
+      "upgrade"
+    ]
+  ],
+  "receivedHeaders": [
+    [
+      [
+        "x-upgrade",
+        "fixture"
+      ],
+      [
+        "x-fixture",
+        "upgrade"
+      ]
+    ]
+  ],
+  "entries": [
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Request\",\"id\":0,\"tag\":\"broken\",\"payload\":null,\"traceId\":\"0f5529576f8d7be22d96ae24fd508680\",\"spanId\":\"661a48edcebedecb\",\"sampled\":true,\"headers\":[]}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Chunk\",\"requestId\":0,\"values\":[1]}"
+    },
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Ack\",\"requestId\":0}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Exit\",\"requestId\":0,\"exit\":{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Fail\",\"error\":{\"code\":\"MID\"}}]}}"
+    }
+  ]
+}

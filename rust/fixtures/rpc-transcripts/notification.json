@@ -1,0 +1,44 @@
+{
+  "effectVersion": "4.1.3",
+  "name": "notification",
+  "frameParts": true,
+  "upgradeHeaders": [
+    [
+      "x-upgrade",
+      "fixture"
+    ],
+    [
+      "x-fixture",
+      "upgrade"
+    ]
+  ],
+  "receivedHeaders": [
+    [
+      [
+        "x-upgrade",
+        "fixture"
+      ],
+      [
+        "x-fixture",
+        "upgrade"
+      ]
+    ]
+  ],
+  "entries": [
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Request\",\"id\":\"\",\"tag\":\"echo\",\"payload\":{\"value\":\"silent\"},\"headers\":[],\"isNotification\":true}"
+    },
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Ping\"}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Pong\"}"
+    }
+  ]
+}

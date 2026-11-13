@@ -1,0 +1,43 @@
+{
+  "effectVersion": "4.1.3",
+  "name": "unary-success",
+  "frameParts": true,
+  "upgradeHeaders": [
+    [
+      "x-upgrade",
+      "fixture"
+    ],
+    [
+      "x-fixture",
+      "upgrade"
+    ]
+  ],
+  "receivedHeaders": [
+    [
+      [
+        "x-upgrade",
+        "fixture"
+      ],
+      [
+        "x-fixture",
+        "upgrade"
+      ],
+      [
+        "x-fixture",
+        "yes"
+      ]
+    ]
+  ],
+  "entries": [
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Request\",\"id\":0,\"tag\":\"echo\",\"payload\":{\"value\":\"hello 🌍\"},\"traceId\":\"cf1858540e00b97995ff48b1c09d7496\",\"spanId\":\"f4ff6074c6293ae4\",\"sampled\":true,\"headers\":[[\"x-fixture\",\"yes\"]]}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Exit\",\"requestId\":0,\"exit\":{\"_tag\":\"Success\",\"value\":\"hello 🌍\"}}"
+    }
+  ]
+}

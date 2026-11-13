@@ -1,0 +1,62 @@
+{
+  "effectVersion": "4.1.3",
+  "name": "ping-after-eof",
+  "frameParts": true,
+  "upgradeHeaders": [
+    [
+      "x-upgrade",
+      "fixture"
+    ],
+    [
+      "x-fixture",
+      "upgrade"
+    ]
+  ],
+  "receivedHeaders": [
+    [
+      [
+        "x-upgrade",
+        "fixture"
+      ],
+      [
+        "x-fixture",
+        "upgrade"
+      ]
+    ]
+  ],
+  "entries": [
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Request\",\"id\":0,\"tag\":\"wait\",\"payload\":{\"key\":\"a\"},\"traceId\":\"d899ee7d50a3a052aaa1925a517451ec\",\"spanId\":\"568c3160f65b469f\",\"sampled\":true,\"headers\":[]}"
+    },
+    {
+      "action": "eof"
+    },
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Eof\"}"
+    },
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Ping\"}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Pong\"}"
+    },
+    {
+      "action": "release",
+      "key": "a",
+      "value": "done"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Exit\",\"requestId\":0,\"exit\":{\"_tag\":\"Success\",\"value\":\"done\"}}"
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "effectVersion": "4.1.3",
+  "name": "stream",
+  "frameParts": true,
+  "upgradeHeaders": [
+    [
+      "x-upgrade",
+      "fixture"
+    ],
+    [
+      "x-fixture",
+      "upgrade"
+    ]
+  ],
+  "receivedHeaders": [
+    [
+      [
+        "x-upgrade",
+        "fixture"
+      ],
+      [
+        "x-fixture",
+        "upgrade"
+      ]
+    ]
+  ],
+  "entries": [
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Request\",\"id\":0,\"tag\":\"numbers\",\"payload\":null,\"traceId\":\"09076a03cb47bcc4f6781cb878421795\",\"spanId\":\"36425e778f238c26\",\"sampled\":true,\"headers\":[]}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Chunk\",\"requestId\":0,\"values\":[1]}"
+    },
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Ack\",\"requestId\":0}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Chunk\",\"requestId\":0,\"values\":[2]}"
+    },
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Ack\",\"requestId\":0}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Chunk\",\"requestId\":0,\"values\":[3]}"
+    },
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Ack\",\"requestId\":0}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Exit\",\"requestId\":0,\"exit\":{\"_tag\":\"Success\",\"value\":null}}"
+    }
+  ]
+}

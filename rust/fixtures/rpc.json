@@ -1,0 +1,4082 @@
+[
+  {
+    "tag": "guestShare.create",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/GuestShareCreateInput"
+    },
+    "success": {
+      "$ref": "#/$defs/GuestShareCreateResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.guestShare.create.error"
+    },
+    "streams": false,
+    "requiredScope": "access:write"
+  },
+  {
+    "tag": "server.probe",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.probe.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.probe.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.probe.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.getConfig",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getConfig.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/ServerConfig"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getConfig.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.refreshProviders",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.refreshProviders.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/ServerProviderUpdatedPayload"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.refreshProviders.error"
+    },
+    "streams": false,
+    "requiredScope": "orchestration:read"
+  },
+  {
+    "tag": "server.updateProvider",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ServerProviderUpdateInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ServerProviderUpdatedPayload"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.updateProvider.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "provider.consumeResetCredit",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProviderConsumeResetCreditInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProviderConsumeResetCreditResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.consumeResetCredit.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "provider.auth.start",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProviderAuthStartInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProviderAuthState"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.auth.start.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "provider.auth.complete",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProviderAuthCompleteInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProviderAuthState"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.auth.complete.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "provider.chatgpt.reconnect-profile",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ChatGptReconnectProfileInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.chatgpt.reconnect-profile.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.chatgpt.reconnect-profile.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "provider.chatgpt.import-profile",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ChatGptImportProfileInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProviderAuthState"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.chatgpt.import-profile.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "provider.chatgpt.handoff.subscribe",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ChatGptHandoffInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ChatGptHandoffState"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.chatgpt.handoff.subscribe.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "provider.auth.respond",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProviderAuthRespondInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProviderAuthState"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.auth.respond.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "provider.auth.cancel",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProviderAuthCancelInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProviderAuthState"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.auth.cancel.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "provider.auth.removeMethod",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProviderAuthRemoveMethodInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProviderAuthState"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.auth.removeMethod.error"
+    },
+    "streams": false,
+    "requiredScope": "providers:manage"
+  },
+  {
+    "tag": "provider.auth.logout",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProviderSetupInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProviderAuthState"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.auth.logout.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "provider.auth.subscribe",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProviderSetupInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProviderAuthState"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.auth.subscribe.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "provider.install.start",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProviderSetupInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProviderInstallState"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.install.start.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "provider.install.cancel",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProviderInstallCancelInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProviderInstallState"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.install.cancel.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "provider.install.subscribe",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProviderSetupInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProviderInstallState"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.install.subscribe.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "provider.install.remove",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProviderSetupInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProviderInstallState"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.install.remove.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.updateServer",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ServerSelfUpdateInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ServerSelfUpdateResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.updateServer.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.getNpmRelease",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ServerNpmReleaseInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getNpmRelease.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getNpmRelease.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.updateServerWithProgress",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ServerSelfUpdateInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ServerSelfUpdateProgressEvent"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.updateServerWithProgress.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.commitDesktopUpdate",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/DesktopUpdateCommitInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ServerSelfUpdateResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.commitDesktopUpdate.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.upsertKeybinding",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ServerUpsertKeybindingInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ServerRemoveKeybindingResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.upsertKeybinding.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.removeKeybinding",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ServerRemoveKeybindingInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ServerRemoveKeybindingResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.removeKeybinding.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.runStorageCleanup",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.runStorageCleanup.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/StorageCleanupReport"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.runStorageCleanup.error"
+    },
+    "streams": false,
+    "requiredScope": "settings:write"
+  },
+  {
+    "tag": "server.getStorageCleanupReport",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getStorageCleanupReport.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getStorageCleanupReport.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getStorageCleanupReport.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.getDatabaseStorage",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getDatabaseStorage.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getDatabaseStorage.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getDatabaseStorage.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.reclaimDatabaseSpace",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.error"
+    },
+    "streams": false,
+    "requiredScope": "environment:maintain"
+  },
+  {
+    "tag": "server.updateSettings",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.updateSettings.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/ServerSettings"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.updateSettings.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "peerLinks.list",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.peerLinks.list.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.peerLinks.list.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.peerLinks.list.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "peerLinks.link",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PeerLinkCreateInput"
+    },
+    "success": {
+      "$ref": "#/$defs/PeerLink"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.peerLinks.link.error"
+    },
+    "streams": false,
+    "requiredScope": "access:write"
+  },
+  {
+    "tag": "peerLinks.unlink",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PeerLinkRemoveInput"
+    },
+    "success": {
+      "$ref": "#/$defs/PeerLinkRemoveResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.peerLinks.unlink.error"
+    },
+    "streams": false,
+    "requiredScope": "access:write"
+  },
+  {
+    "tag": "peerLinks.answerRequest",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PeerLinkRequestAnswerInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.peerLinks.answerRequest.error"
+    },
+    "streams": false,
+    "requiredScope": "access:write"
+  },
+  {
+    "tag": "server.discoverSourceControl",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.discoverSourceControl.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/SourceControlDiscoveryResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.discoverSourceControl.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.checkSecretSource",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.checkSecretSource.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/SecretSourceCheckResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.checkSecretSource.error"
+    },
+    "streams": false,
+    "requiredScope": "settings:write"
+  },
+  {
+    "tag": "server.searchAcpRegistry",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/AcpRegistrySearchInput"
+    },
+    "success": {
+      "$ref": "#/$defs/AcpRegistrySearchResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.searchAcpRegistry.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.prepareAcpRegistryAgent",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/AcpRegistryPrepareInput"
+    },
+    "success": {
+      "$ref": "#/$defs/AcpRegistryPrepareResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.prepareAcpRegistryAgent.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.uninstallAcpRegistryManagedBinary",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/AcpRegistryManagedBinaryUninstallInput"
+    },
+    "success": {
+      "$ref": "#/$defs/AcpRegistryManagedBinaryUninstallResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.uninstallAcpRegistryManagedBinary.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.acceptAcpRegistryUrlAuth",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/AcpRegistryAcceptUrlAuthInput"
+    },
+    "success": {
+      "$ref": "#/$defs/AcpRegistryAcceptUrlAuthResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.acceptAcpRegistryUrlAuth.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.listAcpRegistrySessions",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/AcpRegistryListSessionsInput"
+    },
+    "success": {
+      "$ref": "#/$defs/AcpRegistryListSessionsResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.listAcpRegistrySessions.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.importAcpRegistrySession",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/AcpRegistryImportSessionInput"
+    },
+    "success": {
+      "$ref": "#/$defs/AcpRegistryImportSessionResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.importAcpRegistrySession.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.deleteAcpRegistrySession",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/AcpRegistryDeleteSessionInput"
+    },
+    "success": {
+      "$ref": "#/$defs/AcpRegistryDeleteSessionResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.deleteAcpRegistrySession.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.listAcpRegistryProviders",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/AcpRegistryListProvidersInput"
+    },
+    "success": {
+      "$ref": "#/$defs/AcpRegistryListProvidersResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.listAcpRegistryProviders.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.setAcpRegistryProvider",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/AcpRegistrySetProviderInput"
+    },
+    "success": {
+      "$ref": "#/$defs/AcpRegistrySetProviderResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.setAcpRegistryProvider.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.disableAcpRegistryProvider",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/AcpRegistryDisableProviderInput"
+    },
+    "success": {
+      "$ref": "#/$defs/AcpRegistryDisableProviderResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.disableAcpRegistryProvider.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.logoutAcpRegistry",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/AcpRegistryLogoutInput"
+    },
+    "success": {
+      "$ref": "#/$defs/AcpRegistryLogoutResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.logoutAcpRegistry.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.getTraceDiagnostics",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getTraceDiagnostics.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/ServerTraceDiagnosticsResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getTraceDiagnostics.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.getProcessDiagnostics",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getProcessDiagnostics.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/ServerProcessDiagnosticsResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getProcessDiagnostics.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.getHostResources",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getHostResources.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/HostResourcesSnapshot"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getHostResources.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.getProcessResourceHistory",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ServerProcessResourceHistoryInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ServerProcessResourceHistoryResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getProcessResourceHistory.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.getResourceTelemetryHistory",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ResourceTelemetryHistoryInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ResourceTelemetryHistory"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getResourceTelemetryHistory.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.retryResourceTelemetry",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.retryResourceTelemetry.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/ResourceTelemetryRetryResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.retryResourceTelemetry.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.checkOtlpEndpoint",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OtlpEndpointCheckInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OtlpEndpointCheckResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.checkOtlpEndpoint.error"
+    },
+    "streams": false,
+    "requiredScope": "settings:write"
+  },
+  {
+    "tag": "server.listTextGeneratorModels",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ListTextGeneratorModelsInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ListTextGeneratorModelsResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.listTextGeneratorModels.error"
+    },
+    "streams": false,
+    "requiredScope": "settings:write"
+  },
+  {
+    "tag": "server.prepareTriage",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ServerPrepareTriageInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ServerPrepareTriageResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.prepareTriage.error"
+    },
+    "streams": false,
+    "requiredScope": "orchestration:operate"
+  },
+  {
+    "tag": "server.getUsageSummary",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/UsageSummaryInput"
+    },
+    "success": {
+      "$ref": "#/$defs/UsageSummary"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.getUsageSummary.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.refreshUsageRates",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.refreshUsageRates.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/UsagePricing"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.refreshUsageRates.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.signalProcess",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ServerSignalProcessInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ServerSignalProcessResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.signalProcess.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "scheduledTasks.subscribe",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ScheduledTaskListInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ScheduledTaskListResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.scheduledTasks.subscribe.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "scheduledTasks.upsert",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ScheduledTaskUpsertInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ScheduledTaskMutationResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.scheduledTasks.upsert.error"
+    },
+    "streams": false,
+    "requiredScope": "orchestration:operate"
+  },
+  {
+    "tag": "scheduledTasks.setEnabled",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ScheduledTaskSetEnabledInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ScheduledTaskMutationResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.scheduledTasks.setEnabled.error"
+    },
+    "streams": false,
+    "requiredScope": "orchestration:operate"
+  },
+  {
+    "tag": "scheduledTasks.delete",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ScheduledTaskDeleteInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ScheduledTaskDeleteResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.scheduledTasks.delete.error"
+    },
+    "streams": false,
+    "requiredScope": "orchestration:operate"
+  },
+  {
+    "tag": "scheduledTasks.runNow",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ScheduledTaskRunNowInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ScheduledTaskRunNowResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.scheduledTasks.runNow.error"
+    },
+    "streams": false,
+    "requiredScope": "orchestration:operate"
+  },
+  {
+    "tag": "scheduledTasks.rotateWebhookToken",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ScheduledTaskRotateWebhookTokenInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ScheduledTaskMutationResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.scheduledTasks.rotateWebhookToken.error"
+    },
+    "streams": false,
+    "requiredScope": "orchestration:operate"
+  },
+  {
+    "tag": "secrets.answerRequest",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/SecretRequestAnswerInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.secrets.answerRequest.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "scheduledTasks.listWebhookDeliveries",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ScheduledTaskListWebhookDeliveriesInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ScheduledTaskListWebhookDeliveriesResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.scheduledTasks.listWebhookDeliveries.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "scheduledTasks.getWebhookDelivery",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ScheduledTaskGetWebhookDeliveryInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ScheduledTaskGetWebhookDeliveryResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.scheduledTasks.getWebhookDelivery.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "server.reportClientActivity",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ClientActivityReportInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reportClientActivity.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "cloud.getRelayClientStatus",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.cloud.getRelayClientStatus.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/RelayClientStatusSchema"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.cloud.getRelayClientStatus.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "cloud.installRelayClient",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.cloud.installRelayClient.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/RelayClientInstallProgressEventSchema"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.cloud.installRelayClient.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.list",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestListInput"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestListResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.list.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.listStats",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestListStatsInput"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestListStatsResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.listStats.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.filterOptions",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestFilterOptionsInput"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestFilterOptions"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.filterOptions.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.summary",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestRef"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestSummary"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.summary.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.routing",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestRef"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestRoutingResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.routing.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.routingIdentity",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestRoutingIdentityInput"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestRoutingIdentityResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.routingIdentity.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.stack",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestRef"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.stack.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.stack.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.linkedThreads",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestRef"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestLinkedThreadsResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.linkedThreads.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.detail",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestRef"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestDetail"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.detail.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.preview",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestRef"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestPreview"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.preview.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.checks",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestRef"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.checks.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.checks.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.activity",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestRef"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestActivity"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.activity.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.reviewGuide",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestRef"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestReviewGuideResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.reviewGuide.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.generateReviewGuide",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestRef"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestReviewGuideResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.generateReviewGuide.error"
+    },
+    "streams": false,
+    "requiredScope": "orchestration:operate"
+  },
+  {
+    "tag": "pullRequests.threadComments",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestThreadCommentsInput"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestThreadCommentsResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.threadComments.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.diffFileContents",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestDiffFileContentsInput"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestDiffFileContentsResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.diffFileContents.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.filesViewed",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestRef"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestFilesViewedResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.filesViewed.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.changeBreakdown",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestRef"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestChangeBreakdown"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.changeBreakdown.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.setFilesViewed",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestSetFilesViewedInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.setFilesViewed.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "pullRequests.runAction",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestActionInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.runAction.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.runAction.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "pullRequests.update",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestUpdateInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.update.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "pullRequests.comment",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestCommentInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.comment.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "pullRequests.updateComment",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestCommentUpdateInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.updateComment.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "pullRequests.submitReview",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestSubmitReviewInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.submitReview.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "pullRequests.replyToThread",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestThreadReplyInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.replyToThread.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "pullRequests.setThreadResolution",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestThreadResolutionInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.setThreadResolution.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "pullRequests.setReaction",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestReactionInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.setReaction.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "pullRequests.invalidate",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestInvalidateInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.invalidate.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.reportState",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestReportStateInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.reportState.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.subscribeRefreshes",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.subscribeRefreshes.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/NonNegativeInt"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.subscribeRefreshes.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.subscribeLinkedThreadRefreshes",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.subscribeLinkedThreadRefreshes.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/NonNegativeInt"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.subscribeLinkedThreadRefreshes.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.reviewerCandidates",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestReviewerCandidatesInput"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestReviewerCandidateList"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.reviewerCandidates.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.requestReviewers",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestReviewerRequestInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.requestReviewers.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "pullRequests.labelCandidates",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestRef"
+    },
+    "success": {
+      "$ref": "#/$defs/PullRequestLabelCandidateList"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.labelCandidates.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "pullRequests.setLabels",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PullRequestLabelChangeInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.pullRequests.setLabels.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "sourceControl.lookupRepository",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/SourceControlRepositoryLookupInput"
+    },
+    "success": {
+      "$ref": "#/$defs/SourceControlRepositoryInfo"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.sourceControl.lookupRepository.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "sourceControl.cloneRepository",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/SourceControlCloneRepositoryInput"
+    },
+    "success": {
+      "$ref": "#/$defs/SourceControlCloneRepositoryResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.sourceControl.cloneRepository.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "sourceControl.publishRepository",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/SourceControlPublishRepositoryInput"
+    },
+    "success": {
+      "$ref": "#/$defs/SourceControlPublishRepositoryResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.sourceControl.publishRepository.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "sourceControl.signInStart",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/SourceControlSignInInput"
+    },
+    "success": {
+      "$ref": "#/$defs/SourceControlSignInPrompt"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.sourceControl.signInStart.error"
+    },
+    "streams": false,
+    "requiredScope": "settings:write"
+  },
+  {
+    "tag": "sourceControl.signInWait",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/SourceControlSignInInput"
+    },
+    "success": {
+      "$ref": "#/$defs/SourceControlSignInResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.sourceControl.signInWait.error"
+    },
+    "streams": false,
+    "requiredScope": "settings:write"
+  },
+  {
+    "tag": "sourceControl.signInCancel",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/SourceControlSignInInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.sourceControl.signInCancel.error"
+    },
+    "streams": false,
+    "requiredScope": "settings:write"
+  },
+  {
+    "tag": "sourceControl.appAccess",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/SourceControlAppAccessInput"
+    },
+    "success": {
+      "$ref": "#/$defs/SourceControlAppAccess"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.sourceControl.appAccess.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "sourceControl.starred",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/SourceControlStarredInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.sourceControl.starred.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.sourceControl.starred.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "sourceControl.star",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/SourceControlStarredInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.sourceControl.starred.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.sourceControl.star.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "projectClone.start",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProjectCloneStartInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProjectCloneStartResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.projectClone.start.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "projectClone.cancel",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProjectCloneActionInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProjectCloneActionResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.projectClone.cancel.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "projectClone.retry",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProjectCloneActionInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProjectCloneActionResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.projectClone.retry.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "subscribeProjectClones",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProjectCloneSubscribeInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProjectCloneListEvent"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeProjectClones.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "projects.listEntries",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProjectListEntriesInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProjectListEntriesResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.projects.listEntries.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "projects.listIgnoredFiles",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProjectListIgnoredFilesInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProjectListIgnoredFilesResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.projects.listIgnoredFiles.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "projects.readFile",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProjectReadFileInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProjectReadFileResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.projects.readFile.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "projects.searchContents",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProjectSearchContentsInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProjectSearchContentsResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.projects.searchContents.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "projects.searchEntries",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProjectSearchEntriesInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProjectSearchEntriesResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.projects.searchEntries.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "projects.ensureScratch",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.projects.ensureScratch.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/ProjectEnsureScratchResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.projects.ensureScratch.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "projects.createNew",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProjectCreateNewInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProjectCreateNewResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.projects.createNew.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "projects.createFromThread",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProjectCreateFromThreadInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProjectCreateFromThreadResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.projects.createFromThread.error"
+    },
+    "streams": false,
+    "requiredScope": "orchestration:operate"
+  },
+  {
+    "tag": "projects.writeFile",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProjectWriteFileInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProjectWriteFileResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.projects.writeFile.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "projects.mutate",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProjectMutation"
+    },
+    "success": {
+      "$ref": "#/$defs/Project"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.projects.mutate.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "shell.openInEditor",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/LaunchEditorInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.shell.openInEditor.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "filesystem.browse",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/FilesystemBrowseInput"
+    },
+    "success": {
+      "$ref": "#/$defs/FilesystemBrowseResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.filesystem.browse.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "filesystem.getMetadata",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/FilesystemGetMetadataInput"
+    },
+    "success": {
+      "$ref": "#/$defs/FilesystemGetMetadataResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.filesystem.getMetadata.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "agentSessions.scan",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/AgentSessionScanInput"
+    },
+    "success": {
+      "$ref": "#/$defs/AgentSessionScanResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.agentSessions.scan.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "agentSessions.import",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/AgentSessionImportInput"
+    },
+    "success": {
+      "$ref": "#/$defs/AgentSessionImportResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.agentSessions.import.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "assets.createUrl",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/AssetCreateUrlInput"
+    },
+    "success": {
+      "$ref": "#/$defs/AssetCreateUrlResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.assets.createUrl.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "assets.persistChatAttachments",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PersistChatAttachmentsInput"
+    },
+    "success": {
+      "$ref": "#/$defs/PersistChatAttachmentsResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.assets.persistChatAttachments.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "attachments.createUploadUrl",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/AttachmentCreateUploadUrlInput"
+    },
+    "success": {
+      "$ref": "#/$defs/AttachmentCreateUploadUrlResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.attachments.createUploadUrl.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "attachments.delete",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/AttachmentDeleteInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.attachments.delete.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "mcpApps.callTool",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/McpAppCallToolInput"
+    },
+    "success": {
+      "$ref": "#/$defs/McpAppCallToolResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.mcpApps.callTool.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "mcpApps.toolInfo",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/McpAppToolInfoInput"
+    },
+    "success": {
+      "$ref": "#/$defs/McpAppToolInfo"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.mcpApps.toolInfo.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "mcpApps.readResource",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/McpAppReadResourceInput"
+    },
+    "success": {
+      "$ref": "#/$defs/McpAppReadResourceResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.mcpApps.readResource.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "mcpApps.updateModelContext",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/McpAppUpdateModelContextInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.mcpApps.updateModelContext.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "provider.uploadFeedback",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ProviderUploadFeedbackInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ProviderUploadFeedbackResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.provider.uploadFeedback.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "subscribeVcsStatus",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/VcsStatusSubscriptionInput"
+    },
+    "success": {
+      "$ref": "#/$defs/VcsStatusStreamEvent"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeVcsStatus.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "subscribeVcsBranch",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/VcsStatusInput"
+    },
+    "success": {
+      "$ref": "#/$defs/VcsBranchStatus"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeVcsBranch.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "vcs.refreshBranch",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/VcsStatusInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.vcs.refreshBranch.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "subscribeWorktreeSetup",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/WorktreeSetupSubscribeInput"
+    },
+    "success": {
+      "$ref": "#/$defs/WorktreeSetupStreamEvent"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeWorktreeSetup.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "worktreeSetup.cancel",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/WorktreeSetupCancelInput"
+    },
+    "success": {
+      "$ref": "#/$defs/WorktreeSetupCancelResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.worktreeSetup.cancel.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "vcs.pull",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/VcsPullInput"
+    },
+    "success": {
+      "$ref": "#/$defs/VcsPullResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.vcs.pull.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "vcs.refreshStatus",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.vcs.refreshStatus.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/VcsStatusResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.vcs.refreshStatus.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "git.runStackedAction",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/GitRunStackedActionInput"
+    },
+    "success": {
+      "$ref": "#/$defs/GitActionProgressEvent"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.git.runStackedAction.error"
+    },
+    "streams": true,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "git.resolvePullRequest",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/GitPullRequestRefInput"
+    },
+    "success": {
+      "$ref": "#/$defs/GitResolvePullRequestResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.git.resolvePullRequest.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "git.preparePullRequestThread",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/GitPreparePullRequestThreadInput"
+    },
+    "success": {
+      "$ref": "#/$defs/GitPreparePullRequestThreadResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.git.preparePullRequestThread.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "vcs.listRefs",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/VcsListRefsInput"
+    },
+    "success": {
+      "$ref": "#/$defs/VcsListRefsResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.vcs.listRefs.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "vcs.createWorktree",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.vcs.createWorktree.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/VcsCreateWorktreeResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.vcs.createWorktree.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "vcs.removeWorktree",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/VcsRemoveWorktreeInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.vcs.removeWorktree.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "vcs.createRef",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/VcsCreateRefInput"
+    },
+    "success": {
+      "$ref": "#/$defs/VcsCreateRefResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.vcs.createRef.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "vcs.switchRef",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/VcsSwitchRefInput"
+    },
+    "success": {
+      "$ref": "#/$defs/VcsSwitchRefResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.vcs.switchRef.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "vcs.init",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/VcsInitInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.vcs.init.error"
+    },
+    "streams": false,
+    "requiredScope": "source-control:write"
+  },
+  {
+    "tag": "review.getBranchCommits",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ReviewBranchCommitsInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ReviewBranchCommitsResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.review.getBranchCommits.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "review.getDiffPreview",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ReviewDiffPreviewInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ReviewDiffPreviewResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.review.getDiffPreview.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "review.getDiffFileContents",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/ReviewDiffFileContentsInput"
+    },
+    "success": {
+      "$ref": "#/$defs/ReviewDiffFileContentsResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.review.getDiffFileContents.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "terminal.open",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/TerminalOpenInput"
+    },
+    "success": {
+      "$ref": "#/$defs/TerminalSessionSnapshot"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.terminal.open.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "terminal.attach",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/TerminalAttachInput"
+    },
+    "success": {
+      "$ref": "#/$defs/TerminalAttachStreamEvent"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.terminal.attach.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "terminal.observe",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/TerminalClearInput"
+    },
+    "success": {
+      "$ref": "#/$defs/TerminalAttachStreamEvent"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.terminal.observe.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "terminal.write",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/TerminalWriteInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.terminal.write.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "terminal.resize",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/TerminalResizeInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.terminal.resize.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "terminal.clear",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/TerminalClearInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.terminal.clear.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "terminal.close",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/TerminalCloseInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.terminal.close.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "subscribeTerminalMetadata",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeTerminalMetadata.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/TerminalMetadataStreamEvent"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeTerminalMetadata.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "preview.open",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PreviewOpenInput"
+    },
+    "success": {
+      "$ref": "#/$defs/PreviewSessionSnapshot"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.preview.open.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "preview.resize",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PreviewResizeInput"
+    },
+    "success": {
+      "$ref": "#/$defs/PreviewSessionSnapshot"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.preview.resize.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "preview.adjust",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PreviewAdjustInput"
+    },
+    "success": {
+      "$ref": "#/$defs/PreviewSessionSnapshot"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.preview.adjust.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "preview.close",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PreviewCloseInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.preview.close.error"
+    },
+    "streams": false,
+    "requiredScope": "preview:operate"
+  },
+  {
+    "tag": "preview.list",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PreviewListInput"
+    },
+    "success": {
+      "$ref": "#/$defs/PreviewListResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.preview.list.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "preview.clearProfile",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PreviewClearProfileInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.preview.clearProfile.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "preview.reportProfiles",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PreviewReportProfilesInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.preview.reportProfiles.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "preview.reportStatus",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PreviewReportStatusInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.preview.reportStatus.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "subscribePreviewEvents",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribePreviewEvents.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/PreviewEvent"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribePreviewEvents.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "preview.stopLocalServer",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/PreviewStopLocalServerInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.preview.stopLocalServer.error"
+    },
+    "streams": false,
+    "requiredScope": "terminal:operate"
+  },
+  {
+    "tag": "subscribeDiscoveredLocalServers",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeDiscoveredLocalServers.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/DiscoveredLocalServerList"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeDiscoveredLocalServers.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "device.configure",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/DeviceConfigureInput"
+    },
+    "success": {
+      "$ref": "#/$defs/DeviceServiceState"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.device.configure.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "device.list",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/DeviceListInput"
+    },
+    "success": {
+      "$ref": "#/$defs/DeviceServiceState"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.device.list.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "device.testHost",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/SshDeviceHostConfig"
+    },
+    "success": {
+      "$ref": "#/$defs/DeviceHostSummary"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.device.testHost.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "device.easAccount",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/DeviceEasAccountInput"
+    },
+    "success": {
+      "$ref": "#/$defs/DeviceEasAccount"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.device.easAccount.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "device.simlockIdentity",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/DeviceSimlockIdentityInput"
+    },
+    "success": {
+      "$ref": "#/$defs/DeviceSimlockIdentity"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.device.simlockIdentity.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "device.open",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/DeviceOpenInput"
+    },
+    "success": {
+      "$ref": "#/$defs/DeviceSession"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.device.open.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "device.close",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/DeviceCloseInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.device.close.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "device.shutdown",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/DeviceShutdownInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.device.shutdown.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "device.detail",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/DeviceDetailInput"
+    },
+    "success": {
+      "$ref": "#/$defs/DeviceDetail"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.device.detail.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "device.action",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/DeviceActionInput"
+    },
+    "success": {
+      "$ref": "#/$defs/DeviceDetail"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.device.action.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "subscribeDeviceState",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeDeviceState.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/DeviceServiceState"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeDeviceState.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "subscribeServerConfig",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeServerConfig.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/ServerConfigStreamEvent"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeServerConfig.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "subscribeServerLifecycle",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeServerLifecycle.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/ServerLifecycleStreamEvent"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeServerLifecycle.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "subscribeAuthAccess",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeAuthAccess.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/AuthAccessStreamEvent"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeAuthAccess.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "subscribeResourceTelemetry",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeResourceTelemetry.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/ResourceTelemetrySnapshot"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.subscribeResourceTelemetry.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.dispatchCommand",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2Command"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2DispatchCommandResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.dispatchCommand.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.getWorkflowScript",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2GetWorkflowScriptInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2GetWorkflowScriptResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.getWorkflowScript.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.getNativeChildWork",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2GetNativeChildWorkInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2GetNativeChildWorkResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.getNativeChildWork.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.stopWorkflow",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2StopWorkflowInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.server.reclaimDatabaseSpace.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.stopWorkflow.error"
+    },
+    "streams": false,
+    "requiredScope": "orchestration:operate"
+  },
+  {
+    "tag": "orchestration.forceStopThread",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2ForceStopThreadInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2ForceStopThreadResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.forceStopThread.error"
+    },
+    "streams": false,
+    "requiredScope": "orchestration:operate"
+  },
+  {
+    "tag": "orchestration.getTurnItem",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2GetTurnItemInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2GetTurnItemResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.getTurnItem.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.getTurnDiff",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationGetTurnDiffInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationGetFullThreadDiffResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.getTurnDiff.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.getFullThreadDiff",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationGetFullThreadDiffInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationGetFullThreadDiffResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.getFullThreadDiff.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.searchThreads",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2SearchThreadsInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2SearchThreadsResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.searchThreads.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.searchThread",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2SearchThreadInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2SearchThreadResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.searchThread.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.searchThreadStream",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2SearchThreadInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2SearchThreadResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.searchThreadStream.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.getArchivedShellSnapshot",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.getArchivedShellSnapshot.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2ArchivedShellSnapshot"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.getArchivedShellSnapshot.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.getThreadFamily",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2GetThreadFamilyInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2ThreadFamily"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.getThreadFamily.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.getThreadTitles",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2GetThreadTitlesInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2ThreadTitles"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.getThreadTitles.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.getThreadLinkMetadata",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2GetThreadTitlesInput"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.getThreadLinkMetadata.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.getThreadLinkMetadata.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.getWorktreeThreadIds",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2GetWorktreeThreadIdsInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2WorktreeThreadIds"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.getWorktreeThreadIds.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.getOlderSettledThreads",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2GetOlderSettledThreadsInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2OlderSettledThreadsPage"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.getOlderSettledThreads.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.getThreadProjection",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2GetThreadProjectionInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2ThreadProjection"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.getThreadProjection.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.launchThread",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2ThreadLaunchInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2ThreadLaunchResult"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.launchThread.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.subscribeShell",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2SubscribeShellInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2ShellStreamItem"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.subscribeShell.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.subscribeThread",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2SubscribeThreadInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2ThreadStreamItem"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.subscribeThread.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.subscribeCommandOutput",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2SubscribeCommandOutputInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2CommandOutputFrame"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.subscribeCommandOutput.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "orchestration.subscribePromptSuggestion",
+    "group": "WsRpcGroup",
+    "payload": {
+      "$ref": "#/$defs/OrchestrationV2SubscribePromptSuggestionInput"
+    },
+    "success": {
+      "$ref": "#/$defs/OrchestrationV2PromptSuggestion"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.WsRpcGroup.orchestration.subscribePromptSuggestion.error"
+    },
+    "streams": true,
+    "requiredScope": null
+  },
+  {
+    "tag": "initialize",
+    "group": "AgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.initialize.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.initialize.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.AgentRpcs.initialize.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "auth/login",
+    "group": "AgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.auth~1login.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.auth~1login.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.AgentRpcs.auth~1login.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "auth/logout",
+    "group": "AgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.auth~1logout.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.auth~1logout.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.AgentRpcs.auth~1logout.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/new",
+    "group": "AgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1new.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1new.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1new.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/list",
+    "group": "AgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1list.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1list.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1list.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/fork",
+    "group": "AgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1fork.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1fork.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1fork.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/resume",
+    "group": "AgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1resume.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1resume.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1resume.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/close",
+    "group": "AgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1close.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1close.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1close.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/delete",
+    "group": "AgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1delete.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1delete.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1delete.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "providers/list",
+    "group": "AgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.providers~1list.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.providers~1list.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.AgentRpcs.providers~1list.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "providers/set",
+    "group": "AgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.providers~1set.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.providers~1set.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.AgentRpcs.providers~1set.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "providers/disable",
+    "group": "AgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.providers~1disable.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.providers~1disable.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.AgentRpcs.providers~1disable.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/prompt",
+    "group": "AgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1prompt.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1prompt.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1prompt.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/set_config_option",
+    "group": "AgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1set_config_option.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1set_config_option.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1set_config_option.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/request_permission",
+    "group": "ClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.ClientRpcs.session~1request_permission.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.ClientRpcs.session~1request_permission.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.ClientRpcs.session~1request_permission.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "elicitation/create",
+    "group": "ClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.ClientRpcs.elicitation~1create.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.ClientRpcs.elicitation~1create.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.ClientRpcs.elicitation~1create.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "mcp/connect",
+    "group": "ClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.ClientRpcs.mcp~1connect.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.ClientRpcs.mcp~1connect.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.ClientRpcs.mcp~1connect.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "mcp/message",
+    "group": "ClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.ClientRpcs.mcp~1message.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.ClientRpcs.mcp~1message.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.ClientRpcs.mcp~1message.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "mcp/disconnect",
+    "group": "ClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.ClientRpcs.mcp~1disconnect.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.ClientRpcs.mcp~1disconnect.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.ClientRpcs.mcp~1disconnect.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "initialize",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.initialize.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.initialize.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.initialize.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/set_model",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1set_model.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1set_model.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1set_model.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/set_mode",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1set_mode.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1set_mode.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1set_mode.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "auth/login",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.auth~1login.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.auth~1login.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.auth~1login.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "authenticate",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.authenticate.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.authenticate.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.authenticate.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "auth/logout",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.auth~1logout.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.auth~1logout.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.auth~1logout.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "logout",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.logout.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.logout.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.logout.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/new",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1new.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1new.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1new.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/load",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1load.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1load.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1load.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/list",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1list.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1list.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1list.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/fork",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1fork.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1fork.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1fork.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/resume",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1resume.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1resume.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1resume.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/close",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1close.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1close.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1close.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/delete",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1delete.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.session~1delete.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1delete.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "providers/list",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.providers~1list.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.providers~1list.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.providers~1list.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "providers/set",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.providers~1set.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.providers~1set.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.providers~1set.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "providers/disable",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.AgentRpcs.providers~1disable.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.AgentRpcs.providers~1disable.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.providers~1disable.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/prompt",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1prompt.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1prompt.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1prompt.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/set_config_option",
+    "group": "CompatAgentRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1set_config_option.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1set_config_option.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.session~1set_config_option.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/request_permission",
+    "group": "CompatClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.session~1request_permission.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.session~1request_permission.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.session~1request_permission.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "elicitation/create",
+    "group": "CompatClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatAgentRpcs.initialize.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.elicitation~1create.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.elicitation~1create.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "session/elicitation",
+    "group": "CompatClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.ClientRpcs.elicitation~1create.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.session~1elicitation.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.session~1elicitation.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "_session/elicitation",
+    "group": "CompatClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.ClientRpcs.elicitation~1create.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs._session~1elicitation.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs._session~1elicitation.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "mcp/connect",
+    "group": "CompatClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.ClientRpcs.mcp~1connect.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.ClientRpcs.mcp~1connect.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.mcp~1connect.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "mcp/message",
+    "group": "CompatClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.ClientRpcs.mcp~1message.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.ClientRpcs.mcp~1message.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.mcp~1message.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "mcp/disconnect",
+    "group": "CompatClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.ClientRpcs.mcp~1disconnect.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.ClientRpcs.mcp~1disconnect.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.mcp~1disconnect.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "fs/read_text_file",
+    "group": "CompatClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.fs~1read_text_file.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.fs~1read_text_file.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.fs~1read_text_file.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "fs/write_text_file",
+    "group": "CompatClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.fs~1write_text_file.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.fs~1write_text_file.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.fs~1write_text_file.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "terminal/create",
+    "group": "CompatClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.terminal~1create.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.terminal~1create.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.terminal~1create.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "terminal/output",
+    "group": "CompatClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.terminal~1output.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.terminal~1output.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.terminal~1output.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "terminal/release",
+    "group": "CompatClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.terminal~1release.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.terminal~1release.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.terminal~1release.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "terminal/wait_for_exit",
+    "group": "CompatClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.terminal~1wait_for_exit.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.terminal~1wait_for_exit.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.terminal~1wait_for_exit.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  },
+  {
+    "tag": "terminal/kill",
+    "group": "CompatClientRpcs",
+    "payload": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.terminal~1kill.payload"
+    },
+    "success": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.terminal~1kill.success"
+    },
+    "error": {
+      "$ref": "#/$defs/rpc.CompatClientRpcs.terminal~1kill.error"
+    },
+    "streams": false,
+    "requiredScope": null
+  }
+]

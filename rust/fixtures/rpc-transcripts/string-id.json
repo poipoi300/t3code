@@ -1,0 +1,39 @@
+{
+  "effectVersion": "4.1.3",
+  "name": "string-id",
+  "frameParts": true,
+  "upgradeHeaders": [
+    [
+      "x-upgrade",
+      "fixture"
+    ],
+    [
+      "x-fixture",
+      "upgrade"
+    ]
+  ],
+  "receivedHeaders": [
+    [
+      [
+        "x-upgrade",
+        "fixture"
+      ],
+      [
+        "x-fixture",
+        "upgrade"
+      ]
+    ]
+  ],
+  "entries": [
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Request\",\"id\":\"string\",\"tag\":\"echo\",\"payload\":{\"value\":\"value\"},\"headers\":[]}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Exit\",\"requestId\":\"string\",\"exit\":{\"_tag\":\"Success\",\"value\":\"value\"}}"
+    }
+  ]
+}

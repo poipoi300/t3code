@@ -1,0 +1,29 @@
+{
+  "auto_vacuum": {
+    "auto_vacuum": 2
+  },
+  "busy_timeout": {
+    "timeout": 5000
+  },
+  "checkpoint_fullfsync": {
+    "checkpoint_fullfsync": 1
+  },
+  "foreign_keys": {
+    "foreign_keys": 1
+  },
+  "journal_mode": {
+    "journal_mode": "wal"
+  },
+  "journal_size_limit": {
+    "journal_size_limit": 134217728
+  },
+  "synchronous": {
+    "synchronous": 1
+  },
+  "temp_store": {
+    "temp_store": 2
+  },
+  "wal_autocheckpoint": {
+    "wal_autocheckpoint": 10000
+  }
+}

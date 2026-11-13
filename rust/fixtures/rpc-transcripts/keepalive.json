@@ -1,0 +1,32 @@
+{
+  "effectVersion": "4.1.3",
+  "name": "keepalive",
+  "frameParts": true,
+  "upgradeHeaders": [
+    [
+      "x-upgrade",
+      "fixture"
+    ],
+    [
+      "x-fixture",
+      "upgrade"
+    ]
+  ],
+  "receivedHeaders": [],
+  "entries": [
+    {
+      "action": "tick",
+      "now": 5000
+    },
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Ping\"}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Pong\"}"
+    }
+  ]
+}

@@ -200,6 +200,9 @@ export default defineConfig({
       "apps/mobile/modules/t3-highlights/cpp/generated/**",
       "apps/mobile/modules/t3-highlights/nitrogen/generated/**",
       "*.icon/**",
+      // Rust workspace: cargo fmt owns the sources, and its fixtures are byte-compared with
+      // TypeScript output, so reformatting them breaks the tests that read them.
+      "rust/**",
     ],
     sortPackageJson: {},
     overrides: [
@@ -228,6 +231,7 @@ export default defineConfig({
       "apps/mobile/android/**",
       "apps/mobile/ios/**",
       "apps/mobile/uniwind-types.d.ts",
+      "rust/**",
     ],
     plugins: ["eslint", "oxc", "react", "unicorn", "typescript"],
     jsPlugins: ["./oxlint-plugin-t3code/index.ts", "@shadcn/lint"],

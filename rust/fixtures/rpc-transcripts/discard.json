@@ -1,0 +1,39 @@
+{
+  "effectVersion": "4.1.3",
+  "name": "discard",
+  "frameParts": true,
+  "upgradeHeaders": [
+    [
+      "x-upgrade",
+      "fixture"
+    ],
+    [
+      "x-fixture",
+      "upgrade"
+    ]
+  ],
+  "receivedHeaders": [
+    [
+      [
+        "x-upgrade",
+        "fixture"
+      ],
+      [
+        "x-fixture",
+        "upgrade"
+      ]
+    ]
+  ],
+  "entries": [
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Request\",\"id\":0,\"tag\":\"echo\",\"payload\":{\"value\":\"ignored\"},\"traceId\":\"dac0d45f38e2f2e6162bbf905ac9f6fc\",\"spanId\":\"fc1a926fb61553a6\",\"sampled\":true,\"headers\":[],\"discard\":true}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Exit\",\"requestId\":0,\"exit\":{\"_tag\":\"Success\",\"value\":null}}"
+    }
+  ]
+}

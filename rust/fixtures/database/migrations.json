@@ -1,0 +1,358 @@
+[
+  {
+    "id": 1,
+    "name": "OrchestrationEvents"
+  },
+  {
+    "id": 2,
+    "name": "OrchestrationCommandReceipts"
+  },
+  {
+    "id": 3,
+    "name": "CheckpointDiffBlobs"
+  },
+  {
+    "id": 4,
+    "name": "ProviderSessionRuntime"
+  },
+  {
+    "id": 5,
+    "name": "Projections"
+  },
+  {
+    "id": 6,
+    "name": "ProjectionThreadSessionRuntimeModeColumns"
+  },
+  {
+    "id": 7,
+    "name": "ProjectionThreadMessageAttachments"
+  },
+  {
+    "id": 8,
+    "name": "ProjectionThreadActivitySequence"
+  },
+  {
+    "id": 9,
+    "name": "ProviderSessionRuntimeMode"
+  },
+  {
+    "id": 10,
+    "name": "ProjectionThreadsRuntimeMode"
+  },
+  {
+    "id": 11,
+    "name": "OrchestrationThreadCreatedRuntimeMode"
+  },
+  {
+    "id": 12,
+    "name": "ProjectionThreadsInteractionMode"
+  },
+  {
+    "id": 13,
+    "name": "ProjectionThreadProposedPlans"
+  },
+  {
+    "id": 14,
+    "name": "ProjectionThreadProposedPlanImplementation"
+  },
+  {
+    "id": 15,
+    "name": "ProjectionTurnsSourceProposedPlan"
+  },
+  {
+    "id": 16,
+    "name": "CanonicalizeModelSelections"
+  },
+  {
+    "id": 17,
+    "name": "ProjectionThreadsArchivedAt"
+  },
+  {
+    "id": 18,
+    "name": "ProjectionThreadsArchivedAtIndex"
+  },
+  {
+    "id": 19,
+    "name": "ProjectionSnapshotLookupIndexes"
+  },
+  {
+    "id": 20,
+    "name": "AuthAccessManagement"
+  },
+  {
+    "id": 21,
+    "name": "AuthSessionClientMetadata"
+  },
+  {
+    "id": 22,
+    "name": "AuthSessionLastConnectedAt"
+  },
+  {
+    "id": 23,
+    "name": "ProjectionThreadShellSummary"
+  },
+  {
+    "id": 24,
+    "name": "BackfillProjectionThreadShellSummary"
+  },
+  {
+    "id": 25,
+    "name": "CleanupInvalidProjectionPendingApprovals"
+  },
+  {
+    "id": 26,
+    "name": "CanonicalizeModelSelectionOptions"
+  },
+  {
+    "id": 27,
+    "name": "ProviderSessionRuntimeInstanceId"
+  },
+  {
+    "id": 28,
+    "name": "ProjectionThreadSessionInstanceId"
+  },
+  {
+    "id": 29,
+    "name": "ProjectionThreadDetailOrderingIndexes"
+  },
+  {
+    "id": 30,
+    "name": "ProjectionThreadShellArchiveIndexes"
+  },
+  {
+    "id": 31,
+    "name": "AuthAuthorizationScopes"
+  },
+  {
+    "id": 32,
+    "name": "AuthPairingProofKeyThumbprint"
+  },
+  {
+    "id": 33,
+    "name": "ProjectionThreadsSettled"
+  },
+  {
+    "id": 34,
+    "name": "ProjectionThreadsSnoozed"
+  },
+  {
+    "id": 35,
+    "name": "ProjectionThreadTitleRegeneration"
+  },
+  {
+    "id": 36,
+    "name": "ProjectionThreadsPinned"
+  },
+  {
+    "id": 37,
+    "name": "ProjectionTurnsKeysetIndex"
+  },
+  {
+    "id": 38,
+    "name": "ProjectionThreadsPinOrderKey"
+  },
+  {
+    "id": 39,
+    "name": "ProjectionProjectsDefaultThreadEnvMode"
+  },
+  {
+    "id": 40,
+    "name": "ProjectionProjectFaviconPath"
+  },
+  {
+    "id": 41,
+    "name": "AuthSessionClientConnection"
+  },
+  {
+    "id": 42,
+    "name": "ProjectionThreadLinkedPullRequest"
+  },
+  {
+    "id": 43,
+    "name": "ProjectionThreadsUnsettledAt"
+  },
+  {
+    "id": 44,
+    "name": "ClearAutomaticProjectModelDefaults"
+  },
+  {
+    "id": 45,
+    "name": "ProjectionProjectsAutoPull"
+  },
+  {
+    "id": 46,
+    "name": "RepairAutomaticSettlementTimestamps"
+  },
+  {
+    "id": 47,
+    "name": "ProjectionProjectIcon"
+  },
+  {
+    "id": 48,
+    "name": "ProjectionThreadBranchPullRequest"
+  },
+  {
+    "id": 49,
+    "name": "ProjectionThreadsActiveOrderKey"
+  },
+  {
+    "id": 50,
+    "name": "ProjectionThreadPullRequests"
+  },
+  {
+    "id": 51,
+    "name": "ProjectionThreadMessageContext"
+  },
+  {
+    "id": 52,
+    "name": "ProjectionThreadTitleState"
+  },
+  {
+    "id": 53,
+    "name": "PullRequestFilesViewed"
+  },
+  {
+    "id": 54,
+    "name": "ProjectionThreadsAutoSettleDisabledAt"
+  },
+  {
+    "id": 55,
+    "name": "OrchestrationV2"
+  },
+  {
+    "id": 56,
+    "name": "RemoveRedundantProjectionIndexes"
+  },
+  {
+    "id": 57,
+    "name": "ScheduledTaskWebhooks"
+  },
+  {
+    "id": 58,
+    "name": "WebhookRelayDeliveries"
+  },
+  {
+    "id": 59,
+    "name": "McpAppModelContext"
+  },
+  {
+    "id": 60,
+    "name": "ThreadSnapshotWindowIndexes"
+  },
+  {
+    "id": 61,
+    "name": "PullRequestReviewGuides"
+  },
+  {
+    "id": 62,
+    "name": "ThreadFailureLookupIndex"
+  },
+  {
+    "id": 63,
+    "name": "DropUnusedV1Projections"
+  },
+  {
+    "id": 64,
+    "name": "CanonicalizeThreadPullRequestLinks"
+  },
+  {
+    "id": 65,
+    "name": "CodexUsageNativeTurnIndex"
+  },
+  {
+    "id": 66,
+    "name": "RepairClientSettlementTimestamps"
+  },
+  {
+    "id": 67,
+    "name": "WebhookDedupe"
+  },
+  {
+    "id": 68,
+    "name": "ShellStopRequestIndex"
+  },
+  {
+    "id": 69,
+    "name": "ThreadMessageSearch"
+  },
+  {
+    "id": 70,
+    "name": "PeerLinks"
+  },
+  {
+    "id": 71,
+    "name": "PeerLinkFence"
+  },
+  {
+    "id": 72,
+    "name": "WaitingLinkRequestIndex"
+  },
+  {
+    "id": 73,
+    "name": "ActiveTurnItemIndexes"
+  },
+  {
+    "id": 74,
+    "name": "ExcludeAttachmentPlaceholdersFromSearch"
+  },
+  {
+    "id": 75,
+    "name": "SubagentDeliveryState"
+  },
+  {
+    "id": 76,
+    "name": "ProjectionProjectsPinArchive"
+  },
+  {
+    "id": 77,
+    "name": "RepairBooleanSettledOverride"
+  },
+  {
+    "id": 78,
+    "name": "DropOrchestrationEventCorrelationIndex"
+  },
+  {
+    "id": 79,
+    "name": "DelegatedRecoveryIndexes"
+  },
+  {
+    "id": 80,
+    "name": "ScheduledTaskThreadMode"
+  },
+  {
+    "id": 81,
+    "name": "ProjectionMessageSearchText"
+  },
+  {
+    "id": 82,
+    "name": "TurnItemConversationIndex"
+  },
+  {
+    "id": 83,
+    "name": "CommandReadIndexes"
+  },
+  {
+    "id": 84,
+    "name": "LastExecutedRunIndex"
+  },
+  {
+    "id": 85,
+    "name": "TurnItemCounts"
+  },
+  {
+    "id": 86,
+    "name": "QueuedTurnInputIndex"
+  },
+  {
+    "id": 87,
+    "name": "ProjectionProjectsCustomTitle"
+  },
+  {
+    "id": 88,
+    "name": "TurnItemTypeStatusIndex"
+  },
+  {
+    "id": 89,
+    "name": "ShellThreadReadIndexes"
+  }
+]

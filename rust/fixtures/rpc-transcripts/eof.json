@@ -1,0 +1,52 @@
+{
+  "effectVersion": "4.1.3",
+  "name": "eof",
+  "frameParts": true,
+  "upgradeHeaders": [
+    [
+      "x-upgrade",
+      "fixture"
+    ],
+    [
+      "x-fixture",
+      "upgrade"
+    ]
+  ],
+  "receivedHeaders": [
+    [
+      [
+        "x-upgrade",
+        "fixture"
+      ],
+      [
+        "x-fixture",
+        "upgrade"
+      ]
+    ]
+  ],
+  "entries": [
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Request\",\"id\":0,\"tag\":\"wait\",\"payload\":{\"key\":\"a\"},\"traceId\":\"7b9f6185e25483fa0f4f7db0ec777a7e\",\"spanId\":\"d6a0b9ce17266d56\",\"sampled\":true,\"headers\":[]}"
+    },
+    {
+      "action": "eof"
+    },
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Eof\"}"
+    },
+    {
+      "action": "release",
+      "key": "a",
+      "value": "done"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Exit\",\"requestId\":0,\"exit\":{\"_tag\":\"Success\",\"value\":\"done\"}}"
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "effectVersion": "4.1.3",
+  "name": "interrupt-unary",
+  "frameParts": true,
+  "upgradeHeaders": [
+    [
+      "x-upgrade",
+      "fixture"
+    ],
+    [
+      "x-fixture",
+      "upgrade"
+    ]
+  ],
+  "receivedHeaders": [
+    [
+      [
+        "x-upgrade",
+        "fixture"
+      ],
+      [
+        "x-fixture",
+        "upgrade"
+      ]
+    ]
+  ],
+  "entries": [
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Request\",\"id\":0,\"tag\":\"wait\",\"payload\":{\"key\":\"a\"},\"traceId\":\"56ecbf2050f8358e4e5db6a77806ad09\",\"spanId\":\"374b89e449f7a0cd\",\"sampled\":true,\"headers\":[]}"
+    },
+    {
+      "action": "interrupt",
+      "id": 0
+    },
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Interrupt\",\"requestId\":0}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Exit\",\"requestId\":0,\"exit\":{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Interrupt\",\"fiberId\":67}]}}"
+    }
+  ]
+}

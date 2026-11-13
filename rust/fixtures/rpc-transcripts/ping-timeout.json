@@ -1,0 +1,103 @@
+{
+  "effectVersion": "4.1.3",
+  "name": "ping-timeout",
+  "frameParts": true,
+  "upgradeHeaders": [
+    [
+      "x-upgrade",
+      "fixture"
+    ],
+    [
+      "x-fixture",
+      "upgrade"
+    ]
+  ],
+  "receivedHeaders": [
+    [
+      [
+        "x-upgrade",
+        "fixture"
+      ],
+      [
+        "x-fixture",
+        "upgrade"
+      ]
+    ]
+  ],
+  "entries": [
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Request\",\"id\":0,\"tag\":\"wait\",\"payload\":{\"key\":\"timeout\"},\"traceId\":\"be13adee51f6cb7f2c3b230f0af68f9d\",\"spanId\":\"402b8940363debfd\",\"sampled\":true,\"headers\":[]}"
+    },
+    {
+      "action": "tick",
+      "now": 5000
+    },
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Ping\"}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Pong\"}"
+    },
+    {
+      "action": "drop-server-frames"
+    },
+    {
+      "action": "tick",
+      "now": 10000
+    },
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Ping\"}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Pong\"}"
+    },
+    {
+      "action": "tick",
+      "now": 15000
+    },
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Ping\"}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Pong\"}"
+    },
+    {
+      "action": "tick",
+      "now": 20000
+    },
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Ping\"}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Pong\"}"
+    },
+    {
+      "action": "tick",
+      "now": 25000
+    },
+    {
+      "action": "expect-ping-timeout"
+    },
+    {
+      "action": "disconnect"
+    }
+  ]
+}

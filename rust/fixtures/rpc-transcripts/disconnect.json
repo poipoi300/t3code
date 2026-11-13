@@ -1,0 +1,62 @@
+{
+  "effectVersion": "4.1.3",
+  "name": "disconnect",
+  "frameParts": true,
+  "upgradeHeaders": [
+    [
+      "x-upgrade",
+      "fixture"
+    ],
+    [
+      "x-fixture",
+      "upgrade"
+    ]
+  ],
+  "receivedHeaders": [
+    [
+      [
+        "x-upgrade",
+        "fixture"
+      ],
+      [
+        "x-fixture",
+        "upgrade"
+      ]
+    ],
+    [
+      [
+        "x-upgrade",
+        "fixture"
+      ],
+      [
+        "x-fixture",
+        "upgrade"
+      ]
+    ]
+  ],
+  "entries": [
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Request\",\"id\":0,\"tag\":\"wait\",\"payload\":{\"key\":\"a\"},\"traceId\":\"66e753e0835a669550302d861fc43f99\",\"spanId\":\"0d3582878df9b0c3\",\"sampled\":true,\"headers\":[]}"
+    },
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Request\",\"id\":1,\"tag\":\"endless\",\"payload\":null,\"traceId\":\"c521d98795851e524c4b94d87c565d87\",\"spanId\":\"1a6c7ecd24f47112\",\"sampled\":true,\"headers\":[]}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Chunk\",\"requestId\":1,\"values\":[1]}"
+    },
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Ack\",\"requestId\":1}"
+    },
+    {
+      "action": "disconnect"
+    }
+  ]
+}

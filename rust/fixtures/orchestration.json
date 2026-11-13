@@ -1,0 +1,1090 @@
+{
+  "OrchestrationV2Command": [
+    {
+      "tag": "thread.stop",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.stop"
+      }
+    },
+    {
+      "tag": "thread.create",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.create"
+      }
+    },
+    {
+      "tag": "thread.archive",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.archive"
+      }
+    },
+    {
+      "tag": "thread.guest-share.close",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.guest-share.close"
+      }
+    },
+    {
+      "tag": "thread.guest-message.dismiss",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.guest-message.dismiss"
+      }
+    },
+    {
+      "tag": "thread.unarchive",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.unarchive"
+      }
+    },
+    {
+      "tag": "thread.delete",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.delete"
+      }
+    },
+    {
+      "tag": "thread.settle",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.settle"
+      }
+    },
+    {
+      "tag": "thread.auto-settle",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.auto-settle"
+      }
+    },
+    {
+      "tag": "thread.unsettle",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.unsettle"
+      }
+    },
+    {
+      "tag": "thread.snooze",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.snooze"
+      }
+    },
+    {
+      "tag": "thread.unsnooze",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.unsnooze"
+      }
+    },
+    {
+      "tag": "thread.auto-settle.set",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.auto-settle.set"
+      }
+    },
+    {
+      "tag": "thread.pin",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.pin"
+      }
+    },
+    {
+      "tag": "thread.unpin",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.unpin"
+      }
+    },
+    {
+      "tag": "thread.tag.set",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.tag.set"
+      }
+    },
+    {
+      "tag": "thread.pin.reorder",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.pin.reorder"
+      }
+    },
+    {
+      "tag": "thread.active.reorder",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.active.reorder"
+      }
+    },
+    {
+      "tag": "thread.visit",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.visit"
+      }
+    },
+    {
+      "tag": "thread.mark-unread",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.mark-unread"
+      }
+    },
+    {
+      "tag": "thread.metadata.update",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.metadata.update"
+      }
+    },
+    {
+      "tag": "thread.pull-request.link",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.pull-request.link"
+      }
+    },
+    {
+      "tag": "thread.pull-request.unlink",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.pull-request.unlink"
+      }
+    },
+    {
+      "tag": "thread.pull-request-link.sync",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.pull-request-link.sync"
+      }
+    },
+    {
+      "tag": "thread.pull-request.watch",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.pull-request.watch"
+      }
+    },
+    {
+      "tag": "thread.pull-request.sync",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.pull-request.sync"
+      }
+    },
+    {
+      "tag": "thread.title.regeneration.complete",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.title.regeneration.complete"
+      }
+    },
+    {
+      "tag": "thread.runtime-mode.set",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.runtime-mode.set"
+      }
+    },
+    {
+      "tag": "thread.interaction-mode.set",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.interaction-mode.set"
+      }
+    },
+    {
+      "tag": "thread.model-selection.set",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.model-selection.set"
+      }
+    },
+    {
+      "tag": "provider-session.detach",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.provider-session.detach"
+      }
+    },
+    {
+      "tag": "message.dispatch",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.message.dispatch"
+      }
+    },
+    {
+      "tag": "prepared-run.release",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.prepared-run.release"
+      }
+    },
+    {
+      "tag": "notification.delivery.accept",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.notification.delivery.accept"
+      }
+    },
+    {
+      "tag": "prepared-run.progress",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.prepared-run.progress"
+      }
+    },
+    {
+      "tag": "prepared-run.fail",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.prepared-run.fail"
+      }
+    },
+    {
+      "tag": "prepared-run.retry",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.prepared-run.retry"
+      }
+    },
+    {
+      "tag": "subagent.stop",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.subagent.stop"
+      }
+    },
+    {
+      "tag": "run.interrupt",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.run.interrupt"
+      }
+    },
+    {
+      "tag": "queued-message.promote-to-steer",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.queued-message.promote-to-steer"
+      }
+    },
+    {
+      "tag": "queue.resume",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.queue.resume"
+      }
+    },
+    {
+      "tag": "queued-run.start",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.queued-run.start"
+      }
+    },
+    {
+      "tag": "queued-run.reorder",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.queued-run.reorder"
+      }
+    },
+    {
+      "tag": "queued-run.cancel",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.queued-run.cancel"
+      }
+    },
+    {
+      "tag": "queued-run.edit",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.queued-run.edit"
+      }
+    },
+    {
+      "tag": "runtime-request.respond",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.runtime-request.respond"
+      }
+    },
+    {
+      "tag": "thread.user-input.dismiss",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.user-input.dismiss"
+      }
+    },
+    {
+      "tag": "checkpoint.rollback",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.checkpoint.rollback"
+      }
+    },
+    {
+      "tag": "thread.fork",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.fork"
+      }
+    },
+    {
+      "tag": "thread.merge_back",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.merge_back"
+      }
+    },
+    {
+      "tag": "delegated_task.request",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.delegated_task.request"
+      }
+    },
+    {
+      "tag": "delegated_task.wake-policy",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.delegated_task.wake-policy"
+      }
+    },
+    {
+      "tag": "delegated_task.completion-delivery.acknowledge",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.delegated_task.completion-delivery.acknowledge"
+      }
+    },
+    {
+      "tag": "delegated_task.completion-delivery.dispose",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.delegated_task.completion-delivery.dispose"
+      }
+    },
+    {
+      "tag": "thread.created.record",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.thread.created.record"
+      }
+    },
+    {
+      "tag": "provider.switch",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2Command.provider.switch"
+      }
+    }
+  ],
+  "OrchestrationV2DomainEvent": [
+    {
+      "tag": "thread.created",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.created"
+      }
+    },
+    {
+      "tag": "thread.archived",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.archived"
+      }
+    },
+    {
+      "tag": "thread.unarchived",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.unarchived"
+      }
+    },
+    {
+      "tag": "thread.deleted",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.deleted"
+      }
+    },
+    {
+      "tag": "thread.settled",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.settled"
+      }
+    },
+    {
+      "tag": "thread.unsettled",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.unsettled"
+      }
+    },
+    {
+      "tag": "thread.snoozed",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.snoozed"
+      }
+    },
+    {
+      "tag": "thread.unsnoozed",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.unsnoozed"
+      }
+    },
+    {
+      "tag": "thread.pinned",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.pinned"
+      }
+    },
+    {
+      "tag": "thread.auto-settle-set",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.auto-settle-set"
+      }
+    },
+    {
+      "tag": "thread.unpinned",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.unpinned"
+      }
+    },
+    {
+      "tag": "thread.pin-reordered",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.pin-reordered"
+      }
+    },
+    {
+      "tag": "thread.active-reordered",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.active-reordered"
+      }
+    },
+    {
+      "tag": "thread.tags-updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.tags-updated"
+      }
+    },
+    {
+      "tag": "thread.visited",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.visited"
+      }
+    },
+    {
+      "tag": "thread.marked-unread",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.marked-unread"
+      }
+    },
+    {
+      "tag": "thread.metadata-updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.metadata-updated"
+      }
+    },
+    {
+      "tag": "thread.pull-request-synced",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.pull-request-synced"
+      }
+    },
+    {
+      "tag": "thread.runtime-mode-updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.runtime-mode-updated"
+      }
+    },
+    {
+      "tag": "thread.interaction-mode-updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.interaction-mode-updated"
+      }
+    },
+    {
+      "tag": "thread.model-selection-updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.model-selection-updated"
+      }
+    },
+    {
+      "tag": "thread.provider-switched",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.provider-switched"
+      }
+    },
+    {
+      "tag": "thread.guest-share-updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.guest-share-updated"
+      }
+    },
+    {
+      "tag": "thread.pull-request-link-updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.pull-request-link-updated"
+      }
+    },
+    {
+      "tag": "run.created",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.run.created"
+      }
+    },
+    {
+      "tag": "run.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.run.updated"
+      }
+    },
+    {
+      "tag": "run.background-work-cancelled",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.run.background-work-cancelled"
+      }
+    },
+    {
+      "tag": "run-attempt.created",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.run-attempt.created"
+      }
+    },
+    {
+      "tag": "run-attempt.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.run-attempt.updated"
+      }
+    },
+    {
+      "tag": "node.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.node.updated"
+      }
+    },
+    {
+      "tag": "subagent.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.subagent.updated"
+      }
+    },
+    {
+      "tag": "provider-session.attached",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.provider-session.attached"
+      }
+    },
+    {
+      "tag": "provider-session.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.provider-session.updated"
+      }
+    },
+    {
+      "tag": "provider-session.detached",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.provider-session.detached"
+      }
+    },
+    {
+      "tag": "provider-thread.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.provider-thread.updated"
+      }
+    },
+    {
+      "tag": "provider-turn.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.provider-turn.updated"
+      }
+    },
+    {
+      "tag": "runtime-request.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.runtime-request.updated"
+      }
+    },
+    {
+      "tag": "message.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.message.updated"
+      }
+    },
+    {
+      "tag": "turn-item.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.turn-item.updated"
+      }
+    },
+    {
+      "tag": "plan.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.plan.updated"
+      }
+    },
+    {
+      "tag": "checkpoint-scope.created",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.checkpoint-scope.created"
+      }
+    },
+    {
+      "tag": "checkpoint.captured",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.checkpoint.captured"
+      }
+    },
+    {
+      "tag": "checkpoint.rollback-requested",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.checkpoint.rollback-requested"
+      }
+    },
+    {
+      "tag": "context-handoff.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.context-handoff.updated"
+      }
+    },
+    {
+      "tag": "context-transfer.created",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.context-transfer.created"
+      }
+    },
+    {
+      "tag": "context-transfer.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.context-transfer.updated"
+      }
+    }
+  ],
+  "OrchestrationV2DomainEventJson": [
+    {
+      "tag": "thread.created",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.created"
+      }
+    },
+    {
+      "tag": "thread.archived",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.archived"
+      }
+    },
+    {
+      "tag": "thread.unarchived",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.unarchived"
+      }
+    },
+    {
+      "tag": "thread.deleted",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.deleted"
+      }
+    },
+    {
+      "tag": "thread.settled",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.settled"
+      }
+    },
+    {
+      "tag": "thread.unsettled",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.unsettled"
+      }
+    },
+    {
+      "tag": "thread.snoozed",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.snoozed"
+      }
+    },
+    {
+      "tag": "thread.unsnoozed",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.unsnoozed"
+      }
+    },
+    {
+      "tag": "thread.pinned",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.pinned"
+      }
+    },
+    {
+      "tag": "thread.auto-settle-set",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.auto-settle-set"
+      }
+    },
+    {
+      "tag": "thread.unpinned",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.unpinned"
+      }
+    },
+    {
+      "tag": "thread.pin-reordered",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.pin-reordered"
+      }
+    },
+    {
+      "tag": "thread.active-reordered",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.active-reordered"
+      }
+    },
+    {
+      "tag": "thread.tags-updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.tags-updated"
+      }
+    },
+    {
+      "tag": "thread.visited",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.visited"
+      }
+    },
+    {
+      "tag": "thread.marked-unread",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.marked-unread"
+      }
+    },
+    {
+      "tag": "thread.pull-request-synced",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.pull-request-synced"
+      }
+    },
+    {
+      "tag": "thread.metadata-updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.metadata-updated"
+      }
+    },
+    {
+      "tag": "thread.runtime-mode-updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.runtime-mode-updated"
+      }
+    },
+    {
+      "tag": "thread.interaction-mode-updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.interaction-mode-updated"
+      }
+    },
+    {
+      "tag": "thread.model-selection-updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.model-selection-updated"
+      }
+    },
+    {
+      "tag": "thread.provider-switched",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.provider-switched"
+      }
+    },
+    {
+      "tag": "thread.guest-share-updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.guest-share-updated"
+      }
+    },
+    {
+      "tag": "thread.pull-request-link-updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.pull-request-link-updated"
+      }
+    },
+    {
+      "tag": "run.created",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.run.created"
+      }
+    },
+    {
+      "tag": "run.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.run.updated"
+      }
+    },
+    {
+      "tag": "run.background-work-cancelled",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.run.background-work-cancelled"
+      }
+    },
+    {
+      "tag": "run-attempt.created",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.run-attempt.created"
+      }
+    },
+    {
+      "tag": "run-attempt.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.run-attempt.updated"
+      }
+    },
+    {
+      "tag": "node.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.node.updated"
+      }
+    },
+    {
+      "tag": "subagent.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.subagent.updated"
+      }
+    },
+    {
+      "tag": "provider-session.attached",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.provider-session.attached"
+      }
+    },
+    {
+      "tag": "provider-session.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.provider-session.updated"
+      }
+    },
+    {
+      "tag": "provider-session.detached",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.provider-session.detached"
+      }
+    },
+    {
+      "tag": "provider-thread.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.provider-thread.updated"
+      }
+    },
+    {
+      "tag": "provider-turn.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.provider-turn.updated"
+      }
+    },
+    {
+      "tag": "runtime-request.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.runtime-request.updated"
+      }
+    },
+    {
+      "tag": "message.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.message.updated"
+      }
+    },
+    {
+      "tag": "turn-item.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.turn-item.updated"
+      }
+    },
+    {
+      "tag": "plan.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.plan.updated"
+      }
+    },
+    {
+      "tag": "checkpoint-scope.created",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.checkpoint-scope.created"
+      }
+    },
+    {
+      "tag": "checkpoint.captured",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.checkpoint.captured"
+      }
+    },
+    {
+      "tag": "checkpoint.rollback-requested",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.checkpoint.rollback-requested"
+      }
+    },
+    {
+      "tag": "context-handoff.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.context-handoff.updated"
+      }
+    },
+    {
+      "tag": "context-transfer.created",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.context-transfer.created"
+      }
+    },
+    {
+      "tag": "context-transfer.updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.context-transfer.updated"
+      }
+    }
+  ],
+  "ProjectMutation": [
+    {
+      "tag": "project.create",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/ProjectMutation.project.create"
+      }
+    },
+    {
+      "tag": "project.update",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/ProjectMutation.project.update"
+      }
+    },
+    {
+      "tag": "project.delete",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/ProjectMutation.project.delete"
+      }
+    }
+  ],
+  "ApplicationProjectEvent": [
+    {
+      "tag": "project.created",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/ApplicationProjectEvent.project.created"
+      }
+    },
+    {
+      "tag": "project.meta-updated",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/ApplicationProjectEvent.project.meta-updated"
+      }
+    },
+    {
+      "tag": "project.deleted",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/ApplicationProjectEvent.project.deleted"
+      }
+    }
+  ]
+}

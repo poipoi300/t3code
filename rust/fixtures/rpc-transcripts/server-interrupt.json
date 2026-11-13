@@ -1,0 +1,39 @@
+{
+  "effectVersion": "4.1.3",
+  "name": "server-interrupt",
+  "frameParts": true,
+  "upgradeHeaders": [
+    [
+      "x-upgrade",
+      "fixture"
+    ],
+    [
+      "x-fixture",
+      "upgrade"
+    ]
+  ],
+  "receivedHeaders": [
+    [
+      [
+        "x-upgrade",
+        "fixture"
+      ],
+      [
+        "x-fixture",
+        "upgrade"
+      ]
+    ]
+  ],
+  "entries": [
+    {
+      "direction": "client",
+      "kind": "text",
+      "data": "{\"_tag\":\"Request\",\"id\":0,\"tag\":\"serverInterrupt\",\"payload\":null,\"traceId\":\"9d56b54cc35087059166c936afd56e44\",\"spanId\":\"96f19ecfaed8bc8c\",\"sampled\":true,\"headers\":[]}"
+    },
+    {
+      "direction": "server",
+      "kind": "text",
+      "data": "{\"_tag\":\"Exit\",\"requestId\":0,\"exit\":{\"_tag\":\"Failure\",\"cause\":[{\"_tag\":\"Interrupt\",\"fiberId\":242}]}}"
+    }
+  ]
+}
