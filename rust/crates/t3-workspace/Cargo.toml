@@ -1,0 +1,42 @@
+[package]
+name = "t3-workspace"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+t3-contracts = { path = "../t3-contracts" }
+t3-process = { path = "../t3-process" }
+t3-git = { path = "../t3-git" }
+cap-std = "3"
+cap-fs-ext = "3"
+t3-terminal = { path = "../t3-terminal" }
+tokio = { version = "1", features = ["fs", "io-util", "rt", "sync", "time", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+fff-search = "=0.11.0"
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+regex = "1"
+dunce = "1"
+percent-encoding = "2"
+icu_collator = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+rustix = { version = "1", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+winx = "0.36.4"
+winsafe = { version = "0.0.19", features = ["kernel"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[lints]
+workspace = true
