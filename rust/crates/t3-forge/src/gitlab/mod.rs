@@ -3,6 +3,8 @@ mod checkout;
 mod read;
 mod write;
 mod queries;
+mod activity;
+mod adapter;
 use crate::{Result,ForgeError,FailureReason,cli::*,forge::*,model::*,support::*};
 use serde_json::{Value,json};
 use std::{path::Path,sync::Arc,collections::HashMap,time::Duration};
@@ -14,10 +16,12 @@ pub struct GitLab {
     git:t3_git::Git,
     environment:t3_process::Environment,
     capabilities:PullRequestCapabilities,
-    details:Arc<Mutex<HashMap<String,(tokio::time::Instant,Value)>>>,
+    details:Arc<Mutex<HashMap<String,(tokio::time::Instant,u64,Value)>>>,
     projects:Arc<Mutex<HashMap<String,(tokio::time::Instant,Value)>>>,
     stop:t3_process::CancellationToken,
     tasks:tokio_util::task::TaskTracker,
+    generation:Arc<std::sync::atomic::AtomicU64>,
+    revision:u64,
 }
 fn error(operation:&str,detail:&str)->ForgeError{ForgeError::provider("gitlab",operation,FailureReason::Failed,detail)}
 fn parse<T:serde::de::DeserializeOwned>(value:Value,operation:&str)->Result<T>{crate::support::decode("gitlab",operation,value)}
@@ -25,9 +29,9 @@ fn project(repository:&str)->Result<String>{let repository=repository.trim();if 
 fn mr(input:&PullRequestInput)->Result<String>{if input.number==0||input.number>i32::MAX as u64{return Err(error("reference","Invalid merge request number."));}Ok(format!("{}/merge_requests/{}",project(&input.repo.repository)?,input.number))}
 fn key(input:&PullRequestInput)->String{format!("{}\0{}\0{}\0{}",input.repo.cwd,input.repo.host.to_lowercase(),input.repo.repository,input.number)}
 impl GitLab {
-    pub fn new(git:t3_git::Git)->Result<Self>{Ok(Self{cli:Arc::new(ProcessForgeCli),git,environment:Default::default(),capabilities:parse(json!({"diff":true,"comment":true,"actions":["merge","ready","draft","close","reopen","delete-branch","update-branch","enable-auto-merge","disable-auto-merge","revert"],"mergeMethods":["merge","squash","rebase"],"deleteBranch":true,"updateMethods":["rebase"],"search":true,"reactions":true,"mentions":true,"referenceSigils":["#","!"],"viewedFiles":"environment","review":{"inlineComment":true,"rangeComment":true,"reply":true,"resolve":true,"verdicts":["comment","approve","request-changes"]},"reviewers":{"request":true,"listCandidates":true,"searchCandidates":true},"labels":true,"edit":{"changeRequest":true,"comment":true,"maintainerEdits":true}}),"capabilities")?,details:Default::default(),projects:Default::default(),stop:t3_process::CancellationToken::new(),tasks:{let tasks=tokio_util::task::TaskTracker::new();tasks.close();tasks}})}
-    pub fn with_cli(mut self,cli:Arc<dyn ForgeCli>)->Self{self.cli=cli;self}
-    pub fn with_environment(mut self,environment:t3_process::Environment)->Self{self.environment=environment;self}
+    pub fn new(git:t3_git::Git)->Result<Self>{Ok(Self{cli:Arc::new(ProcessForgeCli),git,environment:Default::default(),capabilities:parse(json!({"diff":true,"comment":true,"actions":["merge","ready","draft","close","reopen","delete-branch","update-branch","enable-auto-merge","disable-auto-merge","revert"],"mergeMethods":["merge","squash","rebase"],"deleteBranch":true,"updateMethods":["rebase"],"search":true,"reactions":true,"mentions":true,"referenceSigils":["#","!"],"viewedFiles":"environment","review":{"inlineComment":true,"rangeComment":true,"reply":true,"resolve":true,"verdicts":["comment","approve","request-changes"]},"reviewers":{"request":true,"listCandidates":true,"searchCandidates":true},"labels":true,"edit":{"changeRequest":true,"comment":true,"maintainerEdits":true}}),"capabilities")?,details:Default::default(),projects:Default::default(),generation:Default::default(),revision:0,stop:t3_process::CancellationToken::new(),tasks:{let tasks=tokio_util::task::TaskTracker::new();tasks.close();tasks}})}
+    pub fn with_cli(mut self,cli:Arc<dyn ForgeCli>)->Self{self.cli=cli;self.details=Default::default();self.projects=Default::default();self.revision=self.revision.wrapping_add(1);self}
+    pub fn with_environment(mut self,environment:t3_process::Environment)->Self{self.environment=environment;self.details=Default::default();self.projects=Default::default();self.revision=self.revision.wrapping_add(1);self}
     async fn execute(&self,cwd:&Path,host:Option<&str>,operation:&str,args:Vec<String>,stdin:Option<Value>,max_bytes:usize)->Result<CliResponse>{
         let mut environment=self.environment.clone();
         if let Some(host)=host{let host=host.trim().to_lowercase();if !crate::github::transport::valid_host(&host){return Err(error(operation,"Invalid GitLab host."));}environment.insert("GITLAB_HOST".into(),Some(host.into()));}
@@ -49,5 +53,4 @@ impl GitLab {
     async fn api(&self,repo:&ProviderRepositoryRef,operation:&str,method:&str,path:&str,body:Option<Value>)->Result<Value>{let bytes=self.api_raw(repo,operation,method,path,body,8*1024*1024).await?;if bytes.is_empty(){return Ok(Value::Null);}serde_json::from_slice(&bytes).map_err(|_|error(operation,"GitLab returned invalid JSON."))}
     async fn graphql(&self,repo:&ProviderRepositoryRef,operation:&str,query:&str,variables:Value)->Result<Value>{let value=self.api(repo,operation,"POST","graphql",Some(json!({"query":query,"variables":variables}))).await?;if rows(&value["errors"]).next().is_some(){return Err(error(operation,"GitLab could not complete the GraphQL operation."));}value.get("data").filter(|v|!v.is_null()).cloned().ok_or_else(||error(operation,"GitLab returned no GraphQL data."))}
     fn vars(input:&PullRequestInput)->Value{json!({"fullPath":input.repo.repository,"iid":input.number.to_string()})}
-    async fn invalidate(&self,input:&PullRequestInput){self.details.lock().await.remove(&key(input));}
 }

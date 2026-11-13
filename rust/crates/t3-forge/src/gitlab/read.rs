@@ -16,8 +16,8 @@ impl GitLab {
         Ok(d::permissions(raw,label["project"]["mergeRequest"]["userPermissions"]["adminMergeRequest"]==true,maintainer,delete))
     }
     pub(super) async fn read_detail(&self,input:&PullRequestInput,cached:bool)->Result<Value>{
-        let cache_key=key(input);
-        if cached&&let Some((_,value))=self.details.lock().await.get(&cache_key).filter(|(at,_)|at.elapsed()<Duration::from_secs(60)){return Ok(value.clone());}
+        let cache_key=key(input);let generation=self.generation.load(std::sync::atomic::Ordering::Acquire);
+        if cached&&let Some((_,_,value))=self.details.lock().await.get(&cache_key).filter(|(at,epoch,_)|*epoch==generation&&at.elapsed()<Duration::from_secs(60)){return Ok(value.clone());}
         let raw=self.raw_detail(input).await?;
         let permissions=self.permission_values(input,&raw).await?;
         let project_key=format!("{}\0{}\0{}",input.repo.cwd,input.repo.host,input.repo.repository);
@@ -32,10 +32,10 @@ impl GitLab {
         }
         let mut value=d::detail(&raw,permissions,d::merge_capabilities(&project_settings),checks)?;
         self.add_stats(input,&mut value).await?;self.add_states(input,&mut value).await?;
-        if cached{let mut cache=self.details.lock().await;if cache.len()>=256{cache.clear();}cache.insert(cache_key,(tokio::time::Instant::now(),value.clone()));}Ok(value)
+        if cached&&self.generation.load(std::sync::atomic::Ordering::Acquire)==generation{let mut cache=self.details.lock().await;if cache.len()>=256{cache.clear();}cache.insert(cache_key,(tokio::time::Instant::now(),generation,value.clone()));}Ok(value)
     }
-    async fn add_stats(&self,input:&PullRequestInput,value:&mut Value)->Result<()>{let raw=self.graphql(&input.repo,"getMergeRequestStats",q::MERGE_REQUEST_STATS_GRAPHQL_QUERY,json!({"fullPath":input.repo.repository,"iids":[input.number.to_string()]})).await?;for node in nodes(&raw["project"]["mergeRequests"]){if node["iid"].as_str().and_then(|s|s.parse::<u64>().ok())==Some(input.number){for field in ["additions","deletions"]{if let Some(count)=node["diffStatsSummary"][field].as_u64(){value[field]=json!(count);}}}}Ok(())}
-    async fn add_states(&self,input:&PullRequestInput,value:&mut Value)->Result<()>{let raw=self.graphql(&input.repo,"getListStates",q::LIST_STATES_GRAPHQL_QUERY,json!({"fullPath":input.repo.repository,"iids":[input.number.to_string()]})).await?;if let Some(node)=nodes(&raw["project"]["mergeRequests"]).find(|n|n["iid"].as_str().and_then(|s|s.parse::<u64>().ok())==Some(input.number)){d::apply_states(value,node,raw["metadata"]["enterprise"].as_bool());}Ok(())}
+    pub(super) async fn add_stats(&self,input:&PullRequestInput,value:&mut Value)->Result<()>{let raw=self.graphql(&input.repo,"getMergeRequestStats",q::MERGE_REQUEST_STATS_GRAPHQL_QUERY,json!({"fullPath":input.repo.repository,"iids":[input.number.to_string()]})).await?;for node in nodes(&raw["project"]["mergeRequests"]){if node["iid"].as_str().and_then(|s|s.parse::<u64>().ok())==Some(input.number){for field in ["additions","deletions"]{if let Some(count)=node["diffStatsSummary"][field].as_u64(){value[field]=json!(count);}}}}Ok(())}
+    pub(super) async fn add_states(&self,input:&PullRequestInput,value:&mut Value)->Result<()>{let raw=self.graphql(&input.repo,"getListStates",q::LIST_STATES_GRAPHQL_QUERY,json!({"fullPath":input.repo.repository,"iids":[input.number.to_string()]})).await?;if let Some(node)=nodes(&raw["project"]["mergeRequests"]).find(|n|n["iid"].as_str().and_then(|s|s.parse::<u64>().ok())==Some(input.number)){d::apply_states(value,node,raw["metadata"]["enterprise"].as_bool());}Ok(())}
     pub(super) async fn list_requests(&self,input:ListInput)->Result<ProviderChangeRequestPage>{
         let graph=if let Some(cursor)=&input.cursor{cursor.resume_after.is_some()}else{self.graphql(&input.repo,"supportsGraphqlList",q::SERVER_VERSION_GRAPHQL_QUERY,json!({})).await.ok().and_then(|v|text(&v["metadata"],"version").map(str::to_string)).is_some_and(|v|{let mut parts=v.split('.').filter_map(|n|n.parse::<u64>().ok());let major=parts.next().unwrap_or(0);major>17||major==17&&parts.next().unwrap_or(0)>=9})};
         if graph{match self.graph_list(&input).await{Ok(value)=>return Ok(value),Err(error) if input.cursor.is_some()||matches!(error.reason(),Some(FailureReason::MissingTool|FailureReason::Unauthenticated|FailureReason::RateLimited))=>return Err(error),Err(_)=>{}}}

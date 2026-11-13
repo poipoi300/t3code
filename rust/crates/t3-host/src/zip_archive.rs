@@ -50,6 +50,9 @@ impl<R: Read + Seek> Archive<R> {
             .map_err(|_| Error::Io)?;
         let zip =
             ZipArchive::new(reader).map_err(|_| Error::Refused("archive could not be read"))?;
+        if zip.has_duplicate_names() {
+            return Err(Error::Refused("archive repeats a member"));
+        }
         if zip.len() > limits.entries {
             return Err(Error::Refused("archive exceeds entry count limit"));
         }
