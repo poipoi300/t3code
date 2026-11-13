@@ -34,6 +34,7 @@ pub struct RemoteParent {
     pub active: Option<ActiveParent>,
     pub repository_key: Option<String>,
 }
+#[derive(Clone)]
 pub struct RemoteTask {
     pub key: TaskKey,
     pub remote: OrchestrationV2RemoteTaskChild,

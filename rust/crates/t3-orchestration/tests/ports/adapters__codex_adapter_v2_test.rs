@@ -329,6 +329,24 @@ fn malformed_native_policy_fields_fail_before_turn_start() {
 }
 
 #[test]
+fn settled_turn_payloads_release_when_idle_and_wait_for_retained_work() {
+    let options=kit::options();
+    let mut projection=mapping::Projection::new(options.clock,options.ids,kit::open_input(),options.instance_id);
+    projection.prepare_start(kit::turn_input("native-thread",1,"work").unwrap()).unwrap();
+    projection.notification("turn/started",json!({"threadId":"native-thread","turn":kit::native_turn("idle-turn","inProgress")})).unwrap();
+    projection.notification("turn/completed",json!({"threadId":"native-thread","turn":kit::native_turn("idle-turn","completed")})).unwrap();
+    assert_eq!(projection.release_settled_turns(),1);
+    assert!(projection.notification("item/completed",json!({"threadId":"native-thread","turnId":"idle-turn","item":{"type":"agentMessage","id":"late","text":"stale"}})).unwrap().is_empty());
+    projection.prepare_start(kit::turn_input("native-thread",2,"work").unwrap()).unwrap();
+    projection.notification("turn/started",json!({"threadId":"native-thread","turn":kit::native_turn("background-turn","inProgress")})).unwrap();
+    projection.notification("item/started",json!({"threadId":"native-thread","turnId":"background-turn","item":native_background_command("retained","inProgress")})).unwrap();
+    projection.notification("turn/completed",json!({"threadId":"native-thread","turn":kit::native_turn("background-turn","completed")})).unwrap();
+    assert_eq!(projection.release_settled_turns(),0);
+    projection.notification("item/completed",json!({"threadId":"native-thread","turnId":"background-turn","item":native_background_command("retained","completed")})).unwrap();
+    assert_eq!(projection.release_settled_turns(),1);
+}
+
+#[test]
 fn failed_turn_terminalizes_tool_nodes_before_the_terminal_signal() {
     let options = kit::options();
     let mut projection = mapping::Projection::new(
@@ -2086,6 +2104,34 @@ async fn stopped_turns_contain_late_commands_and_confirm_untracked_process_clean
             .unwrap()
     );
     assert!(requests.try_recv().is_err());
+    h.runtime.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_late_command_containment_keeps_the_session_alive_and_work_pending_for_stop_retry() {
+    let mut h=kit::Harness::open().await.unwrap();
+    h.start("native-turn").await.unwrap();
+    let stop=InterruptInput {provider_thread:kit::thread("native-thread").unwrap(),provider_turn_id:ProviderTurnId(mapping::derived("provider-turn","native-turn","native-turn")),request_runtime_restart:false};
+    let runtime=h.runtime.clone();
+    let server=async {
+        let request=h.peer.read().await.unwrap();assert_eq!(request["method"],"turn/interrupt");
+        h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":kit::native_turn("native-turn","interrupted")}})).await.unwrap();
+        h.peer.respond(&request,json!({})).await.unwrap();
+    };
+    let (result,_)=tokio::join!(runtime.interrupt_turn(stop.clone()),server);result.unwrap();
+    h.collect_until(|event|matches!(event.kind,ProviderEventKind::Terminal{..})).await.unwrap();
+    h.peer.write(&json!({"method":"item/started","params":{"threadId":"native-thread","turnId":"native-turn","item":native_background_command("late-failure","inProgress")}})).await.unwrap();
+    let request=h.peer.read().await.unwrap();assert_eq!(request["method"],"thread/backgroundTerminals/terminate");
+    h.peer.respond(&request,json!({"terminated":false})).await.unwrap();
+    h.collect_until(|event|matches!(event.kind,ProviderEventKind::BackgroundWork{pending:true,..})).await.unwrap();
+    assert!(h.runtime.pending_background_work(Some(kit::thread("native-thread").unwrap()),true).await.unwrap());
+    let runtime=h.runtime.clone();
+    let server=async {
+        let request=h.peer.read().await.unwrap();assert_eq!(request["method"],"thread/backgroundTerminals/terminate");
+        h.peer.respond(&request,json!({"terminated":true})).await.unwrap();
+    };
+    let (result,_)=tokio::join!(runtime.interrupt_turn(stop),server);result.unwrap();
+    assert!(!h.runtime.pending_background_work(Some(kit::thread("native-thread").unwrap()),true).await.unwrap());
     h.runtime.close().await.unwrap();
 }
 
