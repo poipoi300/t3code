@@ -662,3 +662,31 @@ impl ReplayCursor {
         Err(self.mismatch("input closed before transcript completion", Value::Null))
     }
 }
+
+pub fn materialize_transcript_workspace(
+    mut transcript: ReplayTranscript,
+    workspace: &str,
+) -> ReplayTranscript {
+    fn replace(value: &mut Value, workspace: &str) {
+        match value {
+            Value::String(text) if text == "<workspace>" => *text = workspace.to_owned(),
+            Value::Array(values) => {
+                for value in values {
+                    replace(value, workspace);
+                }
+            }
+            Value::Object(values) => {
+                for value in values.values_mut() {
+                    replace(value, workspace);
+                }
+            }
+            _ => {}
+        }
+    }
+    for entry in &mut transcript.entries {
+        if let ReplayEntry::ExpectOutbound(entry) = entry {
+            replace(&mut entry.frame, workspace);
+        }
+    }
+    transcript
+}

@@ -203,3 +203,25 @@ transitions; no sleep polling is used. Test files correspond to source behavior:
 
 Final command results are recorded below after verification. This is not a claim
 that every TypeScript test or native integration has been ported.
+
+Verification on Windows (2026-11-13), target
+`D:\t3code-rust-target\server-j`, workspace Cargo jobs unchanged:
+
+- `cargo fmt -p t3-host`: passed.
+- `cargo test -p t3-host`: **52 passed**, zero failed/ignored; archive/theme 6,
+  background 4, desktop update 5, guest 5, keep-awake 2, policy 8,
+  review/worktrees 2, secrets 5, launcher/triage 6, cleanup 9.
+- Exact `cargo clippy -p t3-host --all-targets -- -D warnings`: blocked by 57
+  existing large-error/large-enum diagnostics in `t3-codex-app-server`, outside
+  this crate's edit ownership. Log:
+  `D:\t3code-rust-target\server-j\t3-host-clippy.log`.
+- `cargo clippy -p t3-host --all-targets --no-deps -- -D warnings` passed on all
+  current implementation code before the final policy route regression test
+  was added. The subsequent attempt including that test was blocked by new
+  sibling compile failures in `t3-provider/src/cursor_auth.rs`: E0507 moving
+  `api_key_expires_at_ms`, and E0063 missing `accepts_callback`.
+
+The required full-Clippy pass is NOT claimed. No sibling lint was suppressed,
+no sibling code was edited, no independent child review was spawned, and no
+commit was made. Resume verification after those owners repair their crates;
+full launcher and composition gaps above remain explicit incomplete work.

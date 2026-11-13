@@ -1,80 +1,71 @@
-# Second coordinator pause — 2026-11-13
-
-Pause requested because the usage reset has not landed. Resume in this thread
-only after the coordinator lifts it. No commits, delegates, live data/credentials,
-dev servers, workspace-manifest edits or foreign source edits were made.
+# PR application port integration hand-off — 2026-11-13
 
 ## Authoritative location and build rules
 
-Crate: `C:\Users\Administrator\t3code-rust\rust\crates\t3-pull-request`.
-It was built outside the workspace before its complete directory was moved in
-atomically during the first turn. The old staging copy at
-`D:\t3code-rust-target\server-k\staging-t3-pull-request` is stale; do not use it.
-Set `CARGO_TARGET_DIR=D:\t3code-rust-target\server-k` on every Cargo command.
-Keep `rust/.cargo/config.toml` at **two jobs**; never override it.
+The complete crate is at
+`C:\Users\Administrator\t3code-rust\rust\crates\t3-pull-request`.
+It was built outside the workspace before its complete directory was moved in.
+The staging copy at
+`D:\t3code-rust-target\server-k\staging-t3-pull-request` is stale.
+Use `CARGO_TARGET_DIR=D:\t3code-rust-target\server-k` for every Cargo command.
+Respect the workspace's configured four Cargo jobs; do not override them.
 
-## Completed implementation
+## Completed work
 
-PR application methods, optional Forge/SQLite adapters, authoritative project and
-account context, read/cache/mutation policy, linked-thread records, watch
-registration, viewed revisions and injected review-guide lifecycle are present.
-All wire data uses contracts. README describes public API and ownership.
+The crate supplies application service methods for all 35 PR RPCs from the server
+F handoff, optional Forge and SQLite adapters, authorized repository/account
+context, persistent and memory read caches, mutations, linked-thread records,
+viewed revisions, watch registration, and injected review-guide lifecycle.
+Wire data comes from `t3-contracts`; native integration types are not substitute
+wire contracts. README describes public API, differences and composition.
 
-This resume added optional `orchestration` feature and
-`OrchestrationPullRequestBackend`, implementing strict summaries, persisted native
-stacks, reads, batching, invalidation, shared change counters, merge refs and link
-notifications. It preserves typed error policy and retry dates and joins feeds
-and admitted calls on shutdown. Legacy checkout refresh/discovery uses injected
-`CheckoutPullRequests`; the host supplies authoritative worktree/project/identity
-services. Orchestration polling, wake, sync and settlement were not duplicated.
+The optional orchestration adapter implements `PullRequestBackend`: strict
+summaries, persisted stacks, reads and batches, invalidation, shared change feeds,
+merge notifications, linked-thread notifications, typed errors and joined
+shutdown. Checkout refresh/discovery delegates to `CheckoutPullRequests`.
+Watch polling, fingerprint baselines, wake deduplication, sync and settlement
+remain owned by `t3-orchestration`; their algorithms were not duplicated.
 
-Also completed ICU base filter ordering, the 100-option limit, diff keys following
-new summary revisions, minute diff maintenance, list preview seeding, and driver
-login guidance/provider mapping. README now explains the expanded seam.
+The final parity work includes ICU filter ordering/100-item cap, list preview
+seeding, diff invalidation on updated summaries, diff expiry, driver login
+metadata, environment viewed-response caching, viewed-write/read race protection,
+and restricting unbound GitHub reads to the public hostname. Focused regressions
+were observed failing before their fixes. Error metadata is boxed to keep the
+native result error small; the classifier compiles its constant patterns once.
 
-## Verification and exact stopping point
+## Remaining integration blockers
 
-- Resumed full suite before new edits: **44 passed**.
-- New orchestration adapter suite: **5 passed**, including typed policy, strict
-  summaries, shared feeds, merge forwarding and shutdown cancellation.
-- Latest application suite with `--features forge,sqlite`: **20 passed**. Includes
-  viewed revision refresh, diff expiry, updated-head invalidation and preview
-  reuse. Collation, updated diff and preview cases were observed red then green.
-- Current test count should be **52** (20 application, 7 cache, 6 Forge, 6 guide,
-  4 SQLite, 4 watch, 5 adapter). The sixth Forge test for unavailable guidance
-  has not yet run. Do not claim a 52-test green suite.
-- Last all-feature run failed in another owner's file:
-  `t3-orchestration/src/ports/transport/thread_search.rs:117`, E0282 for
-  `let current = &mut best[index]`. Leave that file alone. Earlier adapter tests
-  compiled/passed before this concurrent change.
-- Orchestration also emitted a deprecation warning at
-  `src/ports/sessions_recovery/provider_session_manager.rs:130` (`fetch_update`).
-  It may block all-feature Clippy with `-D warnings`; leave it to its owner.
-- Latest formatting check passed. Earlier default/all-feature Clippy passed before
-  this resume; final Clippy remains due. No test or build is intentionally left
-  running. The final non-orchestration compile result is appended below.
+- The host must supply authoritative `ProjectSource`, records/cache locations,
+  driver/account bindings, `WatchOrchestration`, and `CheckoutPullRequests`, then
+  install `OrchestrationPullRequestBackend` in `RuntimePorts::pull_requests`.
+  These are owned by server/project/worktree composition outside this crate.
+- Production guide generation requires a `GuideGenerator` implementation backed
+  by provider text generation, model/enablement policy, stack-aware input and an
+  isolated Git checkout/fetch/ref-cleanup service. No production text-generation
+  backend was found in the current provider/project/server crates. The lifecycle,
+  atomic claims, persistence, normalization, cancellation and cleanup seam here
+  are implemented and tested.
+- Review Git commands already belong to server F's authorized Git adapter.
+  Triage additionally requires server paths, runtime/liveness, boot relay,
+  source/version management and session/CLI prompt integration. README records
+  those dependencies; no substitute backend or prompt was invented.
+- Non-GitHub production behavior depends on upstream Forge driver support.
+  POSIX execution and the entire original TS assertion suite are not claimed.
 
-## First on resume
+## Verification
 
-1. Read the appended compile result. Run the new unavailable-guidance Forge test,
-   then scoped default / Forge+SQLite tests and Clippy. Run adapter/all-feature
-   checks once the orchestration owner repairs the inference error. `--no-deps`
-   can separate owned lint diagnostics; it does not prove dependencies pass.
-2. Remaining source audit: environment viewed-file responses currently read the
-   records each call; the TS facade caches them for 15 seconds. Host viewed writes
-   clear entries rather than bumping a dedicated viewed epoch: audit a slow read
-   overlapping a later untick. This was only identified while planning the next
-   change; **no edit or new test was started for it**.
-3. Production guide generation is blocked on provider text generation and isolated
-   checkout adapters behind `GuideGenerator` (no backend found in current provider,
-   project or server source). Triage dependencies are listed in README. Review Git
-   operations belong to package F. Do not invent substitutes or edit those owners.
-4. Finish scoped verification and update status. Do not claim the entire TS suite
-   is ported or POSIX is verified.
+Final scoped format check and all-feature Clippy with `--no-deps -D warnings`
+passed. The final all-feature suite passed **55 tests**: 1 classifier, 20
+application, 7 cache, 7 Forge, 6 guide, 5 orchestration adapter, 4 SQLite, 1 viewed
+race and 4 watch tests. Default checks and dependency-wide lint status are still
+being collected; replace this sentence with their completed results.
+No live host/provider calls, credentials, dev servers or user state were used.
 
-Inherited before the first turn: no predecessor crate/files. Replaced predecessor
-implementation: none. Authoritative work is in the crate above.
+First integration step: wire the host-owned contexts/checkout adapter, then the
+production guide generator when its upstream services exist. Keep orchestration
+watch/sync/settlement ownership as described in README.
 
-Final compile result: `cargo check --offline -p t3-pull-request --features forge,sqlite`
-**PASSED** on the final owned source (25.51 seconds, two configured jobs, target
-directory `D:\t3code-rust-target\server-k`). All commands have finished.
+Already present at original takeover: no predecessor crate or files.
+Predecessor implementation replaced: none.
+Only this crate was edited; no commits, git-state mutations, delegates, workspace
+manifest changes, foreign source edits or Cargo job overrides were made.
