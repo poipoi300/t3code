@@ -10,8 +10,7 @@ static BEARER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+").expect("static bearer pattern")
 });
 static URL_USERINFO: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)([a-z][a-z0-9+.-]*://)[^/\s@\"\\]+@"#)
-        .expect("static URL user-info pattern")
+    Regex::new(r#"(?i)([a-z][a-z0-9+.-]*://)[^/\s@\"\\]+@"#).expect("static URL user-info pattern")
 });
 static CLI_PRIVATE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)(^|\s)(--?(?:api[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token|token|password|secret|prompt|message|p))(=|\s+)(?:\"[^\"]*\"|'[^']*'|[^\s]+)"#)
@@ -19,7 +18,7 @@ static CLI_PRIVATE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub fn redact_text(text: &str) -> String {
-    let redacted = URL_USERINFO.replace_all(text,"$1<redacted>@");
+    let redacted = URL_USERINFO.replace_all(text, "$1<redacted>@");
     let redacted = CREDENTIALS.replace_all(&redacted, "$1$2=<redacted>");
     let redacted = BEARER.replace_all(&redacted, "Bearer <redacted>");
     CLI_PRIVATE
@@ -27,20 +26,47 @@ pub fn redact_text(text: &str) -> String {
         .into_owned()
 }
 
-fn private_argument(argument:&str)->bool {
-    let Some(flag)=argument.strip_prefix("--").or_else(||argument.strip_prefix('-')) else {return false;};
-    matches!(flag.to_ascii_lowercase().replace(['-','_'],"").as_str(),"apikey"|"accesstoken"|"refreshtoken"|"idtoken"|"token"|"password"|"secret"|"prompt"|"message"|"p")
+fn private_argument(argument: &str) -> bool {
+    let Some(flag) = argument
+        .strip_prefix("--")
+        .or_else(|| argument.strip_prefix('-'))
+    else {
+        return false;
+    };
+    matches!(
+        flag.to_ascii_lowercase().replace(['-', '_'], "").as_str(),
+        "apikey"
+            | "accesstoken"
+            | "refreshtoken"
+            | "idtoken"
+            | "token"
+            | "password"
+            | "secret"
+            | "prompt"
+            | "message"
+            | "p"
+    )
 }
 
-pub fn redact_arguments(arguments:impl IntoIterator<Item=impl AsRef<str>>)->String {
-    let mut private_value=false;
-    arguments.into_iter().map(|argument| {
-        let argument=argument.as_ref();
-        if std::mem::take(&mut private_value) {return "<redacted>".to_owned();}
-        if let Some((flag,_))=argument.split_once('=') && private_argument(flag) {return format!("{flag}=<redacted>");}
-        private_value=private_argument(argument);
-        redact_text(argument)
-    }).collect::<Vec<_>>().join(" ")
+pub fn redact_arguments(arguments: impl IntoIterator<Item = impl AsRef<str>>) -> String {
+    let mut private_value = false;
+    arguments
+        .into_iter()
+        .map(|argument| {
+            let argument = argument.as_ref();
+            if std::mem::take(&mut private_value) {
+                return "<redacted>".to_owned();
+            }
+            if let Some((flag, _)) = argument.split_once('=')
+                && private_argument(flag)
+            {
+                return format!("{flag}=<redacted>");
+            }
+            private_value = private_argument(argument);
+            redact_text(argument)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn private_field(key: &str) -> bool {

@@ -140,7 +140,7 @@ impl ResourceSampler for NativeSampler {
                 let command = if d.cmd().is_empty() {
                     p.name().to_string_lossy().into_owned()
                 } else {
-                    privacy::redact_arguments(d.cmd().iter().map(|part|part.to_string_lossy()))
+                    privacy::redact_arguments(d.cmd().iter().map(|part| part.to_string_lossy()))
                 };
                 Some(ResourceMonitorProcessSample {
                     pid: *pid,

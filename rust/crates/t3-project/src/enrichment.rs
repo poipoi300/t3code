@@ -17,6 +17,21 @@ pub struct EnrichmentChange {
     pub workspace_root: String,
     pub enrichment: ProjectEnrichment,
 }
+#[derive(Clone, Copy)]
+pub struct EnrichmentOptions {
+    pub cache_capacity: usize,
+    pub max_pending: usize,
+    pub concurrency: usize,
+}
+impl Default for EnrichmentOptions {
+    fn default() -> Self {
+        Self {
+            cache_capacity: 512,
+            max_pending: 512,
+            concurrency: 4,
+        }
+    }
+}
 #[derive(Default)]
 struct Entry {
     identity: Option<RepositoryIdentity>,
@@ -36,6 +51,7 @@ struct Cache {
     closed: bool,
 }
 struct Inner {
+    options: EnrichmentOptions,
     cache: Mutex<Cache>,
     identity: RepositoryIdentityResolver,
     favicon: Arc<FaviconResolver>,
@@ -49,12 +65,25 @@ struct Inner {
 pub struct ProjectEnrichmentService(Arc<Inner>);
 impl ProjectEnrichmentService {
     pub fn new(identity: RepositoryIdentityResolver, favicon: Arc<FaviconResolver>) -> Self {
+        Self::with_options(identity, favicon, EnrichmentOptions::default())
+    }
+    pub fn with_options(
+        identity: RepositoryIdentityResolver,
+        favicon: Arc<FaviconResolver>,
+        options: EnrichmentOptions,
+    ) -> Self {
+        let options = EnrichmentOptions {
+            cache_capacity: options.cache_capacity.max(1),
+            max_pending: options.max_pending.max(1),
+            concurrency: options.concurrency.max(1),
+        };
         Self(Arc::new(Inner {
+            options,
             cache: Default::default(),
             identity,
             favicon,
-            identity_lane: Arc::new(Semaphore::new(4)),
-            favicon_lane: Arc::new(Semaphore::new(4)),
+            identity_lane: Arc::new(Semaphore::new(options.concurrency)),
+            favicon_lane: Arc::new(Semaphore::new(options.concurrency)),
             changes: broadcast::channel(256).0,
             tasks: TaskTracker::new(),
             stop: CancellationToken::new(),
@@ -89,7 +118,9 @@ impl ProjectEnrichmentService {
             if cache.closed {
                 return;
             }
-            if !cache.entries.contains_key(root) && cache.entries.len() >= 512 {
+            if !cache.entries.contains_key(root)
+                && cache.entries.len() >= self.0.options.cache_capacity
+            {
                 let old = cache
                     .entries
                     .iter()

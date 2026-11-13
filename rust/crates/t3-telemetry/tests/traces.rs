@@ -107,10 +107,22 @@ fn cli_credentials_and_prompt_arguments_are_redacted() {
     assert!(!redacted.contains("TOP_SECRET"));
     assert!(!redacted.contains("PROMPT_CONTENT"));
     assert!(redacted.contains("--model safe"));
-    let url=t3_telemetry::privacy::redact_text("failed request to https://operator:PRIVATE_PASSWORD@collector.example/v1/traces");
+    let url = t3_telemetry::privacy::redact_text(
+        "failed request to https://operator:PRIVATE_PASSWORD@collector.example/v1/traces",
+    );
     assert!(!url.contains("PRIVATE_PASSWORD"));
     assert!(!url.contains("operator:"));
     assert!(url.contains("collector.example/v1/traces"));
-    let command=t3_telemetry::privacy::redact_arguments(["provider","--prompt","a multi word PRIVATE_PROMPT\nwith a second line","--api-key=PRIVATE_KEY with spaces","--model","safe"]);
-    assert!(!command.contains("PRIVATE"));assert!(!command.contains("second line"));assert!(!command.contains("multi word"));assert!(command.contains("--model safe"));
+    let command = t3_telemetry::privacy::redact_arguments([
+        "provider",
+        "--prompt",
+        "a multi word PRIVATE_PROMPT\nwith a second line",
+        "--api-key=PRIVATE_KEY with spaces",
+        "--model",
+        "safe",
+    ]);
+    assert!(!command.contains("PRIVATE"));
+    assert!(!command.contains("second line"));
+    assert!(!command.contains("multi word"));
+    assert!(command.contains("--model safe"));
 }
