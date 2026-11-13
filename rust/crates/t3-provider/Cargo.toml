@@ -1,0 +1,38 @@
+[package]
+name = "t3-provider"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+t3-contracts = { path = "../t3-contracts" }
+t3-process = { path = "../t3-process" }
+t3-config = { path = "../t3-config" }
+t3-codex-app-server = { path = "../t3-codex-app-server" }
+t3-claude-cli = { path = "../t3-claude-cli" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "time", "rt", "macros", "fs", "net", "io-util"] }
+regex = "1"
+sha2 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+url = "2"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1"
+base64 = "0.22"
+getrandom = "0.3"
+ring = "0.17"
+file-id = "0.2"
+serde_yaml_ng = "0.10"
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "test-util", "net", "io-util"] }
+
+[lints]
+workspace = true
