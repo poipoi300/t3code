@@ -672,12 +672,14 @@ fn pending_restart_observations(
     inputs.map(|inputs| &inputs.restart_continuations)
 }
 
+// Local shim until DecisionInputs exposes the runtime's extension capabilities.
 fn session_supports_selection(_inputs: Option<&DecisionInputs>, _session: &Value) -> Result<bool> {
     Err(Error::Unsupported(
         "live selection application requires the session extension observation",
     ))
 }
 
+// Local shim until DecisionInputs exposes the host registry's prepared PR identities.
 fn prepared_pull_request_identities(
     _inputs: Option<&DecisionInputs>,
 ) -> Result<&crate::ports::decisions::orchestrator::PreparedPullRequestIdentities> {

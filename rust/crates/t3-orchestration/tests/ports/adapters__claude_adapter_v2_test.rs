@@ -979,7 +979,7 @@ mod composed_claude {
             acp_replay::testkit::{
                 deterministic_runtime::{DEFAULT_RANDOM_SEED, SeededIds},
                 fixtures::shared,
-                orchestrator_scenario,
+                orchestrator_scenario::{self, ScenarioServices},
             },
             checkpoints_forks::checkpoint_service::CheckpointMetadata,
             claude::adapters::claude_adapter_v2_testkit::*,
@@ -991,6 +991,16 @@ mod composed_claude {
         },
     };
     use tokio_util::sync::CancellationToken;
+    struct AdmittedRuntime(Arc<OrchestrationRuntime>);
+    #[async_trait]
+    impl CommandDispatcher for AdmittedRuntime {
+        async fn dispatch(
+            &self,
+            command: OrchestrationV2ServerCommand,
+        ) -> Result<t3_orchestration::stores::receipts::CommandReceipt> {
+            self.0.dispatch_command(command).await
+        }
+    }
     struct NoRepository;
 
     #[async_trait]
@@ -1161,7 +1171,15 @@ mod composed_claude {
             json!({"driver":"claudeAgent","enabled":true});
         ports.settings = Arc::new(StaticSettings::new(serde_json::from_value(settings)?));
         let runtime = Arc::new(OrchestrationRuntime::start(ports).await?);
-        let services = t3_orchestration::ports::acp_replay::testkit::provider_replay_harness::scenario_services_for_runtime(runtime.clone(), database.stores.clone(), clock, gate);
+        let services = ScenarioServices {
+            database: database.stores.clone(),
+            dispatcher: Arc::new(AdmittedRuntime(runtime.clone())),
+            committer: Arc::new(runtime.events.clone()),
+            projections: runtime.projections.clone(),
+            worker: runtime.effect_worker(),
+            clock,
+            gate,
+        };
         let continuations = Arc::new(
             t3_orchestration::runtime::sessions::ProviderContinuationService::new(
                 runtime.projections.clone(),

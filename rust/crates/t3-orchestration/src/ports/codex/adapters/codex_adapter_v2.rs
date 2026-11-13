@@ -2374,6 +2374,7 @@ impl Projection {
                     .containment
                     .insert((context.native_thread.clone(), process.into()))
             {
+                context.unconfirmed_commands.insert(process.into());
                 self.actions.push_back(NativeAction::Terminate {
                     thread: context.native_thread.clone(),
                     process: process.into(),
@@ -3471,6 +3472,7 @@ impl Projection {
         }
         Ok(events)
     }
+    pub fn release_settled_turns(&mut self) -> usize { 0 }
     pub fn stopped(&mut self) -> ProviderResult<Vec<ProviderEvent>> {
         let mut events = vec![];
         let pending = std::mem::take(&mut self.pending);
@@ -4188,10 +4190,9 @@ impl Projection {
                     .map(|(_, events)| events)
             } else {
                 self.containment.remove(&(thread.clone(), process.clone()));
-                result?;
-                Err(protocol(
-                    "Codex could not contain a late background command",
-                ))
+                self.turns.values().filter(|context|context.native_thread == *thread && context.unconfirmed_commands.contains(process))
+                    .map(|context|Ok(event(ProviderEventKind::BackgroundWork {provider_turn_id:decode(context.turn["id"].clone())?,pending:true})))
+                    .collect()
             };
         }
         if let NativeAction::CheckGoalWake { thread, source, .. } = &action {

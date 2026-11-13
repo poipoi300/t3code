@@ -4982,6 +4982,7 @@ dependencies = [
  "subtle",
  "t3-auth",
  "t3-contracts",
+ "t3-orchestration",
  "t3-persistence",
  "t3-process",
  "tempfile",

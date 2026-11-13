@@ -86,6 +86,7 @@ pub fn command_identity(
     ))
 }
 
+// Local shim: the frozen error enum cannot carry the source's tagged wrappers and nested causes.
 pub fn rejection(command: &Value, reason: impl Into<String>) -> Error {
     Error::Rejected {
         command_id: CommandId(command["commandId"].as_str().unwrap_or_default().to_owned()),
