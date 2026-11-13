@@ -12,6 +12,7 @@ pub struct CliRequest {
     pub environment: t3_process::Environment,
     pub max_bytes: usize,
     pub timeout: Duration,
+    pub cancellation: t3_process::CancellationToken,
 }
 pub struct CliResponse {
     pub stdout: Vec<u8>,
@@ -34,6 +35,7 @@ impl ForgeCli for ProcessForgeCli {
         options.max_output_bytes=request.max_bytes;
         options.timeout=Some(request.timeout);
         options.check_exit=false;
+        options.cancellation=request.cancellation;
         let output=t3_process::run(options).await.map_err(|error|ForgeError::provider(request.provider,&request.operation,if matches!(error,t3_process::ProcessError::NotFound{..}){FailureReason::MissingTool}else{FailureReason::Failed},"The source control CLI could not complete the operation."))?;
         Ok(CliResponse {stdout:output.stdout,stderr:output.stderr,code:output.code.unwrap_or(-1),truncated:output.stdout_truncated||output.stderr_truncated})
     }
