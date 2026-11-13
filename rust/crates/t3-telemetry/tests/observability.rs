@@ -1,4 +1,12 @@
 use t3_telemetry::observability::*;
+
+#[test]
+fn rpc_labels_cover_contract_methods_and_keep_diagnostic_queries_untraced() {
+    for method in t3_contracts::rpc::WS_METHODS {assert_ne!(t3_telemetry::rpc::aggregate(method.tag),"unknown","{}",method.tag);}
+    assert_eq!(t3_telemetry::rpc::aggregate("orchestration.launchThread"),"orchestration");
+    assert!(t3_telemetry::rpc::tracing_disabled("server.getTraceDiagnostics"));
+    assert!(!t3_telemetry::rpc::tracing_disabled("server.getHostResources"));
+}
 #[test]
 fn idle_system_sleep_does_not_become_an_event_loop_stall() {
     let mut readings = EventLoopReadings {

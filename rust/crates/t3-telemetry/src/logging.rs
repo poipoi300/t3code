@@ -696,8 +696,9 @@ pub async fn build(options: LoggingOptions) -> Result<(tracing::Dispatch, Teleme
         .with_target(false)
         .with_tracked_inactivity(false)
         .with_error_events_to_status(false)
-        .with_filter(tracing_subscriber::filter::filter_fn(move |metadata| {
+        .with_filter(tracing_subscriber::filter::dynamic_filter_fn(move |metadata,_context| {
             !metadata.target().starts_with("opentelemetry")
+                && !crate::rpc::tracing_suppressed()
                 && if metadata.is_event() {
                     !logs_exported && metadata.level() <= &log_level
                 } else {
@@ -737,35 +738,50 @@ pub async fn build(options: LoggingOptions) -> Result<(tracing::Dispatch, Teleme
 }
 
 pub async fn initialize(options: LoggingOptions) -> Result<TelemetryHandle> {
-    let warnings=options.telemetry.warnings.clone();
+    let warnings = options.telemetry.warnings.clone();
     let (dispatch, handle) = build(options).await?;
     tracing::dispatcher::set_global_default(dispatch)
         .map_err(|_| Error::SubscriberAlreadyInstalled)?;
     if let Some(provider) = &handle.meter_provider {
         opentelemetry::global::set_meter_provider(provider.clone());
     }
-    GLOBAL_INITIALIZED.store(true,Ordering::Release);
-    for warning in warnings {tracing::warn!(message=%warning);}
+    GLOBAL_INITIALIZED.store(true, Ordering::Release);
+    for warning in warnings {
+        tracing::warn!(message=%warning);
+    }
     Ok(handle)
 }
 
 use t3_contracts::server::OtlpSignal;
 
-static GLOBAL_INITIALIZED:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
+static GLOBAL_INITIALIZED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
-pub fn is_initialized()->bool {GLOBAL_INITIALIZED.load(Ordering::Acquire)}
+pub fn is_initialized() -> bool {
+    GLOBAL_INITIALIZED.load(Ordering::Acquire)
+}
 
-pub fn server_observability(config:&ResolvedConfig)->Result<t3_contracts::server::ServerObservability> {
-    let active=is_initialized();
-    let mut value=json!({"logsDirectoryPath":config.paths.logs().to_string_lossy(),"localTracingEnabled":active,
+pub fn server_observability(
+    config: &ResolvedConfig,
+) -> Result<t3_contracts::server::ServerObservability> {
+    let active = is_initialized();
+    let mut value = json!({"logsDirectoryPath":config.paths.logs().to_string_lossy(),"localTracingEnabled":active,
         "otlpTracesEnabled":active&&otlp::endpoint(&config.telemetry,OtlpSignal::Traces).is_some(),
         "otlpMetricsEnabled":active&&otlp::endpoint(&config.telemetry,OtlpSignal::Metrics).is_some(),
         "otlpLogsEnabled":active&&otlp::endpoint(&config.telemetry,OtlpSignal::Logs).is_some()});
-    for (signal,prefix) in [(OtlpSignal::Traces,"otlpTraces"),(OtlpSignal::Metrics,"otlpMetrics"),(OtlpSignal::Logs,"otlpLogs")] {
-        if let Some(endpoint)=otlp::endpoint(&config.telemetry,signal) {
-            value[format!("{prefix}Url")]=json!(endpoint.url);
-            if ["environment","settings","bootstrap"].contains(&endpoint.source.as_str()) {value[format!("{prefix}Source")]=json!(endpoint.source);}
-            if let Some(variable)=&endpoint.variable {value[format!("{prefix}Variable")]=json!(variable);}
+    for (signal, prefix) in [
+        (OtlpSignal::Traces, "otlpTraces"),
+        (OtlpSignal::Metrics, "otlpMetrics"),
+        (OtlpSignal::Logs, "otlpLogs"),
+    ] {
+        if let Some(endpoint) = otlp::endpoint(&config.telemetry, signal) {
+            value[format!("{prefix}Url")] = json!(endpoint.url);
+            if ["environment", "settings", "bootstrap"].contains(&endpoint.source.as_str()) {
+                value[format!("{prefix}Source")] = json!(endpoint.source);
+            }
+            if let Some(variable) = &endpoint.variable {
+                value[format!("{prefix}Variable")] = json!(variable);
+            }
         }
     }
     Ok(serde_json::from_value(value)?)
