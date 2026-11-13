@@ -235,16 +235,24 @@ pub fn kind_context_id(kind: &str, id: &str) -> String {
     context_id(&format!("{kind}_{id}"))
 }
 pub(super) fn context_link(kind: &str, id: &str, label: &str) -> String {
+    let clean = context_label(label, kind);
+    format!(
+        "{}[{clean}](t3-context://v1/{kind}/{id})",
+        if kind == "image" { "!" } else { "" },
+    )
+}
+pub(super) fn context_label(label: &str, kind: &str) -> String {
     let clean = label
         .replace(['[', ']', '\\', '\r', '\n'], " ")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    format!(
-        "{}[{}](t3-context://v1/{kind}/{id})",
-        if kind == "image" { "!" } else { "" },
-        if clean.is_empty() { kind } else { &clean }
-    )
+    let mut units = 0;
+    let clean: String = clean.chars().take_while(|ch| {
+        units += ch.len_utf16();
+        units <= 200
+    }).collect();
+    if clean.is_empty() { kind.into() } else { clean }
 }
 pub(super) fn ensure_reference(prompt: &mut String, kind: &str, id: &str, label: &str) {
     if prompt.contains(&format!("](t3-context://v1/{kind}/{id})")) {

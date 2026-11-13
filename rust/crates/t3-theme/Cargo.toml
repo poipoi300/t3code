@@ -1,0 +1,18 @@
+[package]
+name = "t3-theme"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
+thiserror = "2"
+sha2 = "0.10"
+miniz_oxide = "0.8"
+url = "2"
+
+[lints]
+workspace = true

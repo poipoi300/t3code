@@ -137,7 +137,13 @@ impl<P: crate::platform::Platform + 'static, E: RpcEndpoint + 'static> CleanupSo
 pub trait ResourceRemoval {
     fn remove_resource(&self, handle: String) -> HostFuture<'_, ()>;
 }
-/// Marked platform shim: replace with Platform::remove_resource after the host seam lands.
+pub struct HostResourceRemoval<P>(pub Rc<P>);
+impl<P: crate::platform::Platform> ResourceRemoval for HostResourceRemoval<P> {
+    fn remove_resource(&self, handle: String) -> HostFuture<'_, ()> {
+        self.0.remove_resource(handle)
+    }
+}
+/// Hosts without registered-resource removal retain candidates for a later retry.
 pub struct PendingResourceRemoval;
 impl ResourceRemoval for PendingResourceRemoval {
     fn remove_resource(&self, _handle: String) -> HostFuture<'_, ()> {

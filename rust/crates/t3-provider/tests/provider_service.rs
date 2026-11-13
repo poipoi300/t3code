@@ -222,7 +222,7 @@ async fn an_update_survives_rpc_disconnect_rejects_duplicates_and_publishes_its_
     assert!(service.get_providers().await.0.iter().all(|provider| provider.version.as_ref().unwrap().0 == "0.166.0"));
 
     assert_eq!(
-        service.get_providers().await.0[0]
+        service.get_providers().await.0.iter().find(|provider| provider.instance_id.0 == "work").unwrap()
             .update_state
             .as_ref()
             .unwrap()

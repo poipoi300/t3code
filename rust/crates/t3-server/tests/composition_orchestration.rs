@@ -206,7 +206,9 @@ async fn a_dispatched_message_runs_a_turn_seen_on_subscribe_thread_and_http_read
         .unwrap();
     let (mut dispatched, mut reply, mut completed, mut shell_seen) = (false, false, false, false);
     while !(dispatched && reply && completed && shell_seen) {
-        match event(&mut socket, &mut client).await {
+        let next = event(&mut socket, &mut client).await;
+        eprintln!("E2E {}", format!("{next:?}").chars().take(600).collect::<String>());
+        match next {
             CallEvent::Exit { id, exit } if id == dispatch => {
                 ok(exit);
                 dispatched = true;
