@@ -1,0 +1,7 @@
+use crate::ports::acp_replay::testkit::fixtures::shared::OrchestratorFixtureInput;
+
+pub fn kiro_subagent_interrupt_input() -> crate::error::Result<OrchestratorFixtureInput> {
+    Ok(serde_json::from_str(
+        r#"{"steps":[{"type":"message","text":"Delegate this to one sub-agent with your sub-agent tool and run nothing yourself: the sub-agent must run the shell command `sleep 30` with its shell tool and then reply exactly: Done. Wait for it, then reply with exactly what it said."},{"type":"interrupt","targetRunIndex":1,"waitForTurnItemType":"dynamic_tool","inSubagentThread":true}]}"#,
+    )?)
+}

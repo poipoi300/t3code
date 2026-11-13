@@ -307,6 +307,7 @@ impl SshDeviceHost {
                     Ok(next) => {
                         let ready = next.ready.clone();
                         *connection = Some(next);
+                        phase(DeviceHostStatus::Ready, None);
                         return Ok(ready);
                     }
                     Err(e) => last_error = Some(e),
