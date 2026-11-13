@@ -276,7 +276,8 @@ stream ownership/replay, paused-clock idle unloading and native-worker IPC.
 All credentials, audio and model files in tests are synthetic and temporary.
 
 Windows verification, 2026-11-13: formatting and Clippy with `-D warnings` pass
-in both configurations; 22 default tests and 23 native-speech tests pass. The
+in the default and all-features configurations; 26 default tests and 30 tests
+with both native speech and the orchestration host enabled pass. The
 executed TypeScript corpus covers 100 prompts, 11 dictionary cases and 48 filler
 cases. Native runtime transcript: CPU device discovery succeeds with no GPU
 devices; loading a nonexistent temporary model returns `SpeechError::Inference`
