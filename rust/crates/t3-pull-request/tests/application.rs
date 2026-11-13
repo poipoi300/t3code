@@ -298,10 +298,11 @@ async fn filtered_list_advances_through_duplicate_boundary_rows() {
         result.entries.iter().map(|e| e.number).collect::<Vec<_>>(),
         [2]
     );
-    let queries = host.queries.lock().expect("queries");
-    assert_eq!(queries.len(), 2);
-    assert_eq!(queries[1].cursor.as_ref().expect("cursor").seen_at, [1]);
-    drop(queries);
+    {
+        let queries = host.queries.lock().expect("queries");
+        assert_eq!(queries.len(), 2);
+        assert_eq!(queries[1].cursor.as_ref().expect("cursor").seen_at, [1]);
+    }
     let mut row_ref = reference();
     row_ref.number = 2;
     assert_eq!(

@@ -17,6 +17,9 @@ Construct bindings with one shared `ForgeHost::new(Arc<dyn Forge>)` per driver.
 Project settings supply `remove_agent_credits_on_merge`. Unknown-host refinement,
 Azure/mounted-host canonical identity, secret refresh, and environment permissions
 belong to the project/host composition, not a second registry in this crate.
+`ProjectSource::canonical_repository_key` permits that registry's canonical
+identity mapping. The Forge adapter permits unbound public reads only on
+`github.com`; recognized private hosts still require authorized checkout context.
 
 The service exposes the application methods needed by all 35 `pullRequests.*`
 RPCs in the package F handoff. Reads include list/stats/filter options, routing
@@ -35,7 +38,7 @@ auth, HTTP compression and transport flow control remain the server's concern.
 
 Cache TTLs are 30 seconds for lists, 60 seconds for normal summaries/details,
 10 minutes for merged summaries/details and commit diffs, and 15 seconds for
-checks/fingerprints/host viewed marks. Stale detail/summary/diff reads may serve
+checks/fingerprints/viewed marks. Stale detail/summary/diff reads may serve
 held values for up to 10 minutes while a scoped background read revalidates.
 Strict reads and watch preflight bypass that recovery as requested. Successful
 summary and stack reads also have a 60-second persisted cache with striped scope
@@ -46,7 +49,9 @@ may fall back to `MemoryStore` on I/O failure and schedule `prune` hourly.
 Viewer identities and batched stats are cached for ten minutes and one minute
 respectively. Detail reads seed summary/checks/stats; lists seed up to 64 previews.
 File revisions retain bounded partial answers, refresh held views in the background,
-and refresh stale revisions before saving marks. A minute maintenance task drops
+and refresh stale revisions before saving marks. Viewed writes and viewed-only
+invalidation advance a separate revision so an older pending read cannot restore
+superseded marks. A minute maintenance task drops
 diffs older than ten minutes; it is joined by shutdown and does not block `drain`.
 
 Repositories are read at most 12 at a time. Cross-repository searches group by
@@ -151,13 +156,10 @@ there are no replacement wire DTOs to move to contracts.
 ## Verification
 
 Use `CARGO_TARGET_DIR=D:\t3code-rust-target\server-k` and the workspace's configured
-two Cargo jobs. Run scoped `cargo fmt -p t3-pull-request --check`,
+four Cargo jobs without overriding them. Run scoped `cargo fmt -p t3-pull-request -- --check`,
 `cargo clippy -p t3-pull-request --all-targets --all-features -- -D warnings`,
-and `cargo test -p t3-pull-request --all-features`. Verification results are
-recorded in `HANDOFF.md` while this task is paused. The latest all-feature run
-is blocked by an unrelated inference error in
-`t3-orchestration/src/ports/transport/thread_search.rs:117`; this crate's earlier
-five adapter tests and latest 20 application tests passed. Formatting passes.
+and `cargo test -p t3-pull-request --all-features`. Final verification results and
+remaining host integration requirements are recorded in `HANDOFF.md`.
 
 Takeover: no predecessor crate or files existed. No predecessor implementation
 was replaced. Only this crate is owned; no commits, git-state mutations or

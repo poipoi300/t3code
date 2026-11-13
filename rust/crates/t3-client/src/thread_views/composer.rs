@@ -9,6 +9,7 @@ pub mod direction;
 pub mod editor;
 pub mod markdown_source;
 pub mod mobile_content;
+pub mod mobile_attachments;
 pub mod mobile_drafts;
 pub mod mobile_models;
 pub mod mobile_selection;

@@ -78,6 +78,20 @@ fn archive_bounds_cover_count_member_total_compressed_size_and_crc() {
     let mut bound = limits();
     bound.compressed_bytes = bytes.len() as u64 - 1;
     assert!(Archive::open(&path, bound).is_err());
+    assert!(Archive::new(Cursor::new(&bytes), bound).is_err());
+    let mut duplicate = bytes.clone();
+    let second = duplicate
+        .windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == b"PK\x01\x02")
+        .nth(1)
+        .unwrap()
+        .0;
+    duplicate[second + 46] = b'a';
+    assert!(matches!(
+        Archive::new(Cursor::new(duplicate), limits()),
+        Err(t3_host::Error::Refused("archive repeats a member"))
+    ));
     let mut corrupt = bytes;
     let offset = corrupt.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
     corrupt[offset + 16] ^= 1;

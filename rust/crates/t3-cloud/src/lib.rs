@@ -6,6 +6,7 @@ pub mod direct;
 pub mod guest;
 pub mod http;
 pub mod link_requests;
+pub mod remote;
 pub mod managed;
 pub mod oauth;
 pub mod peer;

@@ -1,0 +1,34 @@
+[package]
+name = "t3-i18n"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json = "1"
+thiserror = "2"
+sha2 = "0.10"
+unicode-general-category = "1"
+icu = { version = "2", features = ["experimental"] }
+fixed_decimal = { version = "0.7", features = ["ryu"] }
+tinystr = "0.8"
+jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"], optional = true }
+
+[features]
+default = ["icu-fallback", "iana"]
+# Format dates and compact numbers through ICU4X for host locales that have no generated Intl
+# table (every locale except the shipped UI languages, en-GB, and their default regions).
+# Without it those locales use the en-US patterns with their own number symbols, and ICU4X's
+# date and compact-number data stays out of the binary.
+icu-fallback = []
+# Resolve IANA time zone names (`America/New_York`) with a bundled tz database. Without it an
+# IANA zone formats as UTC and callers pass `TimeZone::Fixed` offsets instead.
+iana = ["dep:jiff"]
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

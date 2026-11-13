@@ -2,6 +2,26 @@
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 const DIRECTORY: &str = "t3-composer-attachments";
+pub(super) fn media_kind(attachment: &serde_json::Value) -> Option<&'static str> {
+    let mime = attachment["mimeType"].as_str().unwrap_or_default()
+        .split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    if matches!(mime.as_str(), "image/gif" | "image/jpeg" | "image/png" | "image/webp") {
+        return Some("image");
+    }
+    let generic = matches!(mime.as_str(), "" | "application/octet-stream" | "binary/octet-stream"
+        | "application/unknown" | "video/mp2t" | "video/vnd.dlna.mpeg-tts");
+    if mime.starts_with("video/") && !generic {
+        return Some("video");
+    }
+    if !generic { return None; }
+    let name = attachment["name"].as_str().unwrap_or_default();
+    let extension = name.rsplit_once('.')?.1.to_ascii_lowercase();
+    if matches!(extension.trim(), "gif" | "jpeg" | "jpg" | "png" | "webp") {
+        Some("image")
+    } else if matches!(extension.as_str(), "avi" | "m4v" | "mkv" | "mov" | "mp4" | "ogv" | "webm") {
+        Some("video")
+    } else { None }
+}
 fn uuid(value: &str) -> bool {
     value.len() == 36
         && value.bytes().enumerate().all(|(index, byte)| {

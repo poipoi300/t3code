@@ -87,6 +87,7 @@ async fn file_retention_is_strict_recursive_only_for_logs_and_dry_run_does_not_p
         ("logs/a.log.2", NOW - 86_400_000),
         ("logs/x.txt.1", 0),
         ("browser-artifacts/old.png", 0),
+        ("browser-artifacts/before-epoch.png", -86_400_000),
         ("browser-artifacts/nested/kept.png", 0),
     ] {
         write_old(&temp.path().join(name), b"abc", at);
@@ -97,9 +98,15 @@ async fn file_retention_is_strict_recursive_only_for_logs_and_dry_run_does_not_p
     assert!(service.latest_report().await.is_none());
     assert!(stream.try_recv().is_err());
     let report = service.run_now().await.unwrap();
-    assert_eq!(report.bytes_freed, WireNumber::Finite(6.into()));
+    assert_eq!(report.bytes_freed, WireNumber::Finite(9.into()));
     assert!(!temp.path().join("logs/nested/a.log.1").exists());
     assert!(!temp.path().join("browser-artifacts/old.png").exists());
+    assert!(
+        !temp
+            .path()
+            .join("browser-artifacts/before-epoch.png")
+            .exists()
+    );
     for name in [
         "logs/live.log",
         "logs/a.log.2",

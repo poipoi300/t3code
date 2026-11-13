@@ -445,11 +445,14 @@ impl StorageCleanup {
                 {
                     continue;
                 }
-                let modified = metadata
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as i128);
+                let modified =
+                    metadata
+                        .modified()
+                        .ok()
+                        .map(|t| match t.duration_since(UNIX_EPOCH) {
+                            Ok(duration) => duration.as_millis() as i128,
+                            Err(error) => -(error.duration().as_millis() as i128),
+                        });
                 if modified.is_none_or(|ms| ms >= i128::from(threshold)) {
                     continue;
                 }
