@@ -1,0 +1,14 @@
+query PullRequestSourceBranch($repositoryId: ID!, $ref: String!) {
+  node(id: $repositoryId) {
+    ... on Repository {
+      defaultBranchRef {
+        name
+      }
+      ref(qualifiedName: $ref) {
+        target {
+          oid
+        }
+      }
+    }
+  }
+}

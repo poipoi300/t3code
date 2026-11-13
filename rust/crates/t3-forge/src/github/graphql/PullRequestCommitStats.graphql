@@ -1,0 +1,9 @@
+query PullRequestCommitStats($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on Commit {
+      oid
+      additions
+      deletions
+    }
+  }
+}

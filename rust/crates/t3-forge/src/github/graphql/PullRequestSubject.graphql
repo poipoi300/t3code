@@ -1,0 +1,26 @@
+query PullRequestSubject($owner: String!, $name: String!, $number: Int!, $subjectId: ID!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id
+    }
+  }
+  node(id: $subjectId) {
+    id
+    ... on IssueComment {
+      pullRequest {
+        id
+      }
+    }
+    
+    ... on PullRequestReviewComment {
+      reviewCommentPullRequest: pullRequest {
+        id
+      }
+    }
+    ... on PullRequestReview {
+      reviewPullRequest: pullRequest {
+        id
+      }
+    }
+  }
+}

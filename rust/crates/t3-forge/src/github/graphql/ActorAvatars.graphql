@@ -1,0 +1,12 @@
+query ActorAvatars($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on User {
+      login
+      avatarUrl
+    }
+    ... on Bot {
+      login
+      avatarUrl
+    }
+  }
+}

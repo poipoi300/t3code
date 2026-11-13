@@ -1,0 +1,6 @@
+query RoutingIdentityViewer {
+  viewer {
+    databaseId
+    login
+  }
+}

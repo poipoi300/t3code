@@ -1,0 +1,39 @@
+{
+  "id": "T1",
+  "path": "src/a.ts",
+  "line": 1,
+  "diffSide": "RIGHT",
+  "isResolved": false,
+  "isOutdated": false,
+  "comments": {
+    "totalCount": 2,
+    "pageInfo": {
+      "hasNextPage": false,
+      "endCursor": null
+    },
+    "nodes": [
+      {
+        "id": "C1",
+        "author": null,
+        "body": "C1",
+        "createdAt": "2026-07-01T00:00:00Z",
+        "lastEditedAt": null,
+        "url": "https://github.com/acme/web/pull/7#discussion_C1",
+        "isMinimized": false,
+        "pullRequestReview": null,
+        "reactionGroups": []
+      },
+      {
+        "id": "C2",
+        "author": null,
+        "body": "C2",
+        "createdAt": "2026-07-01T00:00:00Z",
+        "lastEditedAt": null,
+        "url": "https://github.com/acme/web/pull/7#discussion_C2",
+        "isMinimized": false,
+        "pullRequestReview": null,
+        "reactionGroups": []
+      }
+    ]
+  }
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "fixture": "core.json",
+    "source": "packages/source-control-github/src/server/GitHubPullRequestApi.test.ts",
+    "line": 58,
+    "origin": "TypeScript fixture-builder default output"
+  },
+  {
+    "fixture": "core-paged-checks.json",
+    "source": "packages/source-control-github/src/server/GitHubPullRequestApi.test.ts",
+    "line": 58,
+    "origin": "TypeScript fixture-builder output; synthetic call arguments"
+  },
+  {
+    "fixture": "decoder-core.json",
+    "source": "packages/source-control-github/src/server/gitHubPullRequestJson.test.ts",
+    "line": 368,
+    "origin": "TypeScript fixture-builder default output"
+  },
+  {
+    "fixture": "review-thread.json",
+    "source": "packages/source-control-github/src/server/GitHubPullRequestApi.test.ts",
+    "line": 366,
+    "origin": "TypeScript fixture-builder output; synthetic call arguments"
+  }
+]

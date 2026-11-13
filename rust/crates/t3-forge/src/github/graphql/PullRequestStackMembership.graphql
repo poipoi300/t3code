@@ -1,0 +1,14 @@
+query PullRequestStackMembership($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      stack {
+        number
+        size
+        baseRefName
+      }
+      stackEntry {
+        position
+      }
+    }
+  }
+}

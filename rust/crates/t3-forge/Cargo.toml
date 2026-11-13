@@ -1,0 +1,30 @@
+[package]
+name = "t3-forge"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+t3-contracts = { path = "../t3-contracts" }
+t3-process = { path = "../t3-process" }
+t3-git = { path = "../t3-git" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+url = "2"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+tokio = { version = "1", features = ["fs", "sync", "time", "rt-multi-thread", "macros", "net", "io-util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+chrono = "0.4"
+sha2 = "0.10"
+futures-util = "0.3"
+base64 = "0.22"
+tempfile = "3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
+[lints.rust]
+unsafe_code = "deny"
