@@ -199,3 +199,73 @@ fn deployment_templates_cover_registry_controls_and_profile_matches_typescript()
         "settings.defaultModelSelection is null, which a configuration profile cannot hold; deploy this policy as a file."
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn serve_routes_fail_closed_on_hangs_and_failed_removal_and_recheck_success() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use t3_host::{
+        Result,
+        policy::{ServeRoute, ServeRoutes},
+    };
+    struct Routes {
+        hang: u8,
+        fail: bool,
+        present: AtomicBool,
+    }
+    #[async_trait::async_trait]
+    impl ServeRoutes for Routes {
+        async fn can_bind(&self, _: &str, _: u16) -> Result<bool> {
+            if self.hang == 1 {
+                std::future::pending().await
+            } else {
+                Ok(true)
+            }
+        }
+        async fn routes(&self, _: &str, _: u16) -> Result<Vec<ServeRoute>> {
+            if self.hang == 2 {
+                return std::future::pending().await;
+            }
+            Ok(if self.present.load(Ordering::SeqCst) {
+                vec![ServeRoute {
+                    serve_port: 443,
+                    removable: true,
+                }]
+            } else {
+                vec![]
+            })
+        }
+        async fn disable(&self, _: &ServeRoute) -> Result<()> {
+            if self.hang == 3 {
+                return std::future::pending().await;
+            }
+            if !self.fail {
+                self.present.store(false, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+    let p = policy(
+        json!({"schemaVersion":1,"organization":"Org","limits":{"clients":["local-browser"]}}),
+    );
+    for (hang, fail, success) in [
+        (1, false, false),
+        (2, false, false),
+        (3, false, false),
+        (0, true, false),
+        (0, false, true),
+    ] {
+        let routes = Routes {
+            hang,
+            fail,
+            present: AtomicBool::new(true),
+        };
+        assert_eq!(
+            p.close_tailscale_serve_to("127.0.0.1", 3773, &routes)
+                .await
+                .is_ok(),
+            success,
+            "hang={hang}, failed removal={fail}"
+        );
+        assert_eq!(routes.present.load(Ordering::SeqCst), !success);
+    }
+}
