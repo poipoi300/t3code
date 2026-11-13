@@ -1,0 +1,7 @@
+# Fixtures are compared byte for byte with TypeScript output, so git must not
+# translate their line endings.
+fixtures/** -text
+crates/*/fixtures/** -text
+crates/*/tests/fixtures/** -text
+crates/*/data/** -text
+*.jsonl -text
