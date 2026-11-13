@@ -635,8 +635,8 @@ pub trait Forge: Send + Sync {
     }
     async fn refine_repository_identity(
         &self,
-        _identity: VcsRepositoryIdentity,
-    ) -> Result<VcsRepositoryIdentity> {
+        _identity: RepositoryIdentity,
+    ) -> Result<RepositoryIdentity> {
         Err(ForgeError::unsupported(
             &self.kind(),
             "refine_repository_identity",

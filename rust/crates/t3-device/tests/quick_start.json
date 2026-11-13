@@ -1,0 +1,62 @@
+[
+  {
+    "device": {
+      "hostId": "local",
+      "id": "phone",
+      "platform": "ios",
+      "name": "Phone",
+      "version": "Cloud",
+      "booted": true,
+      "physical": false
+    },
+    "kind": null,
+    "installDirectory": null,
+    "command": "/path with spaces/agent-device",
+    "expected": "The user is watching Phone (Cloud) in the Device panel.\nDrive it with '/path with spaces/agent-device'. It is bound to this device and session, so it needs no --platform, --udid, --serial, --config or --session flags. Use this exact path; login shells may reset PATH.\nEvery app launch, deep link, tap, text entry, alert, setting, screenshot and recording on this device goes through it. Run open <bundle-or-package-id> (apps lists them) before snapshots, CLI screenshots or input; it starts the session they need. Use device_screenshot just to look.\n  '/path with spaces/agent-device' open <bundle-or-package-id> --relaunch  # restarts the app; Expo dev clients connect to their Metro, --metro-port <port> picks it\n  '/path with spaces/agent-device' open <bundle-or-package-id> <deep-link-url>\n  '/path with spaces/agent-device' snapshot -i  # accessibility tree with @eN refs\n  '/path with spaces/agent-device' press @e3 --settle\n  '/path with spaces/agent-device' fill @e5 \"text\" --settle\n  '/path with spaces/agent-device' alert accept\n  '/path with spaces/agent-device' settings appearance dark  # also text-size, permission grant <name>\n  '/path with spaces/agent-device' screenshot /tmp/shot.png  # iOS saves 1x points; add --pixel-density <n> (3 on most iPhones) for device resolution, or call device_screenshot to look\n  '/path with spaces/agent-device' record start --scope device /tmp/run.mp4  # then record stop\n  '/path with spaces/agent-device' install <app> <path-to-.app-or-.apk>\nPrefer snapshot refs over coordinates. Run '/path with spaces/agent-device' help <command> for flags and '/path with spaces/agent-device' help workflow for guides.\nDo not use simctl, idb, adb or ssh for those actions. They stay fine for builds, installs, code sync, Metro, port forwards, logs, test runners and what this command cannot do; come back to it for every UI action and screenshot so the user can watch.\nEach device_open returns its own command; opening another device does not retarget this one.\nThe command is removed when the device closes or T3 Code restarts. If it is missing, call device_open again.\nFirst use builds an XCTest runner and can take a couple of minutes; later commands are fast."
+  },
+  {
+    "device": {
+      "hostId": "local",
+      "id": "phone",
+      "platform": "android",
+      "name": "Phone",
+      "version": "Cloud",
+      "booted": true,
+      "physical": false
+    },
+    "kind": null,
+    "installDirectory": null,
+    "command": "/path with spaces/agent-device",
+    "expected": "The user is watching Phone (Cloud) in the Device panel.\nDrive it with '/path with spaces/agent-device'. It is bound to this device and session, so it needs no --platform, --udid, --serial, --config or --session flags. Use this exact path; login shells may reset PATH.\nEvery app launch, deep link, tap, text entry, alert, setting, screenshot and recording on this device goes through it. Run open <bundle-or-package-id> (apps lists them) before snapshots, CLI screenshots or input; it starts the session they need. Use device_screenshot just to look.\n  '/path with spaces/agent-device' open <bundle-or-package-id> --relaunch  # restarts the app; Expo dev clients connect to their Metro, --metro-port <port> picks it\n  '/path with spaces/agent-device' open <bundle-or-package-id> <deep-link-url>\n  '/path with spaces/agent-device' snapshot -i  # accessibility tree with @eN refs\n  '/path with spaces/agent-device' press @e3 --settle\n  '/path with spaces/agent-device' fill @e5 \"text\" --settle\n  '/path with spaces/agent-device' alert accept\n  '/path with spaces/agent-device' settings appearance dark  # also text-size, permission grant <name>\n  '/path with spaces/agent-device' screenshot /tmp/shot.png  # or call device_screenshot to look\n  '/path with spaces/agent-device' record start --scope device /tmp/run.mp4  # then record stop\n  '/path with spaces/agent-device' install <app> <path-to-.app-or-.apk>\nPrefer snapshot refs over coordinates. Run '/path with spaces/agent-device' help <command> for flags and '/path with spaces/agent-device' help workflow for guides.\nDo not use simctl, idb, adb or ssh for those actions. They stay fine for builds, installs, code sync, Metro, port forwards, logs, test runners and what this command cannot do; come back to it for every UI action and screenshot so the user can watch.\nEach device_open returns its own command; opening another device does not retarget this one.\nThe command is removed when the device closes or T3 Code restarts. If it is missing, call device_open again.\nThe Android snapshot helper installs itself on first use."
+  },
+  {
+    "device": {
+      "hostId": "local",
+      "id": "phone",
+      "platform": "ios",
+      "name": "Phone",
+      "version": "Cloud",
+      "booted": true,
+      "physical": false
+    },
+    "kind": "eas",
+    "installDirectory": null,
+    "command": "/path with spaces/agent-device",
+    "expected": "The user is watching Phone (Cloud) in the Device panel.\nDrive it with '/path with spaces/agent-device'. It is bound to this device and session, so it needs no --platform, --udid, --serial, --config or --session flags. Use this exact path; login shells may reset PATH.\nEvery app launch, deep link, tap, text entry, alert, setting, screenshot and recording on this device goes through it. Run open <bundle-or-package-id> (apps lists them) before snapshots, CLI screenshots or input; it starts the session they need. Use device_screenshot just to look.\n  '/path with spaces/agent-device' open <bundle-or-package-id> --relaunch  # restarts the app; Expo dev clients connect to their Metro, --metro-port <port> picks it\n  '/path with spaces/agent-device' open <bundle-or-package-id> <deep-link-url>\n  '/path with spaces/agent-device' snapshot -i  # accessibility tree with @eN refs\n  '/path with spaces/agent-device' press @e3 --settle\n  '/path with spaces/agent-device' fill @e5 \"text\" --settle\n  '/path with spaces/agent-device' alert accept\n  '/path with spaces/agent-device' settings appearance dark  # also text-size, permission grant <name>\n  '/path with spaces/agent-device' screenshot /tmp/shot.png  # iOS saves 1x points; add --pixel-density <n> (3 on most iPhones) for device resolution, or call device_screenshot to look\n  '/path with spaces/agent-device' record start --scope device /tmp/run.mp4  # then record stop\n  '/path with spaces/agent-device' install <app> <path-to-.app-or-.apk>\nPrefer snapshot refs over coordinates. Run '/path with spaces/agent-device' help <command> for flags and '/path with spaces/agent-device' help workflow for guides.\nDo not use simctl, idb, adb or ssh for those actions. They stay fine for builds, installs, code sync, Metro, port forwards, logs, test runners and what this command cannot do; come back to it for every UI action and screenshot so the user can watch.\nEach device_open returns its own command; opening another device does not retarget this one.\nThe command is removed when the device closes or T3 Code restarts. If it is missing, call device_open again.\nThis is an EAS Simulator session in the cloud. It bills the Expo account per minute until it stops, so call device_close with shutdown: true when you are done. It starts with no apps installed: install-from-source <url> installs a build from a URL (iOS needs a .tar.gz containing a .app), and install uploads one from this machine."
+  },
+  {
+    "device": {
+      "hostId": "local",
+      "id": "phone",
+      "platform": "android",
+      "name": "Phone",
+      "version": "Cloud",
+      "booted": true,
+      "physical": false
+    },
+    "kind": "simlock",
+    "installDirectory": "/workspace",
+    "command": "/path with spaces/agent-device",
+    "expected": "The user is watching Phone (Cloud) in the Device panel.\nDrive it with '/path with spaces/agent-device'. It is bound to this device and session, so it needs no --platform, --udid, --serial, --config or --session flags. Use this exact path; login shells may reset PATH.\nEvery app launch, deep link, tap, text entry, alert, setting, screenshot and recording on this device goes through it. Run open <bundle-or-package-id> (apps lists them) before snapshots, CLI screenshots or input; it starts the session they need. Use device_screenshot just to look.\n  '/path with spaces/agent-device' open <bundle-or-package-id> --relaunch  # restarts the app; Expo dev clients connect to their Metro, --metro-port <port> picks it\n  '/path with spaces/agent-device' open <bundle-or-package-id> <deep-link-url>\n  '/path with spaces/agent-device' snapshot -i  # accessibility tree with @eN refs\n  '/path with spaces/agent-device' press @e3 --settle\n  '/path with spaces/agent-device' fill @e5 \"text\" --settle\n  '/path with spaces/agent-device' alert accept\n  '/path with spaces/agent-device' settings appearance dark  # also text-size, permission grant <name>\n  '/path with spaces/agent-device' screenshot /tmp/shot.png  # or call device_screenshot to look\n  '/path with spaces/agent-device' record start --scope device /tmp/run.mp4  # then record stop\n  '/path with spaces/agent-device' install <app> <path-to-.app-or-.apk>\nPrefer snapshot refs over coordinates. Run '/path with spaces/agent-device' help <command> for flags and '/path with spaces/agent-device' help workflow for guides.\nDo not use simctl, idb, adb or ssh for those actions. They stay fine for builds, installs, code sync, Metro, port forwards, logs, test runners and what this command cannot do; come back to it for every UI action and screenshot so the user can watch.\nEach device_open returns its own command; opening another device does not retarget this one.\nThe command is removed when the device closes or T3 Code restarts. If it is missing, call device_open again.\nThis device is leased from a Simlock pool (alpha in T3 Code). The lease returns it to the pool, wiped, when it ends, so call device_close with shutdown: true when you are done. It starts with no apps installed. agent-device accepts install for this lease only when run from /workspace."
+  }
+]
