@@ -1,0 +1,11 @@
+pub mod acp_adapter_v2_testkit;
+pub mod acp_registry_adapter_v2_testkit;
+pub mod cursor_adapter_v2_testkit;
+pub mod fx_adapter_v2_testkit;
+pub mod grok_adapter_v2_testkit;
+pub mod kiro_adapter_v2_testkit;
+pub mod muse_adapter_v2_testkit;
+pub mod open_code2_adapter_v2_testkit;
+pub mod open_code_adapter_v2_testkit;
+pub mod pi_adapter_v2_testkit;
+pub mod provider_text_delta_coalescer;

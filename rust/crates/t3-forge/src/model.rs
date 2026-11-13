@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-pub use t3_contracts::git::GitPullRequestReference;
 pub use t3_contracts::environment::RepositoryIdentity;
+pub use t3_contracts::git::GitPullRequestReference;
 pub use t3_contracts::pull_request::*;
 pub use t3_contracts::source_control::{
     ChangeRequest, ChangeRequestState, SourceControlProviderInfo, SourceControlProviderKind,

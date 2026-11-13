@@ -1,0 +1,40 @@
+[package]
+name = "t3-orchestration"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Sibling crates still under repair are optional so that one mid-edit crate
+# cannot stop every package of this crate from building.
+[features]
+git-backend = ["dep:t3-git"]
+codex-adapter = ["dep:t3-codex-app-server", "dep:t3-process"]
+claude-adapter = ["dep:t3-claude-cli", "dep:t3-process"]
+acp-adapter = ["dep:t3-acp", "dep:t3-process"]
+
+[dependencies]
+t3-contracts = { path = "../t3-contracts" }
+t3-persistence = { path = "../t3-persistence" }
+t3-git = { path = "../t3-git", optional = true }
+t3-process = { path = "../t3-process", optional = true }
+t3-codex-app-server = { path = "../t3-codex-app-server", optional = true }
+t3-claude-cli = { path = "../t3-claude-cli", optional = true }
+t3-acp = { path = "../t3-acp", optional = true }
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip: persisted event JSON must reproduce JavaScript's number text.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+thiserror = "2"
+async-trait = "0.1"
+tokio = { version = "1", features = ["sync", "rt", "macros", "time", "test-util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tempfile = "3"
+unicode-segmentation = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+# Intl.Collator ordering for ids with mixed case and punctuation (as t3-usage).
+icu_collator = "2"
