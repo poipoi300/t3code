@@ -1,0 +1,147 @@
+[
+  {
+    "name": "t3_rpc_requests_total",
+    "kind": "counter",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_rpc_request_duration",
+    "kind": "timer",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_orchestration_commands_total",
+    "kind": "counter",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_orchestration_command_duration",
+    "kind": "timer",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_orchestration_effect_claims_total",
+    "kind": "counter",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_orchestration_effect_queue_wait",
+    "kind": "timer",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_provider_sessions_total",
+    "kind": "counter",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_provider_turns_total",
+    "kind": "counter",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_provider_turn_duration",
+    "kind": "timer",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_server_resident_bytes",
+    "kind": "gauge",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_server_heap_used_bytes",
+    "kind": "gauge",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_server_cpu_utilization",
+    "kind": "gauge",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_server_event_loop_utilization",
+    "kind": "gauge",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_server_event_loop_delay_max",
+    "kind": "gauge",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_runs_total",
+    "kind": "counter",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_run_duration",
+    "kind": "timer",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_run_queue_wait",
+    "kind": "timer",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_git_commands_total",
+    "kind": "counter",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_git_command_duration",
+    "kind": "timer",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_terminal_sessions_total",
+    "kind": "counter",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_webhook_deliveries_total",
+    "kind": "counter",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_webhook_delivery_duration",
+    "kind": "timer",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_webhook_held_delay",
+    "kind": "timer",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_webhook_runs_total",
+    "kind": "counter",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_secret_requests_total",
+    "kind": "counter",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_secret_refs_consumed_total",
+    "kind": "counter",
+    "source": "apps/server/src/observability/Metrics.ts"
+  },
+  {
+    "name": "t3_process_group_resident_bytes",
+    "kind": "gauge",
+    "source": "apps/server/src/resourceTelemetry/ProcessGroupMetrics.ts"
+  },
+  {
+    "name": "t3_process_group_cpu_percent",
+    "kind": "gauge",
+    "source": "apps/server/src/resourceTelemetry/ProcessGroupMetrics.ts"
+  },
+  {
+    "name": "t3_process_group_count",
+    "kind": "gauge",
+    "source": "apps/server/src/resourceTelemetry/ProcessGroupMetrics.ts"
+  }
+]

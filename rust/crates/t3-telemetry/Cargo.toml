@@ -1,0 +1,48 @@
+[package]
+name = "t3-telemetry"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+
+[dependencies]
+t3-contracts = { path = "../t3-contracts" }
+t3-config = { path = "../t3-config" }
+t3-process = { path = "../t3-process" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "test-util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry"] }
+tracing-opentelemetry = "0.32"
+opentelemetry = { version = "0.31", features = ["trace", "metrics", "logs"] }
+opentelemetry_sdk = { version = "0.31", features = ["trace", "metrics", "logs"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "metrics", "logs", "http-proto", "http-json", "reqwest-blocking-client", "reqwest-rustls"] }
+opentelemetry-http = "0.31"
+async-trait = "0.1"
+http = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+sysinfo = "0.39.3"
+uuid = { version = "1", features = ["v4", "v7"] }
+sha2 = "0.10"
+base64 = "0.22"
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+axum = "0.8"
+prost = "0.14"
+opentelemetry-proto = {version="0.31", default-features=false, features=["gen-tonic-messages","trace","metrics","logs","with-serde"]}
+
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+

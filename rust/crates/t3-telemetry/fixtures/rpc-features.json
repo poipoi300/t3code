@@ -1,0 +1,70 @@
+{
+  "terminal.open": [
+    "terminal.open",
+    null
+  ],
+  "preview.open": [
+    "preview.open",
+    null
+  ],
+  "device.open": [
+    "device.open",
+    null
+  ],
+  "shell.openInEditor": [
+    "editor.open",
+    "editor"
+  ],
+  "vcs.createWorktree": [
+    "worktree.create",
+    null
+  ],
+  "git.runStackedAction": [
+    "git.stacked_action",
+    "action"
+  ],
+  "pullRequests.runAction": [
+    "pull_request.action",
+    "action"
+  ],
+  "pullRequests.submitReview": [
+    "pull_request.review",
+    null
+  ],
+  "pullRequests.comment": [
+    "pull_request.comment",
+    null
+  ],
+  "scheduledTasks.upsert": [
+    "scheduled_task.save",
+    null
+  ],
+  "scheduledTasks.runNow": [
+    "scheduled_task.run_now",
+    null
+  ],
+  "agentSessions.import": [
+    "agent_session.import",
+    null
+  ],
+  "projectClone.start": [
+    "project.clone",
+    null
+  ],
+  "sourceControl.publishRepository": [
+    "repository.publish",
+    null
+  ],
+  "sourceControl.signInStart": [
+    "source_control.sign_in",
+    null
+  ],
+  "server.upsertKeybinding": [
+    "keybinding.customize",
+    null
+  ],
+  "guestShare.create": [
+    "guest_share.create",
+    null
+  ]
+}
