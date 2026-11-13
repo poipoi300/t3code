@@ -57,8 +57,9 @@ native result error small; the classifier compiles its constant patterns once.
 Final scoped format check and all-feature Clippy with `--no-deps -D warnings`
 passed. The final all-feature suite passed **55 tests**: 1 classifier, 20
 application, 7 cache, 7 Forge, 6 guide, 5 orchestration adapter, 4 SQLite, 1 viewed
-race and 4 watch tests. Default checks and dependency-wide lint status are still
-being collected; replace this sentence with their completed results.
+race and 4 watch tests. Default Clippy with `-D warnings` and all **39 default
+tests** also passed. The dependency-wide all-feature lint result is still being
+collected; replace this sentence with its completed result.
 No live host/provider calls, credentials, dev servers or user state were used.
 
 First integration step: wire the host-owned contexts/checkout adapter, then the
