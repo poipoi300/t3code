@@ -1,0 +1,7 @@
+# Many checkouts and agents build this workspace at once on one machine. With
+# the default (one rustc per core) twenty concurrent builds exhausted the
+# system's commit memory and took other processes down; at four jobs and 27
+# concurrent builds it was down to 10 GB free again. Override per command with
+# `--jobs` or `CARGO_BUILD_JOBS` on a quiet machine.
+[build]
+jobs = 4

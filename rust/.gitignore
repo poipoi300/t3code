@@ -1,0 +1,8 @@
+/target
+
+# Regenerated from the TypeScript by `node rust/tools/export/main.ts`; about
+# 95 MB together, so they stay out of the repository.
+/fixtures/contracts.schema.json
+/fixtures/differential.jsonl
+/fixtures/samples/
+/fixtures/non-scalar/
