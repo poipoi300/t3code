@@ -1,0 +1,4 @@
+{"type":"assistant","timestamp":"2026-08-01T10:00:00Z","requestId":"req_1","sessionId":"session-1","message":{"id":"msg_1","model":"claude-fable-5","usage":{"input_tokens":2,"cache_creation_input_tokens":1097,"cache_read_input_tokens":67934,"output_tokens":42,"speed":"fast","cache_creation":{"ephemeral_1h_input_tokens":400},"iterations":[{"type":"advisor_message","model":"claude-opus-5-5","input_tokens":20,"output_tokens":5,"cache_creation_input_tokens":4,"cache_creation":{"ephemeral_1h_input_tokens":3}},{"type":"advisor_message","model":"<synthetic>","output_tokens":100},{"type":"other"}]}}}
+{"type":"assistant","timestamp":"2026-08-01T10:00:00Z","requestId":"req_3","sessionId":"session-1","message":{"id":"msg_3","model":"<synthetic>","usage":{"input_tokens":2,"cache_creation_input_tokens":1097,"cache_read_input_tokens":67934,"output_tokens":5}}}
+{broken
+{"type":"user","message":{"usage":{}}}

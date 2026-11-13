@@ -1,0 +1,37 @@
+[package]
+name = "t3-usage"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+t3-contracts = { path = "../t3-contracts" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+thiserror = "2"
+chrono = "0.4"
+chrono-tz = "0.10"
+tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
+rusqlite = { version = "0.40", features = ["bundled", "hooks", "limits"] }
+tempfile = "3"
+tracing = "0.1"
+icu_collator = "2"
+sha2 = "0.10"
+zstd = "0.13"
+indexmap = { version = "2", features = ["serde"] }
+file-id = "0.2"
+dunce = "1"
+url = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.31", features = ["fs"] }
+
+[lints]
+workspace = true

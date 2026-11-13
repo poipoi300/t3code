@@ -1,0 +1,1636 @@
+[
+  {
+    "name": "category and speed",
+    "records": [
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "fast",
+        "dedupeKey": null
+      }
+    ],
+    "options": {
+      "timeZone": "UTC",
+      "sinceDay": "2026-08-01",
+      "untilDay": "2026-08-31"
+    },
+    "accepted": [
+      true,
+      true
+    ],
+    "expected": {
+      "buckets": [
+        {
+          "day": "2026-08-07",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 200,
+            "cachedInputTokens": 2000,
+            "cacheCreationTokens": 20,
+            "outputTokens": 100,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.013875000000000002,
+          "cacheSavingsUsd": 0.027000000000000003,
+          "categoryCostUsd": {
+            "input": 0.003,
+            "cacheRead": 0.003,
+            "cacheWrite": 0.000375,
+            "output": 0.0075
+          },
+          "fastCostUsd": 0.00925,
+          "speedPremiumUsd": 0.004625,
+          "costSource": "modelPriced",
+          "records": 2,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        }
+      ],
+      "duplicatesDropped": 0,
+      "outOfWindow": 0
+    }
+  },
+  {
+    "name": "copies first bucket",
+    "records": [
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1200,
+          "cacheCreationTokens": 10,
+          "outputTokens": 3,
+          "reasoningTokens": 5
+        },
+        "reportedCostUsd": 1,
+        "speed": "fast",
+        "dedupeKey": "msg_1:"
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1786190400000,
+        "model": "claude-fable-5[1m]",
+        "sessionId": "session-fork",
+        "totals": {
+          "uncachedInputTokens": 2,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 40,
+          "outputTokens": 264,
+          "reasoningTokens": 135
+        },
+        "reportedCostUsd": 2,
+        "speed": "standard",
+        "dedupeKey": "msg_1:"
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1786190400000,
+        "model": "claude-fable-5[1m]",
+        "sessionId": "session-fork",
+        "totals": {
+          "uncachedInputTokens": 2,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 40,
+          "outputTokens": 264,
+          "reasoningTokens": 135
+        },
+        "reportedCostUsd": 2,
+        "speed": "standard",
+        "dedupeKey": "msg_1:"
+      }
+    ],
+    "options": {
+      "timeZone": "UTC",
+      "sinceDay": "2026-08-01",
+      "untilDay": "2026-08-31",
+      "sources": [
+        "0.jsonl",
+        "1.jsonl",
+        "2.jsonl"
+      ]
+    },
+    "accepted": [
+      true,
+      false,
+      false
+    ],
+    "expected": {
+      "buckets": [
+        {
+          "day": "2026-08-07",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "sourcePath": "0.jsonl",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 1200,
+            "cacheCreationTokens": 40,
+            "outputTokens": 264,
+            "reasoningTokens": 135
+          },
+          "costUsd": 2,
+          "cacheSavingsUsd": 0.0216,
+          "categoryCostUsd": {
+            "input": 0.125786,
+            "cacheRead": 0.150943,
+            "cacheWrite": 0.062893,
+            "output": 1.660377
+          },
+          "fastCostUsd": 2,
+          "speedPremiumUsd": 1,
+          "costSource": "providerReported",
+          "records": 1,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        }
+      ],
+      "duplicatesDropped": 2,
+      "outOfWindow": 0
+    }
+  },
+  {
+    "name": "first outside",
+    "records": [
+      {
+        "provider": "claude",
+        "timestampMs": 1782907200000,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": "key"
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": "key"
+      }
+    ],
+    "options": {
+      "timeZone": "UTC",
+      "sinceDay": "2026-08-01",
+      "untilDay": "2026-08-31"
+    },
+    "accepted": [
+      false,
+      false
+    ],
+    "expected": {
+      "buckets": [],
+      "duplicatesDropped": 1,
+      "outOfWindow": 1
+    }
+  },
+  {
+    "name": "zone UTC",
+    "records": [
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785608099999,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785608100000,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785628739999,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785628740000,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      }
+    ],
+    "options": {
+      "timeZone": "UTC",
+      "sinceDay": "2026-08-01",
+      "untilDay": "2026-08-31"
+    },
+    "accepted": [
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "expected": {
+      "buckets": [
+        {
+          "day": "2026-08-01",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 400,
+            "cachedInputTokens": 4000,
+            "cacheCreationTokens": 40,
+            "outputTokens": 200,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.018500000000000003,
+          "cacheSavingsUsd": 0.036000000000000004,
+          "categoryCostUsd": {
+            "input": 0.004,
+            "cacheRead": 0.004,
+            "cacheWrite": 0.0005,
+            "output": 0.01
+          },
+          "costSource": "modelPriced",
+          "records": 4,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        },
+        {
+          "day": "2026-08-07",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 1000,
+            "cacheCreationTokens": 10,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.004625000000000001,
+          "cacheSavingsUsd": 0.009000000000000001,
+          "categoryCostUsd": {
+            "input": 0.001,
+            "cacheRead": 0.001,
+            "cacheWrite": 0.000125,
+            "output": 0.0025
+          },
+          "costSource": "modelPriced",
+          "records": 1,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        }
+      ],
+      "duplicatesDropped": 0,
+      "outOfWindow": 0
+    }
+  },
+  {
+    "name": "zone America/Los_Angeles",
+    "records": [
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785608099999,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785608100000,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785628739999,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785628740000,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      }
+    ],
+    "options": {
+      "timeZone": "America/Los_Angeles",
+      "sinceDay": "2026-08-01",
+      "untilDay": "2026-08-31"
+    },
+    "accepted": [
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "expected": {
+      "buckets": [
+        {
+          "day": "2026-08-01",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 400,
+            "cachedInputTokens": 4000,
+            "cacheCreationTokens": 40,
+            "outputTokens": 200,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.018500000000000003,
+          "cacheSavingsUsd": 0.036000000000000004,
+          "categoryCostUsd": {
+            "input": 0.004,
+            "cacheRead": 0.004,
+            "cacheWrite": 0.0005,
+            "output": 0.01
+          },
+          "costSource": "modelPriced",
+          "records": 4,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        },
+        {
+          "day": "2026-08-06",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 1000,
+            "cacheCreationTokens": 10,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.004625000000000001,
+          "cacheSavingsUsd": 0.009000000000000001,
+          "categoryCostUsd": {
+            "input": 0.001,
+            "cacheRead": 0.001,
+            "cacheWrite": 0.000125,
+            "output": 0.0025
+          },
+          "costSource": "modelPriced",
+          "records": 1,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        }
+      ],
+      "duplicatesDropped": 0,
+      "outOfWindow": 0
+    }
+  },
+  {
+    "name": "zone Asia/Kathmandu",
+    "records": [
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785608099999,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785608100000,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785628739999,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785628740000,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      }
+    ],
+    "options": {
+      "timeZone": "Asia/Kathmandu",
+      "sinceDay": "2026-08-01",
+      "untilDay": "2026-08-31"
+    },
+    "accepted": [
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "expected": {
+      "buckets": [
+        {
+          "day": "2026-08-01",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 1000,
+            "cacheCreationTokens": 10,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.004625000000000001,
+          "cacheSavingsUsd": 0.009000000000000001,
+          "categoryCostUsd": {
+            "input": 0.001,
+            "cacheRead": 0.001,
+            "cacheWrite": 0.000125,
+            "output": 0.0025
+          },
+          "costSource": "modelPriced",
+          "records": 1,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        },
+        {
+          "day": "2026-08-02",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 300,
+            "cachedInputTokens": 3000,
+            "cacheCreationTokens": 30,
+            "outputTokens": 150,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.013875000000000002,
+          "cacheSavingsUsd": 0.027000000000000003,
+          "categoryCostUsd": {
+            "input": 0.003,
+            "cacheRead": 0.003,
+            "cacheWrite": 0.000375,
+            "output": 0.0075
+          },
+          "costSource": "modelPriced",
+          "records": 3,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        },
+        {
+          "day": "2026-08-07",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 1000,
+            "cacheCreationTokens": 10,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.004625000000000001,
+          "cacheSavingsUsd": 0.009000000000000001,
+          "categoryCostUsd": {
+            "input": 0.001,
+            "cacheRead": 0.001,
+            "cacheWrite": 0.000125,
+            "output": 0.0025
+          },
+          "costSource": "modelPriced",
+          "records": 1,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        }
+      ],
+      "duplicatesDropped": 0,
+      "outOfWindow": 0
+    }
+  },
+  {
+    "name": "zone +00:01",
+    "records": [
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785608099999,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785608100000,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785628739999,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785628740000,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      }
+    ],
+    "options": {
+      "timeZone": "+00:01",
+      "sinceDay": "2026-08-01",
+      "untilDay": "2026-08-31"
+    },
+    "accepted": [
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "expected": {
+      "buckets": [
+        {
+          "day": "2026-08-01",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 300,
+            "cachedInputTokens": 3000,
+            "cacheCreationTokens": 30,
+            "outputTokens": 150,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.013875000000000002,
+          "cacheSavingsUsd": 0.027000000000000003,
+          "categoryCostUsd": {
+            "input": 0.003,
+            "cacheRead": 0.003,
+            "cacheWrite": 0.000375,
+            "output": 0.0075
+          },
+          "costSource": "modelPriced",
+          "records": 3,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        },
+        {
+          "day": "2026-08-02",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 1000,
+            "cacheCreationTokens": 10,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.004625000000000001,
+          "cacheSavingsUsd": 0.009000000000000001,
+          "categoryCostUsd": {
+            "input": 0.001,
+            "cacheRead": 0.001,
+            "cacheWrite": 0.000125,
+            "output": 0.0025
+          },
+          "costSource": "modelPriced",
+          "records": 1,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        },
+        {
+          "day": "2026-08-07",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 1000,
+            "cacheCreationTokens": 10,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.004625000000000001,
+          "cacheSavingsUsd": 0.009000000000000001,
+          "categoryCostUsd": {
+            "input": 0.001,
+            "cacheRead": 0.001,
+            "cacheWrite": 0.000125,
+            "output": 0.0025
+          },
+          "costSource": "modelPriced",
+          "records": 1,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        }
+      ],
+      "duplicatesDropped": 0,
+      "outOfWindow": 0
+    }
+  },
+  {
+    "name": "zone not-a-zone",
+    "records": [
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785608099999,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785608100000,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785628739999,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785628740000,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      }
+    ],
+    "options": {
+      "timeZone": "not-a-zone",
+      "sinceDay": "2026-08-01",
+      "untilDay": "2026-08-31"
+    },
+    "accepted": [
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "expected": {
+      "buckets": [
+        {
+          "day": "2026-08-01",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 400,
+            "cachedInputTokens": 4000,
+            "cacheCreationTokens": 40,
+            "outputTokens": 200,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.018500000000000003,
+          "cacheSavingsUsd": 0.036000000000000004,
+          "categoryCostUsd": {
+            "input": 0.004,
+            "cacheRead": 0.004,
+            "cacheWrite": 0.0005,
+            "output": 0.01
+          },
+          "costSource": "modelPriced",
+          "records": 4,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        },
+        {
+          "day": "2026-08-07",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 1000,
+            "cacheCreationTokens": 10,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.004625000000000001,
+          "cacheSavingsUsd": 0.009000000000000001,
+          "categoryCostUsd": {
+            "input": 0.001,
+            "cacheRead": 0.001,
+            "cacheWrite": 0.000125,
+            "output": 0.0025
+          },
+          "costSource": "modelPriced",
+          "records": 1,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        }
+      ],
+      "duplicatesDropped": 0,
+      "outOfWindow": 0
+    }
+  },
+  {
+    "name": "hourly bounds",
+    "records": [
+      {
+        "provider": "claude",
+        "timestampMs": 1785991019999,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1785991020000,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1786073820000,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1786077419999,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1786077420000,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      }
+    ],
+    "options": {
+      "timeZone": "UTC",
+      "sinceDay": "2026-08-01",
+      "untilDay": "2026-08-31",
+      "resolution": "hour",
+      "sinceTimeMs": 1785991020000,
+      "untilTimeMs": 1786077420000
+    },
+    "accepted": [
+      false,
+      true,
+      true,
+      true,
+      false
+    ],
+    "expected": {
+      "buckets": [
+        {
+          "day": "2026-08-06",
+          "hourStart": "2026-08-06T04:37:00.000Z",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 1000,
+            "cacheCreationTokens": 10,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.004625000000000001,
+          "cacheSavingsUsd": 0.009000000000000001,
+          "categoryCostUsd": {
+            "input": 0.001,
+            "cacheRead": 0.001,
+            "cacheWrite": 0.000125,
+            "output": 0.0025
+          },
+          "costSource": "modelPriced",
+          "records": 1,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        },
+        {
+          "day": "2026-08-07",
+          "hourStart": "2026-08-07T03:37:00.000Z",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 200,
+            "cachedInputTokens": 2000,
+            "cacheCreationTokens": 20,
+            "outputTokens": 100,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.009250000000000001,
+          "cacheSavingsUsd": 0.018000000000000002,
+          "categoryCostUsd": {
+            "input": 0.002,
+            "cacheRead": 0.002,
+            "cacheWrite": 0.00025,
+            "output": 0.005
+          },
+          "costSource": "modelPriced",
+          "records": 2,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        }
+      ],
+      "duplicatesDropped": 0,
+      "outOfWindow": 2
+    }
+  },
+  {
+    "name": "unpriced",
+    "records": [
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "kimi-k3",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      }
+    ],
+    "options": {
+      "timeZone": "UTC",
+      "sinceDay": "2026-08-01",
+      "untilDay": "2026-08-31"
+    },
+    "accepted": [
+      true
+    ],
+    "expected": {
+      "buckets": [
+        {
+          "day": "2026-08-07",
+          "provider": "claude",
+          "model": "kimi-k3",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 1000,
+            "cacheCreationTokens": 10,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0,
+          "cacheSavingsUsd": 0,
+          "costSource": "unpriced",
+          "records": 1,
+          "unpricedRecords": 1,
+          "unpricedTokens": 1160,
+          "sessions": 1
+        }
+      ],
+      "duplicatesDropped": 0,
+      "outOfWindow": 0
+    }
+  },
+  {
+    "name": "reported",
+    "records": [
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": 1.25,
+        "speed": "standard",
+        "dedupeKey": null
+      }
+    ],
+    "options": {
+      "timeZone": "UTC",
+      "sinceDay": "2026-08-01",
+      "untilDay": "2026-08-31"
+    },
+    "accepted": [
+      true
+    ],
+    "expected": {
+      "buckets": [
+        {
+          "day": "2026-08-07",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 1000,
+            "cacheCreationTokens": 10,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          },
+          "costUsd": 1.25,
+          "cacheSavingsUsd": 0.009000000000000001,
+          "categoryCostUsd": {
+            "input": 0.27027,
+            "cacheRead": 0.27027,
+            "cacheWrite": 0.033784,
+            "output": 0.675676
+          },
+          "costSource": "providerReported",
+          "records": 1,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        }
+      ],
+      "duplicatesDropped": 0,
+      "outOfWindow": 0
+    }
+  },
+  {
+    "name": "alias",
+    "records": [
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "example-preview",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null,
+        "rateModel": "wrong"
+      }
+    ],
+    "options": {
+      "timeZone": "UTC",
+      "sinceDay": "2026-08-01",
+      "untilDay": "2026-08-31",
+      "aliases": {
+        "example-preview": "claude-fable-5"
+      }
+    },
+    "accepted": [
+      true,
+      true
+    ],
+    "expected": {
+      "buckets": [
+        {
+          "day": "2026-08-07",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 200,
+            "cachedInputTokens": 2000,
+            "cacheCreationTokens": 20,
+            "outputTokens": 100,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.009250000000000001,
+          "cacheSavingsUsd": 0.018000000000000002,
+          "categoryCostUsd": {
+            "input": 0.002,
+            "cacheRead": 0.002,
+            "cacheWrite": 0.00025,
+            "output": 0.005
+          },
+          "costSource": "modelPriced",
+          "records": 2,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        }
+      ],
+      "duplicatesDropped": 0,
+      "outOfWindow": 0
+    }
+  },
+  {
+    "name": "original filter",
+    "records": [
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "preview",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      },
+      {
+        "provider": "codex",
+        "timestampMs": 1786075513944,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "standard",
+        "dedupeKey": null
+      }
+    ],
+    "options": {
+      "timeZone": "UTC",
+      "sinceDay": "2026-08-01",
+      "untilDay": "2026-08-31",
+      "aliases": {
+        "preview": "claude-fable-5"
+      },
+      "modelFilter": {
+        "include": [
+          {
+            "provider": "claude",
+            "model": "claude-fable-5"
+          }
+        ]
+      }
+    },
+    "accepted": [
+      true,
+      false,
+      false
+    ],
+    "expected": {
+      "buckets": [
+        {
+          "day": "2026-08-07",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 1000,
+            "cacheCreationTokens": 10,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.004625000000000001,
+          "cacheSavingsUsd": 0.009000000000000001,
+          "categoryCostUsd": {
+            "input": 0.001,
+            "cacheRead": 0.001,
+            "cacheWrite": 0.000125,
+            "output": 0.0025
+          },
+          "costSource": "modelPriced",
+          "records": 1,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        }
+      ],
+      "duplicatesDropped": 0,
+      "outOfWindow": 0
+    }
+  },
+  {
+    "name": "override",
+    "records": [
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": 10,
+        "speed": "standard",
+        "dedupeKey": null
+      }
+    ],
+    "options": {
+      "timeZone": "UTC",
+      "sinceDay": "2026-08-01",
+      "untilDay": "2026-08-31",
+      "overrides": {
+        "claude-fable-5": {
+          "inputCostPerMillionTokens": 2,
+          "outputCostPerMillionTokens": 8
+        }
+      }
+    },
+    "accepted": [
+      true
+    ],
+    "expected": {
+      "buckets": [
+        {
+          "day": "2026-08-07",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 1000,
+            "cacheCreationTokens": 10,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.00262,
+          "cacheSavingsUsd": 0,
+          "categoryCostUsd": {
+            "input": 0.0002,
+            "cacheRead": 0.002,
+            "cacheWrite": 0.00002,
+            "output": 0.0004
+          },
+          "costSource": "modelPriced",
+          "records": 1,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        }
+      ],
+      "duplicatesDropped": 0,
+      "outOfWindow": 0
+    }
+  },
+  {
+    "name": "cache ttl",
+    "records": [
+      {
+        "provider": "claude",
+        "timestampMs": 1786075513944,
+        "model": "claude-fable-5",
+        "sessionId": "session-a",
+        "totals": {
+          "uncachedInputTokens": 100,
+          "cachedInputTokens": 1000,
+          "cacheCreationTokens": 10,
+          "outputTokens": 50,
+          "reasoningTokens": 0
+        },
+        "reportedCostUsd": null,
+        "speed": "fast",
+        "dedupeKey": null,
+        "cacheCreation1hTokens": 7
+      }
+    ],
+    "options": {
+      "timeZone": "UTC",
+      "sinceDay": "2026-08-01",
+      "untilDay": "2026-08-31"
+    },
+    "accepted": [
+      true
+    ],
+    "expected": {
+      "buckets": [
+        {
+          "day": "2026-08-07",
+          "provider": "claude",
+          "model": "claude-fable-5",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 1000,
+            "cacheCreationTokens": 10,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.009355,
+          "cacheSavingsUsd": 0.018000000000000002,
+          "categoryCostUsd": {
+            "input": 0.002,
+            "cacheRead": 0.002,
+            "cacheWrite": 0.000355,
+            "output": 0.005
+          },
+          "fastCostUsd": 0.009355,
+          "speedPremiumUsd": 0.004678,
+          "costSource": "modelPriced",
+          "records": 1,
+          "unpricedRecords": 0,
+          "unpricedTokens": 0,
+          "sessions": 1
+        }
+      ],
+      "duplicatesDropped": 0,
+      "outOfWindow": 0
+    }
+  }
+]

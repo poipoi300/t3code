@@ -1,0 +1,7 @@
+{"type":"session_meta","timestamp":"2026-08-01T10:00:00Z","payload":{"type":"session_meta","id":"codex-session-1","model_provider":"openai"}}
+{"type":"turn_context","timestamp":"2026-08-01T10:00:01Z","payload":{"type":"turn_context","model":"gpt-6-astra","turn_id":"turn-1"}}
+{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":"ultrafast"}}}
+{"type":"event_msg","timestamp":"2026-08-01T10:00:05Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":9}}}}
+{"type":"event_msg","timestamp":"2026-08-01T10:00:05Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":9}}}}
+{"type":"event_msg","timestamp":"2026-08-01T10:00:05Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":"invalid"}}}}
+{"type":"event_msg","timestamp":"2026-08-01T10:00:08Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":21}}}}

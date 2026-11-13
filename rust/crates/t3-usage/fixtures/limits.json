@@ -1,0 +1,287 @@
+[
+  {
+    "provider": "codex",
+    "input": {
+      "primary": {
+        "usedPercent": 105,
+        "resetsAt": 1785578500
+      },
+      "secondary": {
+        "usedPercent": 50,
+        "resetsAt": 1785588500
+      }
+    },
+    "checkedAt": "2026-08-01T10:00:00.000Z",
+    "expected": {
+      "checkedAt": "2026-08-01T10:00:00.000Z",
+      "windows": [
+        {
+          "id": "primary",
+          "kind": "session",
+          "label": "Session",
+          "usedPercent": 100,
+          "windowDurationMins": 300,
+          "resetsAt": "2026-08-01T10:01:40.000Z"
+        },
+        {
+          "id": "secondary",
+          "kind": "weekly",
+          "label": "Weekly",
+          "usedPercent": 50,
+          "windowDurationMins": 10080,
+          "resetsAt": "2026-08-01T12:48:20.000Z"
+        }
+      ]
+    }
+  },
+  {
+    "provider": "codex",
+    "input": {
+      "planType": "free",
+      "primary": {
+        "usedPercent": 5
+      }
+    },
+    "checkedAt": "2026-08-01T10:00:00.000Z",
+    "expected": {
+      "checkedAt": "2026-08-01T10:00:00.000Z",
+      "windows": [
+        {
+          "id": "primary",
+          "kind": "monthly",
+          "label": "Monthly",
+          "usedPercent": 5,
+          "windowDurationMins": 43200
+        }
+      ]
+    }
+  },
+  {
+    "provider": "codex",
+    "input": {
+      "limitId": "model-x",
+      "primary": {
+        "usedPercent": 90
+      }
+    },
+    "checkedAt": "2026-08-01T10:00:00.000Z",
+    "expected": {
+      "checkedAt": "2026-08-01T10:00:00.000Z",
+      "windows": []
+    }
+  },
+  {
+    "provider": "codex",
+    "input": {
+      "individualLimit": {
+        "remainingPercent": 20,
+        "resetsAt": 1785578500
+      }
+    },
+    "checkedAt": "2026-08-01T10:00:00.000Z",
+    "expected": {
+      "checkedAt": "2026-08-01T10:00:00.000Z",
+      "windows": [
+        {
+          "id": "individual",
+          "kind": "monthly",
+          "label": "Monthly credit limit",
+          "usedPercent": 80,
+          "resetsAt": "2026-08-01T10:01:40.000Z"
+        }
+      ]
+    }
+  },
+  {
+    "provider": "claude",
+    "input": {
+      "rate_limits_available": false
+    },
+    "checkedAt": "2026-08-01T10:00:00.000Z",
+    "expected": {
+      "checkedAt": "2026-08-01T10:00:00.000Z",
+      "windows": [],
+      "unavailable": {
+        "reason": "unsupported"
+      }
+    }
+  },
+  {
+    "provider": "claude",
+    "input": {
+      "rate_limits_available": true,
+      "rate_limits": {
+        "five_hour": {
+          "utilization": 40,
+          "resets_at": "2026-08-01T12:00:00Z"
+        },
+        "seven_day": {
+          "utilization": 90,
+          "resets_at": null
+        },
+        "model_scoped": [
+          {
+            "display_name": "Opus 5.5",
+            "utilization": 20,
+            "resets_at": null
+          }
+        ],
+        "extra_usage": {
+          "is_enabled": true,
+          "monthly_limit": 100,
+          "used_credits": 25
+        }
+      }
+    },
+    "checkedAt": "2026-08-01T10:00:00.000Z",
+    "expected": {
+      "checkedAt": "2026-08-01T10:00:00.000Z",
+      "windows": [
+        {
+          "id": "five_hour",
+          "kind": "session",
+          "label": "Session",
+          "windowDurationMins": 300,
+          "usedPercent": 40,
+          "resetsAt": "2026-08-01T12:00:00.000Z"
+        },
+        {
+          "id": "seven_day",
+          "kind": "weekly",
+          "label": "Weekly",
+          "windowDurationMins": 10080,
+          "usedPercent": 90
+        },
+        {
+          "id": "seven_day_opus_5_5",
+          "kind": "weekly",
+          "label": "Weekly · Opus 5.5",
+          "windowDurationMins": 10080,
+          "usedPercent": 20
+        },
+        {
+          "id": "monthly_spend",
+          "kind": "monthly",
+          "label": "Monthly spend",
+          "usedPercent": 25
+        }
+      ]
+    }
+  },
+  {
+    "provider": "grok",
+    "input": {
+      "config": {
+        "creditUsagePercent": 50,
+        "currentPeriod": {
+          "type": "USAGE_PERIOD_TYPE_WEEKLY",
+          "start": "2026-08-01T00:00:00Z",
+          "end": "2026-08-08T00:00:00Z"
+        }
+      }
+    },
+    "checkedAt": "2026-08-01T10:00:00.000Z",
+    "expected": {
+      "checkedAt": "2026-08-01T10:00:00.000Z",
+      "windows": [
+        {
+          "id": "subscription",
+          "kind": "weekly",
+          "label": "Weekly",
+          "usedPercent": 50,
+          "resetsAt": "2026-08-08T00:00:00.000Z",
+          "windowDurationMins": 10080
+        }
+      ]
+    }
+  },
+  {
+    "provider": "grok",
+    "input": {
+      "config": {
+        "currentPeriod": {
+          "type": "MONTHLY",
+          "start": "2026-08-01T00:00:00Z",
+          "end": "2026-09-01T00:00:00Z"
+        }
+      }
+    },
+    "checkedAt": "2026-08-01T10:00:00.000Z",
+    "expected": {
+      "checkedAt": "2026-08-01T10:00:00.000Z",
+      "windows": [
+        {
+          "id": "subscription",
+          "kind": "monthly",
+          "label": "Monthly",
+          "usedPercent": 0,
+          "resetsAt": "2026-09-01T00:00:00.000Z",
+          "windowDurationMins": 44640
+        }
+      ]
+    }
+  },
+  {
+    "provider": "grok",
+    "input": {},
+    "checkedAt": "2026-08-01T10:00:00.000Z",
+    "expected": {
+      "checkedAt": "2026-08-01T10:00:00.000Z",
+      "windows": []
+    }
+  },
+  {
+    "provider": "cursor",
+    "input": {
+      "billingCycleStart": "1785578400000",
+      "billingCycleEnd": "1788256800000",
+      "planUsage": {
+        "totalPercentUsed": 40,
+        "autoPercentUsed": 110,
+        "apiPercentUsed": 20
+      }
+    },
+    "checkedAt": "2026-08-01T10:00:00.000Z",
+    "expected": {
+      "checkedAt": "2026-08-01T10:00:00.000Z",
+      "windows": [
+        {
+          "id": "apiPercentUsed",
+          "kind": "monthly",
+          "label": "Other Models",
+          "usedPercent": 20,
+          "resetsAt": "2026-09-01T10:00:00.000Z",
+          "windowDurationMins": 44640
+        },
+        {
+          "id": "autoPercentUsed",
+          "kind": "monthly",
+          "label": "Cursor Models",
+          "usedPercent": 100,
+          "resetsAt": "2026-09-01T10:00:00.000Z",
+          "windowDurationMins": 44640
+        },
+        {
+          "id": "totalPercentUsed",
+          "kind": "monthly",
+          "label": "Overall",
+          "usedPercent": 40,
+          "resetsAt": "2026-09-01T10:00:00.000Z",
+          "windowDurationMins": 44640
+        }
+      ]
+    }
+  },
+  {
+    "provider": "cursor",
+    "input": {},
+    "checkedAt": "2026-08-01T10:00:00.000Z",
+    "expected": {
+      "checkedAt": "2026-08-01T10:00:00.000Z",
+      "windows": [],
+      "unavailable": {
+        "reason": "unsupported"
+      }
+    }
+  }
+]

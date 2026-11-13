@@ -1,0 +1,1243 @@
+[
+  {
+    "file": "claude-copies.jsonl",
+    "provider": "claude",
+    "expected": {
+      "records": [
+        {
+          "provider": "claude",
+          "timestampMs": 1785578400000,
+          "model": "claude-fable-5",
+          "sessionId": "session-1",
+          "totals": {
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 67934,
+            "cacheCreationTokens": 1097,
+            "outputTokens": 3,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": "msg_1:req_1"
+        },
+        {
+          "provider": "claude",
+          "timestampMs": 1785578400000,
+          "model": "claude-fable-5",
+          "sessionId": "session-1",
+          "totals": {
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 67934,
+            "cacheCreationTokens": 1097,
+            "outputTokens": 264,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": "msg_1:req_1"
+        }
+      ],
+      "tailRecords": [
+        {
+          "provider": "claude",
+          "timestampMs": 1785578400000,
+          "model": "claude-fable-5",
+          "sessionId": "session-1",
+          "totals": {
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 67934,
+            "cacheCreationTokens": 1097,
+            "outputTokens": 7,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": "msg_2:req_2"
+        }
+      ],
+      "malformedRecords": 0,
+      "position": {
+        "resumeOffset": 526,
+        "guardLength": 64,
+        "guardHash": 1183240174,
+        "state": null
+      },
+      "resumed": false
+    }
+  },
+  {
+    "file": "claude-advisor.jsonl",
+    "provider": "claude",
+    "expected": {
+      "records": [
+        {
+          "provider": "claude",
+          "timestampMs": 1785578400000,
+          "model": "claude-fable-5",
+          "sessionId": "session-1",
+          "totals": {
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 67934,
+            "cacheCreationTokens": 1097,
+            "outputTokens": 42,
+            "reasoningTokens": 0
+          },
+          "cacheCreation1hTokens": 400,
+          "reportedCostUsd": null,
+          "speed": "fast",
+          "dedupeKey": "msg_1:req_1"
+        },
+        {
+          "provider": "claude",
+          "timestampMs": 1785578400000,
+          "model": "claude-opus-5-5",
+          "sessionId": "session-1",
+          "totals": {
+            "uncachedInputTokens": 20,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 4,
+            "outputTokens": 5,
+            "reasoningTokens": 0
+          },
+          "cacheCreation1hTokens": 3,
+          "reportedCostUsd": null,
+          "speed": "fast",
+          "dedupeKey": "msg_1:req_1:advisor:0"
+        }
+      ],
+      "tailRecords": [],
+      "malformedRecords": 0,
+      "position": {
+        "resumeOffset": 906,
+        "guardLength": 64,
+        "guardHash": 159785256,
+        "state": null
+      },
+      "resumed": false
+    }
+  },
+  {
+    "file": "codex-legacy.jsonl",
+    "provider": "codex",
+    "expected": {
+      "records": [
+        {
+          "provider": "codex",
+          "timestampMs": 1785578405000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 9,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "ultrafast",
+          "dedupeKey": null
+        }
+      ],
+      "tailRecords": [
+        {
+          "provider": "codex",
+          "timestampMs": 1785578408000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 21,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "ultrafast",
+          "dedupeKey": null
+        }
+      ],
+      "malformedRecords": 1,
+      "position": {
+        "resumeOffset": 865,
+        "guardLength": 64,
+        "guardHash": 1643490619,
+        "state": {
+          "model": "gpt-6-astra",
+          "speed": "ultrafast",
+          "sessionId": "codex-session-1",
+          "lastUsageSignature": "{\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":9,\"reasoning_output_tokens\":0,\"total_tokens\":109}",
+          "lastCumulativeUsage": {
+            "input_tokens": 100,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 9,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 109
+          },
+          "requestLedgerActive": false,
+          "malformedRecords": 1,
+          "sawSessionMeta": true,
+          "modelProvider": "openai",
+          "turnId": "turn-1",
+          "sawThreadSettings": true,
+          "suppressingForkCopies": false,
+          "forkCopyAnchorMs": 0
+        }
+      },
+      "resumed": false
+    }
+  },
+  {
+    "file": "codex-ledger.jsonl",
+    "provider": "codex",
+    "expected": {
+      "records": [
+        {
+          "provider": "codex",
+          "timestampMs": 1785578401000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 20,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "unresolvedServiceTierTurnId": "turn-1",
+          "dedupeKey": "[\"codex\",\"codex-session-1\",\"resp_1\"]"
+        },
+        {
+          "provider": "codex",
+          "timestampMs": 1785578403000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 150,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 10,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "unresolvedServiceTierTurnId": "turn-1",
+          "dedupeKey": "[\"codex\",\"codex-session-1\",\"resp_2\"]"
+        },
+        {
+          "provider": "codex",
+          "timestampMs": 1785578405000,
+          "model": "gpt-6-sol",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 200,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 30,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "unresolvedServiceTierTurnId": "turn-2",
+          "dedupeKey": "[\"codex\",\"codex-session-1\",\"resp_3\"]"
+        }
+      ],
+      "tailRecords": [],
+      "malformedRecords": 0,
+      "position": {
+        "resumeOffset": 1341,
+        "guardLength": 64,
+        "guardHash": 2161951522,
+        "state": {
+          "model": "gpt-6-sol",
+          "speed": "standard",
+          "sessionId": "codex-session-1",
+          "lastUsageSignature": null,
+          "lastCumulativeUsage": {
+            "input_tokens": 450,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 60,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 510
+          },
+          "latestCumulativeAtMs": 1785578406000,
+          "requestLedgerActive": true,
+          "malformedRecords": 0,
+          "sawSessionMeta": true,
+          "modelProvider": "openai",
+          "turnId": "turn-2",
+          "sawThreadSettings": false,
+          "suppressingForkCopies": false,
+          "forkCopyAnchorMs": 0
+        }
+      },
+      "resumed": false
+    }
+  },
+  {
+    "file": "codex-cumulative.jsonl",
+    "provider": "codex",
+    "expected": {
+      "records": [
+        {
+          "provider": "codex",
+          "timestampMs": 1785578405000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 20,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        },
+        {
+          "provider": "codex",
+          "timestampMs": 1785578408000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 10,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 2,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        },
+        {
+          "provider": "codex",
+          "timestampMs": 1785578409000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 9,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 1,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        },
+        {
+          "provider": "codex",
+          "timestampMs": 1785578410000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 5,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 1,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        },
+        {
+          "provider": "codex",
+          "timestampMs": 1785578411000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 4,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 1,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        }
+      ],
+      "tailRecords": [],
+      "malformedRecords": 1,
+      "position": {
+        "resumeOffset": 1752,
+        "guardLength": 64,
+        "guardHash": 2503304997,
+        "state": {
+          "model": "gpt-6-astra",
+          "speed": "standard",
+          "sessionId": "codex-session-1",
+          "lastUsageSignature": "{\"input_tokens\":4,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":1,\"reasoning_output_tokens\":0,\"total_tokens\":5}",
+          "lastCumulativeUsage": {
+            "input_tokens": 29,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 5,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 34
+          },
+          "latestCumulativeAtMs": 1785578411000,
+          "requestLedgerActive": false,
+          "malformedRecords": 1,
+          "sawSessionMeta": true,
+          "modelProvider": "",
+          "turnId": "turn-1",
+          "sawThreadSettings": false,
+          "suppressingForkCopies": false,
+          "forkCopyAnchorMs": 0
+        }
+      },
+      "resumed": false
+    }
+  },
+  {
+    "file": "codex-unreported.jsonl",
+    "provider": "codex",
+    "expected": {
+      "records": [
+        {
+          "provider": "codex",
+          "timestampMs": 1785578401000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 20,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        },
+        {
+          "provider": "codex",
+          "timestampMs": 1785578402000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 150,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 10,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        },
+        {
+          "provider": "codex",
+          "timestampMs": 1785578404000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 200,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 30,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        }
+      ],
+      "tailRecords": [],
+      "malformedRecords": 0,
+      "position": {
+        "resumeOffset": 934,
+        "guardLength": 64,
+        "guardHash": 2161951522,
+        "state": {
+          "model": "gpt-6-astra",
+          "speed": "standard",
+          "sessionId": "codex-session-1",
+          "lastUsageSignature": "{\"input_tokens\":200,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":30,\"reasoning_output_tokens\":0,\"total_tokens\":230}",
+          "lastCumulativeUsage": {
+            "input_tokens": 450,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 60,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 510
+          },
+          "sequenceStartSignature": "[1785578401000,{\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":20,\"reasoning_output_tokens\":0,\"total_tokens\":120}]",
+          "latestCumulativeAtMs": 1785578404000,
+          "requestLedgerActive": false,
+          "malformedRecords": 0,
+          "sawSessionMeta": true,
+          "modelProvider": "",
+          "turnId": "turn-1",
+          "sawThreadSettings": false,
+          "suppressingForkCopies": false,
+          "forkCopyAnchorMs": 0
+        }
+      },
+      "resumed": false
+    }
+  },
+  {
+    "file": "codex-fork.jsonl",
+    "provider": "codex",
+    "expected": {
+      "records": [
+        {
+          "provider": "codex",
+          "timestampMs": 1785578408000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 5,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 1,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        }
+      ],
+      "tailRecords": [],
+      "malformedRecords": 0,
+      "position": {
+        "resumeOffset": 924,
+        "guardLength": 64,
+        "guardHash": 2723657201,
+        "state": {
+          "model": "gpt-6-astra",
+          "speed": "standard",
+          "sessionId": "codex-session-1",
+          "lastUsageSignature": "{\"input_tokens\":5,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":1,\"reasoning_output_tokens\":0,\"total_tokens\":6}",
+          "lastCumulativeUsage": {
+            "input_tokens": 305,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 51,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 356
+          },
+          "latestCumulativeAtMs": 1785578408000,
+          "requestLedgerActive": false,
+          "malformedRecords": 0,
+          "sawSessionMeta": true,
+          "modelProvider": "",
+          "turnId": "turn-1",
+          "sawThreadSettings": false,
+          "suppressingForkCopies": false,
+          "forkCopyAnchorMs": 1785578400000
+        }
+      },
+      "resumed": false
+    }
+  },
+  {
+    "file": "codex-validation.jsonl",
+    "provider": "codex",
+    "expected": {
+      "records": [
+        {
+          "provider": "codex",
+          "timestampMs": 1785578405000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 20,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 5,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        }
+      ],
+      "tailRecords": [],
+      "malformedRecords": 3,
+      "position": {
+        "resumeOffset": 1645,
+        "guardLength": 64,
+        "guardHash": 292376880,
+        "state": {
+          "model": "gpt-6-astra",
+          "speed": "standard",
+          "sessionId": "codex-session-1",
+          "lastUsageSignature": "{\"input_tokens\":20,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":5,\"reasoning_output_tokens\":0,\"total_tokens\":25}",
+          "lastCumulativeUsage": {
+            "input_tokens": 20,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 5,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 25
+          },
+          "sequenceStartSignature": "[1785578405000,{\"input_tokens\":20,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":5,\"reasoning_output_tokens\":0,\"total_tokens\":25}]",
+          "latestCumulativeAtMs": 1785578409000,
+          "requestLedgerActive": false,
+          "malformedRecords": 3,
+          "sawSessionMeta": true,
+          "modelProvider": "",
+          "turnId": "turn-1",
+          "sawThreadSettings": false,
+          "suppressingForkCopies": false,
+          "forkCopyAnchorMs": 0
+        }
+      },
+      "resumed": false
+    }
+  },
+  {
+    "file": "grok.jsonl",
+    "provider": "grok",
+    "expected": {
+      "records": [
+        {
+          "provider": "grok",
+          "timestampMs": 1785578400000,
+          "model": "grok-a",
+          "sessionId": "s",
+          "totals": {
+            "uncachedInputTokens": 60,
+            "cachedInputTokens": 20,
+            "cacheCreationTokens": 0,
+            "outputTokens": 10,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": 0.4,
+          "speed": "standard",
+          "dedupeKey": "s:p:grok-a"
+        },
+        {
+          "provider": "grok",
+          "timestampMs": 1785578400000,
+          "model": "grok-b",
+          "sessionId": "s",
+          "totals": {
+            "uncachedInputTokens": 20,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 10,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": 0.6,
+          "speed": "standard",
+          "dedupeKey": "s:p:grok-b"
+        },
+        {
+          "provider": "grok",
+          "timestampMs": 1785578401000,
+          "model": "grok",
+          "sessionId": "s",
+          "totals": {
+            "uncachedInputTokens": 15,
+            "cachedInputTokens": 5,
+            "cacheCreationTokens": 0,
+            "outputTokens": 2,
+            "reasoningTokens": 2
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        }
+      ],
+      "tailRecords": [],
+      "malformedRecords": 0,
+      "position": {
+        "resumeOffset": 521,
+        "guardLength": 64,
+        "guardHash": 3639836217,
+        "state": null
+      },
+      "resumed": false
+    }
+  },
+  {
+    "file": "pi.jsonl",
+    "provider": "pi",
+    "expected": {
+      "records": [
+        {
+          "provider": "pi",
+          "timestampMs": 1785578400000,
+          "model": "anthropic/claude-fable-5",
+          "rateModel": "claude-fable-5",
+          "sessionId": "pi-session",
+          "totals": {
+            "uncachedInputTokens": 10,
+            "cachedInputTokens": 30,
+            "cacheCreationTokens": 4,
+            "outputTokens": 20,
+            "reasoningTokens": 20
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": "[\"pi\",\"m1\",\"2026-08-01T10:00:00Z\",\"anthropic/claude-fable-5\"]"
+        },
+        {
+          "provider": "pi",
+          "timestampMs": 1785578401000,
+          "model": "Tools/summaries",
+          "sessionId": "pi-session",
+          "totals": {
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 0,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": 0.2,
+          "speed": "standard",
+          "dedupeKey": "[\"pi\",\"t1\",\"2026-08-01T10:00:01Z\",\"Tools/summaries\"]"
+        },
+        {
+          "provider": "pi",
+          "timestampMs": 1785578402000,
+          "model": "Tools/summaries",
+          "sessionId": "pi-session",
+          "totals": {
+            "uncachedInputTokens": 5,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 2,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": "[\"pi\",\"c1\",\"2026-08-01T10:00:02Z\",\"Tools/summaries\"]"
+        }
+      ],
+      "tailRecords": [],
+      "malformedRecords": 0,
+      "position": {
+        "resumeOffset": 536,
+        "guardLength": 64,
+        "guardHash": 1694991132,
+        "state": {
+          "sessionId": "pi-session"
+        }
+      },
+      "resumed": false
+    }
+  },
+  {
+    "file": "muse.jsonl",
+    "provider": "muse",
+    "expected": {
+      "records": [
+        {
+          "provider": "muse",
+          "timestampMs": 1785578400123,
+          "model": "muse-wonder-full-1.0",
+          "sessionId": "session-1",
+          "totals": {
+            "uncachedInputTokens": 30,
+            "cachedInputTokens": 60,
+            "cacheCreationTokens": 10,
+            "outputTokens": 20,
+            "reasoningTokens": 8
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": "[\"muse\",\"inference-1\"]"
+        }
+      ],
+      "tailRecords": [],
+      "malformedRecords": 0,
+      "position": {
+        "resumeOffset": 447,
+        "guardLength": 64,
+        "guardHash": 3164695075,
+        "state": null
+      },
+      "resumed": false
+    }
+  },
+  {
+    "file": "codex-legacy.jsonl.zst",
+    "provider": "codex",
+    "expected": {
+      "records": [
+        {
+          "provider": "codex",
+          "timestampMs": 1785578405000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 9,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "ultrafast",
+          "dedupeKey": null
+        }
+      ],
+      "tailRecords": [
+        {
+          "provider": "codex",
+          "timestampMs": 1785578408000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 21,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "ultrafast",
+          "dedupeKey": null
+        }
+      ],
+      "malformedRecords": 1,
+      "position": {
+        "resumeOffset": 0,
+        "guardLength": 0,
+        "guardHash": 0,
+        "state": {
+          "model": "gpt-6-astra",
+          "speed": "ultrafast",
+          "sessionId": "codex-session-1",
+          "lastUsageSignature": "{\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":9,\"reasoning_output_tokens\":0,\"total_tokens\":109}",
+          "lastCumulativeUsage": {
+            "input_tokens": 100,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 9,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 109
+          },
+          "requestLedgerActive": false,
+          "malformedRecords": 1,
+          "sawSessionMeta": true,
+          "modelProvider": "openai",
+          "turnId": "turn-1",
+          "sawThreadSettings": true,
+          "suppressingForkCopies": false,
+          "forkCopyAnchorMs": 0
+        }
+      },
+      "resumed": false
+    }
+  },
+  {
+    "file": "codex-ledger.jsonl.zst",
+    "provider": "codex",
+    "expected": {
+      "records": [
+        {
+          "provider": "codex",
+          "timestampMs": 1785578401000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 20,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "unresolvedServiceTierTurnId": "turn-1",
+          "dedupeKey": "[\"codex\",\"codex-session-1\",\"resp_1\"]"
+        },
+        {
+          "provider": "codex",
+          "timestampMs": 1785578403000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 150,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 10,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "unresolvedServiceTierTurnId": "turn-1",
+          "dedupeKey": "[\"codex\",\"codex-session-1\",\"resp_2\"]"
+        },
+        {
+          "provider": "codex",
+          "timestampMs": 1785578405000,
+          "model": "gpt-6-sol",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 200,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 30,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "unresolvedServiceTierTurnId": "turn-2",
+          "dedupeKey": "[\"codex\",\"codex-session-1\",\"resp_3\"]"
+        }
+      ],
+      "tailRecords": [],
+      "malformedRecords": 0,
+      "position": {
+        "resumeOffset": 0,
+        "guardLength": 0,
+        "guardHash": 0,
+        "state": {
+          "model": "gpt-6-sol",
+          "speed": "standard",
+          "sessionId": "codex-session-1",
+          "lastUsageSignature": null,
+          "lastCumulativeUsage": {
+            "input_tokens": 450,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 60,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 510
+          },
+          "latestCumulativeAtMs": 1785578406000,
+          "requestLedgerActive": true,
+          "malformedRecords": 0,
+          "sawSessionMeta": true,
+          "modelProvider": "openai",
+          "turnId": "turn-2",
+          "sawThreadSettings": false,
+          "suppressingForkCopies": false,
+          "forkCopyAnchorMs": 0
+        }
+      },
+      "resumed": false
+    }
+  },
+  {
+    "file": "codex-cumulative.jsonl.zst",
+    "provider": "codex",
+    "expected": {
+      "records": [
+        {
+          "provider": "codex",
+          "timestampMs": 1785578405000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 20,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        },
+        {
+          "provider": "codex",
+          "timestampMs": 1785578408000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 10,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 2,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        },
+        {
+          "provider": "codex",
+          "timestampMs": 1785578409000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 9,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 1,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        },
+        {
+          "provider": "codex",
+          "timestampMs": 1785578410000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 5,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 1,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        },
+        {
+          "provider": "codex",
+          "timestampMs": 1785578411000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 4,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 1,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        }
+      ],
+      "tailRecords": [],
+      "malformedRecords": 1,
+      "position": {
+        "resumeOffset": 0,
+        "guardLength": 0,
+        "guardHash": 0,
+        "state": {
+          "model": "gpt-6-astra",
+          "speed": "standard",
+          "sessionId": "codex-session-1",
+          "lastUsageSignature": "{\"input_tokens\":4,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":1,\"reasoning_output_tokens\":0,\"total_tokens\":5}",
+          "lastCumulativeUsage": {
+            "input_tokens": 29,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 5,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 34
+          },
+          "latestCumulativeAtMs": 1785578411000,
+          "requestLedgerActive": false,
+          "malformedRecords": 1,
+          "sawSessionMeta": true,
+          "modelProvider": "",
+          "turnId": "turn-1",
+          "sawThreadSettings": false,
+          "suppressingForkCopies": false,
+          "forkCopyAnchorMs": 0
+        }
+      },
+      "resumed": false
+    }
+  },
+  {
+    "file": "codex-unreported.jsonl.zst",
+    "provider": "codex",
+    "expected": {
+      "records": [
+        {
+          "provider": "codex",
+          "timestampMs": 1785578401000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 100,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 20,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        },
+        {
+          "provider": "codex",
+          "timestampMs": 1785578402000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 150,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 10,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        },
+        {
+          "provider": "codex",
+          "timestampMs": 1785578404000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 200,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 30,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        }
+      ],
+      "tailRecords": [],
+      "malformedRecords": 0,
+      "position": {
+        "resumeOffset": 0,
+        "guardLength": 0,
+        "guardHash": 0,
+        "state": {
+          "model": "gpt-6-astra",
+          "speed": "standard",
+          "sessionId": "codex-session-1",
+          "lastUsageSignature": "{\"input_tokens\":200,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":30,\"reasoning_output_tokens\":0,\"total_tokens\":230}",
+          "lastCumulativeUsage": {
+            "input_tokens": 450,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 60,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 510
+          },
+          "sequenceStartSignature": "[1785578401000,{\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":20,\"reasoning_output_tokens\":0,\"total_tokens\":120}]",
+          "latestCumulativeAtMs": 1785578404000,
+          "requestLedgerActive": false,
+          "malformedRecords": 0,
+          "sawSessionMeta": true,
+          "modelProvider": "",
+          "turnId": "turn-1",
+          "sawThreadSettings": false,
+          "suppressingForkCopies": false,
+          "forkCopyAnchorMs": 0
+        }
+      },
+      "resumed": false
+    }
+  },
+  {
+    "file": "codex-fork.jsonl.zst",
+    "provider": "codex",
+    "expected": {
+      "records": [
+        {
+          "provider": "codex",
+          "timestampMs": 1785578408000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 5,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 1,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        }
+      ],
+      "tailRecords": [],
+      "malformedRecords": 0,
+      "position": {
+        "resumeOffset": 0,
+        "guardLength": 0,
+        "guardHash": 0,
+        "state": {
+          "model": "gpt-6-astra",
+          "speed": "standard",
+          "sessionId": "codex-session-1",
+          "lastUsageSignature": "{\"input_tokens\":5,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":1,\"reasoning_output_tokens\":0,\"total_tokens\":6}",
+          "lastCumulativeUsage": {
+            "input_tokens": 305,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 51,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 356
+          },
+          "latestCumulativeAtMs": 1785578408000,
+          "requestLedgerActive": false,
+          "malformedRecords": 0,
+          "sawSessionMeta": true,
+          "modelProvider": "",
+          "turnId": "turn-1",
+          "sawThreadSettings": false,
+          "suppressingForkCopies": false,
+          "forkCopyAnchorMs": 1785578400000
+        }
+      },
+      "resumed": false
+    }
+  },
+  {
+    "file": "codex-validation.jsonl.zst",
+    "provider": "codex",
+    "expected": {
+      "records": [
+        {
+          "provider": "codex",
+          "timestampMs": 1785578405000,
+          "model": "gpt-6-astra",
+          "sessionId": "codex-session-1",
+          "totals": {
+            "uncachedInputTokens": 20,
+            "cachedInputTokens": 0,
+            "cacheCreationTokens": 0,
+            "outputTokens": 5,
+            "reasoningTokens": 0
+          },
+          "reportedCostUsd": null,
+          "speed": "standard",
+          "dedupeKey": null
+        }
+      ],
+      "tailRecords": [],
+      "malformedRecords": 3,
+      "position": {
+        "resumeOffset": 0,
+        "guardLength": 0,
+        "guardHash": 0,
+        "state": {
+          "model": "gpt-6-astra",
+          "speed": "standard",
+          "sessionId": "codex-session-1",
+          "lastUsageSignature": "{\"input_tokens\":20,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":5,\"reasoning_output_tokens\":0,\"total_tokens\":25}",
+          "lastCumulativeUsage": {
+            "input_tokens": 20,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 5,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 25
+          },
+          "sequenceStartSignature": "[1785578405000,{\"input_tokens\":20,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":5,\"reasoning_output_tokens\":0,\"total_tokens\":25}]",
+          "latestCumulativeAtMs": 1785578409000,
+          "requestLedgerActive": false,
+          "malformedRecords": 3,
+          "sawSessionMeta": true,
+          "modelProvider": "",
+          "turnId": "turn-1",
+          "sawThreadSettings": false,
+          "suppressingForkCopies": false,
+          "forkCopyAnchorMs": 0
+        }
+      },
+      "resumed": false
+    }
+  }
+]

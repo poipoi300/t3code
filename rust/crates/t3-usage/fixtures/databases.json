@@ -1,0 +1,2152 @@
+{
+  "opencode": [
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-0"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-1"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-2"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-3"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-4"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-5"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-6"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-7"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-8"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-9"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-10"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-11"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-12"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-13"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-14"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-15"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-16"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-17"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-18"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-19"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-20"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-21"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-22"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-23"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-24"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-25"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-26"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-27"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-28"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-29"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-30"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-31"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-32"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-33"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-34"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-35"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-36"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-37"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-38"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-39"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-40"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-41"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-42"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-43"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-44"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-45"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-46"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-47"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-48"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-49"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-50"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-51"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-52"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-53"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-54"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-55"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-56"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-57"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-58"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-59"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-60"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-61"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-62"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-63"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-64"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-65"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-66"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-67"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-68"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-69"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-70"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-71"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-72"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-73"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-74"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-75"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-76"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-77"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-78"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-79"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-80"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-81"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-82"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-83"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-84"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-85"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-86"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-87"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-88"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-89"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-90"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-91"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-92"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-93"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-94"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-95"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-96"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-97"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-98"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-99"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-100"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-101"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-102"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-103"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-104"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-105"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-106"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-107"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-108"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-109"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-110"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-111"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-112"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-113"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-114"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-115"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-116"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-117"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-118"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-119"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-120"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-121"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-122"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-123"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-124"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-125"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-126"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-127"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-128"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "claude-sonnet-4-5",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 10,
+        "cacheCreationTokens": 2,
+        "outputTokens": 25,
+        "reasoningTokens": 5
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:msg-129"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "gpt-x-free",
+      "rateModel": "opencode_go/gpt-x-free",
+      "sessionId": "session-2",
+      "totals": {
+        "uncachedInputTokens": 5,
+        "cachedInputTokens": 0,
+        "cacheCreationTokens": 0,
+        "outputTokens": 2,
+        "reasoningTokens": 0
+      },
+      "reportedCostUsd": 0,
+      "speed": "standard",
+      "dedupeKey": "opencode:gateway"
+    },
+    {
+      "provider": "opencode",
+      "timestampMs": 1780000000000,
+      "model": "legacy-model",
+      "sessionId": "session-1",
+      "totals": {
+        "uncachedInputTokens": 8,
+        "cachedInputTokens": 0,
+        "cacheCreationTokens": 0,
+        "outputTokens": 3,
+        "reasoningTokens": 0
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "opencode:legacy"
+    }
+  ],
+  "antigravity": [
+    {
+      "provider": "antigravity",
+      "sessionId": "a-usage",
+      "timestampMs": 1780000000000,
+      "model": "gemini-9.1-flash-high",
+      "totals": {
+        "uncachedInputTokens": 100,
+        "cachedInputTokens": 20,
+        "cacheCreationTokens": 5,
+        "outputTokens": 40,
+        "reasoningTokens": 10
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "antigravity:11:response-1",
+      "rateModel": "gemini-9.1-flash"
+    },
+    {
+      "provider": "antigravity",
+      "sessionId": "a-usage",
+      "timestampMs": 1780000000000,
+      "model": "claude-opus-4-6",
+      "totals": {
+        "uncachedInputTokens": 12,
+        "cachedInputTokens": 0,
+        "cacheCreationTokens": 0,
+        "outputTokens": 3,
+        "reasoningTokens": 0
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": "antigravity:11:retry-1"
+    }
+  ]
+}

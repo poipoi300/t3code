@@ -1,0 +1,6296 @@
+[
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 2.0036875,
+      "costSource": "modelPriced",
+      "categoryCostUsd": {
+        "input": 2.00001,
+        "cacheRead": 0.001,
+        "cacheWrite": 0.00017750000000000003,
+        "output": 0.0025
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 0.009000000000000001
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": {
+        "input": 1.2477057924451793,
+        "cacheRead": 0.0006238497769737048,
+        "cacheWrite": 0.00011073333541283262,
+        "output": 0.001559624442434262
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 0.009000000000000001
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 4.007375,
+      "costSource": "modelPriced",
+      "categoryCostUsd": {
+        "input": 4.00002,
+        "cacheRead": 0.002,
+        "cacheWrite": 0.00035500000000000006,
+        "output": 0.005
+      },
+      "speedPremiumUsd": 2.0036875
+    },
+    "savings": 0.018000000000000002
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": {
+        "input": 1.2477057924451793,
+        "cacheRead": 0.0006238497769737048,
+        "cacheWrite": 0.00011073333541283262,
+        "output": 0.001559624442434262
+      },
+      "speedPremiumUsd": 0.625
+    },
+    "savings": 0.018000000000000002
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 2.0036875,
+      "costSource": "modelPriced",
+      "categoryCostUsd": {
+        "input": 2.00001,
+        "cacheRead": 0.001,
+        "cacheWrite": 0.00017750000000000003,
+        "output": 0.0025
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 0.009000000000000001
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": {
+        "input": 1.2477057924451793,
+        "cacheRead": 0.0006238497769737048,
+        "cacheWrite": 0.00011073333541283262,
+        "output": 0.001559624442434262
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 0.009000000000000001
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 2.0036875,
+      "costSource": "modelPriced",
+      "categoryCostUsd": {
+        "input": 2.00001,
+        "cacheRead": 0.001,
+        "cacheWrite": 0.00017750000000000003,
+        "output": 0.0025
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 0.009000000000000001
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": {
+        "input": 1.2477057924451793,
+        "cacheRead": 0.0006238497769737048,
+        "cacheWrite": 0.00011073333541283262,
+        "output": 0.001559624442434262
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 0.009000000000000001
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 4.007375,
+      "costSource": "modelPriced",
+      "categoryCostUsd": {
+        "input": 4.00002,
+        "cacheRead": 0.002,
+        "cacheWrite": 0.00035500000000000006,
+        "output": 0.005
+      },
+      "speedPremiumUsd": 2.0036875
+    },
+    "savings": 0.018000000000000002
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": {
+        "input": 1.2477057924451793,
+        "cacheRead": 0.0006238497769737048,
+        "cacheWrite": 0.00011073333541283262,
+        "output": 0.001559624442434262
+      },
+      "speedPremiumUsd": 0.625
+    },
+    "savings": 0.018000000000000002
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 2.0036875,
+      "costSource": "modelPriced",
+      "categoryCostUsd": {
+        "input": 2.00001,
+        "cacheRead": 0.001,
+        "cacheWrite": 0.00017750000000000003,
+        "output": 0.0025
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 0.009000000000000001
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": {
+        "input": 1.2477057924451793,
+        "cacheRead": 0.0006238497769737048,
+        "cacheWrite": 0.00011073333541283262,
+        "output": 0.001559624442434262
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 0.009000000000000001
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "claude-fable-5": {
+        "input_cost_per_token": 0.00001,
+        "output_cost_per_token": 0.00005,
+        "cache_read_input_token_cost": 0.000001,
+        "cache_creation_input_token_cost": 0.0000125,
+        "cache_creation_input_token_cost_above_1hr": 0.00002,
+        "provider_specific_entry": {
+          "fast": 2
+        }
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0.201261,
+      "costSource": "modelPriced",
+      "categoryCostUsd": {
+        "input": 0.20000099999999998,
+        "cacheRead": 0.001,
+        "cacheWrite": 0.000009999999999999999,
+        "output": 0.00025
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": {
+        "input": 1.2421743407813735,
+        "cacheRead": 0.0062108406497036195,
+        "cacheWrite": 0.00006210840649703618,
+        "output": 0.0015527101624259049
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0.201261,
+      "costSource": "modelPriced",
+      "categoryCostUsd": {
+        "input": 0.20000099999999998,
+        "cacheRead": 0.001,
+        "cacheWrite": 0.000009999999999999999,
+        "output": 0.00025
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": {
+        "input": 1.2421743407813735,
+        "cacheRead": 0.0062108406497036195,
+        "cacheWrite": 0.00006210840649703618,
+        "output": 0.0015527101624259049
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0.201261,
+      "costSource": "modelPriced",
+      "categoryCostUsd": {
+        "input": 0.20000099999999998,
+        "cacheRead": 0.001,
+        "cacheWrite": 0.000009999999999999999,
+        "output": 0.00025
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": {
+        "input": 1.2421743407813735,
+        "cacheRead": 0.0062108406497036195,
+        "cacheWrite": 0.00006210840649703618,
+        "output": 0.0015527101624259049
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "openai/gpt-x": {
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      },
+      "reseller/gpt-x": {
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000007
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "a/model": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5
+      },
+      "b/model": {
+        "input_cost_per_token": 2,
+        "output_cost_per_token": 5
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "claude-fable-5[1m]",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "gpt-x",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "model",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 400722,
+      "costSource": "modelPriced",
+      "categoryCostUsd": {
+        "input": 400002,
+        "cacheRead": 200,
+        "cacheWrite": 20,
+        "output": 500
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 1800
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": {
+        "input": 1.2477540539326515,
+        "cacheRead": 0.0006238739075967878,
+        "cacheWrite": 0.00006238739075967878,
+        "output": 0.0015596847689919695
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 1800
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 601083,
+      "costSource": "modelPriced",
+      "categoryCostUsd": {
+        "input": 600003,
+        "cacheRead": 300.00000000000006,
+        "cacheWrite": 30,
+        "output": 750
+      },
+      "speedPremiumUsd": 200361
+    },
+    "savings": 2700
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": {
+        "input": 1.2477540539326515,
+        "cacheRead": 0.0006238739075967879,
+        "cacheWrite": 0.00006238739075967878,
+        "output": 0.0015596847689919695
+      },
+      "speedPremiumUsd": 0.4166666666666667
+    },
+    "savings": 2700
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 400722,
+      "costSource": "modelPriced",
+      "categoryCostUsd": {
+        "input": 400002,
+        "cacheRead": 200,
+        "cacheWrite": 20,
+        "output": 500
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 1800
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "tier",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": {
+        "input": 1.2477540539326515,
+        "cacheRead": 0.0006238739075967878,
+        "cacheWrite": 0.00006238739075967878,
+        "output": 0.0015596847689919695
+      },
+      "speedPremiumUsd": 0
+    },
+    "savings": 1800
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "unknown",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "standard",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "fast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": null,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 0,
+      "costSource": "unpriced",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  },
+  {
+    "document": {
+      "tier": {
+        "input_cost_per_token": 1,
+        "output_cost_per_token": 5,
+        "cache_read_input_token_cost": 0.1,
+        "input_cost_per_token_above_200k_tokens": 2,
+        "output_cost_per_token_above_200k_tokens": 10,
+        "input_cost_per_token_priority": 3,
+        "output_cost_per_token_priority": 15
+      }
+    },
+    "record": {
+      "provider": "claude",
+      "timestampMs": 1786075513944,
+      "model": "sonnet",
+      "sessionId": "session-a",
+      "totals": {
+        "uncachedInputTokens": 200001,
+        "cachedInputTokens": 1000,
+        "cacheCreationTokens": 10,
+        "outputTokens": 50,
+        "reasoningTokens": 20
+      },
+      "reportedCostUsd": 1.25,
+      "speed": "ultrafast",
+      "dedupeKey": null,
+      "cacheCreation1hTokens": 7
+    },
+    "expected": {
+      "costUsd": 1.25,
+      "costSource": "providerReported",
+      "categoryCostUsd": null,
+      "speedPremiumUsd": 0
+    },
+    "savings": 0
+  }
+]

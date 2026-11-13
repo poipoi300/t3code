@@ -1,0 +1,12 @@
+{
+  "claude-fable-5": {
+    "input_cost_per_token": 0.00001,
+    "output_cost_per_token": 0.00005,
+    "cache_read_input_token_cost": 0.000001,
+    "cache_creation_input_token_cost": 0.0000125,
+    "cache_creation_input_token_cost_above_1hr": 0.00002,
+    "provider_specific_entry": {
+      "fast": 2
+    }
+  }
+}

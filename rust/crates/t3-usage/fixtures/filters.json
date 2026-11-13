@@ -1,0 +1,64 @@
+[
+  {
+    "input": null,
+    "expected": null
+  },
+  {
+    "input": {},
+    "expected": null
+  },
+  {
+    "input": {
+      "exclude": []
+    },
+    "expected": null
+  },
+  {
+    "input": {
+      "include": []
+    },
+    "expected": {
+      "include": []
+    }
+  },
+  {
+    "input": {
+      "include": [
+        {
+          "model": "b"
+        },
+        {
+          "model": "a",
+          "provider": "claude"
+        },
+        {
+          "model": "b"
+        }
+      ],
+      "exclude": [
+        {
+          "model": "b"
+        },
+        {
+          "model": "b"
+        }
+      ]
+    },
+    "expected": {
+      "include": [
+        {
+          "model": "a",
+          "provider": "claude"
+        },
+        {
+          "model": "b"
+        }
+      ],
+      "exclude": [
+        {
+          "model": "b"
+        }
+      ]
+    }
+  }
+]
