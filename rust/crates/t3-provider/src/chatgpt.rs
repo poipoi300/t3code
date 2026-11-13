@@ -543,8 +543,6 @@ impl ChatGptAuth {
         let lease = self.store.lease().await?;
         lease
             .run(async {
-                lease
-                    .run(async {
                         lease.check()?;
                         let saved = self.store.load().await?;
                         let credentials = Self::active(&saved).ok_or(ServiceError::Unavailable)?;
@@ -563,8 +561,6 @@ impl ChatGptAuth {
                             registration: registration.clone(),
                             credentials,
                         }))
-                    })
-                    .await
             })
             .await
     }
@@ -682,6 +678,7 @@ impl ChatGptAuth {
     pub async fn finish(&self, pending: PendingLogin, callback: &str) -> ServiceResult<()> {
         let _gate = self.gate.lock().await;
         let lease = self.store.lease().await?;
+        lease.run(async {
         lease.check()?;
         let returned = validate_callback(callback, &pending.redirect_uri, pending.state.expose())?;
         let query: BTreeMap<_, _> = returned
@@ -803,6 +800,7 @@ impl ChatGptAuth {
         } else {
             Err(ServiceError::Sharing)
         }
+        }).await
     }
     pub fn profile_key(record: &Credentials) -> ServiceResult<String> {
         let tuple = serde_json::to_vec(&json!([
