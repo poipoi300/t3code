@@ -469,7 +469,7 @@ impl ProviderService {
                 Err(_) => {
                     if let Some(value) = self.snapshots.write().await.get_mut(id) {
                         value.status = ServerProviderState::Error;
-                        value.message = Some("Provider refresh failed after update.".to_owned().into());
+                        value.message = Some(Some("Provider refresh failed after update.".to_owned().into()));
                     }
                 }
             }
