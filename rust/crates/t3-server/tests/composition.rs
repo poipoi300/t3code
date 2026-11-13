@@ -232,12 +232,25 @@ async fn binary_serves_health_bootstrap_and_core_rpc_then_stops_and_releases_its
         config["environment"]["environmentId"],
         descriptor["environmentId"]
     );
-    assert_eq!(config["observability"]["localTracingEnabled"],true);
-    let traces=success(call(&mut socket,&mut client,"server.getTraceDiagnostics",CallKind::Unary).await);
-    assert_eq!(traces["parseErrorCount"],0);
-    assert!(traces["recordCount"].as_u64().is_some_and(|count|count>0),"{traces}");
-    let trace_path=home.join("userdata/logs/server.trace.ndjson");
-    let trace_text=std::fs::read_to_string(&trace_path).unwrap();
+    assert_eq!(config["observability"]["localTracingEnabled"], true);
+    let traces = success(
+        call(
+            &mut socket,
+            &mut client,
+            "server.getTraceDiagnostics",
+            CallKind::Unary,
+        )
+        .await,
+    );
+    assert_eq!(traces["parseErrorCount"], 0);
+    assert!(
+        traces["recordCount"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "{traces}"
+    );
+    let trace_path = home.join("userdata/logs/server.trace.ndjson");
+    let trace_text = std::fs::read_to_string(&trace_path).unwrap();
     assert!(trace_text.contains("server.ready"));
     assert!(!trace_text.contains(credential));
     assert_eq!(
@@ -260,8 +273,14 @@ async fn binary_serves_health_bootstrap_and_core_rpc_then_stops_and_releases_its
     }
 
     // A second server on the owned home refuses with the supervisor's do-not-restart code.
+    let overflow_backup = home.join("userdata/logs/server.trace.ndjson.42");
+    std::fs::write(&overflow_backup, "owned server backup").unwrap();
     let second = spawn_binary(home).wait_with_output().await.unwrap();
     assert_eq!(second.status.code(), Some(78), "{second:?}");
+    assert!(
+        overflow_backup.exists(),
+        "a refused server must not prune the owner's logs"
+    );
 
     // Stop with a live WebSocket and an open subscription.
     stop(&mut child, &runtime_file).await;

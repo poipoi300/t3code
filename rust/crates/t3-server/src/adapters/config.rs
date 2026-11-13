@@ -104,7 +104,8 @@ impl LocalServices {
             self.settings.snapshot().await.map_err(service_error)?,
             secret_references,
         )?;
-        let observability=t3_telemetry::logging::server_observability(&self.config).map_err(service_error)?;
+        let observability =
+            t3_telemetry::logging::server_observability(&self.config).map_err(service_error)?;
         serde_json::from_value(json!({
             "environment": self.environment, "auth": self.auth.descriptor(),
             "cwd": self.config.cwd.to_string_lossy(), "keybindingsConfigPath": self.config.paths.keybindings().to_string_lossy(),

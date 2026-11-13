@@ -176,12 +176,20 @@ mod live {
         let a = adapter.clone();
         registry.register::<WsOrchestrationV2StopWorkflowRpc, _, _>(move |_, input| {
             let a = a.clone();
-            async move { a.stop_workflow(input).await.map_err(|error| internal(&error)) }
+            async move {
+                a.stop_workflow(input)
+                    .await
+                    .map_err(|error| internal(&error))
+            }
         })?;
         let a = adapter.clone();
         registry.register::<WsOrchestrationV2ForceStopThreadRpc, _, _>(move |_, input| {
             let a = a.clone();
-            async move { a.force_stop_thread(input).await.map_err(|error| internal(&error)) }
+            async move {
+                a.force_stop_thread(input)
+                    .await
+                    .map_err(|error| internal(&error))
+            }
         })?;
         Ok(())
     }
@@ -192,14 +200,18 @@ mod live {
         register_pending(registry)?;
         register_commands(registry, &adapter)?;
         let a = adapter.clone();
-        registry.register_stream::<WsOrchestrationV2SubscribeShellRpc, _, _, _>(move |_, input| {
-            let a = a.clone();
-            async move {
-                Ok(a.subscribe_shell(input).map(|item| {
-                    item.map_err(|e| shell_error("Failed while streaming the orchestration V2 shell", &e))
-                }))
-            }
-        })?;
+        registry.register_stream::<WsOrchestrationV2SubscribeShellRpc, _, _, _>(
+            move |_, input| {
+                let a = a.clone();
+                async move {
+                    Ok(a.subscribe_shell(input).map(|item| {
+                        item.map_err(|e| {
+                            shell_error("Failed while streaming the orchestration V2 shell", &e)
+                        })
+                    }))
+                }
+            },
+        )?;
         let a = adapter.clone();
         registry.register_stream::<WsOrchestrationV2SubscribeThreadRpc, _, _, _>(
             move |_, input| {

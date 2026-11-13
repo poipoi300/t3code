@@ -3,7 +3,7 @@
 //! header gate, authentication with `orchestration:read`, then the scope-checked read.
 //! `GET /api/orchestration/threads/{id}/transcript` has no Rust service yet and is not mounted.
 use super::{auth::split, error::ApiError};
-use crate::{adapters::orchestration as orchestration, services::ServiceRegistry};
+use crate::{adapters::orchestration, services::ServiceRegistry};
 use axum::{
     Json, Router,
     extract::{ConnectInfo, Path, State},
@@ -25,15 +25,25 @@ pub fn routes(router: Router<Arc<ServiceRegistry>>) -> Router<Arc<ServiceRegistr
     router
         .route("/api/orchestration/shell", get(shell))
         .route("/api/orchestration/threads/{thread_id}", get(thread))
-        .route("/api/orchestration/threads/{thread_id}/bounded", get(bounded))
-        .route("/api/orchestration/threads/{thread_id}/history", get(history))
+        .route(
+            "/api/orchestration/threads/{thread_id}/bounded",
+            get(bounded),
+        )
+        .route(
+            "/api/orchestration/threads/{thread_id}/history",
+            get(history),
+        )
 }
 
 /// First occurrence wins, as URLSearchParams.get does.
 fn query(request: &axum::extract::Request) -> HashMap<String, String> {
     let mut pairs = HashMap::new();
-    for (key, value) in url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes()) {
-        pairs.entry(key.into_owned()).or_insert_with(|| value.into_owned());
+    for (key, value) in
+        url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes())
+    {
+        pairs
+            .entry(key.into_owned())
+            .or_insert_with(|| value.into_owned());
     }
     pairs
 }
@@ -44,7 +54,14 @@ async fn guard(
     remote: SocketAddr,
     request: axum::extract::Request,
     internal: Internal,
-) -> Result<(Arc<orchestration::OrchestrationAdapter>, Vec<AuthEnvironmentScope>, HashMap<String, String>), Response> {
+) -> Result<
+    (
+        Arc<orchestration::OrchestrationAdapter>,
+        Vec<AuthEnvironmentScope>,
+        HashMap<String, String>,
+    ),
+    Response,
+> {
     let protocol = request
         .headers()
         .get(orchestration::PROTOCOL_HEADER)
@@ -71,9 +88,8 @@ async fn guard(
 }
 
 fn thread_id(value: String) -> Result<ThreadId, Response> {
-    serde_json::from_value(serde_json::Value::String(value)).map_err(|_| {
-        not_found(h::EnvironmentResourceNotFoundReason::ThreadNotFound)
-    })
+    serde_json::from_value(serde_json::Value::String(value))
+        .map_err(|_| not_found(h::EnvironmentResourceNotFoundReason::ThreadNotFound))
 }
 
 fn not_found(reason: h::EnvironmentResourceNotFoundReason) -> Response {
@@ -142,7 +158,10 @@ async fn thread(
         Ok(id) => id,
         Err(response) => return response,
     };
-    answer(adapter.http_read().thread_snapshot(&scopes, id).await, internal)
+    answer(
+        adapter.http_read().thread_snapshot(&scopes, id).await,
+        internal,
+    )
 }
 
 async fn bounded(

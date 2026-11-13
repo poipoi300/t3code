@@ -93,15 +93,21 @@ pub async fn start_with(
     inputs: crate::adapters::config::ConfigInputs,
     options: StartOptions,
 ) -> crate::Result<RunningServer> {
-    start_configured(inputs,options,false).await
+    start_configured(inputs, options, false).await
 }
 
 /// Starts the standalone binary's process-wide tracing subscriber after acquiring ownership.
-pub async fn start_with_global_tracing(inputs:crate::adapters::config::ConfigInputs)->crate::Result<RunningServer> {
-    start_configured(inputs,StartOptions::default(),true).await
+pub async fn start_with_global_tracing(
+    inputs: crate::adapters::config::ConfigInputs,
+) -> crate::Result<RunningServer> {
+    start_configured(inputs, StartOptions::default(), true).await
 }
 
-async fn start_configured(inputs:crate::adapters::config::ConfigInputs,options:StartOptions,install_global_tracing:bool)->crate::Result<RunningServer> {
+async fn start_configured(
+    inputs: crate::adapters::config::ConfigInputs,
+    options: StartOptions,
+    install_global_tracing: bool,
+) -> crate::Result<RunningServer> {
     let mut config = resolve(&inputs)?;
     if config.private_network_only
         || config.bootstrap_fd.is_some()
@@ -129,7 +135,16 @@ async fn start_configured(inputs:crate::adapters::config::ConfigInputs,options:S
     let mut domains = Domains::default();
     let prepared = async {
         let pairing_credential = local.auth.startup_pairing_credential().await?;
-        start_domains(&local, &shutdown, &mut domains, account_home, environment, &options,install_global_tracing).await?;
+        start_domains(
+            &local,
+            &shutdown,
+            &mut domains,
+            account_home,
+            environment,
+            &options,
+            install_global_tracing,
+        )
+        .await?;
         let handlers = crate::handlers::registry_with(&domains)?;
         crate::Result::Ok((pairing_credential, handlers))
     }
@@ -199,6 +214,7 @@ async fn activate(services: &ServiceRegistry) -> crate::Result<()> {
     services.lifecycle.advance(Phase::CommandReady);
     services.local.publish_ready()?;
     services.lifecycle.advance(Phase::Ready);
+    tracing::info_span!("server.ready").in_scope(|| tracing::info!("server ready"));
     Ok(())
 }
 
@@ -241,7 +257,7 @@ async fn start_domains(
     account_home: std::path::PathBuf,
     environment: std::collections::BTreeMap<String, String>,
     options: &StartOptions,
-    install_global_tracing:bool,
+    install_global_tracing: bool,
 ) -> crate::Result<()> {
     let context = DomainContext {
         local,
@@ -250,7 +266,10 @@ async fn start_domains(
         account_home,
         environment,
     };
-    domains.insert_runtime(crate::adapters::telemetry::TelemetryAdapter::start(&context,install_global_tracing).await?)?;
+    domains.insert_runtime(
+        crate::adapters::telemetry::TelemetryAdapter::start(&context, install_global_tracing)
+            .await?,
+    )?;
     #[cfg(feature = "workspace")]
     let workspaces = crate::workspaces::EnvironmentWorkspaces::new(&context);
     #[cfg(all(feature = "git", feature = "workspace"))]

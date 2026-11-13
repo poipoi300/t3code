@@ -5,8 +5,10 @@ async fn main() -> std::process::ExitCode {
             if !matches!(&invocation, t3_server::cli::Invocation::Serve(_)) {
                 let filter = tracing_subscriber::EnvFilter::try_from_default_env()
                     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
-                let _ = tracing_subscriber::fmt().with_writer(std::io::stderr)
-                    .with_env_filter(filter).try_init();
+                let _ = tracing_subscriber::fmt()
+                    .with_writer(std::io::stderr)
+                    .with_env_filter(filter)
+                    .try_init();
             }
             t3_server::cli::run(invocation).await
         }

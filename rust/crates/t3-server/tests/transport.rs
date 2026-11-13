@@ -272,29 +272,63 @@ async fn real_http_pairing_effect_rpc_scopes_revocation_static_and_shutdown() {
     assert_eq!(config["environment"]["orchestrationProtocolVersion"], 2);
     assert!(config["settings"].is_object());
     assert!(config["keybindings"].is_array());
-    for (method,payload,key) in [
-        ("server.getTraceDiagnostics",json!({}),"recordCount"),
-        ("server.getProcessDiagnostics",json!({}),"processCount"),
-        ("server.getHostResources",json!({}),"totalMemoryBytes"),
-        ("server.getProcessResourceHistory",json!({"windowMs":1000,"bucketMs":1000}),"buckets"),
-        ("server.getResourceTelemetryHistory",json!({"windowMs":1000,"bucketMs":1000}),"health"),
-        ("server.retryResourceTelemetry",json!({}),"accepted"),
-        ("server.signalProcess",json!({"pid":std::process::id(),"startTimeMs":0,"signal":"SIGKILL"}),"signaled"),
+    for (method, payload, key) in [
+        ("server.getTraceDiagnostics", json!({}), "recordCount"),
+        ("server.getProcessDiagnostics", json!({}), "processCount"),
+        ("server.getHostResources", json!({}), "totalMemoryBytes"),
+        (
+            "server.getProcessResourceHistory",
+            json!({"windowMs":1000,"bucketMs":1000}),
+            "buckets",
+        ),
+        (
+            "server.getResourceTelemetryHistory",
+            json!({"windowMs":1000,"bucketMs":1000}),
+            "health",
+        ),
+        ("server.retryResourceTelemetry", json!({}), "accepted"),
+        (
+            "server.signalProcess",
+            json!({"pid":std::process::id(),"startTimeMs":0,"signal":"SIGKILL"}),
+            "signaled",
+        ),
     ] {
-        let result=unary(&mut socket,&mut client,method,payload).await;
-        let Exit::Success {value:Some(value)}=result else {panic!("diagnostics RPC {method} failed: {result:?}");};
-        assert!(value.get(key).is_some(),"{method}: {value}");
-        if method=="server.signalProcess" {assert_eq!(value["signaled"],false);}
+        let result = unary(&mut socket, &mut client, method, payload).await;
+        let Exit::Success { value: Some(value) } = result else {
+            panic!("diagnostics RPC {method} failed: {result:?}");
+        };
+        assert!(value.get(key).is_some(), "{method}: {value}");
+        if method == "server.signalProcess" {
+            assert_eq!(value["signaled"], false);
+        }
     }
-    let checked=unary(&mut socket,&mut client,"server.checkOtlpEndpoint",json!({"signal":"traces","url":format!("{base}/healthz")})).await;
-    let Exit::Success {value:Some(checked)}=checked else {panic!("endpoint check failed: {checked:?}");};
-    assert_eq!(checked["_tag"],"Rejected");
-    let resource_ticket=ticket(&http,&base,&cookie,"rpc").await;
-    let (mut resources_socket,_)=tokio_tungstenite::connect_async(format!("ws://{}/ws?orchestrationProtocol=2&wsTicket={resource_ticket}",runtime.address)).await.unwrap();
-    let mut resources_client=Client::new(0,Default::default());
-    resources_client.start("subscribeResourceTelemetry",json!({}),CallKind::Stream).unwrap();
-    let snapshot=chunk(&mut resources_socket,&mut resources_client).await;
-    assert_eq!(snapshot["health"]["native"]["status"],"healthy");
+    let checked = unary(
+        &mut socket,
+        &mut client,
+        "server.checkOtlpEndpoint",
+        json!({"signal":"traces","url":format!("{base}/healthz")}),
+    )
+    .await;
+    let Exit::Success {
+        value: Some(checked),
+    } = checked
+    else {
+        panic!("endpoint check failed: {checked:?}");
+    };
+    assert_eq!(checked["_tag"], "Rejected");
+    let resource_ticket = ticket(&http, &base, &cookie, "rpc").await;
+    let (mut resources_socket, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{}/ws?orchestrationProtocol=2&wsTicket={resource_ticket}",
+        runtime.address
+    ))
+    .await
+    .unwrap();
+    let mut resources_client = Client::new(0, Default::default());
+    resources_client
+        .start("subscribeResourceTelemetry", json!({}), CallKind::Stream)
+        .unwrap();
+    let snapshot = chunk(&mut resources_socket, &mut resources_client).await;
+    assert_eq!(snapshot["health"]["native"]["status"], "healthy");
     resources_socket.close(None).await.unwrap();
     client
         .start("subscribeServerConfig", json!({}), CallKind::Stream)

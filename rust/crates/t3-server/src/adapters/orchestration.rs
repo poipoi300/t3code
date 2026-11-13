@@ -136,7 +136,9 @@ impl t3_orchestration::api::SettingsService for LiveSettings {
     }
     fn subscribe(
         &self,
-    ) -> OrchestrationResult<tokio::sync::watch::Receiver<Arc<t3_contracts::settings::ServerSettings>>> {
+    ) -> OrchestrationResult<
+        tokio::sync::watch::Receiver<Arc<t3_contracts::settings::ServerSettings>>,
+    > {
         Ok(self.current.clone())
     }
 }
@@ -204,7 +206,9 @@ impl OrchestrationAdapter {
     fn runtime(&self) -> OrchestrationResult<&t3_orchestration::composition::OrchestrationRuntime> {
         self.runtime
             .as_deref()
-            .ok_or(OrchestrationError::Unsupported("orchestration runtime not started"))
+            .ok_or(OrchestrationError::Unsupported(
+                "orchestration runtime not started",
+            ))
     }
 
     /// `orchestration.dispatchCommand`: the client command with user provenance, through intake.
@@ -232,7 +236,10 @@ impl OrchestrationAdapter {
     }
 
     /// `orchestration.stopWorkflow`.
-    pub async fn stop_workflow(&self, input: OrchestrationV2StopWorkflowInput) -> OrchestrationResult<()> {
+    pub async fn stop_workflow(
+        &self,
+        input: OrchestrationV2StopWorkflowInput,
+    ) -> OrchestrationResult<()> {
         self.runtime()?.stop.stop_workflow(input, None).await
     }
 
@@ -422,7 +429,6 @@ impl OrchestrationAdapter {
         })
     }
 }
-
 
 fn boxed<T: Send + 'static>(
     stream: impl Stream<Item = OrchestrationResult<T>> + Send + 'static,

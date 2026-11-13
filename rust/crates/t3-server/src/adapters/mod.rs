@@ -12,14 +12,14 @@ pub mod git;
 pub mod orchestration;
 #[cfg(feature = "local-services")]
 pub mod persistence;
-#[cfg(feature = "local-services")]
-pub mod telemetry;
 #[cfg(feature = "providers")]
 pub mod process;
 #[cfg(feature = "providers")]
 pub mod providers;
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
+#[cfg(feature = "local-services")]
+pub mod telemetry;
 #[cfg(feature = "terminal")]
 pub mod terminal;
 #[cfg(feature = "usage")]

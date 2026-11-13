@@ -43,7 +43,9 @@ mod authority {
         root.parent().is_some().then_some(root)
     }
 
-    fn active_projects(connection: &t3_persistence::rusqlite::Connection) -> t3_persistence::Result<Vec<Project>> {
+    fn active_projects(
+        connection: &t3_persistence::rusqlite::Connection,
+    ) -> t3_persistence::Result<Vec<Project>> {
         let mut statement = connection.prepare(
             "SELECT project_id, workspace_root, favicon_path FROM projection_projects
              WHERE deleted_at IS NULL ORDER BY created_at ASC, project_id ASC",
@@ -104,7 +106,9 @@ mod authority {
                            AND json_extract(payload_json, '$.worktreePath') IS NOT NULL",
                     )?;
                     let threads = statement
-                        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                        .query_map([], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        })?
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok((projects, threads))
                 })
@@ -152,7 +156,10 @@ mod authority {
                         .unwrap_or_default();
                     listed.insert(project_id.clone(), worktrees);
                 }
-                if listed.get(&project_id).is_some_and(|paths| paths.contains(&real)) {
+                if listed
+                    .get(&project_id)
+                    .is_some_and(|paths| paths.contains(&real))
+                {
                     roots.push(real);
                 }
             }
@@ -170,7 +177,10 @@ mod authority {
         }
 
         /// A live thread's worktree, or its live project's root (`assets.createUrl` in ws.ts).
-        async fn thread_workspace(&self, thread_id: String) -> t3_persistence::Result<Option<PathBuf>> {
+        async fn thread_workspace(
+            &self,
+            thread_id: String,
+        ) -> t3_persistence::Result<Option<PathBuf>> {
             self.database
                 .reader(move |connection| {
                     let thread = connection
@@ -276,8 +286,10 @@ mod authority {
                 _: &'a Path,
                 _: &'a str,
                 _: Option<&'a str>,
-            ) -> BoxFuture<'a, t3_workspace::Result<Option<crate::adapters::workspace::SourceControlMedia>>>
-            {
+            ) -> BoxFuture<
+                'a,
+                t3_workspace::Result<Option<crate::adapters::workspace::SourceControlMedia>>,
+            > {
                 Box::pin(async { Ok(None) })
             }
         }
@@ -335,7 +347,11 @@ mod authority {
                     favicons: Arc::new(FaviconResolver::new(home)),
                     external: Arc::new(NoExternalAssets),
                 },
-                attachments: AttachmentStore::new(paths.attachments(), signer, Arc::new(NoDocumentText)),
+                attachments: AttachmentStore::new(
+                    paths.attachments(),
+                    signer,
+                    Arc::new(NoDocumentText),
+                ),
                 authority,
             }))
         }

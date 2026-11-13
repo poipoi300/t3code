@@ -201,14 +201,21 @@ impl Server {
 fn ok(exit: Exit) -> Value {
     match exit {
         Exit::Success { value } => value.unwrap_or(Value::Null),
-        other => panic!("expected success, got {}", serde_json::to_value(other).unwrap()),
+        other => panic!(
+            "expected success, got {}",
+            serde_json::to_value(other).unwrap()
+        ),
     }
 }
 /// The first failure's tag (`Fail` error or `Die` defect).
 fn failure(exit: Exit) -> String {
     let encoded = serde_json::to_value(&exit).unwrap();
     let cause = &encoded["cause"][0];
-    let value = if cause["error"].is_null() { &cause["defect"] } else { &cause["error"] };
+    let value = if cause["error"].is_null() {
+        &cause["defect"]
+    } else {
+        &cause["error"]
+    };
     assert!(!value.is_null(), "expected a failure, got {encoded}");
     value["_tag"].as_str().unwrap_or("").to_owned()
 }
@@ -232,12 +239,17 @@ async fn workspace_files_follow_the_environment_authority_and_deny_everything_el
     assert_eq!(contents["contents"], "hello\n");
 
     // Anything else is refused, for reads and for writes, and the write leaves no file.
-    assert_ne!(failure(s.unary("projects.readFile", read(&outside)).await), "");
-    let write = json!({"cwd": outside.to_string_lossy(), "relativePath": "planted.txt", "contents": "x"});
+    assert_ne!(
+        failure(s.unary("projects.readFile", read(&outside)).await),
+        ""
+    );
+    let write =
+        json!({"cwd": outside.to_string_lossy(), "relativePath": "planted.txt", "contents": "x"});
     assert_ne!(failure(s.unary("projects.writeFile", write).await), "");
     assert!(!outside.join("planted.txt").exists());
     // `..` cannot climb out of a granted root.
-    let climb = json!({"cwd": managed.to_string_lossy(), "relativePath": "../../outside/hello.txt"});
+    let climb =
+        json!({"cwd": managed.to_string_lossy(), "relativePath": "../../outside/hello.txt"});
     assert_ne!(failure(s.unary("projects.readFile", climb).await), "");
 
     // A live project grants its root, re-read on every call; deleting it revokes at once.
@@ -249,18 +261,27 @@ async fn workspace_files_follow_the_environment_authority_and_deny_everything_el
             (),
         )
         .unwrap();
-    assert_ne!(failure(s.unary("projects.readFile", read(&project)).await), "");
+    assert_ne!(
+        failure(s.unary("projects.readFile", read(&project)).await),
+        ""
+    );
     s.database()
         .execute("UPDATE projection_projects SET deleted_at = NULL", ())
         .unwrap();
 
     // A thread worktree counts only when Git lists it for the thread's project.
     let linked = s.home().join("linked");
-    git(&project, &["worktree", "add", "-q", linked.to_str().unwrap()]);
+    git(
+        &project,
+        &["worktree", "add", "-q", linked.to_str().unwrap()],
+    );
     s.insert_thread("thread-linked", "project-1", &linked);
     ok(s.unary("projects.readFile", read(&linked)).await);
     s.insert_thread("thread-forged", "project-1", &outside);
-    assert_ne!(failure(s.unary("projects.readFile", read(&outside)).await), "");
+    assert_ne!(
+        failure(s.unary("projects.readFile", read(&outside)).await),
+        ""
+    );
 
     // Asset URLs are signed for the same authority and served by the mounted HTTP route.
     std::fs::write(managed.join("page.html"), "<p>granted</p>").unwrap();
@@ -271,7 +292,11 @@ async fn workspace_files_follow_the_environment_authority_and_deny_everything_el
         )
         .await);
     let href = url["relativeUrl"].as_str().unwrap();
-    let href = if href.starts_with("http") { href.to_owned() } else { format!("{}{href}", s.origin) };
+    let href = if href.starts_with("http") {
+        href.to_owned()
+    } else {
+        format!("{}{href}", s.origin)
+    };
     let served = reqwest::Client::new()
         .get(href)
         .header("cookie", &s.cookie)
@@ -301,7 +326,9 @@ async fn terminals_attach_per_socket_and_stream_while_the_client_acknowledges() 
     open["cols"] = json!(80);
     open["rows"] = json!(24);
     ok(s.unary("terminal.open", open).await);
-    s.client.start("terminal.attach", session.clone(), CallKind::Stream).unwrap();
+    s.client
+        .start("terminal.attach", session.clone(), CallKind::Stream)
+        .unwrap();
     let mut write = session.clone();
     // Shell-agnostic: the echoed command line and the printed line each carry the marker.
     write["data"] = json!(if cfg!(windows) {
@@ -310,7 +337,10 @@ async fn terminals_attach_per_socket_and_stream_while_the_client_acknowledges() 
         "echo socket-marker\n"
     });
     // The write's exit and the attach stream's chunks arrive interleaved.
-    let write_id = s.client.start("terminal.write", write, CallKind::Unary).unwrap();
+    let write_id = s
+        .client
+        .start("terminal.write", write, CallKind::Unary)
+        .unwrap();
     let (mut written, mut output) = (false, String::new());
     while !(written && output.matches("socket-marker").count() >= 2) {
         match s.event().await {
@@ -348,7 +378,10 @@ async fn source_control_serves_granted_repositories_and_refuses_others() {
         .await;
     assert_eq!(failure(denied), "EnvironmentAuthorizationError");
     let created = s
-        .unary("vcs.createRef", json!({"cwd": outside.to_string_lossy(), "refName": "planted"}))
+        .unary(
+            "vcs.createRef",
+            json!({"cwd": outside.to_string_lossy(), "refName": "planted"}),
+        )
         .await;
     assert_eq!(failure(created), "EnvironmentAuthorizationError");
     s.runtime.shutdown().await.unwrap();
@@ -361,7 +394,10 @@ async fn scheduled_tasks_and_their_webhook_route_are_served() {
         .start("scheduledTasks.subscribe", json!({}), CallKind::Stream)
         .unwrap();
     let list = s.chunk().await;
-    assert!(list.to_string().contains("tasks") || list.is_array() || list.is_object(), "{list}");
+    assert!(
+        list.to_string().contains("tasks") || list.is_array() || list.is_object(),
+        "{list}"
+    );
     let http = reqwest::Client::new();
     let head = http
         .head(format!("{}/api/hooks/hook-1/token-1", s.origin))
@@ -381,4 +417,3 @@ async fn scheduled_tasks_and_their_webhook_route_are_served() {
     assert_eq!(post.headers()["x-t3-hook-outcome"], "error");
     s.runtime.shutdown().await.unwrap();
 }
-

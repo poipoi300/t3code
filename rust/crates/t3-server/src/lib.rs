@@ -9,7 +9,10 @@ pub mod registry;
 pub mod runtime;
 pub mod services;
 pub mod shutdown;
-#[cfg(all(feature = "local-services", any(feature = "workspace", feature = "terminal")))]
+#[cfg(all(
+    feature = "local-services",
+    any(feature = "workspace", feature = "terminal")
+))]
 pub mod workspaces;
 pub mod ws;
 

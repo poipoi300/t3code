@@ -17,7 +17,6 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-
 async fn event(socket: &mut Socket, client: &mut Client) -> CallEvent {
     loop {
         while let Some(message) = client.pop_outgoing() {
@@ -207,7 +206,10 @@ async fn a_dispatched_message_runs_a_turn_seen_on_subscribe_thread_and_http_read
     let (mut dispatched, mut reply, mut completed, mut shell_seen) = (false, false, false, false);
     while !(dispatched && reply && completed && shell_seen) {
         let next = event(&mut socket, &mut client).await;
-        eprintln!("E2E {}", format!("{next:?}").chars().take(600).collect::<String>());
+        eprintln!(
+            "E2E {}",
+            format!("{next:?}").chars().take(600).collect::<String>()
+        );
         match next {
             CallEvent::Exit { id, exit } if id == dispatch => {
                 ok(exit);
