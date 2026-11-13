@@ -1,0 +1,516 @@
+{
+  "provenance": "constructed, not recorded",
+  "source": "@anthropic-ai/claude-agent-sdk 0.3.321: sdk.d.ts SDK*Message declarations and sdk.mjs Query.readMessages passthrough. command_lifecycle and system conversation_reset/autocompact_state/ui_panes exercise existing compatibility extensions rather than asserting that the SDK emits those forms.",
+  "samples": [
+    {
+      "label": "system:init",
+      "frame": {
+        "type": "system",
+        "subtype": "init",
+        "model": "sonnet",
+        "session_id": "s",
+        "tools": [
+          "Read"
+        ],
+        "capabilities": [
+          "steering"
+        ],
+        "claude_code_version": "2.1.321"
+      }
+    },
+    {
+      "label": "system:status",
+      "frame": {
+        "type": "system",
+        "subtype": "status",
+        "status": "compacting",
+        "permissionMode": "plan"
+      }
+    },
+    {
+      "label": "system:compact_boundary",
+      "frame": {
+        "type": "system",
+        "subtype": "compact_boundary",
+        "compact_metadata": {
+          "trigger": "auto",
+          "pre_tokens": 200,
+          "post_tokens": 80
+        }
+      }
+    },
+    {
+      "label": "system:api_retry",
+      "frame": {
+        "type": "system",
+        "subtype": "api_retry",
+        "attempt": 1,
+        "max_retries": 2,
+        "retry_delay_ms": 1000,
+        "error_status": 429,
+        "error": "rate_limit"
+      }
+    },
+    {
+      "label": "system:background_tasks_changed",
+      "frame": {
+        "type": "system",
+        "subtype": "background_tasks_changed",
+        "tasks": [
+          {
+            "task_id": "t",
+            "status": "running"
+          }
+        ]
+      }
+    },
+    {
+      "label": "system:model_refusal_fallback",
+      "frame": {
+        "type": "system",
+        "subtype": "model_refusal_fallback",
+        "content": "fallback",
+        "original_model": "opus",
+        "fallback_model": "sonnet",
+        "trigger": "refusal",
+        "direction": "retry"
+      }
+    },
+    {
+      "label": "system:model_refusal_no_fallback",
+      "frame": {
+        "type": "system",
+        "subtype": "model_refusal_no_fallback",
+        "content": "refused",
+        "original_model": "sonnet",
+        "trigger": "refusal"
+      }
+    },
+    {
+      "label": "system:informational",
+      "frame": {
+        "type": "system",
+        "subtype": "informational",
+        "content": "notice",
+        "level": "info"
+      }
+    },
+    {
+      "label": "system:local_command_output",
+      "frame": {
+        "type": "system",
+        "subtype": "local_command_output",
+        "content": "output"
+      }
+    },
+    {
+      "label": "system:plugin_install",
+      "frame": {
+        "type": "system",
+        "subtype": "plugin_install",
+        "status": "installed",
+        "name": "sample"
+      }
+    },
+    {
+      "label": "system:thinking_tokens",
+      "frame": {
+        "type": "system",
+        "subtype": "thinking_tokens",
+        "estimated_tokens": 100,
+        "estimated_tokens_delta": 10
+      }
+    },
+    {
+      "label": "system:session_state_changed",
+      "frame": {
+        "type": "system",
+        "subtype": "session_state_changed",
+        "state": "requires_action"
+      }
+    },
+    {
+      "label": "system:worker_shutting_down",
+      "frame": {
+        "type": "system",
+        "subtype": "worker_shutting_down",
+        "reason": "idle"
+      }
+    },
+    {
+      "label": "system:commands_changed",
+      "frame": {
+        "type": "system",
+        "subtype": "commands_changed",
+        "commands": [
+          {
+            "name": "help",
+            "description": "Help"
+          }
+        ]
+      }
+    },
+    {
+      "label": "system:notification",
+      "frame": {
+        "type": "system",
+        "subtype": "notification",
+        "key": "k",
+        "text": "notice",
+        "priority": "low"
+      }
+    },
+    {
+      "label": "system:files_persisted",
+      "frame": {
+        "type": "system",
+        "subtype": "files_persisted",
+        "files": [
+          {
+            "filename": "a",
+            "file_id": "f"
+          }
+        ],
+        "failed": [],
+        "processed_at": "2026-11-13T00:00:00Z"
+      }
+    },
+    {
+      "label": "system:memory_recall",
+      "frame": {
+        "type": "system",
+        "subtype": "memory_recall",
+        "mode": "select",
+        "memories": [
+          {
+            "path": "/mem",
+            "scope": "personal"
+          }
+        ]
+      }
+    },
+    {
+      "label": "system:elicitation_complete",
+      "frame": {
+        "type": "system",
+        "subtype": "elicitation_complete",
+        "mcp_server_name": "s",
+        "elicitation_id": "e"
+      }
+    },
+    {
+      "label": "system:permission_denied",
+      "frame": {
+        "type": "system",
+        "subtype": "permission_denied",
+        "tool_name": "Bash",
+        "tool_use_id": "t",
+        "message": "denied"
+      }
+    },
+    {
+      "label": "system:mirror_error",
+      "frame": {
+        "type": "system",
+        "subtype": "mirror_error",
+        "error": "disk full",
+        "key": {
+          "projectKey": "p",
+          "sessionId": "s"
+        }
+      }
+    },
+    {
+      "label": "system:conversation_reset",
+      "frame": {
+        "type": "system",
+        "subtype": "conversation_reset",
+        "new_conversation_id": "next",
+        "trigger": "clear"
+      }
+    },
+    {
+      "label": "system:session_writes_lost",
+      "frame": {
+        "type": "system",
+        "subtype": "session_writes_lost",
+        "error_code": "ENOSPC",
+        "lost": [
+          "transcript"
+        ],
+        "transcript_session_ids": [
+          "s"
+        ]
+      }
+    },
+    {
+      "label": "system:control_request_progress",
+      "frame": {
+        "type": "system",
+        "subtype": "control_request_progress",
+        "request_id": "r",
+        "status": "api_retry",
+        "attempt": 1
+      }
+    },
+    {
+      "label": "system:autocompact_state",
+      "frame": {
+        "type": "system",
+        "subtype": "autocompact_state",
+        "enabled": true
+      }
+    },
+    {
+      "label": "system:ui_panes",
+      "frame": {
+        "type": "system",
+        "subtype": "ui_panes",
+        "panes": []
+      }
+    },
+    {
+      "label": "assistant",
+      "frame": {
+        "type": "assistant",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "hello"
+            }
+          ],
+          "id": "a",
+          "model": "sonnet",
+          "usage": {
+            "input_tokens": 2,
+            "output_tokens": 3
+          },
+          "stop_reason": "end_turn"
+        }
+      }
+    },
+    {
+      "label": "user",
+      "frame": {
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": "hello"
+        },
+        "uuid": "u"
+      }
+    },
+    {
+      "label": "result",
+      "frame": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": "done",
+        "num_turns": 1,
+        "usage": {
+          "input_tokens": 2,
+          "output_tokens": 3
+        },
+        "modelUsage": {
+          "sonnet": {
+            "costUSD": 0.05
+          }
+        }
+      }
+    },
+    {
+      "label": "stream_event",
+      "frame": {
+        "type": "stream_event",
+        "event": {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "hello"
+          }
+        }
+      }
+    },
+    {
+      "label": "rate_limit_event",
+      "frame": {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+          "status": "allowed",
+          "utilization": 0.2
+        }
+      }
+    },
+    {
+      "label": "command_lifecycle",
+      "frame": {
+        "type": "command_lifecycle",
+        "command_uuid": "c",
+        "state": "started"
+      }
+    },
+    {
+      "label": "prompt_suggestion",
+      "frame": {
+        "type": "prompt_suggestion",
+        "suggestion": "Try this"
+      }
+    },
+    {
+      "label": "active_goal",
+      "frame": {
+        "type": "active_goal",
+        "goal": {
+          "description": "write tests"
+        }
+      }
+    },
+    {
+      "label": "auth_status",
+      "frame": {
+        "type": "auth_status",
+        "isAuthenticating": false,
+        "output": [
+          "signed in"
+        ]
+      }
+    },
+    {
+      "label": "tool_progress",
+      "frame": {
+        "type": "tool_progress",
+        "tool_use_id": "t",
+        "tool_name": "Bash",
+        "parent_tool_use_id": null,
+        "elapsed_time_seconds": 1.5
+      }
+    },
+    {
+      "label": "tool_use_summary",
+      "frame": {
+        "type": "tool_use_summary",
+        "summary": "Checked files",
+        "preceding_tool_use_ids": [
+          "t"
+        ]
+      }
+    },
+    {
+      "label": "conversation_reset",
+      "frame": {
+        "type": "conversation_reset",
+        "new_conversation_id": "next",
+        "trigger": "clear"
+      }
+    },
+    {
+      "label": "keep_alive",
+      "frame": {
+        "type": "keep_alive"
+      }
+    },
+    {
+      "label": "transcript_mirror",
+      "frame": {
+        "type": "transcript_mirror",
+        "filePath": "project/session.jsonl",
+        "entries": [
+          "line"
+        ]
+      }
+    },
+    {
+      "label": "system:task_started",
+      "frame": {
+        "type": "system",
+        "subtype": "task_started",
+        "task_id": "t",
+        "tool_use_id": "tool",
+        "description": "check",
+        "status": "running",
+        "usage": {
+          "total_tokens": 3
+        }
+      }
+    },
+    {
+      "label": "system:task_progress",
+      "frame": {
+        "type": "system",
+        "subtype": "task_progress",
+        "task_id": "t",
+        "tool_use_id": "tool",
+        "description": "check",
+        "status": "running",
+        "usage": {
+          "total_tokens": 3
+        }
+      }
+    },
+    {
+      "label": "system:task_updated",
+      "frame": {
+        "type": "system",
+        "subtype": "task_updated",
+        "task_id": "t",
+        "tool_use_id": "tool",
+        "description": "check",
+        "status": "running",
+        "usage": {
+          "total_tokens": 3
+        }
+      }
+    },
+    {
+      "label": "system:task_notification",
+      "frame": {
+        "type": "system",
+        "subtype": "task_notification",
+        "task_id": "t",
+        "tool_use_id": "tool",
+        "description": "check",
+        "status": "running",
+        "usage": {
+          "total_tokens": 3
+        }
+      }
+    },
+    {
+      "label": "system:hook_started",
+      "frame": {
+        "type": "system",
+        "subtype": "hook_started",
+        "hook_id": "h",
+        "hook_name": "check",
+        "hook_event": "PreToolUse",
+        "stdout": "ok"
+      }
+    },
+    {
+      "label": "system:hook_progress",
+      "frame": {
+        "type": "system",
+        "subtype": "hook_progress",
+        "hook_id": "h",
+        "hook_name": "check",
+        "hook_event": "PreToolUse",
+        "stdout": "ok"
+      }
+    },
+    {
+      "label": "system:hook_response",
+      "frame": {
+        "type": "system",
+        "subtype": "hook_response",
+        "hook_id": "h",
+        "hook_name": "check",
+        "hook_event": "PreToolUse",
+        "stdout": "ok"
+      }
+    }
+  ]
+}
