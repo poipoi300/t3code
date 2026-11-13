@@ -1,0 +1,32 @@
+[package]
+name = "t3-config"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+t3-contracts = { path = "../t3-contracts" }
+t3-persistence = { path = "../t3-persistence" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+notify = "8"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+sha2 = "0.10"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+file-id = "0.2"
+tracing = "0.1"
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
+
+[lints.rust]
+unsafe_code = "deny"
