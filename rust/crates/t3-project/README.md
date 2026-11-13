@@ -215,5 +215,16 @@ configured Cargo job limit (currently four):
     cargo clippy -p t3-project --all-targets -- -D warnings
     cargo test -p t3-project
 
-Final results follow after verification. Earlier full execution passed 35 tests.
+Latest Windows verification: format passes; cargo test passes 38 tests (one unit,
+37 integration, zero ignored; zero doc tests). Integration counts: managed/identity
+8, parsing 9, project service 8, session import 3, trackers 9. This includes real
+Git/SQLite/processes, an outside-pointing Windows junction, ownership-query
+failure refusal and actual scratch recreation. The retention regression was
+observed failing before the captured-deadline fix and passing afterwards; the
+absent-inode versus literal-string regression was also observed red then green.
+
+The exact required clippy command is blocked by seven sibling dead-code errors
+in t3-forge/src/support.rs:4-10 (decode, encode, text, rows, nodes, sha,
+quote_patch_path). No sibling files were changed. A --no-deps check can diagnose
+owned lints but does not replace this required gate.
 No actual provider home or live T3 database was read, copied or modified.

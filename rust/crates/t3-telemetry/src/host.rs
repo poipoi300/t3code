@@ -1,4 +1,6 @@
 use crate::{Error, Result, number, unix_millis};
+
+pub fn hostname()->String {sysinfo::System::host_name().unwrap_or_else(||"unknown".into())}
 use std::{
     collections::BTreeSet,
     path::PathBuf,

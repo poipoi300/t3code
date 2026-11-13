@@ -1,0 +1,78 @@
+[package]
+name = "t3-server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+[lints]
+workspace = true
+[features]
+# The assembled domain services the `t3` binary serves; orchestration joins once it is stable.
+default = ["local-services", "workspace", "terminal", "git", "scheduler", "usage"]
+local-services = [
+    "dep:t3-auth",
+    "dep:t3-config",
+    "dep:t3-persistence",
+    "dep:clap",
+    "dep:qrcodegen",
+    "dep:if-addrs",
+    "dep:reqwest",
+    "dep:t3-telemetry",
+]
+orchestration = ["dep:t3-orchestration", "t3-orchestration/git-backend", "t3-orchestration/acp-adapter", "dep:t3-git", "dep:async-trait"]
+workspace = ["dep:t3-workspace", "dep:t3-git"]
+git = ["dep:t3-git"]
+forge = ["dep:t3-forge"]
+terminal = ["dep:t3-terminal"]
+scheduler = ["dep:t3-scheduler", "dep:async-trait"]
+usage = ["dep:t3-usage", "dep:sysinfo"]
+providers = ["dep:t3-process", "dep:t3-acp", "dep:t3-codex-app-server", "dep:t3-claude-cli"]
+[dependencies]
+t3-contracts = { path = "../t3-contracts" }
+t3-telemetry = {path="../t3-telemetry",optional=true}
+t3-rpc = { path = "../t3-rpc" }
+t3-auth = { path = "../t3-auth", optional = true }
+t3-config = { path = "../t3-config", optional = true }
+t3-persistence = { path = "../t3-persistence", optional = true }
+t3-orchestration = { path = "../t3-orchestration", optional = true }
+t3-workspace = { path = "../t3-workspace", optional = true }
+t3-git = { path = "../t3-git", optional = true }
+t3-forge = { path = "../t3-forge", optional = true }
+t3-terminal = { path = "../t3-terminal", optional = true }
+t3-scheduler = { path = "../t3-scheduler", optional = true }
+t3-usage = { path = "../t3-usage", optional = true }
+t3-process = { path = "../t3-process", optional = true }
+t3-acp = { path = "../t3-acp", optional = true }
+t3-codex-app-server = { path = "../t3-codex-app-server", optional = true }
+t3-claude-cli = { path = "../t3-claude-cli", optional = true }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs", "io-util", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt", "io"] }
+futures = "0.3"
+tracing = "0.1"
+clap = { version = "4.5", optional = true }
+qrcodegen = { version = "1.8", optional = true }
+if-addrs = { version = "0.14", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json"], optional = true }
+async-trait = { version = "0.1", optional = true }
+sysinfo = { version = "0.37", default-features = false, features = ["system"], optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter", "std"] }
+async-stream = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+url = "2"
+mime_guess = "2"
+percent-encoding = "2"
+httpdate = "1"
+tower-http = {version = "0.6", features = ["cors", "compression-gzip"]}
+[dev-dependencies]
+tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tokio-tungstenite = "0.28"
+tokio = { version = "1", features = ["process"] }
+[[bin]]
+name = "t3"
+path = "src/bin/t3.rs"
+required-features = ["local-services"]

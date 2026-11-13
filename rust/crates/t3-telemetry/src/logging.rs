@@ -737,12 +737,15 @@ pub async fn build(options: LoggingOptions) -> Result<(tracing::Dispatch, Teleme
 }
 
 pub async fn initialize(options: LoggingOptions) -> Result<TelemetryHandle> {
+    let warnings=options.telemetry.warnings.clone();
     let (dispatch, handle) = build(options).await?;
     tracing::dispatcher::set_global_default(dispatch)
         .map_err(|_| Error::SubscriberAlreadyInstalled)?;
     if let Some(provider) = &handle.meter_provider {
         opentelemetry::global::set_meter_provider(provider.clone());
     }
+    GLOBAL_INITIALIZED.store(true,Ordering::Release);
+    for warning in warnings {tracing::warn!(message=%warning);}
     Ok(handle)
 }
 

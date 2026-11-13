@@ -43,7 +43,9 @@ recent-history scanner/import service composition are present.
 - Extended the scratch test to actually delete/recreate scratch. First execution
   failed because optional metadata probes pinned it on Windows. That fixture
   now shuts enrichment down before creating projects, avoiding background pins.
-- Final full test execution after these edits is pending at this checkpoint.
+- Final full test execution after these edits PASSED all 38 tests: 1 unit;
+  managed/identity 8, parsing 9, project service 8, session import 3, trackers 9.
+  Zero failed/ignored; zero doc tests. Scratch recreation now passes as well.
 - Required clippy reached owned diagnostics; all owned errors found were fixed.
   Latest exact command is blocked by seven foreign dead-code errors at
   t3-forge/src/support.rs:4-10 (decode, encode, text, rows, nodes, sha,

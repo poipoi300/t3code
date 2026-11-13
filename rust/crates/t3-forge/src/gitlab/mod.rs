@@ -16,6 +16,8 @@ pub struct GitLab {
     capabilities:PullRequestCapabilities,
     details:Arc<Mutex<HashMap<String,(tokio::time::Instant,Value)>>>,
     projects:Arc<Mutex<HashMap<String,(tokio::time::Instant,Value)>>>,
+    stop:t3_process::CancellationToken,
+    tasks:tokio_util::task::TaskTracker,
 }
 fn error(operation:&str,detail:&str)->ForgeError{ForgeError::provider("gitlab",operation,FailureReason::Failed,detail)}
 fn parse<T:serde::de::DeserializeOwned>(value:Value,operation:&str)->Result<T>{crate::support::decode("gitlab",operation,value)}
@@ -23,13 +25,13 @@ fn project(repository:&str)->Result<String>{let repository=repository.trim();if 
 fn mr(input:&PullRequestInput)->Result<String>{if input.number==0||input.number>i32::MAX as u64{return Err(error("reference","Invalid merge request number."));}Ok(format!("{}/merge_requests/{}",project(&input.repo.repository)?,input.number))}
 fn key(input:&PullRequestInput)->String{format!("{}\0{}\0{}\0{}",input.repo.cwd,input.repo.host.to_lowercase(),input.repo.repository,input.number)}
 impl GitLab {
-    pub fn new(git:t3_git::Git)->Result<Self>{Ok(Self{cli:Arc::new(ProcessForgeCli),git,environment:Default::default(),capabilities:parse(json!({"diff":true,"comment":true,"actions":["merge","ready","draft","close","reopen","delete-branch","update-branch","enable-auto-merge","disable-auto-merge","revert"],"mergeMethods":["merge","squash","rebase"],"deleteBranch":true,"updateMethods":["rebase"],"search":true,"reactions":true,"mentions":true,"referenceSigils":["#","!"],"viewedFiles":"environment","review":{"inlineComment":true,"rangeComment":true,"reply":true,"resolve":true,"verdicts":["comment","approve","request-changes"]},"reviewers":{"request":true,"listCandidates":true,"searchCandidates":true},"labels":true,"edit":{"changeRequest":true,"comment":true,"maintainerEdits":true}}),"capabilities")?,details:Default::default(),projects:Default::default()})}
+    pub fn new(git:t3_git::Git)->Result<Self>{Ok(Self{cli:Arc::new(ProcessForgeCli),git,environment:Default::default(),capabilities:parse(json!({"diff":true,"comment":true,"actions":["merge","ready","draft","close","reopen","delete-branch","update-branch","enable-auto-merge","disable-auto-merge","revert"],"mergeMethods":["merge","squash","rebase"],"deleteBranch":true,"updateMethods":["rebase"],"search":true,"reactions":true,"mentions":true,"referenceSigils":["#","!"],"viewedFiles":"environment","review":{"inlineComment":true,"rangeComment":true,"reply":true,"resolve":true,"verdicts":["comment","approve","request-changes"]},"reviewers":{"request":true,"listCandidates":true,"searchCandidates":true},"labels":true,"edit":{"changeRequest":true,"comment":true,"maintainerEdits":true}}),"capabilities")?,details:Default::default(),projects:Default::default(),stop:t3_process::CancellationToken::new(),tasks:{let tasks=tokio_util::task::TaskTracker::new();tasks.close();tasks}})}
     pub fn with_cli(mut self,cli:Arc<dyn ForgeCli>)->Self{self.cli=cli;self}
     pub fn with_environment(mut self,environment:t3_process::Environment)->Self{self.environment=environment;self}
     async fn execute(&self,cwd:&Path,host:Option<&str>,operation:&str,args:Vec<String>,stdin:Option<Value>,max_bytes:usize)->Result<CliResponse>{
         let mut environment=self.environment.clone();
         if let Some(host)=host{let host=host.trim().to_lowercase();if !crate::github::transport::valid_host(&host){return Err(error(operation,"Invalid GitLab host."));}environment.insert("GITLAB_HOST".into(),Some(host.into()));}
-        let response=self.cli.run(CliRequest{program:"glab",provider:"gitlab",operation:operation.into(),cwd:cwd.into(),args,stdin:stdin.map(|v|v.to_string().into_bytes()),environment,max_bytes,timeout:Duration::from_secs(if max_bytes>8*1024*1024{60}else{30})}).await?;
+        let response=self.cli.run(CliRequest{program:"glab",provider:"gitlab",operation:operation.into(),cwd:cwd.into(),args,stdin:stdin.map(|v|v.to_string().into_bytes()),environment,max_bytes,cancellation:self.stop.clone(),timeout:Duration::from_secs(if max_bytes>8*1024*1024{60}else{30})}).await?;
         if response.code!=0{
             let stderr=String::from_utf8_lossy(&response.stderr).to_lowercase();
             let reason=if stderr.contains("glab auth login")||stderr.contains("invalid_grant")||stderr.contains("401"){FailureReason::Unauthenticated}else if stderr.contains("429")||stderr.contains("rate limit"){FailureReason::RateLimited}else if stderr.contains("404")||stderr.contains("not found"){FailureReason::NotFound}else if stderr.contains("403"){FailureReason::Forbidden}else{FailureReason::Failed};
