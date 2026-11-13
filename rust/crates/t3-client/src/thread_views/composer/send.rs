@@ -1,0 +1,906 @@
+//! Durable composer submission and the shell-driven delivery loop shared by every client.
+use super::super::outbox::{
+    Delivery, DeliveryResult, DispatchMode, DraftAttachment, Outbox, QueuedCreation, QueuedMessage,
+};
+use super::delivery_policy::ThreadSettings;
+use crate::{
+    ClientError, ClientStore,
+    operations::{CommandStatus, OperationQueue},
+    platform::{
+        HostFuture, NetworkStatus, Platform, PlatformEvent, Storage, StorageArea, StorageKey,
+        StorageTransaction, StorageWrite,
+    },
+    rpc::RpcEndpoint,
+    types::{CommandId, EnvironmentId, Generation, ThreadKey},
+};
+use futures::{
+    FutureExt, Stream, StreamExt, future::LocalBoxFuture, lock::Mutex, stream::LocalBoxStream,
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    cell::{Cell, RefCell},
+    collections::{BTreeMap, BTreeSet},
+    pin::Pin,
+    rc::{Rc, Weak},
+    task::{Context, Poll, Waker},
+};
+use t3_contracts::{
+    base_schemas::MessageId, composer_context::OrchestrationMessageContext,
+    orchestration_v2::OrchestrationV2CreationSource, server::ServerConfig,
+};
+
+#[derive(Debug, Clone, Default)]
+pub struct SendOptions {
+    pub attachments: Vec<DraftAttachment>,
+    pub context: Option<OrchestrationMessageContext>,
+    pub settings: Option<ThreadSettings>,
+    pub creation: Option<QueuedCreation>,
+    pub dispatch_mode: Option<DispatchMode>,
+    pub compact_before_send: bool,
+    pub fresh_context: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendState {
+    Queued,
+    Preparing,
+    Dispatching,
+    Retry { not_before: u64, reason: String },
+    AwaitingConfirmation,
+    Accepted { sequence: Option<u64> },
+    Restored { draft_key: String, reason: String },
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingMessage {
+    pub message: Rc<QueuedMessage>,
+    pub state: SendState,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct Overlay(pub Option<QueuedMessage>);
+type PreparedAttachments = (
+    Vec<DraftAttachment>,
+    Vec<t3_contracts::chat_attachment::ChatAttachment>,
+);
+
+#[derive(Debug, Clone)]
+pub struct FanoutTarget {
+    pub model: t3_contracts::model_selection::ModelSelection,
+    pub text: String,
+}
+#[derive(Debug)]
+pub struct FanoutSubmission {
+    pub thread: ThreadKey,
+    pub model: t3_contracts::model_selection::ModelSelection,
+    pub message: Result<MessageId, ClientError>,
+}
+
+pub(super) struct SharedStorage<P>(pub Rc<P>);
+impl<P> Clone for SharedStorage<P> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl<P: Storage> Storage for SharedStorage<P> {
+    fn get(&self, area: StorageArea, key: StorageKey) -> HostFuture<'_, Option<Vec<u8>>> {
+        self.0.get(area, key)
+    }
+    fn write(&self, area: StorageArea, writes: Vec<StorageWrite>) -> HostFuture<'_, ()> {
+        self.0.write(area, writes)
+    }
+    fn list(&self, area: StorageArea, namespace: String) -> HostFuture<'_, Vec<StorageKey>> {
+        self.0.list(area, namespace)
+    }
+    fn transaction(&self, transaction: StorageTransaction) -> HostFuture<'_, bool> {
+        self.0.transaction(transaction)
+    }
+}
+pub(super) struct Session<E> {
+    pub generation: Generation,
+    pub endpoint: Rc<E>,
+    pub config: Rc<ServerConfig>,
+    pub upload_base: Option<String>,
+}
+#[derive(Default)]
+struct SignalSlot {
+    dirty: bool,
+    waker: Option<Waker>,
+}
+#[derive(Default)]
+pub(super) struct Changes {
+    slots: RefCell<Vec<Weak<RefCell<SignalSlot>>>>,
+}
+struct ChangesStream(Rc<RefCell<SignalSlot>>);
+impl Stream for ChangesStream {
+    type Item = ();
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<()>> {
+        let mut slot = self.0.borrow_mut();
+        if slot.dirty {
+            slot.dirty = false;
+            Poll::Ready(Some(()))
+        } else {
+            slot.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+impl Changes {
+    pub fn subscribe(&self) -> LocalBoxStream<'static, ()> {
+        let slot = Rc::new(RefCell::new(SignalSlot {
+            dirty: true,
+            waker: None,
+        }));
+        self.slots.borrow_mut().push(Rc::downgrade(&slot));
+        Box::pin(ChangesStream(slot))
+    }
+    pub fn notify(&self) {
+        let mut wakes = vec![];
+        self.slots.borrow_mut().retain(|weak| {
+            let Some(slot) = weak.upgrade() else {
+                return false;
+            };
+            let mut slot = slot.borrow_mut();
+            slot.dirty = true;
+            if let Some(waker) = slot.waker.take() {
+                wakes.push(waker);
+            }
+            true
+        });
+        for waker in wakes {
+            waker.wake();
+        }
+    }
+}
+pub(super) struct SendInner<P: Platform, E: RpcEndpoint> {
+    pub environment: EnvironmentId,
+    pub platform: Rc<P>,
+    pub store: ClientStore,
+    pub source: OrchestrationV2CreationSource,
+    pub session: RefCell<Option<Session<E>>>,
+    pub outbox: Outbox<SharedStorage<P>>,
+    pub commands: OperationQueue<Overlay>,
+    pub states: RefCell<BTreeMap<MessageId, SendState>>,
+    pub attempts: RefCell<BTreeMap<MessageId, u32>>,
+    pub epochs: RefCell<BTreeMap<crate::optimistic::ProjectionKey, (Generation, u64)>>,
+    pub resolved_entities: RefCell<BTreeSet<CommandId>>,
+    pub editing: RefCell<BTreeSet<MessageId>>,
+    pub delivery: Mutex<Delivery>,
+    pub step_lock: Mutex<()>,
+    pub loaded: Cell<bool>,
+    pub load_lock: Mutex<()>,
+    pub disposed: Cell<bool>,
+    pub running: Cell<bool>,
+    pub changes: Changes,
+    pub interrupted: Changes,
+    pub prepared: RefCell<BTreeMap<MessageId, PreparedAttachments>>,
+    pub fanout_prepared: RefCell<BTreeMap<String, PreparedAttachments>>,
+    pub failure: RefCell<Option<super::send_transport::Failure>>,
+    pub drafts: RefCell<Option<Rc<super::mobile_store::MobileDraftStore<P>>>>,
+}
+pub struct SendService<P: Platform, E: RpcEndpoint> {
+    pub(super) inner: Rc<SendInner<P, E>>,
+}
+impl<P: Platform, E: RpcEndpoint> Clone for SendService<P, E> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
+    pub fn new(
+        environment: EnvironmentId,
+        platform: Rc<P>,
+        store: ClientStore,
+        source: OrchestrationV2CreationSource,
+    ) -> Self {
+        Self {
+            inner: Rc::new(SendInner {
+                commands: OperationQueue::new(environment.clone()),
+                environment,
+                platform: platform.clone(),
+                store,
+                source,
+                session: RefCell::new(None),
+                outbox: Outbox::new(SharedStorage(platform)),
+                states: RefCell::new(BTreeMap::new()),
+                attempts: RefCell::new(BTreeMap::new()),
+                epochs: RefCell::new(BTreeMap::new()),
+                resolved_entities: RefCell::new(BTreeSet::new()),
+                editing: RefCell::new(BTreeSet::new()),
+                delivery: Mutex::new(Delivery::default()),
+                step_lock: Mutex::new(()),
+                loaded: Cell::new(false),
+                load_lock: Mutex::new(()),
+                disposed: Cell::new(false),
+                running: Cell::new(false),
+                changes: Changes::default(),
+                interrupted: Changes::default(),
+                prepared: RefCell::new(BTreeMap::new()),
+                fanout_prepared: RefCell::new(BTreeMap::new()),
+                failure: RefCell::new(None),
+                drafts: RefCell::new(None),
+            }),
+        }
+    }
+    pub fn changes(&self) -> LocalBoxStream<'static, ()> {
+        self.inner.changes.subscribe()
+    }
+    pub fn attach_drafts(&self, drafts: Rc<super::mobile_store::MobileDraftStore<P>>) {
+        *self.inner.drafts.borrow_mut() = Some(drafts);
+    }
+    pub fn state(&self, id: &MessageId) -> Option<SendState> {
+        self.inner.states.borrow().get(id).cloned()
+    }
+    pub(super) fn set_state(&self, id: &MessageId, state: SendState) {
+        self.inner.states.borrow_mut().insert(id.clone(), state);
+        self.inner.changes.notify();
+    }
+    pub fn connect(
+        &self,
+        generation: Generation,
+        endpoint: Rc<E>,
+        config: Rc<ServerConfig>,
+    ) -> Result<(), ClientError> {
+        if endpoint.destination().as_ref() != Some(&self.inner.environment)
+            || config.environment.environment_id != self.inner.environment
+        {
+            return Err(ClientError::EnvironmentMismatch);
+        }
+        let changed = self.inner.session.borrow().as_ref().is_none_or(|session| {
+            session.generation != generation || !Rc::ptr_eq(&session.endpoint, &endpoint)
+        });
+        if changed {
+            self.inner.epochs.borrow_mut().clear();
+            self.inner.resolved_entities.borrow_mut().clear();
+        }
+        let upload_base = (!changed)
+            .then(|| {
+                self.inner
+                    .session
+                    .borrow()
+                    .as_ref()
+                    .and_then(|session| session.upload_base.clone())
+            })
+            .flatten();
+        *self.inner.session.borrow_mut() = Some(Session {
+            generation,
+            endpoint,
+            config,
+            upload_base,
+        });
+        self.wake();
+        Ok(())
+    }
+    pub fn connect_with_upload_base(
+        &self,
+        generation: Generation,
+        endpoint: Rc<E>,
+        config: Rc<ServerConfig>,
+        base: &str,
+    ) -> Result<(), ClientError> {
+        let base = crate::environment::normalize_http_base_url(base)
+            .map_err(|_| ClientError::InvalidPayload("The upload origin is invalid.".into()))?;
+        self.connect(generation, endpoint, config)?;
+        if let Some(session) = self.inner.session.borrow_mut().as_mut() {
+            session.upload_base = Some(base);
+        }
+        Ok(())
+    }
+    pub fn disconnect(&self) {
+        self.inner.session.borrow_mut().take();
+        self.inner.commands.disconnect();
+        self.inner.interrupted.notify();
+        self.inner.changes.notify();
+    }
+    pub fn wake(&self) {
+        self.inner
+            .states
+            .borrow_mut()
+            .retain(|_, state| !matches!(state, SendState::Retry { .. }));
+        self.inner.attempts.borrow_mut().clear();
+        self.inner.changes.notify();
+    }
+    pub fn dispose(&self) {
+        self.inner.disposed.set(true);
+        self.inner.interrupted.notify();
+        self.inner.changes.notify();
+    }
+    pub fn hold_edit(&self, id: MessageId) {
+        self.inner.editing.borrow_mut().insert(id);
+        self.inner.changes.notify();
+    }
+    pub fn release_edit(&self, id: &MessageId) {
+        self.inner.editing.borrow_mut().remove(id);
+        self.inner.changes.notify();
+    }
+    pub fn retry_message(&self, id: &MessageId) -> Result<(), ClientError> {
+        if matches!(self.state(id), Some(SendState::AwaitingConfirmation)) {
+            return Err(ClientError::InvalidPayload(
+                "Wait for delivery confirmation before retrying this message.".into(),
+            ));
+        }
+        self.inner.attempts.borrow_mut().remove(id);
+        self.inner.states.borrow_mut().remove(id);
+        self.inner.changes.notify();
+        Ok(())
+    }
+    pub async fn update_pending(
+        &self,
+        id: &MessageId,
+        text: String,
+        options: SendOptions,
+    ) -> Result<bool, ClientError> {
+        self.load().await?;
+        let _guard = self.inner.step_lock.lock().await;
+        let Some(current) = self.inner.outbox.messages().into_iter().find(|message| {
+            message.environment_id == self.inner.environment && &message.message_id == id
+        }) else {
+            return Ok(false);
+        };
+        if self.inner.commands.status(&current.command_id).is_some() {
+            return Err(ClientError::InvalidPayload(
+                "This message has already entered delivery. Wait for its result before editing it."
+                    .into(),
+            ));
+        }
+        if text.trim().is_empty() && options.attachments.is_empty() {
+            return Err(ClientError::InvalidPayload(
+                "Write a message or attach a file.".into(),
+            ));
+        }
+        let revision = self.inner.outbox.revision(id);
+        let mut next = current.as_ref().clone();
+        next.text = text;
+        next.attachments = options.attachments;
+        next.context = options.context;
+        if let Some(settings) = options.settings {
+            next.model_selection = Some(settings.model_selection);
+            next.runtime_mode = Some(settings.runtime_mode);
+            next.interaction_mode = Some(settings.interaction_mode);
+        }
+        next.dispatch_mode = options.dispatch_mode;
+        next.compact_before_send = options.compact_before_send.then_some(true);
+        next.fresh_context = options.fresh_context.then_some(true);
+        let changed = self.inner.outbox.update(next, Some(revision)).await?;
+        if changed {
+            self.inner.prepared.borrow_mut().remove(id);
+            self.set_state(id, SendState::Queued);
+            self.inner.attempts.borrow_mut().remove(id);
+        }
+        Ok(changed)
+    }
+    pub async fn discard_pending(
+        &self,
+        id: &MessageId,
+    ) -> Result<Option<Rc<QueuedMessage>>, ClientError> {
+        self.load().await?;
+        let _guard = self.inner.step_lock.lock().await;
+        let Some(current) = self.inner.outbox.messages().into_iter().find(|message| {
+            message.environment_id == self.inner.environment && &message.message_id == id
+        }) else {
+            return Ok(None);
+        };
+        if self.inner.commands.status(&current.command_id).is_some() {
+            return Err(ClientError::InvalidPayload("This message has already entered delivery. Wait for its result before discarding it.".into()));
+        }
+        let revision = self.inner.outbox.revision(id);
+        let removed = self
+            .inner
+            .outbox
+            .remove(&current, Some(revision), || true)
+            .await?;
+        if removed.is_some() {
+            self.inner.prepared.borrow_mut().remove(id);
+            self.inner.states.borrow_mut().remove(id);
+            self.inner.attempts.borrow_mut().remove(id);
+            self.inner.changes.notify();
+        }
+        Ok(removed)
+    }
+    pub async fn flush_outbox(&self) -> Result<bool, ClientError> {
+        let previously_loaded = self.inner.loaded.get();
+        self.load().await?;
+        if previously_loaded && !self.inner.outbox.completely_loaded() {
+            let _guard = self.inner.load_lock.lock().await;
+            self.inner.outbox.load().await?;
+        }
+        for message in self.inner.outbox.messages() {
+            if !self.inner.outbox.confirm_queued(&message).await {
+                return Ok(false);
+            }
+        }
+        Ok(self.inner.outbox.completely_loaded())
+    }
+    pub fn attachment_owners(&self) -> Vec<serde_json::Value> {
+        let mut owners = self
+            .inner
+            .outbox
+            .messages()
+            .into_iter()
+            .map(|message| (message.message_id.clone(), message))
+            .collect::<BTreeMap<_, _>>();
+        for record in self.inner.commands.records() {
+            if let Some(message) = record.change.apply.0 {
+                owners
+                    .entry(message.message_id.clone())
+                    .or_insert(Rc::new(message));
+            }
+        }
+        owners
+            .values()
+            .map(|message| serde_json::json!({"attachments":message.attachments}))
+            .collect()
+    }
+    pub async fn load(&self) -> Result<(), ClientError> {
+        let _guard = self.inner.load_lock.lock().await;
+        if self.inner.loaded.get() {
+            return Ok(());
+        }
+        self.inner.outbox.load().await?;
+        let report = self
+            .inner
+            .commands
+            .restore_available(self.inner.platform.as_ref())
+            .await
+            .map_err(super::send_transport::operation_error)?;
+        if !report.errors.is_empty() {
+            return Err(ClientError::InvalidPayload(
+                "Unreadable delivery records were retained for recovery.".into(),
+            ));
+        }
+        self.inner.loaded.set(true);
+        self.inner.changes.notify();
+        Ok(())
+    }
+    pub async fn send_message(
+        &self,
+        key: &ThreadKey,
+        text: String,
+    ) -> Result<MessageId, ClientError> {
+        self.submit(
+            key,
+            text,
+            SendOptions {
+                dispatch_mode: Some(DispatchMode::Auto),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+    pub async fn submit(
+        &self,
+        key: &ThreadKey,
+        text: String,
+        options: SendOptions,
+    ) -> Result<MessageId, ClientError> {
+        self.enqueue_submission(key, text, options, None, None)
+            .await
+    }
+    pub async fn edit_queued_run(
+        &self,
+        key: &ThreadKey,
+        run: t3_contracts::base_schemas::RunId,
+        message: MessageId,
+        text: String,
+        options: SendOptions,
+    ) -> Result<MessageId, ClientError> {
+        if options.creation.is_some() || options.compact_before_send || options.fresh_context {
+            return Err(ClientError::InvalidPayload(
+                "Queued edits cannot create or restart a thread.".into(),
+            ));
+        }
+        self.enqueue_submission(key, text, options, Some((run, message)), None)
+            .await
+    }
+    pub async fn submit_multiple(
+        &self,
+        targets: Vec<FanoutTarget>,
+        options: SendOptions,
+    ) -> Result<Vec<FanoutSubmission>, ClientError> {
+        let valid = targets.len() > 1
+            && options.creation.as_ref().is_some_and(|creation| {
+                creation.workspace_mode == super::super::outbox::WorkspaceMode::Worktree
+                    && creation
+                        .branch
+                        .as_ref()
+                        .is_some_and(|branch| !branch.trim().is_empty())
+            })
+            && options.settings.is_some();
+        if !valid {
+            return Err(ClientError::InvalidPayload(
+                "Multiple models require a new thread, a Git base branch, and captured settings."
+                    .into(),
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        let mut submissions = vec![];
+        for target in targets {
+            if !seen.insert(serde_json::to_string(&target.model)?) {
+                return Err(ClientError::InvalidPayload(
+                    "Choose each model once.".into(),
+                ));
+            }
+            let thread = ThreadKey {
+                environment: self.inner.environment.clone(),
+                thread: t3_contracts::base_schemas::ThreadId(
+                    crate::operations::allocate_command_id(self.inner.platform.as_ref(), None)?.0,
+                ),
+            };
+            let mut options = options.clone();
+            if let Some(settings) = options.settings.as_mut() {
+                settings.model_selection = target.model.clone();
+                settings.interaction_mode =
+                    t3_contracts::provider_policy::ProviderInteractionMode::Default;
+            }
+            submissions.push((thread, target, options));
+        }
+        let group = crate::operations::allocate_command_id(self.inner.platform.as_ref(), None)?.0;
+        Ok(
+            futures::future::join_all(submissions.into_iter().map(|(thread, target, options)| {
+                let group = group.clone();
+                async move {
+                    let message = self
+                        .enqueue_submission(&thread, target.text, options, None, Some(group))
+                        .await;
+                    FanoutSubmission {
+                        thread,
+                        model: target.model,
+                        message,
+                    }
+                }
+            }))
+            .await,
+        )
+    }
+    async fn enqueue_submission(
+        &self,
+        key: &ThreadKey,
+        text: String,
+        options: SendOptions,
+        edit: Option<(t3_contracts::base_schemas::RunId, MessageId)>,
+        fanout_group: Option<String>,
+    ) -> Result<MessageId, ClientError> {
+        if key.environment != self.inner.environment {
+            return Err(ClientError::EnvironmentMismatch);
+        }
+        if self.inner.disposed.get() {
+            return Err(ClientError::Cancelled);
+        }
+        if text.trim().is_empty() && options.attachments.is_empty() {
+            return Err(ClientError::InvalidPayload(
+                "Write a message or attach a file.".into(),
+            ));
+        }
+        self.load().await?;
+        let settings = options
+            .settings
+            .or_else(|| self.thread_settings(key))
+            .ok_or_else(|| {
+                ClientError::InvalidPayload("Thread settings are not available yet.".into())
+            })?;
+        let command_id =
+            crate::operations::allocate_command_id(self.inner.platform.as_ref(), None)?;
+        let mut extra = serde_json::Map::new();
+        if let Some(group) = fanout_group {
+            extra.insert("fanoutGroup".into(), serde_json::Value::String(group));
+        }
+        let message_id = if let Some((run, message)) = edit {
+            if self
+                .inner
+                .outbox
+                .messages()
+                .iter()
+                .any(|queued| queued.message_id == message)
+            {
+                return Err(ClientError::InvalidPayload(
+                    "This queued message already has a pending edit.".into(),
+                ));
+            }
+            extra.insert("queuedRunId".into(), serde_json::to_value(run)?);
+            message
+        } else {
+            MessageId(crate::operations::allocate_command_id(self.inner.platform.as_ref(), None)?.0)
+        };
+        let message = QueuedMessage {
+            environment_id: key.environment.clone(),
+            thread_id: key.thread.clone(),
+            message_id: message_id.clone(),
+            command_id,
+            text,
+            context: options.context,
+            attachments: options.attachments,
+            model_selection: Some(settings.model_selection),
+            runtime_mode: Some(settings.runtime_mode),
+            interaction_mode: Some(settings.interaction_mode),
+            creation: options.creation,
+            dispatch_mode: options.dispatch_mode,
+            compact_before_send: options.compact_before_send.then_some(true),
+            fresh_context: options.fresh_context.then_some(true),
+            created_at: super::send_commands::epoch_iso(self.inner.platform.now_epoch_ms()),
+            extra,
+        };
+        let pending = self.inner.outbox.enqueue(message);
+        self.set_state(&message_id, SendState::Queued);
+        if let Err(error) = pending.await {
+            self.inner.states.borrow_mut().remove(&message_id);
+            self.inner.changes.notify();
+            return Err(error);
+        }
+        self.inner.changes.notify();
+        Ok(message_id)
+    }
+    pub(super) fn thread_settings(&self, key: &ThreadKey) -> Option<ThreadSettings> {
+        let snapshot = self.inner.store.snapshot();
+        let environment = snapshot.environments.get(&key.environment)?;
+        let thread = environment
+            .shell
+            .snapshot
+            .as_ref()?
+            .threads
+            .iter()
+            .find(|thread| thread.id == key.thread)?;
+        Some(ThreadSettings {
+            model_selection: thread.model_selection.clone(),
+            runtime_mode: thread.runtime_mode,
+            interaction_mode: thread.interaction_mode,
+        })
+    }
+    pub(super) fn projection_epoch(&self, key: &ThreadKey) -> u64 {
+        self.inner
+            .store
+            .snapshot()
+            .environments
+            .get(&key.environment)
+            .and_then(|environment| environment.threads.get(&key.thread))
+            .map_or(0, |thread| thread.generation)
+    }
+    pub fn pending_messages(&self, key: &ThreadKey) -> Vec<PendingMessage> {
+        self.pending(key, false)
+    }
+    pub fn pending_edits(&self, key: &ThreadKey) -> Vec<PendingMessage> {
+        self.pending(key, true)
+    }
+    fn pending(&self, key: &ThreadKey, edits: bool) -> Vec<PendingMessage> {
+        use crate::optimistic::ProjectionKey;
+        let base = Rc::new(Vec::<PendingMessage>::new());
+        let queued = self.inner.commands.view(
+            &base,
+            &ProjectionKey::thread(key.environment.clone(), key.thread.clone()),
+            |messages, change, status| {
+                if let Some(message) = &change.apply.0 {
+                    messages.push(PendingMessage {
+                        message: Rc::new(message.clone()),
+                        state: match status {
+                            CommandStatus::Accepted { sequence } => SendState::Accepted {
+                                sequence: Some(*sequence),
+                            },
+                            CommandStatus::UnknownDelivery => SendState::AwaitingConfirmation,
+                            _ => SendState::Dispatching,
+                        },
+                    });
+                }
+            },
+        );
+        let mut result = queued.as_ref().clone();
+        let snapshot = self.inner.store.snapshot();
+        let seen: BTreeSet<_> = snapshot
+            .environments
+            .get(&key.environment)
+            .and_then(|environment| environment.threads.get(&key.thread))
+            .and_then(|thread| thread.projection.as_ref())
+            .map_or_else(BTreeSet::new, |projection| {
+                projection
+                    .messages
+                    .iter()
+                    .filter_map(|message| match &message.id {
+                        t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(id) => {
+                            Some(id.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            });
+        for message in self
+            .inner
+            .outbox
+            .messages()
+            .into_iter()
+            .filter(|message| message.thread_key() == *key)
+        {
+            if !result
+                .iter()
+                .any(|item| item.message.message_id == message.message_id)
+            {
+                let state = self.state(&message.message_id).unwrap_or(SendState::Queued);
+                result.push(PendingMessage { message, state });
+            }
+        }
+        result.retain(|item| {
+            item.message.extra.contains_key("queuedRunId") == edits
+                && (edits || !seen.contains(&item.message.message_id))
+        });
+        result.sort_by(|a, b| {
+            (&a.message.created_at, &a.message.message_id)
+                .cmp(&(&b.message.created_at, &b.message.message_id))
+        });
+        result
+    }
+    pub(super) fn current(&self, generation: Generation) -> bool {
+        !self.inner.disposed.get()
+            && self
+                .inner
+                .session
+                .borrow()
+                .as_ref()
+                .is_some_and(|session| session.generation == generation)
+    }
+    pub async fn step(&self) -> Result<Option<DeliveryResult>, ClientError> {
+        self.load().await?;
+        let _guard = self.inner.step_lock.lock().await;
+        self.reconcile().await?;
+        let Some(generation) = self
+            .inner
+            .session
+            .borrow()
+            .as_ref()
+            .map(|session| session.generation)
+        else {
+            return Ok(None);
+        };
+        if !self
+            .inner
+            .store
+            .snapshot()
+            .environments
+            .get(&self.inner.environment)
+            .is_some_and(|environment| {
+                environment.shell.session == generation
+                    && environment.shell.status == crate::types::SyncStatus::Live
+            })
+        {
+            return Ok(None);
+        }
+        let now = self.inner.platform.monotonic_ms();
+        let mut seen = BTreeSet::new();
+        let candidate=self.inner.outbox.messages().into_iter().filter(|message|message.environment_id==self.inner.environment && seen.insert(message.thread_id.clone())).find(|message| {
+            !self.inner.editing.borrow().contains(&message.message_id) && !matches!(self.state(&message.message_id),Some(SendState::Retry {not_before,..}) if not_before>now)
+                && !matches!(self.state(&message.message_id),Some(SendState::AwaitingConfirmation))
+        });
+        let Some(message) = candidate else {
+            return Ok(None);
+        };
+        if !self.inner.outbox.confirm_queued(&message).await {
+            self.inner.outbox.enqueue(message.as_ref().clone()).await?;
+            self.inner.changes.notify();
+            return Ok(Some(DeliveryResult::Retry));
+        }
+        let transport = super::send_transport::ProductionDelivery(self.clone());
+        let gate = || {
+            self.current(generation) && !self.inner.editing.borrow().contains(&message.message_id)
+        };
+        let mut delivery = self.inner.delivery.lock().await;
+        let result = delivery
+            .deliver(
+                &self.inner.outbox,
+                &transport,
+                message.clone(),
+                super::super::outbox::DispatchStep::Send,
+                gate,
+            )
+            .await;
+        let outcome = match result {
+            Ok(DeliveryResult::Accepted(sequence)) => {
+                self.set_state(&message.message_id, SendState::Accepted { sequence });
+                self.inner.prepared.borrow_mut().remove(&message.message_id);
+                self.inner.attempts.borrow_mut().remove(&message.message_id);
+                DeliveryResult::Accepted(sequence)
+            }
+            Ok(result) => result,
+            Err(error) => match self.handle_failure(&message, error, generation).await {
+                Ok(result) => result,
+                Err(error) => {
+                    self.schedule_retry(&message.message_id, error.to_string());
+                    DeliveryResult::Retry
+                }
+            },
+        };
+        if let Some(group) = message
+            .extra
+            .get("fanoutGroup")
+            .and_then(serde_json::Value::as_str)
+            && !self.inner.outbox.messages().iter().any(|pending| {
+                pending
+                    .extra
+                    .get("fanoutGroup")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(group)
+            })
+        {
+            self.inner.fanout_prepared.borrow_mut().remove(group);
+        }
+        self.inner.changes.notify();
+        Ok(Some(outcome))
+    }
+    pub fn retry_deadline(&self) -> Option<u64> {
+        let generation = self
+            .inner
+            .session
+            .borrow()
+            .as_ref()
+            .map(|session| session.generation)?;
+        if self.inner.disposed.get()
+            || !self
+                .inner
+                .store
+                .snapshot()
+                .environments
+                .get(&self.inner.environment)
+                .is_some_and(|environment| {
+                    environment.shell.session == generation
+                        && environment.shell.status == crate::types::SyncStatus::Live
+                })
+        {
+            return None;
+        }
+        let mut seen = BTreeSet::new();
+        self.inner
+            .outbox
+            .messages()
+            .iter()
+            .filter(|message| {
+                message.environment_id == self.inner.environment
+                    && seen.insert(message.thread_id.clone())
+                    && !self.inner.editing.borrow().contains(&message.message_id)
+            })
+            .filter_map(|message| match self.state(&message.message_id) {
+                Some(SendState::Retry { not_before, .. }) => Some(not_before),
+                _ => None,
+            })
+            .min()
+    }
+    pub fn run(&self) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        let service = self.clone();
+        async move {
+            if service.inner.running.replace(true) {
+                return Err(ClientError::InvalidPayload("The composer delivery loop is already running.".into()));
+            }
+            struct Running<P:Platform,E:RpcEndpoint>(Rc<SendInner<P,E>>);
+            impl<P:Platform,E:RpcEndpoint> Drop for Running<P,E> {
+                fn drop(&mut self) {self.0.running.set(false);}
+            }
+            let _running=Running(service.inner.clone());
+            let mut changes=service.changes();
+            let mut store=service.inner.store.subscribe().chain(futures::stream::pending());
+            let mut events=service.inner.platform.events().chain(futures::stream::pending());
+            let mut interrupted=service.inner.interrupted.subscribe();
+            let _=interrupted.next().await;
+            while !service.inner.disposed.get() {
+                loop {
+                    let outcome=futures::select_biased! {
+                        _=interrupted.next().fuse()=>{
+                            if service.inner.disposed.get(){return Ok(());}
+                            continue;
+                        },
+                        outcome=service.step().fuse()=>outcome?,
+                    };
+                    let Some(outcome)=outcome else {break;};
+                    if matches!(outcome,DeliveryResult::Wait|DeliveryResult::Retry|DeliveryResult::StaleSession|DeliveryResult::StaleMessage) {
+                        break;
+                    }
+                }
+                let timer=match service.retry_deadline() {
+                    Some(deadline)=>service.inner.platform.sleep(deadline.saturating_sub(service.inner.platform.monotonic_ms())),
+                    None=>futures::future::pending().boxed_local(),
+                };
+                futures::select_biased! {
+                    _=changes.next().fuse()=>{},
+                    _=store.next().fuse()=>{service.reconcile().await?;},
+                    event=events.next().fuse()=>{
+                        if matches!(event,Some(PlatformEvent::Foreground|PlatformEvent::Network(NetworkStatus::Online))) {service.wake();}
+                    },
+                    _=timer.fuse()=>{},
+                }
+            }
+            Ok(())
+        }.boxed_local()
+    }
+}

@@ -1,0 +1,27 @@
+[package]
+name = "t3-client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+t3-contracts = { path = "../t3-contracts" }
+t3-rpc = { path = "../t3-rpc" }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+thiserror = "2"
+futures = "0.3"
+url = "2"
+sha2 = "0.10"
+base64 = "0.22"
+unicode-normalization = "0.1"
+unicode-segmentation = "1"
+unicode-general-category = "1"
+
+[dev-dependencies]
+p256 = { version = "0.13", features = ["ecdsa"] }
+
+[lints]
+workspace = true

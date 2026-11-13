@@ -1,0 +1,28 @@
+//! Composer logic added after the first wave: markdown source, text direction, triggers, send paths.
+pub mod attachment_files;
+pub mod block_shortcuts;
+pub mod citations;
+pub mod cleanup;
+pub mod code_pairs;
+pub mod delivery_policy;
+pub mod direction;
+pub mod editor;
+pub mod markdown_source;
+pub mod mobile_content;
+pub mod mobile_drafts;
+pub mod mobile_models;
+pub mod mobile_selection;
+pub mod mobile_store;
+pub mod policy;
+pub mod send;
+mod send_commands;
+mod send_policy;
+mod send_transport;
+mod send_uploads;
+pub mod structure;
+pub mod web_content;
+pub mod web_context;
+pub mod web_drafts;
+pub mod web_models;
+mod web_normalize;
+pub mod web_sessions;
