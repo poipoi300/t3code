@@ -218,7 +218,7 @@ async fn an_update_survives_rpc_disconnect_rejects_duplicates_and_publishes_its_
     release.send(()).unwrap();
     service.await_updates().await;
     let peer_snapshots: Vec<_> = std::iter::from_fn(|| peer_events.try_recv().ok()).collect();
-    assert_eq!(peer_snapshots, ["snapshot:machine", "snapshot:machine"]);
+    assert_eq!(peer_snapshots, ["snapshot:machine", "invalidate", "snapshot:machine"]);
     assert!(service.get_providers().await.0.iter().all(|provider| provider.version.as_ref().unwrap().0 == "0.166.0"));
 
     assert_eq!(

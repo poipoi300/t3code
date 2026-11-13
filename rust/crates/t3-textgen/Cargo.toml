@@ -1,0 +1,50 @@
+[package]
+name = "t3-textgen"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "test-util"] }
+tokio-util = "0.7"
+t3-contracts = { path = "../t3-contracts" }
+t3-process = { path = "../t3-process" }
+t3-orchestration = { path = "../t3-orchestration", optional = true }
+unicode-segmentation = "1"
+unicode-normalization = "0.1"
+regex = "1"
+icu_collator = "2"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "rustls-tls"] }
+futures-util = "0.3"
+tempfile = "3"
+base64 = "0.22"
+same-file = "1"
+uuid = { version = "1", features = ["v4"] }
+transcribe-cpp = { version = "=0.4.1", default-features = false, optional = true }
+
+transcribe-cpp-sys = { version = "=0.4.1", default-features = false, optional = true }
+[features]
+native-speech = ["dep:transcribe-cpp", "dep:transcribe-cpp-sys"]
+orchestration-host = ["dep:t3-orchestration"]
+
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+
+[[bin]]
+name = "t3-speech-worker"
+path = "src/bin/t3-speech-worker.rs"
+required-features = ["native-speech"]
+
+

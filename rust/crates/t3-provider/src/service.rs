@@ -24,6 +24,10 @@ pub trait ProviderInstanceService: Send + Sync {
     async fn invalidate_models(&self, _cwd: Option<&str>, _fresh: bool) -> ServiceResult<()> {
         Ok(())
     }
+    async fn invalidate_caches(&self) -> ServiceResult<()> {
+        self.invalidate_models(None, true).await
+    }
+    async fn after_update(&self) -> ServiceResult<()> { Ok(()) }
     fn catalogs_per_cwd(&self) -> bool {
         false
     }
@@ -58,6 +62,7 @@ pub trait GlobalProviderSources: Send + Sync {
 #[async_trait]
 pub trait CatalogRefresh: Send + Sync {
     async fn refresh(&self) -> ServiceResult<()>;
+    async fn force_refresh(&self) -> ServiceResult<()> { self.refresh().await }
 }
 #[async_trait]
 pub trait MaintenanceExecutor: Send + Sync {
@@ -436,6 +441,41 @@ impl ProviderService {
 
         rx.borrow().clone().ok_or(ServiceError::Maintenance)?
     }
+    async fn refresh_after_update(&self, driver: &str, selected: &ProviderInstanceId) -> ServiceResult<Vec<ServerProvider>> {
+        self.catalog.force_refresh().await?;
+        let snapshots = self.snapshots.read().await.clone();
+        let instances: Vec<_> = self.instances.read().await.iter().filter(|(id, _)| {
+            *id == selected || snapshots.get(*id).is_some_and(|value| value.driver.0 == driver && value.enabled)
+        }).map(|(_, instance)| instance.clone()).collect();
+        if let Some(instance) = instances.iter().find(|instance| instance.instance_id() == selected) {
+            let _ = instance.after_update().await;
+        }
+        let mut verified = vec![];
+        for instance in instances {
+            let id = instance.instance_id();
+            let refresh = async {
+                instance.invalidate_caches().await?;
+                instance.maintenance(true).await?;
+                instance.latest_version(true).await?;
+                instance.snapshot(None, true).await
+            }.await;
+            let current = self.instances.read().await;
+            if current.get(id).is_none_or(|current| !Arc::ptr_eq(current, &instance)) { continue; }
+            match refresh {
+                Ok(value) => {
+                    self.snapshots.write().await.insert(id.clone(), value.clone());
+                    verified.push(value);
+                }
+                Err(_) => {
+                    if let Some(value) = self.snapshots.write().await.get_mut(id) {
+                        value.status = ServerProviderState::Error;
+                        value.message = Some("Provider refresh failed after update.".to_owned().into());
+                    }
+                }
+            }
+        }
+        Ok(verified)
+    }
     async fn run_update(
         &self,
         instance: Arc<dyn ProviderInstanceService>,
@@ -515,8 +555,9 @@ impl ProviderService {
                 let checked=instance.snapshot(None,true).await?;
                 let current=checked.installed_version.as_ref().and_then(Option::as_ref).or(checked.version.as_ref());
                 let already_current=current.is_some_and(|version|if target.is_some(){version.0.trim_start_matches('v')==candidate}else{!crate::versions::compare_versions(&version.0,candidate).is_lt()});
+                let restart = needs_opencode_restart(std::slice::from_ref(&checked));
                 self.snapshots.write().await.insert(id.clone(),checked);
-                if already_current{return Ok((ServerProviderUpdateStatus::Unchanged,"Already up to date."));}
+                if already_current{return Ok((ServerProviderUpdateStatus::Succeeded,if restart {OPENCODE_SERVER_RESTART_MESSAGE}else{"Already up to date."}));}
             }
             let action = if let Some(target) = target {
                 crate::maintenance::targeted_update(&fresh, target)
@@ -535,25 +576,25 @@ impl ProviderService {
                     sharing.push(other.clone());
                 }
             }
+            self.update_state(&id, ServerProviderUpdateStatus::Running, started.clone(), "Waiting for running provider work to finish.").await?;
             self.execution_gate
-                .update(&sharing, self.executor.execute(action))
+                .update(&sharing, async {
+                    self.update_state(&id, ServerProviderUpdateStatus::Running, started.clone(), "Running provider update.").await?;
+                    self.executor.execute(action).await
+                })
                 .await?;
-            let refreshed = instance.snapshot(None, true).await?;
-            let version = refreshed
-                .installed_version
-                .as_ref()
-                .and_then(Option::as_ref)
-                .or(refreshed.version.as_ref());
-            let failed = !refreshed.installed
-                || refreshed.status == ServerProviderState::Error && (refreshed.auth.status!=ServerProviderAuthStatus::Unauthenticated || refreshed.version.is_none())
-                || target.is_some_and(|t| version.is_none_or(|v| v.0.trim_start_matches('v') != t));
-            let outdated=target.is_none() && latest.as_deref().is_some_and(|latest|version.is_some_and(|version|crate::versions::compare_versions(&version.0,latest).is_lt()));
-            self.snapshots.write().await.insert(id.clone(), refreshed);
+            self.update_state(&id, ServerProviderUpdateStatus::Running, started.clone(), "Verifying the installed version.").await?;
+            let refreshed = self.refresh_after_update(&input.provider.0, &id).await?;
+            let installed_version = |provider: &ServerProvider| provider.installed_version.as_ref().and_then(Option::as_ref).or(provider.version.as_ref()).map(|version| version.0.clone());
+            let failed = refreshed.is_empty() || refreshed.iter().any(|provider| !provider.installed
+                || provider.status == ServerProviderState::Error && (provider.auth.status != ServerProviderAuthStatus::Unauthenticated || provider.version.is_none())
+                || target.is_some_and(|target| installed_version(provider).is_none_or(|version| version.trim_start_matches('v') != target)));
+            let outdated = target.is_none() && refreshed.iter().any(|provider| latest.as_deref().is_some_and(|latest| installed_version(provider).is_some_and(|version| crate::versions::compare_versions(&version, latest).is_lt())));
             if failed {
                 return Ok((ServerProviderUpdateStatus::Unchanged,"Update command completed, but T3 Code could not verify the provider version."));
             }
             if outdated{return Ok((ServerProviderUpdateStatus::Unchanged,"Update command completed, but T3 Code still detects an outdated provider version."));}
-            Ok((ServerProviderUpdateStatus::Succeeded,"Provider updated."))
+            Ok((ServerProviderUpdateStatus::Succeeded, if needs_opencode_restart(&refreshed) {OPENCODE_SERVER_RESTART_MESSAGE}else{"Provider updated."}))
         }
         .await;
         self.update_state(
@@ -573,6 +614,12 @@ impl ProviderService {
             let _ = update.wait_for(|v| v.is_some()).await;
         }
     }
+}
+
+const OPENCODE_SERVER_RESTART_MESSAGE: &str = "OpenCode CLI updated. Restart the configured local OpenCode server to use the new version.";
+fn needs_opencode_restart(providers: &[ServerProvider]) -> bool {
+    providers.iter().any(|provider| provider.driver.0 == "opencode"
+        && provider.installed_version.as_ref().and_then(Option::as_ref).zip(provider.version.as_ref()).is_some_and(|(installed, running)| installed != running))
 }
 
 fn machine_catalog_digest(provider: &ServerProvider) -> ServiceResult<String> {

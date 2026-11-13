@@ -563,6 +563,13 @@ impl NativeProvider {
 }
 #[async_trait]
 impl ProviderInstanceService for NativeProvider {
+    async fn invalidate_caches(&self) -> ServiceResult<()> {
+        self.probe_cache.invalidate().await;
+        if let Some(machine) = self.machine.lock().await.as_mut() {
+            machine.workspace_snapshots = None;
+        }
+        Ok(())
+    }
     async fn maintenance(
         &self,
         fresh: bool,
