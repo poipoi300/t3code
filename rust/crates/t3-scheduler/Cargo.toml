@@ -1,0 +1,42 @@
+[package]
+name = "t3-scheduler"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+t3-contracts = { path = "../t3-contracts" }
+t3-persistence = { path = "../t3-persistence" }
+async-trait = "0.1"
+chrono = "0.4"
+chrono-tz = "=0.10.4"
+jiff-tzdb = "=0.1.9"
+tz-rs = "0.7.3"
+iana-time-zone = "0.1"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+regex = "1"
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2"
+base64 = "0.22"
+hex = "0.4"
+url = "2"
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+getrandom = "0.3"
+tracing = "0.1"
+indexmap = { version = "2", features = ["serde"] }
+ryu-js = "1"
+futures-util = "0.3"
+
+[dev-dependencies]
+t3-process = { path = "../t3-process" }
+tempfile = "3"
+tokio = { version = "1", features = ["test-util", "rt-multi-thread"] }
+
+[lints]
+workspace = true
