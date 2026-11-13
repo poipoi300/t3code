@@ -160,6 +160,11 @@ four Cargo jobs without overriding them. Run scoped `cargo fmt -p t3-pull-reques
 `cargo clippy -p t3-pull-request --all-targets --all-features -- -D warnings`,
 and `cargo test -p t3-pull-request --all-features`. Final verification results and
 remaining host integration requirements are recorded in `HANDOFF.md`.
+The final scoped format, default Clippy and 39 default tests passed. All-feature
+Clippy with `--no-deps` and all 55 tests passed before concurrent Forge GitLab
+changes introduced compile errors; the later dependency-wide lint run is blocked
+in `t3-forge/src/gitlab/activity.rs` and `gitlab/read.rs`. See the hand-off for
+exact diagnostics. No Forge files were changed here.
 
 Takeover: no predecessor crate or files existed. No predecessor implementation
 was replaced. Only this crate is owned; no commits, git-state mutations or

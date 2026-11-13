@@ -13,6 +13,7 @@ pub mod privacy;
 pub mod product;
 pub mod provider_usage;
 pub mod resources;
+pub mod rpc;
 
 mod collector;
 

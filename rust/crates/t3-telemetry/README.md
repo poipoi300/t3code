@@ -49,10 +49,14 @@ eight-snapshot stream. Its initial snapshot and receiver are acquired under one
 lock. Handlers own authorization and RPC cancellation; the subscription must stay
 alive until the RPC stream ends. Do not destructure away its demand lease.
 
-The existing server binary and handler registry are owned by `t3-server`; this
-crate does not edit them. Its owner can replace all nine unsupported registrations
-with the calls above and retain the two lifecycle handles without implementing
-diagnostic aggregation in handlers.
+`t3-server` wires all nine methods through `adapters/telemetry.rs` and
+`handlers/telemetry.rs` under `local-services`. Its binary uses
+`runtime::start_with_global_tracing`: ownership is acquired before logs are opened
+or pruned. The telemetry domain starts first and shuts down last, after streams
+release their leases. Trace diagnostics flush the local sink before reading it.
+Library `start`/`start_with` leave the global subscriber to their embedding host;
+they still serve diagnostics and resource streams. Configuration reports whether
+the file tracer is initialized and which configured signals are exporting.
 
 ## Source behavior
 
@@ -75,6 +79,9 @@ diagnostic aggregation in handlers.
   primitives and name fixture, millisecond histograms with the source's 35
   exponential boundaries, fixed group names, provider-script classification,
   and resetting empty groups to zero. `Metrics` takes a supplied OTEL meter.
+* `observability/RpcInstrumentation.ts`: `ws.rpc.<method>` spans, all 220 aggregate
+  labels, request counters/duration and interrupt outcomes. The four source
+  diagnostic methods suppress nested tracing without disabling their logs.
 * `diagnostics/*.ts`: streamed rotated-file aggregation, browser/effect errors
   and interruptions, bounded top/recent summaries, malformed-line counts,
   missing-file/partial-read errors, backend-only process diagnostics and legacy
@@ -170,7 +177,7 @@ separate from product analytics opt-out, as in TypeScript.
 
 No prompt/file contents, provider credentials, bearer tokens, cookies or query
 tickets belong in these APIs. Redaction covers sensitive field names, URL ticket,
-DPoP/token/password parameters, bearer strings and private CLI arguments; nested
+DPoP/token/password parameters, URL user-info, bearer strings and private CLI arguments; nested
 values are bounded and strings truncated. This is stricter than the TypeScript
 field behavior. Process command lines, names and local diagnostic paths are
 returned **only** to authorized diagnostic clients as in TypeScript, with known
@@ -211,7 +218,7 @@ signals (SIGKILL; SIGINT can return false); POSIX signal paths are unexecuted he
 
 ## Verification
 
-From the Rust workspace, retaining `.cargo/config.toml`'s two-job limit:
+From the Rust workspace, retaining `.cargo/config.toml`'s configured job limit:
 
 ```powershell
 $env:CARGO_TARGET_DIR='D:\t3code-rust-target\server-l'

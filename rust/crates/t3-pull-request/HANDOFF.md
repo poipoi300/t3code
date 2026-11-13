@@ -58,8 +58,12 @@ Final scoped format check and all-feature Clippy with `--no-deps -D warnings`
 passed. The final all-feature suite passed **55 tests**: 1 classifier, 20
 application, 7 cache, 7 Forge, 6 guide, 5 orchestration adapter, 4 SQLite, 1 viewed
 race and 4 watch tests. Default Clippy with `-D warnings` and all **39 default
-tests** also passed. The dependency-wide all-feature lint result is still being
-collected; replace this sentence with its completed result.
+tests** also passed. A subsequent dependency-wide all-feature Clippy run met new
+concurrent compile errors in `t3-forge/src/gitlab/activity.rs:43,287` (E0716) and
+`t3-forge/src/gitlab/read.rs:594` (E0373); those files are outside this task's
+ownership. The 55-test pass above predates those new upstream changes. Retry the
+all-feature lint/tests after the Forge owner finishes. Do not patch those files
+from this task.
 No live host/provider calls, credentials, dev servers or user state were used.
 
 First integration step: wire the host-owned contexts/checkout adapter, then the
