@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<policyDefinitionResources xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" revision="1.0" schemaVersion="1.0" xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions">
+  <displayName>T3 Code</displayName>
+  <description>Policies for T3 Code</description>
+  <resources>
+    <stringTable>
+      <string id="T3Code">T3 Code</string>
+      <string id="SUPPORTED_T3Code">T3 Code with managed policy support</string>
+      <string id="Organization">Organization</string>
+      <string id="Organization_Help">Required whenever any other T3 Code policy is set: T3 Code will not start with policies that do not name an organization.
+
+Users see the name as &quot;Managed by &lt;organization&gt;&quot; beside every control the policy locks. The support URL is optional.</string>
+      <string id="MaxRuntimeMode">Broadest permission mode</string>
+      <string id="MaxRuntimeMode_Help">The broadest permission mode any thread may use, including threads agents and scheduled tasks start.
+
+A thread already above it cannot run another turn until someone lowers its mode. Under this limit, each provider's launch settings (binary path, launch arguments, environment variables) come only from the policy.
+
+Disabled or Not Configured: no restriction.</string>
+      <string id="MaxRuntimeMode_approval-required">Supervised</string>
+      <string id="MaxRuntimeMode_auto-accept-edits">Auto-accept edits</string>
+      <string id="MaxRuntimeMode_auto">Auto</string>
+      <string id="MaxRuntimeMode_full-access">Full access</string>
+      <string id="Clients">Allowed clients</string>
+      <string id="Clients_Help">What may connect to T3 Code on this machine.
+
+Without Remote, T3 Code only listens on this machine, does not create pairing links, signs out devices that paired earlier, and turns T3 Connect off. Check at least one client.
+
+Disabled or Not Configured: no restriction.</string>
+      <string id="Connect">Allow T3 Connect</string>
+      <string id="Connect_Help">Disabled turns T3 Connect off and unlinks this machine. Other remote access still follows Allowed clients.
+
+Enabled or Not Configured leaves T3 Connect available.</string>
+      <string id="WebhookTasks">Allow webhook tasks</string>
+      <string id="WebhookTasks_Help">Disabled stops scheduled tasks from using webhook triggers. Existing webhook tasks are kept but do not run.</string>
+      <string id="BrowserCookieImport">Allow importing browser cookies</string>
+      <string id="BrowserCookieImport_Help">Disabled stops users from importing cookies from another browser into T3 Code's browser.</string>
+      <string id="Telemetry">Allow usage data</string>
+      <string id="Telemetry_Help">Disabled stops T3 Code from sending product usage data and relay connection traces. Enabled cannot turn them on for a user who turned them off.</string>
+      <string id="AllowedDrivers">Allowed providers</string>
+      <string id="AllowedDrivers_Help">Only the checked providers may run. Threads on other providers stay, marked unavailable.
+
+Disabled or Not Configured: no restriction.</string>
+      <string id="Updates">Updates</string>
+      <string id="Updates_Help">Off stops T3 Code from checking for updates, for machines that receive T3 Code through device management.
+
+A feed URL makes the desktop app update from your own mirror of the release feed instead of GitHub; it must be https. Unchecking nightly makes the nightly channel unavailable.
+
+Disabled or Not Configured: no restriction.</string>
+      <string id="UpdatesMode_auto">Automatic</string>
+      <string id="UpdatesMode_off">Off</string>
+      <string id="Settings">Managed settings (JSON)</string>
+      <string id="Settings_Help">Defaults and locks for server settings, as the &quot;settings&quot; object of a T3 Code policy. Each key is a setting path; each value is {&quot;value&quot;: ..., &quot;locked&quot;: true|false}.
+
+Example: {&quot;enableAgentBrowserAccess&quot;: {&quot;value&quot;: false, &quot;locked&quot;: true}}
+
+Run &quot;t3 policy check&quot; on a policy file with the same object to validate it first.</string>
+      <string id="ProviderInstances">Provider settings (JSON)</string>
+      <string id="ProviderInstances_Help">Fields set on every instance of a provider, as the &quot;limits.providers.instances&quot; object of a T3 Code policy: environment variables, binaryPath, launchArgs.
+
+Example: {&quot;claudeAgent&quot;: {&quot;locked&quot;: true, &quot;environment&quot;: [{&quot;name&quot;: &quot;CLAUDE_CODE_USE_BEDROCK&quot;, &quot;value&quot;: &quot;1&quot;}]}}
+
+Every user on the machine can read this value, so do not put credentials in it.</string>
+    </stringTable>
+    <presentationTable>
+      <presentation id="Organization">
+        <textBox refId="Organization"><label>Organization name</label></textBox>
+        <textBox refId="SupportUrl"><label>Support URL (optional)</label></textBox>
+      </presentation>
+      <presentation id="MaxRuntimeMode">
+        <dropdownList refId="MaxRuntimeMode" noSort="true" defaultItem="1">Broadest permission mode</dropdownList>
+      </presentation>
+      <presentation id="Clients">
+        <checkBox refId="Clients_desktop" defaultChecked="true">Desktop app on this machine</checkBox>
+        <checkBox refId="Clients_local-browser" defaultChecked="true">A browser on this machine</checkBox>
+        <checkBox refId="Clients_remote" defaultChecked="false">Remote: phones, other computers, app.t3.codes</checkBox>
+      </presentation>
+      <presentation id="AllowedDrivers">
+        <checkBox refId="AllowedDrivers_codex" defaultChecked="true">Codex</checkBox>
+        <checkBox refId="AllowedDrivers_claudeAgent" defaultChecked="true">Claude</checkBox>
+        <checkBox refId="AllowedDrivers_antigravity" defaultChecked="false">Antigravity</checkBox>
+        <checkBox refId="AllowedDrivers_cursor" defaultChecked="false">Cursor</checkBox>
+        <checkBox refId="AllowedDrivers_grok" defaultChecked="false">Grok</checkBox>
+        <checkBox refId="AllowedDrivers_fx" defaultChecked="false">fx</checkBox>
+        <checkBox refId="AllowedDrivers_kiro" defaultChecked="false">Kiro</checkBox>
+        <checkBox refId="AllowedDrivers_muse" defaultChecked="false">Muse Code</checkBox>
+        <checkBox refId="AllowedDrivers_opencode" defaultChecked="false">OpenCode</checkBox>
+        <checkBox refId="AllowedDrivers_pi" defaultChecked="false">Pi</checkBox>
+        <checkBox refId="AllowedDrivers_acpRegistry" defaultChecked="false">ACP Registry</checkBox>
+      </presentation>
+      <presentation id="Updates">
+        <dropdownList refId="UpdatesMode" noSort="true" defaultItem="0">Updates</dropdownList>
+        <textBox refId="UpdatesFeedUrl"><label>Feed URL (optional)</label></textBox>
+        <checkBox refId="AllowNightly" defaultChecked="true">Allow the nightly channel</checkBox>
+      </presentation>
+      <presentation id="Settings">
+        <textBox refId="Settings"><label>Settings JSON</label></textBox>
+      </presentation>
+      <presentation id="ProviderInstances">
+        <textBox refId="ProviderInstances"><label>Provider settings JSON</label></textBox>
+      </presentation>
+    </presentationTable>
+  </resources>
+</policyDefinitionResources>

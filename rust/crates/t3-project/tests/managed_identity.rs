@@ -68,6 +68,8 @@ async fn named_projects_are_real_committed_repositories_with_unique_folders() {
 #[tokio::test]
 async fn scratch_is_unique_recreated_and_never_inherits_a_checkout() {
     let f = Fixture::new();
+    // Metadata probes pin directories on Windows; this fixture removes scratch externally.
+    f.service.enrichment().shutdown().await;
     let base = f.root("base");
     let folders = ManagedProjectFolders::new(
         base.clone(),

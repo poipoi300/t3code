@@ -5130,7 +5130,6 @@ dependencies = [
  "cap-std",
  "chrono",
  "dunce",
- "file-id",
  "filetime",
  "futures-util",
  "getrandom 0.3.4",

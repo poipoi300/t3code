@@ -1,11 +1,11 @@
 //! Native remote connectivity services. Does not target wasm32-unknown-unknown.
 pub mod api;
-pub mod link_requests;
 pub mod cloud;
 pub mod crypto;
 pub mod direct;
 pub mod guest;
 pub mod http;
+pub mod link_requests;
 pub mod managed;
 pub mod oauth;
 pub mod peer;

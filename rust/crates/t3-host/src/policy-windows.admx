@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<policyDefinitions xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" revision="1.0" schemaVersion="1.0" xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions">
+  <policyNamespaces>
+    <target prefix="t3code" namespace="T3Tools.Policies.T3Code" />
+  </policyNamespaces>
+  <resources minRequiredRevision="1.0" />
+  <supportedOn>
+    <definitions>
+      <definition name="SUPPORTED_T3Code" displayName="$(string.SUPPORTED_T3Code)" />
+    </definitions>
+  </supportedOn>
+  <categories>
+    <category name="T3Code" displayName="$(string.T3Code)" />
+  </categories>
+  <policies>
+    <policy name="Organization" class="Machine" displayName="$(string.Organization)" explainText="$(string.Organization_Help)" key="SOFTWARE\Policies\T3Tools\T3Code" presentation="$(presentation.Organization)">
+      <parentCategory ref="T3Code" />
+      <supportedOn ref="SUPPORTED_T3Code" />
+      <elements>
+        <text id="Organization" valueName="Organization" required="true" />
+        <text id="SupportUrl" valueName="SupportUrl" />
+      </elements>
+    </policy>
+    <policy name="MaxRuntimeMode" class="Machine" displayName="$(string.MaxRuntimeMode)" explainText="$(string.MaxRuntimeMode_Help)" key="SOFTWARE\Policies\T3Tools\T3Code" presentation="$(presentation.MaxRuntimeMode)">
+      <parentCategory ref="T3Code" />
+      <supportedOn ref="SUPPORTED_T3Code" />
+      <elements>
+        <enum id="MaxRuntimeMode" valueName="MaxRuntimeMode" required="true">
+            <item displayName="$(string.MaxRuntimeMode_approval-required)"><value><string>approval-required</string></value></item>
+            <item displayName="$(string.MaxRuntimeMode_auto-accept-edits)"><value><string>auto-accept-edits</string></value></item>
+            <item displayName="$(string.MaxRuntimeMode_auto)"><value><string>auto</string></value></item>
+            <item displayName="$(string.MaxRuntimeMode_full-access)"><value><string>full-access</string></value></item>
+          </enum>
+      </elements>
+    </policy>
+    <policy name="Clients" class="Machine" displayName="$(string.Clients)" explainText="$(string.Clients_Help)" key="SOFTWARE\Policies\T3Tools\T3Code" valueName="Clients" presentation="$(presentation.Clients)">
+      <parentCategory ref="T3Code" />
+      <supportedOn ref="SUPPORTED_T3Code" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+      <elements>
+        <boolean id="Clients_desktop" key="SOFTWARE\Policies\T3Tools\T3Code\Clients" valueName="desktop"><trueValue><decimal value="1" /></trueValue><falseValue><decimal value="0" /></falseValue></boolean>
+        <boolean id="Clients_local-browser" key="SOFTWARE\Policies\T3Tools\T3Code\Clients" valueName="local-browser"><trueValue><decimal value="1" /></trueValue><falseValue><decimal value="0" /></falseValue></boolean>
+        <boolean id="Clients_remote" key="SOFTWARE\Policies\T3Tools\T3Code\Clients" valueName="remote"><trueValue><decimal value="1" /></trueValue><falseValue><decimal value="0" /></falseValue></boolean>
+      </elements>
+    </policy>
+    <policy name="Connect" class="Machine" displayName="$(string.Connect)" explainText="$(string.Connect_Help)" key="SOFTWARE\Policies\T3Tools\T3Code" valueName="Connect">
+      <parentCategory ref="T3Code" />
+      <supportedOn ref="SUPPORTED_T3Code" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+    </policy>
+    <policy name="WebhookTasks" class="Machine" displayName="$(string.WebhookTasks)" explainText="$(string.WebhookTasks_Help)" key="SOFTWARE\Policies\T3Tools\T3Code" valueName="WebhookTasks">
+      <parentCategory ref="T3Code" />
+      <supportedOn ref="SUPPORTED_T3Code" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+    </policy>
+    <policy name="BrowserCookieImport" class="Machine" displayName="$(string.BrowserCookieImport)" explainText="$(string.BrowserCookieImport_Help)" key="SOFTWARE\Policies\T3Tools\T3Code" valueName="BrowserCookieImport">
+      <parentCategory ref="T3Code" />
+      <supportedOn ref="SUPPORTED_T3Code" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+    </policy>
+    <policy name="Telemetry" class="Machine" displayName="$(string.Telemetry)" explainText="$(string.Telemetry_Help)" key="SOFTWARE\Policies\T3Tools\T3Code" valueName="Telemetry">
+      <parentCategory ref="T3Code" />
+      <supportedOn ref="SUPPORTED_T3Code" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+    </policy>
+    <policy name="AllowedDrivers" class="Machine" displayName="$(string.AllowedDrivers)" explainText="$(string.AllowedDrivers_Help)" key="SOFTWARE\Policies\T3Tools\T3Code" valueName="AllowedDrivers" presentation="$(presentation.AllowedDrivers)">
+      <parentCategory ref="T3Code" />
+      <supportedOn ref="SUPPORTED_T3Code" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+      <elements>
+        <boolean id="AllowedDrivers_codex" key="SOFTWARE\Policies\T3Tools\T3Code\AllowedDrivers" valueName="codex"><trueValue><decimal value="1" /></trueValue><falseValue><decimal value="0" /></falseValue></boolean>
+        <boolean id="AllowedDrivers_claudeAgent" key="SOFTWARE\Policies\T3Tools\T3Code\AllowedDrivers" valueName="claudeAgent"><trueValue><decimal value="1" /></trueValue><falseValue><decimal value="0" /></falseValue></boolean>
+        <boolean id="AllowedDrivers_antigravity" key="SOFTWARE\Policies\T3Tools\T3Code\AllowedDrivers" valueName="antigravity"><trueValue><decimal value="1" /></trueValue><falseValue><decimal value="0" /></falseValue></boolean>
+        <boolean id="AllowedDrivers_cursor" key="SOFTWARE\Policies\T3Tools\T3Code\AllowedDrivers" valueName="cursor"><trueValue><decimal value="1" /></trueValue><falseValue><decimal value="0" /></falseValue></boolean>
+        <boolean id="AllowedDrivers_grok" key="SOFTWARE\Policies\T3Tools\T3Code\AllowedDrivers" valueName="grok"><trueValue><decimal value="1" /></trueValue><falseValue><decimal value="0" /></falseValue></boolean>
+        <boolean id="AllowedDrivers_fx" key="SOFTWARE\Policies\T3Tools\T3Code\AllowedDrivers" valueName="fx"><trueValue><decimal value="1" /></trueValue><falseValue><decimal value="0" /></falseValue></boolean>
+        <boolean id="AllowedDrivers_kiro" key="SOFTWARE\Policies\T3Tools\T3Code\AllowedDrivers" valueName="kiro"><trueValue><decimal value="1" /></trueValue><falseValue><decimal value="0" /></falseValue></boolean>
+        <boolean id="AllowedDrivers_muse" key="SOFTWARE\Policies\T3Tools\T3Code\AllowedDrivers" valueName="muse"><trueValue><decimal value="1" /></trueValue><falseValue><decimal value="0" /></falseValue></boolean>
+        <boolean id="AllowedDrivers_opencode" key="SOFTWARE\Policies\T3Tools\T3Code\AllowedDrivers" valueName="opencode"><trueValue><decimal value="1" /></trueValue><falseValue><decimal value="0" /></falseValue></boolean>
+        <boolean id="AllowedDrivers_pi" key="SOFTWARE\Policies\T3Tools\T3Code\AllowedDrivers" valueName="pi"><trueValue><decimal value="1" /></trueValue><falseValue><decimal value="0" /></falseValue></boolean>
+        <boolean id="AllowedDrivers_acpRegistry" key="SOFTWARE\Policies\T3Tools\T3Code\AllowedDrivers" valueName="acpRegistry"><trueValue><decimal value="1" /></trueValue><falseValue><decimal value="0" /></falseValue></boolean>
+      </elements>
+    </policy>
+    <policy name="Updates" class="Machine" displayName="$(string.Updates)" explainText="$(string.Updates_Help)" key="SOFTWARE\Policies\T3Tools\T3Code" valueName="Updates" presentation="$(presentation.Updates)">
+      <parentCategory ref="T3Code" />
+      <supportedOn ref="SUPPORTED_T3Code" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+      <elements>
+        <enum id="UpdatesMode" valueName="UpdatesMode" required="true">
+            <item displayName="$(string.UpdatesMode_auto)"><value><string>auto</string></value></item>
+            <item displayName="$(string.UpdatesMode_off)"><value><string>off</string></value></item>
+          </enum>
+        <text id="UpdatesFeedUrl" valueName="UpdatesFeedUrl" />
+        <boolean id="AllowNightly" valueName="AllowNightly"><trueValue><decimal value="1" /></trueValue><falseValue><decimal value="0" /></falseValue></boolean>
+      </elements>
+    </policy>
+    <policy name="Settings" class="Machine" displayName="$(string.Settings)" explainText="$(string.Settings_Help)" key="SOFTWARE\Policies\T3Tools\T3Code" presentation="$(presentation.Settings)">
+      <parentCategory ref="T3Code" />
+      <supportedOn ref="SUPPORTED_T3Code" />
+      <elements>
+        <text id="Settings" valueName="Settings" maxLength="32767" />
+      </elements>
+    </policy>
+    <policy name="ProviderInstances" class="Machine" displayName="$(string.ProviderInstances)" explainText="$(string.ProviderInstances_Help)" key="SOFTWARE\Policies\T3Tools\T3Code" presentation="$(presentation.ProviderInstances)">
+      <parentCategory ref="T3Code" />
+      <supportedOn ref="SUPPORTED_T3Code" />
+      <elements>
+        <text id="ProviderInstances" valueName="ProviderInstances" maxLength="32767" />
+      </elements>
+    </policy>
+  </policies>
+</policyDefinitions>

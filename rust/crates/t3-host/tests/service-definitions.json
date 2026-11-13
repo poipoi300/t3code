@@ -1,0 +1,22 @@
+{
+  "plan": {
+    "program": [
+      "/home/test/T3 Code/runtime/versions/1.2.3/t3",
+      "__service-launcher"
+    ],
+    "baseDir": "/home/test/T3 Code%name",
+    "logPath": "/home/test/T3 Code/logs/boot-service.log",
+    "installBinDir": "/home/test/.local/bin"
+  },
+  "windows": {
+    "program": [
+      "C:\\T3 Code\\runtime\\versions\\1.2.3\\t3.exe",
+      "__service-launcher"
+    ],
+    "baseDir": "C:\\T3 & Code\\",
+    "logPath": "C:\\T3 Code\\logs\\boot-service.log"
+  },
+  "systemd": "[Unit]\nDescription=T3 Code server\nStartLimitIntervalSec=300\nStartLimitBurst=5\n\n[Service]\nType=simple\nWorkingDirectory=%h\nEnvironment=T3CODE_HOME=\"/home/test/T3 Code%%name\"\nEnvironment=T3CODE_INSTALL_BIN_DIR=/home/test/.local/bin\nEnvironment=T3_BOOT_SERVICE_UNIT=t3code.service\nExecStart=\"/home/test/T3 Code/runtime/versions/1.2.3/t3\" __service-launcher\nKillMode=mixed\nOOMPolicy=continue\nRestart=always\nRestartSec=5\nCPUWeight=1000\nIOWeight=1000\nMemoryLow=1536M\nOOMScoreAdjust=100\nManagedOOMPreference=avoid\nStandardOutput=append:/home/test/T3 Code/logs/boot-service.log\nStandardError=append:/home/test/T3 Code/logs/boot-service.log\n\n[Install]\nWantedBy=default.target\n",
+  "launchd": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key>\n  <string>com.t3tools.t3code.service</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>/home/test/T3 Code/runtime/versions/1.2.3/t3</string>\n    <string>__service-launcher</string>\n  </array>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>/usr/bin:/x&amp;y</string>\n    <key>T3CODE_HOME</key>\n    <string>/home/test/T3 Code%name</string>\n    <key>T3CODE_INSTALL_BIN_DIR</key>\n    <string>/home/test/.local/bin</string>\n    <key>T3_BOOT_SERVICE_UNIT</key>\n    <string>com.t3tools.t3code.service.plist</string>\n  </dict>\n  <key>WorkingDirectory</key>\n  <string>/home/test</string>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <true/>\n  <key>ThrottleInterval</key>\n  <integer>5</integer>\n  <key>ExitTimeOut</key>\n  <integer>90</integer>\n  <key>ProcessType</key>\n  <string>Interactive</string>\n  <key>StandardOutPath</key>\n  <string>/home/test/T3 Code/logs/boot-service.log</string>\n  <key>StandardErrorPath</key>\n  <string>/home/test/T3 Code/logs/boot-service.log</string>\n</dict>\n</plist>\n",
+  "task": "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n  <RegistrationInfo>\n    <Description>T3 Code server</Description>\n  </RegistrationInfo>\n  <Triggers>\n    <LogonTrigger>\n      <UserId>DOMAIN\\user&amp;other</UserId>\n    </LogonTrigger>\n    <TimeTrigger>\n      <StartBoundary>2000-01-01T00:00:00</StartBoundary>\n      <Repetition>\n        <Interval>PT1M</Interval>\n      </Repetition>\n    </TimeTrigger>\n  </Triggers>\n  <Principals>\n    <Principal id=\"Author\">\n      <UserId>DOMAIN\\user&amp;other</UserId>\n      <LogonType>InteractiveToken</LogonType>\n      <RunLevel>LeastPrivilege</RunLevel>\n    </Principal>\n  </Principals>\n  <Settings>\n    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n    <Priority>5</Priority>\n  </Settings>\n  <Actions Context=\"Author\">\n    <Exec>\n      <Command>C:\\Windows\\System32\\conhost.exe</Command>\n      <Arguments>--headless \"C:\\T3 Code\\runtime\\versions\\1.2.3\\t3.exe\" \"__service-launcher\" \"--base-dir\" \"C:\\T3 &amp; Code\\\\\" \"--log-file\" \"C:\\T3 Code\\logs\\boot-service.log\" \"--service-unit\" \"t3code-task.xml\"</Arguments>\n      <WorkingDirectory>C:\\Users\\test</WorkingDirectory>\n    </Exec>\n  </Actions>\n</Task>\n"
+}

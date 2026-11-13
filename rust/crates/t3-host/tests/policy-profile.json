@@ -1,0 +1,13 @@
+{
+  "document": {
+    "schemaVersion": 1,
+    "organization": "Org & Company",
+    "settings": {
+      "keepAwakeWhileAgentsWork": {
+        "value": false,
+        "locked": true
+      }
+    }
+  },
+  "profile": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>PayloadContent</key>\n  <array>\n    <dict>\n      <key>PayloadDisplayName</key>\n      <string>T3 Code policy</string>\n      <key>PayloadIdentifier</key>\n      <string>com.t3tools.t3code.policy.payload-uuid</string>\n      <key>PayloadType</key>\n      <string>com.t3tools.t3code</string>\n      <key>PayloadUUID</key>\n      <string>payload-uuid</string>\n      <key>PayloadVersion</key>\n      <integer>1</integer>\n      <key>schemaVersion</key>\n      <integer>1</integer>\n      <key>organization</key>\n      <string>Org &amp; Company</string>\n      <key>settings</key>\n      <dict>\n        <key>keepAwakeWhileAgentsWork</key>\n        <dict>\n          <key>value</key>\n          <false />\n          <key>locked</key>\n          <true />\n        </dict>\n      </dict>\n    </dict>\n  </array>\n  <key>PayloadDescription</key>\n  <string>Configures T3 Code for every user on this Mac.</string>\n  <key>PayloadDisplayName</key>\n  <string>T3 Code policy for Org &amp; Company</string>\n  <key>PayloadIdentifier</key>\n  <string>com.t3tools.t3code.policy</string>\n  <key>PayloadOrganization</key>\n  <string>Org &amp; Company</string>\n  <key>PayloadScope</key>\n  <string>System</string>\n  <key>PayloadType</key>\n  <string>Configuration</string>\n  <key>PayloadUUID</key>\n  <string>profile-uuid</string>\n  <key>PayloadVersion</key>\n  <integer>1</integer>\n</dict>\n</plist>\n"
+}

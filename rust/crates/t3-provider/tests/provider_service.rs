@@ -87,11 +87,14 @@ impl MaintenanceExecutor for Executor {
     }
 }
 fn instance(enabled: bool) -> (Arc<Instance>, mpsc::UnboundedReceiver<String>) {
+    instance_at("work", enabled)
+}
+fn instance_at(id: &str, enabled: bool) -> (Arc<Instance>, mpsc::UnboundedReceiver<String>) {
     let (events, receiver) = mpsc::unbounded_channel();
-    let value=serde_json::from_value(json!({"instanceId":"work","driver":"codex","displayName":"Work","enabled":enabled,"installed":true,"version":"0.166.0","status":"ready","checkedAt":"2027-01-15T08:00:00.000Z","auth":{"status":"authenticated"},"models":[{"slug":"model","name":"Model","isCustom":false,"capabilities":null}],"slashCommands":[{"name":"command","description":"full description"}],"skills":[{"name":"skill","path":"/skill","enabled":true,"scope":"user","description":"full description"}]})).unwrap();
+    let value=serde_json::from_value(json!({"instanceId":id,"driver":"codex","displayName":"Work","enabled":enabled,"installed":true,"version":"0.166.0","status":"ready","checkedAt":"2027-01-15T08:00:00.000Z","auth":{"status":"authenticated"},"models":[{"slug":"model","name":"Model","isCustom":false,"capabilities":null}],"slashCommands":[{"name":"command","description":"full description"}],"skills":[{"name":"skill","path":"/skill","enabled":true,"scope":"user","description":"full description"}]})).unwrap();
     (
         Arc::new(Instance {
-            id: "work".into(),
+            id: id.into(),
             value: Mutex::new(value),
             events,
             ownership: Mutex::new("shared".into()),
@@ -188,6 +191,10 @@ async fn an_update_survives_rpc_disconnect_rejects_duplicates_and_publishes_its_
     let (instance, _events) = instance(true);
     instance.value.lock().await.version = Some("0.165.0".into());
     service.register(instance.clone()).await;
+    let (peer, mut peer_events) = instance_at("other", true);
+    peer.value.lock().await.version = Some("0.165.0".into());
+    service.register(peer.clone()).await;
+
     service
         .refresh_providers(serde_json::from_value(json!({})).unwrap())
         .await
@@ -207,8 +214,13 @@ async fn an_update_survives_rpc_disconnect_rejects_duplicates_and_publishes_its_
         ServiceError::Busy
     );
     instance.value.lock().await.version = Some("0.166.0".into());
+    peer.value.lock().await.version = Some("0.166.0".into());
     release.send(()).unwrap();
     service.await_updates().await;
+    let peer_snapshots: Vec<_> = std::iter::from_fn(|| peer_events.try_recv().ok()).collect();
+    assert_eq!(peer_snapshots, ["snapshot:machine", "snapshot:machine"]);
+    assert!(service.get_providers().await.0.iter().all(|provider| provider.version.as_ref().unwrap().0 == "0.166.0"));
+
     assert_eq!(
         service.get_providers().await.0[0]
             .update_state
@@ -239,7 +251,7 @@ async fn an_already_current_installation_is_verified_without_running_its_updater
             .as_ref()
             .unwrap()
             .status,
-        ServerProviderUpdateStatus::Unchanged
+        ServerProviderUpdateStatus::Succeeded
     );
     assert!(received.try_recv().is_err());
 }
