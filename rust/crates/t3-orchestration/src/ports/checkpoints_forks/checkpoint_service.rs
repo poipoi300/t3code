@@ -467,6 +467,15 @@ impl CheckpointService {
             .await
     }
 
+    /// Before the provider rolls its conversation back (re-review 4 F7): the folder must still
+    /// belong to the repository its scope was bound to, so that refusal leaves both sides as they
+    /// were.
+    pub async fn preflight_restore(&self, scope: &OrchestrationV2CheckpointScope) -> Result<()> {
+        self.metadata
+            .bind_scope(PathBuf::from(&scope.cwd.0), false)
+            .await
+    }
+
     pub async fn delete_stale_refs(
         &self,
         scope: OrchestrationV2CheckpointScope,

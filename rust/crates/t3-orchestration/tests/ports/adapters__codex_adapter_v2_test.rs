@@ -2772,6 +2772,59 @@ async fn unloaded_archived_rollback_resumes_before_paginated_revert() {
     assert!(h.peer.read().await.is_err());
 }
 
+/// Re-review 4 F7: a rollback retried after T3 failed to record the first attempt never reverts
+/// the target turn or an older one. T3 still lists the later turns; Codex no longer has them.
+#[tokio::test]
+async fn a_retried_rollback_never_reverts_the_target_turn() {
+    let mut h = kit::Harness::open().await.unwrap();
+    let thread = kit::thread("native-thread").unwrap();
+    let turn = |id: &str, native: &str, ordinal: u64| -> OrchestrationV2ProviderTurn {
+        mapping::decode(json!({"id":id,"providerThreadId":thread.id,"nodeId":"root","runAttemptId":format!("attempt:{id}"),"nativeTurnRef":mapping::native_ref(native),"ordinal":ordinal,"status":"completed","startedAt":kit::NOW,"completedAt":kit::NOW})).unwrap()
+    };
+    let turns = vec![
+        turn("t1", "n1", 1),
+        turn("t2", "n2", 2),
+        turn("t3", "n3", 3),
+    ];
+    let input = RollbackInput {
+        provider_thread: thread.clone(),
+        target: RollbackTarget::ProviderTurn {
+            checkpoint_id: CheckpointId("checkpoint".into()),
+            app_run_ordinal: 1,
+            provider_turn: Box::new(turns[0].clone()),
+            message: None,
+        },
+        provider_thread_turns: turns,
+    };
+    let runtime = h.runtime.clone();
+    let server = async {
+        let read = h.peer.read().await.unwrap();
+        assert_eq!(read["method"], "thread/read");
+        h.peer.respond(&read,json!({"thread":{"id":"native-thread","historyMode":"paginated","status":{"type":"idle"}}})).await.unwrap();
+        let list = h.peer.read().await.unwrap();
+        assert_eq!(list["method"], "thread/turns/list");
+        // The first attempt already reverted n2 and n3.
+        h.peer
+            .respond(
+                &list,
+                json!({"data":[kit::native_turn("n1","completed")],"nextCursor":null}),
+            )
+            .await
+            .unwrap();
+        let next = h.peer.read().await.unwrap();
+        assert_ne!(
+            next["method"], "thread/revert",
+            "the retry reverted the target turn: {next}"
+        );
+        assert_eq!(next["method"], "thread/read");
+        h.peer.respond(&next,json!({"thread":{"id":"native-thread","historyMode":"paginated","status":{"type":"idle"}}})).await.unwrap();
+    };
+    let (result, _) = tokio::join!(runtime.rollback(input), server);
+    result.unwrap();
+    h.runtime.close().await.unwrap();
+    assert!(h.peer.read().await.is_err());
+}
+
 macro_rules! recording_test {
     ($name:ident,$fixture:literal) => {
         #[tokio::test]
@@ -5367,7 +5420,10 @@ async fn command_output_reaches_a_subscriber_while_running_and_ends_when_settled
     for line in kit::fixture("command_output_streaming")?.lines() {
         let mut entry: Value = serde_json::from_str(line)?;
         if entry["type"] == "expect_outbound" && entry["frame"]["method"] == "turn/start" {
-            prompt = entry["frame"]["params"]["input"][0]["text"].as_str().unwrap_or_default().into();
+            prompt = entry["frame"]["params"]["input"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .into();
             sandbox = entry["frame"]["params"]["sandboxPolicy"].clone();
         }
         if entry["frame"]["method"] == "item/completed"
@@ -5382,11 +5438,12 @@ async fn command_output_reaches_a_subscriber_while_running_and_ends_when_settled
             operation: "Codex recording",
             detail: error.to_string(),
         })?;
-    let gate = t3_orchestration::testing::replay::ReplayGate::new([SETTLE.to_owned()])
-        .map_err(|error| t3_orchestration::error::Error::Service {
+    let gate = t3_orchestration::testing::replay::ReplayGate::new([SETTLE.to_owned()]).map_err(
+        |error| t3_orchestration::error::Error::Service {
             operation: "Codex recording",
             detail: error.to_string(),
-        })?;
+        },
+    )?;
     let adapter = Arc::new(kit::CodexReplayAdapter::new(
         kit::options(),
         transcript,

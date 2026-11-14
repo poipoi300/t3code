@@ -67,8 +67,8 @@ impl CommandDispatcher for Recorder {
 pub(super) struct NoRestore;
 #[async_trait]
 impl ThreadWorktreeRestore for NoRestore {
-    async fn restore(&self, _: OrchestrationV2AppThread) -> Result<()> {
-        Ok(())
+    async fn restore(&self, _: OrchestrationV2AppThread) -> Result<bool> {
+        Ok(false)
     }
 }
 struct Hydration(mpsc::UnboundedSender<ThreadId>);
@@ -236,7 +236,7 @@ async fn send_restores_before_start_but_live_steering_and_receipt_replay_survive
     }
     #[async_trait]
     impl ThreadWorktreeRestore for Restore {
-        async fn restore(&self, thread: OrchestrationV2AppThread) -> Result<()> {
+        async fn restore(&self, thread: OrchestrationV2AppThread) -> Result<bool> {
             assert_eq!(json!(thread.worktree_path), "C:/worktrees/gone");
             assert!(self.commands.commands.lock().unwrap().is_empty());
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -249,7 +249,7 @@ async fn send_restores_before_start_but_live_steering_and_receipt_replay_survive
                     detail: "branch_checked_out_in_worktree".into(),
                 });
             }
-            Ok(())
+            Ok(true)
         }
     }
     for (mode, running, fresh, replay, fails, cancelled, restores, dispatched) in [

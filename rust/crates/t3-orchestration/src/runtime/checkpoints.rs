@@ -53,11 +53,15 @@ impl crate::ports::checkpoints_forks::checkpoint_rollback_service::RollbackWorks
             .read(move |db| crate::stores::projects::get(db, &project_id, false))
             .await?;
         let Some(project) = project else {
+            // Nothing was created, so nothing is bound (re-review 4 F1).
             return Ok(());
         };
+        // Through the project root's saved binding: a repository planted there refuses the
+        // recreation instead of supplying the checkout (re-review 4 F6).
         let git = self
             .backend
-            .handle(PathBuf::from(project.workspace_root))
+            .git(PathBuf::from(project.workspace_root))
+            .await?
             .with_cancellation(cancellation.clone());
         git.execute(&["worktree", "prune"], Default::default())
             .await
@@ -71,8 +75,16 @@ impl crate::ports::checkpoints_forks::checkpoint_rollback_service::RollbackWorks
         if cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        Ok(())
+        // The checkout this recovery made: the one trusted rebind (re-review 4 F1).
+        self.backend.bind_scope(PathBuf::from(&path.0), true).await
     }
+}
+
+/// What the bindings store keeps for a scope: the repository first seen there, or `None` when the
+/// folder was not a repository then (re-review 4 F3).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedBinding {
+    repository: Option<t3_git::RepositoryBinding>,
 }
 
 impl Default for GitCheckpointBackend {
@@ -117,12 +129,23 @@ impl GitCheckpointBackend {
             return Ok(git);
         };
         if !replace && let Some(saved) = bindings.get(&cwd).await? {
-            let saved: t3_git::RepositoryBinding = serde_json::from_value(saved)?;
-            return git.with_repository_binding(saved).await.map_err(git_error);
+            let saved: SavedBinding = serde_json::from_value(saved)?;
+            return match saved.repository {
+                Some(identity) => git.with_repository_binding(identity).await.map_err(git_error),
+                // First seen outside any repository: one created there since is not trusted.
+                None => match git.bind_repository().await.map_err(git_error)? {
+                    None => Ok(git),
+                    Some(_) => Err(Error::Service {
+                        operation: crate::ports::checkpoints_forks::checkpoint_rollback_service::REPOSITORY_CHANGED_OPERATION,
+                        detail: "A Git repository was created in this folder after T3 first saw it without one. T3 will not restore, capture or read it until you trust that repository.".into(),
+                    }),
+                },
+            };
         }
-        if let Some(binding) = git.bind_repository().await.map_err(git_error)? {
-            bindings.put(&cwd, serde_json::to_value(&binding)?).await?;
-        }
+        let repository = git.bind_repository().await.map_err(git_error)?;
+        bindings
+            .put(&cwd, serde_json::to_value(SavedBinding { repository })?)
+            .await?;
         Ok(git)
     }
 
@@ -141,11 +164,12 @@ fn git_error(error: GitError) -> Error {
             detail: t3_git::INDEX_LOCKED_DETAIL.into(),
         },
         GitError::Unsupported(_) => Error::Unsupported("checkpoint filesystem capture"),
-        GitError::RepositoryChanged { ref path, detail } => Error::Service {
+        // The folder is left out: clients that may roll back see the refusal, not the server's
+        // layout (re-review 4 L4).
+        GitError::RepositoryChanged { detail, .. } => Error::Service {
             operation: crate::ports::checkpoints_forks::checkpoint_rollback_service::REPOSITORY_CHANGED_OPERATION,
             detail: format!(
-                "{} no longer belongs to the repository this thread started in: {detail} T3 will not restore, capture or read it until the folder is restored.",
-                path.display()
+                "This folder no longer belongs to the repository this thread started in: {detail} T3 will not restore, capture or read it until the folder is restored."
             ),
         },
         error => Error::Service {
@@ -667,6 +691,11 @@ mod tests {
                     == crate::ports::checkpoints_forks::checkpoint_rollback_service::REPOSITORY_CHANGED_OPERATION =>
             {
                 assert!(detail.contains("no longer belongs to the repository"), "{detail}");
+                // Re-review 4 L4: clients see the refusal, not the server's folder layout.
+                assert!(
+                    !detail.contains(&*scope_dir.to_string_lossy()),
+                    "{detail}"
+                );
             }
             other => panic!("the planted repository must be refused, got {other:?}"),
         }
@@ -1284,6 +1313,241 @@ mod tests {
                 .count(),
             2
         );
+        Ok(())
+    }
+
+    /// Plain `git` with the isolated configuration, as an agent runs it in its folder (t3-git
+    /// would apply this process's saved bindings instead).
+    fn agent_git(home: &Path, cwd: &Path, args: &[&str]) -> Result<()> {
+        let mut command = std::process::Command::new("git");
+        command.current_dir(cwd).args(args);
+        for key in ["HOME", "USERPROFILE", "XDG_CONFIG_HOME"] {
+            command.env(key, home);
+        }
+        for key in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
+            command.env(key, home.join("no-config"));
+        }
+        for (key, value) in [
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_AUTHOR_NAME", "Agent"),
+            ("GIT_AUTHOR_EMAIL", "agent@example.invalid"),
+            ("GIT_COMMITTER_NAME", "Agent"),
+            ("GIT_COMMITTER_EMAIL", "agent@example.invalid"),
+        ] {
+            command.env(key, value);
+        }
+        for key in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_COUNT",
+        ] {
+            command.env_remove(key);
+        }
+        let output = command.output()?;
+        if !output.status.success() {
+            return Err(Error::Service {
+                operation: "agent git",
+                detail: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// An agent's repository in `cwd` whose clean filter leaves `marker` whenever Git runs it.
+    fn plant_filtered_repository(home: &Path, cwd: &Path, marker: &Path) -> Result<()> {
+        agent_git(home, cwd, &["init", "--initial-branch=main"])?;
+        let target = marker.to_string_lossy().replace('\\', "/");
+        agent_git(
+            home,
+            cwd,
+            &[
+                "config",
+                "filter.planted.clean",
+                &format!("touch '{target}'; cat"),
+            ],
+        )?;
+        std::fs::write(cwd.join(".gitattributes"), "* filter=planted\n")?;
+        agent_git(home, cwd, &["add", "-A"])?;
+        agent_git(home, cwd, &["commit", "-m", "planted"])?;
+        if marker.exists() {
+            std::fs::remove_file(marker)?;
+        }
+        Ok(())
+    }
+
+    fn scope_at(cwd: &Path, id: &str) -> OrchestrationV2CheckpointScope {
+        let mut scope = prepare_root_run_scope(PrepareRootScope {
+            thread_id: ThreadId("thread:test".into()),
+            run_id: RunId("run:test".into()),
+            root_node_id: NodeId("node:test".into()),
+            provider_thread_id: ProviderThreadId("provider:test".into()),
+            cwd: cwd.to_path_buf(),
+            created_at: t3_contracts::wire::WireDateTime(crate::testing::TEST_TIME.into()),
+        });
+        scope.id = IdOrIndex::Id(CheckpointScopeId(id.into()));
+        scope
+    }
+
+    fn bindings_at(
+        path: PathBuf,
+    ) -> Arc<crate::runtime::repository_bindings::FileRepositoryBindings> {
+        Arc::new(crate::runtime::repository_bindings::FileRepositoryBindings::new(path))
+    }
+
+    fn refused_as_changed<T: std::fmt::Debug>(result: Result<T>) -> String {
+        match result {
+            Err(Error::Service { operation, detail })
+                if operation
+                    == crate::ports::checkpoints_forks::checkpoint_rollback_service::REPOSITORY_CHANGED_OPERATION =>
+            {
+                detail
+            }
+            other => panic!("expected the changed-repository refusal, got {other:?}"),
+        }
+    }
+
+    /// Re-review 4 F3: a folder first seen outside any repository is recorded so. A repository
+    /// an agent creates there later is refused, and its filters never run as the server user,
+    /// until the user trusts it (`bind_scope(.., true)`).
+    #[tokio::test]
+    async fn a_repository_created_after_first_sight_is_refused_until_trusted() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home)?;
+        let folder = temp.path().join("plain");
+        std::fs::create_dir(&folder)?;
+        std::fs::write(folder.join("notes.txt"), "user work\n")?;
+        let backend = GitCheckpointBackend::new(isolated_git(&home)).with_repository_bindings(
+            bindings_at(temp.path().join("state").join("repository-bindings.json")),
+        );
+        backend.bind_scope(folder.clone(), false).await?;
+        let marker = temp.path().join("filter-ran");
+        plant_filtered_repository(&home, &folder, &marker)?;
+        let scope = scope_at(&folder, "scope:first-sight");
+        refused_as_changed(capture_in(&backend, &scope, 1).await);
+        assert!(
+            !marker.exists(),
+            "the agent's filter ran as the server user"
+        );
+        refused_as_changed(backend.is_repository(folder.clone()).await);
+        backend.bind_scope(folder.clone(), true).await?;
+        capture_in(&backend, &scope, 2).await?;
+        Ok(())
+    }
+
+    fn project_thread(project: &str, worktree: &Path) -> Result<OrchestrationV2AppThread> {
+        let mut thread: OrchestrationV2AppThread = serde_json::from_str(
+            include_str!("../../../../fixtures/samples/OrchestrationV2AppThread.jsonl")
+                .lines()
+                .next()
+                .expect("thread fixture"),
+        )?;
+        thread.project_id = IdOrIndex::Id(ProjectId(project.into()));
+        thread.branch = Some(TrimmedNonEmptyString("feature".into()));
+        thread.worktree_path = Some(TrimmedNonEmptyString(
+            worktree.to_string_lossy().into_owned(),
+        ));
+        Ok(thread)
+    }
+
+    async fn project_rooted_at(root: &Path) -> Result<crate::stores::StoreDatabase> {
+        let database = crate::testing::TestDatabase::memory()?;
+        let mut event = serde_json::to_value(crate::testing::project_event(
+            "project:event",
+            "project:test",
+        )?)?;
+        event["payload"]["workspaceRoot"] = serde_json::to_value(root)?;
+        let event = serde_json::from_value(event)?;
+        database
+            .stores
+            .transaction(move |db| crate::stores::projects::apply(db, &event))
+            .await?;
+        Ok(database.stores)
+    }
+
+    /// Re-review 4 F6: a missing worktree is recreated through the project root's saved binding.
+    /// A repository planted at the project root refuses the recreation instead of supplying it.
+    #[tokio::test]
+    async fn worktree_recreation_refuses_a_repository_planted_at_the_project_root() -> Result<()> {
+        use crate::ports::checkpoints_forks::checkpoint_rollback_service::RollbackWorkspaceRecovery;
+        let repo = Repository::new().await?;
+        let temp = repo._temp.path().to_path_buf();
+        let home = temp.join("home");
+        let project_root = repo.root.join("pkg");
+        std::fs::create_dir(&project_root)?;
+        std::fs::write(project_root.join("f"), "user work\n")?;
+        repo.command(&["add", "pkg/f"]).await?;
+        repo.command(&["commit", "-m", "pkg"]).await?;
+        repo.command(&["branch", "feature"]).await?;
+        let bound = Arc::new(
+            GitCheckpointBackend::new(isolated_git(&home))
+                .with_repository_bindings(bindings_at(temp.join("state").join("bindings.json"))),
+        );
+        bound.bind_scope(project_root.clone(), false).await?;
+        plant_filtered_repository(&home, &project_root, &temp.join("filter-ran"))?;
+        agent_git(&home, &project_root, &["branch", "feature"])?;
+        let managed = temp.join("managed");
+        let worktree = managed.join("repo").join("feature");
+        let recovery = GitRollbackWorkspaceRecovery {
+            backend: bound,
+            database: project_rooted_at(&project_root).await?,
+            managed_roots: vec![managed],
+        };
+        refused_as_changed(
+            recovery
+                .recreate(
+                    &project_thread("project:test", &worktree)?,
+                    CancellationToken::new(),
+                )
+                .await,
+        );
+        assert!(!worktree.exists());
+        Ok(())
+    }
+
+    /// Re-review 4 F1: the recovery that recreated a worktree rebinds it (the trusted case); one
+    /// whose project is gone creates nothing and binds nothing.
+    #[tokio::test]
+    async fn a_recreated_worktree_is_rebound_and_a_missing_project_binds_nothing() -> Result<()> {
+        use crate::{
+            api::RepositoryBindingStore,
+            ports::checkpoints_forks::checkpoint_rollback_service::RollbackWorkspaceRecovery,
+        };
+        let repo = Repository::new().await?;
+        let temp = repo._temp.path().to_path_buf();
+        repo.command(&["branch", "feature"]).await?;
+        let store = bindings_at(temp.join("state").join("bindings.json"));
+        let bound = Arc::new(
+            GitCheckpointBackend::new(isolated_git(&temp.join("home")))
+                .with_repository_bindings(store.clone()),
+        );
+        let managed = temp.join("managed");
+        let recovery = GitRollbackWorkspaceRecovery {
+            backend: bound,
+            database: project_rooted_at(&repo.root).await?,
+            managed_roots: vec![managed.clone()],
+        };
+        let worktree = managed.join("repo").join("feature");
+        recovery
+            .recreate(
+                &project_thread("project:test", &worktree)?,
+                CancellationToken::new(),
+            )
+            .await?;
+        assert!(worktree.join(".git").is_file());
+        assert!(store.get(&worktree).await?.is_some(), "not rebound");
+        let other = managed.join("repo").join("other");
+        recovery
+            .recreate(
+                &project_thread("project:gone", &other)?,
+                CancellationToken::new(),
+            )
+            .await?;
+        assert!(!other.exists());
+        assert!(store.get(&other).await?.is_none());
         Ok(())
     }
 }

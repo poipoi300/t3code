@@ -1254,10 +1254,11 @@ pub trait SettleScriptRunner: Send + Sync {
 }
 
 /// TS `ThreadWorktreeRestore`: recreates a thread's missing worktree under its workspace lease
-/// before a send starts a turn.
+/// before a send starts a turn. Returns whether it recreated the folder: only a checkout it made
+/// is rebound (t3-git re-review 4 F1).
 #[async_trait]
 pub trait ThreadWorktreeRestore: Send + Sync {
-    async fn restore(&self, thread: OrchestrationV2AppThread) -> Result<()>;
+    async fn restore(&self, thread: OrchestrationV2AppThread) -> Result<bool>;
 }
 
 /// Server-owned storage for the Git repository each checkpoint scope was bound to (t3-git H-1),
@@ -1293,6 +1294,11 @@ pub trait AgentScope: Send + Sync {
     }
     async fn oom_killed(&self, _thread_id: ThreadId) -> Result<bool> {
         Err(crate::error::Error::Unsupported("AgentScope.oom_killed"))
+    }
+    /// How many processes of the thread's agent scope are still alive, where the host can tell
+    /// (`None`: it cannot). A file restore refuses while any are (t3-git re-review 4 F9).
+    async fn live_processes(&self, _thread_id: ThreadId) -> Result<Option<usize>> {
+        Ok(None)
     }
 }
 

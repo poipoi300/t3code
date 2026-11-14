@@ -301,11 +301,16 @@ pub fn service(
             ids: h.ids.clone(),
             clock: h.clock.clone(),
             writers: Arc::new(t3_orchestration::composition::NoHostWriters),
+            agent_scope: Arc::new(NoAgentScope),
         },
         sessions,
         calls,
     )
 }
+/// A host that cannot see the agent's processes.
+pub struct NoAgentScope;
+impl AgentScope for NoAgentScope {}
+
 pub fn request(
     scope: &OrchestrationV2CheckpointScope,
     checkpoint: &OrchestrationV2Checkpoint,
@@ -1311,5 +1316,417 @@ async fn a_writer_cannot_start_while_a_restore_runs() -> Result<()> {
         writers.try_write(),
         "the hold ends when the restore returns"
     );
+    Ok(())
+}
+
+/// The composed runtime over the fake provider and `backend`, with `thread:test` on a worktree at
+/// `cwd` (project root `root`) and its baseline checkpoint.
+async fn composed(
+    h: &Harness,
+    root: &Path,
+    cwd: &Path,
+    backend: &Arc<Backend>,
+    recovery: Arc<dyn RollbackWorkspaceRecovery>,
+    other: Option<Arc<FakeProviderAdapter>>,
+) -> Result<(
+    t3_orchestration::composition::OrchestrationRuntime,
+    Arc<FakeProviderAdapter>,
+    OrchestrationV2CheckpointScope,
+    OrchestrationV2Checkpoint,
+    tokio::sync::mpsc::UnboundedReceiver<FakeCall>,
+)> {
+    use t3_orchestration::{
+        composition::{OrchestrationRuntime, RuntimePorts, StaticSettings},
+        ports::sessions_recovery::provider_adapter_registry::AdapterRegistry,
+    };
+    let mut project = serde_json::to_value(t3_orchestration::testing::project_event(
+        "composed:project",
+        "project:test",
+    )?)?;
+    project["payload"]["workspaceRoot"] = serde_json::json!(root);
+    let project = serde_json::from_value(project)?;
+    h.db.stores
+        .transaction(move |db| t3_orchestration::stores::projects::apply(db, &project))
+        .await?;
+    h.seed("thread.created", thread("thread:test", Some(cwd)))
+        .await?;
+    let scope = h.seed_run(cwd, 1, "completed").await?;
+    backend
+        .service()
+        .capture_baseline(scope.clone(), 0, CancellationToken::new())
+        .await?;
+    let baseline = backend
+        .service()
+        .materialize_baseline(capture_input(scope.clone(), 0))
+        .await?;
+    h.seed("checkpoint.captured", &baseline).await?;
+    let (_, sessions, calls) = service(h, backend, true);
+    let adapter = sessions.adapter.clone();
+    adapter
+        .open_session_with_policy
+        .push(Ok(adapter.runtime.clone()));
+    let mut adapters: Vec<Arc<dyn ProviderAdapter>> = vec![adapter.clone()];
+    adapters.extend(
+        other
+            .iter()
+            .map(|other| other.clone() as Arc<dyn ProviderAdapter>),
+    );
+    let mut ports = RuntimePorts::new(
+        h.db.stores.clone(),
+        Arc::new(AdapterRegistry::from_adapters(adapters)),
+        backend.clone(),
+        h.clock.clone(),
+    );
+    ports.ids = h.ids.clone();
+    ports.rollback_workspaces = Some(recovery);
+    let mut settings = serde_json::to_value(t3_contracts::settings::ServerSettings::default())?;
+    settings["providerInstances"]["codex"] = serde_json::json!({"driver":"codex","enabled":true});
+    if other.is_some() {
+        settings["providerInstances"]["codex-side"] =
+            serde_json::json!({"driver":"codex","enabled":true});
+    }
+    ports.settings = Arc::new(StaticSettings::new(serde_json::from_value(settings)?));
+    ports.worker.max_attempts = 1;
+    Ok((
+        OrchestrationRuntime::start(ports).await?,
+        adapter,
+        scope,
+        baseline,
+        calls,
+    ))
+}
+
+/// Re-review 4 F2: a turn of another thread on the folder being restored waits for the restore.
+/// A thread launched into the worktree after the isolation checks (or one they skip) is kept out
+/// of the folder only by the workspace reservation while Git restores.
+#[tokio::test]
+async fn another_threads_turn_on_the_restored_folder_waits_for_the_restore() -> Result<()> {
+    use t3_orchestration::ports::checkpoints_forks::checkpoint_restore_safety::WorkspaceReservations;
+    let temp = tempfile::tempdir()?;
+    let h = Harness::new().await?;
+    let backend = Arc::new(Backend::default());
+    // The other thread runs on its own provider instance and session, so only the folder's
+    // reservation can hold its turn back.
+    let mut session = serde_json::to_value(session())?;
+    session["id"] = serde_json::json!("session:side");
+    session["providerInstanceId"] = serde_json::json!("codex-side");
+    let session: OrchestrationV2ProviderSession = serde_json::from_value(session)?;
+    let (side_adapter, mut calls) = FakeProviderAdapter::new(
+        ProviderInstanceId("codex-side".into()),
+        t3_contracts::provider_instance::ProviderDriverKind("codex".into()),
+        session.capabilities.clone(),
+        session,
+        ThreadSnapshot {
+            provider_thread: provider(),
+            provider_turns: vec![],
+            messages: vec![],
+            reasoning_message_ids: None,
+            runtime_requests: vec![],
+            provider_payload: None,
+        },
+    );
+    let side_adapter = Arc::new(side_adapter);
+    let (runtime, _adapter, scope, baseline, _calls) = composed(
+        &h,
+        temp.path(),
+        temp.path(),
+        &backend,
+        Arc::new(Recovery),
+        Some(side_adapter.clone()),
+    )
+    .await?;
+    let adapter = side_adapter;
+    let gate = Arc::new(Gate::default());
+    *backend.restore_gate.lock().expect("restore gate") = Some(gate.clone());
+    runtime.dispatch_command(serde_json::from_value(serde_json::json!({"type":"checkpoint.rollback","commandId":"composed:rollback","threadId":"thread:test","checkpointId":baseline.id,"scopeId":scope.id,"restoreFiles":true}))?).await?;
+    let worker = runtime.effect_worker();
+    let drain = worker.drain(64);
+    tokio::pin!(drain);
+    tokio::select! {
+        biased;
+        permit = gate.entered.acquire() => permit.expect("restore reached").forget(),
+        result = &mut drain => panic!("the rollback ended before Git restored: {result:?}"),
+    }
+    adapter
+        .open_session_with_policy
+        .push(Ok(adapter.runtime.clone()));
+    let mut side = serde_json::to_value(thread("thread:side", Some(temp.path())))?;
+    side["providerInstanceId"] = serde_json::json!("codex-side");
+    side["modelSelection"]["instanceId"] = serde_json::json!("codex-side");
+    side["activeProviderThreadId"] = serde_json::Value::Null;
+    h.seed("thread.created", side).await?;
+    runtime.dispatch_command(serde_json::from_value(serde_json::json!({"type":"message.dispatch","commandId":"side:message","threadId":"thread:side","messageId":"message:side","text":"Hello","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"}))?).await?;
+    // Any contact with the other thread's provider before Git returns is the failure.
+    while calls.try_recv().is_ok() {}
+    let fake = adapter.runtime.clone();
+    let reservations = WorkspaceReservations::global();
+    tokio::select! {
+        biased;
+        opened = adapter.open_session_with_policy.next_call() => panic!(
+            "the other thread opened its provider while Git restored: {:?}",
+            opened.map(|(input, _, _)| input.thread_id)
+        ),
+        ensured = fake.ensure_thread_with_policy.next_call() => panic!(
+            "the other thread reached its provider while Git restored: {:?}",
+            ensured.map(|(input, _)| input.thread_id)
+        ),
+        resumed = fake.resume_thread_with_policy.next_call() => panic!(
+            "the other thread resumed its provider thread while Git restored: {:?}",
+            resumed.is_some()
+        ),
+        started = fake.start_turn_with_policy.next_call() => panic!(
+            "the other thread started a turn while Git restored: {:?}",
+            started.is_some()
+        ),
+        call = calls.recv() => panic!("the other thread reached its provider while Git restored: {call:?}"),
+        waiting = reservations.waiting_on(temp.path()) => waiting?,
+        result = &mut drain => panic!("the worker settled while Git restored: {result:?}"),
+    }
+    gate.release.add_permits(1);
+    drain.await?;
+    assert_eq!(backend.restores.load(Ordering::SeqCst), 1);
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+/// Re-review 4 F8: a restore refused for a live writer leaves a leftover worktree folder (one
+/// without `.git`) where it is. Recovery would move it aside and delete it, with its ignored
+/// files, while the writer still works in it.
+#[tokio::test]
+async fn a_refused_restore_leaves_a_leftover_worktree_folder_in_place() -> Result<()> {
+    let parent = tempfile::tempdir()?;
+    let cwd = parent.path().join("checkout");
+    std::fs::create_dir(&cwd)?;
+    std::fs::write(cwd.join(".env"), "TOKEN=kept")?;
+    let h = Harness::new().await?;
+    let backend = Arc::new(Backend::default());
+    let (scope, checkpoint) = restorable(&h, &backend, &cwd).await?;
+    let (mut service, _, mut calls) = service(&h, &backend, true);
+    service.workspace_recovery = Arc::new(RecreateFolder(cwd.clone()));
+    service.writers = Arc::new(Writers {
+        live: vec!["terminal `npm run dev`".into()],
+        ..Default::default()
+    });
+    let error = service
+        .execute(
+            request(&scope, &checkpoint, true)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a live writer refuses the restore");
+    assert!(
+        rollback_failure_client_message(&error).contains("npm run dev"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(cwd.join(".env")).ok().as_deref(),
+        Some("TOKEN=kept"),
+        "the leftover folder was moved aside and deleted before the refusal"
+    );
+    assert!(!cwd.join(".git").exists(), "recovery ran before the check");
+    assert_eq!(std::fs::read_dir(parent.path())?.count(), 1);
+    assert!(
+        !std::iter::from_fn(|| calls.try_recv().ok())
+            .any(|call| matches!(call, FakeCall::Rollback(_)))
+    );
+    Ok(())
+}
+
+/// Re-review 4 F7: a folder whose repository changed is refused before the provider rolls back
+/// its conversation, so the refusal leaves T3 and the provider as they were.
+#[tokio::test]
+async fn a_changed_repository_refuses_before_the_providers_rollback() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let h = Harness::new().await?;
+    let backend = Arc::new(Backend::default());
+    let (scope, checkpoint) = restorable(&h, &backend, temp.path()).await?;
+    *backend.refuse_binding.lock().expect("binding") = Some("a repository was planted".into());
+    let (service, _, mut calls) = service(&h, &backend, true);
+    let error = service
+        .execute(
+            request(&scope, &checkpoint, true)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a changed repository refuses the restore");
+    assert!(
+        matches!(&error, Error::Service { operation, .. } if *operation == REPOSITORY_CHANGED_OPERATION),
+        "{error}"
+    );
+    assert!(
+        !std::iter::from_fn(|| calls.try_recv().ok())
+            .any(|call| matches!(call, FakeCall::Rollback(_))),
+        "the provider rolled back before the refusal"
+    );
+    assert_eq!(backend.restores.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+/// Re-review 4 F9 and the untested claims: background work the provider reports, a probe that
+/// fails, a session that cannot report at all, and live processes in the agent's scope each
+/// refuse the restore before the provider's rollback.
+#[tokio::test]
+async fn unreported_or_reported_provider_work_refuses_a_restore() -> Result<()> {
+    struct LiveScope;
+    #[async_trait]
+    impl AgentScope for LiveScope {
+        async fn live_processes(&self, _thread_id: ThreadId) -> Result<Option<usize>> {
+            Ok(Some(2))
+        }
+    }
+    for case in [
+        "reported",
+        "probe fails",
+        "cannot report",
+        "agent processes",
+    ] {
+        let temp = tempfile::tempdir()?;
+        let h = Harness::new().await?;
+        let backend = Arc::new(Backend::default());
+        let (scope, checkpoint) = restorable(&h, &backend, temp.path()).await?;
+        let (mut service, sessions, mut calls) = service(&h, &backend, true);
+        let runtime = &sessions.adapter.runtime;
+        match case {
+            "reported" => *runtime.background_work.lock().expect("work") = Some(Ok(true)),
+            "probe fails" => {
+                *runtime.background_work.lock().expect("work") = Some(Err("probe".into()))
+            }
+            "cannot report" => runtime
+                .leaves_no_background_work
+                .store(false, Ordering::SeqCst),
+            _ => service.agent_scope = Arc::new(LiveScope),
+        }
+        let Err(error) = service
+            .execute(
+                request(&scope, &checkpoint, true)?,
+                CancellationToken::new(),
+            )
+            .await
+        else {
+            panic!("{case}: the restore ran without proof that the provider is quiet");
+        };
+        assert!(
+            matches!(&error, Error::Service { operation, .. } if *operation == WRITERS_RUNNING_OPERATION),
+            "{case}: {error}"
+        );
+        assert_eq!(backend.restores.load(Ordering::SeqCst), 0, "{case}");
+        assert!(
+            !std::iter::from_fn(|| calls.try_recv().ok())
+                .any(|call| matches!(call, FakeCall::Rollback(_))),
+            "{case}"
+        );
+    }
+    Ok(())
+}
+
+/// The lane re-check: a turn recorded while the provider rolled back refuses the restore before
+/// Git runs.
+#[tokio::test]
+async fn a_turn_recorded_during_the_providers_rollback_refuses_the_restore() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let h = Harness::new().await?;
+    let backend = Arc::new(Backend::default());
+    let (scope, checkpoint) = restorable(&h, &backend, temp.path()).await?;
+    let (service, sessions, _calls) = service(&h, &backend, true);
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    *sessions
+        .adapter
+        .runtime
+        .rollback_hold
+        .lock()
+        .expect("rollback hold") = Some((entered, released));
+    let input = request(&scope, &checkpoint, true)?;
+    let rollback =
+        tokio::spawn(async move { service.execute(input, CancellationToken::new()).await });
+    entering.await.expect("provider rollback entered");
+    h.seed_run(temp.path(), 2, "running").await?;
+    release.send(()).expect("release the provider rollback");
+    let error = rollback
+        .await
+        .expect("rollback task")
+        .expect_err("the new turn refuses the restore");
+    assert!(
+        rollback_failure_client_message(&error).contains("a running turn"),
+        "{error}"
+    );
+    assert_eq!(backend.restores.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+/// A recovery that reports success without creating the folder.
+struct CreatesNothing;
+#[async_trait]
+impl RollbackWorkspaceRecovery for CreatesNothing {
+    async fn is_managed(&self, _path: &Path) -> Result<bool> {
+        Ok(true)
+    }
+    async fn recreate(
+        &self,
+        _thread: &OrchestrationV2AppThread,
+        _cancellation: CancellationToken,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Re-review 4 F1: only a recovery that created the folder may rebind it. One that created
+/// nothing (as when the project row is gone) leaves the saved binding alone.
+#[tokio::test]
+async fn a_recovery_that_creates_nothing_never_rebinds_the_folder() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let worktree = temp.path().join("missing-worktree");
+    let h = Harness::new().await?;
+    let backend = Arc::new(Backend::default());
+    let (runtime, _adapter, scope, baseline, _calls) = composed(
+        &h,
+        temp.path(),
+        &worktree,
+        &backend,
+        Arc::new(CreatesNothing),
+        None,
+    )
+    .await?;
+    runtime.dispatch_command(serde_json::from_value(serde_json::json!({"type":"checkpoint.rollback","commandId":"composed:rollback","threadId":"thread:test","checkpointId":baseline.id,"scopeId":scope.id,"restoreFiles":true}))?).await?;
+    runtime.effect_worker().drain(64).await?;
+    assert!(
+        !backend
+            .binds
+            .lock()
+            .expect("binds")
+            .iter()
+            .any(|(path, replace)| *replace && *path == worktree),
+        "{:?}",
+        backend.binds.lock().expect("binds")
+    );
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+/// Re-review 4 L4: a command title the agent chose reaches the refusal on one line and capped.
+#[tokio::test]
+async fn writer_names_in_a_refusal_are_capped_and_on_one_line() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let h = Harness::new().await?;
+    let backend = Arc::new(Backend::default());
+    let (scope, checkpoint) = restorable(&h, &backend, temp.path()).await?;
+    let title = format!("watch\nInjected: {}", "x".repeat(300));
+    h.seed("turn-item.updated", serde_json::json!({"id":"command:long","threadId":"thread:test","runId":"run:1","nodeId":"node:1","providerThreadId":"provider:test","providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":7,"status":"running","title":title,"startedAt":time(),"completedAt":null,"updatedAt":time(),"type":"command_execution","input":"watch"}))
+        .await?;
+    let (service, _, _calls) = service(&h, &backend, true);
+    let error = service
+        .execute(
+            request(&scope, &checkpoint, true)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a running command refuses the restore");
+    let message = rollback_failure_client_message(&error);
+    assert!(
+        message.contains("command `watch Injected: xxx"),
+        "{message}"
+    );
+    assert!(!message.contains('\n'), "{message}");
+    assert!(message.chars().count() < 260, "{message}");
     Ok(())
 }

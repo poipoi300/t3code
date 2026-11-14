@@ -1036,7 +1036,15 @@ impl CodexSessionRuntime {
         }
     }
 
-    async fn revert(&self, thread: &str, count: usize) -> ProviderResult<Value> {
+    /// Reverts the newest `count` native turns, stopping short of `stop_at`: a retry after a
+    /// revert T3 did not record finds the target among the newest turns and removes nothing more
+    /// (re-review 4 F7).
+    async fn revert(
+        &self,
+        thread: &str,
+        count: usize,
+        stop_at: Option<&str>,
+    ) -> ProviderResult<Value> {
         let mut remaining = count;
         let mut cursor: Option<String> = None;
         let mut seen = HashSet::new();
@@ -1047,6 +1055,10 @@ impl CodexSessionRuntime {
             }
             let page:native::ThreadTurnsListResponse=self.rpc("thread/turns/list", &json!({"threadId":thread,"cursor":cursor,"limit":remaining.min(100),"sortDirection":"desc","itemsView":"summary"})).await?;
             for turn in page.data {
+                if stop_at == Some(turn.id.as_str()) {
+                    remaining = 0;
+                    break;
+                }
                 before = Some(turn.id);
                 remaining -= 1;
                 if remaining == 0 {
@@ -1456,7 +1468,11 @@ impl SessionRuntime for CodexSessionRuntime {
             params["excludeTurns"] = json!(true);
             self.resume_native(params, &input.provider_thread).await?;
         }
-        let response = self.revert(thread, count).await?;
+        let target = head
+            .as_ref()
+            .and_then(|head| head.native_id.as_ref())
+            .map(|id| id.0.clone());
+        let response = self.revert(thread, count, target.as_deref()).await?;
         self.snapshot_result(input.provider_thread, Some(response), head)
             .await
     }
@@ -1499,7 +1515,7 @@ impl SessionRuntime for CodexSessionRuntime {
             if metadata["thread"]["historyMode"] != "paginated" {
                 return Err(protocol("Cannot trim a legacy Codex fork"));
             }
-            response = self.revert(thread, count).await?;
+            response = self.revert(thread, count, None).await?;
         }
         let mut forked = json!({"providerThreadId":input.source_provider_thread.id});
         if let Some(turn) = input.provider_turn_id {

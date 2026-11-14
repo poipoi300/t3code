@@ -177,43 +177,15 @@ impl Workspace {
         root: &Path,
         bindings: Option<Arc<dyn RepositoryBindingStore>>,
     ) -> Result<Self> {
-        use std::ffi::OsString;
         let path = root.join("workspace");
         let home = root.join("home");
         std::fs::create_dir(&path)?;
         std::fs::create_dir(&home)?;
-        let mut environment = std::collections::BTreeMap::<OsString, Option<OsString>>::new();
-        for key in ["HOME", "USERPROFILE", "XDG_CONFIG_HOME"] {
-            environment.insert(key.into(), Some(home.clone().into_os_string()));
-        }
-        for key in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
-            environment.insert(key.into(), Some(home.join("no-config").into_os_string()));
-        }
-        for (key, value) in [
-            ("GIT_CONFIG_NOSYSTEM", "1"),
-            ("GIT_CONFIG_COUNT", "0"),
-            ("GIT_AUTHOR_NAME", "Test"),
-            ("GIT_AUTHOR_EMAIL", "test@example.invalid"),
-            ("GIT_COMMITTER_NAME", "Test"),
-            ("GIT_COMMITTER_EMAIL", "test@example.invalid"),
-        ] {
-            environment.insert(key.into(), Some(value.into()));
-        }
-        for key in ["GIT_CONFIG_PARAMETERS", "GIT_CONFIG", "GIT_TEMPLATE_DIR"] {
-            environment.insert(key.into(), None);
-        }
-        let factory_environment = environment.clone();
-        let mut backend =
-            t3_orchestration::runtime::checkpoints::GitCheckpointBackend::new(move |cwd| {
-                t3_git::Git::new(cwd).with_environment(factory_environment.clone())
-            });
-        if let Some(bindings) = bindings {
-            backend = backend.with_repository_bindings(bindings);
-        }
+        let environment = git_environment(&home);
         let git = t3_git::Git::new(path.clone()).with_environment(environment);
         let workspace = Self {
             path,
-            checkpoints: Arc::new(backend),
+            checkpoints: git_checkpoints(&home, bindings),
             git: Some(git),
         };
         workspace.git(&["init", "--initial-branch=main"]).await?;
@@ -239,6 +211,52 @@ impl Workspace {
             })?
             .stdout_text())
     }
+}
+
+/// Git configuration isolated under `home`, away from the developer's own.
+#[cfg(feature = "git-backend")]
+fn git_environment(
+    home: &Path,
+) -> std::collections::BTreeMap<std::ffi::OsString, Option<std::ffi::OsString>> {
+    let mut environment = std::collections::BTreeMap::new();
+    for key in ["HOME", "USERPROFILE", "XDG_CONFIG_HOME"] {
+        environment.insert(key.into(), Some(home.as_os_str().to_owned()));
+    }
+    for key in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
+        environment.insert(key.into(), Some(home.join("no-config").into_os_string()));
+    }
+    for (key, value) in [
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_COUNT", "0"),
+        ("GIT_AUTHOR_NAME", "Test"),
+        ("GIT_AUTHOR_EMAIL", "test@example.invalid"),
+        ("GIT_COMMITTER_NAME", "Test"),
+        ("GIT_COMMITTER_EMAIL", "test@example.invalid"),
+    ] {
+        environment.insert(key.into(), Some(value.into()));
+    }
+    for key in ["GIT_CONFIG_PARAMETERS", "GIT_CONFIG", "GIT_TEMPLATE_DIR"] {
+        environment.insert(key.into(), None);
+    }
+    environment
+}
+
+/// Package 07's real checkpoint backend with `home`'s configuration, keeping each scope's
+/// binding in `bindings`.
+#[cfg(feature = "git-backend")]
+fn git_checkpoints(
+    home: &Path,
+    bindings: Option<Arc<dyn RepositoryBindingStore>>,
+) -> Arc<dyn CheckpointPort> {
+    let environment = git_environment(home);
+    let mut backend =
+        t3_orchestration::runtime::checkpoints::GitCheckpointBackend::new(move |cwd| {
+            t3_git::Git::new(cwd).with_environment(environment.clone())
+        });
+    if let Some(bindings) = bindings {
+        backend = backend.with_repository_bindings(bindings);
+    }
+    Arc::new(backend)
 }
 
 /// Reads the thread stream until a run settles; checks the turn's visible milestones.
@@ -1313,7 +1331,7 @@ async fn a_launched_worktree_is_bound_before_its_first_turn() -> Result<()> {
         std::fs::read(&store_path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .is_some_and(|saved| saved.get(&key).is_some())
+            .is_some_and(|saved| saved["bindings"].get(&key).is_some())
     };
     let wrapped = std::sync::Mutex::new(None::<Arc<Probe>>);
     let root = workspace.path.clone();
@@ -1367,5 +1385,210 @@ async fn a_launched_worktree_is_bound_before_its_first_turn() -> Result<()> {
     }
     runtime.shutdown().await?;
     assert_eq!(*adapter.checked.lock().expect("checked lock"), vec![true]);
+    Ok(())
+}
+
+/// Plain `git` with `home`'s isolated configuration, as an agent runs it in its folder.
+#[cfg(feature = "git-backend")]
+fn agent_git(home: &Path, cwd: &Path, args: &[&str]) -> Result<()> {
+    let mut command = std::process::Command::new("git");
+    command.current_dir(cwd).args(args);
+    for (key, value) in git_environment(home) {
+        match value {
+            Some(value) => command.env(key, value),
+            None => command.env_remove(key),
+        };
+    }
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+    ] {
+        command.env_remove(key);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(Error::Service {
+            operation: "agent git",
+            detail: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// The runtime over `root`'s database and Git backend, launching threads into existing worktrees.
+#[cfg(feature = "git-backend")]
+async fn worktree_runtime(
+    root: &Path,
+    checkpoints: Arc<dyn CheckpointPort>,
+) -> Result<OrchestrationRuntime> {
+    let workspace = root.join("workspace");
+    start_with(
+        &root.join("statev2.sqlite"),
+        checkpoints,
+        NOW,
+        |adapter| adapter,
+        |ports| {
+            ports.launch = Some(Arc::new(RootLaunch));
+            ports.workspaces = Arc::new(RootWorkspace(workspace));
+        },
+    )
+    .await
+}
+
+/// Waits until the thread has `count` runs and all of them are settled.
+#[cfg(feature = "git-backend")]
+async fn settled_runs(
+    runtime: &OrchestrationRuntime,
+    count: usize,
+) -> Result<OrchestrationV2ThreadProjection> {
+    let mut committed = runtime.events.subscribe();
+    loop {
+        let projection = runtime
+            .projections
+            .projection(ThreadId(THREAD.into()))
+            .await?
+            .expect("thread");
+        let runs = serde_json::to_value(&projection.runs)?;
+        let runs = runs.as_array().cloned().unwrap_or_default();
+        if runs.len() == count
+            && runs
+                .iter()
+                .all(|run| SETTLED.contains(&run["status"].as_str().unwrap_or_default()))
+        {
+            return Ok(projection);
+        }
+        committed.recv().await.map_err(|error| Error::Service {
+            operation: "settled runs",
+            detail: error.to_string(),
+        })?;
+    }
+}
+
+#[cfg(feature = "git-backend")]
+const PLANTED_SEND_CHILD: &str = "T3_ORCHESTRATION_PLANTED_SEND_CHILD";
+
+/// Re-review 4 F1: a send never rebinds a worktree thread's folder. After a restart, a
+/// repository planted in place of the worktree's `.git` keeps being refused: the saved binding is
+/// unchanged and the planted repository's filters never run as the server user.
+#[cfg(feature = "git-backend")]
+#[tokio::test]
+async fn a_send_after_a_restart_never_rebinds_a_planted_worktree_repository() -> Result<()> {
+    if let Some(root) = std::env::var_os(PLANTED_SEND_CHILD) {
+        return send_after_restart(PathBuf::from(root)).await;
+    }
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    let store_path = root.join("state").join("repository-bindings.json");
+    let workspace = Workspace::repository_with(
+        root,
+        Some(Arc::new(
+            t3_orchestration::runtime::repository_bindings::FileRepositoryBindings::new(
+                store_path.clone(),
+            ),
+        )),
+    )
+    .await?;
+    let worktree = root.join("feature");
+    workspace
+        .git(&[
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            &worktree.to_string_lossy(),
+        ])
+        .await?;
+    let runtime = worktree_runtime(root, workspace.checkpoints.clone()).await?;
+    create_project(&runtime, &workspace).await?;
+    runtime
+        .launch_client_thread(serde_json::from_value(json!({"commandId":"command:launch","threadId":THREAD,"projectId":"project:runtime","title":"Worktree","modelSelection":{"instanceId":DEV_REPLAY_INSTANCE_ID,"model":MODEL},"runtimeMode":"approval-required","interactionMode":"default","workspaceStrategy":{"type":"existing_worktree","worktreePath":worktree,"branch":"feature"},"initialMessage":{"text":"Hello","attachments":[]}}))?)
+        .await?;
+    settled_runs(&runtime, 1).await?;
+    runtime.shutdown().await?;
+    drop(runtime);
+    let saved = std::fs::read(&store_path)?;
+    // The agent replaces the worktree's `.git` pointer with a repository of its own whose clean
+    // filter runs whatever it likes.
+    let home = root.join("home");
+    std::fs::remove_file(worktree.join(".git"))?;
+    let marker = root.join("filter-ran");
+    agent_git(&home, &worktree, &["init", "--initial-branch=main"])?;
+    let target = marker.to_string_lossy().replace('\\', "/");
+    agent_git(
+        &home,
+        &worktree,
+        &[
+            "config",
+            "filter.planted.clean",
+            &format!("touch '{target}'; cat"),
+        ],
+    )?;
+    std::fs::write(worktree.join(".gitattributes"), "* filter=planted\n")?;
+    agent_git(&home, &worktree, &["add", "-A"])?;
+    agent_git(&home, &worktree, &["commit", "-m", "planted"])?;
+    std::fs::remove_file(&marker)?;
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "a_send_after_a_restart_never_rebinds_a_planted_worktree_repository",
+            "--exact",
+            "--nocapture",
+        ])
+        .env(PLANTED_SEND_CHILD, root)
+        .output()?;
+    assert!(
+        !marker.exists(),
+        "the planted repository's filter ran as the server user"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&std::fs::read(&store_path)?),
+        String::from_utf8_lossy(&saved),
+        "the send rebound the worktree"
+    );
+    assert!(
+        output.status.success(),
+        "after restart: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    Ok(())
+}
+
+/// The after-restart half, in a fresh process: t3-git's first-use memory is empty, so only the
+/// saved binding stands between the send and the planted repository.
+#[cfg(feature = "git-backend")]
+async fn send_after_restart(root: PathBuf) -> Result<()> {
+    let checkpoints = git_checkpoints(
+        &root.join("home"),
+        Some(Arc::new(
+            t3_orchestration::runtime::repository_bindings::FileRepositoryBindings::new(
+                root.join("state").join("repository-bindings.json"),
+            ),
+        )),
+    );
+    let runtime = worktree_runtime(&root, checkpoints).await?;
+    runtime
+        .threads
+        .send_to_thread(serde_json::from_value(json!({"projectId":"project:runtime","commandId":"command:after-restart","threadId":THREAD,"messageId":"message:after-restart","text":"Hello","attachments":[],"mode":"auto","freshContext":false,"modelSelection":null,"scheduledTaskId":null,"senderThreadId":null,"linkedSender":null,"createdBy":"user","creationSource":"web"}))?)
+        .await?;
+    let projection = settled_runs(&runtime, 2).await?;
+    let projection = serde_json::to_value(&projection)?;
+    let latest = projection["runs"]
+        .as_array()
+        .and_then(|runs| runs.iter().max_by_key(|run| run["ordinal"].as_u64()))
+        .expect("the second run")["id"]
+        .clone();
+    assert!(
+        !projection["checkpoints"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|checkpoint| checkpoint["runId"] == latest && checkpoint["status"] == "ready"),
+        "the turn's checkpoint was taken in the planted repository: {}",
+        projection["checkpoints"]
+    );
+    runtime.shutdown().await?;
     Ok(())
 }

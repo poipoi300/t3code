@@ -474,6 +474,12 @@ pub trait SessionRuntime: Send + Sync {
     fn extensions(&self) -> Option<&dyn SessionExtensions> {
         None
     }
+    /// A documented promise that nothing this provider starts outlives its turn. A file restore
+    /// cannot otherwise tell a quiet session without `extensions()` from one still writing, so it
+    /// refuses (t3-git re-review 4 F9).
+    fn leaves_no_background_work(&self) -> bool {
+        false
+    }
 }
 #[derive(Debug, Clone, Default)]
 pub struct ExtensionCapabilities {

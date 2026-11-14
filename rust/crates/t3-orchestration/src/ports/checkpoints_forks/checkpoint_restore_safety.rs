@@ -258,11 +258,13 @@ pub enum ReservationKind {
 struct Reservations {
     next: u64,
     held: Vec<(u64, PathBuf, ReservationKind)>,
+    waiting: Vec<(u64, PathBuf)>,
 }
 
 pub struct WorkspaceReservations {
     state: std::sync::Mutex<Reservations>,
     released: tokio::sync::watch::Sender<u64>,
+    waiters: tokio::sync::watch::Sender<u64>,
 }
 
 impl Default for WorkspaceReservations {
@@ -270,7 +272,24 @@ impl Default for WorkspaceReservations {
         Self {
             state: std::sync::Mutex::new(Reservations::default()),
             released: tokio::sync::watch::channel(0).0,
+            waiters: tokio::sync::watch::channel(0).0,
         }
+    }
+}
+
+/// Marks one blocked `reserve` call while it waits.
+struct Waiting<'a> {
+    owner: &'a WorkspaceReservations,
+    id: u64,
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        let mut state = self.owner.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.waiting.retain(|(id, _)| *id != self.id);
+        self.owner
+            .waiters
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 }
 
@@ -296,6 +315,7 @@ impl WorkspaceReservations {
     ) -> Result<WorkspaceReservation> {
         let canonical = canonicalize_missing(cwd)?;
         let mut released = self.released.subscribe();
+        let mut waiting = None;
         loop {
             if cancellation.is_cancelled() {
                 return Err(Error::Cancelled);
@@ -317,11 +337,48 @@ impl WorkspaceReservations {
                         id,
                     });
                 }
+                if waiting.is_none() {
+                    let id = state.next;
+                    state.next = state.next.checked_add(1).ok_or_else(|| Error::Service {
+                        operation: "workspace.reserve",
+                        detail: "Reservation identity exhausted".into(),
+                    })?;
+                    state.waiting.push((id, canonical.clone()));
+                    waiting = Some(Waiting { owner: self, id });
+                    self.waiters
+                        .send_modify(|generation| *generation = generation.wrapping_add(1));
+                }
             }
             tokio::select! {
                 _ = cancellation.cancelled() => return Err(Error::Cancelled),
                 result = released.changed() => { result.map_err(|error| Error::Service { operation: "workspace.reserve", detail: error.to_string() })?; },
             }
+        }
+    }
+}
+
+impl WorkspaceReservations {
+    /// Resolves once a reservation of a folder overlapping `cwd` is waiting: a test's proof that
+    /// a turn start is held off rather than not yet reached.
+    #[cfg(any(test, feature = "testkit"))]
+    pub async fn waiting_on(&self, cwd: &Path) -> Result<()> {
+        let canonical = canonicalize_missing(cwd)?;
+        let mut changed = self.waiters.subscribe();
+        loop {
+            if self
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .waiting
+                .iter()
+                .any(|(_, path)| paths_overlap(path, &canonical))
+            {
+                return Ok(());
+            }
+            changed.changed().await.map_err(|error| Error::Service {
+                operation: "workspace.reserve",
+                detail: error.to_string(),
+            })?;
         }
     }
 }

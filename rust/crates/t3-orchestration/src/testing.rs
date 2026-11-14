@@ -114,6 +114,18 @@ pub struct FakeSessionRuntime {
     >,
     calls: mpsc::UnboundedSender<FakeCall>,
     cancellation: CancellationToken,
+    /// `Some` gives the session extensions whose `pending_background_work` answers with it.
+    pub background_work: Mutex<Option<std::result::Result<bool, String>>>,
+    /// What `leaves_no_background_work` declares (true: the fake starts nothing of its own).
+    pub leaves_no_background_work: std::sync::atomic::AtomicBool,
+    /// When set, `rollback` signals the sender on entry and returns once the receiver resolves.
+    #[allow(clippy::type_complexity)]
+    pub rollback_hold: Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
 }
 impl FakeProviderAdapter {
     pub fn new(
@@ -140,6 +152,9 @@ impl FakeProviderAdapter {
                     subscribers: Mutex::new(Vec::new()),
                     calls,
                     cancellation: CancellationToken::new(),
+                    background_work: Mutex::new(None),
+                    leaves_no_background_work: std::sync::atomic::AtomicBool::new(true),
+                    rollback_hold: Mutex::new(None),
                 }),
             },
             receiver,
@@ -275,6 +290,16 @@ impl SessionRuntime for FakeSessionRuntime {
     fn background_tasks_end_with_process(&self) -> bool {
         true
     }
+    fn leaves_no_background_work(&self) -> bool {
+        self.leaves_no_background_work.load(Ordering::SeqCst)
+    }
+    fn extensions(&self) -> Option<&dyn SessionExtensions> {
+        self.background_work
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+            .then_some(self as &dyn SessionExtensions)
+    }
     async fn subscribe(&self) -> ProviderResult<EventSubscription> {
         self.record(FakeCall::Subscribe)?;
         if self.cancellation.is_cancelled() {
@@ -342,11 +367,150 @@ impl SessionRuntime for FakeSessionRuntime {
     }
     async fn rollback(&self, input: RollbackInput) -> ProviderResult<ThreadSnapshot> {
         self.record(FakeCall::Rollback(Box::new(input)))?;
+        let hold = self
+            .rollback_hold
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some((entered, release)) = hold {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
         Ok(self.read_snapshot())
     }
     async fn fork(&self, input: ForkInput) -> ProviderResult<OrchestrationV2ProviderThread> {
         self.record(FakeCall::Fork(Box::new(input)))?;
         Ok(self.read_snapshot().provider_thread)
+    }
+}
+
+fn unused_extension<T>() -> ProviderResult<T> {
+    Err(ProviderError::Unsupported("fake session extension"))
+}
+
+/// Only `pending_background_work` is scripted (by `background_work`); the rest is unused.
+#[async_trait]
+impl SessionExtensions for FakeSessionRuntime {
+    fn capabilities(&self) -> ExtensionCapabilities {
+        ExtensionCapabilities::default()
+    }
+    async fn pending_background_work(
+        &self,
+        _thread: Option<OrchestrationV2ProviderThread>,
+        _include_subagents: bool,
+    ) -> ProviderResult<bool> {
+        match self
+            .background_work
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            Some(Ok(pending)) => Ok(pending),
+            Some(Err(detail)) => Err(ProviderError::Operation {
+                operation: ProviderOperation::Snapshot,
+                detail,
+            }),
+            None => unused_extension(),
+        }
+    }
+    async fn model_context_window(
+        &self,
+        _selection: t3_contracts::model_selection::ModelSelection,
+        _cwd: Option<PathBuf>,
+    ) -> ProviderResult<Option<u64>> {
+        unused_extension()
+    }
+    fn can_reuse_context_usage(
+        &self,
+        _previous: &t3_contracts::model_selection::ModelSelection,
+        _next: &t3_contracts::model_selection::ModelSelection,
+    ) -> bool {
+        false
+    }
+    fn normalize_thread_load_selection(
+        &self,
+        selection: t3_contracts::model_selection::ModelSelection,
+    ) -> t3_contracts::model_selection::ModelSelection {
+        selection
+    }
+    async fn inject_history(
+        &self,
+        _thread: OrchestrationV2ProviderThread,
+        _messages: Vec<OrchestrationV2HistoricalMessage>,
+        _context: String,
+    ) -> ProviderResult<bool> {
+        unused_extension()
+    }
+    async fn compact(&self, _input: TurnInput) -> ProviderResult<()> {
+        unused_extension()
+    }
+    async fn apply_selection(
+        &self,
+        _thread: OrchestrationV2ProviderThread,
+        _selection: t3_contracts::model_selection::ModelSelection,
+    ) -> ProviderResult<()> {
+        unused_extension()
+    }
+    async fn stop_task(
+        &self,
+        _thread: OrchestrationV2ProviderThread,
+        _task_id: String,
+    ) -> ProviderResult<()> {
+        unused_extension()
+    }
+    async fn await_tasks(
+        &self,
+        _thread: OrchestrationV2ProviderThread,
+        _task_ids: Vec<String>,
+        _awaited: bool,
+    ) -> ProviderResult<Vec<String>> {
+        unused_extension()
+    }
+    async fn stop_subagent(
+        &self,
+        _thread: OrchestrationV2ProviderThread,
+        _native_task_id: String,
+        _requested_at: Option<IsoDateTime>,
+    ) -> ProviderResult<Option<SubagentOutcome>> {
+        unused_extension()
+    }
+    async fn unload(
+        &self,
+        _thread: OrchestrationV2ProviderThread,
+        _archive: bool,
+    ) -> ProviderResult<()> {
+        unused_extension()
+    }
+    async fn upload_feedback(
+        &self,
+        _thread: OrchestrationV2ProviderThread,
+        _reason: Option<String>,
+    ) -> ProviderResult<String> {
+        unused_extension()
+    }
+    async fn list_tools(
+        &self,
+        _thread: OrchestrationV2ProviderThread,
+        _server: String,
+    ) -> ProviderResult<Vec<McpTool>> {
+        unused_extension()
+    }
+    async fn call_tool(
+        &self,
+        _thread: OrchestrationV2ProviderThread,
+        _server: String,
+        _tool: String,
+        _arguments: serde_json::Value,
+    ) -> ProviderResult<McpResult> {
+        unused_extension()
+    }
+    async fn read_resource(
+        &self,
+        _thread: OrchestrationV2ProviderThread,
+        _server: String,
+        _uri: String,
+    ) -> ProviderResult<Vec<serde_json::Value>> {
+        unused_extension()
     }
 }
 
@@ -588,7 +752,7 @@ scripted_service! { FakeEventIngestor: EventIngestor {
 } }
 
 scripted_service! { FakeThreadWorktreeRestore: ThreadWorktreeRestore {
-    restore(thread: OrchestrationV2AppThread) -> ();
+    restore(thread: OrchestrationV2AppThread) -> bool;
 } }
 
 scripted_service! { FakeSessionRetentionCheck: SessionRetentionCheck {

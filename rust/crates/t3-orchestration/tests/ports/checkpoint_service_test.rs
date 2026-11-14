@@ -104,6 +104,22 @@ pub mod support {
         pub deleted: Mutex<Vec<String>>,
         pub gate: Mutex<Option<Arc<Gate>>>,
         pub restore_gate: Mutex<Option<Arc<Gate>>>,
+        /// Set: the folder's saved repository binding refuses (t3-git H-1), as the Git backend
+        /// does before any checkpoint operation.
+        pub refuse_binding: Mutex<Option<String>>,
+        /// Every `bind_scope` call: the folder and whether it replaced the saved binding.
+        pub binds: Mutex<Vec<(PathBuf, bool)>>,
+    }
+    impl Backend {
+        fn binding(&self) -> Result<()> {
+            match self.refuse_binding.lock().expect("binding").clone() {
+                Some(detail) => Err(Error::Service {
+                    operation: t3_orchestration::ports::checkpoints_forks::checkpoint_rollback_service::REPOSITORY_CHANGED_OPERATION,
+                    detail,
+                }),
+                None => Ok(()),
+            }
+        }
     }
     impl Backend {
         pub fn service(self: &Arc<Self>) -> Arc<CheckpointService> {
@@ -187,6 +203,7 @@ pub mod support {
             _ordinal: u64,
             cancellation: CancellationToken,
         ) -> Result<()> {
+            self.binding()?;
             self.restores.fetch_add(1, Ordering::SeqCst);
             let gate = self.restore_gate.lock().expect("restore gate").clone();
             if let Some(gate) = gate {
@@ -213,6 +230,10 @@ pub mod support {
                 "refs/test/{}/{ordinal}",
                 encode_id_part(&serde_json::to_string(scope).expect("scope"))
             ))
+        }
+        async fn bind_scope(&self, cwd: PathBuf, replace: bool) -> Result<()> {
+            self.binds.lock().expect("binds").push((cwd, replace));
+            self.binding()
         }
         async fn is_repository(&self, _cwd: PathBuf) -> Result<bool> {
             self.probes.fetch_add(1, Ordering::SeqCst);

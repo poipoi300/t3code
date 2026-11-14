@@ -2958,6 +2958,9 @@ impl SessionRuntime for ManagedRuntime {
     fn background_tasks_end_with_process(&self) -> bool {
         self.runtime.background_tasks_end_with_process()
     }
+    fn leaves_no_background_work(&self) -> bool {
+        self.runtime.leaves_no_background_work()
+    }
     fn extensions(&self) -> Option<&dyn SessionExtensions> {
         self.runtime
             .extensions()

@@ -111,6 +111,8 @@ pub struct CheckpointRollbackService {
     pub clock: Arc<dyn Clock>,
     /// The host's terminals, dev servers and scripts for the thread, held through a restore.
     pub writers: Arc<dyn ThreadWriters>,
+    /// The host's per-thread process scope: processes the agent started, even detached ones.
+    pub agent_scope: Arc<dyn AgentScope>,
 }
 
 #[async_trait]
@@ -150,6 +152,40 @@ pub fn latest_provider_turn_for_attempt<'a>(
         })
 }
 
+/// A writer's name as clients see it: one line of at most 80 characters (re-review 4 L4).
+fn writer_name(name: &str) -> String {
+    let line = name
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if line.chars().count() <= 80 {
+        line
+    } else {
+        format!("{}…", line.chars().take(79).collect::<String>())
+    }
+}
+
+/// Provider work that outlives a turn. A session that can neither report it nor promise there
+/// is none cannot be proven quiet (re-review 4 F9).
+async fn background_writers(
+    session: &dyn SessionRuntime,
+    provider: &OrchestrationV2ProviderThread,
+) -> Vec<String> {
+    let running = match session.extensions() {
+        Some(extensions) => extensions
+            .pending_background_work(Some(provider.clone()), true)
+            .await
+            .unwrap_or(true)
+            .then_some("background work its provider started"),
+        None if session.leaves_no_background_work() => None,
+        None => Some("work its provider may still be running (this provider cannot report it)"),
+    };
+    running.into_iter().map(str::to_owned).collect()
+}
+
 fn writers_running(running: &[String]) -> Result<()> {
     if running.is_empty() {
         return Ok(());
@@ -171,24 +207,46 @@ impl CheckpointRollbackService {
         &self,
         thread_id: &ThreadId,
         cwd: &str,
-        session: &dyn SessionRuntime,
+        session: Option<&dyn SessionRuntime>,
         provider: &OrchestrationV2ProviderThread,
     ) -> Result<WriterHold> {
         let mut running = self.running_writers(thread_id, session, provider).await?;
+        match self.agent_scope.live_processes(thread_id.clone()).await {
+            Ok(None | Some(0)) => {}
+            Ok(Some(1)) => running.push("a process the agent started".into()),
+            Ok(Some(count)) => running.push(format!("{count} processes the agent started")),
+            Err(_) => {
+                running.push("processes the agent started (they could not be checked)".into())
+            }
+        }
         let hold = self
             .writers
             .hold(thread_id.clone(), PathBuf::from(cwd))
             .await?;
-        running.extend(hold.running.iter().cloned());
+        running.extend(hold.running.iter().map(|name| writer_name(name)));
         writers_running(&running)?;
         Ok(hold)
     }
 
-    /// The thread's own writers: a running turn, provider commands, provider background work.
+    /// The folder a file restore writes: the thread's worktree, or its project's root.
+    async fn restore_folder(&self, thread: &OrchestrationV2AppThread) -> Result<Option<PathBuf>> {
+        if let Some(path) = &thread.worktree_path {
+            return Ok(Some(PathBuf::from(&path.0)));
+        }
+        let project_id = expanded_id(&thread.project_id)?;
+        Ok(self
+            .database
+            .read(move |db| crate::stores::projects::get(db, &project_id, true))
+            .await?
+            .map(|project| PathBuf::from(project.workspace_root)))
+    }
+
+    /// The thread's own writers: a running turn, provider commands and, with a session to ask,
+    /// provider background work.
     async fn running_writers(
         &self,
         thread_id: &ThreadId,
-        session: &dyn SessionRuntime,
+        session: Option<&dyn SessionRuntime>,
         provider: &OrchestrationV2ProviderThread,
     ) -> Result<Vec<String>> {
         // Narrow reads: history may hold payloads older runs no longer decode.
@@ -232,20 +290,15 @@ impl CheckpointRollbackService {
             };
             for item in items {
                 if let OrchestrationV2TurnItem::CommandExecution(item) = item {
-                    running.push(match item.title.as_deref() {
+                    running.push(match item.title.as_deref().map(writer_name) {
                         Some(title) if !title.is_empty() => format!("command `{title}`"),
                         _ => "a command".to_owned(),
                     });
                 }
             }
         }
-        if let Some(extensions) = session.extensions()
-            && extensions
-                .pending_background_work(Some(provider.clone()), true)
-                .await
-                .unwrap_or(true)
-        {
-            running.push("background work its provider started".to_owned());
+        if let Some(session) = session {
+            running.extend(background_writers(session, provider).await);
         }
         Ok(running)
     }
@@ -261,12 +314,13 @@ impl CheckpointRollbackService {
             .await?
             .ok_or_else(|| Error::ThreadNotFound(input.thread_id.clone()))?;
         let reservations = WorkspaceReservations::global();
-        // The reservation excludes overlapping turn starts throughout provider rollback and restore.
+        // Every turn start on an overlapping folder (composed through `CoordinatedTurnStart`)
+        // waits from here until the rollback commits (re-review 4 F2).
         let _reservation = if input.restore_files {
-            match &thread.worktree_path {
+            match self.restore_folder(&thread).await? {
                 Some(path) => Some(
                     reservations
-                        .reserve(Path::new(&path.0), ReservationKind::Restore, &cancellation)
+                        .reserve(&path, ReservationKind::Restore, &cancellation)
                         .await?,
                 ),
                 None => None,
@@ -404,6 +458,18 @@ impl CheckpointRollbackService {
             return Err(reject(SHARED_WORKSPACE_RESTORE_MESSAGE));
         }
         let configured_policy = self.policy.resolve_configured(&context.thread).await?;
+        // Writers are checked, and the host's held until Git returns, before recovery may move a
+        // leftover folder aside (re-review 4 F8). A live session answers for its background work
+        // now; the session opened below answers again before the provider's rollback.
+        let host_writers = if input.restore_files {
+            let live = self.sessions.get(expanded_id(session_id)?).await?;
+            Some(
+                self.quiesce(&input.thread_id, &scope.cwd.0, live.as_deref(), provider)
+                    .await?,
+            )
+        } else {
+            None
+        };
         self.recover_workspace(&context.thread, input.restore_files, &cancellation)
             .await?;
         if input.restore_files
@@ -450,17 +516,13 @@ impl CheckpointRollbackService {
                 configured_policy.options,
             )
             .await?;
-        // Before the provider's rollback, so a refusal changes nothing. The host's writers stay
-        // held until Git returns; the thread lane is not held here because ingesting the
-        // provider's rollback events takes it.
-        let host_writers = if input.restore_files {
-            Some(
-                self.quiesce(&input.thread_id, &scope.cwd.0, session.as_ref(), &provider)
-                    .await?,
-            )
-        } else {
-            None
-        };
+        // Before the provider's rollback, so these refusals change nothing (re-review 4 F7, F9).
+        // The thread lane is not held here because ingesting the provider's rollback events
+        // takes it.
+        if input.restore_files {
+            writers_running(&background_writers(session.as_ref(), provider).await)?;
+            self.checkpoints.preflight_restore(scope).await?;
+        }
         let mut turns = Vec::new();
         for turn in &context.provider_turns {
             if turn.provider_thread_id != provider.id {
@@ -522,7 +584,7 @@ impl CheckpointRollbackService {
             // keeps new ones out until the commit.
             writers_running(
                 &self
-                    .running_writers(&input.thread_id, session.as_ref(), &provider)
+                    .running_writers(&input.thread_id, Some(session.as_ref()), provider)
                     .await?,
             )?;
             self.checkpoints

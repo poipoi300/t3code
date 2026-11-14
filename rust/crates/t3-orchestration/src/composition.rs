@@ -397,44 +397,15 @@ struct RebindingWorktreeRestore {
 
 #[async_trait]
 impl ThreadWorktreeRestore for RebindingWorktreeRestore {
-    async fn restore(&self, thread: OrchestrationV2AppThread) -> Result<()> {
+    async fn restore(&self, thread: OrchestrationV2AppThread) -> Result<bool> {
         let worktree = thread.worktree_path.clone();
-        self.inner.restore(thread).await?;
-        if let Some(path) = worktree {
+        let recreated = self.inner.restore(thread).await?;
+        if recreated && let Some(path) = worktree {
             self.repositories
                 .bind_scope(std::path::PathBuf::from(path.0), true)
                 .await?;
         }
-        Ok(())
-    }
-}
-
-struct RebindingRecovery {
-    inner: Arc<
-        dyn crate::ports::checkpoints_forks::checkpoint_rollback_service::RollbackWorkspaceRecovery,
-    >,
-    repositories: Arc<dyn CheckpointMetadata>,
-}
-
-#[async_trait]
-impl crate::ports::checkpoints_forks::checkpoint_rollback_service::RollbackWorkspaceRecovery
-    for RebindingRecovery
-{
-    async fn is_managed(&self, path: &std::path::Path) -> Result<bool> {
-        self.inner.is_managed(path).await
-    }
-    async fn recreate(
-        &self,
-        thread: &OrchestrationV2AppThread,
-        cancellation: CancellationToken,
-    ) -> Result<()> {
-        self.inner.recreate(thread, cancellation).await?;
-        if let Some(path) = &thread.worktree_path {
-            self.repositories
-                .bind_scope(std::path::PathBuf::from(&path.0), true)
-                .await?;
-        }
-        Ok(())
+        Ok(recreated)
     }
 }
 
@@ -568,6 +539,7 @@ impl OrchestrationRuntime {
             lanes.clone(),
         );
         ingestor.agent_scope = agent_scope.clone();
+        let agent_scope: Arc<dyn AgentScope> = agent_scope.unwrap_or_else(|| Arc::new(Unbound));
         ingestor.telemetry = telemetry;
         let ingestor = Arc::new(ingestor);
         // The manager ingests only session-scoped artifacts (requests and recovered commands that
@@ -671,14 +643,21 @@ impl OrchestrationRuntime {
         );
         let operations = Arc::new(ComposedThreads {
             policy: policy.clone(),
-            turn_start: ProviderTurnStartService {
-                projections: reader.clone(),
-                committer: events.clone(),
-                sessions: session_directory.clone(),
-                execution: execution.clone(),
-                clock: clock.clone(),
-                ids: ids.clone(),
-            },
+            // A restore holds the folder's reservation from before the provider's rollback to the
+            // commit; a turn start on an overlapping folder waits for it (re-review 4 F2).
+            turn_start: crate::ports::checkpoints_forks::checkpoint_restore_safety::CoordinatedTurnStart::new(
+                ProviderTurnStartService {
+                    projections: reader.clone(),
+                    committer: events.clone(),
+                    sessions: session_directory.clone(),
+                    execution: execution.clone(),
+                    clock: clock.clone(),
+                    ids: ids.clone(),
+                },
+                reader.clone(),
+                database.clone(),
+                crate::ports::checkpoints_forks::checkpoint_restore_safety::WorkspaceCoordination::global(),
+            ),
             finalization: RunFinalizationService {
                 capture: Arc::new(CheckpointCaptureService {
                     checkpoints: checkpoint_service.clone(),
@@ -703,15 +682,13 @@ impl OrchestrationRuntime {
                 sessions: session_directory.clone(),
                 providers: providers.clone(),
                 policy: Arc::new(ResolvedRollbackPolicy(policy)),
-                workspace_recovery: Arc::new(RebindingRecovery {
-                    inner: workspace_recovery,
-                    repositories: repositories.clone(),
-                }),
+                workspace_recovery,
                 events: events.clone(),
                 database: database.clone(),
                 ids: ids.clone(),
                 clock: clock.clone(),
                 writers: thread_writers.unwrap_or_else(|| Arc::new(NoHostWriters)),
+                agent_scope: agent_scope.clone(),
             }),
             None => Arc::new(Unbound),
         };
@@ -771,7 +748,7 @@ impl OrchestrationRuntime {
         let stop = ThreadStopService::new(ThreadStopServices {
             management: threads.clone(),
             sessions: session_directory,
-            agent_scope: agent_scope.unwrap_or_else(|| Arc::new(Unbound)),
+            agent_scope: agent_scope.clone(),
             gate: lanes.clone(),
         });
         let _ = operations.restart.set(
@@ -1174,7 +1151,13 @@ impl OrchestrationRuntime {
         if let Some(root) = created_root {
             // Not part of TypeScript's project creation, so it cannot fail it: the scope's first
             // checkpoint operation, before any turn, binds the same way.
-            let _ = self.repositories.bind_scope(root, false).await;
+            if let Err(error) = self.repositories.bind_scope(root.clone(), false).await {
+                tracing::warn!(
+                    folder = %root.display(),
+                    %error,
+                    "project folder not bound at creation; its first checkpoint binds it"
+                );
+            }
         }
         Ok(receipt)
     }
@@ -1183,6 +1166,13 @@ impl OrchestrationRuntime {
     /// projects outside `project_command`. Call it before any agent can write there.
     pub async fn bind_repository(&self, cwd: std::path::PathBuf) -> Result<()> {
         self.repositories.bind_scope(cwd, false).await
+    }
+
+    /// The user's explicit "trust this repository" for a folder that refused as changed
+    /// (`checkpoint.git.repository-changed`): binds whatever repository is there now (re-review 4
+    /// F3). Never call it without the user's request.
+    pub async fn trust_repository(&self, cwd: std::path::PathBuf) -> Result<()> {
+        self.repositories.bind_scope(cwd, true).await
     }
 
     /// Closes admission, stops the settlement, watch and launch producers, stops the effect worker,
@@ -1241,7 +1231,7 @@ impl OrchestrationRuntime {
 /// checkpoint capture (06/07), title generation and delegated stops (08).
 struct ComposedThreads {
     policy: Arc<dyn RuntimePolicyResolver>,
-    turn_start: ProviderTurnStartService,
+    turn_start: crate::ports::checkpoints_forks::checkpoint_restore_safety::CoordinatedTurnStart,
     finalization: RunFinalizationService,
     // Set right after construction: thread management dispatches through the runtime layer,
     // which needs the worker that routes to these operations.
@@ -1690,8 +1680,8 @@ pub struct NoWorktreeRestore;
 
 #[async_trait]
 impl ThreadWorktreeRestore for NoWorktreeRestore {
-    async fn restore(&self, _thread: OrchestrationV2AppThread) -> Result<()> {
-        Ok(())
+    async fn restore(&self, _thread: OrchestrationV2AppThread) -> Result<bool> {
+        Ok(false)
     }
 }
 
@@ -1854,5 +1844,152 @@ mod tests {
             typed_force_stop_error(Error::Cancelled, thread()),
             Error::Cancelled
         ));
+    }
+
+    /// Records `bind_scope` calls; refuses them when `refuse` is set.
+    #[derive(Default)]
+    struct Binds {
+        calls: std::sync::Mutex<Vec<(std::path::PathBuf, bool)>>,
+        refuse: bool,
+    }
+    #[async_trait]
+    impl CheckpointMetadata for Binds {
+        fn reference(&self, scope: &CheckpointScopeId, ordinal: u64) -> CheckpointRef {
+            CheckpointRef(format!("refs/test/{}/{ordinal}", scope.0))
+        }
+        async fn is_repository(&self, _cwd: std::path::PathBuf) -> Result<bool> {
+            Ok(true)
+        }
+        async fn delete_refs(
+            &self,
+            _scope: OrchestrationV2CheckpointScope,
+            _checkpoints: Vec<OrchestrationV2Checkpoint>,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn bind_scope(&self, cwd: std::path::PathBuf, replace: bool) -> Result<()> {
+            self.calls.lock().expect("binds").push((cwd, replace));
+            if self.refuse {
+                return Err(Error::Service {
+                    operation: "checkpoint.git.repository-changed",
+                    detail: "refused".into(),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    fn app_thread(worktree: &str) -> OrchestrationV2AppThread {
+        let mut thread: OrchestrationV2AppThread = serde_json::from_str(
+            include_str!("../../../fixtures/samples/OrchestrationV2AppThread.jsonl")
+                .lines()
+                .next()
+                .expect("thread fixture"),
+        )
+        .expect("thread");
+        thread.worktree_path = Some(t3_contracts::base_schemas::TrimmedNonEmptyString(
+            worktree.into(),
+        ));
+        thread
+    }
+
+    /// Re-review 4 F1: a send's worktree restore that recreated nothing never rebinds the folder,
+    /// so a repository planted there cannot become the thread's binding.
+    #[tokio::test]
+    async fn a_worktree_restore_that_recreates_nothing_never_rebinds() -> Result<()> {
+        let binds = Arc::new(Binds::default());
+        let restore = RebindingWorktreeRestore {
+            inner: Arc::new(NoWorktreeRestore),
+            repositories: binds.clone(),
+        };
+        let _ = restore.restore(app_thread("/work/feature")).await?;
+        assert!(
+            !binds
+                .calls
+                .lock()
+                .expect("binds")
+                .iter()
+                .any(|(_, replace)| *replace),
+            "{:?}",
+            binds.calls.lock().expect("binds")
+        );
+        Ok(())
+    }
+
+    /// Records removals; prepares the strategy's folder as the workspace.
+    #[derive(Default)]
+    struct Removals(std::sync::Mutex<Vec<std::path::PathBuf>>);
+    #[async_trait]
+    impl WorkspaceBackend for Removals {
+        async fn prepare(
+            &self,
+            _project_id: ProjectId,
+            _thread_id: ThreadId,
+            strategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
+            _cancellation: CancellationToken,
+        ) -> Result<Workspace> {
+            let path = match strategy {
+                OrchestrationV2ThreadLaunchWorkspaceStrategy::ExistingWorktree(existing) => {
+                    std::path::PathBuf::from(existing.worktree_path.0)
+                }
+                _ => std::path::PathBuf::from("/work/created"),
+            };
+            Ok(Workspace {
+                cwd: path.clone(),
+                branch: None,
+                worktree_path: Some(path),
+            })
+        }
+        async fn remove(
+            &self,
+            workspace: Workspace,
+            _cancellation: CancellationToken,
+        ) -> Result<()> {
+            self.0.lock().expect("removals").push(workspace.cwd);
+            Ok(())
+        }
+        async fn current_branch(&self, _cwd: std::path::PathBuf) -> Result<Option<String>> {
+            Ok(None)
+        }
+    }
+
+    /// t3-git H-1: a worktree the launch created and could not bind is removed; a folder the
+    /// user brought (an existing worktree) is refused but never removed.
+    #[tokio::test]
+    async fn a_created_worktree_that_cannot_be_bound_is_removed() -> Result<()> {
+        for (strategy, removed) in [
+            (
+                serde_json::json!({"type":"worktree","baseRef":"main","branch":"feature"}),
+                true,
+            ),
+            (
+                serde_json::json!({"type":"existing_worktree","worktreePath":"/work/existing"}),
+                false,
+            ),
+        ] {
+            let inner = Arc::new(Removals::default());
+            let workspaces = BindingWorkspaces {
+                inner: inner.clone(),
+                repositories: Arc::new(Binds {
+                    refuse: true,
+                    ..Default::default()
+                }),
+            };
+            let result = workspaces
+                .prepare(
+                    ProjectId("project:test".into()),
+                    ThreadId("thread:test".into()),
+                    serde_json::from_value(strategy.clone())?,
+                    CancellationToken::new(),
+                )
+                .await;
+            assert!(result.is_err(), "{strategy}");
+            assert_eq!(
+                !inner.0.lock().expect("removals").is_empty(),
+                removed,
+                "{strategy}"
+            );
+        }
+        Ok(())
     }
 }
