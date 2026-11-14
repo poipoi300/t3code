@@ -1,4 +1,4 @@
-use crate::{CancellationToken, ExecuteOptions, Git, GitError, OutputMode};
+use crate::{CancellationToken, ExecuteOptions, Git, GitError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -89,24 +89,33 @@ enum LinkKind {
     Symlink,
     #[cfg(windows)]
     MountPoint,
+    #[cfg(windows)]
+    OtherNameSurrogate,
 }
 impl LinkKind {
     fn is_mount(self) -> bool {
         #[cfg(windows)]
         {
-            self == Self::MountPoint
+            matches!(self, Self::MountPoint | Self::OtherNameSurrogate)
         }
         #[cfg(not(windows))]
         {
             false
         }
+    }    fn is_junction(self) -> bool {
+        #[cfg(windows)]
+        { self == Self::MountPoint }
+        #[cfg(not(windows))]
+        { false }
     }
 }
+
 #[cfg(windows)]
 fn classify_tag(tag: u32) -> LinkKind {
     match tag {
         0xa000000c => LinkKind::Symlink,
         0xa0000003 => LinkKind::MountPoint,
+        tag if tag & 0x20000000 != 0 => LinkKind::OtherNameSurrogate,
         _ => LinkKind::None,
     }
 }
@@ -173,7 +182,7 @@ pub(crate) struct RestoreScope {
 enum PathOutput {
     Diff,
     CachedDiff,
-    Index,
+    Index { include_skipped: bool },
     Clean,
 }
 struct PathRecords {
@@ -297,18 +306,21 @@ impl PathRecords {
                     return Ok(());
                 }
             }
-            PathOutput::Index => {
+            PathOutput::Index { include_skipped } => {
                 if record.len() < 3 || record[1] != b' ' {
                     return Err(GitError::InvalidOutput("Git index path record".into()));
                 }
-                if record[0] != b'S' && !record[0].is_ascii_lowercase() {
+                let gitlink = record.get(2..8) == Some(b"160000".as_slice());
+                if !gitlink && !(include_skipped && record[0] == b'S')
+                    && !record[0].is_ascii_lowercase()
+                {
                     return Ok(());
                 }
                 let separator = record
                     .iter()
                     .position(|byte| *byte == b'\t')
                     .ok_or_else(|| GitError::InvalidOutput("Git index stage metadata".into()))?;
-                mode = Some(record.get(2..8) == Some(b"160000".as_slice()));
+                mode = Some(gitlink);
                 record[separator + 1..].to_vec()
             }
             PathOutput::Clean => {
@@ -451,18 +463,15 @@ impl Git {
         let mut working = vec!["-c", "core.fsmonitor=false", "diff"];
         working.extend(common);
         working.extend(["--ignore-submodules=all", commit, "--", "."]);
-        let index_args = [
-            "ls-files",
-            "--cached",
-            "--full-name",
-            "--stage",
-            "-v",
-            "-z",
-            "--",
-            ".",
-        ];
+        let mut index_args = vec!["ls-files", "--cached", "--full-name", "--stage", "-v", "-z"];
+        if sparse {
+            index_args.push("--sparse");
+        }
+        index_args.extend(["--", "."]);
         let (index, staged, worktree) = tokio::join!(
-            self.path_records(&index_args, PathOutput::Index),
+            self.path_records(&index_args, PathOutput::Index {
+                include_skipped: !sparse || selected.is_some(),
+            }),
             self.path_records(&cached, PathOutput::CachedDiff),
             self.path_records(&working, PathOutput::Diff)
         );
@@ -478,31 +487,6 @@ impl Git {
             let selected: BTreeSet<_> = selected.iter().map(PathBuf::from).collect();
             paths.retain(|path| selected.contains(path));
         }
-        if sparse && !paths.is_empty() {
-            let mut stdin = Vec::new();
-            for path in &paths {
-                stdin.extend_from_slice(path.as_os_str().as_encoded_bytes());
-                stdin.push(0);
-            }
-            let output = self
-                .at(&scope.root)
-                .execute(
-                    &["sparse-checkout", "check-rules", "-z"],
-                    ExecuteOptions {
-                        max_output_bytes: stdin.len(),
-                        output_mode: OutputMode::Error,
-                        stdin: Some(stdin),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            paths = output
-                .stdout
-                .split(|byte| *byte == 0)
-                .filter(|record| !record.is_empty())
-                .map(|record| os_path(record.to_vec()))
-                .collect::<Result<_, _>>()?;
-        }
         self.check_touch_paths(
             scope,
             paths
@@ -514,11 +498,31 @@ impl Git {
                 .filter(|(_, skip)| *skip)
                 .map(|(path, _)| scope.root.join(path))
                 .collect(),
+            false,
         )
         .await?;
         Ok(tracked)
     }
-    pub(crate) async fn check_clean_paths(&self, scope: &RestoreScope) -> Result<(), GitError> {
+    pub(crate) async fn clean_has_native_mount_guard(&self) -> Result<bool, GitError> {
+        #[cfg(not(windows))]
+        { Ok(true) }
+        #[cfg(windows)]
+        {
+            let result = self.without_fsmonitor().execute(&["--version"], ExecuteOptions {
+                allow_nonzero: true,
+                timeout: Some(std::time::Duration::from_secs(5)),
+                max_output_bytes: 4096,
+                ..Default::default()
+            }).await;
+            match result {
+                Err(error @ GitError::Process(t3_process::ProcessError::Cancelled)) => Err(error),
+                Ok(output) if output.code == Some(0) && !output.stdout_truncated
+                    && !output.stdout_invalid_utf8 => Ok(clean_mount_guard_version(&output.stdout_text())),
+                _ => Ok(false),
+            }
+        }
+    }
+    pub(crate) async fn check_clean_paths(&self, scope: &RestoreScope, native_mount_guard: bool) -> Result<(), GitError> {
         let (_, paths, _) = self
             .path_records(
                 &[
@@ -541,6 +545,7 @@ impl Git {
                 .map(|path| scope.directory.join(path))
                 .collect(),
             BTreeSet::new(),
+            native_mount_guard,
         )
         .await
     }
@@ -552,7 +557,7 @@ impl Git {
         let directory = scope.directory.clone();
         let cancellation = self.cancellation.clone();
         tokio::task::spawn_blocking(move || {
-            check_directories(&root, &directory, &mut BTreeSet::new(), &cancellation)?;
+            check_directories(&root, &directory, &mut BTreeMap::new(), &cancellation, false)?;
             std::fs::create_dir_all(directory)?;
             Ok(())
         })
@@ -564,11 +569,12 @@ impl Git {
         scope: &RestoreScope,
         paths: Vec<PathBuf>,
         skip_leaves: BTreeSet<PathBuf>,
+        native_clean_guard: bool,
     ) -> Result<(), GitError> {
         let root = scope.root.clone();
         let cancellation = self.cancellation.clone();
         tokio::task::spawn_blocking(move || {
-            let mut checked = BTreeSet::new();
+            let mut checked = BTreeMap::new();
             for path in paths {
                 let path = lexical_absolute(&path)?;
                 if !path.starts_with(&root) {
@@ -577,10 +583,16 @@ impl Git {
                     ));
                 }
                 if let Some(parent) = path.parent().filter(|path| path.starts_with(&root)) {
-                    check_directories(&root, parent, &mut checked, &cancellation)?;
+                    if !check_directories(&root, parent, &mut checked, &cancellation, true)? {
+                        continue;
+                    }
                 }
                 if !skip_leaves.contains(&path) {
-                    check_deleting_directory(&path, &cancellation)?;
+                    if native_clean_guard {
+                        check_clean_leaf(&path)?;
+                    } else {
+                        check_deleting_directory(&path, &cancellation)?;
+                    }
                 }
             }
             Ok(())
@@ -589,38 +601,72 @@ impl Git {
         .map_err(|_| GitError::InvalidOutput("restore path check task failed".into()))?
     }
 }
+#[cfg(windows)]
+fn clean_mount_guard_version(output: &str) -> bool {
+    // Git for Windows 2.23.0 added clean's mount-point guard: git-for-windows/git#2268.
+    let Some(version) = output.trim().strip_prefix("git version ") else { return false; };
+    let Some((core, build)) = version.split_once(".windows.") else { return false; };
+    if !build.parse::<u32>().is_ok_and(|build| build > 0) { return false; }
+    let mut parts = core.split('.');
+    let version = (parts.next().and_then(|v| v.parse::<u32>().ok()),
+        parts.next().and_then(|v| v.parse::<u32>().ok()),
+        parts.next().and_then(|v| v.parse::<u32>().ok()));
+    matches!(version, (Some(major), Some(minor), Some(patch))
+        if parts.next().is_none() && (major, minor, patch) >= (2, 23, 0))
+}
 fn check_directories(
     root: &Path,
     directory: &Path,
-    checked: &mut BTreeSet<PathBuf>,
+    checked: &mut BTreeMap<PathBuf, bool>,
     cancellation: &CancellationToken,
-) -> Result<(), GitError> {
-    let relative = directory
-        .strip_prefix(root)
+    replace_ancestors: bool,
+) -> Result<bool, GitError> {
+    let relative = directory.strip_prefix(root)
         .map_err(|_| GitError::UnsafeRestore("Git path parent is outside the top-level.".into()))?;
     let mut directory = root.to_owned();
     for component in std::iter::once(None).chain(relative.components().map(Some)) {
-        if cancellation.is_cancelled() {
-            return Err(t3_process::ProcessError::Cancelled.into());
-        }
-        if let Some(component) = component {
-            directory.push(component);
-        }
-        if !checked.insert(directory.clone()) {
+        if cancellation.is_cancelled() { return Err(t3_process::ProcessError::Cancelled.into()); }
+        if let Some(component) = component { directory.push(component); }
+        if let Some(real) = checked.get(&directory) {
+            if !real { return Ok(false); }
             continue;
         }
         match std::fs::symlink_metadata(&directory) {
-            Ok(metadata)
-                if link_kind(&directory, &metadata)? != LinkKind::None || !metadata.is_dir() =>
-            {
-                return Err(GitError::UnsafeRestore(
-                    "Git write/delete ancestor is not a real directory.".into(),
-                ));
+            Ok(metadata) => {
+                let kind = link_kind(&directory, &metadata)?;
+                if kind.is_mount() {
+                    return Err(GitError::UnsafeRestore(format!(
+                        "Refusing a junction, mount point or name surrogate ancestor at {}.", directory.display())));
+                }
+                if kind == LinkKind::Symlink || !metadata.is_dir() {
+                    if directory == root || !replace_ancestors {
+                        return Err(GitError::UnsafeRestore(format!(
+                            "Restore scope is not a real directory at {}.", directory.display())));
+                    }
+                    checked.insert(directory, false);
+                    return Ok(false);
+                }
+                checked.insert(directory.clone(), true);
             }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                checked.insert(directory, false);
+                return Ok(false);
+            }
             Err(error) => return Err(error.into()),
         }
+    }
+    Ok(true)
+}
+fn check_clean_leaf(path: &Path) -> Result<(), GitError> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let kind = link_kind(path, &metadata)?;
+    if kind.is_mount() && !kind.is_junction() {
+        return Err(GitError::UnsafeRestore(format!(
+            "Refusing an unsupported name surrogate at {}.", path.display())));
     }
     Ok(())
 }
@@ -638,7 +684,7 @@ fn check_deleting_directory(path: &Path, cancellation: &CancellationToken) -> Re
         let kind = link_kind(&path, &metadata)?;
         if kind.is_mount() {
             return Err(GitError::UnsafeRestore(
-                "Git clean would traverse a junction or mount point.".into(),
+                format!("Refusing a junction, mount point or name surrogate at {}.", path.display()),
             ));
         }
         if kind == LinkKind::None && metadata.is_dir() {
@@ -749,6 +795,9 @@ mod touch_tests {
         {
             assert!(classify_tag(0xa000000c) == LinkKind::Symlink);
             assert!(classify_tag(0xa0000003).is_mount());
+            for tag in [0xa0000019, 0xa000001d, 0xa0000027, 0x20000042] {
+                assert!(classify_tag(tag).is_mount(), "name surrogate {tag:#x}");
+            }
             for tag in [0x9000001a, 0x80000017, 0x8000001b, 0] {
                 assert!(classify_tag(tag) == LinkKind::None);
             }

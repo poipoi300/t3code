@@ -1,19 +1,8 @@
-# Many checkouts and agents build this workspace at once on one machine. With
-# the default (one rustc per core) twenty concurrent builds exhausted the
-# system's commit memory and took other processes down; at four jobs and 27
-# concurrent builds it was down to 10 GB free again. Override per command with
-# `--jobs` or `CARGO_BUILD_JOBS` on a quiet machine.
-[build]
-jobs = 2
-# Twenty-odd build directories compile the same dependencies. sccache shares the
-# ones it can across them (measured: about a third; crates downstream of a
-# proc macro miss on Windows). It never caches the workspace's own edited crates.
-#
-# rustc-gate (source in the coordinator's notes, tools\rustc-gate\gate.rs) runs
-# sccache after two bounded waits: a limited number of compiles of local (workspace) crates
-# machine-wide, and no new compile while free commit memory is under a floor.
-# Machine-specific, like the paths below: replace before this branch is shared.
-rustc-wrapper = "D:\\t3code-tools\\rustc-gate5.exe"
+# Portable build settings for every workspace under rust/ (the main workspace,
+# crates/t3-ui and shells). Machine-local settings (job count, a rustc wrapper,
+# cache locations) belong in an untracked .cargo/config.toml in a parent
+# directory, which cargo merges with this file, or in CARGO_BUILD_JOBS and
+# RUSTC_WRAPPER.
 
 # Full debug information made each build directory 15 to 45 GB (PDBs for every
 # test binary, type records in every rlib) and filled the build disk within
@@ -23,8 +12,3 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
-
-[env]
-SCCACHE_DIR = "D:\\sccache"
-SCCACHE_CACHE_SIZE = "80G"
-SCCACHE_IDLE_TIMEOUT = "0"

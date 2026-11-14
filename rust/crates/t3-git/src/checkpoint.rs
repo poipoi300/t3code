@@ -1084,7 +1084,10 @@ impl Git {
         let tracked = self
             .check_restore_writes(&scope, &commit, sparse, None)
             .await?;
+        let native_clean_guard = self.clean_has_native_mount_guard().await?;
+        self.check_clean_paths(&scope, native_clean_guard).await?;
         let mut mutated = false;
+        let mut tracked_restored = false;
         let restored = async {
             if tracked {
                 let mut restore = long_paths().to_vec();
@@ -1107,6 +1110,7 @@ impl Git {
                     .await?;
                 mutated = true;
                 self.text(&args).await?;
+                tracked_restored = true;
                 if sparse {
                     let manual = self.manual_sparse_paths().await.unwrap_or_default();
                     if !manual.is_empty() {
@@ -1134,9 +1138,18 @@ impl Git {
                 }
             }
             self.recreate_restore_scope(&scope).await?;
-            self.clean_checkpoint_workspace(&scope, &mut mutated).await
+            self.clean_checkpoint_workspace(&scope, &mut mutated, native_clean_guard).await
         }
         .await;
+        let restored = restored.map_err(|error| match error {
+            GitError::UnsafeRestore(message) if mutated => GitError::UnsafeRestore(format!(
+                "{}: {message}", if tracked_restored {
+                    "Tracked files were restored before cleanup was refused"
+                } else {
+                    "Workspace cleanup had already started before refusal"
+                })),
+            error => error,
+        });
         if mutated {
             // Reset changes only the index; a safety refusal must never prevent this finalizer.
             let finalizer = self
@@ -1219,12 +1232,13 @@ impl Git {
         &self,
         scope: &crate::safety::RestoreScope,
         mutated: &mut bool,
+        native_clean_guard: bool,
     ) -> Result<(), GitError> {
         let mut args = long_paths().to_vec();
         args.extend(["clean", "-fd", "--", "."]);
         for pass in 0..4 {
             self.recreate_restore_scope(scope).await?;
-            self.check_clean_paths(scope).await?;
+            self.check_clean_paths(scope, native_clean_guard).await?;
             *mutated = true;
             let output = self
                 .execute(
