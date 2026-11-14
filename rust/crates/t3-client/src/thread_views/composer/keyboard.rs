@@ -1,4 +1,4 @@
-//! Port of ComposerPromptEditorTiptap.handleKeyDown and chat/composerCommandKey's list/send ordering.
+//! Port of apps/web/src/components/ComposerPromptEditorTiptap.tsx handleKeyDown and chat/composerCommandKey.ts.
 
 use serde_json::{Value, json};
 
@@ -39,7 +39,10 @@ pub enum Action {
     Consume,
     Submit,
     Rewrite(Rewrite),
-    Split(Rewrite),
+    Split {
+        rewrite: Rewrite,
+        preserve_marks: bool,
+    },
     Lift(Rewrite),
 }
 
@@ -49,6 +52,7 @@ pub enum CaretAction {
     Move(usize),
 }
 
+/// Port of ComposerPromptEditorTiptap.tsx caret keys and composer-rich-text-doc.ts styled stops.
 pub fn caret_key(
     doc: &Value,
     selection: Selection,
@@ -196,6 +200,7 @@ fn code_node(block: &CodeBlock) -> Value {
         "content":if block.text.is_empty(){vec![]}else{vec![json!({"type":"text","text":block.text})]}})
 }
 
+/// Port of apps/web/src/composer-code-block.ts code key commands.
 fn code_key(doc: &Value, selection: Selection, event: &KeyEvent<'_>) -> Option<Rewrite> {
     let (start, node) = block(doc, selection)?;
     if editor::name(&node) != "codeBlock" {
@@ -244,6 +249,7 @@ fn code_key(doc: &Value, selection: Selection, event: &KeyEvent<'_>) -> Option<R
     })
 }
 
+/// Port of apps/web/src/composer-code-block.ts convertCodeFenceOnEnter.
 fn opening_fence(doc: &Value, selection: Selection) -> Option<Rewrite> {
     let (start, node) = block(doc, selection)?;
     if editor::name(&node) != "paragraph" {
@@ -268,6 +274,7 @@ fn opening_fence(doc: &Value, selection: Selection) -> Option<Rewrite> {
     })
 }
 
+/// Port of apps/web/src/components/chat/composerCommandKey.ts applyListEdit.
 fn list_edit(
     doc: &Value,
     selection: Selection,
@@ -327,6 +334,7 @@ fn list_edit(
 }
 
 /// The callback is the host's suggestion/application command handler, between code keys and send.
+/// Closing-marker marks follow apps/web/src/composer-markdown-source.ts collapseShownMarkdownSource.
 pub fn resolve(
     doc: &Value,
     selection: Selection,
@@ -349,12 +357,14 @@ pub fn resolve(
     {
         return Action::Rewrite(rewrite);
     }
-    if event.key == "Enter" && options.rich && !event.meta && !event.ctrl {
-        if let Some(rewrite) =
+    if event.key == "Enter"
+        && options.rich
+        && !event.meta
+        && !event.ctrl
+        && let Some(rewrite) =
             code_key(doc, selection, event).or_else(|| opening_fence(doc, selection))
-        {
-            return Action::Rewrite(rewrite);
-        }
+    {
+        return Action::Rewrite(rewrite);
     }
     if command(in_list) {
         return Action::Consume;
@@ -427,10 +437,16 @@ pub fn resolve(
             selection: collapsed.selection,
         });
     }
-    Action::Split(Rewrite {
-        document: collapsed.document,
-        selection: collapsed.selection,
-    })
+    Action::Split {
+        rewrite: Rewrite {
+            document: collapsed.document,
+            selection: collapsed.selection,
+        },
+        preserve_marks: selection.collapsed()
+            && markdown_source::source_regions(doc)
+                .iter()
+                .any(|range| range.to == selection.from()),
+    }
 }
 
 #[cfg(test)]
@@ -539,7 +555,7 @@ mod tests {
                     false,
                     |_| false
                 ),
-                Action::Split(_)
+                Action::Split { .. }
             ));
         }
     }
@@ -730,7 +746,7 @@ mod tests {
             resolve(&doc, caret(&doc, 6), &key("Enter"), options, false, |_| {
                 false
             }),
-            Action::Split(_)
+            Action::Split { .. }
         ));
         assert_eq!(
             resolve(&doc, caret(&doc, 6), &key("Tab"), options, false, |_| false),
@@ -781,6 +797,29 @@ mod tests {
 
     #[test]
     fn styled_caret_stops_precede_atom_steps_and_follow_line_direction() {
+        let shown = json!({"type":"doc","content":[{"type":"paragraph","content":[
+            {"type":"text","text":"**word**","marks":[{"type":"markdownSource"}]}
+        ]}]});
+        assert!(matches!(
+            resolve(
+                &shown,
+                Selection::caret(9),
+                &KeyEvent {
+                    shift: true,
+                    ..key("Enter")
+                },
+                Options {
+                    rich: true,
+                    ..Default::default()
+                },
+                false,
+                |_| false
+            ),
+            Action::Split {
+                preserve_marks: true,
+                ..
+            }
+        ));
         let doc = json!({"type":"doc","content":[{"type":"paragraph","content":[
             {"type":"text","text":"x","marks":[{"type":"bold"}]},
             {"type":"composer-mention","attrs":{"path":"a.md","source":"@a.md"}},

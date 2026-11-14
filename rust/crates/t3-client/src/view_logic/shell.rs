@@ -20,6 +20,8 @@ pub mod models;
 pub mod navigation;
 #[path = "shell/palette.rs"]
 pub mod palette;
+#[path = "shell/palette_files.rs"]
+pub mod palette_files;
 #[path = "shell/panels.rs"]
 pub mod panels;
 #[path = "shell/preview_state.rs"]

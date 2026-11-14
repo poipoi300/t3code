@@ -81,6 +81,8 @@ pub mod detail;
 pub mod execution;
 pub mod execution_presentation;
 pub mod families;
+pub mod find;
+pub mod minimap;
 pub mod feedback;
 pub mod item_support;
 pub mod lifecycle;

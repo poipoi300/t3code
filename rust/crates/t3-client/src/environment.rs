@@ -964,16 +964,28 @@ impl<S> EnvironmentRegistry<S> {
         let Some(bytes) = platform.get(StorageArea::Ordinary, key.clone()).await? else {
             return Ok(Self::default());
         };
-        let doc = crate::persistence::load_connection_catalog(platform)
-            .await
-            .map_err(|_| {
-                ClientError::InvalidPayload(
-                    "invalid connection catalog; original record retained".into(),
-                )
-            })?
-            .ok_or_else(|| {
-                ClientError::InvalidPayload("connection catalog disappeared during load".into())
-            })?;
+        let loaded = match crate::persistence::load_connection_catalog(platform).await {
+            Ok(Some(loaded)) => loaded,
+            Ok(None) => {
+                return Err(ClientError::InvalidPayload(
+                    "connection catalog disappeared during load".into(),
+                ));
+            }
+            Err(crate::persistence::PersistenceError::Platform(error)) => {
+                return Err(ClientError::Platform(error));
+            }
+            // Unreadable: kept aside and replaced with an empty catalog, so pairing works again.
+            Err(_) => {
+                let mut registry = Self::default();
+                registry.catalog_bytes = Some(quarantine_catalog(platform, bytes, time).await?);
+                return Ok(registry);
+            }
+        };
+        if loaded.dropped_targets > 0 {
+            // Keep the original beside the catalog: its unknown targets are gone from the next save.
+            quarantine_copy(platform, &bytes, time).await?;
+        }
+        let doc = loaded.document;
         let mut registry = Self::default();
         let mut registrations: Vec<EnvironmentRegistration> = Vec::new();
         for target in doc.targets {
@@ -1040,6 +1052,67 @@ impl<S> EnvironmentRegistry<S> {
     }
 }
 
+fn quarantine_key(time: Time) -> StorageKey {
+    StorageKey::new(
+        "connection-catalog-quarantine",
+        None,
+        &time.epoch_ms.to_string(),
+    )
+}
+async fn quarantine_copy(platform: &dyn Platform, bytes: &[u8], time: Time) -> Result<(), ClientError> {
+    platform
+        .write(
+            StorageArea::Ordinary,
+            vec![StorageWrite {
+                key: quarantine_key(time),
+                value: Some(bytes.to_vec()),
+            }],
+        )
+        .await?;
+    Ok(())
+}
+/// Moves an unreadable catalog aside and starts an empty one, unless it changed meanwhile.
+async fn quarantine_catalog(
+    platform: &dyn Platform,
+    bytes: Vec<u8>,
+    time: Time,
+) -> Result<Vec<u8>, ClientError> {
+    let empty = crate::persistence::Record::new(
+        "connection-catalog",
+        None,
+        "current",
+        1,
+        serde_json::json!({"schemaVersion": 1, "targets": [], "disabledEnvironmentIds": []}),
+    )
+    .encode()
+    .map_err(|_| ClientError::InvalidPayload("could not encode connection catalog".into()))?;
+    let committed = platform
+        .transaction(StorageTransaction {
+            conditions: vec![StorageCondition {
+                area: StorageArea::Ordinary,
+                key: catalog_key(),
+                expected: Some(bytes.clone()),
+            }],
+            ordinary: vec![
+                StorageWrite {
+                    key: quarantine_key(time),
+                    value: Some(bytes),
+                },
+                StorageWrite {
+                    key: catalog_key(),
+                    value: Some(empty.clone()),
+                },
+            ],
+            secure: vec![],
+        })
+        .await?;
+    if !committed {
+        return Err(ClientError::InvalidPayload(
+            "connection catalog changed concurrently".into(),
+        ));
+    }
+    Ok(empty)
+}
 fn catalog_key() -> StorageKey {
     StorageKey {
         namespace: "connection-catalog".into(),

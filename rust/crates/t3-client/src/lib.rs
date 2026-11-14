@@ -9,6 +9,7 @@ pub mod device;
 pub mod environment;
 pub mod error;
 pub mod mcp_apps;
+pub mod navigation;
 pub mod operations;
 pub mod optimistic;
 pub mod permissions;

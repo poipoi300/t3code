@@ -274,7 +274,11 @@ pub fn branch_selection_target(
             checkout_cwd: path.0.clone(),
             next_worktree_path: (!project_checkout).then(|| path.0.clone()),
             reuse_existing_worktree: true,
-            stays_in_active_checkout: if project_checkout { active_worktree.is_none() } else { active_worktree == Some(path.0.as_str()) },
+            stays_in_active_checkout: if project_checkout {
+                active_worktree.is_none()
+            } else {
+                active_worktree == Some(path.0.as_str())
+            },
         };
     }
     let next = if active_worktree.is_some() && reference.is_default {

@@ -416,44 +416,62 @@ pub fn tool_group_action(entry: &WorkLogEntry) -> &'static str {
             "update"
         };
     }
-    let name = tool_name(entry);
-    let token = if name.contains(['.', '/']) || name.contains("__") {
-        String::new()
-    } else {
-        name.replace(['_', ' ', '-'], "").to_lowercase()
+    let data = entry
+        .tool_data
+        .as_ref()
+        .filter(|data| data.is_object())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let tool_name = match entry.structured_payload.as_deref() {
+        Some(t3_contracts::orchestration_v2::OrchestrationV2TurnItem::DynamicTool(item)) => {
+            item.tool_name.as_ref().map(|name| name.0.clone())
+        }
+        _ => data["toolName"]
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| entry.tool_title.clone()),
     };
-    if matches!(token.as_str(), "read" | "readfile") {
+    let mut classified_data = data;
+    if let Some(name) = tool_name.filter(|name| !name.is_empty()) {
+        classified_data["toolName"] = Value::String(name);
+    }
+    let item_type = match entry.item_type.as_deref() {
+        Some(kind @ ("command_execution" | "file_change" | "web_search")) => Some(kind),
+        Some("dynamic_tool") => Some("dynamic_tool_call"),
+        _ => None,
+    };
+    let classified = classify_tool_activity(item_type, None, &classified_data);
+    let item_type = entry.item_type.as_deref();
+    let local = item_type == Some("file_search")
+        || item_type == Some("web_search")
+            && word(
+                &normalize_compact_tool_label(entry.tool_title.as_deref().unwrap_or(&entry.label))
+                    .to_lowercase(),
+                "grep",
+            );
+    if classified == "read" {
         return "read";
     }
-    if entry.item_type.as_deref() == Some("file_change")
-        || entry.tool_data.as_ref().is_some_and(|d| {
-            matches!(
-                d["kind"].as_str(),
-                Some("edit" | "move" | "delete" | "write")
-            )
-        })
-    {
+    if classified == "file_change" || item_type == Some("file_change") {
         return "edit";
     }
-    if entry.item_type.as_deref() == Some("command_execution")
+    if classified == "command"
+        || item_type == Some("command_execution")
         || entry.command.as_ref().is_some_and(|c| !c.is_empty())
-        || matches!(token.as_str(), "terminal" | "bash" | "shell")
     {
         return "command";
     }
-    let local = entry.item_type.as_deref() == Some("file_search")
-        || entry.item_type.as_deref() == Some("web_search")
-            && entry
-                .tool_title
-                .as_deref()
-                .unwrap_or(&entry.label)
-                .to_lowercase()
-                .split(|c: char| !c.is_alphanumeric() && c != '_')
-                .any(|s| s == "grep");
-    if local || matches!(token.as_str(), "find" | "grep" | "glob" | "rg" | "ls") {
+    if classified == "search" {
+        return if item_type == Some("web_search") && !local {
+            "search"
+        } else {
+            "code-search"
+        };
+    }
+    if local {
         return "code-search";
     }
-    if entry.item_type.as_deref() == Some("web_search") {
+    if item_type == Some("web_search") {
         return "search";
     }
     if entry.changed_files.as_ref().is_some_and(|v| !v.is_empty()) {
@@ -463,6 +481,76 @@ pub fn tool_group_action(entry: &WorkLogEntry) -> &'static str {
         "other"
     } else {
         "update"
+    }
+}
+
+/// `\b{needle}\b` in JavaScript's sense: ASCII letters, digits and `_` are word characters.
+fn word(haystack: &str, needle: &str) -> bool {
+    let is_word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+    haystack.match_indices(needle).any(|(index, _)| {
+        !is_word(haystack[..index].chars().next_back())
+            && !is_word(haystack[index + needle.len()..].chars().next())
+    })
+}
+
+/// Ports `packages/shared/src/toolActivity.ts` `classifyToolActivity`: what kind of work a
+/// tool call is, from its item type, request kind, ACP `kind` and tool name, in that order.
+pub fn classify_tool_activity(
+    item_type: Option<&str>,
+    request_kind: Option<&str>,
+    data: &Value,
+) -> &'static str {
+    let trimmed = |value: &Value| {
+        value
+            .as_str()
+            .map(crate::view_logic::JsTrim::js_trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let request_kind = request_kind
+        .map(crate::view_logic::JsTrim::js_trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase);
+    let kind = trimmed(&data["kind"]).map(|kind| kind.to_lowercase());
+    let tool_name = trimmed(&data["toolName"])
+        .or_else(|| trimmed(&data["item"]["tool"]))
+        .filter(|name| !name.contains("__") && !name.contains(['.', '/']))
+        .map(|name| {
+            name.chars()
+                .filter(|c| !crate::view_logic::is_js_whitespace(*c) && !matches!(c, '_' | '-'))
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        });
+    let (request_kind, kind, tool_name) = (
+        request_kind.as_deref(),
+        kind.as_deref(),
+        tool_name.as_deref(),
+    );
+    match item_type {
+        Some("command_execution") => return "command",
+        Some("image_view") => return "read",
+        Some("file_change") => return "file_change",
+        Some("web_search") => return "search",
+        _ => {}
+    }
+    if request_kind == Some("command") || kind == Some("execute") {
+        "command"
+    } else if request_kind == Some("file-change")
+        || matches!(kind, Some("edit" | "move" | "delete" | "write"))
+    {
+        "file_change"
+    } else if kind == Some("search")
+        || matches!(tool_name, Some("find" | "grep" | "glob" | "rg" | "ls"))
+    {
+        "search"
+    } else if request_kind == Some("file-read") || kind == Some("read") {
+        "read"
+    } else if matches!(tool_name, Some("terminal" | "bash" | "shell")) {
+        "command"
+    } else if matches!(tool_name, Some("read" | "readfile")) {
+        "read"
+    } else {
+        "other"
     }
 }
 fn image_path(path: &str) -> bool {

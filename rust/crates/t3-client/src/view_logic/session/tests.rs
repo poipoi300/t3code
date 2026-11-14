@@ -275,3 +275,44 @@ fn summarizes_send_to_user_calls_as_sent_messages() {
         "Sent 2 messages"
     );
 }
+
+fn work_entry(value: Value) -> WorkLogEntry {
+    let mut value = value;
+    let object = value.as_object_mut().unwrap();
+    for (key, default) in [
+        ("id", json!("e")),
+        ("label", json!("")),
+        ("createdAt", json!("")),
+        ("tone", json!("tool")),
+        ("runId", Value::Null),
+    ] {
+        object.entry(key).or_insert(default);
+    }
+    serde_json::from_value(value).unwrap()
+}
+
+#[test]
+fn tool_group_actions_follow_the_shared_tool_classifier() {
+    // presentation.ts computeToolGroupAction over toolActivity.ts classifyToolActivity.
+    use crate::work_log::tool_group_action;
+    for (entry, action) in [
+        // The tool's kind decides before any name.
+        (json!({"toolTitle":"Run","toolData":{"kind":"execute"}}), "command"),
+        (json!({"toolTitle":"Read","toolData":{"kind":"edit"}}), "edit"),
+        (json!({"toolTitle":"Lookup","toolData":{"kind":"search"}}), "code-search"),
+        (json!({"toolTitle":"Open","toolData":{"kind":"read"}}), "read"),
+        // A nested ACP tool name counts when nothing else names the tool.
+        (json!({"toolData":{"item":{"tool":"grep"}}}), "code-search"),
+        (json!({"toolData":{"toolName":"Bash"}}), "command"),
+        // The bare label is not a tool name.
+        (json!({"label":"Read"}), "other"),
+        // A namespaced name is not a token.
+        (json!({"toolData":{"toolName":"files.read"}}), "other"),
+        (json!({"itemType":"web_search","toolTitle":"grep src"}), "code-search"),
+        (json!({"itemType":"web_search","toolTitle":"Searched the web"}), "search"),
+        (json!({"command":"ls"}), "command"),
+        (json!({"tone":"info"}), "update"),
+    ] {
+        assert_eq!(tool_group_action(&work_entry(entry.clone())), action, "{entry}");
+    }
+}

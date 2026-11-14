@@ -4,6 +4,13 @@ use crate::{
 };
 use std::collections::BTreeSet;
 
+pub fn resolve_environment_filter<'a>(
+    selected: Option<&'a EnvironmentId>,
+    known: &BTreeSet<EnvironmentId>,
+) -> Option<&'a EnvironmentId> {
+    selected.filter(|environment| known.contains(*environment))
+}
+
 fn archived(project: &EnvironmentProject) -> bool {
     project
         .project

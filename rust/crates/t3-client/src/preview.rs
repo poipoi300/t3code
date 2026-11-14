@@ -1,7 +1,7 @@
 //! Browser preview protocol policy. The host owns JPEG decoding and presentation.
-pub mod open;
-pub mod gesture;
 pub mod file_path;
+pub mod gesture;
+pub mod open;
 use crate::device::{DeviceHubAccess, form_encode};
 use serde_json::{Value, json};
 use t3_contracts::preview::{

@@ -1,4 +1,4 @@
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt};
 use futures::{future::LocalBoxFuture, stream::LocalBoxStream};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -392,6 +392,22 @@ pub trait Platform: Storage {
     fn http(&self, request: HttpRequest) -> HostFuture<'_, HttpResponse>;
     fn websocket(&self, request: SocketRequest) -> HostFuture<'_, Box<dyn WebSocket>>;
     fn host(&self, action: HostAction) -> HostFuture<'_, HostReply>;
+    /// The raw launch address; claimed native schemes and HTTP origins are validated by the host.
+    fn app_url(&self) -> HostFuture<'_, Option<String>> {
+        async { Err(PlatformError::Unsupported("app URL".into())) }.boxed_local()
+    }
+    /// Current first, then resolved history/claimed-link changes. Drop releases host listeners.
+    fn app_url_changes(&self) -> LocalBoxStream<'static, Result<crate::navigation::AppUrlSnapshot, PlatformError>> {
+        futures::stream::once(async { Err(PlatformError::Unsupported("app URL history".into())) }).boxed_local()
+    }
+    /// A GoThenPush reply settles only after traversal resolves and the push prunes forward history.
+    fn navigate_app_url(&self, _request: crate::navigation::AppUrlRequest) -> HostFuture<'_, ()> {
+        async { Err(PlatformError::Unsupported("app URL navigation".into())) }.boxed_local()
+    }
+    fn text_download_supported(&self) -> bool { false }
+    fn download_text(&self, _filename: String, _contents: String, _media_type: String) -> HostFuture<'_, ()> {
+        async { Err(PlatformError::Unsupported("text download".into())) }.boxed_local()
+    }
     fn notification_permission(&self) -> HostFuture<'_, bool> {
         async move {
             match self.host(HostAction::NotificationPermission).await? {
@@ -450,9 +466,18 @@ pub trait Platform: Storage {
         }
         .boxed_local()
     }
+    /// Which links this host hands to the OS (`external_links::safe_external_url`).
+    fn external_url_surface(&self) -> crate::persistence::external_links::ExternalUrlSurface {
+        crate::persistence::external_links::ExternalUrlSurface::Web
+    }
     fn open_url(&self, url: String) -> HostFuture<'_, ()> {
         async move {
-            if !crate::persistence::external_links::is_web_url(&url) {
+            if crate::persistence::external_links::safe_external_url(
+                &url,
+                self.external_url_surface(),
+            )
+            .is_none()
+            {
                 return Err(PlatformError::InvalidData("Unable to open link.".into()));
             }
             match self.host(HostAction::OpenUrl(url)).await? {

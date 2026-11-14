@@ -106,7 +106,7 @@ impl<E: RpcEndpoint> RpcEndpoint for ObservedEndpoint<'_, E> {
                         failure.kind = FailureKind::Retry;
                     }
                     Some(failure)
-                },
+                }
                 Err(RpcCallError::Rejected(errors)) => Some(Failure {
                     kind: if errors.iter().any(should_retry) {
                         FailureKind::Retry
@@ -228,9 +228,20 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         };
         let input = serde_json::to_value(command)?;
         let id: CommandId = serde_json::from_value(input["commandId"].clone())?;
-        let replay = M::TAG == <WsOrchestrationV2LaunchThreadRpc as t3_contracts::rpc::RpcMethod>::TAG
-            && self.inner.launches.borrow().get(&message.message_id).is_some_and(|(revision, _)| *revision == self.inner.outbox.revision(&message.message_id));
-        let unknown = matches!(self.inner.commands.status(&id), Some(CommandStatus::UnknownDelivery));
+        let replay = M::TAG
+            == <WsOrchestrationV2LaunchThreadRpc as t3_contracts::rpc::RpcMethod>::TAG
+            && self
+                .inner
+                .launches
+                .borrow()
+                .get(&message.message_id)
+                .is_some_and(|(revision, _)| {
+                    *revision == self.inner.outbox.revision(&message.message_id)
+                });
+        let unknown = matches!(
+            self.inner.commands.status(&id),
+            Some(CommandStatus::UnknownDelivery)
+        );
         match self.inner.commands.status(&id) {
             Some(CommandStatus::Accepted { sequence }) => return Ok(Some(sequence)),
             Some(CommandStatus::AcceptedAwaitingEntity) => return Ok(None),
@@ -298,18 +309,41 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                     self.check_current(generation)?;
                     let committed = sequence(&reply);
                     if let Some(committed_sequence) = committed {
-                        self.inner.commands.resolve_receipt(self.inner.platform.as_ref(), &crate::operations::CommandReceipt {
-                            command: id, environment: message.environment_id.clone(), committed_sequence,
-                        }, self.projection_epoch(&message.thread_key())).await.map_err(operation_error)?;
+                        self.inner
+                            .commands
+                            .resolve_receipt(
+                                self.inner.platform.as_ref(),
+                                &crate::operations::CommandReceipt {
+                                    command: id,
+                                    environment: message.environment_id.clone(),
+                                    committed_sequence,
+                                },
+                                self.projection_epoch(&message.thread_key()),
+                            )
+                            .await
+                            .map_err(operation_error)?;
                     } else {
-                        self.inner.commands.resolve_entity(self.inner.platform.as_ref(), &id,
-                            &ProjectionKey::thread(message.environment_id.clone(), message.thread_id.clone()),
-                            self.projection_epoch(&message.thread_key())).await.map_err(operation_error)?;
+                        self.inner
+                            .commands
+                            .resolve_entity(
+                                self.inner.platform.as_ref(),
+                                &id,
+                                &ProjectionKey::thread(
+                                    message.environment_id.clone(),
+                                    message.thread_id.clone(),
+                                ),
+                                self.projection_epoch(&message.thread_key()),
+                            )
+                            .await
+                            .map_err(operation_error)?;
                     }
                     return Ok(committed);
                 }
                 Err(error) => {
-                    let failure = failure.borrow_mut().take().unwrap_or_else(|| Failure::error(&error.into_client_error()));
+                    let failure = failure
+                        .borrow_mut()
+                        .take()
+                        .unwrap_or_else(|| Failure::error(&error.into_client_error()));
                     return Err(self.fail(failure));
                 }
             }
@@ -359,15 +393,32 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             .records()
             .into_iter()
             .find(|record| record.command == message.command_id);
-        let launch = self.inner.launches.borrow().get(&message.message_id)
+        let launch = self
+            .inner
+            .launches
+            .borrow()
+            .get(&message.message_id)
             .filter(|(revision, _)| *revision == self.inner.outbox.revision(&message.message_id))
             .map(|(_, input)| input.clone());
         if let Some(input) = launch {
-            let settings = ThreadSettings { model_selection: input.model_selection.clone(), runtime_mode: input.runtime_mode, interaction_mode: input.interaction_mode };
-            if let Some(reason) = super::send_policy::block_reason(&config, Some(&input.project_id), message, &settings) {
+            let settings = ThreadSettings {
+                model_selection: input.model_selection.clone(),
+                runtime_mode: input.runtime_mode,
+                interaction_mode: input.interaction_mode,
+            };
+            if let Some(reason) = super::send_policy::block_reason(
+                &config,
+                Some(&input.project_id),
+                message,
+                &settings,
+            ) {
                 return Err(ClientError::InvalidPayload(reason));
             }
-            return self.execute::<WsOrchestrationV2LaunchThreadRpc>(message, &input, true, |reply| reply.sequence).await;
+            return self
+                .execute::<WsOrchestrationV2LaunchThreadRpc>(message, &input, true, |reply| {
+                    reply.sequence
+                })
+                .await;
         }
         if let Some(record) = existing {
             if record.method
@@ -694,7 +745,13 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             let input: OrchestrationV2ThreadLaunchInput = serde_json::from_value(
                 json!({"commandId":message.command_id,"threadId":message.thread_id,"projectId":creation.project_id,"title":title,"generateTitle":true,"modelSelection":settings.model_selection,"runtimeMode":settings.runtime_mode,"interactionMode":settings.interaction_mode,"workspaceStrategy":strategy,"creationSource":self.inner.source,"initialMessage":initial}),
             )?;
-            self.inner.launches.borrow_mut().insert(message.message_id.clone(), (self.inner.outbox.revision(&message.message_id), input.clone()));
+            self.inner.launches.borrow_mut().insert(
+                message.message_id.clone(),
+                (
+                    self.inner.outbox.revision(&message.message_id),
+                    input.clone(),
+                ),
+            );
             return self
                 .execute::<WsOrchestrationV2LaunchThreadRpc>(message, &input, true, |reply| {
                     reply.sequence
@@ -743,7 +800,15 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             .unwrap_or_else(|| Failure::error(&error));
         match failure.kind {
             FailureKind::Unknown => {
-                if self.inner.launches.borrow().get(&message.message_id).is_some_and(|(revision, _)| *revision == self.inner.outbox.revision(&message.message_id)) {
+                if self
+                    .inner
+                    .launches
+                    .borrow()
+                    .get(&message.message_id)
+                    .is_some_and(|(revision, _)| {
+                        *revision == self.inner.outbox.revision(&message.message_id)
+                    })
+                {
                     self.schedule_retry(&message.message_id, failure.reason);
                     return Ok(DeliveryResult::Retry);
                 }
@@ -801,8 +866,13 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         reason: &str,
     ) -> Result<bool, ClientError> {
         let drafts = self.inner.drafts.borrow().clone();
+        let web_drafts = self.inner.web_drafts.borrow().clone();
         let mut restored_text = None;
-        let draft_key = if let Some(drafts) = drafts {
+        let draft_key = if let Some(drafts) = web_drafts {
+            let key = drafts.recover_message(message).await?;
+            restored_text = drafts.document().borrow()["draftsByThreadKey"][&key]["prompt"].as_str().map(str::to_owned);
+            key
+        } else if let Some(drafts) = drafts {
             drafts.load().await?;
             let mut key = String::new();
             drafts.update(|current| {
@@ -897,17 +967,40 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             return Ok(());
         };
         let messages = self.inner.outbox.messages();
-        self.inner.launches.borrow_mut().retain(|id, _| messages.iter().any(|message| &message.message_id == id));
+        self.inner
+            .launches
+            .borrow_mut()
+            .retain(|id, _| messages.iter().any(|message| &message.message_id == id));
         for message in messages.iter().filter(|message| message.creation.is_some()) {
-            let unchanged = self.inner.launches.borrow().get(&message.message_id)
-                .is_some_and(|(revision, _)| *revision == self.inner.outbox.revision(&message.message_id));
+            let unchanged = self
+                .inner
+                .launches
+                .borrow()
+                .get(&message.message_id)
+                .is_some_and(|(revision, _)| {
+                    *revision == self.inner.outbox.revision(&message.message_id)
+                });
             let exists = environment.shell.status == crate::types::SyncStatus::Live
                 && environment.shell.session == generation
-                && environment.shell.snapshot.as_ref().is_some_and(|shell| shell.threads.iter().any(|thread| thread.id == message.thread_id));
+                && environment.shell.snapshot.as_ref().is_some_and(|shell| {
+                    shell
+                        .threads
+                        .iter()
+                        .any(|thread| thread.id == message.thread_id)
+                });
             if exists && !unchanged && !self.inner.editing.borrow().contains(&message.message_id) {
                 let revision = self.inner.outbox.revision(&message.message_id);
-                if self.restore_message(message, "The task changed after launch; its draft was recovered.").await? {
-                    self.inner.outbox.remove(message, Some(revision), || self.current(generation)).await?;
+                if self
+                    .restore_message(
+                        message,
+                        "The task changed after launch; its draft was recovered.",
+                    )
+                    .await?
+                {
+                    self.inner
+                        .outbox
+                        .remove(message, Some(revision), || self.current(generation))
+                        .await?;
                     self.inner.launches.borrow_mut().remove(&message.message_id);
                 }
             }

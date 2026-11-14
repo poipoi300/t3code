@@ -767,3 +767,163 @@ fn an_open_command_row_streams_its_output_and_a_settled_one_is_kept_for_five_min
     assert!(expired.view().is_some());
     assert_eq!(harness.server().state.borrow().command_output_subscribes, 3);
 }
+
+/// A runtime restored over storage damaged after `paired` saved one environment.
+fn restored_after(harness: &mut Harness, damage: impl FnOnce(&mut Harness)) -> ClientRuntime<TestPlatform> {
+    drop(paired(harness));
+    harness.settle();
+    damage(harness);
+    let restored = runtime(harness);
+    assert!(
+        harness.run(restored.restore()).is_ok(),
+        "restore carries on past a damaged record"
+    );
+    harness.settle();
+    restored
+}
+
+/// After damage, the environment can still be removed and a server paired again.
+fn still_removable_and_pairable(harness: &mut Harness, client: &ClientRuntime<TestPlatform>) {
+    for entry in client.environments() {
+        harness.run(client.remove(&entry.id)).unwrap();
+    }
+    harness.settle();
+    assert!(client.environments().is_empty());
+    harness.server().state.borrow_mut().undecryptable = None;
+    assert_eq!(harness.run(client.pair(pairing())), Ok(environment(ENV)));
+    harness.advance(5_000);
+    assert_eq!(client.environments()[0].state.phase, Phase::Connected);
+}
+
+#[test]
+fn an_undecryptable_credential_does_not_stop_restore_removal_or_pairing() {
+    // Platform review H1: TypeScript quarantines a corrupt catalog and carries on.
+    let mut harness = Harness::new(ENV);
+    let client = restored_after(&mut harness, |harness| {
+        harness.server().state.borrow_mut().undecryptable = Some("connection-credential".into());
+    });
+    let entries = client.environments();
+    assert_eq!(entries.len(), 1, "still listed, so it can be removed");
+    harness.advance(5_000);
+    assert_ne!(client.environments()[0].state.phase, Phase::Connected);
+    still_removable_and_pairable(&mut harness, &client);
+}
+
+#[test]
+fn a_credential_of_an_unknown_kind_does_not_stop_restore_removal_or_pairing() {
+    // A downgrade: an older build reads a credential `_tag` a newer one wrote.
+    let mut harness = Harness::new(ENV);
+    let client = restored_after(&mut harness, |harness| {
+        let platform = harness.platform.clone();
+        harness.run(async move {
+            let keys = platform
+                .list(StorageArea::Secure, "connection-credential".into())
+                .await
+                .unwrap();
+            let id = keys[0].record.clone();
+            let record = t3_client::persistence::Record::new(
+                "connection-credential",
+                None,
+                &id,
+                1,
+                serde_json::json!({"connectionId": id, "credential": {"_tag": "FutureConnectionCredential", "secret": "x"}}),
+            );
+            platform
+                .write(
+                    StorageArea::Secure,
+                    vec![t3_client::platform::StorageWrite {
+                        key: keys[0].clone(),
+                        value: Some(record.encode().unwrap()),
+                    }],
+                )
+                .await
+                .unwrap();
+        });
+    });
+    assert_eq!(client.environments().len(), 1);
+    still_removable_and_pairable(&mut harness, &client);
+}
+
+#[test]
+fn an_unreadable_catalog_is_quarantined_and_pairing_starts_afresh() {
+    let mut harness = Harness::new(ENV);
+    let client = restored_after(&mut harness, |harness| {
+        let platform = harness.platform.clone();
+        harness.run(async move {
+            platform
+                .write(
+                    StorageArea::Ordinary,
+                    vec![t3_client::platform::StorageWrite {
+                        key: t3_client::platform::StorageKey::new("connection-catalog", None, "current"),
+                        value: Some(b"{not a catalog".to_vec()),
+                    }],
+                )
+                .await
+                .unwrap();
+        });
+    });
+    assert!(client.environments().is_empty());
+    assert_eq!(
+        saved(&mut harness, StorageArea::Ordinary, "connection-catalog-quarantine"),
+        1,
+        "the unreadable catalog is kept aside, not discarded"
+    );
+    still_removable_and_pairable(&mut harness, &client);
+}
+
+#[test]
+fn removing_an_environment_leaves_no_copy_of_its_token_in_storage() {
+    // Platform review M2: a quarantined import copy held the token after removal.
+    use base64::Engine;
+    let mut harness = Harness::new(ENV);
+    let client = paired(&mut harness);
+    let platform = harness.platform.clone();
+    harness.run(async move {
+        let raw = serde_json::json!({"credentials":[{"credential":{"token":"paired-bearer"}}]});
+        let record = t3_client::persistence::Record::new(
+            "quarantine",
+            None,
+            "legacy-catalog",
+            1,
+            serde_json::json!({"bytesBase64": base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&raw).unwrap())}),
+        );
+        platform
+            .write(
+                StorageArea::Secure,
+                vec![t3_client::platform::StorageWrite {
+                    key: t3_client::platform::StorageKey::new("quarantine", None, "legacy-catalog"),
+                    value: Some(record.encode().unwrap()),
+                }],
+            )
+            .await
+            .unwrap();
+    });
+    harness.run(client.remove(&environment(ENV))).unwrap();
+    harness.settle();
+    let platform = harness.platform.clone();
+    let copies = harness.run(async move {
+        let mut copies = Vec::new();
+        for area in [StorageArea::Ordinary, StorageArea::Secure] {
+            for namespace in [
+                "connection-credential", "connection-profile", "connection-catalog", "remote-dpop-token",
+                "import-backup", "quarantine", "import-conflict", "connection-catalog-quarantine",
+            ] {
+                for key in platform.list(area, namespace.into()).await.unwrap() {
+                    let bytes = platform.get(area, key.clone()).await.unwrap().unwrap_or_default();
+                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    let decoded = serde_json::from_slice::<serde_json::Value>(&bytes)
+                        .ok()
+                        .and_then(|value| value["payload"]["bytesBase64"].as_str().map(str::to_owned))
+                        .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok())
+                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                        .unwrap_or_default();
+                    if text.contains("paired-bearer") || decoded.contains("paired-bearer") {
+                        copies.push(key);
+                    }
+                }
+            }
+        }
+        copies
+    });
+    assert!(copies.is_empty(), "{copies:?}");
+}

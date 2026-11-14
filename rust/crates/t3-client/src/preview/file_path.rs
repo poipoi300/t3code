@@ -38,7 +38,11 @@ pub fn format_workspace_relative_path(path: &str, workspace_root: Option<&str>) 
         if compare == compare_root {
             display = label.into();
         } else if compare.starts_with(&format!("{compare_root}/")) {
-            display = format!("{label}/{}", &path[root.len() + 1..]);
+            let suffix = path
+                .encode_utf16()
+                .skip(root.encode_utf16().count() + 1)
+                .collect::<Vec<_>>();
+            display = format!("{label}/{}", String::from_utf16_lossy(&suffix));
         } else if !path.starts_with('/') && !is_windows_absolute(path) {
             let relative = path
                 .strip_prefix("./")

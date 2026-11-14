@@ -174,10 +174,19 @@ pub(super) struct SendInner<P: Platform, E: RpcEndpoint> {
     pub changes: Changes,
     pub interrupted: Changes,
     pub prepared: RefCell<BTreeMap<MessageId, PreparedAttachments>>,
-    pub launches: RefCell<BTreeMap<MessageId, (u64, t3_contracts::orchestration_v2::OrchestrationV2ThreadLaunchInput)>>,
+    pub launches: RefCell<
+        BTreeMap<
+            MessageId,
+            (
+                u64,
+                t3_contracts::orchestration_v2::OrchestrationV2ThreadLaunchInput,
+            ),
+        >,
+    >,
     pub fanout_prepared: RefCell<BTreeMap<String, PreparedAttachments>>,
     pub failure: RefCell<Option<super::send_transport::Failure>>,
     pub drafts: RefCell<Option<Rc<super::mobile_store::MobileDraftStore<P>>>>,
+    pub web_drafts: RefCell<Option<Rc<super::draft_service::ComposerDraftService<P>>>>,
     /// Messages the server refused, kept visible until dismissed. Their text was restored into
     /// the thread's draft and their outbox row removed; this list lives in memory only.
     pub refused: RefCell<Vec<Refused>>,
@@ -233,6 +242,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                 fanout_prepared: RefCell::new(BTreeMap::new()),
                 failure: RefCell::new(None),
                 drafts: RefCell::new(None),
+                web_drafts: RefCell::new(None),
                 refused: RefCell::new(Vec::new()),
             }),
         }
@@ -353,14 +363,25 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         options: SendOptions,
     ) -> Result<bool, ClientError> {
         self.load().await?;
-        let _guard = self.inner.step_lock.lock().await;
+        let creation = self
+            .inner
+            .outbox
+            .messages()
+            .iter()
+            .any(|message| &message.message_id == id && message.creation.is_some());
+        let _guard = if creation {
+            None
+        } else {
+            Some(self.inner.step_lock.lock().await)
+        };
         let Some(current) = self.inner.outbox.messages().into_iter().find(|message| {
             message.environment_id == self.inner.environment && &message.message_id == id
         }) else {
             return Ok(false);
         };
         if self.inner.commands.status(&current.command_id).is_some()
-            && !(current.creation.is_some() && self.inner.launches.borrow().contains_key(id)) {
+            && !(current.creation.is_some() && self.inner.launches.borrow().contains_key(id))
+        {
             return Err(ClientError::InvalidPayload(
                 "This message has already entered delivery. Wait for its result before editing it."
                     .into(),
@@ -595,6 +616,10 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                 "Write a message or attach a file.".into(),
             ));
         }
+        let captured_draft = self.capture_web_draft(key, &text);
+        if let Some(validation) = super::submission::get_composer_prompt_length_validation_message(&text)? {
+            return Err(ClientError::Rejected { message: validation.message(), detail: None });
+        }
         self.load().await?;
         let settings = options
             .settings
@@ -605,6 +630,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         let command_id =
             crate::operations::allocate_command_id(self.inner.platform.as_ref(), None)?;
         let mut extra = serde_json::Map::new();
+        if let Some((_, draft)) = &captured_draft { extra.insert("composerDraft".into(), draft.clone()); }
         if let Some(group) = fanout_group {
             extra.insert("fanoutGroup".into(), serde_json::Value::String(group));
         }
@@ -650,6 +676,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             self.inner.changes.notify();
             return Err(error);
         }
+        self.accept_web_draft(key, captured_draft).await?;
         self.inner.changes.notify();
         Ok(message_id)
     }

@@ -200,19 +200,45 @@ pub async fn save_record<T: Serialize>(
     Ok(())
 }
 
-/// Reassembles the legacy catalog view from the shared public and secure records.
+/// A connection catalog as far as its records could be read.
+pub struct LoadedCatalog {
+    pub document: ConnectionCatalogDocument,
+    /// Records left out because they could not be read or have an unknown shape, by kind and
+    /// id. They stay where they are; removing their environment deletes them.
+    pub damaged: Vec<String>,
+    /// Targets dropped from the public record for an unknown shape.
+    pub dropped_targets: usize,
+}
+
+/// Reassembles the legacy catalog view from the shared public and secure records. Each record
+/// is decoded on its own: one that fails (an undecryptable row, a shape a newer build wrote) is
+/// left out and reported, so the rest still loads and its environment can still be removed.
+/// TypeScript discards and quarantines a corrupt catalog document the same way
+/// (`apps/web/src/connection/storage.ts`). Fails only when the public record itself is
+/// unreadable, which the caller quarantines.
 pub async fn load_connection_catalog(
     storage: &(impl Storage + ?Sized),
-) -> Result<Option<ConnectionCatalogDocument>> {
+) -> Result<Option<LoadedCatalog>> {
     let key = StorageKey::new("connection-catalog", None, "current");
     let Some(public) = load_record::<Value>(storage, StorageArea::Ordinary, &key, 1).await? else {
         return Ok(None);
     };
-    let targets: Vec<Value> = serde_json::from_value(public.payload["targets"].clone())
-        .map_err(|_| PersistenceError::Invalid("catalog targets"))?;
+    let Some(raw_targets) = public.payload["targets"].as_array() else {
+        return invalid("catalog targets");
+    };
+    let mut damaged = Vec::new();
+    let targets: Vec<Value> = raw_targets
+        .iter()
+        .filter(|target| valid_target(target))
+        .cloned()
+        .collect();
+    let dropped_targets = raw_targets.len() - targets.len();
     let disabled_environment_ids =
         serde_json::from_value(public.payload["disabledEnvironmentIds"].clone())
-            .map_err(|_| PersistenceError::Invalid("catalog disabled environments"))?;
+            .unwrap_or_else(|_| {
+                damaged.push("disabled environments".to_owned());
+                Vec::new()
+            });
     let mut doc = ConnectionCatalogDocument {
         targets,
         disabled_environment_ids,
@@ -228,59 +254,87 @@ pub async fn load_connection_catalog(
         .iter()
         .filter_map(|v| v["environmentId"].as_str().map(|v| EnvironmentId(v.into())))
         .collect();
+    let readable = |result: Result<Option<Record<Value>>>,
+                    valid: fn(&Value) -> bool,
+                    label: String,
+                    damaged: &mut Vec<String>| match result {
+        Ok(Some(record)) if valid(&record.payload) => Some(record.payload),
+        Ok(None) => None,
+        Ok(Some(_)) | Err(_) => {
+            damaged.push(label);
+            None
+        }
+    };
     for id in ids {
-        for (kind, rows) in [
-            ("connection-profile", &mut doc.profiles),
-            ("connection-credential", &mut doc.credentials),
+        for (kind, rows, valid) in [
+            (
+                "connection-profile",
+                &mut doc.profiles,
+                valid_profile as fn(&Value) -> bool,
+            ),
+            ("connection-credential", &mut doc.credentials, valid_credential),
         ] {
-            if let Some(record) = load_record::<Value>(
+            let result = load_record::<Value>(
                 storage,
                 StorageArea::Secure,
                 &StorageKey::new(kind, None, &id),
                 1,
             )
-            .await?
-            {
-                rows.push(record.payload);
+            .await;
+            if let Some(payload) = readable(result, valid, format!("{kind} {id}"), &mut damaged) {
+                rows.push(payload);
             }
         }
     }
     for environment in environments {
-        if let Some(record) = load_record::<Value>(
+        let result = load_record::<Value>(
             storage,
             StorageArea::Secure,
             &remote_dpop_token_key(&environment),
             1,
         )
-        .await?
-        {
-            doc.remote_dpop_tokens.push(record.payload);
+        .await;
+        if let Some(payload) = readable(
+            result,
+            valid_remote_dpop_token,
+            format!("remote-dpop-token {}", environment.0),
+            &mut damaged,
+        ) {
+            doc.remote_dpop_tokens.push(payload);
         }
-        if let Some(record) = load_record::<RoutingGrant>(
+        match load_record::<RoutingGrant>(
             storage,
             StorageArea::Ordinary,
-            &StorageKey::new("routing-grant", Some(environment), "current"),
+            &StorageKey::new("routing-grant", Some(environment.clone()), "current"),
             1,
         )
-        .await?
+        .await
         {
-            doc.github_routing_permissions
+            Ok(Some(record)) => doc
+                .github_routing_permissions
                 .get_or_insert_with(Vec::new)
-                .push(record.payload.grant);
+                .push(record.payload.grant),
+            Ok(None) => {}
+            Err(_) => damaged.push(format!("routing-grant {}", environment.0)),
         }
     }
-    if let Some(record) = load_record::<BTreeMap<String, Value>>(
+    match load_record::<BTreeMap<String, Value>>(
         storage,
         StorageArea::Secure,
         &StorageKey::new("connection-catalog-extra", None, "current"),
         1,
     )
-    .await?
+    .await
     {
-        doc.extra = record.payload;
+        Ok(Some(record)) => doc.extra = record.payload,
+        Ok(None) => {}
+        Err(_) => damaged.push("connection-catalog-extra".to_owned()),
     }
-    decode_catalog(&encode(&doc)?)?;
-    Ok(Some(doc))
+    Ok(Some(LoadedCatalog {
+        document: doc,
+        damaged,
+        dropped_targets,
+    }))
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -726,22 +780,24 @@ pub fn decode_catalog(bytes: &[u8]) -> Result<ConnectionCatalogDocument> {
     if doc.schema_version != 1
         || doc.targets.iter().any(|v| !valid_target(v))
         || doc.profiles.iter().any(|v| !valid_profile(v))
-        || doc.credentials.iter().any(|v| {
-            !has_strings(v, &["connectionId"])
-                || v["credential"]["_tag"] != "BearerConnectionCredential"
-                || !has_strings(&v["credential"], &["token"])
-        })
-        || doc.remote_dpop_tokens.iter().any(|v| {
-            !has_strings(
-                v,
-                &["environmentId", "label", "accessToken", "dpopThumbprint"],
-            ) || !has_strings(&v["endpoint"], &["httpBaseUrl", "wsBaseUrl"])
-                || !v["expiresAtEpochMs"].is_number()
-        })
+        || doc.credentials.iter().any(|v| !valid_credential(v))
+        || doc.remote_dpop_tokens.iter().any(|v| !valid_remote_dpop_token(v))
     {
         return invalid("connection catalog");
     }
     Ok(doc)
+}
+fn valid_credential(v: &Value) -> bool {
+    has_strings(v, &["connectionId"])
+        && v["credential"]["_tag"] == "BearerConnectionCredential"
+        && has_strings(&v["credential"], &["token"])
+}
+fn valid_remote_dpop_token(v: &Value) -> bool {
+    has_strings(
+        v,
+        &["environmentId", "label", "accessToken", "dpopThumbprint"],
+    ) && has_strings(&v["endpoint"], &["httpBaseUrl", "wsBaseUrl"])
+        && v["expiresAtEpochMs"].is_number()
 }
 fn has_strings(v: &Value, fields: &[&str]) -> bool {
     fields.iter().all(|key| v[*key].is_string())
@@ -1643,6 +1699,14 @@ pub async fn import_namespace(
     use base64::Engine;
     let checksum = namespace_checksum(namespace)?;
     let journal_key = import_journal_key(namespace, &checksum)?;
+    // Older builds kept a raw copy of every imported entry, credentials included. Entries that
+    // fail to parse are quarantined with their exact bytes, so those copies only leak tokens.
+    let stale_backups: Vec<_> = storage
+        .list(StorageArea::Secure, "import-backup".into())
+        .await?
+        .into_iter()
+        .map(|key| StorageWrite { key, value: None })
+        .collect();
     let old_journal = storage
         .get(StorageArea::Ordinary, journal_key.clone())
         .await?;
@@ -1653,6 +1717,9 @@ pub async fn import_namespace(
             && record.payload.source_version == namespace.source_version
             && record.payload.checksum == checksum
         {
+            if !stale_backups.is_empty() {
+                storage.write(StorageArea::Secure, stale_backups).await?;
+            }
             return Ok(ImportReport {
                 status: ImportStatus::AlreadyImported,
                 imported: 0,
@@ -1680,7 +1747,6 @@ pub async fn import_namespace(
             &entry.location,
             &checksum,
         ))?;
-        candidates.push(imported("import-backup", None, &location_id, 1, json!({ "source": namespace.source, "location": entry.location, "bytesBase64": base64::engine::general_purpose::STANDARD.encode(&entry.bytes) }), StorageArea::Secure));
         match read_legacy_entry(entry) {
             Ok(records) => {
                 for record in &records {
@@ -1801,10 +1867,63 @@ pub async fn import_namespace(
         key: journal_key.clone(),
         value: Some(Record::new("import-journal", None, &journal_key.record, 1, journal).encode()?),
     });
+    transaction.secure.extend(stale_backups);
     if !storage.transaction(transaction).await? {
         return Err(PersistenceError::Conflict);
     }
     Ok(report)
+}
+/// Deletes the import copies (old backups, quarantined entries, import conflicts) that mention
+/// `environment` or contain any of `secrets`, so removing an environment leaves no copy of its
+/// token. A copy that cannot be read cannot be inspected and stays.
+pub async fn purge_environment_copies(
+    storage: &(impl Storage + ?Sized),
+    environment: &EnvironmentId,
+    secrets: &[String],
+) -> Result<usize> {
+    use base64::Engine;
+    fn embedded(value: &Value, text: &mut String) {
+        match value {
+            Value::Object(map) => {
+                for (key, value) in map {
+                    if key == "bytesBase64"
+                        && let Some(bytes) = value
+                            .as_str()
+                            .and_then(|v| base64::engine::general_purpose::STANDARD.decode(v).ok())
+                    {
+                        text.push_str(&String::from_utf8_lossy(&bytes));
+                    }
+                    embedded(value, text);
+                }
+            }
+            Value::Array(values) => values.iter().for_each(|value| embedded(value, text)),
+            _ => {}
+        }
+    }
+    let mut deletes = Vec::new();
+    for namespace in ["import-backup", "quarantine", "import-conflict"] {
+        for key in storage.list(StorageArea::Secure, namespace.into()).await? {
+            let Ok(Some(bytes)) = storage.get(StorageArea::Secure, key.clone()).await else {
+                continue;
+            };
+            let mut text = String::from_utf8_lossy(&bytes).into_owned();
+            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                embedded(&value, &mut text);
+            }
+            if text.contains(&environment.0)
+                || secrets
+                    .iter()
+                    .any(|secret| !secret.is_empty() && text.contains(secret.as_str()))
+            {
+                deletes.push(StorageWrite { key, value: None });
+            }
+        }
+    }
+    let purged = deletes.len();
+    if purged > 0 {
+        storage.write(StorageArea::Secure, deletes).await?;
+    }
+    Ok(purged)
 }
 fn newer_preferences(incoming: &[u8], existing: &[u8]) -> bool {
     let new: std::result::Result<Record<Value>, _> = serde_json::from_slice(incoming);

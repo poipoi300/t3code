@@ -4,6 +4,7 @@
 //! the threads screens have open, and the per-environment message delivery. Screens read the
 //! store and call these methods; they never touch connections, sessions or credentials. The
 //! crate owns no executor, so the UI supplies a spawner for the futures it must keep running.
+mod composer;
 use crate::{
     ClientError, ClientStore,
     authorization::RemoteAuthorization,
@@ -105,6 +106,7 @@ struct Environment<P: Platform + 'static> {
 struct Inner<P: Platform + Clone + 'static> {
     platform: P,
     store: ClientStore,
+    git_panel: Rc<crate::workspace::git_panel::GitPanelState>,
     source: OrchestrationV2CreationSource,
     spawn: Spawner,
     environments: RefCell<Vec<Environment<P>>>,
@@ -118,6 +120,7 @@ struct Inner<P: Platform + Clone + 'static> {
     /// Serializes changes to the saved environments (pair, restore, reconnect, remove) so they
     /// apply in the order asked, as TypeScript's registry lease does.
     registry: Mutex<()>,
+    thread_operations: Rc<crate::thread_views::thread_ops::ThreadOpsState>,
     /// Open command rows by identity, so every reader of one row shares one subscription.
     command_outputs: RefCell<BTreeMap<String, std::rc::Weak<CommandOutputShared>>>,
     /// Settled commands' final output, kept until the instant given after the last reader left.
@@ -125,10 +128,13 @@ struct Inner<P: Platform + Clone + 'static> {
     /// One authorization for every environment, as TypeScript's; relay-capable with a relay.
     authorization: RemoteAuthorization,
     relay: Option<Relay>,
+    composer_drafts: Rc<crate::thread_views::composer::draft_service::ComposerDraftService<P>>,
+    composer_task: AbortHandle,
 }
 
 impl<P: Platform + Clone + 'static> Drop for Inner<P> {
     fn drop(&mut self) {
+        self.composer_task.abort();
         if let Some(relay) = &self.relay {
             relay.task.abort();
         }
@@ -218,10 +224,16 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         authorization: RemoteAuthorization,
         relay: Option<Relay>,
     ) -> Self {
+        let composer_drafts = Rc::new(crate::thread_views::composer::draft_service::ComposerDraftService::new(Rc::new(platform.clone())));
+        let (composer_task, composer_registration) = AbortHandle::new_pair();
+        spawn(Abortable::new(composer_drafts.clone().run(), composer_registration).map(|_| ()).boxed_local());
         Self {
             inner: Rc::new(Inner {
+                composer_drafts,
+                composer_task,
                 platform,
                 store,
+                git_panel: Rc::default(),
                 source,
                 spawn,
                 environments: RefCell::new(Vec::new()),
@@ -230,6 +242,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 message_listeners: Rc::default(),
                 queries: RefCell::new(BTreeMap::new()),
                 registry: Mutex::new(()),
+                thread_operations: Rc::default(),
                 command_outputs: RefCell::new(BTreeMap::new()),
                 settled_outputs: Rc::default(),
                 authorization,
@@ -238,8 +251,24 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         }
     }
 
+    pub fn navigation(&self) -> crate::navigation::UrlClient<P> {
+        crate::navigation::UrlClient::new(self.inner.platform.clone())
+    }
+
     pub fn store(&self) -> &ClientStore {
         &self.inner.store
+    }
+
+    pub fn git_panel(&self) -> crate::workspace::git_panel::GitPanel<P> {
+        crate::workspace::git_panel::GitPanel::new(self.clone(), self.inner.platform.clone(), self.inner.spawn.clone(), self.inner.git_panel.clone())
+    }
+
+    pub fn approval_services(&self) -> crate::thread_views::thread_ops::ThreadOperations<P> {
+        crate::thread_views::thread_ops::ThreadOperations::new(self.clone(), self.inner.platform.clone(), self.inner.thread_operations.clone())
+    }
+
+    pub fn plan_services(&self) -> crate::thread_views::thread_ops::ThreadOperations<P> {
+        self.approval_services()
     }
 
     /// Supervises every environment saved by an earlier run, in catalogue order, with its saved
@@ -363,7 +392,6 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             let _lease = this.inner.registry.lock().await;
             let platform = this.inner.platform.clone();
             let mut registry = this.load_registry().await?;
-            registry.bind_authorization(this.inner.authorization.clone());
             registry.register(
                 EnvironmentRegistration {
                     id: environment.clone(),
@@ -396,7 +424,6 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             let _lease = this.inner.registry.lock().await;
             let platform = this.inner.platform.clone();
             let mut registry = this.load_registry().await?;
-            registry.bind_authorization(this.inner.authorization.clone());
             let relayed: Vec<_> = registry
                 .entries()
                 .filter(|registration| {
@@ -954,14 +981,18 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             .retain(|listener| listener.unbounded_send(()).is_ok());
     }
 
+    /// The saved catalog, bound to the shared authorization so a removal forgets the
+    /// environment's sessions and a later registration allows it again.
     async fn load_registry(&self) -> Result<EnvironmentRegistry<SessionEndpoint>, ClientError> {
         let platform = &self.inner.platform;
-        EnvironmentRegistry::load(
+        let mut registry = EnvironmentRegistry::load(
             platform,
             NetworkStatus::Unknown,
             Time::from_platform(platform),
         )
-        .await
+        .await?;
+        registry.bind_authorization(self.inner.authorization.clone());
+        Ok(registry)
     }
 
     /// Starts supervising a saved environment and lists it; the caller holds the registry lease.
@@ -1012,11 +1043,14 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         self.notify_messages();
         let platform = self.inner.platform.clone();
         let mut registry = self.load_registry().await?;
-        registry.bind_authorization(self.inner.authorization.clone());
         let mut ssh_targets = Vec::new();
+        let mut secrets = Vec::new();
         if let Some(handle) = registry.get(environment) {
             let stores = ConnectionStores::new(Rc::new(platform.clone()));
             for route in handle.registration().routes.clone() {
+                if let Ok(Some(credential)) = stores.credential(environment, &route.id).await {
+                    secrets.push(credential.token().expose().clone());
+                }
                 if route.mode == ConnectionMode::Ssh
                     && let Ok(Some(ConnectionProfile::Ssh { target, .. })) =
                         stores.profile(environment, &route.id).await
@@ -1032,6 +1066,9 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         for target in ssh_targets {
             let _ = platform.ssh_disconnect(target).await;
         }
+        crate::persistence::purge_environment_copies(&platform, environment, &secrets)
+            .await
+            .map_err(|_| ClientError::InvalidPayload("could not purge imported copies".into()))?;
         // A later pairing of the same server must not deliver what was queued for this one.
         SendService::<P, SessionEndpoint>::forget_saved(Rc::new(platform), environment).await
     }
@@ -1129,6 +1166,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             self.inner.store.clone(),
             self.inner.source.clone(),
         );
+        send.attach_web_drafts(self.composer_drafts());
         let delivery = send.run();
         let mut message_changes = send.changes();
         let message_listeners = self.inner.message_listeners.clone();

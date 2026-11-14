@@ -143,6 +143,10 @@ fn interrupted_pointer_ends_and_resizes_hold_the_starting_shape() {
 
 #[test]
 fn windows_paths_outside_the_workspace_keep_their_absolute_label_and_position() {
+    assert_eq!(
+        file_path::format_workspace_relative_path("C:/k/文.ts", Some("C:/K")),
+        "K/文.ts"
+    );
     let root = r"C:\Users\mike\dev-stuff\t3code";
     for (path, expected) in [
         (
