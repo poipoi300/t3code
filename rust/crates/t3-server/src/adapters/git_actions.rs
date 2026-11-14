@@ -53,7 +53,8 @@ pub struct GitActionsAdapter {
     worktrees: PathBuf,
 }
 
-pub type ActionStream = BoxStream<'static, Result<GitActionProgressEvent, Box<GitManagerServiceError>>>;
+pub type ActionStream =
+    BoxStream<'static, Result<GitActionProgressEvent, Box<GitManagerServiceError>>>;
 
 impl GitActionsAdapter {
     /// After the pull-request service (pushed refreshes) and the project setup runner.
@@ -61,7 +62,9 @@ impl GitActionsAdapter {
         context: &crate::services::DomainContext<'_>,
         domains: &crate::services::Domains,
     ) -> Option<Arc<Self>> {
-        let git = domains.get::<GitAdapter>().filter(|git| git.is_available())?;
+        let git = domains
+            .get::<GitAdapter>()
+            .filter(|git| git.is_available())?;
         git.vcs()?;
         let orchestration = domains.get::<OrchestrationAdapter>()?;
         orchestration.composed()?;
@@ -121,12 +124,7 @@ impl GitActionsAdapter {
             .vcs()
             .ok_or_else(|| PullRequestRefusal::Git(manager_error(OPERATION, &input.cwd.0)))?;
         // A checkout without a recognised forge can still commit and push.
-        let forge = self
-            .forge
-            .registry()
-            .resolve(git.cwd(), None)
-            .await
-            .ok();
+        let forge = self.forge.registry().resolve(git.cwd(), None).await.ok();
         let failure = Arc::new(Mutex::new(None));
         let text = Arc::new(WorkflowText {
             textgen: self.textgen.clone(),
@@ -144,10 +142,11 @@ impl GitActionsAdapter {
             workflow = workflow.with_worktree_host(host);
         }
         if let Some(handle) = forge {
-            workflow = workflow.with_review_host(Arc::new(t3_forge::review_host::ForgeReviewHost::new(
-                handle,
-                Arc::new(WorktreeSetup(self.setup.clone())),
-            )));
+            workflow =
+                workflow.with_review_host(Arc::new(t3_forge::review_host::ForgeReviewHost::new(
+                    handle,
+                    Arc::new(WorktreeSetup(self.setup.clone())),
+                )));
         }
         let application = GitApplicationService::new(
             workflow,
@@ -190,8 +189,8 @@ impl GitActionsAdapter {
         if input.mode == GitPreparePullRequestThreadMode::Worktree
             && let Some(setting) = vcs.worktree_directory_refusal().await
         {
-            return Err(PullRequestRefusal::Git(Box::new(GitManagerServiceError::Command(
-                GitCommandError {
+            return Err(PullRequestRefusal::Git(Box::new(
+                GitManagerServiceError::Command(GitCommandError {
                     operation: "GitVcsDriver.createWorktree".into(),
                     command: "git worktree add".into(),
                     cwd: input.cwd.0.clone(),
@@ -199,8 +198,8 @@ impl GitActionsAdapter {
                         "The worktree location \"{setting}\" must be an absolute folder on this machine, not a drive root. Change it in Settings → Worktrees."
                     ),
                     ..crate::adapters::git::command_error(OPERATION)
-                },
-            ))));
+                }),
+            )));
         }
         let handle = self
             .forge
@@ -220,7 +219,9 @@ impl GitActionsAdapter {
         let result = host
             .prepare_pull_request_thread(workflow, &input)
             .await
-            .map_err(|error| PullRequestRefusal::Git(service_error(error, OPERATION, &input.cwd.0)))?;
+            .map_err(|error| {
+                PullRequestRefusal::Git(service_error(error, OPERATION, &input.cwd.0))
+            })?;
         let _ = vcs
             .broadcaster()
             .refresh_status(Path::new(&input.cwd.0), false)
@@ -374,7 +375,11 @@ impl GitActionHost for ActionHost {
             .filter(|remote| matches!(remote.scheme(), "http" | "https"))
             .and_then(|remote| {
                 let host = remote.host_str()?.to_lowercase();
-                Some(remote.port().map_or(host.clone(), |port| format!("{host}:{port}")))
+                Some(
+                    remote
+                        .port()
+                        .map_or(host.clone(), |port| format!("{host}:{port}")),
+                )
             });
         let host = web_host.unwrap_or_else(|| {
             text("canonicalKey")
@@ -465,9 +470,12 @@ impl WorkflowText {
         let selection = match &settings.source_control_writer_model_selection {
             None => settings.text_generation_model_selection.clone(),
             Some(selection) => {
-                let json = serde_json::to_value(&settings).map_err(|_| GenerationError::Provider)?;
+                let json =
+                    serde_json::to_value(&settings).map_err(|_| GenerationError::Provider)?;
                 let id = selection.instance_id.0.as_str();
-                let usable = settings.text_generators.contains_key(&selection.instance_id)
+                let usable = settings
+                    .text_generators
+                    .contains_key(&selection.instance_id)
                     || providers.iter().any(|provider| {
                         let snapshot = serde_json::to_value(provider).unwrap_or_default();
                         snapshot["instanceId"] == id
@@ -528,7 +536,9 @@ impl WorkflowText {
             branch_instructions: None,
         };
         match writer.style.mode {
-            SourceControlWritingStyleMode::ConventionalCommits => instructions(CONVENTIONAL_COMMITS),
+            SourceControlWritingStyleMode::ConventionalCommits => {
+                instructions(CONVENTIONAL_COMMITS)
+            }
             SourceControlWritingStyleMode::Custom => {
                 let custom = writer.style.custom_instructions.0.as_str();
                 if custom.is_empty() {
@@ -543,7 +553,8 @@ impl WorkflowText {
                 let id = writer.selection.instance_id.0.as_str();
                 let claude_writer = id == "claudeAgent"
                     || writer.providers.iter().any(|provider| {
-                        provider.instance_id.0.as_str() == id && provider.driver.0.as_str() == "claudeAgent"
+                        provider.instance_id.0.as_str() == id
+                            && provider.driver.0.as_str() == "claudeAgent"
                     });
                 let claude = if claude_writer {
                     repository_instructions(git.cwd(), "CLAUDE.md").await
@@ -570,7 +581,10 @@ impl WorkflowText {
                     instructions(REPOSITORY_CONVENTIONS)
                 } else {
                     GenerationPolicy {
-                        commit_instructions: Some(format!("{}\n\n{examples}", REPOSITORY_CONVENTIONS.0)),
+                        commit_instructions: Some(format!(
+                            "{}\n\n{examples}",
+                            REPOSITORY_CONVENTIONS.0
+                        )),
                         change_request_instructions: Some(format!(
                             "{}\n\n{examples}",
                             REPOSITORY_CONVENTIONS.1
@@ -605,18 +619,21 @@ impl WorkflowText {
     async fn thread_context(&self) -> Option<String> {
         let thread = self.thread_id.clone()?;
         let runtime = self.orchestration.composed()?;
-        let snapshot = match ProjectionReader::snapshot(runtime.projections.as_ref(), thread, None).await {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                tracing::warn!(%error, "GitManager.readThreadContext failed");
-                return None;
-            }
-        };
+        let snapshot =
+            match ProjectionReader::snapshot(runtime.projections.as_ref(), thread, None).await {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    tracing::warn!(%error, "GitManager.readThreadContext failed");
+                    return None;
+                }
+            };
         let projection = serde_json::to_value(&snapshot.projection).ok()?;
         let messages: Vec<Value> = projection["visibleTurnItems"]
             .as_array()?
             .iter()
-            .filter_map(|row| historical_message(&limit_command_output(row.get("item").unwrap_or(row))))
+            .filter_map(|row| {
+                historical_message(&limit_command_output(row.get("item").unwrap_or(row)))
+            })
             .collect();
         let (selected, context) = select_history(
             &messages,
@@ -629,14 +646,22 @@ impl WorkflowText {
 
 #[async_trait::async_trait]
 impl WorkflowTextGenerator for WorkflowText {
-    async fn commit_message(&self, git: &Git, context: &PreparedCommit) -> Result<String, GitError> {
+    async fn commit_message(
+        &self,
+        git: &Git,
+        context: &PreparedCommit,
+    ) -> Result<String, GitError> {
         const OPERATION: &str = "generateCommitMessage";
         let writer = self
             .writer(git.cwd())
             .await
             .map_err(|error| self.fail(git, OPERATION, error))?;
         let policy = self.policy(git, &writer).await;
-        let branch = git.status_details().await.ok().and_then(|details| details.branch);
+        let branch = git
+            .status_details()
+            .await
+            .ok()
+            .and_then(|details| details.branch);
         let generated = self
             .generate(
                 git,
@@ -729,7 +754,14 @@ async fn base_range_ref(git: &Git, base: &str) -> String {
 async fn recent_commit_subjects(git: &Git) -> Vec<String> {
     git.execute_command(
         "GitManager.readRecentCommitSubjects",
-        &["log", "-n", "20", "--no-merges", "--no-show-signature", "--pretty=format:%s"],
+        &[
+            "log",
+            "-n",
+            "20",
+            "--no-merges",
+            "--no-show-signature",
+            "--pretty=format:%s",
+        ],
         ExecuteOptions::default(),
     )
     .await
@@ -897,7 +929,9 @@ fn json_bytes(value: &impl serde::Serialize) -> usize {
 }
 
 fn history_cost(messages: &[Value], context: &str) -> usize {
-    json_bytes(&history_response_items(messages, context)).max(json_bytes(&render_history(messages, context))) + 256
+    json_bytes(&history_response_items(messages, context))
+        .max(json_bytes(&render_history(messages, context)))
+        + 256
 }
 
 /// `selectHistory` with no prior omissions: the latest user and assistant messages and the
@@ -921,7 +955,9 @@ fn select_history(messages: &[Value], coverage: &str, budget: usize) -> (Vec<Val
     let mut widest: Vec<String> = messages.iter().map(id).collect();
     widest.sort_by_key(|id| std::cmp::Reverse(utf16_len(id)));
     widest.truncate(MAX_LISTED_OMITTED_ITEMS);
-    while !widest.is_empty() && json_bytes(&omitted_list(&widest, max_omitted)) as f64 > budget as f64 / 8.0 {
+    while !widest.is_empty()
+        && json_bytes(&omitted_list(&widest, max_omitted)) as f64 > budget as f64 / 8.0
+    {
         widest.pop();
     }
     let context_for = |count: usize, omitted: usize, omitted_ids: &[String]| {
@@ -935,25 +971,38 @@ fn select_history(messages: &[Value], coverage: &str, budget: usize) -> (Vec<Val
             omitted_list(listed, omitted)
         )
     };
-    let mut remaining = budget as i64 - history_cost(&[], &context_for(messages.len(), max_omitted, &widest)) as i64;
+    let mut remaining = budget as i64
+        - history_cost(&[], &context_for(messages.len(), max_omitted, &widest)) as i64;
     let mut selected = vec![false; messages.len()];
     let mut try_add = |index: Option<usize>, remaining: &mut i64| {
         let Some(index) = index else { return };
         let message = &messages[index];
-        if selected[index] || utf16_len(message["text"].as_str().unwrap_or_default()) as i64 > *remaining {
+        if selected[index]
+            || utf16_len(message["text"].as_str().unwrap_or_default()) as i64 > *remaining
+        {
             return;
         }
         let response = &history_response_items(std::slice::from_ref(message), "")[1];
-        let cost = (json_bytes(response) + 1).max(json_bytes(&render_historical_message(message)) + 4) as i64;
+        let cost = (json_bytes(response) + 1)
+            .max(json_bytes(&render_historical_message(message)) + 4) as i64;
         if cost > *remaining {
             return;
         }
         selected[index] = true;
         *remaining -= cost;
     };
-    try_add(messages.iter().rposition(|m| m["role"] == "user"), &mut remaining);
-    try_add(messages.iter().rposition(|m| m["role"] == "assistant"), &mut remaining);
-    try_add(messages.iter().position(|m| m["role"] == "user"), &mut remaining);
+    try_add(
+        messages.iter().rposition(|m| m["role"] == "user"),
+        &mut remaining,
+    );
+    try_add(
+        messages.iter().rposition(|m| m["role"] == "assistant"),
+        &mut remaining,
+    );
+    try_add(
+        messages.iter().position(|m| m["role"] == "user"),
+        &mut remaining,
+    );
     for index in (0..messages.len()).rev() {
         try_add(Some(index), &mut remaining);
     }
@@ -984,7 +1033,10 @@ mod tests {
             sanitize_commit_message("  Fix login...\nsecond line", "  body \n"),
             ("Fix login".into(), "body".into())
         );
-        assert_eq!(sanitize_commit_message("...", ""), ("Update project files".into(), String::new()));
+        assert_eq!(
+            sanitize_commit_message("...", ""),
+            ("Update project files".into(), String::new())
+        );
         let long = "a".repeat(80);
         assert_eq!(sanitize_commit_message(&long, "").0.len(), 72);
         assert_eq!(limit_context("abcdef", 3), "abc\n\n[truncated]");
@@ -995,15 +1047,37 @@ mod tests {
     fn thread_context_keeps_the_latest_exchange_within_its_budget() {
         let message = |id: &str, role: &str, text: &str| json!({"type": if role == "user" {"user_message"} else {"assistant_message"}, "text": text, "threadId":"t", "runId": null, "id": id, "providerThreadId": null, "status":"completed"});
         let items: Vec<Value> = (0..40)
-            .map(|index| message(&format!("item-{index}"), if index % 2 == 0 { "user" } else { "assistant" }, &"x".repeat(900)))
+            .map(|index| {
+                message(
+                    &format!("item-{index}"),
+                    if index % 2 == 0 { "user" } else { "assistant" },
+                    &"x".repeat(900),
+                )
+            })
             .filter_map(|item| historical_message(&item))
             .collect();
         let (chosen, context) = select_history(&items, "Digest", 16_000);
-        let ids: Vec<_> = chosen.iter().map(|m| m["itemId"].as_str().unwrap_or_default().to_owned()).collect();
-        assert!(ids.contains(&"item-0".to_owned()) && ids.contains(&"item-39".to_owned()) && ids.contains(&"item-38".to_owned()));
+        let ids: Vec<_> = chosen
+            .iter()
+            .map(|m| m["itemId"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        assert!(
+            ids.contains(&"item-0".to_owned())
+                && ids.contains(&"item-39".to_owned())
+                && ids.contains(&"item-38".to_owned())
+        );
         assert!(render_history(&chosen, &context).len() <= 16_000);
-        assert!(context.contains(&format!("Selected {} intact items; omitted {} items.", chosen.len(), 40 - chosen.len())));
+        assert!(context.contains(&format!(
+            "Selected {} intact items; omitted {} items.",
+            chosen.len(),
+            40 - chosen.len()
+        )));
         let output = json!({"type":"command_execution","output":"y".repeat(2_500),"input":"ls","exitCode":0});
-        assert!(limit_command_output(&output)["output"].as_str().unwrap_or_default().starts_with("[truncated]\n"));
+        assert!(
+            limit_command_output(&output)["output"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("[truncated]\n")
+        );
     }
 }

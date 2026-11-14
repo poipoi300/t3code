@@ -567,21 +567,10 @@ mod runtime_intake {
 
     #[async_trait::async_trait]
     impl RuntimeTaskIntake for RuntimeIntake {
-        async fn validate(&self, task: &ScheduledTask, _destination_changed: bool) -> Result<()> {
-            // The backend checked a changed destination; the project itself must still exist.
-            let snapshot = self
-                .runtime
-                .projections
-                .shell_snapshot(Some(vec![task.project_id.clone()]), None)
-                .await
-                .map_err(|_| Error::Invalid("Could not read the task's project.".into()))?;
-            if !snapshot
-                .projects
-                .iter()
-                .any(|project| project.id == task.project_id)
-            {
-                return Err(Error::Invalid("Project not found.".into()));
-            }
+        /// TypeScript's `upsert` and `setEnabled` check only a changed bound destination, which
+        /// the backend does; an unbound draft for any project saves disabled and cannot be
+        /// enabled or launched while no launch environment is assembled (`LAUNCH_UNAVAILABLE`).
+        async fn validate(&self, _task: &ScheduledTask, _destination_changed: bool) -> Result<()> {
             Ok(())
         }
 

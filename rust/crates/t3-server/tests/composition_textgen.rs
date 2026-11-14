@@ -142,7 +142,11 @@ fn fake_glab(bin: &Path) {
         "source_branch": "feature", "target_branch": "main",
     });
     std::fs::write(bin.join("mr.json"), request.to_string()).unwrap();
-    std::fs::write(bin.join("project.json"), json!({"id": 42, "path_with_namespace": "acme/web"}).to_string()).unwrap();
+    std::fs::write(
+        bin.join("project.json"),
+        json!({"id": 42, "path_with_namespace": "acme/web"}).to_string(),
+    )
+    .unwrap();
     if cfg!(windows) {
         std::fs::write(
             bin.join("glab.cmd"),
@@ -173,7 +177,10 @@ fn fake_glab(bin: &Path) {
 fn ok(exit: Exit) -> Value {
     match exit {
         Exit::Success { value } => value.unwrap_or(Value::Null),
-        other => panic!("expected success, got {}", serde_json::to_value(other).unwrap()),
+        other => panic!(
+            "expected success, got {}",
+            serde_json::to_value(other).unwrap()
+        ),
     }
 }
 
@@ -265,7 +272,9 @@ impl Server {
                 ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
                 (
                     "GIT_CONFIG_GLOBAL".into(),
-                    home.join(".no-global-config").to_string_lossy().into_owned(),
+                    home.join(".no-global-config")
+                        .to_string_lossy()
+                        .into_owned(),
                 ),
                 ("GIT_TERMINAL_PROMPT".into(), "0".into()),
                 ("GIT_AUTHOR_NAME".into(), "t3".into()),
@@ -393,7 +402,8 @@ impl Server {
         match self.event().await.expect("connection closed") {
             CallEvent::Chunk { id, values } => {
                 self.client.acknowledge(id.clone());
-                self.chunks.extend(values.into_iter().map(|value| (id.clone(), value)));
+                self.chunks
+                    .extend(values.into_iter().map(|value| (id.clone(), value)));
             }
             CallEvent::Exit { id, exit } => self.exits.push((id, exit)),
             other => panic!("unexpected {other:?}"),
@@ -501,12 +511,17 @@ async fn a_new_threads_title_is_generated_once_by_the_configured_text_generator(
     assert_eq!(requests.len(), 1, "one generation request");
     assert_eq!(requests[0].0, "Bearer test-key");
     assert!(
-        requests[0].1.contains("Fix pairing expiry and preserve remote access."),
+        requests[0]
+            .1
+            .contains("Fix pairing expiry and preserve remote access."),
         "{}",
         requests[0].1
     );
     let titles = ok(s
-        .call("orchestration.getThreadTitles", json!({"threadIds": [thread]}))
+        .call(
+            "orchestration.getThreadTitles",
+            json!({"threadIds": [thread]}),
+        )
         .await);
     assert_eq!(titles[thread], "Fix Pairing Expiry");
 
@@ -539,8 +554,21 @@ async fn stacked_actions_commit_and_push_with_a_generated_message() {
     let repo = s.home().join("work").join("app");
     repository(&repo);
     let remote = s.home().join("remote.git");
-    git(s.home(), &["init", "-q", "--bare", "-b", "main", &remote.to_string_lossy()]);
-    git(&repo, &["remote", "add", "origin", &remote.to_string_lossy()]);
+    git(
+        s.home(),
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            &remote.to_string_lossy(),
+        ],
+    );
+    git(
+        &repo,
+        &["remote", "add", "origin", &remote.to_string_lossy()],
+    );
     git(&repo, &["push", "-q", "-u", "origin", "main"]);
     s.create_project("project:app", &repo, json!([])).await;
 
@@ -558,9 +586,15 @@ async fn stacked_actions_commit_and_push_with_a_generated_message() {
         .iter()
         .find(|event| event["kind"] == "action_finished")
         .unwrap_or_else(|| panic!("no action_finished in {events:?}"));
-    assert_eq!(finished["result"]["commit"]["subject"], "Add greeting", "{finished}");
+    assert_eq!(
+        finished["result"]["commit"]["subject"], "Add greeting",
+        "{finished}"
+    );
     assert_eq!(finished["result"]["push"]["status"], "pushed", "{finished}");
-    assert_eq!(git(&repo, &["log", "-1", "--format=%B"]).trim(), "Add greeting\n\nGenerated body");
+    assert_eq!(
+        git(&repo, &["log", "-1", "--format=%B"]).trim(),
+        "Add greeting\n\nGenerated body"
+    );
     assert_eq!(
         git(&repo, &["rev-parse", "HEAD"]),
         git(&remote, &["rev-parse", "refs/heads/main"])
@@ -583,7 +617,10 @@ async fn stacked_actions_commit_and_push_with_a_generated_message() {
     assert_eq!(error["_tag"], "TextGenerationError", "{error}");
     assert_eq!(error["operation"], "generateCommitMessage");
     assert_eq!(error["detail"], "The model API rejected the API key.");
-    assert!(events.iter().any(|event| event["kind"] == "action_failed"), "{events:?}");
+    assert!(
+        events.iter().any(|event| event["kind"] == "action_failed"),
+        "{events:?}"
+    );
     assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head);
 
     // Refusals: a checkout outside every workspace, and a session without source-control:write.
@@ -616,7 +653,10 @@ async fn pull_request_threads_get_a_worktree_and_the_projects_setup_script() {
     let repo = s.home().join("work").join("review");
     repository(&repo);
     git(&repo, &["branch", "feature"]);
-    git(&repo, &["remote", "add", "origin", "https://gitlab.com/acme/web.git"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", "https://gitlab.com/acme/web.git"],
+    );
     // Fetches fail at once instead of reaching the network.
     git(&repo, &["config", "http.proxy", "http://127.0.0.1:9"]);
     s.create_project(
@@ -667,7 +707,10 @@ async fn pull_request_threads_get_a_worktree_and_the_projects_setup_script() {
     );
     assert_eq!(error["_tag"], "GitCommandError", "{error}");
     assert!(
-        error["detail"].as_str().unwrap().contains("uncommitted changes"),
+        error["detail"]
+            .as_str()
+            .unwrap()
+            .contains("uncommitted changes"),
         "{error}"
     );
 

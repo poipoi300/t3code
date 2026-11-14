@@ -9,7 +9,7 @@ publish.workspace = true
 workspace = true
 [features]
 # The assembled domain services the `t3` binary serves.
-default = ["local-services", "workspace", "terminal", "git", "scheduler", "usage", "orchestration", "host", "project", "device", "providers", "preview", "cloud", "forge", "pull-requests", "textgen", "git-actions"]
+default = ["local-services", "workspace", "terminal", "git", "scheduler", "usage", "orchestration", "host", "project", "device", "providers", "preview", "cloud", "forge", "pull-requests", "textgen", "git-actions", "mcp"]
 local-services = [
     "dep:t3-auth",
     "dep:t3-config",

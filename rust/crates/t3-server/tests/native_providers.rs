@@ -152,12 +152,6 @@ impl Provider {
             Self::Claude => "Done. I used `printf`",
         }
     }
-    fn home_variable(self) -> &'static str {
-        match self {
-            Self::Codex => "CODEX_HOME",
-            Self::Claude => "CLAUDE_CONFIG_DIR",
-        }
-    }
 }
 
 /// An instance whose binary is this test file playing `provider`, with one sensitive variable.
@@ -240,6 +234,9 @@ mod harness {
         pub async fn start(home: &Path, settings: &Value, policy: Option<&str>) -> Self {
             std::fs::create_dir_all(home.join("userdata")).unwrap();
             std::fs::create_dir_all(home.join("reports")).unwrap();
+            if std::env::var_os("NATIVE_PROVIDERS_TRACE").is_some() {
+                eprintln!("home: {}", home.display());
+            }
             if !home.join("userdata/settings.json").exists() {
                 std::fs::write(home.join("userdata/settings.json"), settings.to_string())
                     .unwrap();
@@ -385,6 +382,11 @@ mod harness {
             match self.event().await {
                 CallEvent::Chunk { id, values } if self.thread_stream.as_ref() == Some(&id) => {
                     self.client.acknowledge(id);
+                    if std::env::var_os("NATIVE_PROVIDERS_TRACE").is_some() {
+                        for value in &values {
+                            eprintln!("stream: {value}");
+                        }
+                    }
                     self.thread.extend(values);
                     None
                 }
@@ -505,6 +507,7 @@ mod harness {
             .map(|entries| {
                 entries
                     .filter_map(Result::ok)
+                    .filter(|entry| entry.path().extension().is_some_and(|e| e == "json"))
                     .map(|entry| {
                         serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap())
                             .unwrap()
@@ -630,10 +633,10 @@ async fn provider_turn(provider: Provider) {
     let request = server
         .until(|values| {
             objects(values, &|value| {
-                value["type"] == "approval_request" && value["status"] == "pending"
+                value["responseCapability"].is_object() && value["status"] == "pending"
             })
             .first()
-            .map(|item| item["requestId"].as_str().unwrap().to_owned())
+            .map(|record| record["id"].as_str().unwrap().to_owned())
         })
         .await;
     let snapshot = server.snapshot().await;
@@ -648,7 +651,7 @@ async fn provider_turn(provider: Provider) {
     let streamed = Value::Array(server.thread.clone()).to_string();
     assert!(streamed.contains(provider.streamed_text()), "{streamed}");
     let answered = objects(&server.thread, &|value| {
-        value["type"] == "approval_request" && value["requestId"] == request.as_str()
+        value["responseCapability"].is_object() && value["id"] == request.as_str()
     });
     assert!(
         answered.iter().any(|item| item["status"] != "pending"),
@@ -751,10 +754,10 @@ async fn pending_approval_after_restart() {
     let request = server
         .until(|values| {
             objects(values, &|value| {
-                value["type"] == "approval_request" && value["status"] == "pending"
+                value["responseCapability"].is_object() && value["status"] == "pending"
             })
             .first()
-            .map(|item| item["requestId"].as_str().unwrap().to_owned())
+            .map(|record| record["id"].as_str().unwrap().to_owned())
         })
         .await;
     let pid = launches(&home)[0]["pid"].as_u64().unwrap();
@@ -768,7 +771,7 @@ async fn pending_approval_after_restart() {
     let mut server = Server::start(&home, &settings, None).await;
     let snapshot = server.snapshot().await;
     let requests = objects(std::slice::from_ref(&snapshot), &|value| {
-        value["type"] == "approval_request" && value["requestId"] == request.as_str()
+        value["responseCapability"].is_object() && value["id"] == request.as_str()
     });
     assert!(!requests.is_empty(), "{snapshot}");
     assert!(requests.iter().all(|item| item["status"] != "pending"), "{requests:?}");
@@ -888,6 +891,7 @@ mod fake {
     struct Wire {
         input: std::io::Lines<std::io::StdinLock<'static>>,
         output: std::io::Stdout,
+        log: std::fs::File,
     }
     impl Wire {
         fn read(&mut self) -> Option<Value> {
@@ -896,10 +900,12 @@ mod fake {
                 if line.trim().is_empty() {
                     continue;
                 }
+                let _ = writeln!(self.log, "<- {line}");
                 return serde_json::from_str(&line).ok();
             }
         }
         fn write(&mut self, value: &Value) {
+            let _ = writeln!(self.log, "-> {value}");
             let mut output = self.output.lock();
             writeln!(output, "{value}").unwrap();
             output.flush().unwrap();
@@ -931,9 +937,12 @@ mod fake {
             .to_string(),
         )
         .unwrap();
+        let log = std::path::Path::new(&std::env::var("T3_FAKE_REPORT").unwrap())
+            .join(format!("{}.wire.log", std::process::id()));
         let mut wire = Wire {
             input: std::io::stdin().lock().lines(),
             output: std::io::stdout(),
+            log: std::fs::File::create(log).unwrap(),
         };
         match kind {
             "codex" => codex(&mut wire, &steps, exit_after.as_deref()),

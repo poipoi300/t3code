@@ -566,14 +566,37 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
             upsert("task:x", &project, None, true, EVERY_MINUTE()),
             LAUNCH_UNAVAILABLE,
         ),
-        (
-            upsert("task:x", "project:absent", None, false, EVERY_MINUTE()),
-            "Project not found.",
-        ),
     ] {
         let exit = admin.call("scheduledTasks.upsert", input).await;
         assert_eq!(scheduled_task_error(&exit), message);
     }
+
+    // As in TypeScript, a disabled unbound draft saves, even for a project this server does not
+    // know. It cannot be enabled, and running it records a failed run without launching.
+    let draft = admin
+        .call(
+            "scheduledTasks.upsert",
+            upsert("task:draft", "project:absent", None, false, EVERY_MINUTE()),
+        )
+        .await;
+    let saved = &value(&draft)["task"];
+    assert_eq!(saved["enabled"], false, "{draft}");
+    assert!(saved.get("threadId").is_none_or(Value::is_null), "{draft}");
+    let enable = admin
+        .call(
+            "scheduledTasks.setEnabled",
+            json!({"id":"task:draft","enabled":true}),
+        )
+        .await;
+    assert_eq!(scheduled_task_error(&enable), LAUNCH_UNAVAILABLE);
+    let draft_run = admin
+        .call("scheduledTasks.runNow", json!({"id":"task:draft"}))
+        .await;
+    let draft_task = &value(&draft_run)["task"];
+    assert_eq!(draft_task["enabled"], false, "{draft_run}");
+    assert_eq!(draft_task["lastRunStatus"], "failed", "{draft_run}");
+    assert_eq!(draft_task["lastRunError"], LAUNCH_UNAVAILABLE, "{draft_run}");
+    assert!(draft_task.get("threadId").is_none_or(Value::is_null), "{draft_run}");
 
     // Success: bound tasks queue in their thread.
     let interval = admin
@@ -599,24 +622,13 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
             true,
             json!({"type":"interval","everyMs":86_400_000}),
         ),
-        upsert(
-            "task:hook",
-            &project,
-            Some(THREAD),
-            true,
-            json!({"type":"webhook"}),
-        ),
     ] {
         value(&admin.call("scheduledTasks.upsert", input).await);
     }
 
     let thread = admin.stream("orchestration.subscribeThread", json!({"threadId": THREAD}));
     let tasks = admin.stream("scheduledTasks.subscribe", json!({}));
-    let listed = admin.until(&tasks, |list| list["tasks"].is_array()).await;
-    assert!(
-        task(&listed, "task:hook")["webhook"]["path"].is_string(),
-        "{listed}"
-    );
+    admin.until(&tasks, |list| list["tasks"].is_array()).await;
 
     // runNow queues the task's message; Replay runs the turn on the thread's own provider.
     let ran = admin
@@ -672,8 +684,7 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
         })
         .await;
 
-    // A session without orchestration:operate cannot create, toggle or run tasks, and its task
-    // list carries no webhook URL.
+    // A session without orchestration:operate cannot create, toggle or run tasks.
     let mut reader = Session::without(
         &server,
         &admin_cookie,
@@ -696,16 +707,16 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
     }
     let reader_tasks = reader.stream("scheduledTasks.subscribe", json!({}));
     let read = reader.until(&reader_tasks, |list| list["tasks"].is_array()).await;
-    assert!(task(&read, "task:hook").get("webhook").is_none(), "{read}");
     assert!(
-        task(&read, "task:off")["enabled"] == false && task(&read, "task:manual")["runCount"] == 1
+        task(&read, "task:off")["enabled"] == false && task(&read, "task:manual")["runCount"] == 1,
+        "{read}"
     );
 
     // Shutdown joins with `task:once` still pending.
     drop((admin, reader));
     server.shutdown().await.unwrap();
 
-    // A stale due time on a disabled task must not make it fire.
+    // A stale due time on a disabled task (bound, or an unbound draft) must not make it fire.
     let layout = t3_config::home::HomeLayout {
         base_dir: home.clone(),
         state_dir: home.join("userdata"),
@@ -713,11 +724,12 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
     let stale = t3_persistence::rusqlite::Connection::open(layout.database())
         .unwrap()
         .execute(
-            "UPDATE scheduled_tasks SET next_run_at = ?1 WHERE task_id = 'task:off' AND enabled = 0",
+            "UPDATE scheduled_tasks SET next_run_at = ?1
+             WHERE task_id IN ('task:off', 'task:draft') AND enabled = 0",
             [T0],
         )
         .unwrap();
-    assert_eq!(stale, 1);
+    assert_eq!(stale, 2);
 
     // Restart at T0+90 under a ceiling below the thread's full access. Only `task:once` is due;
     // the dispatch ceiling refuses its turn as it refuses a client's, with TypeScript's text.
@@ -752,7 +764,78 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
     let off = task(&after, "task:off");
     assert_eq!(off["runCount"], 0, "{after}");
     assert_eq!(off["lastRunStatus"], "never", "{after}");
+    let draft = task(&after, "task:draft");
+    assert_eq!(draft["runCount"], 1, "{after}");
+    assert_eq!(draft["lastRunError"], LAUNCH_UNAVAILABLE, "{after}");
     drop(admin);
+    server.shutdown().await.unwrap();
+}
+
+/// TypeScript `withVisibleWebhookUrls`: a webhook URL starts agents, so the task list streams it
+/// only to sessions holding orchestration:operate; others still read the task.
+#[tokio::test]
+async fn scheduled_task_webhook_urls_reach_only_operate_sessions() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = start(
+        &temp.path().join("home"),
+        Some(ManualClock::at(T0)),
+        Effects::new(Rates::Table),
+        &temp.path().join("no-policy.json"),
+    )
+    .await;
+    let (mut admin, cookie, permissions) = Session::admin(&server).await;
+    let scratch = admin.call("projects.ensureScratch", json!({})).await;
+    let project = value(&scratch)["projectId"].as_str().unwrap().to_owned();
+    let created = admin
+        .call(
+            "orchestration.dispatchCommand",
+            json!({"type":"thread.create","commandId":"command:thread","threadId":"thread:hook","projectId":project,"title":"Hook","modelSelection":{"instanceId":"devReplay","model":"multi-turn"},"runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"}),
+        )
+        .await;
+    value(&created);
+    let hook = admin
+        .call(
+            "scheduledTasks.upsert",
+            upsert(
+                "task:hook",
+                &project,
+                Some("thread:hook"),
+                true,
+                json!({"type":"webhook"}),
+            ),
+        )
+        .await;
+    let path = value(&hook)["task"]["webhook"]["path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let tasks = admin.stream("scheduledTasks.subscribe", json!({}));
+    let listed = admin.until(&tasks, |list| list["tasks"].is_array()).await;
+    assert_eq!(task(&listed, "task:hook")["webhook"]["path"], path.as_str());
+
+    let mut reader = Session::without(&server, &cookie, &permissions, "orchestration:operate").await;
+    let reader_tasks = reader.stream("scheduledTasks.subscribe", json!({}));
+    let read = reader
+        .until(&reader_tasks, |list| list["tasks"].is_array())
+        .await;
+    let seen = task(&read, "task:hook");
+    assert_eq!(seen["title"], "task:hook", "{read}");
+    assert!(seen.get("webhook").is_none(), "{read}");
+    assert!(!read.to_string().contains(&path), "{read}");
+    // A later change reaches the reader without the URL too.
+    value(
+        &admin
+            .call(
+                "scheduledTasks.setEnabled",
+                json!({"id":"task:hook","enabled":false}),
+            )
+            .await,
+    );
+    let changed = reader
+        .until(&reader_tasks, |list| task(list, "task:hook")["enabled"] == false)
+        .await;
+    assert!(!changed.to_string().contains(&path), "{changed}");
+    drop((admin, reader));
     server.shutdown().await.unwrap();
 }
 

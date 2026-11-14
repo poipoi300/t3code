@@ -212,7 +212,11 @@ impl SessionRuntime for HoldingSession {
             let _ = subscriber.send(Ok(event.clone())).await;
             let _ = subscriber.send(Ok(app.clone())).await;
         }
-        self.seen.turns.lock().unwrap().push(input.thread_id.clone());
+        self.seen
+            .turns
+            .lock()
+            .unwrap()
+            .push(input.thread_id.clone());
         self.changed.send_modify(|n| *n += 1);
         Ok(())
     }
@@ -374,7 +378,9 @@ impl SessionExtensions for HoldingSession {
         _server: String,
         uri: String,
     ) -> ProviderResult<Vec<Value>> {
-        Ok(vec![json!({"uri":uri,"mimeType":"text/html","text":"<p>board</p>"})])
+        Ok(vec![
+            json!({"uri":uri,"mimeType":"text/html","text":"<p>board</p>"}),
+        ])
     }
 }
 
@@ -505,7 +511,10 @@ impl Mcp {
             .find_map(|line| line.strip_prefix("data: "))
             .unwrap_or(&text)
             .to_owned();
-        (status, serde_json::from_str(&body).unwrap_or(Value::String(text)))
+        (
+            status,
+            serde_json::from_str(&body).unwrap_or(Value::String(text)),
+        )
     }
     async fn call(&self, token: &str, tool: &str, arguments: Value) -> Value {
         let (status, body) = self
@@ -650,27 +659,50 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
     assert_eq!(info["title"], "Show board", "{info}");
     input["arguments"] = json!({"page":2});
     let called = success(rpc(&mut socket, &mut client, "mcpApps.callTool", input).await);
-    assert_eq!(called["content"][0]["text"], "show {\"page\":2}", "{called}");
+    assert_eq!(
+        called["content"][0]["text"], "show {\"page\":2}",
+        "{called}"
+    );
     let mut input = app.clone();
     input["uri"] = "ui://board/view".into();
     let resource = success(rpc(&mut socket, &mut client, "mcpApps.readResource", input).await);
-    assert_eq!(resource["contents"][0]["text"], "<p>board</p>", "{resource}");
+    assert_eq!(
+        resource["contents"][0]["text"], "<p>board</p>",
+        "{resource}"
+    );
     // A tool hidden from apps is refused with the typed reason.
     let mut input = app.clone();
     input["name"] = "secret".into();
     input["arguments"] = json!({});
     let refused = rpc(&mut socket, &mut client, "mcpApps.callTool", input).await;
     let refused = serde_json::to_value(refused).unwrap().to_string();
-    assert!(refused.contains("McpAppRequestError") && refused.contains("tool-not-callable"), "{refused}");
+    assert!(
+        refused.contains("McpAppRequestError") && refused.contains("tool-not-callable"),
+        "{refused}"
+    );
     // An item that is not an app is refused as such.
-    let refused = rpc(&mut socket, &mut client, "mcpApps.toolInfo", json!({"threadId":CALLER,"itemId":"item:absent","name":"show"})).await;
+    let refused = rpc(
+        &mut socket,
+        &mut client,
+        "mcpApps.toolInfo",
+        json!({"threadId":CALLER,"itemId":"item:absent","name":"show"}),
+    )
+    .await;
     let refused = serde_json::to_value(refused).unwrap().to_string();
     assert!(refused.contains("not-an-app"), "{refused}");
     // Model context is stored for the app's thread.
     let mut input = app.clone();
     input["conversationThreadId"] = CALLER.into();
     input["content"] = json!([{"type":"text","text":"Board shows page 2."}]);
-    success(rpc(&mut socket, &mut client, "mcpApps.updateModelContext", input).await);
+    success(
+        rpc(
+            &mut socket,
+            &mut client,
+            "mcpApps.updateModelContext",
+            input,
+        )
+        .await,
+    );
     let stored: String = t3_persistence::rusqlite::Connection::open(layout.database())
         .unwrap()
         .query_row(
@@ -680,6 +712,72 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
         )
         .unwrap();
     assert_eq!(stored, "Board shows page 2.");
+    // A session holding only orchestration:read may read tool info but not call a tool.
+    let grant: Value = http
+        .post(format!("{origin}/api/auth/pairing-token"))
+        .header("cookie", &cookie)
+        .json(&json!({"scopes": ["orchestration:read"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let reader = http
+        .post(format!("{origin}/api/auth/browser-session"))
+        .json(&json!({"credential": grant["credential"]}))
+        .send()
+        .await
+        .unwrap()
+        .headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let reader_ticket: Value = http
+        .post(format!("{origin}/api/auth/websocket-ticket/rpc"))
+        .header("cookie", &reader)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (mut reader_socket, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{}/ws?orchestrationProtocol=2&wsTicket={}",
+        runtime.address,
+        reader_ticket["ticket"].as_str().unwrap()
+    ))
+    .await
+    .unwrap();
+    let mut reader_client = Client::new(0, Default::default());
+    let mut input = app.clone();
+    input["name"] = "show".into();
+    success(
+        rpc(
+            &mut reader_socket,
+            &mut reader_client,
+            "mcpApps.toolInfo",
+            input.clone(),
+        )
+        .await,
+    );
+    input["arguments"] = json!({});
+    let refused = rpc(
+        &mut reader_socket,
+        &mut reader_client,
+        "mcpApps.callTool",
+        input,
+    )
+    .await;
+    let refused = serde_json::to_value(refused).unwrap().to_string();
+    assert!(
+        refused.contains("EnvironmentAuthorizationError")
+            && refused.contains("orchestration:operate"),
+        "{refused}"
+    );
 
     // The session opened with its thread's credential, before the turn started.
     changes
@@ -690,7 +788,9 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
         let configs = seen.configs.lock().unwrap();
         let (thread, config) = configs.first().expect("a session opened");
         assert_eq!(thread.0, CALLER);
-        config.clone().expect("the session opened with an MCP credential")
+        config
+            .clone()
+            .expect("the session opened with an MCP credential")
     };
     assert_eq!(config.endpoint, format!("{origin}/mcp"));
     let caller = config.scope.thread.clone().unwrap();
@@ -720,7 +820,8 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
     let (status, listed) = mcp.request(Some(&token), "tools/list", json!({})).await;
     assert_eq!(status, 200, "{listed}");
     let expected = &t3_mcp::catalog::catalog().modes["thread/no-links/full"];
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 74);
+    // 75 less `tool_search` and the three link tools, linked environments being off.
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 71);
     assert_eq!(
         listed["result"]["tools"].to_string(),
         expected["tools"].to_string()
@@ -748,10 +849,12 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
         .await;
     assert!(is_error(&raised), "{raised}");
     assert!(
-        raised.to_string().contains("runtime_mode_escalation_denied")
-            && raised
-                .to_string()
-                .contains("Child runtime mode full-access is broader than parent mode approval-required."),
+        raised
+            .to_string()
+            .contains("runtime_mode_escalation_denied")
+            && raised.to_string().contains(
+                "Child runtime mode full-access is broader than parent mode approval-required."
+            ),
         "{raised}"
     );
     // A credential for B, whose provider holds no run, cannot write as B.
@@ -780,7 +883,11 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
         })
         .unwrap();
     let (_, listed) = mcp
-        .request(Some(&subagent.authorization_header), "tools/list", json!({}))
+        .request(
+            Some(&subagent.authorization_header),
+            "tools/list",
+            json!({}),
+        )
         .await;
     let names = listed["result"]["tools"].to_string();
     assert!(!names.contains("\"watch_pull_request\""), "{names}");
@@ -793,8 +900,7 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
         .await;
     assert_eq!(status, 200, "{hidden}");
     assert_eq!(
-        hidden["error"]["message"],
-        "Tool 'watch_pull_request' not found",
+        hidden["error"]["message"], "Tool 'watch_pull_request' not found",
         "{hidden}"
     );
 

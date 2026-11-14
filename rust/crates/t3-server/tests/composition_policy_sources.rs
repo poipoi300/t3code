@@ -1,7 +1,8 @@
 //! `ceiling-rereview` R1: a managed policy from a platform source (the Group Policy registry key)
 //! reaches the server as the policy file does. Windows only: the key is below HKCU, named through
 //! the development-build override, never the real Policies key.
-#![cfg(windows)]
+#![cfg(all(windows, feature = "local-services", feature = "orchestration"))]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};

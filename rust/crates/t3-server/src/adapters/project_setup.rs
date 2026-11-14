@@ -76,7 +76,12 @@ pub struct WorktreeSetup(pub Arc<ProjectSetupAdapter>);
 
 #[async_trait::async_trait]
 impl t3_forge::review_host::ReviewSetup for WorktreeSetup {
-    async fn setup(&self, cwd: &Path, thread_id: &str, worktree: &Path) -> Result<(), t3_git::GitError> {
+    async fn setup(
+        &self,
+        cwd: &Path,
+        thread_id: &str,
+        worktree: &Path,
+    ) -> Result<(), t3_git::GitError> {
         if let Err(error) = self.0.run_for_worktree(cwd, thread_id, worktree).await {
             tracing::warn!(%error, "GitManager.preparePullRequestThread setup script failed");
         }
@@ -95,7 +100,12 @@ impl t3_git::WorktreeHost for SetupWorktreeHost {
     async fn creation_settings(&self, cwd: &Path) -> t3_git::WorktreeCreationSettings {
         self.creation.creation_settings(cwd).await
     }
-    async fn setup(&self, cwd: &Path, thread_id: &str, worktree: &Path) -> Result<(), t3_git::GitError> {
+    async fn setup(
+        &self,
+        cwd: &Path,
+        thread_id: &str,
+        worktree: &Path,
+    ) -> Result<(), t3_git::GitError> {
         t3_forge::review_host::ReviewSetup::setup(&self.setup, cwd, thread_id, worktree).await
     }
 }

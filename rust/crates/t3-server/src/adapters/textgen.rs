@@ -12,8 +12,7 @@ use serde_json::Value;
 use std::sync::{Arc, OnceLock};
 use t3_config::settings::SettingsService;
 use t3_contracts::{
-    base_schemas::ProjectId, settings::ServerSettings,
-    settings_secret_value::SettingsSecretValue,
+    base_schemas::ProjectId, settings::ServerSettings, settings_secret_value::SettingsSecretValue,
 };
 use t3_textgen::{
     CancellationToken, GenerationError, GenerationRequest, TextGeneration, TextRunner,
@@ -138,10 +137,7 @@ impl TextRunner for Host {
         let secrets: Arc<dyn GeneratorSecrets> = Arc::new(Secrets {
             settings,
             #[cfg(feature = "providers")]
-            resolver: self
-                .providers
-                .get()
-                .map(|domain| domain.secrets.clone()),
+            resolver: self.providers.get().map(|domain| domain.secrets.clone()),
         });
         ApiTextRunner::new(config, secrets)?
             .run(request, cancellation)
@@ -238,15 +234,22 @@ pub fn routing_state(
         .collect();
     for provider in providers {
         let snapshot = serde_json::to_value(provider).map_err(|_| GenerationError::Provider)?;
-        let id = snapshot["instanceId"].as_str().unwrap_or_default().to_owned();
+        let id = snapshot["instanceId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
         let driver = snapshot["driver"].as_str().unwrap_or_default().to_owned();
         let models = snapshot["models"].as_array().cloned().unwrap_or_default();
-        let custom_models = custom_model_slugs(&json["providerInstances"][&id]["config"]["customModels"]);
+        let custom_models =
+            custom_model_slugs(&json["providerInstances"][&id]["config"]["customModels"]);
         let default_model = t3_contracts::model::DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER
             .iter()
             .chain(t3_contracts::model::DEFAULT_MODEL_BY_PROVIDER.iter())
             .find(|(candidate, _)| *candidate == driver)
-            .map_or(t3_contracts::model::DEFAULT_TEXT_GENERATION_MODEL, |(_, model)| *model);
+            .map_or(
+                t3_contracts::model::DEFAULT_TEXT_GENERATION_MODEL,
+                |(_, model)| *model,
+            );
         let mut candidates: Vec<String> = models
             .iter()
             .filter_map(|model| model["slug"].as_str().map(str::to_owned))
@@ -306,7 +309,10 @@ pub fn exhausted_usage_window(provider: &Value, now_ms: f64, model: &str) -> boo
             window["usedPercent"].as_f64().unwrap_or(0.0) >= 100.0
                 && listed(&window["modelIds"], model)
                 && listed(&window["providerIds"], provider_prefix)
-                && match window["resetsAt"].as_str().filter(|value| !value.is_empty()) {
+                && match window["resetsAt"]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                {
                     None => true,
                     Some(resets) => parse_iso_millis(resets).is_none_or(|at| at > now_ms),
                 }
@@ -414,20 +420,20 @@ mod tests {
         assert!(!exhausted_usage_window(&codex, now, "gpt-5"));
         let reset = json!({"driver":"codex","usageLimits":{"windows":[window("primary","2026-11-14T11:59:59Z")]}});
         assert!(!exhausted_usage_window(&reset, now, "gpt-5"));
-        let unparsed = json!({"driver":"codex","usageLimits":{"windows":[window("primary","soon")]}});
+        let unparsed =
+            json!({"driver":"codex","usageLimits":{"windows":[window("primary","soon")]}});
         assert!(exhausted_usage_window(&unparsed, now, "gpt-5"));
-        let cursor = json!({"driver":"cursor","usageLimits":{"windows":[window("apiPercentUsed","")]}});
+        let cursor =
+            json!({"driver":"cursor","usageLimits":{"windows":[window("apiPercentUsed","")]}});
         assert!(exhausted_usage_window(&cursor, now, "claude-4"));
         assert!(!exhausted_usage_window(&cursor, now, "auto"));
-        let gravity = json!({"driver":"antigravity","usageLimits":{"windows":[window("3p-pool","")]}});
+        let gravity =
+            json!({"driver":"antigravity","usageLimits":{"windows":[window("3p-pool","")]}});
         assert!(exhausted_usage_window(&gravity, now, "claude-sonnet"));
         assert!(!exhausted_usage_window(&gravity, now, "gemini-pro"));
         let scoped = json!({"driver":"opencode","usageLimits":{"windows":[{"id":"go_x","usedPercent":100,"modelIds":["opencode-go/a"]}]}});
         assert!(exhausted_usage_window(&scoped, now, "opencode-go/a"));
         assert!(!exhausted_usage_window(&scoped, now, "opencode-go/b"));
-        assert_eq!(
-            parse_iso_millis("2026-11-14T13:00:00+01:00"),
-            Some(now)
-        );
+        assert_eq!(parse_iso_millis("2026-11-14T13:00:00+01:00"), Some(now));
     }
 }
