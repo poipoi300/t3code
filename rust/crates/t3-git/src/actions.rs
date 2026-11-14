@@ -73,6 +73,38 @@ impl Drop for CancelOnDrop {
     }
 }
 pub(crate) struct OperationGuard(pub(crate) Arc<crate::core::CoreState>);
+#[derive(Default)]
+pub(crate) struct OperationScope {
+    active: std::sync::atomic::AtomicUsize,
+    finished: tokio::sync::Notify,
+}
+pub(crate) struct ScopedOperation(Arc<OperationScope>);
+impl OperationScope {
+    pub(crate) fn start(self: &Arc<Self>) -> ScopedOperation {
+        self.active
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        ScopedOperation(self.clone())
+    }
+    async fn drain(&self) {
+        loop {
+            let finished = self.finished.notified();
+            tokio::pin!(finished);
+            finished.as_mut().enable();
+            if self.active.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                return;
+            }
+            finished.await;
+        }
+    }
+}
+impl Drop for ScopedOperation {
+    fn drop(&mut self) {
+        self.0
+            .active
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        self.0.finished.notify_waiters();
+    }
+}
 impl Drop for OperationGuard {
     fn drop(&mut self) {
         self.0
@@ -83,6 +115,10 @@ impl Drop for OperationGuard {
 }
 impl Git {
     pub async fn drain_operations(&self) {
+        if let Some(scope) = &self.operation_scope {
+            scope.drain().await;
+            return;
+        }
         loop {
             let notified = self.core.operations_finished.notified();
             tokio::pin!(notified);
@@ -111,8 +147,10 @@ impl Git {
             .operations
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let operation_guard = OperationGuard(self.core.clone());
+        let scope = self.operation_scope.as_ref().map(|scope| scope.start());
         let result = tokio::spawn(async move {
             let _guard = operation_guard;
+            let _scope = scope;
             operation(git).await
         })
         .await

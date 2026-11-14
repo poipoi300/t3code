@@ -345,6 +345,11 @@ fn repository_name(url: &str) -> Option<String> {
 
 type RequestCache = BTreeMap<String, (tokio::time::Instant, Option<ChangeRequest>)>;
 
+#[async_trait]
+pub trait GitWorkflowFactory: Send + Sync {
+    async fn for_checkout(&self, cwd: &Path) -> Result<GitWorkflowService, GitError>;
+}
+
 #[derive(Clone)]
 pub struct GitWorkflowService {
     git: Git,
@@ -399,9 +404,14 @@ impl GitWorkflowService {
         &self,
         input: &VcsCreateWorktreeInput,
     ) -> Result<VcsCreateWorktreeResult, GitError> {
-        self.create_worktree_with_options(input, crate::WorktreeCreationOptions::default()).await
+        self.create_worktree_with_options(input, crate::WorktreeCreationOptions::default())
+            .await
     }
-    pub async fn create_worktree_with_options(&self, input: &VcsCreateWorktreeInput, options: crate::WorktreeCreationOptions) -> Result<VcsCreateWorktreeResult, GitError> {
+    pub async fn create_worktree_with_options(
+        &self,
+        input: &VcsCreateWorktreeInput,
+        options: crate::WorktreeCreationOptions,
+    ) -> Result<VcsCreateWorktreeResult, GitError> {
         let mut workflow = self.clone();
         let input = input.clone();
         self.git
@@ -459,14 +469,19 @@ impl GitWorkflowService {
             None
         };
         let path = git
-            .add_worktree_with_progress(WorktreeOptions {
-                reference: input.ref_name.0.clone(),
-                new_branch: branch.map(|name| name.0.clone()),
-                path: input.path.as_ref().map(|path| PathBuf::from(&path.0)),
-                directory: settings.directory.or_else(|| self.worktrees_dir.clone()),
-                submodules: options.submodules.or(settings.submodules)
-                    .unwrap_or(crate::WorktreeSubmodules::Auto),
-            }, options.progress)
+            .add_worktree_with_progress(
+                WorktreeOptions {
+                    reference: input.ref_name.0.clone(),
+                    new_branch: branch.map(|name| name.0.clone()),
+                    path: input.path.as_ref().map(|path| PathBuf::from(&path.0)),
+                    directory: settings.directory.or_else(|| self.worktrees_dir.clone()),
+                    submodules: options
+                        .submodules
+                        .or(settings.submodules)
+                        .unwrap_or(crate::WorktreeSubmodules::Auto),
+                },
+                options.progress,
+            )
             .await?;
         if let (Some(branch), Some((name, reference))) = (branch, base) {
             let _ = git
@@ -510,6 +525,7 @@ impl GitWorkflowService {
         }
     }
     pub fn with_cancellation(mut self, cancellation: crate::CancellationToken) -> Self {
+        self.git.operation_scope = Some(Arc::new(crate::actions::OperationScope::default()));
         self.git.status_fetch_scope = Some(cancellation.clone());
         self.git = self.git.with_cancellation(cancellation);
         self
@@ -1263,7 +1279,7 @@ impl GitWorkflowService {
             let paths = input.file_paths.as_ref().and_then(Option::as_ref).map(Vec::as_slice);
             let supplied = input.commit_message.as_ref().and_then(Option::as_ref).map(|value| value.0.as_str());
             let generated = if commit_action && supplied.is_none() {
-                match self.git.prepare_commit_context(paths, false).await? {
+                match self.git.prepare_commit_context(paths, true).await? {
                     Some(context) => Some(cancellable(&self.git.cancellation, self.text_generator.as_ref().ok_or_else(|| self.git.command_error("runCommitStep", "A commit message or text generator is required."))?.commit_message(&self.git, &context)).await?),
                     None => None,
                 }

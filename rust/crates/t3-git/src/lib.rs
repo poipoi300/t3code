@@ -22,8 +22,9 @@ pub use actions::{CheckoutRefresh, parse_commit_message};
 pub use actions::{CommitOptions, PreparedCommit, PushTarget};
 pub use application::{GitActionEffects, GitActionSubscription, GitApplicationService};
 pub use broadcaster::{
-    DEFAULT_VCS_FETCH_INTERVAL, DisabledVcsPolling, VcsBranchSubscription, VcsStatusBroadcaster,
-    VcsStatusPolicy, VcsStatusSubscription, refresh_failure_delay,
+    DEFAULT_VCS_FETCH_INTERVAL, DisabledVcsPolling, VcsBranchChange, VcsBranchChangesSubscription,
+    VcsBranchSubscription, VcsStatusBroadcaster, VcsStatusPolicy, VcsStatusSubscription,
+    refresh_failure_delay,
 };
 pub use core::parse_remote_ref;
 pub use core::{GitStatusDetails, LocalStatusOptions, RemoteStatusDetails};
@@ -37,8 +38,8 @@ pub use remotes::remote_repository_key;
 pub use review::RangeContext;
 pub use setup_tracker::{SetupTask, WorktreeSetupSubscription, WorktreeSetupTracker};
 pub use workflow::{
-    ActionProgress, BranchHeadContext, GitManager, GitWorkflowService, PullRequestContent,
-    ReviewHost, WorkflowTextGenerator, WorktreeCreationSettings, WorktreeHost,
+    ActionProgress, BranchHeadContext, GitManager, GitWorkflowFactory, GitWorkflowService,
+    PullRequestContent, ReviewHost, WorkflowTextGenerator, WorktreeCreationSettings, WorktreeHost,
     available_feature_branch, matches_branch_head, sanitize_feature_branch,
 };
 
@@ -169,6 +170,7 @@ pub struct Git {
     environment: Environment,
     cancellation: CancellationToken,
     status_fetch_scope: Option<CancellationToken>,
+    operation_scope: Option<Arc<actions::OperationScope>>,
     permits: Arc<Semaphore>,
     core: Arc<core::CoreState>,
     internal_paths: Option<(PathBuf, PathBuf)>,
@@ -184,6 +186,7 @@ impl Git {
             environment: Environment::new(),
             cancellation: CancellationToken::new(),
             status_fetch_scope: None,
+            operation_scope: None,
             permits: PERMITS.get_or_init(|| Arc::new(Semaphore::new(8))).clone(),
             core: Arc::new(core::CoreState::default()),
             internal_paths: None,

@@ -15,6 +15,36 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc, watch};
 
 pub const DEFAULT_VCS_FETCH_INTERVAL: Duration = Duration::from_secs(30);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VcsBranchChange {
+    pub cwd: PathBuf,
+    pub ref_name: Option<String>,
+}
+#[derive(Default)]
+struct BranchChanges {
+    next: AtomicU64,
+    listeners: Mutex<BTreeMap<u64, mpsc::UnboundedSender<VcsBranchChange>>>,
+}
+pub struct VcsBranchChangesSubscription {
+    receiver: mpsc::UnboundedReceiver<VcsBranchChange>,
+    hub: Arc<BranchChanges>,
+    id: u64,
+}
+impl VcsBranchChangesSubscription {
+    pub async fn recv(&mut self) -> Option<VcsBranchChange> {
+        self.receiver.recv().await
+    }
+}
+impl Drop for VcsBranchChangesSubscription {
+    fn drop(&mut self) {
+        self.hub
+            .listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+    }
+}
+
 #[async_trait]
 pub trait VcsStatusPolicy: Send + Sync {
     fn automatic_fetch_interval(&self) -> Duration {
@@ -91,6 +121,7 @@ struct Checkout {
     requests: AtomicU64,
     detailed: AtomicUsize,
     listeners: Mutex<Listeners>,
+    branch_changes: Arc<BranchChanges>,
 }
 impl Checkout {
     fn listeners(&self) -> std::sync::MutexGuard<'_, Listeners> {
@@ -107,6 +138,18 @@ impl Checkout {
         }
         cached.revision += 1;
         cached.branch = Some(branch.clone());
+        self.branch_changes
+            .listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, sender| {
+                sender
+                    .send(VcsBranchChange {
+                        cwd: self.workflow.git().cwd().to_owned(),
+                        ref_name: branch.ref_name.clone(),
+                    })
+                    .is_ok()
+            });
         self.listeners()
             .branches
             .retain(|_, sender| sender.send((cached.revision, branch.clone())).is_ok());
@@ -299,7 +342,7 @@ impl Checkout {
             };
             let mut enabled = false;
             for cwd in demand {
-                enabled |= self.policy.auto_pull_enabled(&cwd).await;
+                enabled |= tokio::select! { _ = workflow.git().cancellation.cancelled() => return Err(t3_process::ProcessError::Cancelled.into()), enabled = self.policy.auto_pull_enabled(&cwd) => enabled };
             }
             if enabled {
                 workflow.invalidate_local_status().await;
@@ -362,16 +405,20 @@ impl Checkout {
         ready: watch::Sender<bool>,
     ) {
         let path = workflow.git().head_path().await;
+        let watched_directory = path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(Path::to_owned);
         let (sender, mut receiver) = mpsc::channel(1);
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                // Filter before the bounded queue so lock-file removals cannot displace HEAD.
                 if let Ok(event) = event
                     && !matches!(event.kind, notify::EventKind::Access(_))
-                    && (matches!(event.kind, notify::EventKind::Remove(_))
-                        || event
-                            .paths
-                            .iter()
-                            .any(|path| path.file_name().is_some_and(|name| name == "HEAD")))
+                    && (event.paths.iter().any(|path| {
+                        path.file_name().is_some_and(|name| name == "HEAD")
+                            || Some(path) == watched_directory.as_ref()
+                    }))
                 {
                     let _ = sender.try_send(event);
                 }
@@ -446,7 +493,7 @@ impl Checkout {
             let mut enabled = initial;
             if !interval.is_zero() {
                 for cwd in demand {
-                    enabled |= self.policy.should_run(&cwd).await;
+                    enabled |= tokio::select! { _ = token.cancelled() => return, enabled = self.policy.should_run(&cwd) => enabled };
                 }
             }
             if interval.is_zero() && !initial || !enabled {
@@ -473,6 +520,9 @@ impl Checkout {
     async fn retain(self: &Arc<Self>, detailed: bool, remote: bool, raw: &Path) -> Lease {
         let (id, head) = {
             let mut listeners = self.listeners();
+            listeners
+                .retiring
+                .retain(|worker| !*worker.finished.borrow());
             listeners.next += 1;
             let id = listeners.next;
             listeners.subscribers += 1;
@@ -586,7 +636,9 @@ pub(crate) fn merge_status(
         has_upstream: remote.as_ref().is_some_and(|r| r.has_upstream),
         ahead_count: remote.as_ref().map_or(0, |r| r.ahead_count),
         behind_count: remote.as_ref().map_or(0, |r| r.behind_count),
-        ahead_of_default_count: remote.as_ref().map_or(Some(Some(0)), |r| r.ahead_of_default_count),
+        ahead_of_default_count: remote
+            .as_ref()
+            .map_or(Some(Some(0)), |r| r.ahead_of_default_count),
         pr: remote.and_then(|r| r.pr),
     }
 }
@@ -670,9 +722,16 @@ struct Inner {
     workflow: GitWorkflowService,
     policy: Arc<dyn VcsStatusPolicy>,
     checkouts: Mutex<BTreeMap<PathBuf, Arc<Checkout>>>,
+    branch_changes: Arc<BranchChanges>,
+    factory: Option<Arc<dyn crate::GitWorkflowFactory>>,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
+        self.branch_changes
+            .listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         for checkout in self
             .checkouts
             .lock()
@@ -702,6 +761,8 @@ impl VcsStatusBroadcaster {
                 workflow,
                 policy: Arc::new(DefaultPolicy),
                 checkouts: Mutex::new(BTreeMap::new()),
+                branch_changes: Arc::new(BranchChanges::default()),
+                factory: None,
             }),
         }
     }
@@ -711,19 +772,46 @@ impl VcsStatusBroadcaster {
                 workflow: self.inner.workflow.clone(),
                 policy,
                 checkouts: Mutex::new(BTreeMap::new()),
+                branch_changes: Arc::new(BranchChanges::default()),
+                factory: self.inner.factory.clone(),
             }),
         }
     }
-    fn checkout(&self, cwd: &Path) -> Arc<Checkout> {
-        let path = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_owned());
-        self.inner
+    pub fn with_workflow_factory(mut self, factory: Arc<dyn crate::GitWorkflowFactory>) -> Self {
+        self.inner = Arc::new(Inner {
+            workflow: self.inner.workflow.clone(),
+            policy: self.inner.policy.clone(),
+            checkouts: Mutex::new(BTreeMap::new()),
+            branch_changes: Arc::new(BranchChanges::default()),
+            factory: Some(factory),
+        });
+        self
+    }
+    async fn checkout(&self, cwd: &Path) -> Result<Arc<Checkout>, GitError> {
+        let path = crate::core::physical_path(cwd);
+        let existing = self
+            .inner
+            .checkouts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&path)
+            .cloned();
+        if let Some(checkout) = existing {
+            return Ok(checkout);
+        }
+        let workflow = match &self.inner.factory {
+            Some(factory) => factory.for_checkout(&path).await?,
+            None => self.inner.workflow.at(&path),
+        };
+        Ok(self
+            .inner
             .checkouts
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .entry(path.clone())
             .or_insert_with(|| {
                 Arc::new(Checkout {
-                    workflow: self.inner.workflow.at(path),
+                    workflow,
                     policy: self.inner.policy.clone(),
                     cached: AsyncMutex::new(Cached::default()),
                     local_lock: AsyncMutex::new(()),
@@ -731,15 +819,16 @@ impl VcsStatusBroadcaster {
                     requests: AtomicU64::new(0),
                     detailed: AtomicUsize::new(0),
                     listeners: Mutex::new(Listeners::default()),
+                    branch_changes: self.inner.branch_changes.clone(),
                 })
             })
-            .clone()
+            .clone())
     }
     pub async fn stream_branch_status(
         &self,
         cwd: &Path,
     ) -> Result<VcsBranchSubscription, GitError> {
-        let checkout = self.checkout(cwd);
+        let checkout = self.checkout(cwd).await?;
         let lease = checkout.retain(false, false, cwd).await;
         let (sender, receiver) = mpsc::unbounded_channel();
         checkout.listeners().branches.insert(lease.id, sender);
@@ -751,8 +840,18 @@ impl VcsStatusBroadcaster {
             lease,
         })
     }
+    pub fn stream_branch_changes(&self) -> VcsBranchChangesSubscription {
+        let hub = self.inner.branch_changes.clone();
+        let id = hub.next.fetch_add(1, Ordering::AcqRel);
+        let (sender, receiver) = mpsc::unbounded_channel();
+        hub.listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, sender);
+        VcsBranchChangesSubscription { receiver, hub, id }
+    }
     pub async fn refresh_branch_status(&self, cwd: &Path) -> Result<VcsBranchStatus, GitError> {
-        let checkout = self.checkout(cwd);
+        let checkout = self.checkout(cwd).await?;
         checkout
             .branch(&checkout.workflow)
             .await
@@ -763,7 +862,7 @@ impl VcsStatusBroadcaster {
         cwd: &Path,
         include_remote: bool,
     ) -> Result<VcsStatusSubscription, GitError> {
-        let checkout = self.checkout(cwd);
+        let checkout = self.checkout(cwd).await?;
         let lease = checkout.retain(true, include_remote, cwd).await;
         let (sender, receiver) = mpsc::unbounded_channel();
         checkout.listeners().statuses.insert(lease.id, sender);
@@ -788,7 +887,7 @@ impl VcsStatusBroadcaster {
         })
     }
     pub async fn refresh_local_status(&self, cwd: &Path) -> Result<VcsStatusLocalResult, GitError> {
-        let checkout = self.checkout(cwd);
+        let checkout = self.checkout(cwd).await?;
         let local = checkout.refresh_local(&checkout.workflow).await?;
         // Divergence comes from Git and must not queue behind a forge lookup.
         let details = checkout.workflow.git().status_details_remote(false).await?;
@@ -814,7 +913,7 @@ impl VcsStatusBroadcaster {
         cwd: &Path,
         local_only: bool,
     ) -> Result<VcsStatusResult, GitError> {
-        let checkout = self.checkout(cwd);
+        let checkout = self.checkout(cwd).await?;
         checkout.refresh_local(&checkout.workflow).await?;
         if !local_only {
             checkout
@@ -836,7 +935,7 @@ impl VcsStatusBroadcaster {
         ))
     }
     pub async fn get_status(&self, cwd: &Path) -> Result<VcsStatusResult, GitError> {
-        let checkout = self.checkout(cwd);
+        let checkout = self.checkout(cwd).await?;
         checkout.local(&checkout.workflow).await?;
         let _lock = checkout.remote_lock.lock().await;
         if checkout.cached.lock().await.remote.is_none() {
@@ -861,7 +960,7 @@ impl VcsStatusBroadcaster {
         &self,
         cwd: &Path,
     ) -> Result<Option<VcsStatusRemoteResult>, GitError> {
-        let checkout = self.checkout(cwd);
+        let checkout = self.checkout(cwd).await?;
         if checkout
             .cached
             .lock()
@@ -903,6 +1002,12 @@ impl VcsStatusBroadcaster {
             })
     }
     pub async fn shutdown(&self) {
+        self.inner
+            .branch_changes
+            .listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         let checkouts: Vec<_> = self
             .inner
             .checkouts

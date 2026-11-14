@@ -206,7 +206,7 @@ impl Git {
             parse_remote_ref(name, &names)
         };
         let (remote, branch) = target.unwrap_or_else(|| ("origin".into(), name.into()));
-        Ok(names.contains(&remote).then_some((remote, branch)))
+        Ok((names.contains(&remote) && branch != "HEAD").then_some((remote, branch)))
     }
     pub async fn fetch_worktree_base_commit(
         &self,

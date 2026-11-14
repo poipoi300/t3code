@@ -54,6 +54,10 @@ async fn deleted_remote_default_and_head_alias_are_not_offered() -> TestResult {
     repo.command(&["update-ref", "-d", "refs/remotes/origin/main"])
         .await?;
     assert_eq!(repo.git.default_branch_name("origin").await?, None);
+    assert_eq!(
+        repo.git.resolve_worktree_base_remote("origin/HEAD").await?,
+        None
+    );
     repo.command(&["update-ref", "--no-deref", "-d", "refs/remotes/origin/HEAD"])
         .await?;
     repo.command(&["update-ref", "refs/remotes/origin/HEAD", "HEAD"])

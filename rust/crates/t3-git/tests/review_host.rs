@@ -18,6 +18,17 @@ struct Gate {
     started: tokio::sync::mpsc::UnboundedSender<()>,
     release: tokio::sync::Semaphore,
 }
+struct Factory {
+    first: std::path::PathBuf,
+    workflows: [GitWorkflowService; 2],
+}
+#[async_trait]
+impl t3_git::GitWorkflowFactory for Factory {
+    async fn for_checkout(&self, cwd: &Path) -> Result<GitWorkflowService, GitError> {
+        let index = usize::from(std::fs::canonicalize(cwd)? != std::fs::canonicalize(&self.first)?);
+        Ok(self.workflows[index].at(cwd))
+    }
+}
 #[async_trait]
 impl ReviewHost for Host {
     async fn list(
@@ -68,6 +79,64 @@ impl ReviewHost for Host {
         Ok(false)
     }
 }
+#[tokio::test]
+async fn application_factory_keeps_forge_bindings_and_branch_changes_scoped_to_each_checkout()
+-> TestResult {
+    let first = Repository::new().await?;
+    let second = Repository::new().await?;
+    first.commit("first").await?;
+    second.commit("second").await?;
+    let workflows = [(&first, 11), (&second, 22)].map(|(repo, number)| {
+        GitWorkflowService::new(repo.git.clone()).with_review_host(Arc::new(Host {
+            git: repo.git.clone(),
+            requests: vec![request("main", number)],
+            probes: Mutex::new(vec![]),
+            gate: None,
+        }))
+    });
+    let template = workflows[0].clone();
+    let factory = Arc::new(Factory {
+        first: first.root().to_owned(),
+        workflows,
+    });
+    let broadcaster =
+        t3_git::VcsStatusBroadcaster::new(template.clone()).with_workflow_factory(factory.clone());
+    let service = t3_git::GitApplicationService::new(
+        template,
+        broadcaster.clone(),
+        t3_git::WorktreeSetupTracker::new(),
+    )
+    .with_workflow_factory(factory);
+    let mut changes = broadcaster.stream_branch_changes();
+    for (repo, number) in [(&first, 11), (&second, 22)] {
+        let input =
+            serde_json::from_value(serde_json::json!({"cwd":repo.root(),"reference":"#1"}))?;
+        assert_eq!(
+            service
+                .resolve_pull_request(&input)
+                .await?
+                .pull_request
+                .number,
+            number
+        );
+        let input = serde_json::from_value(serde_json::json!({"cwd":repo.root()}))?;
+        let mut branch = service.subscribe_vcs_branch(&input).await?;
+        assert_eq!(
+            branch.recv().await.expect("initial").ref_name.as_deref(),
+            Some("main")
+        );
+        let change = changes.recv().await.expect("branch change");
+        assert_eq!(
+            std::fs::canonicalize(change.cwd)?,
+            std::fs::canonicalize(repo.root())?
+        );
+        branch.close().await;
+    }
+    broadcaster.shutdown().await;
+    assert!(changes.recv().await.is_none());
+    Ok(())
+}
+
 fn request(head: &str, number: u64) -> ChangeRequest {
     serde_json::from_value(serde_json::json!({"provider":"github","number":number,"title":format!("PR {number}"),"url":format!("https://github.com/upstream/repo/pull/{number}"),"baseRefName":"main","headRefName":head,"state":"open","updatedAt":{"_tag":"None"},"isCrossRepository":true,"headRepositoryNameWithOwner":"fork/repo","headRepositoryOwnerLogin":"fork"})).expect("request")
 }
@@ -143,15 +212,30 @@ async fn resolves_and_prepares_pr_locally_with_dirty_checkout_protection() -> Te
     repo.write("file", "before\n")?;
     let sha = repo.commit("initial").await?;
     repo.command(&["branch", "feature"]).await?;
+    let remote = repo.temp.path().join("remote.git");
+    repo.command(&[
+        "init",
+        "--bare",
+        "--initial-branch=main",
+        &remote.to_string_lossy(),
+    ])
+    .await?;
+    repo.command(&["remote", "add", "origin", &remote.to_string_lossy()])
+        .await?;
+    repo.command(&["push", "origin", "main", "feature"]).await?;
     let mut pr = request("feature", 2);
     pr.is_cross_repository = Some(Some(false));
+    pr.head_repository_name_with_owner = None;
+    pr.head_repository_owner_login = None;
     pr.head_sha = Some(Some(t3_contracts::base_schemas::TrimmedNonEmptyString(sha)));
-    let service = GitWorkflowService::new(repo.git.clone()).with_review_host(Arc::new(Host {
-        git: repo.git.clone(),
-        requests: vec![pr],
-        probes: Mutex::new(vec![]),
-        gate: None,
-    }));
+    let service = GitWorkflowService::new(repo.git.clone())
+        .with_worktrees_directory(repo.temp.path().join("trees"))
+        .with_review_host(Arc::new(Host {
+            git: repo.git.clone(),
+            requests: vec![pr],
+            probes: Mutex::new(vec![]),
+            gate: None,
+        }));
     assert_eq!(
         service
             .resolve_pull_request("#2")
@@ -171,6 +255,37 @@ async fn resolves_and_prepares_pr_locally_with_dirty_checkout_protection() -> Te
     assert_eq!(result.branch.0, "feature");
     assert!(result.is_on_pull_request_head);
     assert!(result.worktree_path.is_none());
+    repo.command(&["switch", "main"]).await?;
+    let input = serde_json::from_value(
+        serde_json::json!({"cwd":repo.root(),"reference":"#2","mode":"worktree"}),
+    )?;
+    let first = service.prepare_pull_request_thread(&input).await?;
+    assert!(first.is_on_pull_request_head);
+    let path = first.worktree_path.expect("worktree");
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&path.0).join("file"))?,
+        "before\n"
+    );
+    let reused = service
+        .prepare_pull_request_thread(&input)
+        .await?
+        .worktree_path
+        .expect("reused worktree");
+    assert_eq!(
+        std::fs::canonicalize(&reused.0)?,
+        std::fs::canonicalize(&path.0)?
+    );
+    std::fs::write(Path::new(&path.0).join("file"), "dirty checkout\n")?;
+    let reused = service.prepare_pull_request_thread(&input).await?;
+    assert_eq!(
+        std::fs::canonicalize(&reused.worktree_path.expect("reused dirty worktree").0)?,
+        std::fs::canonicalize(&path.0)?
+    );
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&path.0).join("file"))?,
+        "dirty checkout\n"
+    );
+    repo.git.remove_worktree(Path::new(&path.0), true).await?;
     Ok(())
 }
 

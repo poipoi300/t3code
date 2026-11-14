@@ -23,6 +23,7 @@ pub struct GitApplicationService {
     broadcaster: VcsStatusBroadcaster,
     tracker: WorktreeSetupTracker,
     effects: Option<Arc<dyn GitActionEffects>>,
+    factory: Option<Arc<dyn crate::GitWorkflowFactory>>,
 }
 impl GitApplicationService {
     pub fn new(
@@ -35,11 +36,22 @@ impl GitApplicationService {
             broadcaster,
             tracker,
             effects: None,
+            factory: None,
         }
     }
     pub fn with_action_effects(mut self, effects: Arc<dyn GitActionEffects>) -> Self {
         self.effects = Some(effects);
         self
+    }
+    pub fn with_workflow_factory(mut self, factory: Arc<dyn crate::GitWorkflowFactory>) -> Self {
+        self.factory = Some(factory);
+        self
+    }
+    async fn workflow(&self, cwd: &Path) -> Result<GitWorkflowService, GitError> {
+        match &self.factory {
+            Some(factory) => factory.for_checkout(cwd).await,
+            None => Ok(self.workflow.at(cwd)),
+        }
     }
     pub async fn subscribe_vcs_branch(
         &self,
@@ -95,7 +107,11 @@ impl GitApplicationService {
         &self,
         input: &VcsCreateWorktreeInput,
     ) -> Result<VcsCreateWorktreeResult, GitError> {
-        let result = self.workflow.create_worktree(input).await?;
+        let result = self
+            .workflow(Path::new(&input.cwd.0))
+            .await?
+            .create_worktree(input)
+            .await?;
         let _ = self
             .broadcaster
             .refresh_status(Path::new(&input.cwd.0), false)
@@ -106,8 +122,8 @@ impl GitApplicationService {
         &self,
         input: &GitPullRequestRefInput,
     ) -> Result<GitResolvePullRequestResult, GitError> {
-        self.workflow
-            .at(&input.cwd.0)
+        self.workflow(Path::new(&input.cwd.0))
+            .await?
             .resolve_pull_request(&input.reference.0)
             .await
     }
@@ -116,8 +132,8 @@ impl GitApplicationService {
         input: &GitPreparePullRequestThreadInput,
     ) -> Result<GitPreparePullRequestThreadResult, GitError> {
         let result = self
-            .workflow
-            .at(&input.cwd.0)
+            .workflow(Path::new(&input.cwd.0))
+            .await?
             .prepare_pull_request_thread(input)
             .await?;
         let _ = self
@@ -130,10 +146,14 @@ impl GitApplicationService {
         let (sender, receiver) = mpsc::unbounded_channel();
         let service = self.clone();
         let (task, handle) = SetupTask::spawn(move |cancellation| async move {
-            let workflow = service
-                .workflow
-                .at(&input.cwd.0)
-                .with_cancellation(cancellation.clone());
+            let workflow = tokio::select! { _ = cancellation.cancelled() => return, result = service.workflow(Path::new(&input.cwd.0)) => result };
+            let workflow = match workflow {
+                Ok(workflow) => workflow.with_cancellation(cancellation.clone()),
+                Err(error) => {
+                    let _ = sender.send(Err(error));
+                    return;
+                }
+            };
             let progress = sender.clone();
             let result = workflow
                 .run_stacked_action(

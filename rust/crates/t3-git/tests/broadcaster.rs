@@ -117,6 +117,11 @@ async fn branch_stream_starts_current_follows_external_switch_and_releases_share
     );
     second.recv().await.expect("initial");
     assert_eq!(service.active_workers(), (1, 0));
+    for n in 0..128 {
+        let path = repo.root().join(format!(".git/watch-noise-{n}.lock"));
+        std::fs::write(&path, "noise")?;
+        std::fs::remove_file(path)?;
+    }
     repo.command(&["switch", "other"]).await?;
     assert_eq!(
         first.recv().await.expect("switch").ref_name.as_deref(),
@@ -163,6 +168,46 @@ async fn detailed_stream_publishes_local_refresh_and_initial_remote_with_disable
     stream.close().await;
     assert_eq!(service.active_workers(), (1, 0));
     passive.close().await;
+    assert_eq!(service.active_workers(), (0, 0));
+    service.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn watcher_that_ended_before_repository_creation_restarts_for_existing_subscribers()
+-> TestResult {
+    let repo = Repository::new().await?;
+    std::fs::remove_dir_all(repo.root().join(".git"))?;
+    let service = VcsStatusBroadcaster::new(GitWorkflowService::new(repo.git.clone()));
+    let mut first = service.stream_branch_status(repo.root()).await?;
+    assert_eq!(
+        first.recv().await.expect("not repo").is_repo,
+        Some(Some(false))
+    );
+    repo.command(&["init", "--initial-branch=main"]).await?;
+    let mut second = service.stream_branch_status(repo.root()).await?;
+    assert_eq!(
+        second
+            .recv()
+            .await
+            .expect("new snapshot")
+            .ref_name
+            .as_deref(),
+        Some("main")
+    );
+    assert_eq!(
+        first
+            .recv()
+            .await
+            .expect("created repo")
+            .ref_name
+            .as_deref(),
+        Some("main")
+    );
+    assert_eq!(service.active_workers(), (1, 0));
+    second.close().await;
+    assert_eq!(service.active_workers(), (1, 0));
+    first.close().await;
     assert_eq!(service.active_workers(), (0, 0));
     service.shutdown().await;
     Ok(())

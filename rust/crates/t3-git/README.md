@@ -143,6 +143,9 @@ read. Subscriptions cancel their final shared worker on drop; `close` and
 output, monotonic sequences, 30-second retention and cleanup-aware cancellation.
 Launch producers and subscriptions must share its instance. `GitActionFollowups`
 ports created-PR linking and pushed-project refresh routing over `GitActionHost`.
+Multi-project hosts inject `GitWorkflowFactory` into the facade and broadcaster
+so each checkout receives its own forge binding. The broadcaster also exposes
+branch-change notifications for orchestration's worktree branch synchronization.
 Server construction and owner requests are in the external server seam brief.
 
 Ref listings reread HEAD even with cached refs, discard stale checkout locations,
@@ -162,8 +165,10 @@ fully ported. A forge-service adapter has been added by the forge owner; hosted
 forge operations have not been integration-tested here. Production construction
 still needs the project/config, orchestration, background-policy and textgen
 adapters described in the seam brief. `detachStackFrame` is Effect-specific.
-Worktree lifecycle still lacks checkout/submodule progress callbacks and macOS
-checkout caches. Native remote normalization lacks some host-specific rewrites in
+`create_worktree_with_options` and `WorktreeCreationOptions` provide checkout and
+submodule progress; `WorktreeSetupTracker::worktree_reporter` maps it to stages.
+Worktree lifecycle still lacks macOS checkout caches. Native remote normalization
+lacks some host-specific rewrites in
 `sourceControlDefinitions.ts`. Process-boundary cause payloads are null, while
 classifications/counts are retained. Rust scalar truncation differs from JS
 UTF-16 slicing for non-BMP subject/progress text. Native-only driver options and

@@ -102,12 +102,20 @@ impl Git {
     pub async fn add_worktree(&self, options: WorktreeOptions) -> Result<PathBuf, GitError> {
         self.add_worktree_with_progress(options, None).await
     }
-    pub async fn add_worktree_with_progress(&self, options: WorktreeOptions, progress: Option<crate::WorktreeReporter>) -> Result<PathBuf, GitError> {
+    pub async fn add_worktree_with_progress(
+        &self,
+        options: WorktreeOptions,
+        progress: Option<crate::WorktreeReporter>,
+    ) -> Result<PathBuf, GitError> {
         let result = self.add_worktree_inner(options, progress).await;
         self.invalidate_caches().await;
         result
     }
-    async fn add_worktree_inner(&self, options: WorktreeOptions, progress: Option<crate::WorktreeReporter>) -> Result<PathBuf, GitError> {
+    async fn add_worktree_inner(
+        &self,
+        options: WorktreeOptions,
+        progress: Option<crate::WorktreeReporter>,
+    ) -> Result<PathBuf, GitError> {
         if options.reference != "-" {
             validate_revision(&options.reference)?;
         }
@@ -208,7 +216,9 @@ impl Git {
             path.as_os_str().to_owned(),
             target_branch.into(),
         ];
-        if let Some(progress) = &progress { progress(crate::WorktreeProgress::CheckoutStarted); }
+        if let Some(progress) = &progress {
+            progress(crate::WorktreeProgress::CheckoutStarted);
+        }
         let result = self
             .execute(
                 &args,
@@ -216,7 +226,9 @@ impl Git {
                     timeout: None,
                     append_truncation_marker: true,
                     env: crate::env(&[("GIT_PROGRESS_DELAY", "0"), ("LANGUAGE", "C")]),
-                    on_stderr_chunk: progress.clone().map(|reporter| crate::worktree_progress::lines(reporter, true)),
+                    on_stderr_chunk: progress
+                        .clone()
+                        .map(|reporter| crate::worktree_progress::lines(reporter, true)),
                     ..Default::default()
                 },
             )
@@ -227,7 +239,9 @@ impl Git {
             }
             return Err(error);
         }
-        if let Some(progress) = &progress { progress(crate::WorktreeProgress::CheckoutFinished); }
+        if let Some(progress) = &progress {
+            progress(crate::WorktreeProgress::CheckoutFinished);
+        }
         if path.join(".gitmodules").try_exists()? {
             let mut source = "settings";
             let mode = if options.submodules == WorktreeSubmodules::Auto {
@@ -239,7 +253,9 @@ impl Git {
                             .ok()
                     });
                 let configured = project.and_then(|project| project.worktree_submodules);
-                if configured.is_some() { source = "t3.json"; }
+                if configured.is_some() {
+                    source = "t3.json";
+                }
                 match configured {
                     Some(t3_contracts::environment::WorktreeSubmodules::None) => {
                         WorktreeSubmodules::None
@@ -253,7 +269,9 @@ impl Git {
                 options.submodules
             };
             if mode != WorktreeSubmodules::None {
-                if let Some(progress) = &progress { progress(crate::WorktreeProgress::SubmodulesStarted); }
+                if let Some(progress) = &progress {
+                    progress(crate::WorktreeProgress::SubmodulesStarted);
+                }
                 let git = self.at(&path);
                 let _lock = git.shared_config_lock().await;
                 let initialized = git
@@ -271,22 +289,31 @@ impl Git {
                     if mode == WorktreeSubmodules::Recursive {
                         args.push("--recursive");
                     }
-                    if progress.is_some() { args.push("--progress"); }
-                    git
-                        .execute(
-                            &args,
-                            ExecuteOptions {
-                                timeout: None,
-                                append_truncation_marker: true,
-                                env: crate::env(&[("LANGUAGE", "C")]),
-                                on_stdout_chunk: progress.clone().map(|reporter| crate::worktree_progress::lines(reporter, false)),
-                                on_stderr_chunk: progress.clone().map(|reporter| crate::worktree_progress::lines(reporter, false)),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                } else { initialized };
-                if let Some(progress) = &progress { progress(crate::WorktreeProgress::SubmodulesFinished { ok: result.is_ok() }); }
+                    if progress.is_some() {
+                        args.push("--progress");
+                    }
+                    git.execute(
+                        &args,
+                        ExecuteOptions {
+                            timeout: None,
+                            append_truncation_marker: true,
+                            env: crate::env(&[("LANGUAGE", "C")]),
+                            on_stdout_chunk: progress
+                                .clone()
+                                .map(|reporter| crate::worktree_progress::lines(reporter, false)),
+                            on_stderr_chunk: progress
+                                .clone()
+                                .map(|reporter| crate::worktree_progress::lines(reporter, false)),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                } else {
+                    initialized
+                };
+                if let Some(progress) = &progress {
+                    progress(crate::WorktreeProgress::SubmodulesFinished { ok: result.is_ok() });
+                }
             } else if let Some(progress) = &progress {
                 progress(crate::WorktreeProgress::SubmodulesDisabled { source });
             }

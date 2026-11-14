@@ -1192,8 +1192,10 @@ impl Git {
                     .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 crate::actions::OperationGuard(self.core.clone())
             });
+            let scope = self.operation_scope.as_ref().map(|scope| scope.start());
             tokio::spawn(async move {
                 let _operation = operation;
+                let _scope = scope;
                 let _permit = tokio::select! {
                     _ = git.cancellation.cancelled() => None,
                     permit = permits.acquire() => permit.ok(),
