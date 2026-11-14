@@ -57,6 +57,57 @@ use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::{Mutex, Semaphore, watch};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+pub(crate) async fn join_thread_reads<'a>(
+    reads: impl IntoIterator<Item = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>>,
+) -> Result<()> {
+    let mut reads: Vec<_> = reads.into_iter().map(Some).collect();
+    std::future::poll_fn(|cx| {
+        let mut all_ready = true;
+        for read in &mut reads {
+            if let Some(future) = read {
+                match future.as_mut().poll(cx) {
+                    std::task::Poll::Ready(Ok(())) => *read = None,
+                    std::task::Poll::Ready(Err(error)) => {
+                        return std::task::Poll::Ready(Err(error));
+                    }
+                    std::task::Poll::Pending => all_ready = false,
+                }
+            }
+        }
+        if all_ready {
+            std::task::Poll::Ready(Ok(()))
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await
+}
+
+pub(crate) fn normalize_pull_request_key(
+    registry: &dyn crate::projections::write::PullRequestIdentityRegistry,
+    key: &t3_contracts::thread_pull_request::ThreadPullRequestKey,
+    url: Option<&str>,
+) -> Result<t3_contracts::thread_pull_request::ThreadPullRequestKey> {
+    let repository = key.repository.0.trim().to_lowercase();
+    let authority = url
+        .and_then(|url| registry.parse_change_request_url(url))
+        .filter(|parsed| parsed.key.repository.0 == repository && parsed.key.number == key.number)
+        .and_then(|parsed| parsed.authority);
+    let host = authority
+        .as_deref()
+        .unwrap_or(&key.host.0)
+        .trim()
+        .to_lowercase();
+    let canonical = registry.canonical_repository_key(&format!("{host}/{repository}"));
+    let (host, repository) = canonical.split_once('/').ok_or_else(|| Error::Decode {
+        entity: "canonical pull request identity",
+        detail: canonical.clone(),
+    })?;
+    Ok(serde_json::from_value(
+        serde_json::json!({"host":host,"repository":repository,"number":key.number}),
+    )?)
+}
+
 #[derive(Default)]
 pub struct ThreadServiceScope {
     closed: std::sync::Mutex<bool>,

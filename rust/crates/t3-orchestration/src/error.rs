@@ -66,6 +66,12 @@ pub enum Error {
     ),
     #[error(transparent)]
     PullRequestHost(PullRequestHostError),
+    /// `orchestration.stopWorkflow`'s typed failure, as the wire carries it.
+    #[error("stop workflow failed: {0:?}")]
+    StopWorkflow(Box<t3_contracts::orchestration_v2::OrchestrationV2StopWorkflowError>),
+    /// `orchestration.forceStopThread`'s typed failure, as the wire carries it.
+    #[error("force stop failed: {0:?}")]
+    ForceStopThread(Box<t3_contracts::orchestration_v2::OrchestrationV2ForceStopThreadError>),
     #[error("service {operation}: {detail}")]
     Service {
         operation: &'static str,

@@ -5,6 +5,7 @@ use crate::{
 };
 use serde_json::json;
 
+// fx and ACP Registry still use this interrupt/restart assertion after Grok switched to queueing.
 pub fn assert_grok_message_steering_output(
     result: &ScenarioResult,
     transcript: &ReplayTranscript,

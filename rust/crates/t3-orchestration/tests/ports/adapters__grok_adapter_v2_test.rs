@@ -11,8 +11,10 @@ use t3_contracts::{
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
     provider_policy::{ProviderInteractionMode, RuntimeMode},
 };
+#[cfg(test)]
+use t3_orchestration::adapters::acp::permission_disposition;
 use t3_orchestration::{
-    adapters::acp::{AcpAdapter, PermissionDisposition, permission_disposition},
+    adapters::acp::{AcpAdapter, PermissionDisposition},
     api::Clock,
     error::Result,
     ports::acp_replay::{
@@ -192,6 +194,129 @@ fn grok_acp_permission_policy_rejects_escalation_and_honors_resolved_access() {
     );
 }
 
+#[tokio::test]
+async fn grok_followups_queue_without_disabling_other_acp_steering()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use t3_orchestration::ports::decisions::command_policy::resolve_message_dispatch_intent;
+    let mut options = t3_process::ProcessOptions::new("node").args([
+        "--input-type=module",
+        "--eval",
+        r#"
+import {readFileSync} from 'node:fs';
+const capability = (file, name) => {
+    const source = readFileSync(file, 'utf8');
+    const start = source.indexOf(`const ${name} =`);
+    const end = source.indexOf(' satisfies OrchestrationV2ProviderCapabilities;', start);
+    if (start < 0 || end < 0) throw new Error(`Missing ${name}`);
+    return `export ${source.slice(start, end)};`;
+};
+const code = capability('packages/provider-acp/src/server/adapter.ts', 'AcpProviderCapabilitiesV2')
+    + capability('packages/provider-grok/src/server/adapter.ts', 'GrokProviderCapabilitiesV2');
+const {AcpProviderCapabilitiesV2: acp, GrokProviderCapabilitiesV2: grok} =
+    await import('data:text/javascript,' + encodeURIComponent(code));
+process.stdout.write(JSON.stringify([acp.turns, grok.turns]));
+"#,
+    ]);
+    options.cwd = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let output = t3_process::run(options).await?;
+    let expected: Vec<Value> = serde_json::from_slice(&output.stdout)?;
+    for (driver, expected) in [
+        ("acpRegistry", &expected[0]),
+        ("fx", &expected[0]),
+        ("grok", &expected[1]),
+    ] {
+        let mut adapter = AcpAdapter::replay(
+            ProviderInstanceId("followup".into()),
+            Arc::new(ManualClock::new(TEST_TIME)),
+            Arc::new(SequenceIds::new("followup")),
+            false,
+        );
+        adapter.driver = ProviderDriverKind(driver.into());
+        let caps = adapter.capabilities().await?;
+        assert_eq!(serde_json::to_value(&caps.turns)?, *expected, "{driver}");
+        assert!(
+            caps.turns.supports_interrupt,
+            "explicit Stop remains available"
+        );
+        let runtime = adapter
+            .open_session(
+                OpenSession {
+                    thread_id: ThreadId("followup-thread".into()),
+                    provider_session_id: ProviderSessionId("followup-session".into()),
+                    model_selection: serde_json::from_value(
+                        json!({"instanceId":"followup","model":"multi-turn"}),
+                    )?,
+                    runtime_policy: policy(RuntimeMode::ApprovalRequired, None, None),
+                    prompt_suggestions: None,
+                    resume_from_session: None,
+                    initial_native_thread_id: None,
+                    initial_provider_item_identity_version: None,
+                },
+                CancellationToken::new(),
+            )
+            .await?;
+        assert_eq!(
+            serde_json::to_value(&runtime.session().capabilities.turns)?,
+            *expected
+        );
+        let session = serde_json::to_value(runtime.session())?;
+        runtime.close().await?;
+        let mut projection: Value = serde_json::from_str(
+            include_str!("../../../../fixtures/samples/OrchestrationV2ThreadProjection.jsonl")
+                .lines()
+                .next()
+                .ok_or("projection sample")?,
+        )?;
+        let mut run: Value = serde_json::from_str(
+            include_str!("../../../../fixtures/samples/OrchestrationV2Run.jsonl")
+                .lines()
+                .next()
+                .ok_or("run sample")?,
+        )?;
+        run.as_object_mut().ok_or("run object")?.extend(serde_json::from_value::<serde_json::Map<String, Value>>(json!({"id":"run","status":"running","ordinal":1,"providerThreadId":"provider-thread","activeAttemptId":"attempt","userMessageId":"message"}))?);
+        let mut thread: Value = serde_json::from_str(
+            include_str!("../../../../fixtures/samples/OrchestrationV2ProviderThread.jsonl")
+                .lines()
+                .next()
+                .ok_or("provider thread sample")?,
+        )?;
+        thread["id"] = json!("provider-thread");
+        thread["providerSessionId"] = json!("followup-session");
+        let mut turn: Value = serde_json::from_str(
+            include_str!("../../../../fixtures/samples/OrchestrationV2ProviderTurn.jsonl")
+                .lines()
+                .next()
+                .ok_or("provider turn sample")?,
+        )?;
+        turn["runAttemptId"] = json!("attempt");
+        turn["status"] = json!("running");
+        projection["runs"] = json!([run]);
+        projection["messages"] = json!([]);
+        projection["providerThreads"] = json!([thread]);
+        projection["providerSessions"] = json!([session]);
+        projection["providerTurns"] = json!([turn]);
+        let projection = serde_json::from_value(projection)?;
+        for intent in ["auto", "steer"] {
+            let resolved = resolve_message_dispatch_intent(
+                &projection,
+                serde_json::from_value(json!({"type":"start_immediately"}))?,
+                Some(intent),
+            );
+            let expected = if driver == "grok" || intent == "auto" {
+                "queue_after_active"
+            } else {
+                "steer_active"
+            };
+            assert_eq!(
+                serde_json::to_value(resolved)?["type"],
+                expected,
+                "{driver}: {intent}"
+            );
+        }
+    }
+    Ok(())
+}
+
 pub async fn grok_native_multiselect_stays_live(
     factory: &dyn AcpFlavorAdapterFactory,
 ) -> Result<()> {
@@ -224,6 +349,10 @@ pub async fn grok_native_multiselect_stays_live(
         factory,
     )
     .await?;
+    let capabilities = harness.adapter.capabilities().await?;
+    assert!(!capabilities.turns.supports_active_steering);
+    assert!(!capabilities.turns.supports_steering_by_interrupt_restart);
+    assert!(capabilities.turns.supports_queued_messages);
     let selection = serde_json::from_value::<t3_contracts::model_selection::ModelSelection>(
         json!({"instanceId":instance,"model":"grok-build"}),
     )?;

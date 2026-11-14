@@ -32,6 +32,11 @@ pub struct ProviderTurnStartService {
     pub ids: Arc<dyn IdGenerator>,
 }
 
+// seam-shim: shared composer/citation projection is supplied by the server host.
+pub trait ComposerContextProjector: Send + Sync {
+    fn project(&self, message: &OrchestrationV2ConversationMessage) -> Result<String>;
+}
+
 struct HandoffWriter {
     committer: Arc<dyn EventCommitter>,
     clock: Arc<dyn Clock>,
@@ -247,6 +252,26 @@ impl ProviderTurnStartService {
         will_retry: bool,
         cancellation: CancellationToken,
     ) -> Result<Option<RunExecutionHandle>> {
+        self.start_configured_with_projector(
+            thread_id,
+            run_id,
+            configured,
+            will_retry,
+            cancellation,
+            None,
+        )
+        .await
+    }
+
+    pub async fn start_configured_with_projector(
+        &self,
+        thread_id: ThreadId,
+        run_id: RunId,
+        configured: ConfiguredRuntimePolicy,
+        will_retry: bool,
+        cancellation: CancellationToken,
+        projector: Option<Arc<dyn ComposerContextProjector>>,
+    ) -> Result<Option<RunExecutionHandle>> {
         let ConfiguredRuntimePolicy {
             policy: runtime_policy,
             options: policy_options,
@@ -326,7 +351,7 @@ impl ProviderTurnStartService {
         {
             return self.empty_compaction(&state).await;
         }
-        let prepared_message = turn_message(message)?;
+        let prepared_message = turn_message_with_projector(message, projector.as_deref())?;
         let recovery = match self.projections.runtime_recovery(thread_id.clone()).await {
             Ok(recovery) => recovery,
             Err(error) => {
@@ -951,30 +976,18 @@ impl ProviderTurnStartService {
             .iter()
             .map(|run| expanded_id(&run.id))
             .collect::<Result<Vec<_>>>()?;
-        let records = self
+        let source = self
             .projections
-            .records(
-                expanded_id(&state.run.thread_id)?,
-                vec![RecordKind::TurnItems],
-                RecordFilter {
-                    run_ids: Some(run_ids.clone()),
-                    turn_item_run_ids: Some(run_ids.into_iter().map(Some).collect()),
-                    ..Default::default()
-                },
-            )
+            .turn_start_history(expanded_id(&state.run.thread_id)?, Some(run_ids))
             .await?;
         let mut items = vec![];
-        for records in records.records {
-            if let ProjectionRecordSet::TurnItems(values) = records {
-                for item in values {
-                    let value = t3_contracts::stored::to_value(&item)?;
-                    let id: TurnItemId = serde_json::from_value(value["id"].clone())?;
-                    if !context.covered.contains(&id)
-                        && PortableHandoffBudget.historical_message(&item).is_some()
-                    {
-                        items.push(item);
-                    }
-                }
+        for item in source {
+            let value = t3_contracts::stored::to_value(&item)?;
+            let id: TurnItemId = serde_json::from_value(value["id"].clone())?;
+            if !context.covered.contains(&id)
+                && PortableHandoffBudget.historical_message(&item).is_some()
+            {
+                items.push(item);
             }
         }
         if items.is_empty() {
@@ -1185,7 +1198,7 @@ impl ProviderTurnStartService {
             "fromModelSelections":previous.map(|run|vec![&run.model_selection]).unwrap_or_default(),"toModel":state.run.model_selection.model,
             "strategy":handoff.strategy,"summary":handoff.summary_text});
         if !self
-            .commit(
+            .commit_with_reserved_start(
                 state,
                 vec![
                     self.event(
@@ -1196,6 +1209,7 @@ impl ProviderTurnStartService {
                     )?,
                     self.event(state, "context-transfer.updated", transfer, &now)?,
                 ],
+                Some(serde_json::from_value(notice["id"].clone())?),
             )
             .await?
         {
@@ -1214,22 +1228,23 @@ impl ProviderTurnStartService {
         projection: &OrchestrationV2ThreadProjection,
         state: &RootRunState,
     ) -> Result<OrchestrationV2ContextHandoff> {
-        let items = read_fork_history_items(
-            self.projections.as_ref(),
-            &projection.thread,
-            state.run.ordinal.saturating_sub(1).max(1),
-        )
-        .await?;
-        let items = items
-            .into_iter()
-            .filter(|item| {
-                t3_contracts::stored::to_value(item).is_ok_and(|value| {
-                    value["runId"]
-                        != t3_contracts::stored::to_value(&state.run.id)
-                            .expect("typed ID serializes")
+        let items = self
+            .projections
+            .turn_start_history(expanded_id(&state.run.thread_id)?, None)
+            .await?;
+        let mut history = vec![];
+        for item in items {
+            let value = t3_contracts::stored::to_value(&item)?;
+            if value["runId"].is_null()
+                || projection.runs.iter().any(|run| {
+                    run.ordinal < state.run.ordinal
+                        && t3_contracts::stored::to_value(&run.id).ok().as_ref()
+                            == Some(&value["runId"])
                 })
-            })
-            .collect();
+            {
+                history.push(item);
+            }
+        }
         ContextHandoffService {
             ids: self.ids.clone(),
             budget: Arc::new(PortableHandoffBudget),
@@ -1245,7 +1260,7 @@ impl ProviderTurnStartService {
                 r#from: 1,
                 to: state.run.ordinal.saturating_sub(1).max(1),
             },
-            items,
+            items: history,
             runs: projection.runs.clone(),
             created_at: self.clock.now(),
             content: HandoffContent::Provider {
@@ -1512,12 +1527,10 @@ impl ProviderTurnStartService {
         );
         let mut estimate = 0;
         if same_native && usage.is_none() {
-            let items = read_fork_history_items(
-                self.projections.as_ref(),
-                &projection.thread,
-                state.run.ordinal.saturating_sub(1).max(1),
-            )
-            .await?;
+            let items = self
+                .projections
+                .turn_start_history(expanded_id(&state.run.thread_id)?, None)
+                .await?;
             for item in items {
                 let value = t3_contracts::stored::to_value(&item)?;
                 if value["runId"] == t3_contracts::stored::to_value(&state.run.id)? {
@@ -1692,23 +1705,56 @@ impl ProviderTurnStartService {
         state: &RootRunState,
         events: Vec<OrchestrationV2DomainEvent>,
     ) -> Result<bool> {
-        Ok(self
-            .committer
-            .commit(CommitRequest {
-                receipt: None,
-                decision: Decision {
-                    events,
-                    ..Default::default()
-                },
-                guard: CommitGuard::RunCurrent {
-                    thread_id: expanded_id(&state.run.thread_id)?,
-                    run_id: expanded_id(&state.run.id)?,
-                    attempt_id: expanded_id(&state.attempt.id)?,
-                    status: OrchestrationV2RunStatus::Starting,
-                },
-            })
-            .await?
-            .committed)
+        self.commit_with_reserved_start(state, events, None).await
+    }
+
+    async fn commit_with_reserved_start(
+        &self,
+        state: &RootRunState,
+        events: Vec<OrchestrationV2DomainEvent>,
+        start_item: Option<TurnItemId>,
+    ) -> Result<bool> {
+        let thread_id = expanded_id(&state.run.thread_id)?;
+        let run_id = expanded_id(&state.run.id)?;
+        let request = CommitRequest {
+            receipt: None,
+            decision: Decision {
+                events,
+                ..Default::default()
+            },
+            guard: CommitGuard::RunCurrent {
+                thread_id: thread_id.clone(),
+                run_id: run_id.clone(),
+                attempt_id: expanded_id(&state.attempt.id)?,
+                status: OrchestrationV2RunStatus::Starting,
+            },
+        };
+        let result = if let Some(item_id) = start_item {
+            let run_ordinal = i64::try_from(state.run.ordinal).map_err(|_| Error::Decode {
+                entity: "run ordinal",
+                detail: "run ordinal exceeds position range".into(),
+            })?;
+            self.committer
+                .commit_prepared(
+                    request,
+                    CommitOptions::default(),
+                    Box::new(move |tx, request| {
+                        crate::stores::positions::allocate(
+                            tx,
+                            &thread_id,
+                            &item_id,
+                            Some(&run_id),
+                            Some(run_ordinal),
+                            crate::stores::positions::Placement::RunStart,
+                        )?;
+                        Ok(request)
+                    }),
+                )
+                .await?
+        } else {
+            self.committer.commit(request).await?
+        };
+        Ok(result.committed)
     }
 
     async fn failed(
@@ -1922,20 +1968,32 @@ pub fn provider_failure_message(error: &Error) -> String {
 }
 
 pub fn turn_message(message: &OrchestrationV2ConversationMessage) -> Result<TurnMessage> {
-    if message.text.contains("t3-context://")
-        || message
-            .context
-            .as_ref()
-            .and_then(Option::as_ref)
-            .is_some_and(|context| !context.records.is_empty())
-    {
-        return Err(Error::Unsupported(
-            "composer context projection for provider input",
-        ));
-    }
+    turn_message_with_projector(message, None)
+}
+
+pub fn turn_message_with_projector(
+    message: &OrchestrationV2ConversationMessage,
+    projector: Option<&dyn ComposerContextProjector>,
+) -> Result<TurnMessage> {
+    let text = if let Some(projector) = projector {
+        projector.project(message)?
+    } else {
+        if message.text.contains("t3-context://")
+            || message
+                .context
+                .as_ref()
+                .and_then(Option::as_ref)
+                .is_some_and(|context| !context.records.is_empty())
+        {
+            return Err(Error::Unsupported(
+                "composer context projection for provider input",
+            ));
+        }
+        message.text.clone()
+    };
     Ok(TurnMessage {
         message_id: expanded_id(&message.id)?,
-        text: message.text.clone(),
+        text,
         attachments: message.attachments.clone(),
         created_by: message.created_by.clone(),
         creation_source: Some(message.creation_source.clone()),

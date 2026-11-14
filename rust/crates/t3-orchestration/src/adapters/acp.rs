@@ -1256,7 +1256,7 @@ pub fn acp_capabilities() -> ProviderResult<OrchestrationV2ProviderCapabilities>
     decode(json!({
         "sessions":{"supportsMultipleProviderThreadsPerSession":false,"supportsModelSwitchInSession":true,"supportsProviderSwitchingViaHandoff":true,"supportsRuntimeModeSwitchInSession":true,"pendingRequestsSurviveRestart":false},
         "threads":{"canCreateEmptyThread":true,"canReadThreadSnapshot":true,"canRollbackThread":false,"canForkThread":false,"canForkFromTurn":false,"canForkFromSubagentThread":false,"exposesNativeThreadId":true},
-        "turns":{"exposesNativeTurnId":false,"emitsTurnStarted":true,"emitsTurnCompleted":true,"supportsInterrupt":true,"supportsActiveSteering":false,"supportsSteeringByInterruptRestart":false,"supportsQueuedMessages":true,"terminalStatusQuality":"strong"},
+        "turns":{"exposesNativeTurnId":false,"emitsTurnStarted":true,"emitsTurnCompleted":true,"supportsInterrupt":true,"supportsActiveSteering":false,"supportsSteeringByInterruptRestart":true,"supportsQueuedMessages":true,"terminalStatusQuality":"strong"},
         "streaming":{"streamsAssistantText":true,"streamsReasoning":true,"streamsToolOutput":false,"streamsPlanText":false,"emitsMessageCompleted":true},
         "tools":{"exposesToolItemIds":true,"emitsToolStarted":true,"emitsToolCompleted":true,"emitsToolOutput":true,"supportsMcpTools":false,"supportsDynamicToolCallbacks":false},
         "approvals":{"supportsCommandApproval":true,"supportsFileReadApproval":true,"supportsFileChangeApproval":true,"supportsApplyPatchApproval":false,"approvalsHaveNativeRequestIds":true,"approvalCallbacksAreLiveOnly":true,"approvalsCanOriginateFromSubagents":false},
@@ -1490,7 +1490,12 @@ impl ProviderAdapter for AcpAdapter {
         self.driver.clone()
     }
     async fn capabilities(&self) -> ProviderResult<OrchestrationV2ProviderCapabilities> {
-        acp_capabilities()
+        let mut capabilities = acp_capabilities()?;
+        if self.driver.0 == "grok" {
+            // Cancelling a Grok prompt kills its running foreground tool.
+            capabilities.turns.supports_steering_by_interrupt_restart = false;
+        }
+        Ok(capabilities)
     }
     async fn plan_selection_transition(
         &self,
@@ -1591,7 +1596,7 @@ impl ProviderAdapter for AcpAdapter {
             .map(|cwd| cwd.to_string_lossy().into_owned())
             .unwrap_or_else(|| ".".into());
         let session = decode(
-            json!({"id":input.provider_session_id,"driver":self.driver,"providerInstanceId":self.instance_id,"status":"ready","cwd":cwd,"model":input.model_selection.model,"capabilities":acp_capabilities()?,"createdAt":now,"updatedAt":now,"lastError":null}),
+            json!({"id":input.provider_session_id,"driver":self.driver,"providerInstanceId":self.instance_id,"status":"ready","cwd":cwd,"model":input.model_selection.model,"capabilities":self.capabilities().await?,"createdAt":now,"updatedAt":now,"lastError":null}),
         )?;
         Ok(Arc::new(AcpSessionRuntime {
             session,

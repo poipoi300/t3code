@@ -82,6 +82,13 @@ pub trait CodexTurnContextProvider: Send + Sync {
     async fn context(&self, input: &TurnInput) -> ProviderResult<CodexHostTurnContext>;
 }
 
+// Local host seam for the authoritative shared Codex allowance conversion helpers.
+pub trait CodexUsagePolicy: Send + Sync {
+    fn merge(&self, previous: Option<&Value>, update: &Value) -> Option<Value>;
+    fn reset_at(&self, snapshot: &Value) -> Option<String>;
+    fn updated(&self, previous: Option<&Value>, update: &Value, checked_at: &IsoDateTime);
+}
+
 pub struct CodexMcpAppCaptureInput {
     pub thread_id: ThreadId,
     pub server: String,
@@ -338,6 +345,7 @@ pub struct CodexAdapterOptions {
     pub attachments: Option<Arc<dyn CodexAttachmentResolver>>,
     pub background: Option<Arc<dyn CodexBackgroundHost>>,
     pub turn_context: Option<Arc<dyn CodexTurnContextProvider>>,
+    pub usage_policy: Option<Arc<dyn CodexUsagePolicy>>,
     pub generated_image_markdown: Option<GeneratedImageMarkdown>,
     pub mcp_apps: Option<Arc<dyn CodexMcpAppHost>>,
 }
@@ -371,6 +379,7 @@ impl CodexAdapterOptions {
             attachments: None,
             background: None,
             turn_context: None,
+            usage_policy: None,
             generated_image_markdown: None,
             mcp_apps: None,
         }
@@ -557,6 +566,7 @@ impl CodexSessionRuntime {
             options.instance_id.clone(),
         );
         projection.enable_background(options.background.is_some());
+        projection.set_usage_policy(options.usage_policy.clone());
         projection.set_image_markdown(options.generated_image_markdown.clone());
         projection.enable_mcp_apps(options.mcp_apps.is_some());
         let stop = cancellation.clone();
@@ -935,7 +945,7 @@ impl CodexSessionRuntime {
     ) -> ProviderResult<()> {
         let confirmed = tokio::select! {
             _ = self.cancellation.cancelled() => return Err(ProviderError::SessionStopped),
-            result = terminate_native_background_process(&self.client, thread, process, self.options.background.as_ref()) => result?,
+            result = tokio::time::timeout(Duration::from_secs(10), terminate_native_background_process(&self.client, thread, process, self.options.background.as_ref())) => result.map_err(|_|protocol("Codex background terminal termination timed out"))??,
         };
         if !confirmed {
             return Err(protocol(
@@ -1491,17 +1501,22 @@ pub(crate) async fn terminate_native_background_process(
     process: &str,
     background: Option<&Arc<dyn CodexBackgroundHost>>,
 ) -> ProviderResult<bool> {
-    let terminated: ProviderResult<native::BackgroundTerminalsTerminateResponse> = client
+    let terminated: native::Result<native::BackgroundTerminalsTerminateResponse> = client
         .request(
             "thread/backgroundTerminals/terminate",
             &json!({"threadId":thread,"processId":process}),
         )
-        .await
-        .map_err(native_error);
+        .await;
     let mut confirmed = match terminated {
         Ok(response) => response.terminated,
-        Err(error) if unknown_method(&error) => false,
-        Err(error) => return Err(error),
+        Err(native::Error::Closed) => true,
+        Err(native::Error::Rpc { error, .. })
+            if error.code == -32600.0 && error.message.starts_with("thread not found:") =>
+        {
+            true
+        }
+        Err(native::Error::Rpc { error, .. }) if error.code == -32601.0 => false,
+        Err(error) => return Err(native_error(error)),
     };
     if !confirmed {
         let mut cursor: Option<String> = None;

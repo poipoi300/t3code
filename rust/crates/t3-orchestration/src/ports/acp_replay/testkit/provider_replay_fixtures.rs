@@ -527,6 +527,8 @@ pub mod native {
                 std::fs::write(path, text)?;
             }
         }
+        host.prepare_workspace(&fixture.name, workspace.path())
+            .await?;
         let prepared = prepare_fixture_case(
             fixture,
             variant,

@@ -137,6 +137,101 @@ impl CompletedTurns {
 }
 
 impl ProviderEventIngestor {
+    pub fn prepare_snapshot(
+        &self,
+        input: IngestInput,
+        guard: CommitGuard,
+        command_id: Option<CommandId>,
+    ) -> Result<crate::ports::commit_worker::provider_commit_batch::PreparedCommit> {
+        use crate::ports::commit_worker::provider_commit_batch::{PreparedCommit, is_snapshot};
+        if !is_snapshot(&input.event) {
+            return Err(Error::Unsupported(
+                "prepare_snapshot requires a provider snapshot",
+            ));
+        }
+        let ids = self.ids.clone();
+        let clock = self.clock.clone();
+        Ok(PreparedCommit {
+            request: CommitRequest {
+                receipt: None,
+                decision: Decision::default(),
+                guard,
+            },
+            options: CommitOptions {
+                command_id,
+                guard_pending_user_input_cancellations: true,
+                ..Default::default()
+            },
+            prepare: Some(Box::new(move |tx, mut request| {
+                let now = clock.now();
+                let (kind, payload, identity) = match &input.event.kind {
+                    ProviderEventKind::Node(node) => {
+                        let prior = crate::projections::read::records(
+                            tx,
+                            &expanded_id(&node.thread_id)?,
+                            &[RecordKind::Nodes],
+                            &RecordFilter {
+                                node_ids: Some(vec![expanded_id(&node.id)?]),
+                                ..Default::default()
+                            },
+                        )?;
+                        if prior.records.iter().any(|records|matches!(records,ProjectionRecordSet::Nodes(nodes) if nodes.contains(node))) {return Ok(request);}
+                        (
+                            "node.updated",
+                            t3_contracts::stored::to_value(node)?,
+                            json!({"threadId":node.thread_id,"runId":node.run_id,"nodeId":node.id}),
+                        )
+                    }
+                    ProviderEventKind::Message(message) => (
+                        "message.updated",
+                        t3_contracts::stored::to_value(message)?,
+                        json!({"threadId":message.thread_id,"runId":message.run_id,"nodeId":message.node_id}),
+                    ),
+                    ProviderEventKind::TurnItem { item, .. } => {
+                        let mut payload = t3_contracts::stored::to_value(item)?;
+                        bound_item(&mut payload);
+                        let identity = json!({"threadId":payload["threadId"],"runId":payload["runId"],"nodeId":payload["nodeId"]});
+                        ("turn-item.updated", payload, identity)
+                    }
+                    ProviderEventKind::Plan(plan) => {
+                        let mut plan = *plan.clone();
+                        if let OrchestrationV2PlanArtifact::TodoList(list) = &mut plan {
+                            let previous: Option<OrchestrationV2PlanArtifact> =
+                                crate::projections::read::one(
+                                    tx,
+                                    "SELECT payload_json FROM orchestration_v2_projection_plans WHERE thread_id=?1 AND plan_id=?2",
+                                    t3_persistence::rusqlite::params![
+                                        expanded_id(&list.thread_id)?.0,
+                                        expanded_id(&list.id)?.0
+                                    ],
+                                )?;
+                            with_plan_step_durations(
+                                list,
+                                match &previous {
+                                    Some(OrchestrationV2PlanArtifact::TodoList(list)) => Some(list),
+                                    _ => None,
+                                },
+                                &now,
+                            );
+                        }
+                        let payload = t3_contracts::stored::to_value(&plan)?;
+                        let identity = json!({"threadId":payload["threadId"],"runId":payload["runId"],"nodeId":payload["nodeId"]});
+                        ("plan.updated", payload, identity)
+                    }
+                    _ => unreachable!("snapshot kind checked before admission"),
+                };
+                request.decision.events.push(input.domain_event(
+                    ids.as_ref(),
+                    &now,
+                    kind,
+                    payload,
+                    identity,
+                )?);
+                Ok(request)
+            })),
+        })
+    }
+
     pub fn new(
         projections: Arc<dyn ProjectionReader>,
         committer: Arc<dyn EventCommitter>,

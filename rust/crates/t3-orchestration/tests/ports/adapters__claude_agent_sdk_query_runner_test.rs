@@ -129,7 +129,7 @@ async fn native_background_wake_waits_for_an_app_run_and_never_offers_a_second_p
         "a completed opaque task does not prove that a native wake began"
     );
     assert!(
-        runtime
+        !runtime
             .extensions()
             .unwrap()
             .pending_background_work(None, true)
@@ -143,6 +143,14 @@ async fn native_background_wake_waits_for_an_app_run_and_never_offers_a_second_p
         "Command \"Build\" finished"
     );
     assert_eq!(request.detail.as_deref(), Some("Build complete"));
+    assert!(
+        runtime
+            .extensions()
+            .unwrap()
+            .pending_background_work(None, true)
+            .await
+            .unwrap()
+    );
     let mut wake = fixture_turn_input().unwrap();
     wake.run_id = RunId("wake-run".into());
     wake.run_ordinal = 2;
@@ -641,4 +649,148 @@ async fn live_selection_updates_flags_and_defers_process_bound_changes() {
         peer.read.next_line().await.unwrap().is_none(),
         "live updates must not send a user prompt or interrupt"
     );
+}
+
+#[tokio::test]
+async fn mcp_servers_keep_each_app_threads_context_and_session_lifetime() {
+    use std::{collections::VecDeque, future::Future, pin::Pin, sync::Mutex};
+    use t3_claude_cli::McpServer;
+    use t3_contracts::orchestration_v2_id_table::IdOrIndex;
+
+    struct BoundServer(ThreadId);
+    impl McpServer for BoundServer {
+        fn notify(&self, _: Value, _: CancellationToken) -> Result<(), t3_claude_cli::Error> {
+            Ok(())
+        }
+        fn handle<'a>(
+            &'a self,
+            message: Value,
+            _: CancellationToken,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, t3_claude_cli::Error>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                assert_eq!(message["method"], "tools/call");
+                Ok(json!({"jsonrpc":"2.0","id":message["id"],"result":{"threadId":self.0}}))
+            })
+        }
+    }
+    #[derive(Default)]
+    struct Factory(Mutex<Vec<CancellationToken>>);
+    #[async_trait::async_trait]
+    impl ClaudeMcpServerFactory for Factory {
+        async fn create(
+            &self,
+            input: &OpenSession,
+            cancellation: CancellationToken,
+        ) -> ProviderResult<BTreeMap<String, Arc<dyn McpServer>>> {
+            self.0.lock().unwrap().push(cancellation);
+            Ok(BTreeMap::from([(
+                "t3".into(),
+                Arc::new(BoundServer(input.thread_id.clone())) as Arc<dyn McpServer>,
+            )]))
+        }
+    }
+    struct Pipes(Mutex<VecDeque<Session>>);
+    impl ClaudeConnector for Pipes {
+        fn connect<'a>(
+            &'a self,
+            _: &'a LaunchOptions,
+            _: CancellationToken,
+        ) -> Pin<Box<dyn Future<Output = ProviderResult<ClaudeConnection>> + Send + 'a>> {
+            let session = self.0.lock().unwrap().pop_front();
+            Box::pin(async move {
+                Ok(ClaudeConnection {
+                    session: session.ok_or(ProviderError::SessionStopped)?,
+                    process: None,
+                })
+            })
+        }
+    }
+    let mut sessions = VecDeque::new();
+    let mut peers = Vec::new();
+    for _ in 0..2 {
+        let (client, server) = tokio::io::duplex(65536);
+        let (read, write) = tokio::io::split(client);
+        sessions.push_back(Session::connect(read, write, SessionOptions::default()));
+        let (read, write) = tokio::io::split(server);
+        peers.push(Peer {
+            read: BufReader::new(read).lines(),
+            write,
+        });
+    }
+    let factory = Arc::new(Factory::default());
+    let adapter = ClaudeAdapterV2::new(ClaudeAdapterOptions {
+        instance_id: ProviderInstanceId("claudeAgent".into()),
+        launch: LaunchOptions {
+            cli_path: Some("fixture-claude".into()),
+            ..Default::default()
+        },
+        connector: Arc::new(Pipes(Mutex::new(sessions))),
+        clock: Arc::new(ManualClock::new(FIXTURE_DATE)),
+        ids: Arc::new(SequenceIds::new("mcp")),
+        new_native_session_id: Arc::new(|| "00000000-0000-4000-8000-000000000001".into()),
+        mcp_servers: BTreeMap::new(),
+        transcript_root: None,
+        attachments: Arc::new(DirectoryClaudeAttachments::default()),
+        host: ClaudeHostOptions {
+            mcp_server_factory: Some(factory.clone()),
+            ..Default::default()
+        },
+    });
+    let mut runtimes = Vec::new();
+    for (index, peer) in peers.iter_mut().enumerate() {
+        let mut input = fixture_turn_input().unwrap();
+        input.thread_id = ThreadId(format!("thread-{index}"));
+        input.app_thread.id = IdOrIndex::Id(input.thread_id.clone());
+        input.provider_thread.app_thread_id = Some(IdOrIndex::Id(input.thread_id.clone()));
+        let session_id = ProviderSessionId(format!("session-{index}"));
+        input.provider_thread.provider_session_id = Some(IdOrIndex::Id(session_id.clone()));
+        let runtime = adapter
+            .open_session(
+                OpenSession {
+                    thread_id: input.thread_id.clone(),
+                    provider_session_id: session_id,
+                    model_selection: input.model_selection.clone(),
+                    runtime_policy: input.runtime_policy.clone(),
+                    prompt_suggestions: None,
+                    resume_from_session: None,
+                    initial_native_thread_id: None,
+                    initial_provider_item_identity_version: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let handle = runtime.clone();
+        let start = tokio::spawn(async move { handle.start_turn(input).await });
+        let initialize = peer.read().await;
+        assert_eq!(initialize["request"]["sdkMcpServers"], json!(["t3"]));
+        peer.send(json!({"type":"control_response","response":{"subtype":"success","request_id":initialize["request_id"],"response":{}}})).await;
+        assert_eq!(peer.read().await["type"], "user");
+        start.await.unwrap().unwrap();
+        runtimes.push(runtime);
+    }
+    for (index, peer) in peers.iter_mut().enumerate() {
+        peer.send(json!({"type":"control_request","request_id":"mcp","request":{"subtype":"mcp_message","server_name":"t3","message":{"jsonrpc":"2.0","id":"context","method":"tools/call","params":{"name":"thread-context","arguments":{}}}}})).await;
+        let response = peer.read().await;
+        assert_eq!(response["response"]["request_id"], "mcp");
+        assert_eq!(
+            response["response"]["response"]["mcp_response"],
+            json!({"jsonrpc":"2.0","id":"context","result":{"threadId":format!("thread-{index}")}})
+        );
+    }
+    runtimes[0].close().await.unwrap();
+    {
+        let tokens = factory.0.lock().unwrap();
+        assert_eq!(tokens.len(), 2);
+        assert!(tokens[0].is_cancelled());
+        assert!(!tokens[1].is_cancelled());
+    }
+    peers[1].send(json!({"type":"control_request","request_id":"after-close","request":{"subtype":"mcp_message","server_name":"t3","message":{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"thread-context","arguments":{}}}}})).await;
+    assert_eq!(
+        peers[1].read().await["response"]["response"]["mcp_response"]["result"]["threadId"],
+        "thread-1"
+    );
+    runtimes[1].close().await.unwrap();
+    assert!(factory.0.lock().unwrap()[1].is_cancelled());
 }

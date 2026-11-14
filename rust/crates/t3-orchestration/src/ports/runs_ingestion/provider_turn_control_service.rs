@@ -1,4 +1,7 @@
-use super::{provider_event_ingestor::expanded_id, provider_turn_start_service::turn_message};
+use super::{
+    provider_event_ingestor::expanded_id,
+    provider_turn_start_service::{ComposerContextProjector, turn_message_with_projector},
+};
 use crate::{
     api::*,
     error::{Error, Result},
@@ -292,6 +295,15 @@ impl ProviderTurnControlService {
         input: SteerTurn,
         cancellation: CancellationToken,
     ) -> std::result::Result<(), ProviderTurnControlError> {
+        self.steer_with_projector(input, cancellation, None).await
+    }
+
+    pub async fn steer_with_projector(
+        &self,
+        input: SteerTurn,
+        cancellation: CancellationToken,
+        projector: Option<Arc<dyn ComposerContextProjector>>,
+    ) -> std::result::Result<(), ProviderTurnControlError> {
         let target = &input.target;
         let wrap = |cause| ProviderTurnControlError::new(target, "steer", cause);
         let context = self
@@ -347,7 +359,7 @@ impl ProviderTurnControlService {
             _ = cancellation.cancelled() => return Err(wrap(Error::Cancelled)),
             result = session.steer_turn(SteerInput { thread_id: target.thread_id.clone(), run_id: expanded_id(&run.id).map_err(wrap)?,
                 provider_thread: loaded.thread, provider_turn_id: target.provider_turn_id.clone(),
-                message: turn_message(message).map_err(wrap)?, model_selection: input.model_selection }) => result,
+                message: turn_message_with_projector(message,projector.as_deref()).map_err(wrap)?, model_selection: input.model_selection }) => result,
         };
         if let Err(error) = result {
             let declined = matches!(error, ProviderError::SteerDeclined(_));

@@ -971,6 +971,7 @@ fn opaque_roster_disappearance_retains_completion_until_native_wake_consumes_it(
         Arc::new(SequenceIds::new("roster")),
     );
     projection.begin(fixture_turn_input().unwrap()).unwrap();
+    projection.handle_frame(&json!({"type":"system","subtype":"task_started","task_id":"shell","task_type":"local_bash","tool_use_id":"launch-shell","description":"Build","is_backgrounded":true})).unwrap();
     projection.handle_frame(&json!({"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"shell","task_type":"local_bash","description":"Build"}]})).unwrap();
     projection
         .handle_frame(&json!({"type":"result","subtype":"success","result":"Started"}))
@@ -978,10 +979,7 @@ fn opaque_roster_disappearance_retains_completion_until_native_wake_consumes_it(
     projection
         .handle_frame(&json!({"type":"system","subtype":"background_tasks_changed","tasks":[]}))
         .unwrap();
-    assert!(
-        projection.pending_background_work(true),
-        "SDK roster removal does not consume the completion wake"
-    );
+    assert!(!projection.pending_background_work(true));
     assert_eq!(
         serde_json::to_value(projection.thread.as_ref().unwrap()).unwrap()["pendingBackgroundTasks"],
         json!([{"taskId":"shell","kind":"command","description":"Build"}])
@@ -990,6 +988,10 @@ fn opaque_roster_disappearance_retains_completion_until_native_wake_consumes_it(
     projection.consume_native_wake().unwrap();
     assert!(!projection.pending_background_work(true));
     assert!(serde_json::to_value(projection.thread.as_ref().unwrap()).unwrap()["pendingBackgroundTasks"].as_array().unwrap().is_empty());
+    let count = projection.items.len();
+    projection.handle_frame(&json!({"type":"system","subtype":"task_notification","task_id":"shell","status":"completed","summary":"Duplicate"})).unwrap();
+    assert!(!projection.pending_background_work(true));
+    assert_eq!(projection.items.len(), count);
 }
 
 #[test]
@@ -1006,8 +1008,100 @@ fn native_agent_rosters_do_not_create_background_command_entries() {
         .handle_frame(&json!({"type":"result","subtype":"success","result":"Started"}))
         .unwrap();
     projection.handle_frame(&json!({"type":"system","subtype":"task_notification","task_id":"agent","status":"completed","summary":"Child complete"})).unwrap();
-    assert!(projection.pending_background_work(true));
+    assert!(!projection.pending_background_work(true));
     assert!(serde_json::to_value(projection.thread.as_ref().unwrap()).unwrap()["pendingBackgroundTasks"].as_array().unwrap().is_empty());
+    projection.consume_native_wake().unwrap();
+    let duplicate = json!({"type":"system","subtype":"task_notification","task_id":"agent","status":"completed","summary":"Child complete"});
+    projection.handle_frame(&duplicate).unwrap();
+    assert!(
+        projection
+            .native_wake_notification(&duplicate)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn send_message_resume_reuses_child_thread_and_appends_ordered_conversation() {
+    let mut projection = fixture_projection(
+        Arc::new(ManualClock::new(FIXTURE_DATE)),
+        Arc::new(SequenceIds::new("resume-child")),
+    );
+    let first = fixture_turn_input().unwrap();
+    projection.begin(first.clone()).unwrap();
+    projection.handle_frame(&json!({"type":"assistant","uuid":"launch","message":{"id":"launch","content":[{"type":"tool_use","id":"original-tool","name":"Agent","input":{"prompt":"Reply A_FIRST","model":"haiku"}}]}})).unwrap();
+    projection.handle_frame(&json!({"type":"system","subtype":"task_started","task_id":"agent","task_type":"local_agent","tool_use_id":"original-tool","prompt":"Reply A_FIRST","description":"Agent A"})).unwrap();
+    projection.handle_frame(&json!({"type":"assistant","uuid":"first-child","parent_tool_use_id":"original-tool","message":{"id":"first-child","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"A_FIRST"}]}})).unwrap();
+    projection.handle_frame(&json!({"type":"system","subtype":"task_notification","task_id":"agent","status":"completed","summary":"A_FIRST"})).unwrap();
+    projection
+        .handle_frame(&json!({"type":"result","subtype":"success","result":"LAUNCHED"}))
+        .unwrap();
+    let mut second = first.clone();
+    second.run_id = t3_contracts::base_schemas::RunId("resume-run".into());
+    second.root_node_id = t3_contracts::base_schemas::NodeId("resume-root".into());
+    second.attempt_id = t3_contracts::base_schemas::RunAttemptId("resume-attempt".into());
+    second.run_ordinal = 2;
+    second.provider_turn_ordinal = 2;
+    projection.begin(second.clone()).unwrap();
+    projection.handle_frame(&json!({"type":"assistant","uuid":"send","message":{"id":"send","content":[{"type":"tool_use","id":"resume-tool","name":"SendMessage","input":{"to":"agent","message":"Reply A_SECOND"}}]}})).unwrap();
+    let events=projection.handle_frame(&json!({"type":"system","subtype":"task_started","task_id":"agent","task_type":"local_agent","tool_use_id":"resume-tool","prompt":"Reply A_SECOND","description":"Agent A"})).unwrap();
+    let task = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            ProviderEventKind::Subagent(task) => Some(serde_json::to_value(task).unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(task["runId"], "resume-run");
+    assert_eq!(task["result"], Value::Null);
+    assert_eq!(task["model"], "claude-haiku-4-5");
+    assert_eq!(task["id"], provider_id("node", "native-item", "task:agent"));
+    let node = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            ProviderEventKind::Node(node)
+                if serde_json::to_value(&node.id).unwrap() == task["id"] =>
+            {
+                Some(serde_json::to_value(node).unwrap())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        node["rootNodeId"],
+        serde_json::to_value(&first.root_node_id).unwrap()
+    );
+    projection.handle_frame(&json!({"type":"assistant","uuid":"second-child","parent_tool_use_id":"original-tool","message":{"id":"second-child","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"A_SECOND"}]}})).unwrap();
+    projection.handle_frame(&json!({"type":"system","subtype":"task_notification","task_id":"agent","status":"completed","summary":"A_SECOND"})).unwrap();
+    projection
+        .handle_frame(&json!({"type":"result","subtype":"success","result":"RESUMED"}))
+        .unwrap();
+    let mut conversation = projection
+        .items
+        .values()
+        .map(|item| serde_json::to_value(item).unwrap())
+        .filter(|item| {
+            item["threadId"] == task["childThreadId"]
+                && matches!(
+                    item["type"].as_str(),
+                    Some("user_message" | "assistant_message")
+                )
+        })
+        .collect::<Vec<_>>();
+    conversation.sort_by_key(|item| item["ordinal"].as_u64().unwrap());
+    assert_eq!(
+        conversation
+            .iter()
+            .map(|item| item["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["Reply A_FIRST", "A_FIRST", "Reply A_SECOND", "A_SECOND"]
+    );
+    assert!(
+        conversation
+            .iter()
+            .all(|item| item["runId"].is_null() && item["providerTurnId"].is_null())
+    );
+    assert_eq!(projection.turns.len(), 2);
 }
 
 mod composed_claude {

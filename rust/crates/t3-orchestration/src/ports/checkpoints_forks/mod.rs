@@ -1,4 +1,5 @@
 pub mod checkpoint_capture_service;
+pub mod checkpoint_diff_query;
 pub mod checkpoint_restore_safety;
 pub mod checkpoint_rollback_service;
 pub mod checkpoint_service;

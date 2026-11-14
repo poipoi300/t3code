@@ -952,6 +952,9 @@ fn stream_identity(event: &OrchestrationV2DomainEvent) -> (&ThreadId, &str) {
             (&event.thread_id, "thread.tags-updated")
         }
         OrchestrationV2DomainEvent::ThreadVisited(event) => (&event.thread_id, "thread.visited"),
+        OrchestrationV2DomainEvent::ThreadVisitRecorded(event) => {
+            (&event.thread_id, "thread.visit-recorded")
+        }
         OrchestrationV2DomainEvent::ThreadMarkedUnread(event) => {
             (&event.thread_id, "thread.marked-unread")
         }

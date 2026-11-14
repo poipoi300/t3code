@@ -82,6 +82,17 @@ fn response_message(message: &OrchestrationV2HistoricalMessage) -> serde_json::V
     serde_json::json!({"type":"message","role":role,"content":[{"type":kind,"text":rendered_message(message)}]})
 }
 
+pub fn history_response_items(
+    messages: &[OrchestrationV2HistoricalMessage],
+    context: &str,
+) -> Vec<serde_json::Value> {
+    let mut responses = vec![
+        serde_json::json!({"type":"message","role":"user","content":[{"type":"input_text","text":context}]}),
+    ];
+    responses.extend(messages.iter().map(response_message));
+    responses
+}
+
 pub fn estimate_text_tokens(text: &str) -> u64 {
     (text.len() as u64).div_ceil(4)
 }
@@ -154,11 +165,9 @@ pub fn handoff_budget(
 
 impl HandoffBudget for PortableHandoffBudget {
     fn cost(&self, messages: &[OrchestrationV2HistoricalMessage], context: &str) -> u64 {
-        let mut responses = vec![
-            serde_json::json!({"type":"message","role":"user","content":[{"type":"input_text","text":context}]}),
-        ];
-        responses.extend(messages.iter().map(response_message));
-        json_bytes(&responses).max(json_bytes(&self.render(messages, context))) + 256
+        json_bytes(&history_response_items(messages, context))
+            .max(json_bytes(&self.render(messages, context)))
+            + 256
     }
 
     fn render(&self, messages: &[OrchestrationV2HistoricalMessage], context: &str) -> String {

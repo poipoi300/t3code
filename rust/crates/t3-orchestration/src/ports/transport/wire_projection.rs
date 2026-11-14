@@ -404,7 +404,7 @@ fn read_html_render(value: &Value) -> Option<Value> {
     Some(output)
 }
 
-fn compact_dynamic_tool_output(value: &Value) -> Result<Option<Value>> {
+pub(crate) fn compact_dynamic_tool_output(value: &Value) -> Result<Option<Value>> {
     let mut budget = ReadBudget {
         bytes: MAX_DYNAMIC_VALUE_BYTES,
         nodes: 128,

@@ -170,6 +170,7 @@ pub fn apply_with_registry(
     }
     let payload_json = crate::stores::event_store::encode_json(&payload)?;
     let statement: Option<(&str, Vec<SqlValue>)> = match &stored.event {
+        ThreadVisitRecorded(_) => None,
         ThreadCreated(_)
         | ThreadArchived(_)
         | ThreadUnarchived(_)
@@ -781,6 +782,7 @@ pub fn apply_to_projection_with_registry(
     value["thread"]["updatedAt"] = event_value["occurredAt"].clone();
     value["updatedAt"] = event_value["occurredAt"].clone();
     let field = match event {
+        ThreadVisitRecorded(_) => return Ok(projection.clone()),
         ThreadPullRequestLinkUpdated(_) => {
             value = t3_contracts::stored::to_value(projection)?;
             update_pull_request(&mut value["thread"], payload, registry);

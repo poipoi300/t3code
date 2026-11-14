@@ -17,6 +17,11 @@ codex-adapter = ["dep:t3-codex-app-server", "dep:t3-process"]
 claude-adapter = ["dep:t3-claude-cli", "dep:t3-process"]
 acp-adapter = ["dep:t3-acp", "dep:t3-process"]
 
+# The composed-runtime milestone runs on package 12's Replay provider.
+[[test]]
+name = "runtime"
+required-features = ["acp-adapter"]
+
 [dependencies]
 t3-contracts = { path = "../t3-contracts" }
 t3-persistence = { path = "../t3-persistence" }

@@ -298,14 +298,13 @@ pub fn prepare_claude_message(
         let ChatAttachment::File(file) = attachment else {
             continue;
         };
-        if file
+        if !file
             .mime_type
             .split(';')
             .next()
             .unwrap_or("")
             .trim()
-            .to_ascii_lowercase()
-            != "application/pdf"
+            .eq_ignore_ascii_case("application/pdf")
             || file.source.as_ref().and_then(|s| s.as_ref()).is_some()
             || usage.pages_used >= CLAUDE_ATTACHMENT_MAX_PAGES
         {
@@ -653,6 +652,16 @@ pub struct ClaudeCompiledModel {
     pub effort: Option<String>,
     pub settings: Value,
 }
+
+#[async_trait]
+pub trait ClaudeMcpServerFactory: Send + Sync {
+    async fn create(
+        &self,
+        input: &OpenSession,
+        cancellation: CancellationToken,
+    ) -> ProviderResult<BTreeMap<String, Arc<dyn McpServer>>>;
+}
+
 #[derive(Default)]
 pub struct ClaudeHostOptions {
     pub home_directory: Option<PathBuf>,
@@ -662,6 +671,7 @@ pub struct ClaudeHostOptions {
     pub attachment_directory: Option<PathBuf>,
     pub auto_compact_window: Option<String>,
     pub compile_model: Option<Arc<ClaudeModelCompiler>>,
+    pub mcp_server_factory: Option<Arc<dyn ClaudeMcpServerFactory>>,
     pub continuation_requests: Option<mpsc::Sender<ContinuationRequest>>,
 }
 pub struct PreparedClaudeLaunch {
@@ -1071,13 +1081,31 @@ impl ProviderAdapter for ClaudeAdapterV2 {
         if cancellation.is_cancelled() {
             return Err(ProviderError::Cancelled);
         }
+        let session_cancellation = cancellation.child_token();
+        let cancellation_guard = session_cancellation.clone().drop_guard();
+        let mut mcp_servers = self.options.mcp_servers.clone();
+        if let Some(factory) = &self.options.host.mcp_server_factory {
+            let servers = tokio::select! {
+                biased;
+                _ = session_cancellation.cancelled() => return Err(ProviderError::Cancelled),
+                result = factory.create(&input, session_cancellation.child_token()) => result?,
+            };
+            for (name, server) in servers {
+                if mcp_servers.insert(name, server).is_some() {
+                    return Err(operation(
+                        ProviderOperation::Open,
+                        "Duplicate Claude MCP server name",
+                    ));
+                }
+            }
+        }
         let now = self.options.clock.now();
         let session = decode(
             json!({"id":input.provider_session_id,"driver":"claudeAgent","providerInstanceId":self.options.instance_id,
             "status":"ready","cwd":input.runtime_policy.cwd.as_deref().unwrap_or(std::path::Path::new(".")).to_string_lossy(),
             "model":input.model_selection.model,"capabilities":claude_capabilities()?,"createdAt":now,"updatedAt":now,"lastError":null}),
         )?;
-        Ok(Arc::new(ClaudeSessionRuntime {
+        let runtime = Arc::new(ClaudeSessionRuntime {
             session,
             inner: Arc::new(RuntimeInner {
                 projection: Mutex::new(ClaudeProjection::new(
@@ -1091,14 +1119,17 @@ impl ProviderAdapter for ClaudeAdapterV2 {
                 attachments: Mutex::new(AttachmentBudget::default()),
                 wake: Mutex::new(NativeWake::default()),
                 continuation_requests: self.options.host.continuation_requests.clone(),
-                cancellation: cancellation.child_token(),
+                cancellation: session_cancellation,
             }),
             options: self.options.clone(),
+            mcp_servers,
             open: input,
             query: AsyncMutex::new(None),
             operations: AsyncMutex::new(()),
             policy_options: Mutex::new(policy_options),
-        }))
+        });
+        let _ = cancellation_guard.disarm();
+        Ok(runtime)
     }
 }
 
@@ -1671,6 +1702,7 @@ pub struct ClaudeSessionRuntime {
     session: OrchestrationV2ProviderSession,
     inner: Arc<RuntimeInner>,
     options: Arc<ClaudeAdapterOptions>,
+    mcp_servers: BTreeMap<String, Arc<dyn McpServer>>,
     open: OpenSession,
     // Keep native query identity stable until controls acknowledge before replacing it.
     query: AsyncMutex<Option<LiveQuery>>,
@@ -1797,13 +1829,12 @@ impl ClaudeSessionRuntime {
             .and_then(|r| r.native_id.as_ref())
             .map(|id| id.0.clone());
         let dynamic_mcp = std::mem::take(&mut options.mcp_servers);
-        for name in self.options.mcp_servers.keys() {
+        for name in self.mcp_servers.keys() {
             options
                 .mcp_servers
                 .insert(name.clone(), json!({"type":"sdk","name":name}));
         }
-        options.initialize.sdk_mcp_servers =
-            Some(self.options.mcp_servers.keys().cloned().collect());
+        options.initialize.sdk_mcp_servers = Some(self.mcp_servers.keys().cloned().collect());
         let description = describe_spawn(&options).map_err(protocol)?;
         let cancellation = self.inner.cancellation.child_token();
         lock(&self.inner.projection).reset_process_usage();
@@ -1813,7 +1844,7 @@ impl ClaudeSessionRuntime {
             .connect(&options, cancellation.clone())
             .await?;
         let client = connection.session.client();
-        for (name, server) in &self.options.mcp_servers {
+        for (name, server) in &self.mcp_servers {
             client.register_mcp_server(name.clone(), server.clone());
         }
         let inner = self.inner.clone();
@@ -2134,7 +2165,10 @@ impl SessionRuntime for ClaudeSessionRuntime {
             }
             return self.inner.emit(events).await;
         }
-        let ambiguous = lock(&self.inner.projection).pending_background_work(true);
+        let ambiguous = {
+            let projection = lock(&self.inner.projection);
+            projection.pending_background_work(true) || projection.has_unconsumed_native_wake()
+        };
         lock(&self.inner.wake).ambiguous_user_turn = ambiguous;
         let (message, reservation) = self.prepare_message(&input.message, None).await?;
         let client = self.launch(&input, &options).await?;
@@ -2477,7 +2511,16 @@ impl SessionExtensions for ClaudeSessionRuntime {
         }) {
             return Ok(false);
         }
-        Ok(projection.pending_background_work(include_subagents))
+        let pending = projection.pending_background_work(include_subagents);
+        drop(projection);
+        Ok(pending
+            || (thread.is_none()
+                && lock(&self.inner.wake).frames.iter().any(|frame| {
+                    matches!(
+                        frame["type"].as_str(),
+                        Some("user" | "assistant" | "result")
+                    )
+                })))
     }
     async fn model_context_window(
         &self,

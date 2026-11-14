@@ -625,17 +625,14 @@ fn turn_token_usage(
         .and_then(|counts| Some((counts.first()?.as_u64()?, counts.get(1)?.as_u64()?)));
     if let (Some(before), Some(current), Some(input), Some(output)) =
         (context.earlier_ledger, current_ledger, input, output)
-    {
-        if let Some(total) = before
+        && let Some(total) = before
             .0
             .checked_add(current.0)
             .zip(before.1.checked_add(current.1))
-            && total.0 >= input
-            && total.1 >= output
-        {
-            value["otherUsage"] =
-                json!({"inputTokens":total.0-input,"outputTokens":total.1-output});
-        }
+        && total.0 >= input
+        && total.1 >= output
+    {
+        value["otherUsage"] = json!({"inputTokens":total.0-input,"outputTokens":total.1-output});
     }
     let complete = status == "completed"
         && result["subtype"] == "success"
@@ -689,8 +686,11 @@ pub struct ClaudeProjection {
     launches: BTreeMap<String, Value>,
     launch_order: VecDeque<String>,
     launch_parents: BTreeMap<String, Option<String>>,
+    launch_contexts: BTreeMap<String, ProjectedTurn>,
     task_tools: BTreeMap<String, String>,
     task_contexts: BTreeMap<String, ProjectedTurn>,
+    task_roots: BTreeMap<String, NodeId>,
+    task_calls: BTreeMap<String, String>,
     children: BTreeMap<String, ProjectedTurn>,
     child_threads: BTreeMap<String, Value>,
     routed: Option<(String, ProjectedTurn)>,
@@ -700,6 +700,7 @@ pub struct ClaudeProjection {
     background: BTreeMap<String, Value>,
     known_background: BTreeMap<String, Value>,
     owed_background: BTreeMap<String, Value>,
+    completed_background: BTreeSet<String>,
     background_calls: BTreeMap<String, (String, Value)>,
     steers: BTreeMap<String, SteerInput>,
     instance_id: ProviderInstanceId,
@@ -729,8 +730,11 @@ impl ClaudeProjection {
             launches: BTreeMap::new(),
             launch_order: VecDeque::new(),
             launch_parents: BTreeMap::new(),
+            launch_contexts: BTreeMap::new(),
             task_tools: BTreeMap::new(),
             task_contexts: BTreeMap::new(),
+            task_roots: BTreeMap::new(),
+            task_calls: BTreeMap::new(),
             children: BTreeMap::new(),
             child_threads: BTreeMap::new(),
             routed: None,
@@ -740,6 +744,7 @@ impl ClaudeProjection {
             background: BTreeMap::new(),
             known_background: BTreeMap::new(),
             owed_background: BTreeMap::new(),
+            completed_background: BTreeSet::new(),
             background_calls: BTreeMap::new(),
             steers: BTreeMap::new(),
             instance_id,
@@ -765,7 +770,6 @@ impl ClaudeProjection {
     }
     pub fn pending_background_work(&self, include_subagents: bool) -> bool {
         !self.background.is_empty()
-            || !self.owed_background.is_empty()
             || (include_subagents
                 && self.tasks.values().any(|v| {
                     matches!(
@@ -774,9 +778,12 @@ impl ClaudeProjection {
                     )
                 }))
     }
+    pub fn has_unconsumed_native_wake(&self) -> bool {
+        !self.owed_background.is_empty()
+    }
     pub fn idle_native_wake_frame(&self, frame: &Value) -> bool {
         self.active.is_none()
-            && self.pending_background_work(true)
+            && (self.pending_background_work(true) || self.has_unconsumed_native_wake())
             && frame["parent_tool_use_id"].is_null()
             && matches!(
                 frame["type"].as_str(),
@@ -829,7 +836,7 @@ impl ClaudeProjection {
     pub fn consume_native_wake(&mut self) -> ProviderResult<Vec<ProviderEvent>> {
         for id in self.owed_background.keys() {
             self.background.remove(id);
-            self.known_background.remove(id);
+            self.completed_background.insert(id.clone());
         }
         self.owed_background.clear();
         let mut events = Vec::new();
@@ -888,8 +895,11 @@ impl ClaudeProjection {
         self.launches.clear();
         self.launch_order.clear();
         self.launch_parents.clear();
+        self.launch_contexts.clear();
         self.task_tools.clear();
         self.task_contexts.clear();
+        self.task_roots.clear();
+        self.task_calls.clear();
         self.children.clear();
         self.child_threads.clear();
         self.routed = None;
@@ -899,6 +909,7 @@ impl ClaudeProjection {
         self.background.clear();
         self.known_background.clear();
         self.owed_background.clear();
+        self.completed_background.clear();
         self.background_calls.clear();
         self.steers.clear();
     }
@@ -1004,9 +1015,25 @@ impl ClaudeProjection {
             .ok_or(ProviderError::SessionStopped)
     }
     fn ordinal(&mut self, key: &str) -> ProviderResult<u64> {
+        let child = self.routed.is_some();
         let context = self.context_mut()?;
-        let next = context.ordinals.len() as u64;
-        Ok(*context.ordinals.entry(key.into()).or_insert(next))
+        if let Some(ordinal) = context.ordinals.get(key) {
+            return Ok(*ordinal);
+        }
+        let base = if child {
+            Some(101)
+        } else {
+            context
+                .input
+                .provider_turn_ordinal
+                .checked_mul(100)
+                .and_then(|base| base.checked_add(1))
+        };
+        let next = base
+            .and_then(|base| base.checked_add(context.ordinals.len() as u64))
+            .ok_or_else(|| operation(ProviderOperation::Stream, "Claude item ordinal overflow"))?;
+        context.ordinals.insert(key.into(), next);
+        Ok(next)
     }
     fn base_item(
         &mut self,
@@ -1078,7 +1105,12 @@ impl ClaudeProjection {
                 value["lastRunOrdinal"] = json!(context.input.run_ordinal);
             }
             let mut roster = self.background.clone();
-            roster.extend(self.owed_background.clone());
+            roster.extend(
+                self.owed_background
+                    .iter()
+                    .filter(|(_, task)| task["kind"] != "subagent")
+                    .map(|(id, task)| (id.clone(), task.clone())),
+            );
             for task in roster.values_mut() {
                 if let Some(task) = task.as_object_mut() {
                     task.remove("nativeKind");
@@ -1506,6 +1538,15 @@ impl ClaudeProjection {
                 .insert(native.into(), (name.into(), input.clone()));
         }
         if matches!(name, "Agent" | "Task" | "SendMessage") {
+            let launch_context = self
+                .routed
+                .as_ref()
+                .and_then(|(id, _)| self.task_contexts.get(id))
+                .cloned()
+                .unwrap_or(self.context()?.clone());
+            self.launch_contexts
+                .entry(native.into())
+                .or_insert(launch_context);
             self.launches.insert(native.into(), input.clone());
             self.launch_parents.insert(
                 native.into(),
@@ -1518,6 +1559,7 @@ impl ClaudeProjection {
                 if let Some(oldest) = self.launch_order.pop_front() {
                     self.launches.remove(&oldest);
                     self.launch_parents.remove(&oldest);
+                    self.launch_contexts.remove(&oldest);
                 }
             }
             return Ok(());
@@ -1718,9 +1760,14 @@ impl ClaudeProjection {
                     .as_array()
                     .or_else(|| frame["background_tasks"].as_array())
                 {
-                    self.background.clear();
+                    let previous = std::mem::take(&mut self.background);
                     for task in tasks {
                         if let Some(id) = task["task_id"].as_str().or_else(|| task["id"].as_str()) {
+                            if task["task_type"] != "local_bash"
+                                || self.completed_background.contains(id)
+                            {
+                                continue;
+                            }
                             let known=self.known_background.get(id).cloned().unwrap_or_else(||json!({"taskId":id,"kind":"command","nativeKind":task["task_type"].as_str().unwrap_or("local_bash"),"description":task["description"].as_str().unwrap_or("Background task")}));
                             if let Ok(context) = self.context() {
                                 let context = context.clone();
@@ -1728,6 +1775,11 @@ impl ClaudeProjection {
                             }
                             self.background.insert(id.into(), known.clone());
                             self.known_background.insert(id.into(), known);
+                        }
+                    }
+                    for (id, task) in previous {
+                        if !self.background.contains_key(&id) {
+                            self.owed_background.entry(id).or_insert(task);
                         }
                     }
                 }
@@ -1813,6 +1865,7 @@ impl ClaudeProjection {
         let tool = frame["tool_use_id"]
             .as_str()
             .map(str::to_owned)
+            .or_else(|| self.task_calls.get(id).cloned())
             .or_else(|| {
                 self.task_tools
                     .iter()
@@ -1822,15 +1875,37 @@ impl ClaudeProjection {
             .as_ref()
             .and_then(|tool| self.launch_parents.get(tool))
             .and_then(|id| id.as_ref());
-        let context = self
-            .task_contexts
-            .get(id)
+        let subtype = frame["subtype"].as_str().unwrap_or_default();
+        let new_call = subtype == "task_started"
+            && tool
+                .as_ref()
+                .is_some_and(|tool| self.task_calls.get(id) != Some(tool));
+        if subtype == "task_started"
+            && self
+                .tasks
+                .get(id)
+                .is_some_and(|task| task["status"] != "running")
+            && !new_call
+        {
+            return Ok(());
+        }
+        let resume_tool = if self.tasks.contains_key(id) && new_call {
+            tool.clone()
+        } else {
+            None
+        };
+        let launch_context = if subtype == "task_started" {
+            tool.as_ref()
+                .and_then(|tool| self.launch_contexts.get(tool))
+        } else {
+            None
+        };
+        let context = launch_context
+            .or_else(|| self.task_contexts.get(id))
             .or_else(|| parent_task.and_then(|id| self.task_contexts.get(id)))
             .cloned()
             .unwrap_or(self.context()?.clone());
-        self.task_contexts
-            .entry(id.into())
-            .or_insert_with(|| context.clone());
+        self.task_contexts.insert(id.into(), context.clone());
         let kind = frame["task_type"]
             .as_str()
             .or_else(|| {
@@ -1839,35 +1914,32 @@ impl ClaudeProjection {
                     .and_then(|t| t["nativeKind"].as_str())
             })
             .unwrap_or("local_agent");
-        let subtype = frame["subtype"].as_str().unwrap_or_default();
-        if matches!(
-            kind,
-            "local_bash" | "local_monitor" | "local_scheduled" | "remote_agent"
-        ) {
+        if kind == "local_bash" {
             if subtype == "task_started" {
-                let monitor = kind == "local_monitor"
-                    || tool
-                        .as_ref()
-                        .and_then(|id| self.background_calls.get(id))
-                        .is_some_and(|(name, _)| name == "Monitor");
-                let mut entry = json!({"taskId":id,"kind":if monitor {"monitor"}else{"command"},"nativeKind":kind,"description":frame["description"].as_str().unwrap_or("Background task")});
-                if let Some(tool) = &tool {
-                    entry["nativeItemId"] = json!(tool);
-                }
-                if frame["is_backgrounded"] == true {
+                self.completed_background.remove(id);
+                let monitor = tool
+                    .as_ref()
+                    .and_then(|id| self.background_calls.get(id))
+                    .is_some_and(|(name, _)| name == "Monitor");
+                let entry = json!({"taskId":id,"kind":if monitor {"monitor"}else{"command"},"nativeKind":kind,"description":frame["description"].as_str().unwrap_or("Background task")});
+                if frame["is_backgrounded"] != false {
                     self.background.insert(id.into(), entry.clone());
                 }
                 self.known_background.insert(id.into(), entry);
             } else if subtype == "task_notification" {
                 self.background.remove(id);
-                if self
-                    .active
-                    .as_ref()
-                    .is_none_or(|active| active.turn["id"] != context.turn["id"])
+                if !self.completed_background.contains(id)
+                    && self
+                        .active
+                        .as_ref()
+                        .is_none_or(|active| active.turn["id"] != context.turn["id"])
                 {
                     if let Some(task) = self.known_background.get(id) {
                         self.owed_background.insert(id.into(), task.clone());
                     }
+                } else {
+                    self.owed_background.remove(id);
+                    self.completed_background.insert(id.into());
                 }
             }
             return self.update_thread(
@@ -1880,7 +1952,16 @@ impl ClaudeProjection {
                 events,
             );
         }
-        let native = format!("subagent:{id}");
+        let was_running = self.tasks.get(id).is_some_and(|task| {
+            matches!(
+                task["status"].as_str(),
+                Some("running" | "pending" | "waiting")
+            )
+        });
+        self.task_roots
+            .entry(id.into())
+            .or_insert_with(|| context.input.root_node_id.clone());
+        let native = format!("task:{id}");
         let launch = frame["tool_use_id"]
             .as_str()
             .and_then(|key| self.launches.get(key))
@@ -1906,9 +1987,19 @@ impl ClaudeProjection {
             self.task_tools.insert(tool.clone(), id.into());
         }
         if subtype == "task_started" {
+            if let Some(tool) = &tool {
+                self.task_calls.insert(id.into(), tool.clone());
+            }
             task["runId"] = json!(context.input.run_id);
             task["status"] = json!("running");
             task["completedAt"] = Value::Null;
+            if resume_tool.is_some() {
+                task["result"] = Value::Null;
+                task["startedAt"] = json!(now);
+                if let Some(object) = task.as_object_mut() {
+                    object.remove("progress");
+                }
+            }
             if frame["prompt"].is_string() {
                 task["prompt"] = frame["prompt"].clone();
             }
@@ -1939,6 +2030,7 @@ impl ClaudeProjection {
         }
         self.tasks.insert(id.into(), task.clone());
         if subtype == "task_notification"
+            && was_running
             && self
                 .active
                 .as_ref()
@@ -1947,20 +2039,32 @@ impl ClaudeProjection {
         {
             self.owed_background.insert(id.into(),json!({"taskId":id,"kind":"subagent","childThreadId":task["childThreadId"],"description":task["title"]}));
         }
-        self.project_child(id, &task, &context, now, events)?;
-        let node = json!({"id":task["id"],"threadId":task["threadId"],"runId":task["runId"],"parentNodeId":task["parentNodeId"],"rootNodeId":context.input.root_node_id,"kind":"subagent","status":task["status"],"countsForRun":false,"providerThreadId":context.input.provider_thread.id,"providerTurnId":context.turn["id"],"nativeItemRef":task["nativeTaskRef"],"runtimeRequestId":null,"checkpointScopeId":null,"startedAt":task["startedAt"],"completedAt":task["completedAt"]});
+        self.project_child(id, &task, &context, now, resume_tool.as_deref(), events)?;
+        let node = json!({"id":task["id"],"threadId":task["threadId"],"runId":task["runId"],"parentNodeId":task["parentNodeId"],"rootNodeId":self.task_roots.get(id),"kind":"subagent","status":task["status"],"countsForRun":false,"providerThreadId":context.input.provider_thread.id,"providerTurnId":context.turn["id"],"nativeItemRef":task["nativeTaskRef"],"runtimeRequestId":null,"checkpointScopeId":null,"startedAt":task["startedAt"],"completedAt":task["completedAt"]});
         events.push(Self::event(ProviderEventKind::Node(Box::new(decode(
             node,
         )?))));
         events.push(Self::event(ProviderEventKind::Subagent(Box::new(decode(
             task.clone(),
         )?))));
-        let mut item = self.base_item(
-            &native,
-            "subagent",
-            task["status"].as_str().unwrap_or("running"),
-            now,
-        )?;
+        let item_native = format!("{native}:subagent");
+        let mut item = if let Some(prior) =
+            self.items
+                .get(&provider_id("turn-item", "native-item", &item_native))
+        {
+            serde_json::to_value(prior)
+                .map_err(|_| operation(ProviderOperation::Stream, "Invalid subagent item"))?
+        } else {
+            self.base_item(
+                &item_native,
+                "subagent",
+                task["status"].as_str().unwrap_or("running"),
+                now,
+            )?
+        };
+        item["status"] = task["status"].clone();
+        item["updatedAt"] = json!(now);
+        item["nativeItemRef"] = task["nativeTaskRef"].clone();
         item["threadId"] = task["threadId"].clone();
         item["runId"] = task["runId"].clone();
         item["nodeId"] = task["id"].clone();
@@ -2003,6 +2107,7 @@ impl ClaudeProjection {
         task: &Value,
         context: &ProjectedTurn,
         now: &str,
+        resume_tool: Option<&str>,
         events: &mut Vec<ProviderEvent>,
     ) -> ProviderResult<()> {
         let child = task["childThreadId"]
@@ -2075,13 +2180,44 @@ impl ClaudeProjection {
             child_context.assistant_texts.clear();
             child_context.input.model_selection = decode(task["modelSelection"].clone())?;
             self.children.insert(id.into(), child_context);
-            let native = format!("task:{id}:prompt");
+        } else if resume_tool.is_some()
+            && let Some(child) = self.children.get_mut(id)
+        {
+            child.input.run_id = context.input.run_id.clone();
+            child.input.runtime_policy = context.input.runtime_policy.clone();
+            child.input.model_selection = decode(task["modelSelection"].clone())?;
+            child.turn = context.turn.clone();
+            child.started_at = now.into();
+            child.stream_blocks.clear();
+            child.stream_message_id.clear();
+            child.stream_usage = Value::Null;
+            child.assistant_texts.clear();
+        }
+        if fresh || resume_tool.is_some() {
+            let native = resume_tool
+                .map(|tool| format!("task:{id}:prompt:{tool}"))
+                .unwrap_or_else(|| format!("task:{id}:prompt"));
+            let ordinal = if fresh {
+                100
+            } else {
+                let context = self
+                    .children
+                    .get_mut(id)
+                    .ok_or(ProviderError::SessionStopped)?;
+                let ordinal = (context.ordinals.len() as u64)
+                    .checked_add(101)
+                    .ok_or_else(|| {
+                        operation(ProviderOperation::Stream, "Claude child ordinal overflow")
+                    })?;
+                context.ordinals.insert(native.clone(), ordinal);
+                ordinal
+            };
             let message_id = provider_id("message", "native-item", &native);
             let message = decode(
                 json!({"id":message_id,"threadId":child,"runId":null,"nodeId":root,"role":"user","senderThreadId":context.input.thread_id,"text":task["prompt"],"attachments":[],"streaming":false,"createdBy":"agent","creationSource":"provider","createdAt":now,"updatedAt":now}),
             )?;
             events.push(Self::event(ProviderEventKind::Message(Box::new(message))));
-            let item = json!({"id":provider_id("turn-item","native-item",&native),"threadId":child,"runId":null,"nodeId":root,"providerThreadId":null,"providerTurnId":null,"nativeItemRef":native_ref(&native,"strong"),"parentItemId":null,"ordinal":100,"type":"user_message","status":"completed","title":null,"startedAt":now,"completedAt":now,"updatedAt":now,"messageId":message_id,"text":task["prompt"],"attachments":[],"createdBy":"agent","creationSource":"provider","inputIntent":"turn_start"});
+            let item = json!({"id":provider_id("turn-item","native-item",&native),"threadId":child,"runId":null,"nodeId":root,"providerThreadId":null,"providerTurnId":null,"nativeItemRef":native_ref(&native,"strong"),"parentItemId":null,"ordinal":ordinal,"type":"user_message","status":"completed","title":null,"startedAt":now,"completedAt":now,"updatedAt":now,"messageId":message_id,"text":task["prompt"],"attachments":[],"createdBy":"agent","creationSource":"provider","inputIntent":"turn_start"});
             self.emit_item(item, events)?;
         }
         if task["status"] != "running"
@@ -2129,7 +2265,7 @@ impl ClaudeProjection {
             task["modelSelection"] = json!({"instanceId":self.instance_id,"model":model});
             task["updatedAt"] = json!(now);
             if let Some(context) = self.task_contexts.get(&task_id).cloned() {
-                self.project_child(&task_id, &task, &context, now, &mut events)?;
+                self.project_child(&task_id, &task, &context, now, None, &mut events)?;
             }
             self.tasks.insert(task_id.clone(), task.clone());
             events.push(Self::event(ProviderEventKind::Subagent(Box::new(decode(
@@ -2825,7 +2961,7 @@ pub fn fork_claude_records(
             .map(|(i, r)| (transcript_uuid(r).to_owned(), i))
             .collect::<BTreeMap<_, _>>();
         let tail = visible.iter().filter_map(|id| index.get(id)).max().copied();
-        let candidates = visible
+        let mut candidates = visible
             .iter()
             .filter_map(|id| index.get(id).copied())
             .chain(
@@ -2835,10 +2971,9 @@ pub fn fork_claude_records(
                     .map(|(i, _)| i),
             );
         let boundary = candidates
-            .filter(|i| {
+            .find(|i| {
                 transcript_uuid(&rows[*i]) == cursor || queued_source(&rows[*i]) == Some(cursor)
             })
-            .next()
             .or_else(|| {
                 rows.iter()
                     .position(|r| transcript_uuid(r) == cursor || queued_source(r) == Some(cursor))

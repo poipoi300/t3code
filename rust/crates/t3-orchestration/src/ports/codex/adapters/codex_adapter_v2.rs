@@ -915,6 +915,10 @@ struct PendingCapture {
 type CaptureSlot = Arc<std::sync::Mutex<Option<crate::adapters::codex::CodexCapturedMcpApp>>>;
 
 enum NativeAction {
+    ReadUsageReset {
+        turn: String,
+        generation: u64,
+    },
     ChildMetadata {
         thread: String,
     },
@@ -952,6 +956,10 @@ enum NativeAction {
         run: RunId,
     },
     Interrupt {
+        thread: String,
+        turn: String,
+    },
+    PauseAndInterruptGoal {
         thread: String,
         turn: String,
     },
@@ -1380,6 +1388,11 @@ pub struct Projection {
     native_started: BTreeSet<String>,
     start_waiters: BTreeMap<String, Vec<tokio::sync::oneshot::Sender<()>>>,
     deferred_terminals: BTreeMap<String, ProviderEvent>,
+    usage_policy: Option<Arc<dyn crate::adapters::codex::CodexUsagePolicy>>,
+    rate_limit_snapshot: Option<Value>,
+    rate_limit_generation: u64,
+    pending_usage_terminals: BTreeMap<String, ProviderEvent>,
+    limited_items: BTreeMap<String, Value>,
     startup_failures: BTreeMap<String, BTreeMap<String, String>>,
     thread_closing: BTreeMap<String, tokio::sync::watch::Sender<bool>>,
     additional_context: BTreeMap<String, Value>,
@@ -1437,6 +1450,11 @@ impl Projection {
             native_started: BTreeSet::new(),
             start_waiters: BTreeMap::new(),
             deferred_terminals: BTreeMap::new(),
+            usage_policy: None,
+            rate_limit_snapshot: None,
+            rate_limit_generation: 0,
+            pending_usage_terminals: BTreeMap::new(),
+            limited_items: BTreeMap::new(),
             startup_failures: BTreeMap::new(),
             thread_closing: BTreeMap::new(),
             additional_context: BTreeMap::new(),
@@ -1454,6 +1472,12 @@ impl Projection {
     }
     pub fn enable_mcp_apps(&mut self, enabled: bool) {
         self.mcp_apps_enabled = enabled;
+    }
+    pub fn set_usage_policy(
+        &mut self,
+        policy: Option<Arc<dyn crate::adapters::codex::CodexUsagePolicy>>,
+    ) {
+        self.usage_policy = policy;
     }
     pub fn set_image_markdown(
         &mut self,
@@ -1488,6 +1512,8 @@ impl Projection {
         self.goal_stopping.remove(&native);
         self.change_runtime_mode(&native, input.runtime_policy.runtime_mode);
         self.remember_thread(input.provider_thread.clone())?;
+        self.limited_items
+            .remove(&expanded_id(&input.provider_thread.id)?.0);
         self.pending_starts.insert(native, Arc::new(input));
         Ok(((), vec![]))
     }
@@ -1558,7 +1584,7 @@ impl Projection {
             && !self.pending_starts.contains_key(thread)
             && !self.continuations.contains_key(thread)
         {
-            self.actions.push_back(NativeAction::Interrupt {
+            self.actions.push_back(NativeAction::PauseAndInterruptGoal {
                 thread: thread.into(),
                 turn: id.into(),
             });
@@ -1569,7 +1595,7 @@ impl Projection {
             && let Some(hold) = self.goal_holds.get(thread).cloned()
         {
             if hold.pausing {
-                self.actions.push_back(NativeAction::Interrupt {
+                self.actions.push_back(NativeAction::PauseAndInterruptGoal {
                     thread: thread.into(),
                     turn: id.into(),
                 });
@@ -1602,13 +1628,9 @@ impl Projection {
                     .get(thread)
                     .is_some_and(|goal| goal["status"] == "active"))
         {
-            self.actions.push_back(NativeAction::Interrupt {
+            self.actions.push_back(NativeAction::PauseAndInterruptGoal {
                 thread: thread.into(),
                 turn: id.into(),
-            });
-            self.actions.push_back(NativeAction::PauseGoal {
-                thread: thread.into(),
-                source: String::new(),
             });
             return Ok(vec![]);
         }
@@ -2266,6 +2288,10 @@ impl Projection {
         params: Value,
     ) -> ProviderResult<Vec<ProviderEvent>> {
         let mut events = self.expire_resolved()?;
+        if method == "account/rateLimits/updated" {
+            events.extend(self.usage_updated(&params["rateLimits"], true)?);
+            return Ok(events);
+        }
         if method == "thread/closed" {
             let thread = text(&params, "threadId");
             if let Some(closing) = self.thread_closing.remove(thread) {
@@ -3652,7 +3678,7 @@ impl Projection {
                 events.push(event);
             }
         }
-        Ok(events)
+        self.filter_usage_terminals(events)
     }
     fn expire_resolved(&mut self) -> ProviderResult<Vec<ProviderEvent>> {
         let ids: Vec<_> = self
@@ -3695,6 +3721,7 @@ impl Projection {
         );
         keep.extend(self.goal_holds.values().map(|hold| hold.source.clone()));
         keep.extend(self.deferred_terminals.keys().cloned());
+        keep.extend(self.pending_usage_terminals.keys().cloned());
         keep.extend(self.pending.values().map(|pending| pending.owner.clone()));
         for (thread, template) in &self.child_templates {
             if self
@@ -3830,6 +3857,7 @@ impl Projection {
             .filter(|(_, c)| {
                 !c.settled
                     && !c.interrupted
+                    && !self.stopped_threads.contains(&c.native_thread)
                     && c.capacity_pending.is_some()
                     && c.retry.as_ref().is_some_and(|r| r.deadline <= now)
             })
@@ -4127,8 +4155,8 @@ impl Projection {
             .prompt_suggestions
             .as_ref()
             .is_some_and(|enabled| enabled())
-            && !(context.app["lineage"]["relationshipToParent"] == "subagent"
-                && context.app["creationSource"] == "provider")
+            && context.app["lineage"]["relationshipToParent"] != "subagent"
+            && context.app["delegatedFrom"].is_null()
         {
             self.actions.push_back(NativeAction::Sample {
                 thread: context.native_thread.clone(),
@@ -4171,6 +4199,24 @@ impl Projection {
                 .map(|sender| sender.subscribe()),
             vec![],
         ))
+    }
+    pub fn finish_child_metadata(
+        &mut self,
+        thread: &str,
+        result: ProviderResult<Value>,
+    ) -> ProviderResult<Vec<ProviderEvent>> {
+        if self.child_selections.contains_key(thread) {
+            return Ok(vec![]);
+        }
+        match result {
+            Ok(response) if response["thread"]["id"] == thread => self.update_child_selection(
+                thread,
+                text(&response, "model"),
+                response.get("reasoningEffort"),
+                response.get("serviceTier"),
+            ),
+            _ => Ok(vec![]),
+        }
     }
     fn update_child_selection(
         &mut self,
@@ -4367,19 +4413,31 @@ impl Projection {
         action: NativeAction,
         result: ProviderResult<Value>,
     ) -> ProviderResult<Vec<ProviderEvent>> {
-        if let NativeAction::ChildMetadata { thread } = action {
-            if self.child_selections.contains_key(&thread) {
-                return Ok(vec![]);
+        if let NativeAction::ReadUsageReset { turn, generation } = action {
+            if generation == self.rate_limit_generation
+                && let Ok(response) = result
+            {
+                let read = response["rateLimitsByLimitId"]
+                    .get("codex")
+                    .filter(|value| !value.is_null())
+                    .unwrap_or(&response["rateLimits"]);
+                self.usage_updated(read, false)?;
             }
-            return match result {
-                Ok(response) if response["thread"]["id"] == thread => self.update_child_selection(
-                    &thread,
-                    text(&response, "model"),
-                    response.get("reasoningEffort"),
-                    response.get("serviceTier"),
-                ),
-                _ => Ok(vec![]),
+            let Some(mut event) = self.pending_usage_terminals.remove(&turn) else {
+                return Ok(vec![]);
             };
+            self.annotate_usage_reset(&mut event)?;
+            self.remember_limited_item(&turn, &event)?;
+            return Ok(vec![event]);
+        }
+        if let NativeAction::PauseAndInterruptGoal { thread, .. } = action {
+            return match result {
+                Ok(response) => self.set_goal(&thread, response["goal"].clone()),
+                Err(_) => Ok(vec![]),
+            };
+        }
+        if let NativeAction::ChildMetadata { thread } = action {
+            return self.finish_child_metadata(&thread, result);
         }
         if let NativeAction::Interrupt { thread, turn } = action {
             let should_settle = self
@@ -4972,6 +5030,137 @@ fn failure_value(error: &Value) -> Value {
     failure
 }
 
+impl Projection {
+    fn failure_reset(&self, failure: &Value) -> Option<String> {
+        if managed_code(&failure["code"]).is_some_and(|(_, _, usage)| usage) {
+            return None;
+        }
+        self.usage_policy
+            .as_ref()?
+            .reset_at(self.rate_limit_snapshot.as_ref()?)
+    }
+
+    fn usage_updated(
+        &mut self,
+        update: &Value,
+        notify: bool,
+    ) -> ProviderResult<Vec<ProviderEvent>> {
+        let Some(policy) = &self.usage_policy else {
+            return Ok(vec![]);
+        };
+        let previous = self.rate_limit_snapshot.take();
+        self.rate_limit_snapshot = policy.merge(previous.as_ref(), update);
+        if update["limitId"]
+            .as_str()
+            .is_none_or(|id| id.is_empty() || id == "codex")
+        {
+            self.rate_limit_generation += 1;
+        }
+        if notify {
+            policy.updated(previous.as_ref(), update, &self.clock.now());
+        }
+        if !notify {
+            return Ok(vec![]);
+        }
+        let mut changed = vec![];
+        for (key, item) in &self.limited_items {
+            if item["failure"]["resetAt"].is_null()
+                && let Some(reset) = self.failure_reset(&item["failure"])
+            {
+                let mut item = item.clone();
+                item["failure"]["resetAt"] = json!(reset);
+                item["updatedAt"] = json!(self.clock.now());
+                changed.push((key.clone(), item));
+            }
+        }
+        let mut events = vec![];
+        for (key, item) in changed {
+            events.push(event(ProviderEventKind::TurnItem {
+                item: Box::new(decode(item.clone())?),
+                session_scoped: None,
+            }));
+            self.limited_items.insert(key, item);
+        }
+        Ok(events)
+    }
+
+    fn annotate_usage_reset(&self, event: &mut ProviderEvent) -> ProviderResult<bool> {
+        let ProviderEventKind::Terminal {
+            outcome: TerminalOutcome::Failed { failure, .. },
+            ..
+        } = &mut event.kind
+        else {
+            return Ok(false);
+        };
+        let mut value = encoded(&failure)?;
+        if value["class"] != "usage_limit" {
+            return Ok(false);
+        }
+        let sharing = managed_code(&value["code"]).is_some_and(|(_, _, usage)| usage);
+        let reset = self.failure_reset(&value);
+        let needs_read = !sharing && reset.is_none() && self.usage_policy.is_some();
+        value["resetAt"] = json!(reset);
+        **failure = decode(value)?;
+        Ok(needs_read)
+    }
+
+    fn remember_limited_item(&mut self, turn: &str, event: &ProviderEvent) -> ProviderResult<()> {
+        let Some(context) = self.turns.get(turn) else {
+            return Ok(());
+        };
+        let item = crate::ports::runs_ingestion::provider_event_ingestor::terminal_failure_item(
+            event,
+            &context.input.thread_id,
+            Some(&context.input.run_id),
+            Some(&context.input.root_node_id),
+            &self.clock.now(),
+        )
+        .map_err(|error| protocol(error.to_string()))?;
+        if let Some(item) = item {
+            self.limited_items
+                .insert(text(&context.thread, "id").into(), encoded(item)?);
+        }
+        Ok(())
+    }
+
+    fn filter_usage_terminals(
+        &mut self,
+        events: Vec<ProviderEvent>,
+    ) -> ProviderResult<Vec<ProviderEvent>> {
+        let mut ready = vec![];
+        for mut event in events {
+            let needs_read = self.annotate_usage_reset(&mut event)?;
+            let source = match &event.kind {
+                ProviderEventKind::Terminal {
+                    provider_turn_id,
+                    outcome: TerminalOutcome::Failed { failure, .. },
+                    ..
+                } if encoded(failure)?["class"] == "usage_limit" => self
+                    .turns
+                    .iter()
+                    .find(|(_, context)| context.turn["id"] == provider_turn_id.0)
+                    .map(|(id, _)| id.clone()),
+                _ => None,
+            };
+            if let Some(source) = source {
+                if needs_read {
+                    if !self.pending_usage_terminals.contains_key(&source) {
+                        self.actions.push_back(NativeAction::ReadUsageReset {
+                            turn: source.clone(),
+                            generation: self.rate_limit_generation,
+                        });
+                        self.pending_usage_terminals.insert(source, event);
+                    }
+                    continue;
+                }
+                self.remember_limited_item(&source, &event)?;
+            }
+            ready.push(event);
+        }
+        Ok(ready)
+    }
+}
+
 fn unwrap_managed_error(value: &Value) -> Value {
     let value = value
         .as_str()
@@ -5133,7 +5322,8 @@ pub(crate) async fn run_runtime(
     let mut response_deadline = tokio::time::Instant::now();
     'actor: loop {
         if transport_failure.is_some()
-            && (projection.responses.is_empty() || tokio::time::Instant::now() >= response_deadline)
+            && ((projection.responses.is_empty() && projection.pending_usage_terminals.is_empty())
+                || tokio::time::Instant::now() >= response_deadline)
         {
             if let Ok(events) = projection.stopped() {
                 for event in events {
@@ -5208,10 +5398,20 @@ async fn execute_action(
 ) -> ProviderResult<Value> {
     let timeout = match action {
         NativeAction::CaptureApp { .. } => 20,
+        NativeAction::PauseAndInterruptGoal { .. } => 20,
         NativeAction::ChildMetadata { .. } => 5,
         _ => 10,
     };
     let operation = async {
+        if let NativeAction::ReadUsageReset { .. } = action {
+            let Some(client) = &client else {
+                return Ok(Value::Null);
+            };
+            return client
+                .request("account/rateLimits/read", &Value::Null)
+                .await
+                .map_err(native_error);
+        }
         match &mut *action {
             NativeAction::ChildMetadata { thread } => {
                 let Some(client) = &client else {
@@ -5305,6 +5505,23 @@ async fn execute_action(
         let Some(client) = client else {
             return Ok(Value::Null);
         };
+        if let NativeAction::PauseAndInterruptGoal { thread, turn } = action {
+            let goal = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                client.request::<_, Value>(
+                    "thread/goal/set",
+                    &json!({"threadId":thread,"status":"paused"}),
+                ),
+            )
+            .await;
+            let _: Value = client
+                .request("turn/interrupt", &json!({"threadId":thread,"turnId":turn}))
+                .await
+                .map_err(native_error)?;
+            return goal
+                .map_err(|_| protocol("Codex goal pause timed out"))?
+                .map_err(native_error);
+        }
         if let NativeAction::Terminate { thread, process } = action {
             let terminated = crate::adapters::codex::terminate_native_background_process(
                 &client,
@@ -5753,7 +5970,7 @@ impl Projection {
             )
         };
         if let Some(model) = model {
-            self.update_child_selection(child, model, None, None)?;
+            self.update_child_selection(child, model, item.get("reasoningEffort"), None)?;
         }
         let model = self
             .child_selections
@@ -5780,6 +5997,15 @@ impl Projection {
         turn_item["prompt"] = json!(prompt);
         turn_item["result"] = Value::Null;
         let mut app = parent.app.clone();
+        app["modelSelection"] = if let Some(selection) = self.child_selections.get(child) {
+            let mut selection = selection.clone();
+            selection["instanceId"] = json!(self.instance);
+            selection
+        } else {
+            encoded(normalize_load_selection(
+                parent.input.model_selection.clone(),
+            ))?
+        };
         app["id"] = json!(child_id);
         app["title"] = json!(title);
         app["createdBy"] = json!("agent");

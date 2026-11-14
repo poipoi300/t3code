@@ -537,6 +537,59 @@ fn failed_turn_terminalizes_tool_nodes_before_the_terminal_signal() {
 }
 
 #[test]
+fn buffered_assistant_text_flushes_before_item_and_turn_completion() {
+    let options = kit::options();
+    let mut state = mapping::Projection::new(
+        options.clock,
+        options.ids,
+        kit::open_input(),
+        options.instance_id,
+    );
+    state
+        .prepare_start(kit::turn_input("native-thread", 1, "work").unwrap())
+        .unwrap();
+    state
+        .notification(
+            "turn/started",
+            json!({"threadId":"native-thread","turn":kit::native_turn("root","inProgress")}),
+        )
+        .unwrap();
+    for (id, complete_item) in [("first", true), ("second", false)] {
+        state.notification("item/started",json!({"threadId":"native-thread","turnId":"root","item":{"type":"agentMessage","id":id,"text":"","phase":"commentary"}})).unwrap();
+        state
+            .notification(
+                "item/agentMessage/delta",
+                json!({"threadId":"native-thread","turnId":"root","itemId":id,"delta":id}),
+            )
+            .unwrap();
+        let events = if complete_item {
+            state.notification("item/completed",json!({"threadId":"native-thread","turnId":"root","item":{"type":"agentMessage","id":id,"text":id,"phase":"commentary"}})).unwrap()
+        } else {
+            state
+                .notification(
+                    "turn/completed",
+                    json!({"threadId":"native-thread","turn":kit::native_turn("root","completed")}),
+                )
+                .unwrap()
+        };
+        let message=events.iter().position(|event|matches!(&event.kind,ProviderEventKind::Message(message) if serde_json::to_value(message).unwrap()["text"]==id)).unwrap();
+        let terminal = events
+            .iter()
+            .position(|event| {
+                if complete_item {
+                    value(event).is_some_and(|item| {
+                        item["nativeItemRef"]["nativeId"] == id && item["status"] == "completed"
+                    })
+                } else {
+                    matches!(event.kind, ProviderEventKind::Terminal { .. })
+                }
+            })
+            .unwrap();
+        assert!(message < terminal);
+    }
+}
+
+#[test]
 fn compaction_items_use_the_canonical_type_and_terminalize_with_the_turn() {
     for outcome in ["failed", "interrupted"] {
         let options = kit::options();
@@ -568,6 +621,93 @@ fn compaction_items_use_the_canonical_type_and_terminalize_with_the_turn() {
                     && item["status"] == outcome
                     && !item["completedAt"].is_null())
         );
+    }
+}
+
+#[tokio::test]
+async fn native_compaction_rpc_preserves_item_identity_through_completion_failure_and_stop() {
+    for outcome in ["completed", "failed", "interrupted", "Stop"] {
+        let mut h = kit::Harness::open().await.unwrap();
+        let runtime = h.runtime.clone();
+        let server = async {
+            let request = h.peer.read().await.unwrap();
+            assert_eq!(request["method"], "thread/compact/start");
+            assert_eq!(request["params"], json!({"threadId":"native-thread"}));
+            h.peer.respond(&request, json!({})).await.unwrap();
+            h.peer.write(&json!({"method":"turn/started","params":{"threadId":"native-thread","turn":kit::native_turn("compact-turn","inProgress")}})).await.unwrap();
+            h.peer.write(&json!({"method":"item/started","params":{"threadId":"native-thread","turnId":"compact-turn","item":{"type":"contextCompaction","id":"compact-item"}}})).await.unwrap();
+            if outcome != "Stop" {
+                if outcome == "completed" {
+                    h.peer.write(&json!({"method":"item/completed","params":{"threadId":"native-thread","turnId":"compact-turn","item":{"type":"contextCompaction","id":"compact-item"}}})).await.unwrap();
+                }
+                h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":kit::native_turn("compact-turn",outcome)}})).await.unwrap();
+            }
+        };
+        let (result, _) = tokio::join!(
+            runtime
+                .extensions()
+                .unwrap()
+                .compact(kit::turn_input("native-thread", 1, "/compact").unwrap()),
+            server
+        );
+        result.unwrap();
+        let mut events = h
+            .collect_until(|event| {
+                if outcome == "Stop" {
+                    value(event).is_some_and(|item| {
+                        item["type"] == "compaction" && item["status"] == "running"
+                    })
+                } else {
+                    matches!(event.kind, ProviderEventKind::Terminal { .. })
+                }
+            })
+            .await
+            .unwrap();
+        if outcome == "Stop" {
+            let server = async {
+                let request = h.peer.read().await.unwrap();
+                assert_eq!(request["method"], "turn/interrupt");
+                h.peer.respond(&request, json!({})).await.unwrap();
+                h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":kit::native_turn("compact-turn","interrupted")}})).await.unwrap();
+            };
+            let stop = InterruptInput {
+                provider_thread: kit::thread("native-thread").unwrap(),
+                provider_turn_id: ProviderTurnId(mapping::derived(
+                    "provider-turn",
+                    "native-turn",
+                    "compact-turn",
+                )),
+                request_runtime_restart: false,
+            };
+            let (result, _) = tokio::join!(runtime.interrupt_turn(stop), server);
+            result.unwrap();
+            events.extend(
+                h.collect_until(|event| matches!(event.kind, ProviderEventKind::Terminal { .. }))
+                    .await
+                    .unwrap(),
+            );
+        }
+        let items: Vec<_> = events
+            .iter()
+            .filter_map(value)
+            .filter(|item| item["type"] == "compaction")
+            .collect();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item["status"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "running",
+                if outcome == "Stop" {
+                    "interrupted"
+                } else {
+                    outcome
+                }
+            ]
+        );
+        assert_eq!(items[0]["id"], items[1]["id"]);
+        runtime.close().await.unwrap();
     }
 }
 
@@ -671,6 +811,52 @@ fn terminal_retry_exhaustion_on_429_is_a_usage_limit_and_preserves_richer_detail
         .unwrap();
     assert_eq!(failure["class"], "usage_limit");
     assert_eq!(failure["message"], "Detailed provider failure.");
+    for (notification_status, completion_status, will_retry, expected) in [
+        (500, Some(429), false, "usage_limit"),
+        (429, Some(500), true, "provider_error"),
+        (429, None, false, "usage_limit"),
+        (429, None, true, "usage_limit"),
+    ] {
+        let options = kit::options();
+        let mut state = mapping::Projection::new(
+            options.clock,
+            options.ids,
+            kit::open_input(),
+            options.instance_id,
+        );
+        state
+            .prepare_start(kit::turn_input("native-thread", 1, "work").unwrap())
+            .unwrap();
+        state
+            .notification(
+                "turn/started",
+                json!({"threadId":"native-thread","turn":kit::native_turn("root","inProgress")}),
+            )
+            .unwrap();
+        state.notification("error",json!({"threadId":"native-thread","turnId":"root","willRetry":will_retry,"error":{"message":"retry exhausted","additionalDetails":"richer details","codexErrorInfo":{"responseTooManyFailedAttempts":{"httpStatusCode":notification_status}}}})).unwrap();
+        let mut turn = kit::native_turn("root", "failed");
+        turn["error"] = json!({"message":"retry exhausted","codexErrorInfo":completion_status.map(|status|json!({"responseTooManyFailedAttempts":{"httpStatusCode":status}}))});
+        let events = state
+            .notification(
+                "turn/completed",
+                json!({"threadId":"native-thread","turn":turn}),
+            )
+            .unwrap();
+        let failure = events
+            .into_iter()
+            .find_map(|event| match event.kind {
+                ProviderEventKind::Terminal {
+                    outcome: TerminalOutcome::Failed { failure, .. },
+                    ..
+                } => Some(serde_json::to_value(failure).unwrap()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            failure["class"], expected,
+            "notification={notification_status}, completion={completion_status:?}, retry={will_retry}"
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -778,6 +964,136 @@ fn managed_failures_keep_sharing_limits_and_actionable_capability_messages() {
         assert_eq!(failure["class"], class);
         assert_eq!(failure["message"], message);
         assert!(failure.get("resetAt").is_none_or(Value::is_null));
+    }
+}
+
+struct CodexUsageFixture(tokio::sync::mpsc::UnboundedSender<Value>);
+impl t3_orchestration::adapters::codex::CodexUsagePolicy for CodexUsageFixture {
+    fn merge(&self, previous: Option<&Value>, update: &Value) -> Option<Value> {
+        if update["limitId"].as_str().is_some_and(|id| id != "codex") {
+            previous.cloned()
+        } else {
+            Some(update.clone())
+        }
+    }
+    fn reset_at(&self, snapshot: &Value) -> Option<String> {
+        match snapshot["primary"]["resetsAt"].as_u64() {
+            Some(1) => Some("2026-11-14T01:00:00.000Z".into()),
+            Some(2) => Some("2026-11-14T02:00:00.000Z".into()),
+            Some(3) => Some("2026-11-14T03:00:00.000Z".into()),
+            _ => None,
+        }
+    }
+    fn updated(&self, _: Option<&Value>, update: &Value, _: &IsoDateTime) {
+        self.0.send(update.clone()).unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn usage_limit_reset_reads_do_not_overwrite_newer_notifications_and_refresh_settled_cards() {
+    for reset_from_notification in [false, true] {
+        let (updates, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let mut options = kit::options();
+        options.usage_policy = Some(Arc::new(CodexUsageFixture(updates)));
+        let mut h = kit::Harness::with_options(options).await.unwrap();
+        h.start("native-turn").await.unwrap();
+        let mut turn = kit::native_turn("native-turn", "failed");
+        turn["error"] =
+            json!({"message":"Usage limit reached","codexErrorInfo":"usageLimitExceeded"});
+        h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":turn}})).await.unwrap();
+        let read = h.peer.read().await.unwrap();
+        assert_eq!(read["method"], "account/rateLimits/read");
+        assert!(read["params"].is_null());
+        let snapshot = |reset| json!({"limitId":"codex","primary":{"usedPercent":100,"resetsAt":reset,"windowDurationMins":300},"secondary":null});
+        if reset_from_notification {
+            h.peer.write(&json!({"method":"account/rateLimits/updated","params":{"rateLimits":snapshot(Some(2))}})).await.unwrap();
+            assert_eq!(observed.recv().await.unwrap()["primary"]["resetsAt"], 2);
+        }
+        h.peer
+            .respond(
+                &read,
+                json!({"rateLimits":snapshot(if reset_from_notification {Some(1)}else{None})}),
+            )
+            .await
+            .unwrap();
+        let events = h
+            .collect_until(|event| matches!(event.kind, ProviderEventKind::Terminal { .. }))
+            .await
+            .unwrap();
+        let failure = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                ProviderEventKind::Terminal {
+                    outcome: TerminalOutcome::Failed { failure, .. },
+                    ..
+                } => Some(serde_json::to_value(failure).unwrap()),
+                _ => None,
+            })
+            .unwrap();
+        if reset_from_notification {
+            assert_eq!(failure["resetAt"], "2026-11-14T02:00:00.000Z");
+        } else {
+            assert!(failure["resetAt"].is_null());
+            h.peer.write(&json!({"method":"account/rateLimits/updated","params":{"rateLimits":snapshot(Some(3))}})).await.unwrap();
+            let events = h
+                .collect_until(|event| {
+                    value(event).is_some_and(|item| {
+                        item["failure"]["resetAt"] == "2026-11-14T03:00:00.000Z"
+                    })
+                })
+                .await
+                .unwrap();
+            let item = events.iter().filter_map(value).next_back().unwrap();
+            assert_eq!(item["type"], "error");
+            assert_eq!(item["status"], "failed");
+            assert_eq!(item["failure"]["class"], "usage_limit");
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event.kind, ProviderEventKind::Terminal { .. }))
+            );
+        }
+        h.runtime.close().await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn usage_reset_read_is_bounded_and_sharing_caps_do_not_read_ordinary_allowance() {
+    for sharing in [false, true] {
+        let (updates, _observed) = tokio::sync::mpsc::unbounded_channel();
+        let mut options = kit::options();
+        options.usage_policy = Some(Arc::new(CodexUsageFixture(updates)));
+        let mut h = kit::Harness::with_options(options).await.unwrap();
+        h.start("native-turn").await.unwrap();
+        let mut turn = kit::native_turn("native-turn", "failed");
+        turn["error"] = if sharing {
+            json!({"message":"The user has reached their Subscription Sharing usage limit"})
+        } else {
+            json!({"message":"Usage limit reached","codexErrorInfo":"usageLimitExceeded"})
+        };
+        h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":turn}})).await.unwrap();
+        if !sharing {
+            let read = h.peer.read().await.unwrap();
+            assert_eq!(read["method"], "account/rateLimits/read");
+            tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        }
+        let events = h
+            .collect_until(|event| matches!(event.kind, ProviderEventKind::Terminal { .. }))
+            .await
+            .unwrap();
+        let failure = events
+            .into_iter()
+            .find_map(|event| match event.kind {
+                ProviderEventKind::Terminal {
+                    outcome: TerminalOutcome::Failed { failure, .. },
+                    ..
+                } => Some(serde_json::to_value(failure).unwrap()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(failure["class"], "usage_limit");
+        assert!(failure["resetAt"].is_null());
+        h.runtime.close().await.unwrap();
     }
 }
 
@@ -944,6 +1260,66 @@ async fn capacity_restart_failure_reports_the_original_failure_once() {
     assert_eq!(failure["message"], "selected model at capacity");
     assert_eq!(failure["code"], "serverOverloaded");
     h.runtime.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn capacity_restart_failure_interrupts_live_native_children_and_keeps_stop_authoritative() {
+    let mut h = kit::Harness::open().await.unwrap();
+    h.start("root").await.unwrap();
+    h.peer.write(&json!({"method":"item/completed","params":{"threadId":"native-thread","turnId":"root","item":{"type":"collabAgentToolCall","id":"spawn","tool":"spawnAgent","status":"completed","receiverThreadIds":["child"],"model":"child-model","prompt":"work","agentsStates":{}}}})).await.unwrap();
+    h.peer.write(&json!({"method":"turn/started","params":{"threadId":"child","turn":kit::native_turn("child-turn","inProgress")}})).await.unwrap();
+    h.collect_until(|event|matches!(&event.kind,ProviderEventKind::Turn {provider_turn,..} if serde_json::to_value(provider_turn).unwrap()["nativeTurnRef"]["nativeId"]=="child-turn")).await.unwrap();
+    let mut turn = kit::native_turn("root", "failed");
+    turn["error"] = json!({"message":"At capacity","codexErrorInfo":"serverOverloaded"});
+    h.peer
+        .write(
+            &json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":turn}}),
+        )
+        .await
+        .unwrap();
+    h.collect_until(|event| {
+        value(event).is_some_and(|item| item["type"] == "error" && item["status"] == "running")
+    })
+    .await
+    .unwrap();
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    let start = h.peer.read().await.unwrap();
+    assert_eq!(start["method"], "turn/start");
+    assert_eq!(start["params"]["input"], json!([]));
+    h.peer
+        .write(&json!({"id":start["id"],"error":{"code":-32603,"message":"Start failed"}}))
+        .await
+        .unwrap();
+    let interrupt = h.peer.read().await.unwrap();
+    assert_eq!(interrupt["method"], "turn/interrupt");
+    assert_eq!(
+        interrupt["params"],
+        json!({"threadId":"child","turnId":"child-turn"})
+    );
+    h.peer.respond(&interrupt, json!({})).await.unwrap();
+    h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"child","turn":kit::native_turn("child-turn","interrupted")}})).await.unwrap();
+    let events=h.collect_until(|event|matches!(&event.kind,ProviderEventKind::Subagent(task) if serde_json::to_value(task).unwrap()["status"]=="interrupted")).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .filter(|event| matches!(event.kind, ProviderEventKind::Terminal { .. }))
+            .count()
+            <= 1
+    );
+    h.runtime
+        .interrupt_turn(InterruptInput {
+            provider_thread: kit::thread("native-thread").unwrap(),
+            provider_turn_id: ProviderTurnId(mapping::derived(
+                "provider-turn",
+                "native-turn",
+                "root",
+            )),
+            request_runtime_restart: false,
+        })
+        .await
+        .unwrap();
+    h.runtime.close().await.unwrap();
+    assert!(h.peer.read().await.is_err());
 }
 
 #[tokio::test(start_paused = true)]
@@ -1138,6 +1514,36 @@ fn context_usage_reuses_effort_changes_and_load_drops_only_effort() {
     );
     second.model = "other".into();
     assert!(!mapping::can_reuse_usage(&first, &second));
+    let options = kit::options();
+    let mut state = mapping::Projection::new(
+        options.clock,
+        options.ids,
+        kit::open_input(),
+        options.instance_id,
+    );
+    state
+        .prepare_start(kit::turn_input("native-thread", 1, "work").unwrap())
+        .unwrap();
+    state
+        .notification(
+            "turn/started",
+            json!({"threadId":"native-thread","turn":kit::native_turn("root","inProgress")}),
+        )
+        .unwrap();
+    let events=state.notification("thread/tokenUsage/updated",json!({"threadId":"native-thread","turnId":"root","tokenUsage":{"total":{"totalTokens":180000,"inputTokens":160000,"cachedInputTokens":20000,"outputTokens":20000,"reasoningOutputTokens":5000},"last":{"totalTokens":50000,"inputTokens":45000,"cachedInputTokens":10000,"outputTokens":5000,"reasoningOutputTokens":1000},"modelContextWindow":200000}})).unwrap();
+    let usage = events
+        .into_iter()
+        .find_map(|event| match event.kind {
+            ProviderEventKind::Turn { provider_turn, .. } => {
+                Some(serde_json::to_value(provider_turn).unwrap()["tokenUsage"].clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        usage,
+        json!({"usedTokens":50000,"maxTokens":200000,"inputTokens":45000,"cachedInputTokens":10000,"outputTokens":5000,"reasoningOutputTokens":1000,"updatedAt":kit::NOW})
+    );
 }
 #[test]
 fn permission_entries_and_multifile_paths_are_classified_by_item() {
@@ -1640,6 +2046,58 @@ async fn resume_uses_durable_app_identity_without_loading_history_and_preserves_
     h.runtime.close().await.unwrap();
 }
 
+#[tokio::test(start_paused = true)]
+async fn unloaded_threads_resume_after_closure_on_either_side_of_the_native_closing_error() {
+    for closed_before_error in [false, true] {
+        let mut h = kit::Harness::open().await.unwrap();
+        let runtime = h.runtime.clone();
+        let server = async {
+            let unload = h.peer.read().await.unwrap();
+            assert_eq!(unload["method"], "thread/unsubscribe");
+            h.peer.respond(&unload, json!({})).await.unwrap();
+        };
+        let (result, _) = tokio::join!(
+            runtime
+                .extensions()
+                .unwrap()
+                .unload(kit::thread("native-thread").unwrap(), false),
+            server
+        );
+        result.unwrap();
+        let server = async {
+            let request = h.peer.read().await.unwrap();
+            assert_eq!(request["method"], "thread/resume");
+            let closed = json!({"method":"thread/closed","params":{"threadId":"native-thread"}});
+            if closed_before_error {
+                h.peer.write(&closed).await.unwrap();
+            }
+            h.peer.write(&json!({"id":request["id"],"error":{"code":-32600,"message":"thread native-thread is closing"}})).await.unwrap();
+            if !closed_before_error {
+                h.peer.write(&closed).await.unwrap();
+            }
+            let retry = h.peer.read().await.unwrap();
+            assert_eq!(retry["method"], "thread/resume");
+            assert_eq!(retry["params"], request["params"]);
+            h.peer
+                .respond(
+                    &retry,
+                    json!({"thread":{"id":"native-thread","updatedAt":1782622450}}),
+                )
+                .await
+                .unwrap();
+        };
+        let input = ResumeThread {
+            provider_thread: kit::thread("native-thread").unwrap(),
+            thread_id: None,
+            model_selection: Some(kit::selection()),
+            runtime_policy: Some(kit::policy()),
+        };
+        let (result, _) = tokio::join!(runtime.resume_thread(input), server);
+        assert_eq!(result.unwrap().updated_at.0, "2026-06-28T04:54:10.000Z");
+        runtime.close().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn thread_start_injects_only_t3_mcp_servers_and_keeps_the_process_shared() {
     let mut options = kit::options();
@@ -1776,35 +2234,48 @@ async fn snapshot_keeps_the_native_timestamp_and_active_thread_status() {
 
 #[tokio::test]
 async fn fork_sends_the_inclusive_native_boundary_and_destination_configuration() {
-    let mut h = kit::Harness::open().await.unwrap();
-    let thread = kit::thread("native-thread").unwrap();
-    let boundary:OrchestrationV2ProviderTurn=mapping::decode(json!({"id":"first","providerThreadId":thread.id,"nodeId":"root","runAttemptId":"attempt","nativeTurnRef":mapping::native_ref("native-first"),"ordinal":1,"status":"completed","startedAt":kit::NOW,"completedAt":kit::NOW})).unwrap();
-    let input = ForkInput {
-        source_provider_thread: thread,
-        source_provider_turns: Some(vec![boundary]),
-        provider_turn_id: Some(ProviderTurnId("first".into())),
-        target_thread_id: ThreadId("fork-target".into()),
-        owner_node_id: None,
-        model_selection: Some(kit::selection()),
-        runtime_policy: Some(kit::policy()),
-    };
-    let runtime = h.runtime.clone();
-    let server = async {
-        let request = h.peer.read().await.unwrap();
-        assert_eq!(request["method"], "thread/fork");
-        assert_eq!(request["params"]["lastTurnId"], "native-first");
-        assert_eq!(request["params"]["excludeTurns"], true);
-        assert_eq!(
-            request["params"]["config"]["shell_environment_policy.set.T3CODE_THREAD_ID"],
-            "fork-target"
-        );
-        h.peer.respond(&request,json!({"thread":{"id":"native-fork","createdAt":1782622440,"updatedAt":1782622450}})).await.unwrap();
-    };
-    let (fork, ()) = tokio::join!(runtime.fork(input), server);
-    let fork = serde_json::to_value(fork.unwrap()).unwrap();
-    assert_eq!(fork["appThreadId"], "fork-target");
-    assert_eq!(fork["forkedFrom"]["providerTurnId"], "first");
-    h.runtime.close().await.unwrap();
+    for archived in [false, true] {
+        let mut h = kit::Harness::open().await.unwrap();
+        let thread = kit::thread("native-thread").unwrap();
+        let boundary:OrchestrationV2ProviderTurn=mapping::decode(json!({"id":"first","providerThreadId":thread.id,"nodeId":"root","runAttemptId":"attempt","nativeTurnRef":mapping::native_ref("native-first"),"ordinal":1,"status":"completed","startedAt":kit::NOW,"completedAt":kit::NOW})).unwrap();
+        let input = ForkInput {
+            source_provider_thread: thread,
+            source_provider_turns: Some(vec![boundary]),
+            provider_turn_id: Some(ProviderTurnId("first".into())),
+            target_thread_id: ThreadId("fork-target".into()),
+            owner_node_id: None,
+            model_selection: Some(kit::selection()),
+            runtime_policy: Some(kit::policy()),
+        };
+        let runtime = h.runtime.clone();
+        let server = async {
+            let mut request = h.peer.read().await.unwrap();
+            assert_eq!(request["method"], "thread/fork");
+            if archived {
+                let params = request["params"].clone();
+                h.peer.write(&json!({"id":request["id"],"error":{"code":-32600,"message":"thread native-thread is archived"}})).await.unwrap();
+                let unarchive = h.peer.read().await.unwrap();
+                assert_eq!(unarchive["method"], "thread/unarchive");
+                assert_eq!(unarchive["params"]["threadId"], "native-thread");
+                h.peer.respond(&unarchive, json!({})).await.unwrap();
+                request = h.peer.read().await.unwrap();
+                assert_eq!(request["method"], "thread/fork");
+                assert_eq!(request["params"], params);
+            }
+            assert_eq!(request["params"]["lastTurnId"], "native-first");
+            assert_eq!(request["params"]["excludeTurns"], true);
+            assert_eq!(
+                request["params"]["config"]["shell_environment_policy.set.T3CODE_THREAD_ID"],
+                "fork-target"
+            );
+            h.peer.respond(&request,json!({"thread":{"id":"native-fork","createdAt":1782622440,"updatedAt":1782622450}})).await.unwrap();
+        };
+        let (fork, ()) = tokio::join!(runtime.fork(input), server);
+        let fork = serde_json::to_value(fork.unwrap()).unwrap();
+        assert_eq!(fork["appThreadId"], "fork-target");
+        assert_eq!(fork["forkedFrom"]["providerTurnId"], "first");
+        h.runtime.close().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1834,6 +2305,92 @@ async fn recorded_simple_transcript_matches_typescript_text_and_terminal() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn legacy_native_history_refuses_rollback_before_any_revert_request() {
+    let mut h = kit::Harness::open().await.unwrap();
+    let thread = kit::thread("native-thread").unwrap();
+    let turn:OrchestrationV2ProviderTurn=mapping::decode(json!({"id":"turn","providerThreadId":thread.id,"nodeId":"root","runAttemptId":"attempt","nativeTurnRef":mapping::native_ref("native-turn"),"ordinal":1,"status":"completed","startedAt":kit::NOW,"completedAt":kit::NOW})).unwrap();
+    let input = RollbackInput {
+        provider_thread: thread,
+        target: RollbackTarget::ThreadStart {
+            checkpoint_id: CheckpointId("checkpoint".into()),
+        },
+        provider_thread_turns: vec![turn],
+    };
+    let runtime = h.runtime.clone();
+    let server = async {
+        let request = h.peer.read().await.unwrap();
+        assert_eq!(request["method"], "thread/read");
+        assert_eq!(request["params"]["includeTurns"], false);
+        h.peer.respond(&request,json!({"thread":{"id":"native-thread","historyMode":"legacy","status":{"type":"idle"}}})).await.unwrap();
+    };
+    let (result, _) = tokio::join!(runtime.rollback(input), server);
+    assert!(matches!(result,Err(ProviderError::Protocol{detail,..}) if detail.contains("legacy")));
+    h.runtime.close().await.unwrap();
+    assert!(h.peer.read().await.is_err());
+}
+
+#[tokio::test]
+async fn unloaded_archived_rollback_resumes_before_paginated_revert() {
+    let mut h = kit::Harness::open().await.unwrap();
+    let thread = kit::thread("native-thread").unwrap();
+    let turn:OrchestrationV2ProviderTurn=mapping::decode(json!({"id":"turn","providerThreadId":thread.id,"nodeId":"root","runAttemptId":"attempt","nativeTurnRef":mapping::native_ref("native-turn"),"ordinal":1,"status":"completed","startedAt":kit::NOW,"completedAt":kit::NOW})).unwrap();
+    let input = RollbackInput {
+        provider_thread: thread,
+        target: RollbackTarget::ThreadStart {
+            checkpoint_id: CheckpointId("checkpoint".into()),
+        },
+        provider_thread_turns: vec![turn],
+    };
+    let runtime = h.runtime.clone();
+    let server = async {
+        let read = h.peer.read().await.unwrap();
+        assert_eq!(read["method"], "thread/read");
+        assert_eq!(read["params"]["includeTurns"], false);
+        h.peer.respond(&read,json!({"thread":{"id":"native-thread","historyMode":"paginated","status":{"type":"notLoaded"}}})).await.unwrap();
+        let resume = h.peer.read().await.unwrap();
+        assert_eq!(resume["method"], "thread/resume");
+        assert_eq!(resume["params"]["excludeTurns"], true);
+        h.peer.write(&json!({"id":resume["id"],"error":{"code":-32600,"message":"thread native-thread is archived"}})).await.unwrap();
+        let unarchive = h.peer.read().await.unwrap();
+        assert_eq!(unarchive["method"], "thread/unarchive");
+        h.peer.respond(&unarchive, json!({})).await.unwrap();
+        let retry = h.peer.read().await.unwrap();
+        assert_eq!(retry["method"], "thread/resume");
+        assert_eq!(retry["params"], resume["params"]);
+        h.peer
+            .respond(&retry, json!({"thread":{"id":"native-thread"}}))
+            .await
+            .unwrap();
+        let list = h.peer.read().await.unwrap();
+        assert_eq!(list["method"], "thread/turns/list");
+        assert_eq!(list["params"]["sortDirection"], "desc");
+        assert_eq!(list["params"]["itemsView"], "summary");
+        h.peer
+            .respond(
+                &list,
+                json!({"data":[kit::native_turn("native-turn","completed")],"nextCursor":null}),
+            )
+            .await
+            .unwrap();
+        let revert = h.peer.read().await.unwrap();
+        assert_eq!(revert["method"], "thread/revert");
+        assert_eq!(revert["params"]["beforeTurnId"], "native-turn");
+        h.peer.respond(&revert,json!({"thread":{"id":"native-thread","historyMode":"paginated","status":{"type":"idle"}}})).await.unwrap();
+    };
+    let (result, _) = tokio::join!(runtime.rollback(input), server);
+    let result = result.unwrap();
+    assert!(
+        result
+            .provider_thread
+            .native_conversation_head_ref
+            .is_none()
+    );
+    assert!(result.provider_turns.is_empty());
+    h.runtime.close().await.unwrap();
+    assert!(h.peer.read().await.is_err());
 }
 
 macro_rules! recording_test {
@@ -2106,54 +2663,98 @@ async fn goal_controls_do_not_create_native_turns_and_validate_before_mutating()
 
 #[tokio::test]
 async fn goal_setting_starts_with_current_turn_policy_before_activating() {
-    let mut h = kit::Harness::open().await.unwrap();
-    let runtime = h.runtime.clone();
-    let server = async {
-        let get = h.peer.read().await.unwrap();
-        assert_eq!(get["method"], "thread/goal/get");
-        h.peer.respond(&get, json!({"goal":null})).await.unwrap();
-        let set = h.peer.read().await.unwrap();
-        assert_eq!(set["method"], "thread/goal/set");
-        assert_eq!(set["params"]["status"], "paused");
-        assert_eq!(set["params"]["objective"], "ship it");
-        let mut goal = json!({"objective":"ship it","status":"paused","tokensUsed":0,"tokenBudget":null,"timeUsedSeconds":0});
-        h.peer.respond(&set, json!({"goal":goal})).await.unwrap();
-        let config = h.peer.read().await.unwrap();
-        h.peer
-            .respond(&config, json!({"config":{},"origins":{}}))
-            .await
-            .unwrap();
-        let start = h.peer.read().await.unwrap();
-        assert_eq!(start["method"], "turn/start");
-        assert_eq!(start["params"]["approvalsReviewer"], "user");
-        assert!(
-            start["params"]["input"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("Do not call create_goal")
+    for stop_during_activation in [false, true] {
+        let mut h = kit::Harness::open().await.unwrap();
+        let runtime = h.runtime.clone();
+        let stop_runtime = runtime.clone();
+        let server = async {
+            let get = h.peer.read().await.unwrap();
+            assert_eq!(get["method"], "thread/goal/get");
+            h.peer.respond(&get, json!({"goal":null})).await.unwrap();
+            let set = h.peer.read().await.unwrap();
+            assert_eq!(set["method"], "thread/goal/set");
+            assert_eq!(set["params"]["status"], "paused");
+            assert_eq!(set["params"]["objective"], "ship it");
+            let mut goal = json!({"objective":"ship it","status":"paused","tokensUsed":0,"tokenBudget":null,"timeUsedSeconds":0});
+            h.peer.respond(&set, json!({"goal":goal})).await.unwrap();
+            let config = h.peer.read().await.unwrap();
+            h.peer
+                .respond(&config, json!({"config":{},"origins":{}}))
+                .await
+                .unwrap();
+            let start = h.peer.read().await.unwrap();
+            assert_eq!(start["method"], "turn/start");
+            assert_eq!(start["params"]["approvalsReviewer"], "user");
+            assert!(
+                start["params"]["input"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Do not call create_goal")
+            );
+            h.peer
+                .respond(
+                    &start,
+                    json!({"turn":kit::native_turn("goal-turn","inProgress")}),
+                )
+                .await
+                .unwrap();
+            let activate = h.peer.read().await.unwrap();
+            assert_eq!(activate["method"], "thread/goal/set");
+            assert_eq!(activate["params"]["status"], "active");
+            if stop_during_activation {
+                let stopping = tokio::spawn(async move {
+                    stop_runtime
+                        .interrupt_turn(InterruptInput {
+                            provider_thread: kit::thread("native-thread").unwrap(),
+                            provider_turn_id: ProviderTurnId(mapping::derived(
+                                "provider-turn",
+                                "native-turn",
+                                "goal-turn",
+                            )),
+                            request_runtime_restart: false,
+                        })
+                        .await
+                });
+                let interrupt = h.peer.read().await.unwrap();
+                assert_eq!(interrupt["method"], "turn/interrupt");
+                h.peer.respond(&interrupt, json!({})).await.unwrap();
+                h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":kit::native_turn("goal-turn","interrupted")}})).await.unwrap();
+                stopping.await.unwrap().unwrap();
+            }
+            goal["status"] = json!("active");
+            h.peer
+                .respond(&activate, json!({"goal":goal}))
+                .await
+                .unwrap();
+            if stop_during_activation {
+                let pause = h.peer.read().await.unwrap();
+                assert_eq!(pause["method"], "thread/goal/set");
+                assert_eq!(pause["params"]["status"], "paused");
+                goal["status"] = json!("paused");
+                h.peer.respond(&pause, json!({"goal":goal})).await.unwrap();
+            }
+        };
+        let (result, _) = tokio::join!(
+            runtime.start_turn(kit::turn_input("native-thread", 1, "/goal ship it").unwrap()),
+            server
         );
-        h.peer
-            .respond(
-                &start,
-                json!({"turn":kit::native_turn("goal-turn","inProgress")}),
-            )
-            .await
-            .unwrap();
-        let activate = h.peer.read().await.unwrap();
-        assert_eq!(activate["method"], "thread/goal/set");
-        assert_eq!(activate["params"]["status"], "active");
-        goal["status"] = json!("active");
-        h.peer
-            .respond(&activate, json!({"goal":goal}))
-            .await
-            .unwrap();
-    };
-    let (result, _) = tokio::join!(
-        runtime.start_turn(kit::turn_input("native-thread", 1, "/goal ship it").unwrap()),
-        server
-    );
-    result.unwrap();
-    h.runtime.close().await.unwrap();
+        result.unwrap();
+        if stop_during_activation {
+            let mut interrupted = false;
+            let events=h.collect_until(|event| {
+            interrupted |= matches!(event.kind,ProviderEventKind::Terminal{outcome:TerminalOutcome::Interrupted{..},..});
+            interrupted && matches!(&event.kind,ProviderEventKind::Thread{provider_thread,..} if serde_json::to_value(provider_thread).unwrap()["goal"]["status"]=="paused")
+        }).await.unwrap();
+            assert!(events.iter().any(|event| matches!(
+                event.kind,
+                ProviderEventKind::Terminal {
+                    outcome: TerminalOutcome::Interrupted { .. },
+                    ..
+                }
+            )));
+        }
+        h.runtime.close().await.unwrap();
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -2199,6 +2800,126 @@ struct CodexBackgroundFixture {
     >,
     pending_wake: bool,
     terminated: tokio::sync::mpsc::UnboundedSender<String>,
+}
+
+#[tokio::test(start_paused = true)]
+async fn goal_expiry_settles_unanswered_pauses_and_pauses_late_turns_before_interrupting() {
+    for late_turn in [false, true] {
+        let mut h = kit::Harness::open().await.unwrap();
+        h.start("goal-turn").await.unwrap();
+        let mut goal = json!({"objective":"ship it","status":"active","tokensUsed":10,"timeUsedSeconds":1,"threadId":"native-thread","createdAt":1,"updatedAt":1});
+        h.peer.write(&json!({"method":"thread/goal/updated","params":{"threadId":"native-thread","goal":goal}})).await.unwrap();
+        h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":kit::native_turn("goal-turn","completed")}})).await.unwrap();
+        h.collect_until(|event|matches!(&event.kind,ProviderEventKind::Thread{provider_thread,..} if serde_json::to_value(provider_thread).unwrap()["nativeConversationHeadRef"]["nativeId"]=="goal-turn")).await.unwrap();
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        let pause = h.peer.read().await.unwrap();
+        assert_eq!(pause["method"], "thread/goal/set");
+        if late_turn {
+            goal["status"] = json!("paused");
+            h.peer.write(&json!({"method":"thread/goal/updated","params":{"threadId":"native-thread","goal":goal}})).await.unwrap();
+            h.peer.write(&json!({"method":"turn/started","params":{"threadId":"native-thread","turn":kit::native_turn("late-goal","inProgress")}})).await.unwrap();
+            let second_pause = h.peer.read().await.unwrap();
+            assert_eq!(second_pause["method"], "thread/goal/set");
+            h.peer
+                .respond(&second_pause, json!({"goal":goal}))
+                .await
+                .unwrap();
+            let interrupt = h.peer.read().await.unwrap();
+            assert_eq!(interrupt["method"], "turn/interrupt");
+            assert_eq!(interrupt["params"]["turnId"], "late-goal");
+            h.peer.respond(&interrupt, json!({})).await.unwrap();
+            h.peer.respond(&pause, json!({"goal":goal})).await.unwrap();
+        } else {
+            tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        }
+        let events = h
+            .collect_until(|event| matches!(event.kind, ProviderEventKind::Terminal { .. }))
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.kind,
+                    ProviderEventKind::Terminal {
+                        outcome: TerminalOutcome::Completed { .. },
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(!events.iter().any(|event|matches!(&event.kind,ProviderEventKind::Turn{provider_turn,..} if serde_json::to_value(provider_turn).unwrap()["nativeTurnRef"]["nativeId"]=="late-goal")));
+        h.runtime.close().await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn goal_stop_pauses_before_interrupt_and_blocks_capacity_retry_during_the_pause() {
+    for at_capacity in [false, true] {
+        let mut h = kit::Harness::open().await.unwrap();
+        h.start("root").await.unwrap();
+        let mut goal = json!({"objective":"ship it","status":"active","tokensUsed":10,"timeUsedSeconds":1,"threadId":"native-thread","createdAt":1,"updatedAt":1});
+        h.peer.write(&json!({"method":"thread/goal/updated","params":{"threadId":"native-thread","goal":goal}})).await.unwrap();
+        h.collect_until(|event|matches!(&event.kind,ProviderEventKind::Thread{provider_thread,..} if serde_json::to_value(provider_thread).unwrap()["goal"]["status"]=="active")).await.unwrap();
+        if at_capacity {
+            let mut turn = kit::native_turn("root", "failed");
+            turn["error"] = json!({"message":"At capacity","codexErrorInfo":"serverOverloaded"});
+            h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":turn}})).await.unwrap();
+            h.collect_until(|event| {
+                value(event)
+                    .is_some_and(|item| item["type"] == "error" && item["status"] == "running")
+            })
+            .await
+            .unwrap();
+        }
+        let runtime = h.runtime.clone();
+        let server = async {
+            let pause = h.peer.read().await.unwrap();
+            assert_eq!(pause["method"], "thread/goal/set");
+            assert_eq!(pause["params"]["status"], "paused");
+            if at_capacity {
+                tokio::time::advance(std::time::Duration::from_secs(3)).await;
+            }
+            goal["status"] = json!("paused");
+            h.peer.respond(&pause, json!({"goal":goal})).await.unwrap();
+            if !at_capacity {
+                let interrupt = h.peer.read().await.unwrap();
+                assert_eq!(interrupt["method"], "turn/interrupt");
+                assert_eq!(interrupt["params"]["turnId"], "root");
+                h.peer.respond(&interrupt, json!({})).await.unwrap();
+                h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":kit::native_turn("root","interrupted")}})).await.unwrap();
+            }
+        };
+        let stop = InterruptInput {
+            provider_thread: kit::thread("native-thread").unwrap(),
+            provider_turn_id: ProviderTurnId(mapping::derived(
+                "provider-turn",
+                "native-turn",
+                "root",
+            )),
+            request_runtime_restart: false,
+        };
+        let (result, _) = tokio::join!(runtime.interrupt_turn(stop), server);
+        result.unwrap();
+        let events = h
+            .collect_until(|event| matches!(event.kind, ProviderEventKind::Terminal { .. }))
+            .await
+            .unwrap();
+        assert!(matches!(
+            events.last().unwrap().kind,
+            ProviderEventKind::Terminal {
+                outcome: TerminalOutcome::Interrupted { .. },
+                ..
+            }
+        ));
+        runtime.close().await.unwrap();
+        let extra = h.peer.read().await;
+        assert!(
+            extra.is_err(),
+            "at_capacity={at_capacity}, unexpected request={extra:?}"
+        );
+    }
 }
 #[async_trait::async_trait]
 impl t3_orchestration::adapters::codex::CodexBackgroundHost for CodexBackgroundFixture {
@@ -2426,7 +3147,7 @@ async fn failed_late_command_containment_keeps_the_session_alive_and_work_pendin
             .await
             .unwrap();
     };
-    let (result, _) = tokio::join!(runtime.interrupt_turn(stop), server);
+    let (result, _) = tokio::join!(runtime.interrupt_turn(stop.clone()), server);
     result.unwrap();
     assert!(
         !h.runtime
@@ -2472,6 +3193,34 @@ async fn failed_late_command_containment_keeps_the_session_alive_and_work_pendin
     })
     .await
     .unwrap();
+    assert!(
+        !h.runtime
+            .pending_background_work(Some(kit::thread("native-thread").unwrap()), true)
+            .await
+            .unwrap()
+    );
+    let mut item = native_background_command("already-unloaded", "inProgress");
+    item["processId"] = json!("unloaded-pid");
+    h.peer.write(&json!({"method":"item/started","params":{"threadId":"native-thread","turnId":"native-turn","item":item}})).await.unwrap();
+    let request = h.peer.read().await.unwrap();
+    assert_eq!(request["method"], "thread/backgroundTerminals/terminate");
+    h.collect_until(|event| {
+        matches!(
+            event.kind,
+            ProviderEventKind::BackgroundWork { pending: true, .. }
+        )
+    })
+    .await
+    .unwrap();
+    h.peer.write(&json!({"id":request["id"],"error":{"code":-32600,"message":"thread not found: native-thread"}})).await.unwrap();
+    let events = h
+        .collect_until(|event| matches!(event.kind, ProviderEventKind::BackgroundWork { .. }))
+        .await
+        .unwrap();
+    assert!(matches!(
+        events.last().unwrap().kind,
+        ProviderEventKind::BackgroundWork { pending: false, .. }
+    ));
     assert!(
         !h.runtime
             .pending_background_work(Some(kit::thread("native-thread").unwrap()), true)
@@ -2543,6 +3292,258 @@ fn stop_keeps_late_descendants_owned_and_defers_root_terminal_until_they_end() {
         }
     ));
     assert!(events.iter().any(|event|matches!(&event.kind,ProviderEventKind::Turn{provider_turn,..} if serde_json::to_value(provider_turn).unwrap()["status"]=="interrupted")));
+}
+
+#[test]
+fn stale_child_metadata_cannot_replace_rerouted_model_or_its_effort_and_tier() {
+    let options = kit::options();
+    let mut state = mapping::Projection::new(
+        options.clock,
+        options.ids,
+        kit::open_input(),
+        options.instance_id,
+    );
+    state
+        .prepare_start(kit::turn_input("native-thread", 1, "work").unwrap())
+        .unwrap();
+    state
+        .notification(
+            "turn/started",
+            json!({"threadId":"native-thread","turn":kit::native_turn("root","inProgress")}),
+        )
+        .unwrap();
+    state.notification("item/completed",json!({"threadId":"native-thread","turnId":"root","item":{"type":"collabAgentToolCall","id":"spawn","tool":"spawnAgent","status":"completed","receiverThreadIds":["child"],"prompt":"work","agentsStates":{}}})).unwrap();
+    state.notification("thread/settings/updated",json!({"threadId":"child","threadSettings":{"model":"original","effort":"low","serviceTier":"ultrafast"}})).unwrap();
+    let events=state.notification("model/rerouted",json!({"threadId":"child","turnId":"child-turn","fromModel":"original","toModel":"new-model","reason":"highRiskCyberActivity"})).unwrap();
+    let task = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            ProviderEventKind::Subagent(task) => Some(serde_json::to_value(task).unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(task["model"], "new-model");
+    assert_eq!(
+        task["modelSelection"]["options"],
+        json!([{"id":"reasoningEffort","value":"low"},{"id":"serviceTier","value":"ultrafast"}])
+    );
+    assert!(
+        state
+            .finish_child_metadata(
+                "child",
+                Ok(json!({"thread":{"id":"child"},"model":"old-model","reasoningEffort":"high"}))
+            )
+            .unwrap()
+            .is_empty()
+    );
+    let events=state.notification("item/completed",json!({"threadId":"native-thread","turnId":"root","item":{"type":"subAgentActivity","id":"child-done","agentThreadId":"child","kind":"completed"}})).unwrap();
+    let task = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            ProviderEventKind::Subagent(task) => Some(serde_json::to_value(task).unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(task["model"], "new-model");
+    assert_eq!(
+        task["modelSelection"]["options"],
+        json!([{"id":"reasoningEffort","value":"low"},{"id":"serviceTier","value":"ultrafast"}])
+    );
+}
+
+#[test]
+fn child_activity_and_spawn_metadata_keep_child_effort_independent_of_the_parent() {
+    for source in ["activity", "spawn", "activity then spawn"] {
+        let options = kit::options();
+        let mut state = mapping::Projection::new(
+            options.clock,
+            options.ids,
+            kit::open_input(),
+            options.instance_id,
+        );
+        let mut input = kit::turn_input("native-thread", 1, "work").unwrap();
+        input.model_selection=serde_json::from_value(json!({"instanceId":"codex","model":"parent-model","options":[{"id":"reasoningEffort","value":"low"}]})).unwrap();
+        state.prepare_start(input).unwrap();
+        state
+            .notification(
+                "turn/started",
+                json!({"threadId":"native-thread","turn":kit::native_turn("root","inProgress")}),
+            )
+            .unwrap();
+        let activity = json!({"type":"subAgentActivity","id":"spawn","kind":"started","agentThreadId":"child","agentPath":"/root/child"});
+        let spawn = json!({"type":"collabAgentToolCall","id":"spawn","tool":"spawnAgent","status":"completed","senderThreadId":"native-thread","receiverThreadIds":["child"],"model":"child-model","reasoningEffort":"high","agentsStates":{"child":{"status":"completed","message":"finished"}}});
+        let items = match source {
+            "activity" => vec![activity],
+            "spawn" => vec![spawn],
+            _ => vec![activity, spawn],
+        };
+        let mut events = vec![];
+        for item in items {
+            events.extend(
+                state
+                    .notification(
+                        "item/completed",
+                        json!({"threadId":"native-thread","turnId":"root","item":item}),
+                    )
+                    .unwrap(),
+            );
+        }
+        let created: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                ProviderEventKind::AppThread {
+                    app_thread,
+                    create_only: Some(true),
+                } => Some(serde_json::to_value(app_thread).unwrap()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(created.len(), 1);
+        let effort = |value: &Value| {
+            value["modelSelection"]["options"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|option| option["id"] == "reasoningEffort")
+                .map(|option| option["value"].clone())
+        };
+        assert_eq!(
+            effort(&created[0]),
+            if source == "spawn" {
+                Some(json!("high"))
+            } else {
+                None
+            }
+        );
+        if source != "activity" {
+            let task = events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    ProviderEventKind::Subagent(task) => Some(serde_json::to_value(task).unwrap()),
+                    _ => None,
+                })
+                .next_back()
+                .unwrap();
+            assert_eq!(task["status"], "completed");
+            assert_eq!(effort(&task), Some(json!("high")));
+        }
+    }
+}
+
+#[test]
+fn native_child_lifecycle_normalizes_shutdown_and_preserves_settled_status_and_time() {
+    for kind in [
+        "shutdown",
+        "activity-completed",
+        "late-activity-completed",
+        "stale-running",
+        "duplicate-completed",
+    ] {
+        let clock = Arc::new(t3_orchestration::testing::ManualClock::new(kit::NOW));
+        let mut options = kit::options();
+        options.clock = clock.clone();
+        let mut state = mapping::Projection::new(
+            options.clock,
+            options.ids,
+            kit::open_input(),
+            options.instance_id,
+        );
+        state
+            .prepare_start(kit::turn_input("native-thread", 1, "work").unwrap())
+            .unwrap();
+        state
+            .notification(
+                "turn/started",
+                json!({"threadId":"native-thread","turn":kit::native_turn("root","inProgress")}),
+            )
+            .unwrap();
+        state.notification("item/completed",json!({"threadId":"native-thread","turnId":"root","item":{"type":"subAgentActivity","id":"spawn","kind":"started","agentThreadId":"child","agentPath":"/root/child"}})).unwrap();
+        if kind == "late-activity-completed" {
+            state
+                .notification(
+                    "turn/completed",
+                    json!({"threadId":"native-thread","turn":kit::native_turn("root","completed")}),
+                )
+                .unwrap();
+            state.release_settled_turns();
+        }
+        let activity = kind.contains("activity");
+        let status = if kind == "shutdown" {
+            "shutdown"
+        } else {
+            "completed"
+        };
+        let update = |id, status| json!({"threadId":"native-thread","turnId":"root","item":{"type":"collabAgentToolCall","id":id,"tool":"listAgents","status":"completed","receiverThreadIds":["child"],"agentsStates":{"child":{"status":status,"message":null}}}});
+        let mut events = if activity {
+            state.notification("item/completed",json!({"threadId":"native-thread","turnId":"root","item":{"type":"subAgentActivity","id":"done","kind":"completed","agentThreadId":"child"}})).unwrap()
+        } else {
+            state
+                .notification("item/completed", update("done", status))
+                .unwrap()
+        };
+        let first = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                ProviderEventKind::Subagent(task) => Some(serde_json::to_value(task).unwrap()),
+                _ => None,
+            })
+            .unwrap();
+        if matches!(kind, "stale-running" | "duplicate-completed") {
+            clock.set("2026-06-28T04:54:00.100Z");
+            events = state
+                .notification(
+                    "item/completed",
+                    update(
+                        "trailing",
+                        if kind == "stale-running" {
+                            "running"
+                        } else {
+                            "completed"
+                        },
+                    ),
+                )
+                .unwrap();
+        }
+        let latest = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                ProviderEventKind::Subagent(task) => Some(serde_json::to_value(task).unwrap()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            latest["status"],
+            if kind == "shutdown" {
+                "cancelled"
+            } else {
+                "completed"
+            }
+        );
+        assert_eq!(latest["completedAt"], first["completedAt"]);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn background_stop_returns_an_error_when_native_termination_never_answers() {
+    let mut h = kit::Harness::open().await.unwrap();
+    h.start("native-turn").await.unwrap();
+    let runtime = h.runtime.clone();
+    let server = async {
+        let request = h.peer.read().await.unwrap();
+        assert_eq!(request["method"], "thread/backgroundTerminals/terminate");
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+    };
+    let (result, _) = tokio::join!(
+        runtime
+            .extensions()
+            .unwrap()
+            .stop_task(kit::thread("native-thread").unwrap(), "fixture-pid".into()),
+        server
+    );
+    assert!(
+        matches!(result,Err(ProviderError::Protocol {detail,..}) if detail.contains("timed out"))
+    );
+    h.runtime.close().await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
@@ -2702,6 +3703,48 @@ async fn queued_acknowledgements_wait_for_native_start_before_stop_is_deliverabl
     assert!(projection.needs_interrupt("queued"));
 }
 
+#[tokio::test(start_paused = true)]
+async fn queued_native_start_expiry_reports_that_stop_was_not_delivered() {
+    let mut h = kit::Harness::open().await.unwrap();
+    let runtime = h.runtime.clone();
+    let server = async {
+        let config = h.peer.read().await.unwrap();
+        assert_eq!(config["method"], "config/read");
+        h.peer
+            .respond(&config, json!({"config":{},"origins":{}}))
+            .await
+            .unwrap();
+        let start = h.peer.read().await.unwrap();
+        assert_eq!(start["method"], "turn/start");
+        let mut turn = kit::native_turn("queued", "inProgress");
+        turn["startedAt"] = Value::Null;
+        h.peer.respond(&start, json!({"turn":turn})).await.unwrap();
+    };
+    let (result, _) = tokio::join!(
+        runtime.start_turn(kit::turn_input("native-thread", 1, "work").unwrap()),
+        server
+    );
+    result.unwrap();
+    let stop = runtime.interrupt_turn(InterruptInput {
+        provider_thread: kit::thread("native-thread").unwrap(),
+        provider_turn_id: ProviderTurnId(mapping::derived(
+            "provider-turn",
+            "native-turn",
+            "queued",
+        )),
+        request_runtime_restart: false,
+    });
+    let (result, _) = tokio::join!(
+        stop,
+        tokio::time::advance(std::time::Duration::from_secs(10))
+    );
+    assert!(
+        matches!(result,Err(ProviderError::Protocol{detail,..}) if detail.contains("Stop could not be delivered"))
+    );
+    runtime.close().await.unwrap();
+    assert!(h.peer.read().await.is_err());
+}
+
 #[test]
 fn startup_notices_and_hook_stop_reasons_are_scoped_to_the_native_thread() {
     let options = kit::options();
@@ -2847,6 +3890,70 @@ async fn prompt_suggestions_sample_only_completed_roots_and_trim_the_result() {
         .unwrap();
     assert!(events.iter().any(|event|matches!(&event.kind,ProviderEventKind::PromptSuggestion{text,..} if text=="Run the tests")));
     h.runtime.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn prompt_suggestions_skip_subagent_remote_and_disabled_threads_across_turns() {
+    for kind in ["subagent", "remote", "toggled-off"] {
+        let enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let flag = enabled.clone();
+        let mut open = kit::open_input();
+        open.prompt_suggestions = Some(Arc::new(move || {
+            flag.load(std::sync::atomic::Ordering::Relaxed)
+        }));
+        let mut h = kit::Harness::with_session(kit::options(), open)
+            .await
+            .unwrap();
+        if kind == "toggled-off" {
+            enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+        for ordinal in 1..=2 {
+            let mut input = kit::turn_input("native-thread", ordinal, "work").unwrap();
+            let mut app = serde_json::to_value(&input.app_thread).unwrap();
+            match kind {
+                "subagent" => {
+                    app["lineage"] = json!({"parentThreadId":"parent","relationshipToParent":"subagent","rootThreadId":"parent"})
+                }
+                "remote" => {
+                    app["delegatedFrom"] = json!({"environmentId":"remote-parent","threadId":"parent","title":"Parent"})
+                }
+                _ => {}
+            }
+            input.app_thread = serde_json::from_value(app).unwrap();
+            let native = format!("turn-{ordinal}");
+            let runtime = h.runtime.clone();
+            let server = async {
+                let config = h.peer.read().await.unwrap();
+                assert_eq!(config["method"], "config/read");
+                h.peer
+                    .respond(&config, json!({"config":{},"origins":{}}))
+                    .await
+                    .unwrap();
+                let start = h.peer.read().await.unwrap();
+                assert_eq!(start["method"], "turn/start");
+                h.peer
+                    .respond(
+                        &start,
+                        json!({"turn":kit::native_turn(&native,"inProgress")}),
+                    )
+                    .await
+                    .unwrap();
+            };
+            let (result, _) = tokio::join!(runtime.start_turn(input), server);
+            result.unwrap();
+            h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":kit::native_turn(&native,"completed")}})).await.unwrap();
+            let events = h
+                .collect_until(|event| matches!(event.kind, ProviderEventKind::Terminal { .. }))
+                .await
+                .unwrap();
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event.kind, ProviderEventKind::PromptSuggestion { .. }))
+            );
+        }
+        h.runtime.close().await.unwrap();
+    }
 }
 
 #[tokio::test]

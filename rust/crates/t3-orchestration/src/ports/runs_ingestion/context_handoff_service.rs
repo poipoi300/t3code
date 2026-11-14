@@ -6,6 +6,17 @@ use crate::{
 use serde_json::json;
 use std::{collections::HashSet, sync::Arc};
 
+#[derive(Debug, thiserror::Error)]
+#[error("Failed to prepare context handoff for run {target_run_id:?} in thread {thread_id:?}.")]
+pub struct ContextHandoffPrepareError {
+    pub thread_id: ThreadId,
+    pub target_run_id: RunId,
+    pub from_provider_thread_ids: Vec<ProviderThreadId>,
+    pub to_provider_thread_id: ProviderThreadId,
+    #[source]
+    pub cause: Box<Error>,
+}
+
 fn utf16_len(text: &str) -> usize {
     text.encode_utf16().count()
 }

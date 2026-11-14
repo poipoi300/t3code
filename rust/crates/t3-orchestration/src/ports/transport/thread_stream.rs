@@ -310,6 +310,7 @@ pub fn event_thread_id(
         OrchestrationV2DomainEvent::ThreadActiveReordered(event) => &event.thread_id,
         OrchestrationV2DomainEvent::ThreadTagsUpdated(event) => &event.thread_id,
         OrchestrationV2DomainEvent::ThreadVisited(event) => &event.thread_id,
+        OrchestrationV2DomainEvent::ThreadVisitRecorded(event) => &event.thread_id,
         OrchestrationV2DomainEvent::ThreadMarkedUnread(event) => &event.thread_id,
         OrchestrationV2DomainEvent::ThreadMetadataUpdated(event) => &event.thread_id,
         OrchestrationV2DomainEvent::ThreadPullRequestSynced(event) => &event.thread_id,

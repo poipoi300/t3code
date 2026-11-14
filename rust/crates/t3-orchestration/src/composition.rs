@@ -63,8 +63,8 @@ use crate::{
     runtime::{
         commit::EventSink,
         dispatch::{
-            CommandInputs, ContextCommandInputs, DispatchServices, Dispatcher,
-            ProjectionCommandInputs, RestartCommandInputs, RuntimeCommandInputs,
+            CommandInputs, ContextCommandInputs, DispatchServices, DispatchThreadOperations,
+            Dispatcher, ProjectionCommandInputs, RestartCommandInputs, RuntimeCommandInputs,
             SettingsCommandInputs,
         },
         ingestion::ProviderCommitter,
@@ -135,6 +135,10 @@ pub struct RuntimePorts {
     /// Without it provider-thread rollback effects are unsupported.
     pub rollback_workspaces: Option<Arc<dyn RollbackWorkspaceRecovery>>,
     pub finalization_observer: Arc<dyn FinalizationObserver>,
+    /// The managed policy's runtime-mode ceiling for thread creation and mode changes; load it
+    /// from the same `ManagedPolicyDocument` given to 04's `ProjectRuntimePolicy::configured`.
+    pub runtime_mode_ceiling:
+        Option<crate::ports::decisions::dispatch_mode_limit::RuntimeModeCeiling>,
     pub sessions: SessionManagerOptions,
     pub worker: WorkerOptions,
 }
@@ -170,6 +174,7 @@ impl RuntimePorts {
             pull_request_identities: None,
             rollback_workspaces: None,
             finalization_observer: Arc::new(Unbound),
+            runtime_mode_ceiling: None,
             sessions: SessionManagerOptions::default(),
             worker: WorkerOptions::default(),
         }
@@ -193,15 +198,22 @@ pub struct OrchestrationRuntime {
     database: StoreDatabase,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGenerator>,
+    /// The dispatcher's thread lanes; a host service that mutates threads must share them.
+    thread_lanes: Arc<KeyedLanes>,
     dispatcher: Dispatcher,
     layer: Arc<RuntimeLayer>,
     worker: OutboxWorker,
     worker_task: Mutex<Option<JoinHandle<Result<()>>>>,
     operations: Arc<ComposedThreads>,
-    execution: Arc<RunExecutionService>,
     ingestor: Arc<ProviderEventIngestor>,
     launches: Option<ThreadLaunchService>,
     project_lane: tokio::sync::Mutex<()>,
+    continuation_service: Arc<
+        crate::ports::sessions_recovery::provider_continuation_service::ProviderContinuationService,
+    >,
+    continuation_task: Mutex<Option<JoinHandle<Result<()>>>>,
+    delegated_recovery: crate::runtime::dispatch::DelegatedRecoveryReport,
+    lifecycle: Lifecycle,
     settlement: Arc<ThreadSettlementService>,
     watch: Option<Arc<PullRequestWatchReactor>>,
     /// Legacy V1 import: shells are reconciled before admission; the host drives
@@ -241,6 +253,7 @@ impl OrchestrationRuntime {
             pull_request_identities,
             rollback_workspaces,
             finalization_observer,
+            runtime_mode_ceiling,
             sessions: session_options,
             worker: worker_options,
         } = ports;
@@ -334,7 +347,7 @@ impl OrchestrationRuntime {
                 recovery: Arc::new(StartupRecovered(recovery.clone())),
                 clock: clock.clone(),
             },
-            None,
+            runtime_mode_ceiling,
             lanes.clone(),
         );
         let raw_dispatcher: Arc<dyn CommandDispatcher> = Arc::new(dispatcher.clone());
@@ -375,6 +388,7 @@ impl OrchestrationRuntime {
             },
             management: OnceLock::new(),
             titles: OnceLock::new(),
+            restart: OnceLock::new(),
             cancellation: CancellationToken::new(),
         });
         let rollback: Arc<dyn CheckpointRollback> = match rollback_workspaces {
@@ -393,8 +407,12 @@ impl OrchestrationRuntime {
             }),
             None => Arc::new(Unbound),
         };
+        let effect_operations: Arc<dyn ThreadOperations> = Arc::new(DispatchThreadOperations {
+            base: operations.clone(),
+            dispatcher: dispatcher.clone(),
+        });
         let executor = Arc::new(ServiceExecutor {
-            threads: operations.clone(),
+            threads: effect_operations.clone(),
             dispatcher: raw_dispatcher.clone(),
             projections: reader.clone(),
             sessions: session_directory.clone(),
@@ -442,8 +460,17 @@ impl OrchestrationRuntime {
             management: threads.clone(),
             sessions: session_directory,
             agent_scope: agent_scope.unwrap_or_else(|| Arc::new(Unbound)),
-            gate: lanes,
+            gate: lanes.clone(),
         });
+        let _ = operations.restart.set(
+            crate::ports::runs_ingestion::restart_continuation::RestartContinuationService {
+                threads: threads.clone(),
+                settings: settings.clone(),
+                operations: effect_operations,
+                clock: clock.clone(),
+                dispatch_policy: None,
+            },
+        );
         let _ = operations.titles.set(titles.map(|generator| {
             ThreadTitleRegenerationService::new(
                 threads.clone(),
@@ -511,6 +538,19 @@ impl OrchestrationRuntime {
         // TS start-up order: legacy shells, provider recovery, effect worker.
         legacy.reconcile_shells().await?;
         let recovery = layer.start().await?;
+        // After provider recovery and before admission (package 04): continuation delivery,
+        // then the delegated-task recovery sweeps, then the committed-event consumers.
+        let continuations = dispatcher.prepare_continuations(
+            projections.clone(),
+            ids.clone(),
+            std::num::NonZeroUsize::new(64).unwrap_or(std::num::NonZeroUsize::MIN),
+        )?;
+        let continuation_service = continuations.service;
+        let runner = continuation_service.clone();
+        let requests = continuations.requests;
+        let continuation_task = tokio::spawn(async move { runner.run(requests).await });
+        let delegated_recovery = dispatcher.recover_delegated_tasks().await;
+        let lifecycle = Lifecycle::start(&sink, &dispatcher).await?;
         let daemon = worker.clone();
         let worker_task = tokio::spawn(async move { daemon.run_daemon().await });
         settlement.start().await?;
@@ -529,15 +569,19 @@ impl OrchestrationRuntime {
             database,
             clock,
             ids,
+            thread_lanes: lanes,
             dispatcher,
             layer,
             worker,
             worker_task: Mutex::new(Some(worker_task)),
             operations,
-            execution,
             ingestor,
             launches,
             project_lane: tokio::sync::Mutex::new(()),
+            continuation_service,
+            continuation_task: Mutex::new(Some(continuation_task)),
+            delegated_recovery,
+            lifecycle,
             settlement,
             watch,
             legacy,
@@ -556,6 +600,31 @@ impl OrchestrationRuntime {
         Arc::new(self.worker.clone())
     }
 
+    /// The dispatcher's thread lanes, for host services (such as project deletion) whose
+    /// cascades must not race thread commands.
+    pub fn thread_lanes(&self) -> Arc<KeyedLanes> {
+        self.thread_lanes.clone()
+    }
+
+    /// The runtime's clock and id generator, for host services that commit alongside it.
+    pub fn clock(&self) -> Arc<dyn Clock> {
+        self.clock.clone()
+    }
+    pub fn ids(&self) -> Arc<dyn IdGenerator> {
+        self.ids.clone()
+    }
+
+    /// The start-up delegated-task recovery sweeps; the host logs each failure.
+    pub fn delegated_recovery(&self) -> &crate::runtime::dispatch::DelegatedRecoveryReport {
+        &self.delegated_recovery
+    }
+
+    /// Failures of the committed-event consumers since start (most recent last, at most 64);
+    /// each consumer keeps running after one.
+    pub fn lifecycle_failures(&self) -> Vec<(&'static str, String)> {
+        self.lifecycle.failures()
+    }
+
     /// What start-up recovery did to state the previous process left.
     pub fn recovery(&self) -> &RecoverySummary {
         &self.recovery
@@ -572,6 +641,29 @@ impl OrchestrationRuntime {
     /// `orchestration.launchThread` (TS `ThreadMessageIntake.launchThread`).
     pub async fn launch_thread(&self, input: LaunchInput) -> Result<LaunchResult> {
         self.intake.launch_thread(input).await
+    }
+
+    /// `orchestration.stopWorkflow`. Failures the RPC types are `Error::StopWorkflow`; anything
+    /// else is a defect, as in TS.
+    pub async fn stop_workflow(&self, input: OrchestrationV2StopWorkflowInput) -> Result<()> {
+        let thread_id = input.thread_id.clone();
+        let subagent_id = input.subagent_id.clone();
+        self.stop
+            .stop_workflow(input, None)
+            .await
+            .map_err(|error| typed_stop_workflow_error(error, thread_id, subagent_id))
+    }
+
+    /// `orchestration.forceStopThread`. Failures the RPC types are `Error::ForceStopThread`.
+    pub async fn force_stop_thread(
+        &self,
+        input: OrchestrationV2ForceStopThreadInput,
+    ) -> Result<OrchestrationV2ForceStopThreadResult> {
+        let thread_id = input.thread_id.clone();
+        self.stop
+            .force_stop_thread(input)
+            .await
+            .map_err(|error| typed_force_stop_error(error, thread_id))
     }
 
     /// Project create, update and delete: the commit TS `ProjectService` performs after
@@ -647,25 +739,27 @@ impl OrchestrationRuntime {
         if let Some(launches) = &self.launches {
             launches.shutdown().await;
         }
-        let mut failure = self.layer.shutdown_worker().await.err();
+        self.lifecycle.shutdown().await;
+        self.continuation_service.shutdown().await;
+        let mut failure = None;
+        let continuation = self
+            .continuation_task
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(task) = continuation {
+            join_task(task, &mut failure).await;
+        }
+        if let Err(error) = self.layer.shutdown_worker().await {
+            failure.get_or_insert(error);
+        }
         let task = self
             .worker_task
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take();
         if let Some(task) = task {
-            match task.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    failure.get_or_insert(error);
-                }
-                Err(error) => {
-                    failure.get_or_insert(Error::Service {
-                        operation: "OrchestrationRuntime.shutdown",
-                        detail: error.to_string(),
-                    });
-                }
-            }
+            join_task(task, &mut failure).await;
         }
         if let Some(Some(titles)) = self.operations.titles.get() {
             titles.shutdown().await;
@@ -693,6 +787,8 @@ struct ComposedThreads {
     // which needs the worker that routes to these operations.
     management: OnceLock<ThreadManagementService>,
     titles: OnceLock<Option<ThreadTitleRegenerationService>>,
+    restart:
+        OnceLock<crate::ports::runs_ingestion::restart_continuation::RestartContinuationService>,
     cancellation: CancellationToken,
 }
 
@@ -761,8 +857,15 @@ impl ThreadOperations for ComposedThreads {
             .await
             .map_err(|error| *error.cause)
     }
-    async fn continue_run(&self, _thread_id: ThreadId, _source_run_id: RunId) -> Result<()> {
-        Err(Error::Unsupported("ThreadOperations.continue_run"))
+    async fn continue_run(&self, thread_id: ThreadId, source_run_id: RunId) -> Result<()> {
+        self.restart
+            .get()
+            .ok_or(Error::Service {
+                operation: "OrchestrationRuntime.threads",
+                detail: "Restart continuation is not wired yet.".into(),
+            })?
+            .continue_restarted_run(thread_id, source_run_id)
+            .await
     }
     async fn stop_delegated(&self, _thread_id: ThreadId, _reason: Option<String>) -> Result<()> {
         Err(Error::Unsupported(
@@ -799,6 +902,141 @@ impl ThreadOperations for ComposedThreads {
             .execute(thread_id, command_id, kind, self.cancellation.child_token())
             .await
     }
+}
+
+async fn join_task(task: JoinHandle<Result<()>>, failure: &mut Option<Error>) {
+    match task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            failure.get_or_insert(error);
+        }
+        Err(error) => {
+            failure.get_or_insert(Error::Service {
+                operation: "OrchestrationRuntime.shutdown",
+                detail: error.to_string(),
+            });
+        }
+    }
+}
+
+/// Committed-event consumers feeding the dispatcher (package 04): run updates drive retries,
+/// queue drain and delivery finalization; provider-turn updates release deferred steers;
+/// subagent and provider-thread updates track holding rosters and terminal child work. Each
+/// reads the sink's durable stream from the sequence current at start, so none is missed.
+struct Lifecycle {
+    cancellation: CancellationToken,
+    tasks: tokio_util::task::TaskTracker,
+    failures: Arc<Mutex<std::collections::VecDeque<(&'static str, String)>>>,
+}
+
+impl Lifecycle {
+    async fn start(sink: &EventSink, dispatcher: &Dispatcher) -> Result<Self> {
+        let after = sink.latest_sequence(None).await?;
+        let lifecycle = Self {
+            cancellation: CancellationToken::new(),
+            tasks: tokio_util::task::TaskTracker::new(),
+            failures: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+        };
+        for event_type in [
+            "run.updated",
+            "provider-turn.updated",
+            "subagent.updated",
+            "provider-thread.updated",
+        ] {
+            let mut stream = sink
+                .stream(crate::runtime::commit::StreamOptions {
+                    thread_id: None,
+                    after_sequence: after,
+                    event_type: Some(event_type.into()),
+                    bounded: false,
+                })
+                .await?;
+            let dispatcher = dispatcher.clone();
+            let cancellation = lifecycle.cancellation.clone();
+            let failures = lifecycle.failures.clone();
+            lifecycle.tasks.spawn(async move {
+                loop {
+                    let event = tokio::select! {
+                        _ = cancellation.cancelled() => return,
+                        event = stream.next() => event,
+                    };
+                    let result = match event {
+                        Ok(Some(event)) => match event_type {
+                            "run.updated" => dispatcher.handle_run_update(&event).await,
+                            "provider-turn.updated" => {
+                                dispatcher.handle_provider_turn_update(&event).await
+                            }
+                            _ => dispatcher.handle_child_work_update(&event).await,
+                        },
+                        Ok(None) => return,
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        let mut failures = failures.lock().unwrap_or_else(|e| e.into_inner());
+                        if failures.len() == 64 {
+                            failures.pop_front();
+                        }
+                        failures.push_back((event_type, error.to_string()));
+                    }
+                }
+            });
+        }
+        lifecycle.tasks.close();
+        Ok(lifecycle)
+    }
+
+    fn failures(&self) -> Vec<(&'static str, String)> {
+        self.failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    async fn shutdown(&self) {
+        self.cancellation.cancel();
+        self.tasks.wait().await;
+    }
+}
+
+// Package 08 encodes the TS failure reason in its stop errors' static operation code; once it
+// returns `Error::StopWorkflow` / `Error::ForceStopThread` itself these pass through unchanged.
+fn typed_stop_workflow_error(error: Error, thread_id: ThreadId, subagent_id: NodeId) -> Error {
+    let Error::Service { operation, detail } = &error else {
+        return error;
+    };
+    let reason = match *operation {
+        "StopWorkflow.not-running" => StopWorkflowErrorReason::NotRunning,
+        "StopWorkflow.unsupported" => StopWorkflowErrorReason::Unsupported,
+        "StopWorkflow.unavailable" => StopWorkflowErrorReason::Unavailable,
+        "StopWorkflow.stop-failed" => StopWorkflowErrorReason::StopFailed,
+        _ => return error,
+    };
+    Error::StopWorkflow(Box::new(OrchestrationV2StopWorkflowError {
+        _tag: StopWorkflowErrorTag::OrchestrationV2StopWorkflowError,
+        thread_id,
+        subagent_id,
+        reason,
+        cause: Some(Some(serde_json::Value::String(detail.clone()))),
+    }))
+}
+
+fn typed_force_stop_error(error: Error, thread_id: ThreadId) -> Error {
+    let Error::Service { operation, detail } = &error else {
+        return error;
+    };
+    let reason = match *operation {
+        "ForceStop.superseded" => Some(Some(ForceStopThreadErrorReason::Superseded)),
+        "ForceStop.clock" | "ForceStop.release" => None,
+        _ => return error,
+    };
+    Error::ForceStopThread(Box::new(OrchestrationV2ForceStopThreadError {
+        _tag: ForceStopThreadErrorTag::OrchestrationV2ForceStopThreadError,
+        thread_id,
+        reason,
+        cause: Some(Some(serde_json::Value::String(detail.clone()))),
+    }))
 }
 
 /// Recovery runs once in [`OrchestrationRuntime::start`], before admission; the dispatcher's
@@ -956,5 +1194,72 @@ impl WorkspaceBackend for Unbound {
     }
     async fn current_branch(&self, _cwd: PathBuf) -> Result<Option<String>> {
         Err(Error::Unsupported("WorkspaceBackend.current_branch"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn service(operation: &'static str) -> Error {
+        Error::Service {
+            operation,
+            detail: "detail".into(),
+        }
+    }
+
+    #[test]
+    fn stop_failures_carry_the_wire_reason_and_other_errors_pass_through() {
+        let thread = || ThreadId("thread".into());
+        let node = || NodeId("node".into());
+        for (operation, reason) in [
+            (
+                "StopWorkflow.not-running",
+                StopWorkflowErrorReason::NotRunning,
+            ),
+            (
+                "StopWorkflow.unsupported",
+                StopWorkflowErrorReason::Unsupported,
+            ),
+            (
+                "StopWorkflow.unavailable",
+                StopWorkflowErrorReason::Unavailable,
+            ),
+            (
+                "StopWorkflow.stop-failed",
+                StopWorkflowErrorReason::StopFailed,
+            ),
+        ] {
+            let Error::StopWorkflow(error) =
+                typed_stop_workflow_error(service(operation), thread(), node())
+            else {
+                panic!("{operation} was not typed");
+            };
+            assert_eq!(error.reason, reason);
+            assert_eq!(error.subagent_id, node());
+        }
+        assert!(matches!(
+            typed_stop_workflow_error(service("Dispatch.failed"), thread(), node()),
+            Error::Service { .. }
+        ));
+        let Error::ForceStopThread(error) =
+            typed_force_stop_error(service("ForceStop.superseded"), thread())
+        else {
+            panic!("superseded was not typed");
+        };
+        assert_eq!(
+            error.reason,
+            Some(Some(ForceStopThreadErrorReason::Superseded))
+        );
+        let Error::ForceStopThread(error) =
+            typed_force_stop_error(service("ForceStop.release"), thread())
+        else {
+            panic!("release was not typed");
+        };
+        assert_eq!(error.reason, None);
+        assert!(matches!(
+            typed_force_stop_error(Error::Cancelled, thread()),
+            Error::Cancelled
+        ));
     }
 }

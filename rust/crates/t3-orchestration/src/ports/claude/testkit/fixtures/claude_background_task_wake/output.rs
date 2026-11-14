@@ -5,6 +5,7 @@ use crate::{
     testing::replay::ReplayTranscript,
 };
 use serde_json::{Value, json};
+use t3_contracts::orchestration_v2::OrchestrationV2Notification;
 pub fn assert_claude_background_task_wake_output(
     result: &ScenarioResult,
     transcript: &ReplayTranscript,
@@ -107,9 +108,11 @@ pub fn assert_claude_background_task_wake_output(
         ),
         "command roster fields differ",
     )?;
+    let expected_notifications: Vec<OrchestrationV2Notification> = serde_json::from_value(
+        json!([{"summary":r#"Command "Background sleep test" finished"#,"outcome":"completed","source":{"kind":"command"}}]),
+    )?;
     require(
-        json!(background_notifications(&p))
-            == json!([{"summary":r#"Command "Background sleep test" finished"#,"outcome":"completed","source":{"kind":"command"}}]),
+        json!(background_notifications(&p)) == serde_json::to_value(expected_notifications)?,
         "background completion notification differs",
     )?;
     require(

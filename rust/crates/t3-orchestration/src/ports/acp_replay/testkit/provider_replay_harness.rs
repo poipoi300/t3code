@@ -138,6 +138,7 @@ pub struct ReplayFixtureHostInput {
 // Local shim: the host supplies checkpoints, managed policy and native continuation services.
 #[async_trait::async_trait]
 pub trait ReplayFixtureHostFactory: Send + Sync {
+    async fn prepare_workspace(&self, fixture: &str, workspace: &std::path::Path) -> Result<()>;
     async fn runtime_ports(
         &self,
         input: ReplayFixtureHostInput,
@@ -440,5 +441,241 @@ impl super::provider_replay_fixtures::native::FixtureAdapterFactory for AcpFixtu
         transcript: &ReplayTranscript,
     ) -> Result<()> {
         (self.assertions)(name, result, transcript)
+    }
+}
+
+#[cfg(feature = "git-backend")]
+pub mod git_fixture {
+    use super::*;
+    use crate::{
+        composition::{BaseRuntimePolicy, RuntimePorts, StaticSettings},
+        ports::decisions::runtime_policy::{OverriddenRuntimePolicy, RuntimePolicyOverride},
+        runtime::checkpoints::{GitCheckpointBackend, GitRollbackWorkspaceRecovery},
+    };
+    use std::path::Path;
+
+    pub struct GitReplayFixtureHost;
+
+    use crate::api::*;
+    use crate::ports::checkpoints_forks::{
+        checkpoint_rollback_service::RollbackWorkspaceRecovery,
+        checkpoint_service::CheckpointMetadata,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    // Git process deadlines need live time while scenario timers use a paused clock.
+    async fn live<T: Send + 'static>(
+        future: impl std::future::Future<Output = Result<T>> + Send + 'static,
+    ) -> Result<T> {
+        tokio::task::spawn_blocking(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(future)
+        })
+        .await
+        .map_err(|error| Error::Service {
+            operation: "fixture live git runtime",
+            detail: error.to_string(),
+        })?
+    }
+    struct LiveCheckpointPort(Arc<GitCheckpointBackend>);
+    #[async_trait::async_trait]
+    impl CheckpointBackend for LiveCheckpointPort {
+        async fn capture(
+            &self,
+            input: CaptureCheckpoint,
+            cancellation: CancellationToken,
+        ) -> Result<CheckpointRef> {
+            let backend = self.0.clone();
+            live(async move { backend.capture(input, cancellation).await }).await
+        }
+        async fn lookup(
+            &self,
+            scope: OrchestrationV2CheckpointScope,
+            ordinal: u64,
+        ) -> Result<Option<CheckpointRef>> {
+            let backend = self.0.clone();
+            live(async move { backend.lookup(scope, ordinal).await }).await
+        }
+        async fn diff(
+            &self,
+            cwd: std::path::PathBuf,
+            from: CheckpointRef,
+            to: CheckpointRef,
+        ) -> Result<CheckpointDiff> {
+            let backend = self.0.clone();
+            live(async move { backend.diff(cwd, from, to).await }).await
+        }
+        async fn restore(
+            &self,
+            scope: OrchestrationV2CheckpointScope,
+            ordinal: u64,
+            cancellation: CancellationToken,
+        ) -> Result<()> {
+            let backend = self.0.clone();
+            live(async move { backend.restore(scope, ordinal, cancellation).await }).await
+        }
+        async fn prune(
+            &self,
+            scope: OrchestrationV2CheckpointScope,
+            preserve: Vec<u64>,
+        ) -> Result<()> {
+            let backend = self.0.clone();
+            live(async move { backend.prune(scope, preserve).await }).await
+        }
+        async fn is_git_repository(&self, cwd: std::path::PathBuf) -> Result<bool> {
+            let backend = self.0.clone();
+            live(async move { backend.is_git_repository(cwd).await }).await
+        }
+        async fn delete_checkpoint_refs(
+            &self,
+            scope: OrchestrationV2CheckpointScope,
+            checkpoints: Vec<OrchestrationV2Checkpoint>,
+        ) -> Result<()> {
+            let backend = self.0.clone();
+            live(async move { backend.delete_checkpoint_refs(scope, checkpoints).await }).await
+        }
+        fn checkpoint_ref(&self, scope: &CheckpointScopeId, ordinal: u64) -> Result<CheckpointRef> {
+            self.0.checkpoint_ref(scope, ordinal)
+        }
+    }
+    #[async_trait::async_trait]
+    impl CheckpointMetadata for LiveCheckpointPort {
+        fn reference(&self, scope: &CheckpointScopeId, ordinal: u64) -> CheckpointRef {
+            self.0.reference(scope, ordinal)
+        }
+        async fn is_repository(&self, cwd: std::path::PathBuf) -> Result<bool> {
+            let backend = self.0.clone();
+            live(async move { backend.is_repository(cwd).await }).await
+        }
+        async fn delete_refs(
+            &self,
+            scope: OrchestrationV2CheckpointScope,
+            checkpoints: Vec<OrchestrationV2Checkpoint>,
+        ) -> Result<()> {
+            let backend = self.0.clone();
+            live(async move { backend.delete_refs(scope, checkpoints).await }).await
+        }
+    }
+    struct LiveRollbackRecovery(Arc<GitRollbackWorkspaceRecovery>);
+    #[async_trait::async_trait]
+    impl RollbackWorkspaceRecovery for LiveRollbackRecovery {
+        async fn is_managed(&self, path: &Path) -> Result<bool> {
+            self.0.is_managed(path).await
+        }
+        async fn recreate(
+            &self,
+            thread: &OrchestrationV2AppThread,
+            cancellation: CancellationToken,
+        ) -> Result<()> {
+            let recovery = self.0.clone();
+            let thread = thread.clone();
+            live(async move { recovery.recreate(&thread, cancellation).await }).await
+        }
+    }
+
+    fn environment(workspace: &Path) -> Result<t3_process::Environment> {
+        let home = workspace.join(".git").join("t3-fixture-home");
+        std::fs::create_dir_all(&home)?;
+        let mut environment = t3_process::Environment::new();
+        for key in ["HOME", "USERPROFILE", "XDG_CONFIG_HOME"] {
+            environment.insert(key.into(), Some(home.clone().into_os_string()));
+        }
+        for key in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
+            environment.insert(key.into(), Some(home.join("no-config").into_os_string()));
+        }
+        for (key, value) in [
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_CONFIG_COUNT", "0"),
+            ("GIT_AUTHOR_NAME", "T3 Code Test"),
+            ("GIT_AUTHOR_EMAIL", "t3code-test@example.com"),
+            ("GIT_COMMITTER_NAME", "T3 Code Test"),
+            ("GIT_COMMITTER_EMAIL", "t3code-test@example.com"),
+        ] {
+            environment.insert(key.into(), Some(value.into()));
+        }
+        for key in ["GIT_CONFIG_PARAMETERS", "GIT_CONFIG", "GIT_TEMPLATE_DIR"] {
+            environment.insert(key.into(), None);
+        }
+        Ok(environment)
+    }
+    fn git_error(error: t3_git::GitError) -> Error {
+        Error::Service {
+            operation: "replay fixture git",
+            detail: format!("{error:?}"),
+        }
+    }
+    #[async_trait::async_trait]
+    impl ReplayFixtureHostFactory for GitReplayFixtureHost {
+        async fn prepare_workspace(&self, fixture: &str, workspace: &Path) -> Result<()> {
+            let readme = workspace.join("README.md");
+            if !readme.try_exists()? {
+                std::fs::write(readme, format!("# {fixture}\n"))?;
+            }
+            let git = t3_git::Git::new(workspace).with_environment(environment(workspace)?);
+            live(async move {
+                for args in [
+                    vec!["init"],
+                    vec!["config", "core.autocrlf", "false"],
+                    vec!["add", "--all"],
+                    vec!["commit", "-m", "initial"],
+                ] {
+                    git.execute(&args, Default::default())
+                        .await
+                        .map_err(git_error)?;
+                }
+                Ok(())
+            })
+            .await
+        }
+        async fn runtime_ports(&self, input: ReplayFixtureHostInput) -> Result<RuntimePorts> {
+            if input.run_continuation_worker {
+                return Err(Error::Unsupported(
+                    "fixture continuation worker: provider-core host owner",
+                ));
+            }
+            if input.provider_batch_observer.is_some() {
+                return Err(Error::Unsupported(
+                    "provider batch observation: owners 03/06",
+                ));
+            }
+            let environment = environment(&input.workspace)?;
+            let backend = Arc::new(GitCheckpointBackend::new(move |cwd| {
+                t3_git::Git::new(cwd).with_environment(environment.clone())
+            }));
+            let mut settings =
+                serde_json::to_value(t3_contracts::settings::ServerSettings::default())?;
+            for instance in input.providers.list().await? {
+                let metadata = input.providers.metadata(instance.clone()).await?;
+                settings["providerInstances"][&instance.0] =
+                    serde_json::json!({"driver":metadata.driver,"enabled":metadata.enabled});
+            }
+            let mut ports = RuntimePorts::new(
+                input.database.clone(),
+                input.providers,
+                Arc::new(LiveCheckpointPort(backend.clone())),
+                input.clock,
+            );
+            ports.ids = input.ids;
+            ports.settings = Arc::new(StaticSettings::new(serde_json::from_value(settings)?));
+            ports.policy = Arc::new(OverriddenRuntimePolicy {
+                base: Arc::new(BaseRuntimePolicy),
+                overrides: RuntimePolicyOverride {
+                    cwd: Some(input.workspace.clone()),
+                    approval_policy: input.runtime_policy_override.get("approvalPolicy").cloned(),
+                    sandbox_policy: input.runtime_policy_override.get("sandboxPolicy").cloned(),
+                },
+                reasoning_effort: None,
+            });
+            ports.rollback_workspaces = Some(Arc::new(LiveRollbackRecovery(Arc::new(
+                GitRollbackWorkspaceRecovery {
+                    backend,
+                    database: input.database,
+                    managed_roots: vec![input.workspace],
+                },
+            ))));
+            Ok(ports)
+        }
     }
 }

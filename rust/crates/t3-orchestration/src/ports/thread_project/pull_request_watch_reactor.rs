@@ -4,9 +4,9 @@ use super::pull_request_watch::{
 };
 use crate::{
     api::*,
-    error::{Error, Result},
-    projections::store::ProjectionStore,
-    runtime::threads::{ThreadServiceScope, date_ms},
+    error::{Error, PullRequestHostError, Result},
+    projections::{store::ProjectionStore, write::PullRequestIdentityRegistry},
+    runtime::threads::{ThreadServiceScope, date_ms, normalize_pull_request_key},
 };
 use serde_json::{Value, json};
 use std::{
@@ -19,7 +19,7 @@ use std::{
 };
 use t3_contracts::{pull_request::*, thread_pull_request::*};
 use tokio::sync::{Mutex, Semaphore};
-use tokio_util::task::TaskTracker;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const QUIET_REREAD_MS: i64 = 10 * 60_000;
 const FINGERPRINT_REREAD_MS: i64 = 30 * 60_000;
@@ -67,6 +67,8 @@ struct ThreadTails {
 struct Cache {
     reads: BTreeMap<String, LastRead>,
     tails: BTreeMap<String, ThreadTails>,
+    failures: BTreeMap<String, u32>,
+    groups: BTreeMap<String, PullRequestRef>,
 }
 struct HeldWake {
     key: String,
@@ -84,6 +86,8 @@ pub struct PullRequestWatchReactor {
     scope: ThreadServiceScope,
     tasks: TaskTracker,
     started: AtomicBool,
+    feeds: Mutex<BTreeMap<String, CancellationToken>>,
+    identities: Option<Arc<dyn PullRequestIdentityRegistry>>,
 }
 
 fn key(link: &ThreadPullRequestLink) -> String {
@@ -201,7 +205,16 @@ impl PullRequestWatchReactor {
             scope: ThreadServiceScope::default(),
             tasks: TaskTracker::new(),
             started: AtomicBool::new(false),
+            feeds: Mutex::new(BTreeMap::new()),
+            identities: None,
         }
+    }
+    pub fn with_identity_registry(
+        mut self,
+        identities: Arc<dyn PullRequestIdentityRegistry>,
+    ) -> Self {
+        self.identities = Some(identities);
+        self
     }
     pub async fn start(self: &Arc<Self>) -> Result<()> {
         self.scope.run(async { self.start_inner() }).await
@@ -224,6 +237,10 @@ impl PullRequestWatchReactor {
                             && !matches!(error, Error::Cancelled) {
                             eprintln!("pull request watch sweep failed: {error}");
                         }
+                        if let Err(error) = reactor.scope.run(reactor.follow_changes()).await
+                            && !matches!(error, Error::Cancelled) {
+                            eprintln!("pull request watch feeds failed: {error}");
+                        }
                     },
                 }
             }
@@ -234,6 +251,10 @@ impl PullRequestWatchReactor {
         self.scope.run(self.pass(None)).await
     }
     pub async fn read_on_change(self: &Arc<Self>, identity: ThreadPullRequestKey) -> Result<()> {
+        let identity = match &self.identities {
+            Some(registry) => normalize_pull_request_key(registry.as_ref(), &identity, None)?,
+            None => identity,
+        };
         let identity = format!(
             "{}/{}#{}",
             identity.host.0.trim().to_lowercase(),
@@ -248,9 +269,73 @@ impl PullRequestWatchReactor {
         self.tasks.wait().await;
     }
 
+    async fn follow_changes(self: &Arc<Self>) -> Result<()> {
+        let wanted = self.cache.lock().await.groups.clone();
+        let mut feeds = self.feeds.lock().await;
+        feeds.retain(|key, cancellation| {
+            if wanted.contains_key(key) && !cancellation.is_cancelled() {
+                true
+            } else {
+                cancellation.cancel();
+                false
+            }
+        });
+        for (key, reference) in wanted {
+            if feeds.contains_key(&key) {
+                continue;
+            }
+            let mut changes = match self.services.pull_requests.changes(reference.clone()).await {
+                Ok(changes) => changes,
+                Err(Error::Cancelled) => return Err(Error::Cancelled),
+                Err(error) => {
+                    eprintln!("pull request watch feed unavailable: {error}");
+                    continue;
+                }
+            };
+            let cancellation = self.scope.cancellation();
+            feeds.insert(key, cancellation.clone());
+            let identity = ThreadPullRequestKey {
+                host: reference
+                    .host
+                    .clone()
+                    .flatten()
+                    .ok_or_else(|| Error::Decode {
+                        entity: "watch feed reference",
+                        detail: "missing host".into(),
+                    })?,
+                repository: reference.repository.clone(),
+                number: reference.number,
+            };
+            let reactor = self.clone();
+            self.tasks.spawn(async move {
+                loop {
+                    tokio::select! { biased;
+                        _ = cancellation.cancelled() => break,
+                        changed = changes.changed() => {
+                            if changed.is_err() { break; }
+                            changes.borrow_and_update();
+                            let result = tokio::select! { biased;
+                                _ = cancellation.cancelled() => break,
+                                result = reactor.read_on_change(identity.clone()) => result,
+                            };
+                            if let Err(error) = result {
+                                if matches!(error, Error::Cancelled) { break; }
+                                eprintln!("pull request watch change read failed: {error}");
+                            }
+                        }
+                    }
+                }
+                cancellation.cancel();
+            });
+        }
+        Ok(())
+    }
+
     async fn pass(self: &Arc<Self>, changed: Option<String>) -> Result<()> {
         // A pass snapshots and advances watches; a second pass must not reuse that snapshot.
         let _pass = self.passes.lock().await;
+        let cancellation = self.scope.cancellation();
+        let _cancel_children = cancellation.clone().drop_guard();
         let mut groups: BTreeMap<String, Vec<Target>> = BTreeMap::new();
         for thread in self
             .services
@@ -259,10 +344,23 @@ impl PullRequestWatchReactor {
             .await?
         {
             let links = thread.pull_requests.clone().flatten().unwrap_or_default();
-            for link in links
+            for mut link in links
                 .into_iter()
                 .filter(|link| link.source != ThreadPullRequestLinkSource::StackDismissed)
             {
+                if let Some(registry) = &self.identities {
+                    let normalized = normalize_pull_request_key(
+                        registry.as_ref(),
+                        &ThreadPullRequestKey {
+                            host: link.host.clone(),
+                            repository: link.repository.clone(),
+                            number: link.number,
+                        },
+                        Some(&link.url.0),
+                    )?;
+                    link.host = normalized.host;
+                    link.repository = normalized.repository;
+                }
                 let Some(watch) = link.watch.clone().flatten() else {
                     continue;
                 };
@@ -289,6 +387,9 @@ impl PullRequestWatchReactor {
                     || json!(thread.lineage)["relationshipToParent"] == "subagent"
                 {
                     if let Err(error) = self.record(&target, None, None, None).await {
+                        if matches!(error, Error::Cancelled) {
+                            return Err(error);
+                        }
                         eprintln!("pull request watch stop failed: {error}");
                     }
                     continue;
@@ -300,6 +401,12 @@ impl PullRequestWatchReactor {
             let mut cache = self.cache.lock().await;
             cache.reads.retain(|key, _| groups.contains_key(key));
             cache.tails.retain(|key, _| groups.contains_key(key));
+            cache.failures.retain(|key, _| groups.contains_key(key));
+            cache.groups = groups
+                .values()
+                .filter_map(|targets| targets.first())
+                .map(|target| Ok((key(&target.link), reference(target)?)))
+                .collect::<Result<_>>()?;
         }
         let slots = Arc::new(Semaphore::new(4));
         let mut reads = Vec::new();
@@ -318,10 +425,14 @@ impl PullRequestWatchReactor {
             };
             let reactor = self.clone();
             let slots = slots.clone();
+            let cancellation = cancellation.clone();
+            let changed = changed.is_some();
             reads.push(self.tasks.spawn(async move {
                 reactor
                     .scope
-                    .run(async {
+                    .run(async { tokio::select! { biased;
+                        _ = cancellation.cancelled() => Err(Error::Cancelled),
+                        result = async {
                         let host = match reactor
                             .services
                             .pull_requests
@@ -329,13 +440,20 @@ impl PullRequestWatchReactor {
                             .await
                         {
                             Ok(host) => host,
-                            Err(Error::Unsupported(_)) => None,
+                            Err(Error::PullRequestHost(PullRequestHostError::RateLimited { .. })) => return Ok(Vec::new()),
                             Err(Error::Cancelled) => return Err(Error::Cancelled),
-                            Err(error) => return Err(error),
+                            Err(error) => { eprintln!("pull request watch fingerprint failed: {error}"); None },
                         };
+                        if changed && let Some(host) = &host {
+                            let previous = reactor.cache.lock().await.reads.get(&group.key).cloned();
+                            if previous.as_ref().is_none_or(|previous| previous.host.as_ref().is_none_or(|last| last != host)) {
+                                reactor.invalidate(&group.targets[0], true).await?;
+                            }
+                        }
                         let _permit = slots.acquire().await.map_err(|_| Error::Cancelled)?;
                         reactor.read_group(group, host).await
-                    })
+                    } => result,
+                    } })
                     .await
             }));
         }
@@ -349,6 +467,61 @@ impl PullRequestWatchReactor {
             }
         }
         self.send_held(held).await
+    }
+
+    async fn invalidate(&self, target: &Target, notify: bool) -> Result<()> {
+        self.services
+            .pull_requests
+            .invalidate(
+                serde_json::from_value(json!({"reference":reference(target)?}))?,
+                notify,
+            )
+            .await
+    }
+
+    async fn read_failed(&self, group: &Group, error: Error) -> Result<Vec<HeldWake>> {
+        if matches!(error, Error::Cancelled) {
+            return Err(error);
+        }
+        let mut cache = self.cache.lock().await;
+        cache.reads.remove(&group.key);
+        match &error {
+            Error::PullRequestHost(PullRequestHostError::RateLimited { .. }) => {
+                return Ok(Vec::new());
+            }
+            Error::PullRequestHost(PullRequestHostError::Failed { .. }) => {
+                cache.failures.remove(&group.key);
+                return Err(error);
+            }
+            _ => {}
+        }
+        let failures = cache.failures.entry(group.key.clone()).or_default();
+        *failures += 1;
+        if *failures < 8 {
+            return Err(error);
+        }
+        drop(cache);
+        let mut landed = true;
+        for target in &group.targets {
+            let number = target.link.number;
+            let wake = json!({"text":format!("T3 Code stopped watching pull request #{number} ({}) because it failed to read it from the host 8 times in a row. Check it yourself, and call watch_pull_request only if it is still open.",target.link.url.0),"notification":{"source":{"kind":"monitor"},"outcome":"failed","summary":format!("#{number}: stopped watching, could not read it")}});
+            let result = match self.record(target, None, Some(wake), None).await {
+                Ok(()) => Ok(()),
+                Err(Error::Cancelled) => return Err(Error::Cancelled),
+                Err(_) => self.record(target, None, None, None).await,
+            };
+            if let Err(error) = result {
+                if matches!(error, Error::Cancelled) {
+                    return Err(error);
+                }
+                landed = false;
+                eprintln!("pull request watch ending failed: {error}");
+            }
+        }
+        if landed {
+            self.cache.lock().await.failures.remove(&group.key);
+        }
+        Err(error)
     }
 
     async fn read_group(
@@ -380,6 +553,9 @@ impl PullRequestWatchReactor {
             self.cache.lock().await.tails.remove(&group.key);
         }
         let reference = reference(&group.targets[0])?;
+        if host.is_some() {
+            self.invalidate(&group.targets[0], false).await?;
+        }
         let (detail, activity) = tokio::join!(
             self.services.pull_requests.detail(reference.clone()),
             async {
@@ -396,17 +572,22 @@ impl PullRequestWatchReactor {
         );
         let detail = match detail {
             Ok(detail) => detail,
-            Err(error) => {
-                self.cache.lock().await.reads.remove(&group.key);
-                return Err(error);
-            }
+            Err(error) => return self.read_failed(&group, error).await,
         };
         if detail.state != PullRequestState::Open {
-            self.cache.lock().await.reads.remove(&group.key);
+            let mut cache = self.cache.lock().await;
+            cache.reads.remove(&group.key);
+            cache.failures.remove(&group.key);
+            drop(cache);
             let mut wakes = Vec::new();
             for target in group.targets {
                 if detail.state == PullRequestState::Merged {
-                    self.record(&target, None, None, None).await?;
+                    if let Err(error) = self.record(&target, None, None, None).await {
+                        if matches!(error, Error::Cancelled) {
+                            return Err(error);
+                        }
+                        eprintln!("pull request watch stop failed: {error}");
+                    }
                 } else {
                     let number = target.link.number;
                     let wake = PullRequestWatchWake {
@@ -432,11 +613,9 @@ impl PullRequestWatchReactor {
         }
         let activity = match activity {
             Ok(activity) => activity,
-            Err(error) => {
-                self.cache.lock().await.reads.remove(&group.key);
-                return Err(error);
-            }
+            Err(error) => return self.read_failed(&group, error).await,
         };
+        self.cache.lock().await.failures.remove(&group.key);
         let remarks = match activity {
             Some(activity) => {
                 self.read_remarks(
@@ -492,6 +671,9 @@ impl PullRequestWatchReactor {
                     && let Err(error) = self.record(&target, Some(&report.next), None, None).await
                 {
                     self.cache.lock().await.reads.remove(&group.key);
+                    if matches!(error, Error::Cancelled) {
+                        return Err(error);
+                    }
                     eprintln!("pull request watch update failed: {error}");
                 }
             } else {
