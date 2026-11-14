@@ -11,6 +11,8 @@ type Listener = mpsc::UnboundedSender<Result<AppUrlSnapshot, PlatformError>>;
 
 pub(crate) struct MemoryHistory {
     entries: Vec<String>,
+    entry_keys: Vec<u64>,
+    next_entry_key: u64,
     index: usize,
     policy: RoutePolicy,
     listeners: Vec<Listener>,
@@ -21,6 +23,8 @@ impl MemoryHistory {
     pub(crate) fn new(launch: Option<String>) -> Self {
         Self {
             entries: vec![launch.unwrap_or_else(|| "/".into())],
+            entry_keys: vec![0],
+            next_entry_key: 1,
             index: 0,
             policy: RoutePolicy::default(),
             listeners: Vec::new(),
@@ -31,6 +35,7 @@ impl MemoryHistory {
         AppUrlSnapshot {
             path: self.entries[self.index].clone(),
             history_index: self.index as u64,
+            entry_key: Some(self.entry_keys[self.index].to_string()),
             can_go_back: self.index > 0,
             can_go_forward: self.index + 1 < self.entries.len(),
             policy: self.policy,
@@ -62,10 +67,22 @@ impl MemoryHistory {
 
     /// A new entry after the current one; forward entries are discarded.
     pub(crate) fn push(&mut self, href: String) {
+        let key = self.allocate_key();
         self.entries.truncate(self.index + 1);
+        self.entry_keys.truncate(self.index + 1);
         self.entries.push(href);
+        self.entry_keys.push(key);
         self.index += 1;
         self.notify();
+    }
+
+    fn allocate_key(&mut self) -> u64 {
+        let key = self.next_entry_key;
+        self.next_entry_key = self
+            .next_entry_key
+            .checked_add(1)
+            .expect("history entry id exhausted");
+        key
     }
 
     fn go(&mut self, delta: i64) {
@@ -83,7 +100,9 @@ impl MemoryHistory {
                 self.push(href)
             }
             AppUrlRequest::Replace(href) => {
+                let key = self.allocate_key();
                 self.entries[self.index] = href;
+                self.entry_keys[self.index] = key;
                 self.notify();
             }
             AppUrlRequest::Go(delta) => self.go(delta),
@@ -126,20 +145,29 @@ mod tests {
         assert_eq!(path(&history), ("/".into(), false, true));
         history.apply(AppUrlRequest::Go(1));
         assert_eq!(path(&history), ("/settings".into(), true, true));
+        let settings = history.snapshot();
+        history.apply(AppUrlRequest::Go(-1));
+        history.apply(AppUrlRequest::Go(1));
+        assert_eq!(history.snapshot().entry_key, settings.entry_key);
         history.apply(AppUrlRequest::Go(5));
         assert_eq!(
             path(&history),
             ("/settings".into(), true, true),
             "out of range does nothing"
         );
+        history.apply(AppUrlRequest::Go(-1));
         history.apply(AppUrlRequest::Push("/archived".into()));
+        assert_eq!(history.snapshot().history_index, settings.history_index);
+        assert_ne!(history.snapshot().entry_key, settings.entry_key);
         assert_eq!(
             path(&history),
             ("/archived".into(), true, false),
             "forward entries are gone"
         );
+        let pushed_key=history.snapshot().entry_key;
         history.apply(AppUrlRequest::Replace("/archived?x=1".into()));
-        assert_eq!(history.snapshot().history_index, 2);
+        assert_eq!(history.snapshot().history_index, 1);
+        assert_ne!(history.snapshot().entry_key,pushed_key);
         let seen: Vec<_> = std::iter::from_fn(|| changes.next().now_or_never().flatten())
             .map(|snapshot| snapshot.unwrap().path)
             .collect();
@@ -150,6 +178,9 @@ mod tests {
                 "/usage",
                 "/",
                 "/settings",
+                "/",
+                "/settings",
+                "/",
                 "/archived",
                 "/archived?x=1"
             ]

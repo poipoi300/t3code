@@ -1,6 +1,6 @@
 //! The app's location on the web: the browser's own location and history, as TanStack's
-//! browser history uses them (each entry's index in `history.state.__TSR_index`, so entries
-//! written by the TypeScript app read the same). Route logic stays in `t3_client::navigation`.
+//! browser history uses `__TSR_index` and `__TSR_key` in history.state, including entries
+//! written by TypeScript. Route logic stays in `t3_client::navigation`.
 use super::js;
 use futures::{StreamExt, channel::mpsc, channel::oneshot, stream::LocalBoxStream};
 use std::{cell::RefCell, rc::Rc};
@@ -12,6 +12,23 @@ use wasm_bindgen::JsValue;
 use web_sys::Window;
 
 const INDEX_KEY: &str = "__TSR_index";
+const ENTRY_KEY: &str = "__TSR_key";
+
+fn random_key() -> Result<String, PlatformError> {
+    let encoded: String = js_sys::Number::from(js_sys::Math::random() + 1.0)
+        .to_string_with_radix(36)
+        .map_err(history_error)?
+        .into();
+    Ok(encoded.chars().skip(7).collect())
+}
+
+fn keyed_state(index: u64, key: &str) -> Result<js_sys::Object, PlatformError> {
+    js::object(&[
+        (INDEX_KEY, JsValue::from_f64(index as f64)),
+        (ENTRY_KEY, JsValue::from_str(key)),
+        ("key", JsValue::from_str(key)),
+    ])
+}
 
 #[derive(Default)]
 struct State {
@@ -56,6 +73,11 @@ fn snapshot(window: &Window, state: &State) -> AppUrlSnapshot {
     AppUrlSnapshot {
         path: path(window),
         history_index: index,
+        entry_key: window
+            .history()
+            .ok()
+            .and_then(|history| history.state().ok())
+            .and_then(|state| js::get(&state, ENTRY_KEY).as_string()),
         can_go_back: index > 0,
         can_go_forward: index < state.forward_limit,
         policy: state.policy,
@@ -73,9 +95,24 @@ impl BrowserHistory {
     /// Listens for back and forward; the returned listener must live as long as the history.
     pub(crate) fn new(window: Window) -> Result<(Self, js::Listener), PlatformError> {
         let history = window.history().map_err(history_error)?;
-        // A fresh page has no index yet; give it 0 so later entries count from here.
-        if js::get(&history.state().unwrap_or(JsValue::NULL), INDEX_KEY).is_undefined() {
-            let entry = js::object(&[(INDEX_KEY, JsValue::from_f64(0.0))])?;
+        let previous = history.state().map_err(history_error)?;
+        let present_key = js::get(&previous, ENTRY_KEY)
+            .as_string()
+            .filter(|key| !key.is_empty());
+        if present_key.is_none() || js::get(&previous, INDEX_KEY).is_undefined() {
+            let key = match present_key.or_else(|| {
+                js::get(&previous, "key")
+                    .as_string()
+                    .filter(|key| !key.is_empty())
+            }) {
+                Some(key) => key,
+                None => random_key()?,
+            };
+            let entry = js_sys::Object::new();
+            if previous.is_object() {
+                let _=js_sys::Object::assign(&entry, &js_sys::Object::from(previous));
+            }
+            let _=js_sys::Object::assign(&entry, &keyed_state(index(&window), &key)?);
             history.replace_state(&entry, "").map_err(history_error)?;
         }
         let state = Rc::new(RefCell::new(State {
@@ -120,7 +157,7 @@ impl BrowserHistory {
         let history = self.window.history().map_err(history_error)?;
         let current = index(&self.window);
         let next = if push { current + 1 } else { current };
-        let entry = js::object(&[(INDEX_KEY, JsValue::from_f64(next as f64))])?;
+        let entry = keyed_state(next, &random_key()?)?;
         if push {
             history.push_state_with_url(&entry, "", Some(href))
         } else {

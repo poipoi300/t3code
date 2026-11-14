@@ -40,6 +40,56 @@ use crate::{
     },
 };
 
+/// The drawer as the thread workspace mounts it (`screens::panel::TerminalRegistration`): the
+/// header's terminal toggle and the drawer under the composer.
+pub fn terminal_registration(
+    services: TerminalServices,
+    key: ThreadKey,
+) -> crate::screens::panel::TerminalRegistration {
+    crate::screens::panel::TerminalRegistration {
+        control: terminal_control(services.clone(), key),
+        render: Rc::new(move |key| thread_terminal_drawer(services.clone(), key).into_element()),
+    }
+}
+
+/// The header's terminal toggle for `key`: open while the thread's drawer is, available with read
+/// or operate access, as the web's `terminal.toggle` is.
+pub fn terminal_control(
+    services: TerminalServices,
+    key: ThreadKey,
+) -> crate::screens::thread::header::TerminalControl {
+    let state = {
+        let key = key.clone();
+        move |services: &TerminalServices| {
+            (
+                services.0.is_open(&key),
+                services.0.can_read(&key) || services.0.can_operate(&key),
+            )
+        }
+    };
+    let current = signal(state(&services));
+    {
+        let services = services.clone();
+        let state = state.clone();
+        spawn(async move {
+            let _ = services.0.load().await;
+            current.set(state(&services));
+            let mut changes = services.0.ui_changes();
+            while changes.next().await.is_some() {
+                let next = state(&services);
+                if current.get_untracked() != next {
+                    current.set(next);
+                }
+            }
+        });
+    }
+    crate::screens::thread::header::TerminalControl {
+        open: Prop::bind(move || current.get().0),
+        available: Prop::bind(move || current.get().1),
+        on_toggle: Rc::new(move || services.0.toggle(&key)),
+    }
+}
+
 /// A terminal's name for display.
 pub fn terminal_label_text(label: &TerminalLabel) -> String {
     match label {
