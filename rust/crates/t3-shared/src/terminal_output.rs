@@ -12,33 +12,68 @@ use std::collections::VecDeque;
 
 const ESC: u16 = 27;
 const LIVE_LINES: usize = 64;
-/// A run's units. A deque, so a write trims or splits a long run by moving its ends instead of
-/// copying the line: TypeScript's sliced and concatenated strings cost O(runs) per write.
-type Units = VecDeque<u16>;
-#[derive(Clone, Default, Serialize, Deserialize)]
+/// One line: all its units in one buffer, and TypeScript's runs over them as pen and length.
+/// A write overwrites units in place and splits, merges or flattens runs by changing lengths,
+/// so it never copies text it does not change, as TypeScript's sliced and concatenated strings.
+#[derive(Clone, Default)]
+struct Line {
+    text: VecDeque<u16>,
+    runs: Vec<Run>,
+}
+#[derive(Clone)]
 struct Run {
     pen: String,
-    #[serde(with = "utf16_units")]
-    text: Units,
+    len: usize,
 }
-mod utf16_units {
-    use super::Units;
-    use serde::{Deserializer, Serializer};
-    pub fn serialize<S: Serializer>(
-        units: &Units,
+/// A run as the JSON state spells it.
+#[derive(Serialize, Deserialize)]
+struct RunJson {
+    pen: String,
+    #[serde(with = "utf16_text")]
+    text: Vec<u16>,
+}
+impl Serialize for Line {
+    fn serialize<S: serde::Serializer>(
+        &self,
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
-        match units.as_slices() {
-            (front, []) => super::utf16_text::serialize(front, serializer),
-            _ => {
-                super::utf16_text::serialize(&units.iter().copied().collect::<Vec<_>>(), serializer)
+        let mut offset = 0;
+        serializer.collect_seq(self.runs.iter().map(|run| {
+            let text = self.text.range(offset..offset + run.len).copied().collect();
+            offset += run.len;
+            RunJson {
+                pen: run.pen.clone(),
+                text,
             }
-        }
+        }))
     }
-    pub fn deserialize<'de, D: Deserializer<'de>>(
+}
+impl<'de> Deserialize<'de> for Line {
+    fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
-    ) -> std::result::Result<Units, D::Error> {
-        super::utf16_text::deserialize(deserializer).map(Units::from)
+    ) -> std::result::Result<Self, D::Error> {
+        let mut line = Line::default();
+        for run in Vec::<RunJson>::deserialize(deserializer)? {
+            line.runs.push(Run {
+                pen: run.pen,
+                len: run.text.len(),
+            });
+            line.text.extend(run.text);
+        }
+        Ok(line)
+    }
+}
+impl<'a> IntoIterator for &'a Line {
+    type Item = &'a Run;
+    type IntoIter = std::slice::Iter<'a, Run>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.runs.iter()
+    }
+}
+impl Line {
+    fn clear(&mut self) {
+        self.text.clear();
+        self.runs.clear();
     }
 }
 mod utf16_text {
@@ -86,7 +121,6 @@ mod utf16_parts {
         Ok([head, tail])
     }
 }
-type Line = Vec<Run>;
 #[derive(Clone, Copy, Serialize, Deserialize)]
 struct Cursor {
     row: usize,
@@ -117,7 +151,7 @@ impl Default for TerminalOutputState {
             pending: String::new(),
             screen: Screen {
                 settled: Default::default(),
-                lines: vec![vec![]],
+                lines: vec![Line::default()],
                 row: 0,
                 col: 0,
                 pen: String::new(),
@@ -187,75 +221,69 @@ fn sgr(pen: &str) -> String {
     }
 }
 fn line_len(line: &Line) -> usize {
-    line.iter().map(|run| run.text.len()).sum()
+    line.text.len()
 }
 /// `sliceLine(line, start, end)` in place, keeping the same runs.
 fn slice_in_place(line: &mut Line, start: usize, end: usize) {
     let mut offset = 0;
     let mut done = false;
-    line.retain_mut(|run| {
+    line.runs.retain_mut(|run| {
         if done {
             return false;
         }
         let run_start = offset;
-        let run_end = run_start + run.text.len();
+        let run_end = run_start + run.len;
         offset = run_end;
         done = run_end >= end;
         let kept = run_end > start && run_start < end;
         if kept {
-            run.text.truncate(end - run_start);
-            run.text.drain(..start.saturating_sub(run_start));
+            run.len = run_end.min(end) - run_start.max(start);
         }
         kept
     });
+    line.text.truncate(end);
+    let start = start.min(line.text.len());
+    line.text.drain(..start);
 }
 /// `trimLineStart`: drops `count` units from the front, and the runs that empties.
 fn trim_line_start(line: &mut Line, count: usize) {
     let mut remaining = count;
     let mut dropped = 0;
-    while remaining > 0 && dropped < line.len() {
-        let run = &mut line[dropped];
-        if run.text.len() <= remaining {
-            remaining -= run.text.len();
+    while remaining > 0 && dropped < line.runs.len() {
+        let run = &mut line.runs[dropped];
+        if run.len <= remaining {
+            remaining -= run.len;
             dropped += 1;
         } else {
-            run.text.drain(..remaining);
+            run.len -= remaining;
             remaining = 0;
         }
     }
-    line.drain(..dropped);
+    line.runs.drain(..dropped);
+    line.text.drain(..count - remaining);
 }
 /// `pushRun`: appends to the last run when the pen matches.
-fn push_units(line: &mut Line, pen: &str, text: &[u16]) {
-    if text.is_empty() {
+fn push_units(line: &mut Line, pen: &str, text: impl ExactSizeIterator<Item = u16>) {
+    let added = text.len();
+    if added == 0 {
         return;
     }
-    match line.last_mut() {
-        Some(last) if last.pen == pen => last.text.extend(text),
-        _ => line.push(Run {
+    match line.runs.last_mut() {
+        Some(last) if last.pen == pen => last.len += added,
+        _ => line.runs.push(Run {
             pen: pen.into(),
-            text: text.iter().copied().collect(),
+            len: added,
         }),
     }
-}
-/// Appends `right` to `left`, copying whichever is shorter.
-fn join(left: &mut Units, mut right: Units) {
-    if left.len() >= right.len() {
-        left.extend(right);
-    } else {
-        for unit in left.drain(..).rev() {
-            right.push_front(unit);
-        }
-        *left = right;
-    }
+    line.text.extend(text);
 }
 /// `writeLine` rebuilds the line through `pushRun`: no empty runs, no neighbours sharing a pen.
 fn canonicalize(line: &mut Line) {
-    line.retain(|run| !run.text.is_empty());
-    line.dedup_by(|next, kept| {
+    line.runs.retain(|run| run.len > 0);
+    line.runs.dedup_by(|next, kept| {
         let same = next.pen == kept.pen;
         if same {
-            join(&mut kept.text, std::mem::take(&mut next.text));
+            kept.len += next.len;
         }
         same
     });
@@ -263,80 +291,59 @@ fn canonicalize(line: &mut Line) {
 /// The run holding unit `position` of a canonical line, and where that run starts.
 fn run_at(line: &Line, position: usize) -> (usize, usize) {
     let mut start = 0;
-    for (index, run) in line.iter().enumerate() {
-        if position < start + run.text.len() {
+    for (index, run) in line.runs.iter().enumerate() {
+        if position < start + run.len {
             return (index, start);
         }
-        start += run.text.len();
+        start += run.len;
     }
-    (line.len(), start)
+    (line.runs.len(), start)
 }
-/// Splits off `text[..head]` and `text[cut..]`, copying only the shorter of the two.
-fn split_units(text: &mut Units, head: usize, cut: usize) -> (Units, Units) {
-    let mut whole = std::mem::take(text);
-    if head <= whole.len() - cut {
-        let left = whole.drain(..head).collect();
-        whole.drain(..cut - head);
-        (left, whole)
-    } else {
-        let right = whole.split_off(cut);
-        whole.truncate(head);
-        (whole, right)
-    }
-}
-/// `writeLine` away from the line's end, in place: the canonical runs of the units before `col`,
-/// padding, `text` in `pen`, then the units after it. Work follows the runs touched.
+/// `writeLine` away from the line's end: the canonical runs of the units before `col`, padding,
+/// `text` in `pen`, then the units after it. Units are overwritten in place; runs change length.
 fn write_within(line: &mut Line, col: usize, text: &[u16], pen: &str) {
     canonicalize(line);
     let len = line_len(line);
     if col >= len {
-        push_units(line, "", &vec![32; col - len]);
-        push_units(line, pen, text);
+        push_units(line, "", std::iter::repeat_n(32, col - len));
+        push_units(line, pen, text.iter().copied());
         return;
     }
     let end = col + text.len();
-    let (first, first_start) = run_at(line, col);
-    let head = col - first_start;
-    let run = &mut line[first];
-    if run.pen == pen && end <= first_start + run.text.len() {
-        for (slot, unit) in run.text.range_mut(head..head + text.len()).zip(text) {
-            *slot = *unit;
-        }
-        return;
+    let overlap = end.min(len) - col;
+    for (slot, unit) in line.text.range_mut(col..col + overlap).zip(text) {
+        *slot = *unit;
     }
+    line.text.extend(&text[overlap..]);
+    let (first, first_start) = run_at(line, col);
     let (last, last_start) = if end < len {
         run_at(line, end)
     } else {
-        (line.len(), len)
+        (line.runs.len(), len)
+    };
+    if first == last && line.runs[first].pen == pen {
+        return;
+    }
+    let left = Run {
+        pen: line.runs[first].pen.clone(),
+        len: col - first_start,
+    };
+    let right = match line.runs.get(last) {
+        Some(run) => Run {
+            pen: run.pen.clone(),
+            len: last_start + run.len - end,
+        },
+        None => Run {
+            pen: String::new(),
+            len: 0,
+        },
     };
     let written = Run {
         pen: pen.into(),
-        text: text.iter().copied().collect(),
+        len: text.len(),
     };
-    let (replaced, middle) = if first == last {
-        let run = &mut line[first];
-        let (left, right) = split_units(&mut run.text, head, end - first_start);
-        let left = Run {
-            pen: run.pen.clone(),
-            text: left,
-        };
-        let right = Run {
-            pen: run.pen.clone(),
-            text: right,
-        };
-        (first + 1, vec![left, written, right])
-    } else {
-        let mut left = std::mem::take(&mut line[first]);
-        left.text.truncate(head);
-        let mut parts = vec![left, written];
-        if last < line.len() {
-            let mut right = std::mem::take(&mut line[last]);
-            right.text.drain(..end - last_start);
-            parts.push(right);
-        }
-        ((last + 1).min(line.len()), parts)
-    };
-    line.splice(first..replaced, middle);
+    let replaced = (last + 1).min(line.runs.len());
+    line.runs.splice(first..replaced, [left, written, right]);
     canonicalize(line);
 }
 /// `eraseLine`: 0 cursor to end, 1 start through cursor, 2 whole line.
@@ -351,14 +358,16 @@ fn erase_in_line(line: &mut Line, col: usize, mode: f64) {
     }
 }
 fn serialize_line(line: &Line) -> Vec<u16> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(line.text.len());
     let mut current = "";
-    for run in line {
+    let mut offset = 0;
+    for run in &line.runs {
         if run.pen != current {
             out.extend(sgr(&run.pen).encode_utf16());
             current = &run.pen;
         }
-        out.extend(run.text.iter());
+        out.extend(line.text.range(offset..offset + run.len));
+        offset += run.len;
     }
     if !current.is_empty() {
         out.extend(sgr("").encode_utf16());
@@ -629,24 +638,20 @@ impl Terminal {
         let row = self.screen.row;
         let line = &mut self.screen.lines[row];
         if self.screen.col == line_len(line) {
-            push_units(line, &self.screen.pen, text);
+            push_units(line, &self.screen.pen, text.iter().copied());
         } else {
             write_within(line, self.screen.col, text, &self.screen.pen);
         }
         self.screen.col += text.len();
-        if line.len() > 2048 {
-            // Flatten old runs so later trimming stays cheap; the first run's buffer is reused.
-            let keep = line.len() - 256;
-            let mut flattened = line.drain(..keep);
-            let mut plain = flattened.next().map(|run| run.text).unwrap_or_default();
-            for run in flattened {
-                plain.extend(run.text);
-            }
-            line.insert(
+        if line.runs.len() > 2048 {
+            // Flatten old runs so later trimming stays cheap: one unstyled run, no text moved.
+            let keep = line.runs.len() - 256;
+            let len = line.runs.drain(..keep).map(|run| run.len).sum();
+            line.runs.insert(
                 0,
                 Run {
                     pen: String::new(),
-                    text: plain,
+                    len,
                 },
             );
         }
@@ -654,10 +659,12 @@ impl Terminal {
         if length > self.max {
             let mut removed = length - self.max;
             trim_line_start(line, removed);
-            if line
-                .first()
-                .and_then(|run| run.text.front())
-                .is_some_and(|ch| (0xdc00..=0xdfff).contains(ch))
+            // `line[0]?.text.charCodeAt(0)`: an empty first run reads NaN.
+            if line.runs.first().is_some_and(|run| run.len > 0)
+                && line
+                    .text
+                    .front()
+                    .is_some_and(|ch| (0xdc00..=0xdfff).contains(ch))
             {
                 trim_line_start(line, 1);
                 removed += 1;
@@ -697,7 +704,7 @@ impl Terminal {
         self.screen.row += 1;
         self.screen.col = 0;
         if self.screen.row == self.screen.lines.len() {
-            self.screen.lines.push(vec![]);
+            self.screen.lines.push(Line::default());
         }
         while self.screen.lines.len() > LIVE_LINES {
             self.scroll_out();
@@ -774,7 +781,7 @@ impl Terminal {
                     self.screen.settled = Default::default();
                     self.settled_units = 0;
                 } else if mode == 2.0 {
-                    self.screen.lines = vec![vec![]];
+                    self.screen.lines = vec![Line::default()];
                     self.screen.row = 0;
                     self.screen.col = 0;
                 }

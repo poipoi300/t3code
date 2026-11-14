@@ -105,5 +105,8 @@ fn rewrites_and_colour_runs_on_a_long_line_do_not_copy_the_line_per_write() {
         alternating < 4 << 20,
         "{alternating} bytes for 10,000 alternating-pen cycles"
     );
-    assert_eq!(output.snapshot().text, "L".repeat(TERMINAL_OUTPUT_TAIL_CHARS));
+    assert_eq!(
+        output.snapshot().text,
+        "L".repeat(TERMINAL_OUTPUT_TAIL_CHARS)
+    );
 }

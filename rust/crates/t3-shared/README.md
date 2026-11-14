@@ -24,7 +24,7 @@ merely because two server modules use it.
 | `packages/shared/src/composerContextLegacy.ts`, `composerContextReferences.ts` (find visibility) | `find_legacy` (private child), `find_text` |
 | `packages/shared/src/assistantCitations.ts`, `fileLinks.ts`, `markdownLinks.ts`, `inlineSkills.ts`, `proposedPlanText.ts`, `markdownPipeline.ts` (find rendering) | `find_text`: citation comments, file/skill labels, plan headings, insight and Markdown boundaries |
 | `apps/server/src/orchestration-v2/ThreadSearch.ts` (pure policy only) | `search_policy`: FTS/scan narrowing and displayed-link normalization; no SQL execution |
-| `apps/server/src/textGeneration/TextGenerators.ts` (saved-key rule) | `text_generators::saved_api_key_applies`: a saved key stands in for a redacted one only for the same kind and origin (a hardening beyond TypeScript; server and client apply the same rule) |
+| `apps/server/src/textGeneration/TextGenerators.ts` (unsaved configurations) | `text_generators::check_supplied_generator`: a placeholder or secret reference reuses a stored secret only for the saved kind at the saved address (a reference only when it is the saved one); any other key goes only to the saved address or an official endpoint. Addresses compare by scheme, host, port and path, trailing `/` ignored, and fail closed. A hardening beyond TypeScript, used by server and client alike |
 
 Regexes keep JavaScript's meaning: `\b` in a pattern without the `u` flag is ASCII
 (`(?-u:\b)`), and `\s` is spelled out as JavaScript's class (it includes U+FEFF and
@@ -43,14 +43,19 @@ port interface, but each call deserialises, copies and re-renders the whole stat
 a long-lived host should keep one `TerminalOutput` per stream instead. The
 historical `Native*` names mean Rust implementations; these types also work in Wasm.
 
-A write changes its line in place, as TypeScript's sliced and concatenated strings
-do: its cost follows the runs it touches (a split copies the shorter side), never the
-line's length, so carriage-return rewrites or a colour per character on a 64K-unit
-line stay linear. `tests/terminal_work.rs` holds that by counting allocated bytes.
+A line keeps all its units in one buffer and TypeScript's runs as pen and length over
+it. A write overwrites units in place, and splitting, merging or flattening runs only
+changes lengths, so no write copies text it does not change, as with TypeScript's sliced and
+concatenated strings. Carriage-return rewrites, a colour per character and a pen that
+alternates in the middle of a 64K-unit line all stay linear in what is written.
+`tests/terminal_work.rs` holds this by counting allocated bytes. Measured against
+TypeScript under Node, the alternating case costs 3.6 to 4.2 µs per cycle at 1K and at 64K
+one-byte units, so it is flat there too.
+
 Run boundaries match TypeScript's exactly (a mid-line write leaves no two neighbours
-sharing a pen), because the 2,048-run limit flattens by run count. SGR parameters
-are JavaScript numbers: truecolour channels are `Number(...) & 255` (ToInt32), so
-2^64 is 0, not 255.
+sharing a pen), because the 2,048-run limit flattens by run count. SGR parameters are
+JavaScript numbers: truecolour channels are `Number(...) & 255` (ToInt32), so 2^64 is 0,
+not 255.
 
 History byte caps and command-tail UTF-16 caps are separate. Use
 `terminal_history::retained_terminal_history` for raw PTY replay. Never apply

@@ -83,7 +83,7 @@ impl TerminalOutput {
                             units += sgr(&run.pen).len();
                             current = &run.pen;
                         }
-                        units += run.text.len();
+                        units += run.len;
                     }
                     units + if current.is_empty() { 0 } else { sgr("").len() }
                 })
