@@ -21,6 +21,10 @@ fn main() -> impl std::process::Termination {
             app_id: "codes.t3.dev".into(),
             size: (1200, 800),
             asset_base: asset_base(),
+            // One instance, as the TypeScript desktop's Electron lock: a second launch brings this
+            // window forward. macOS runs one instance per bundle already.
+            #[cfg(not(target_os = "macos"))]
+            single_instance: true,
             ..Default::default()
         },
     )

@@ -2,5 +2,6 @@
   "name": "T3 Code Dev",
   "id": "codes.t3.dev",
   "rust": "../crates/t3-ui",
-  "root": "App"
+  "root": "App",
+  "singleInstance": true
 }
