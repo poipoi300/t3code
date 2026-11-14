@@ -52,5 +52,35 @@
     "origin": "Synthetic recorded-response fixtures built from the source API decoders and provider behavior; no live credential or forge capture",
     "fixture": "tests/cursor_origin.rs (inline)",
     "source": "packages/source-control-cursor-origin/src/server/"
+  },
+  {
+    "origin": "Synthetic MSI/ZIP refusal and UTF-8 invocation cases from upstream ca1a0280da; no installed CLI invoked",
+    "source": "packages/source-control-azure-devops/src/server/azureCliLauncher.test.ts",
+    "fixture": "src/azure_devops/launcher.rs; tests/azure_devops.rs (inline)"
+  },
+  {
+    "origin": "Synthetic 120-row ignored-head, changed-front, deletion and one-hour rescan cases from upstream 0a6b3ebe22",
+    "source": "packages/source-control-forgejo/src/server/ForgejoSourceControlProvider.test.ts",
+    "fixture": "tests/forgejo.rs (incremental branch lookup)"
+  },
+  {
+    "origin": "Native secret-store integration and recorded device-flow responses using the upstream session schema; temporary secrets only",
+    "source": "packages/source-control-github/src/server/GitHubAppSignIn.ts",
+    "fixture": "tests/session_store.rs; tests/http.rs (sign-in refusal cases)"
+  },
+  {
+    "origin": "Native PR host composition regressions against target/link contracts, including authoritative roots, account refusals, Azure aliases and mounted Forgejo",
+    "source": "apps/server/src/pullRequest/pullRequestTarget.ts",
+    "fixture": "tests/bindings.rs (inline)"
+  },
+  {
+    "origin": "Synthetic unresolved-secret, header-safety and settings/environment precedence cases",
+    "source": "packages/source-control-bitbucket/src/server/BitbucketApi.ts",
+    "fixture": "tests/settings.rs (inline)"
+  },
+  {
+    "origin": "Local clone operand and fixed-public-hint regressions; no live service or credential capture",
+    "source": "apps/server/src/sourceControl/SourceControlRepositoryService.test.ts",
+    "fixture": "tests/services.rs (additional cases)"
   }
 ]

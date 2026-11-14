@@ -110,7 +110,7 @@ async fn checkout_without_state_includes_completed_requests() {
     drained(&cli);
 }
 #[tokio::test]
-async fn unicode_calls_and_discovery_use_bundled_python_and_installer() {
+async fn unicode_calls_use_bundled_python_and_installer() {
     let (forge, cli) = setup(vec![answer("checkoutList", json!([]))]);
     let invocation = t3_forge::azure_devops::launcher::Invocation {
         command: "fixture-python.exe".into(),

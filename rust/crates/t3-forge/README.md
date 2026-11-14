@@ -1,6 +1,6 @@
 # t3-forge
 
-Native, transport-neutral forge layer on Tokio, `t3-contracts`, `t3-process`,
+Native, transport-neutral forge layer on Tokio, `t3-contracts`, `t3-config`, `t3-process`,
 `t3-git`, and reqwest. GitHub operations and the source-control application
 services, GitLab, Bitbucket, Azure DevOps, GitCafe, Forgejo/Gitea and Cursor Origin
 are implemented. Optional operations follow each source backend's supported surface.
@@ -45,6 +45,14 @@ are implemented. Optional operations follow each source backend's supported surf
   `ForgeHandle`. Its required `ReviewSetup` dependency is supplied by the project
   setup owner; PR resolution does not invoke it. It does not grant workspace
   access or supply orchestration postconditions.
+- `bindings::ForgeBindings`: maps authoritative project records to native driver,
+  account, checkout and canonical repository bindings; resolves watch targets and
+  refreshes/discovers existing thread-link contracts. The server implements the
+  foreign PR traits by delegating forge work here and retaining its project,
+  workspace-authority and orchestration-command dependencies.
+- `settings::{github,bitbucket,gitcafe}`: settings/environment credential precedence
+  from already-resolved host values. Unresolved references and redaction markers
+  fail before another environment account can be selected.
 
 One registry and adapter set should live for the server lifetime. `supports`
 reports implemented methods; capabilities describe the exposed feature set.
@@ -53,6 +61,60 @@ opt-in through app sign-in, falls back to a personal credential on refusal,
 and ends quietly when unavailable; consumers must retain polling.
 
 ## Implemented and tested portions
+
+The current upstream specification is the TypeScript after merge `817a9186f9`.
+The Azure launcher drift recognizes only complete MSI/ZIP layouts and runs their
+bundled Python with `-X utf8 -IBm azure.cli` and `AZ_INSTALLER`. Other layouts and
+non-Windows platforms keep `az`. Invocation is resolved once per adapter; fake CLI
+tests explicitly select the direct invocation. `CliRequest::program` is now an owned
+string to carry the resolved interpreter path.
+
+Forgejo branch lookup detects servers ignoring `head=`, shares one list per
+serving account/repository, scans only its changed front and fully rescans after
+one hour. Candidate matches are reread to reject deletion, renamed forks and stale
+state; equal timestamps sort by descending PR number. The cache holds at most 128
+repositories. These behaviors are covered by the current upstream drift fixture.
+
+## Credential storage and sign-in
+
+`github::session_store::SettingsAppSessions` is the production `AppSessionStore`.
+Construct it from the SAME environment-owned `Arc<t3_config::SettingsService>`
+and its matching `SecretStore` at the explicitly supplied `HomeLayout::secrets()`.
+It uses the existing `sourceControlHosts.github.signIns[host]` setting: settings
+JSON holds its redaction marker, while the matching secret file holds UTF-8 JSON
+with `accessToken`, `accessTokenExpiresAt`, `refreshToken` and
+`refreshTokenExpiresAt`. The secret filename is the config store's existing
+`source-control-<base64url(github)>-<base64url(signIns)>-<base64url(host)>.bin`.
+The existing secret store supplies file protections (POSIX 0700/0600 and the
+environment's Windows directory ACL); this crate adds no encryption or new token
+database. `MemoryAppSessions` is ephemeral/test storage.
+
+Refresh compare-and-replace holds the same settings write lock as user updates
+and sign-out, compares the actual stored access token, then reloads/publishes the
+settings snapshot. A deleted secret never falls back to a cached plaintext value.
+Reopen, stale refresh, settings sign-out and concurrent refresh/sign-out fixtures
+cover this boundary. Store writes advance the adapter revision. The host must
+also update its live credential handles/invalidate PR caches on settings changes.
+
+Device codes and polling results remain in memory; only completed sessions are
+stored. Only the current GitHub TS driver exposes app sign-in and starring.
+It supports github.com, an injected public app client id and the device-code
+browser verification page; the service returns the prompt instead of opening a
+server browser. Other forges retain their source-supported CLI/token paths and
+canonical unsupported sign-in responses. Verification links must be HTTP(S),
+bounded and free of userinfo. Denial, expiry, cancellation and shutdown do not save
+sessions. Cancel is idempotent; shutdown closes admission and joins polling tasks.
+`AppSession`, credentials and CLI output never expose tokens through Debug;
+transport/store failures use fixed error text. Settings secret references are
+resolved by the host's existing resolver before `settings::*` conversion.
+
+Repository services preserve source behavior for local clone names, including
+`--bare` after Git's option terminator, SSH-to-HTTPS fallback, typed progress,
+bounded deadlines and guarded cleanup. Only fixed native repository hints are
+forwarded from provider failures. Cursor private-visibility update failures tell
+the caller that its repository was already created and remains team-visible.
+
+## Backend coverage
 
 Sources are `packages/source-control-core/src/{server,shared}`,
 `packages/source-control-definitions`, `apps/server/src/sourceControl`, and
@@ -126,7 +188,7 @@ spawn slots, binary metadata and byte limits, native bounded Myers diffing on
 blocking workers, and the source file/edit/byte slice budgets. Blob revisions
 preserve unknown paths when change paging is truncated. The native text diff
 replaces TypeScript's `diff` dependency; no Node/Python helper is launched.
-Ten Azure CLI fixture tests and three bounded-diff tests cover it.
+Eleven Azure CLI fixture tests, launcher refusals and three bounded-diff tests cover it.
 Azure review writes, check lists, reactions, and reviewer candidates remain
 unsupported exactly as in the source backend. Repository visibility follows
 project permissions because `az repos create` has no visibility option.
@@ -158,7 +220,7 @@ reviewers/labels, edits and merge/update/close/reopen actions. It prefers config
 then uses native HTTP with token authentication. `tea` is the fallback when no
 configured fj account serves the target; a rejected configured account cannot
 silently change identity to tea. JSON writes use stdin. Redirects remain inside
-the serving origin and mounted API path. Ten Forgejo fixture tests cover these
+the serving origin and mounted API path. Eleven Forgejo fixture tests cover these
 boundaries. Replies, resolution and draft conversion are unsupported as in the
 source backend.
 
@@ -179,7 +241,7 @@ serializes token reads, caches successful sessions for five minutes and failures
 for ten seconds, and refreshes a refused token once. Late refusals cannot clear
 a newer session. Long page tokens stay behind bounded opaque cursors; expired
 cursors request a refresh. A changed base triggers mergeability verification;
-an open stacked parent prevents an implicit stack merge. Twelve Cursor fixtures
+an open stacked parent prevents an implicit stack merge. Thirteen Cursor fixtures
 cover these behaviors. Repository creation is followed by a private-visibility
 update; failure identifies the already-created repository and team exposure.
 Reviewer requests/candidates, reactions, labels, blob contents and host viewed
@@ -204,7 +266,7 @@ GitHub event producers and GitLab cleanup tasks.
 ## Remaining work and known differences
 
 - The server composition root must supply authoritative workspace grants before
-  calling any path operation, register adapters, persist `AppSessionStore`,
+  calling any path operation, register adapters, construct `SettingsAppSessions`,
   resolve setting secrets to literals, refresh PATH, and supply `ReviewSetup`.
   No service reads T3 home, provider homes, application settings or live secrets
   implicitly. Updating credentials uses `GitHubCredentials::update_settings`;
@@ -240,7 +302,15 @@ stack reads and optional events to the implemented `t3-pull-request` and
 `t3-orchestration` services. Their polling, persistence, notification and agent-wake
 policy belong outside this crate.
 
-## Server handoff: all 54 deferred RPCs
+## Server handoff: discovery and the 54 deferred RPCs
+
+The server construction instructions, exact ten-method dispatch table and native
+delegations for `ProjectSource`, driver/account bindings, `WatchOrchestration` and
+`CheckoutPullRequests` are in
+`C:\Users\Administrator\t3code-rust-notes\briefs\server-seam-requests.md`,
+section **t3-forge round 2**. This crate cannot depend on `t3-pull-request`, whose
+Forge feature already depends on it. The server's foreign trait implementations
+retain authority and command admission; they forward forge work to `ForgeBindings`.
 
 The dependency direction is `t3-orchestration`'s `PullRequestBackend` port,
 implemented by `t3-pull-request::OrchestrationPullRequestBackend`, through that
@@ -284,6 +354,7 @@ This crate does not remove registrations from `t3-server/handlers/unsupported.rs
 | `sourceControl.appAccess` | `SourceControlSignIn::access` | Same registered credential context |
 | `sourceControl.starred` | `SourceControlSignIn::starred` | Same registered credential context |
 | `sourceControl.star` | `SourceControlSignIn::star` | Same registered credential context |
+| `server.discoverSourceControl` | `SourceControlDiscovery::discover` | Refreshed environment and the same registered adapters |
 | `pullRequests.list` | `Forge::list_change_requests`, `list_change_requests_across` | PR service repository/routing/cache policy |
 | `pullRequests.listStats` | `Forge::list_change_request_stats` | PR service routing/cache policy |
 | `pullRequests.filterOptions` | `Forge::list_repository_labels`, `search_repository_authors`, `search_repository_references` | PR service filter aggregation |
@@ -332,15 +403,18 @@ This crate does not remove registrations from `t3-server/handlers/unsupported.rs
 
 ## Verification
 
-Windows verification: `cargo fmt -p t3-forge --check`, exact
-`cargo clippy -p t3-forge --all-targets --all-features -- -D warnings`, and
-`cargo test -p t3-forge` pass (139 tests across 14 suites). The dependent
-`cargo check -p t3-pull-request --lib --features forge` also passes. All Cargo
-output uses `D:\t3code-rust-target\server-k` and the unchanged two-job config.
-The combined `--all-targets --features forge,orchestration` dependent check is
-blocked outside this crate: `t3-orchestration/src/ports/acp_replay/testkit/fixtures/index.rs:399`
-includes the absent `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/grok_transcript.ndjson`.
-No sibling source or fixture was changed to bypass that error.
+Final round-2 Windows verification passes:
+
+- `cargo fmt -p t3-forge --check`.
+- `cargo clippy -p t3-forge --all-targets --all-features -- -D warnings`, including dependencies.
+- `cargo test -p t3-forge`: **152 tests across 17 suites**.
+- `cargo check -p t3-pull-request --all-targets --features forge,orchestration,sqlite`.
+
+Build output is `D:\t3code-rust-target\forge`, with the unchanged two-job config.
+A concurrent Git-owner type/lint edit briefly blocked earlier checks and settled
+before final verification. No sccache override was needed; no sibling source was
+changed. The server's RPC registrations and authoritative trait wrappers remain
+with its integrator, using the concrete instructions in the seam file.
 
 The inherited baseline was 55 passing tests. Added coverage includes real clone/publish and SSH
 fallback, URL credential redaction, typed progress, sign-in dispatch, CLI
@@ -374,7 +448,7 @@ stack permission reads; noncanonical pinned-host comparison; oversized error
 detail storage and an inherited test-module placement that failed Clippy. The
 stale README's unimplemented-feature list was reconciled against actual code.
 
-From `rust`, set `CARGO_TARGET_DIR` to `D:\t3code-rust-target\server-k`, then
+From `rust`, set `CARGO_TARGET_DIR` to `D:\t3code-rust-target\forge`, then
 run `cargo fmt -p t3-forge --check`, `cargo clippy -p t3-forge --all-targets --all-features -- -D warnings`
 and `cargo test -p t3-forge`. If an in-progress sibling dependency prevents the
 Clippy command, `--no-deps` isolates diagnostics for this crate; it does not replace
