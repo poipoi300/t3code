@@ -1497,14 +1497,32 @@ pub type TextGeneratorBaseUrl = crate::base_schemas::TrimmedNonEmptyString;
 /// TypeScript's `TextGeneratorBaseUrl`: at most 2,048 units, and an http(s) URL without user
 /// info, query or fragment as WHATWG `new URL` reads it (an empty `?` or `#` is allowed).
 pub fn text_generator_base_url_valid(value: &str) -> bool {
+    let acceptable = |url: url::Url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.username().is_empty()
+            && url.password().is_none_or(str::is_empty)
+            && url.query().is_none_or(str::is_empty)
+            && url.fragment().is_none_or(str::is_empty)
+    };
     value.encode_utf16().count() <= 2048
-        && url::Url::parse(value).is_ok_and(|url| {
-            matches!(url.scheme(), "http" | "https")
-                && url.username().is_empty()
-                && url.password().is_none_or(str::is_empty)
-                && url.query().is_none_or(str::is_empty)
-                && url.fragment().is_none_or(str::is_empty)
-        })
+        && match url::Url::parse(value) {
+            Ok(url) => acceptable(url),
+            // Node's URL and this crate's UTS 46 disagree on some labels (Node accepts
+            // `xn--a`), so a host refused by IDNA alone is judged with IDNA taken out:
+            // non-ASCII becomes `a` and `xn--` becomes `xa--`; every delimiter stays.
+            Err(url::ParseError::IdnaError) => {
+                let mut neutral: String = value
+                    .chars()
+                    .map(|ch| if ch.is_ascii() { ch } else { 'a' })
+                    .collect();
+                let lower = neutral.to_ascii_lowercase();
+                for (at, _) in lower.match_indices("xn--") {
+                    neutral.replace_range(at..at + 4, "xa--");
+                }
+                url::Url::parse(&neutral).is_ok_and(acceptable)
+            }
+            Err(_) => false,
+        }
 }
 fn deserialize_text_generator_base_url<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
