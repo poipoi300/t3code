@@ -402,7 +402,7 @@ async fn replace_git_directory_at_the_same_path(
     Ok(marker)
 }
 
-fn refused_as_changed<T: std::fmt::Debug>(result: &Result<T, t3_git::GitError>) -> bool {
+fn refused_as_changed<T>(result: &Result<T, t3_git::GitError>) -> bool {
     matches!(result, Err(t3_git::GitError::RepositoryChanged { .. }))
 }
 
