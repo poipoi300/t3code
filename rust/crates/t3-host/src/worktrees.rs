@@ -80,10 +80,12 @@ pub fn validate_cleanup_worktree(path: &Path, roots: &[PathBuf]) -> Result<PathB
     {
         return Err(Error::Refused("outside the managed worktree folder"));
     }
-    if !fs::metadata(path.join(".git"))
-        .map_err(|_| Error::Io)?
-        .is_file()
-    {
+    let git_link = match fs::metadata(path.join(".git")) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err(Error::Io),
+    };
+    if git_link.is_none_or(|metadata| !metadata.is_file()) {
         return Err(Error::Refused("not a linked worktree"));
     }
     Ok(real)

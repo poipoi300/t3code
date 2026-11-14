@@ -3,6 +3,8 @@ mod environment;
 mod history;
 mod manager;
 mod process;
+mod sanitizer;
+pub mod sequence;
 mod stream;
 mod types;
 

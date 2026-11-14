@@ -17,6 +17,8 @@ t3-process = { path = "../t3-process" }
 t3-git = { path = "../t3-git" }
 t3-provider = { path = "../t3-provider" }
 t3-cloud = { path = "../t3-cloud" }
+t3-persistence = { path = "../t3-persistence" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 base64 = "0.22"
 futures-util = "0.3"
 async-trait = "0.1"
@@ -29,6 +31,8 @@ dunce = "1"
 cap-std = "3.4.6"
 cap-fs-ext = "3.4.6"
 regex = "1"
+tar = "0.4"
+flate2 = "1"
 serde_yaml_ng = "0.10"
 notify = "8"
 uuid = { version = "1", features = ["v4"] }

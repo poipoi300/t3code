@@ -470,3 +470,165 @@ fn parse_environment(raw: &str) -> Vec<(String, String)> {
     }
     entries
 }
+
+#[async_trait::async_trait]
+pub trait BackupCopy: Send + Sync {
+    /// Return false for unsupported/failed cloning; cancellation must abort the owned child.
+    async fn try_clone(
+        &self,
+        source: &Path,
+        destination: &Path,
+        cancel: t3_process::CancellationToken,
+    ) -> Result<bool>;
+}
+pub struct NativeBackupCopy;
+#[async_trait::async_trait]
+impl BackupCopy for NativeBackupCopy {
+    async fn try_clone(
+        &self,
+        source: &Path,
+        destination: &Path,
+        cancel: t3_process::CancellationToken,
+    ) -> Result<bool> {
+        if cancel.is_cancelled() {
+            return Err(Error::Refused("service is stopping"));
+        }
+        if cfg!(windows) {
+            return Ok(false);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if fs::metadata(destination).is_ok_and(|m| m.nlink() > 1) {
+                return Ok(false);
+            }
+        }
+        let flag = if cfg!(target_os = "macos") {
+            "-c"
+        } else {
+            "--reflink=auto"
+        };
+        let mut options = t3_process::ProcessOptions::new("cp").args([
+            std::ffi::OsStr::new(flag),
+            source.as_os_str(),
+            destination.as_os_str(),
+        ]);
+        options.cancellation = cancel.clone();
+        options.timeout = None;
+        options.check_exit = false;
+        options.max_output_bytes = 64 * 1024;
+        let result = t3_process::run(options).await;
+        if cancel.is_cancelled() {
+            return Err(Error::Refused("service is stopping"));
+        }
+        Ok(result.is_ok_and(|r| r.code == Some(0)))
+    }
+}
+#[async_trait::async_trait]
+pub trait TrialHost: Send + Sync {
+    /// Start only the selected, preflighted child through the launcher's owned IPC channel.
+    async fn start_trial(&self, pending: &ServiceUpdate) -> Result<()>;
+}
+/// Called by launcher recovery after its current child has stopped. A stop leaves
+/// durable pending state untouched; the next launcher start can retry that update.
+pub async fn prepare_and_start_trial(
+    base: &Path,
+    state: &ServiceState,
+    copy: &dyn BackupCopy,
+    host: &dyn TrialHost,
+    cancel: t3_process::CancellationToken,
+) -> Result<bool> {
+    let pending = state.update.as_ref().ok_or(Error::Invalid)?;
+    let ServiceUpdate::Pending { id, db_path, .. } = pending else {
+        return Err(Error::Invalid);
+    };
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        return Err(Error::Invalid);
+    }
+    let root = base.join("runtime/db-backup");
+    let backup = root.join(id);
+    let staging = root.join(format!("{id}.staging"));
+    fs::create_dir_all(&root).map_err(|_| Error::Io)?;
+    if !backup.try_exists().map_err(|_| Error::Io)? {
+        if staging.try_exists().map_err(|_| Error::Io)? {
+            if fs::symlink_metadata(&staging)
+                .map_err(|_| Error::Io)?
+                .file_type()
+                .is_symlink()
+                || dunce::canonicalize(&staging).map_err(|_| Error::Io)?
+                    != dunce::canonicalize(&root)
+                        .map_err(|_| Error::Io)?
+                        .join(format!("{id}.staging"))
+            {
+                return Err(Error::Refused("backup staging is a symbolic link"));
+            }
+            fs::remove_dir_all(&staging).map_err(|_| Error::Io)?;
+        }
+        fs::create_dir(&staging).map_err(|_| Error::Io)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
+                .map_err(|_| Error::Io)?;
+        }
+        let result = async {
+            for suffix in ["", "-wal", "-shm"] {
+                if cancel.is_cancelled() {
+                    return Err(Error::Refused("service is stopping"));
+                }
+                let source = std::path::PathBuf::from(format!("{db_path}{suffix}"));
+                if !suffix.is_empty() && !source.try_exists().map_err(|_| Error::Io)? {
+                    continue;
+                }
+                let destination = staging.join(format!("database{suffix}"));
+                let cloned = copy
+                    .try_clone(&source, &destination, cancel.clone())
+                    .await?;
+                if cancel.is_cancelled() {
+                    return Err(Error::Refused("service is stopping"));
+                }
+                if !cloned {
+                    let target = destination.clone();
+                    tokio::task::spawn_blocking(move || fs::copy(source, target))
+                        .await
+                        .map_err(|_| Error::Service)?
+                        .map_err(|_| Error::Io)?;
+                }
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&destination)
+                    .map_err(|_| Error::Io)?
+                    .sync_all()
+                    .map_err(|_| Error::Io)?;
+            }
+            if cancel.is_cancelled() {
+                return Err(Error::Refused("service is stopping"));
+            }
+            fs::rename(&staging, &backup).map_err(|_| Error::Io)?;
+            #[cfg(unix)]
+            fs::File::open(&root)
+                .map_err(|_| Error::Io)?
+                .sync_all()
+                .map_err(|_| Error::Io)?;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            let _ = fs::remove_dir_all(&staging);
+            if cancel.is_cancelled() {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+    }
+    if cancel.is_cancelled() {
+        return Ok(false);
+    }
+    host.start_trial(pending).await?;
+    Ok(true)
+}

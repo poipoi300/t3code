@@ -301,3 +301,73 @@ async fn triage_writes_playbook_and_atomically_publishes_exact_local_source_comm
         "source"
     );
 }
+
+#[tokio::test]
+async fn stopping_during_backup_aborts_copy_preserves_pending_and_starts_no_trial() {
+    use async_trait::async_trait;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use t3_host::service_launcher::*;
+    struct Copy {
+        started: tokio::sync::Notify,
+    }
+    #[async_trait]
+    impl BackupCopy for Copy {
+        async fn try_clone(
+            &self,
+            _: &std::path::Path,
+            destination: &std::path::Path,
+            cancel: t3_process::CancellationToken,
+        ) -> t3_host::Result<bool> {
+            std::fs::write(destination, "partial").unwrap();
+            self.started.notify_one();
+            cancel.cancelled().await;
+            Ok(false)
+        }
+    }
+    struct Trial(AtomicUsize);
+    #[async_trait]
+    impl TrialHost for Trial {
+        async fn start_trial(&self, _: &ServiceUpdate) -> t3_host::Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("userdata/state.sqlite");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    std::fs::write(&db, "database").unwrap();
+    let state:ServiceState=serde_json::from_value(serde_json::json!({"protocol":4,"activeVersion":"1.0.0","update":{"id":"update-1","fromVersion":"1.0.0","targetVersion":"1.1.0","dbPath":db,"status":"pending"}})).unwrap();
+    let state_path = temp.path().join("runtime/service-state.json");
+    write_service_state(&state_path, &state).unwrap();
+    let copy = Arc::new(Copy {
+        started: tokio::sync::Notify::new(),
+    });
+    let trial = Arc::new(Trial(AtomicUsize::new(0)));
+    let cancel = t3_process::CancellationToken::new();
+    let task = {
+        let base = temp.path().to_owned();
+        let copy = copy.clone();
+        let trial = trial.clone();
+        let cancel = cancel.clone();
+        let state = state.clone();
+        tokio::spawn(async move {
+            prepare_and_start_trial(&base, &state, copy.as_ref(), trial.as_ref(), cancel).await
+        })
+    };
+    copy.started.notified().await;
+    cancel.cancel();
+    assert!(!task.await.unwrap().unwrap());
+    assert_eq!(trial.0.load(Ordering::SeqCst), 0);
+    assert_eq!(read_service_state(&state_path).unwrap(), state);
+    assert!(!temp.path().join("runtime/db-backup/update-1").exists());
+    assert!(
+        !temp
+            .path()
+            .join("runtime/db-backup/update-1.staging")
+            .exists()
+    );
+    assert_eq!(std::fs::read_to_string(db).unwrap(), "database");
+}

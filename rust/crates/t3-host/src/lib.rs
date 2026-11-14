@@ -1,15 +1,20 @@
 //! Native, transport-neutral host services. This crate does not target wasm.
 
 pub mod background;
+pub mod database_storage;
 pub mod desktop_update;
+pub mod editor;
 pub mod environment_theme;
 pub mod guest;
 pub mod keep_awake;
+pub mod npm_release;
+pub mod pinned_runtime;
 pub mod policy;
 pub mod policy_templates;
 pub mod review;
 pub mod secret_requests;
 pub mod secrets;
+pub mod self_update;
 pub mod service_launcher;
 pub mod storage_cleanup;
 pub mod triage;

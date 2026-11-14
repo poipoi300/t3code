@@ -34,6 +34,16 @@ pub struct Reports {
 pub trait DesktopControl: Send + Sync {
     async fn subscribe(&self) -> Result<Reports>;
     async fn request(&self, id: &str, track: Option<DesktopUpdateChannelSchema>) -> Result<()>;
+    async fn request_checked(
+        &self,
+        _id: &str,
+        _track: DesktopUpdateChannelSchema,
+        _target_version: &str,
+    ) -> Result<()> {
+        Err(Error::Refused(
+            "desktop control does not support a checked track switch",
+        ))
+    }
     fn cancel(&self, id: &str);
     async fn commit(&self, id: &str) -> Result<()>;
 }
@@ -70,8 +80,25 @@ impl DesktopAppUpdate {
     }
     pub async fn run(
         &self,
+        progress: impl FnMut(ServerSelfUpdateProgressStage) -> Result<()>,
+        track: Option<DesktopUpdateChannelSchema>,
+    ) -> Result<ServerSelfUpdateResult> {
+        self.run_internal(progress, track, None).await
+    }
+    pub async fn run_checked(
+        &self,
+        progress: impl FnMut(ServerSelfUpdateProgressStage) -> Result<()>,
+        track: Option<DesktopUpdateChannelSchema>,
+        target_version: String,
+    ) -> Result<ServerSelfUpdateResult> {
+        self.run_internal(progress, track, Some(target_version))
+            .await
+    }
+    async fn run_internal(
+        &self,
         mut progress: impl FnMut(ServerSelfUpdateProgressStage) -> Result<()>,
         track: Option<DesktopUpdateChannelSchema>,
+        target_version: Option<String>,
     ) -> Result<ServerSelfUpdateResult> {
         if !self.available {
             return Err(Error::Refused("desktop updates are unavailable"));
@@ -88,7 +115,11 @@ impl DesktopAppUpdate {
         };
         let result = tokio::time::timeout(Duration::from_secs(20 * 60), async {
             let mut reports = self.control.subscribe().await?;
-            self.control.request(&id, track.clone()).await?;
+            if let (Some(track), Some(target)) = (track.clone(), target_version.as_deref()) {
+                self.control.request_checked(&id, track, target).await?;
+            } else {
+                self.control.request(&id, track.clone()).await?;
+            }
             let mut last = None;
             while let Some(report) = reports.changes.recv().await {
                 if report.request_id.as_ref().map(|s| s.0.as_str()) != Some(id.as_str()) {

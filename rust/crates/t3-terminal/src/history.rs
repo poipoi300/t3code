@@ -1,4 +1,5 @@
 use crate::{DEFAULT_TERMINAL_ID, TerminalError};
+use crate::sequence::{terminal_sequence_end, terminal_sequence_state_after, Utf8SequenceState};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 use std::{
@@ -13,7 +14,8 @@ pub fn retained_terminal_history(value: &str, max_bytes: usize) -> String {
     while !value.is_char_boundary(start) {
         start += 1;
     }
-    value[start..].to_owned()
+    let state = terminal_sequence_state_after(0, &value[..start]);
+    value[start + terminal_sequence_end(state, &value[start..])..].to_owned()
 }
 #[derive(Debug)]
 pub struct BoundedTerminalHistory {
@@ -22,6 +24,7 @@ pub struct BoundedTerminalHistory {
     breaks: usize,
     max_lines: usize,
     max_bytes: usize,
+    sequence_state: u32,
 }
 impl BoundedTerminalHistory {
     pub fn new(max_lines: usize, max_bytes: usize) -> Self {
@@ -31,6 +34,7 @@ impl BoundedTerminalHistory {
             breaks: 0,
             max_lines,
             max_bytes,
+            sequence_state: 0,
         }
     }
     pub fn append(&mut self, value: &str) {
@@ -67,203 +71,51 @@ impl BoundedTerminalHistory {
         let trailing = self.chunks.back().is_some_and(|s| s.ends_with('\n'));
         let mut lines = self.breaks + usize::from(!trailing);
         while lines > self.max_lines {
-            let Some(front) = self.chunks.front_mut() else {
+            let Some(front) = self.chunks.front() else {
                 break;
             };
             if let Some(pos) = front.find('\n') {
-                front.drain(..pos + 1);
-                self.bytes -= pos + 1;
-                self.breaks -= 1;
+                self.drop_prefix(pos + 1);
                 lines -= 1;
             } else {
-                self.bytes -= front.len();
-                front.clear();
-            }
-            if front.is_empty() {
-                self.chunks.pop_front();
+                self.drop_prefix(front.len());
             }
         }
         while self.bytes > self.max_bytes {
-            let Some(front) = self.chunks.front_mut() else {
+            let Some(front) = self.chunks.front() else {
                 break;
             };
             let mut drop = (self.bytes - self.max_bytes).min(front.len());
             while !front.is_char_boundary(drop) {
                 drop += 1;
             }
-            self.breaks -= front[..drop].bytes().filter(|&b| b == b'\n').count();
-            front.drain(..drop);
-            self.bytes -= drop;
-            if front.is_empty() {
-                self.chunks.pop_front();
-            }
+            self.drop_prefix(drop);
         }
+        while self.sequence_state != 0 {
+            let Some(front) = self.chunks.front() else { break; };
+            self.drop_prefix(terminal_sequence_end(self.sequence_state, front));
+        }
+    }
+    fn drop_prefix(&mut self, count: usize) {
+        let Some(front) = self.chunks.front_mut() else { return; };
+        self.sequence_state = terminal_sequence_state_after(self.sequence_state, &front[..count]);
+        self.breaks -= front[..count].bytes().filter(|&b| b == b'\n').count();
+        self.bytes -= count;
+        front.drain(..count);
+        if front.is_empty() { self.chunks.pop_front(); }
     }
     pub fn clear(&mut self) {
         self.chunks.clear();
         self.bytes = 0;
         self.breaks = 0;
+        self.sequence_state = 0;
     }
     pub fn value(&self) -> String {
         self.chunks.iter().map(String::as_str).collect()
     }
 }
 
-#[derive(Default, Debug)]
-pub struct HistorySanitizer {
-    pending: String,
-}
-impl HistorySanitizer {
-    pub fn clear(&mut self) {
-        self.pending.clear();
-    }
-    pub fn push(&mut self, data: &str) -> String {
-        if self.pending.is_empty() && !data.contains('\x1b') {
-            return data.into();
-        }
-        let pending_scan_start = if self.pending.ends_with('\x1b') {
-            self.pending.len() - 1
-        } else {
-            self.pending.len()
-        };
-        let mut input = std::mem::take(&mut self.pending);
-        input.push_str(data);
-        let bytes = input.as_bytes();
-        let mut out = String::new();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] != 27 {
-                let end = input[i..]
-                    .find('\x1b')
-                    .map(|n| i + n)
-                    .unwrap_or(bytes.len());
-                out.push_str(&input[i..end]);
-                i = end;
-                continue;
-            }
-            let start = i;
-            let Some(&kind) = bytes.get(i + 1) else {
-                self.pending = input[i..].into();
-                break;
-            };
-            if kind == b'[' {
-                let mut c = i + 2;
-                let mut body = String::new();
-                let mut controls = String::new();
-                let mut complete = false;
-                while c < bytes.len() {
-                    let ch = match input[c..].chars().next() {
-                        Some(ch) => ch,
-                        None => break,
-                    };
-                    if matches!(ch, '\x18' | '\x1a') || ('@'..='~').contains(&ch) {
-                        let strip = match ch {
-                            'n' => true,
-                            'R' => body.chars().all(|c| c.is_ascii_digit() || ";?".contains(c)),
-                            'c' => body
-                                .chars()
-                                .all(|c| c.is_ascii_digit() || ">=;?".contains(c)),
-                            'p' | 'y' => body.strip_suffix('$').is_some_and(|s| {
-                                s.chars().all(|c| c.is_ascii_digit() || ";?".contains(c))
-                            }),
-                            'q' => body
-                                .strip_prefix('>')
-                                .is_some_and(|s| s.chars().all(|c| c.is_ascii_digit() || c == ';')),
-                            'u' => body.starts_with('?'),
-                            _ => false,
-                        };
-                        c += ch.len_utf8();
-                        complete = true;
-                        if strip {
-                            out.push_str(&controls);
-                        } else {
-                            out.push_str(&input[start..c]);
-                        }
-                        break;
-                    }
-                    if ch < '\x10' {
-                        controls.push(ch);
-                    } else if ch >= ' ' && ch != '\x7f' || ch == '\x1b' {
-                        body.push(ch);
-                    }
-                    c += ch.len_utf8();
-                }
-                if !complete {
-                    self.pending = input[start..].into();
-                    break;
-                }
-                i = c;
-            } else if matches!(kind, b']' | b'P' | b'^' | b'_') {
-                let mut c = (i + 2).max(pending_scan_start);
-                let mut end = None;
-                while c < bytes.len() {
-                    let ch = match input[c..].chars().next() {
-                        Some(ch) => ch,
-                        None => break,
-                    };
-                    if matches!(ch, '\x18' | '\x1a')
-                        || (kind == b']' && ch == '\x07')
-                        || (kind != b']' && ch == '\u{9c}')
-                    {
-                        end = Some(c + ch.len_utf8());
-                        break;
-                    }
-                    if ch == '\x1b' {
-                        if let Some(next) = bytes.get(c + 1) {
-                            end = Some(if *next == b'\\' { c + 2 } else { c });
-                        }
-                        break;
-                    }
-                    c += ch.len_utf8();
-                }
-                let Some(end) = end else {
-                    self.pending = input[start..].into();
-                    break;
-                };
-                let content = &input[start + 2..end];
-                let strip = if kind == b']' {
-                    ["10;", "11;", "12;"].iter().any(|p| {
-                        content
-                            .strip_prefix(p)
-                            .is_some_and(|s| s.starts_with('?') || s.starts_with("rgb:"))
-                    })
-                } else if kind == b'P' {
-                    let content = content.strip_prefix(['0', '1']).unwrap_or(content);
-                    ["$q", "$r", "+q", "+r"]
-                        .iter()
-                        .any(|s| content.starts_with(s))
-                } else {
-                    false
-                };
-                if !strip {
-                    out.push_str(&input[start..end]);
-                }
-                i = end;
-            } else {
-                let mut c = i + 1;
-                while c < bytes.len() && (0x20..=0x2f).contains(&bytes[c]) {
-                    c += 1;
-                }
-                if c == bytes.len() {
-                    self.pending = input[start..].into();
-                    break;
-                }
-                let end = if bytes[c] == 27 {
-                    c
-                } else if (0x30..=0x7e).contains(&bytes[c]) {
-                    c + 1
-                } else {
-                    i + 1 + input[i + 1..].chars().next().map_or(0, char::len_utf8)
-                };
-                if kind != b'Z' {
-                    out.push_str(&input[start..end]);
-                }
-                i = end;
-            }
-        }
-        out
-    }
-}
+pub use crate::sanitizer::HistorySanitizer;
 
 const INPUT_RESET: &str = "\x1b[?1049h\x1b[<100u\x1b[=0;1u\x1b[?1049l\x1b[?1;9;66;67;1000;1002;1003;1004;1005;1006;1015;2004l\x1b[?25;1035;1036h\x1b[<100u\x1b[=0;1u\x1b[>4m";
 pub(crate) fn neutralize(history: &str, lines: usize, bytes: usize) -> String {
@@ -371,6 +223,16 @@ impl HistoryStore {
             let result = (|| {
                 let size = file.metadata()?.len();
                 let offset = size.saturating_sub(self.max_bytes as u64);
+                let mut decoder = Utf8SequenceState::default();
+                let mut remaining = offset;
+                let mut skipped = [0; 64 * 1024];
+                while remaining > 0 {
+                    let count = remaining.min(skipped.len() as u64) as usize;
+                    let read = file.read(&mut skipped[..count])?;
+                    if read == 0 { break; }
+                    decoder.feed(&skipped[..read], false);
+                    remaining -= read as u64;
+                }
                 file.seek(SeekFrom::Start(offset))?;
                 let mut data = Vec::new();
                 file.take(size - offset).read_to_end(&mut data)?;
@@ -380,8 +242,11 @@ impl HistoryStore {
                         start += 1;
                     }
                 }
+                decoder.feed(&data[..start], true);
+                let raw = String::from_utf8_lossy(&data[start..]);
+                let end = terminal_sequence_end(decoder.state, &raw);
                 Ok::<_, std::io::Error>((
-                    String::from_utf8_lossy(&data[start..]).into_owned(),
+                    raw[end..].to_owned(),
                     offset > 0,
                 ))
             })();

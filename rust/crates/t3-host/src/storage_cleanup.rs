@@ -42,9 +42,14 @@ pub struct MergedPullRequest {
 }
 #[async_trait]
 pub trait CleanupHost: Send + Sync {
-    /// Read current projection/settings, including archived and deleted ownership,
-    /// live sessions, starting/running terminals and unfinished deletion effects.
+    /// Complete authoritative settings, live/archived/deleted ownership and project roots,
+    /// starting/running terminal cwds, and every live provider cwd (including ready/shared
+    /// sessions). Pending deletions include failed effects, excluding only succeeded/cancelled.
+    /// Any unavailable source, decode or liveness failure MUST return Err, never empty data.
+    /// Read again under the SAME lease used by provider startup and workspace restoration.
     async fn snapshot(&self) -> Result<CleanupSnapshot>;
+    /// Complete enabled scheduled-task thread ids; unavailable reads must fail.
+    async fn enabled_scheduled_threads(&self) -> Result<BTreeSet<ThreadId>>;
     async fn storage_cleanup_settings(&self) -> Result<StorageCleanupSettings>;
     /// Must be the same lease provider turn startup and checkpoint restore use.
     async fn acquire_workspace_lease(&self, path: &Path) -> Result<OwnedMutexGuard<()>>;
@@ -224,7 +229,9 @@ impl StorageCleanup {
         }
     }
     async fn snapshot(&self) -> Result<CleanupSnapshot> {
-        let mut snapshot = self.host.snapshot().await?;
+        let mut snapshot = tokio::time::timeout(Duration::from_secs(30), self.host.snapshot())
+            .await
+            .map_err(|_| Error::Refused("cleanup safety snapshot is unavailable"))??;
         snapshot.managed_roots.retain(|path| !network_path(path));
         if let Some(only) = &self.dev_worktree_root {
             let real = dunce::canonicalize(only).unwrap_or_else(|_| only.clone());
@@ -590,9 +597,6 @@ impl StorageCleanup {
         if self::owner(group).is_none() {
             return Err(Error::Refused("worktree is shared by unrelated threads"));
         }
-        let Some(branch) = owner.shell.branch.as_ref() else {
-            return Err(Error::Refused("repository or branch changed"));
-        };
         for thread in group {
             if !thread.deleted && !thread_idle(&thread.shell, now, &snapshot.settings)? {
                 return Err(Error::Refused("thread is running or has pending work"));
@@ -670,10 +674,34 @@ impl StorageCleanup {
         let unchanged =
             rules.worktree_unchanged && (settled.is_some() || !value["archivedAt"].is_null());
         let mut eligible = owner.deleted || old || settled_due;
-        if !eligible && !unchanged && !rules.worktree_on_merge {
+        if !eligible && (owner.shell.branch.is_none() || !unchanged && !rules.worktree_on_merge) {
             return Err(Error::Refused("worktree is not due for cleanup"));
         }
         let requested = owner.shell.worktree_path.as_ref().ok_or(Error::Invalid)?;
+        if owner.shell.branch.is_none() && !owner.deleted && self.is_scratch(path) {
+            let reason = if old {
+                format!("Inactive for {} days", (now - activity) / DAY_MS)
+            } else {
+                format!(
+                    "Settled for {} days",
+                    (now - settled.unwrap_or(now).max(activity)) / DAY_MS
+                )
+            };
+            return self
+                .clean_scratch(
+                    snapshot,
+                    group,
+                    path,
+                    Path::new(&requested.0),
+                    rules,
+                    dry_run,
+                    reason,
+                )
+                .await;
+        }
+        let Some(branch) = owner.shell.branch.as_ref() else {
+            return Err(Error::Refused("repository or branch changed"));
+        };
         validate_cleanup_worktree(Path::new(&requested.0), &snapshot.managed_roots)?;
         validate_cleanup_worktree(path, &snapshot.managed_roots)?;
         protect(snapshot, path)?;
@@ -826,7 +854,12 @@ impl StorageCleanup {
         if dry_run {
             return Ok((format!("Would remove: {reason}"), Some(bytes)));
         }
-        let _lease = self.host.acquire_workspace_lease(path).await?;
+        let _lease = tokio::time::timeout(
+            Duration::from_secs(30),
+            self.host.acquire_workspace_lease(path),
+        )
+        .await
+        .map_err(|_| Error::Refused("workspace is busy"))??;
         let latest = self.snapshot().await?;
         validate_cleanup_worktree(Path::new(&requested.0), &latest.managed_roots)?;
         validate_cleanup_worktree(path, &latest.managed_roots)?;
@@ -883,6 +916,122 @@ impl StorageCleanup {
             Some(bytes),
         ))
     }
+    fn scratch_root(&self) -> Option<PathBuf> {
+        dunce::canonicalize(self.state_dir.parent()?.join("scratch")).ok()
+    }
+    fn is_scratch(&self, path: &Path) -> bool {
+        self.scratch_root()
+            .is_some_and(|root| path.parent() == Some(root.as_path()))
+    }
+    async fn scratch_keep(
+        &self,
+        path: &Path,
+        requested: &Path,
+        rules: &WorktreeCleanupRules,
+        group: &[&CleanupThread],
+    ) -> Result<()> {
+        let real_parent = dunce::canonicalize(requested.parent().ok_or(Error::Invalid)?)
+            .map_err(|_| Error::Io)?;
+        if dunce::canonicalize(requested).map_err(|_| Error::Io)?
+            != real_parent.join(requested.file_name().ok_or(Error::Invalid)?)
+        {
+            return Err(Error::Refused("folder is a symbolic link"));
+        }
+        if !self.is_scratch(path) {
+            return Err(Error::Refused("outside the scratch folder"));
+        }
+        if rules.worktree_keep_when != WorktreeKeepWhen::TrackedChanges {
+            for entry in fs::read_dir(path).map_err(|_| Error::Io)? {
+                if entry.map_err(|_| Error::Io)?.file_name() != "node_modules" {
+                    return Err(Error::Refused("has local files"));
+                }
+            }
+        }
+        let scheduled = tokio::time::timeout(
+            Duration::from_secs(30),
+            self.host.enabled_scheduled_threads(),
+        )
+        .await
+        .map_err(|_| Error::Refused("scheduled tasks are unavailable"))??;
+        if group.iter().any(|t| scheduled.contains(&t.shell.id)) {
+            return Err(Error::Refused("thread has a scheduled task"));
+        }
+        Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn clean_scratch(
+        &self,
+        snapshot: &CleanupSnapshot,
+        group: &[&CleanupThread],
+        path: &Path,
+        requested: &Path,
+        rules: &WorktreeCleanupRules,
+        dry_run: bool,
+        reason: String,
+    ) -> Result<(String, Option<u64>)> {
+        self.scratch_keep(path, requested, rules, group).await?;
+        protect(snapshot, path)?;
+        protect(snapshot, requested)?;
+        let inspect = || {
+            let path = path.to_owned();
+            async move {
+                tokio::time::timeout(
+                    Duration::from_secs(30),
+                    tokio::task::spawn_blocking(move || {
+                        if path.join(".git").exists() {
+                            return Err(Error::Refused("contains a nested Git repository"));
+                        }
+                        measure_worktree(&path, true)
+                    }),
+                )
+                .await
+                .map_err(|_| Error::Refused("worktree inspection timed out"))?
+                .map_err(|_| Error::Service)?
+            }
+        };
+        let bytes = inspect().await?;
+        if dry_run {
+            return Ok((format!("Would remove: {reason}"), Some(bytes)));
+        }
+        let _lease = tokio::time::timeout(
+            Duration::from_secs(30),
+            self.host.acquire_workspace_lease(path),
+        )
+        .await
+        .map_err(|_| Error::Refused("workspace is busy"))??;
+        inspect().await?;
+        self.scratch_keep(path, requested, rules, group).await?;
+        let latest = self.snapshot().await?;
+        protect(&latest, path)?;
+        protect(&latest, requested)?;
+        let members = latest
+            .threads
+            .iter()
+            .filter(|t| {
+                !t.deleted
+                    && t.shell
+                        .worktree_path
+                        .as_ref()
+                        .is_some_and(|p| dunce::canonicalize(&p.0).ok().as_deref() == Some(path))
+            })
+            .count();
+        if latest.settings != snapshot.settings
+            || group.iter().any(|t| !latest.threads.contains(t))
+            || members != group.len()
+        {
+            return Err(Error::Refused(
+                "thread activity or settings changed since check",
+            ));
+        }
+        if group
+            .iter()
+            .any(|t| latest.pending_deletion_threads.contains(&t.shell.id))
+        {
+            return Err(Error::Refused("thread deletion is still pending"));
+        }
+        fs::remove_dir_all(path).map_err(|_| Error::Io)?;
+        Ok((reason, Some(bytes)))
+    }
     async fn report_orphans(
         &self,
         snapshot: &CleanupSnapshot,
@@ -897,6 +1046,29 @@ impl StorageCleanup {
             .collect();
         let mut registered: Option<Vec<PathBuf>> = None;
         let mut candidates = BTreeSet::new();
+        let scratch_root = self.scratch_root();
+        if let Some(root) = &scratch_root
+            && let Ok(children) = fs::read_dir(root)
+        {
+            for child in children.flatten() {
+                let path = child.path();
+                if child
+                    .file_type()
+                    .is_ok_and(|t| t.is_dir() && !t.is_symlink())
+                    && dunce::canonicalize(&path).ok().as_ref() == Some(&path)
+                    && !referenced.iter().any(|p| occupies(&path, p))
+                    && !snapshot.project_roots.iter().any(|p| occupies(&path, p))
+                    && child
+                        .metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                        .is_some_and(|d| d.as_millis() as i128 <= i128::from(now - 3_600_000))
+                {
+                    candidates.insert(path);
+                }
+            }
+        }
         for root in &snapshot.managed_roots {
             let Ok(root) = dunce::canonicalize(root) else {
                 continue;
@@ -1012,7 +1184,9 @@ impl StorageCleanup {
                 }
             }
             let mut entry = blank(StorageCleanupReportEntryKind::Worktree, Some(path));
-            entry.reason = if path.join(".git").is_file() {
+            entry.reason = if path.parent() == scratch_root.as_deref() {
+                "No thread uses this folder".into()
+            } else if path.join(".git").is_file() {
                 "No thread uses this worktree".into()
             } else {
                 "No thread uses this folder, and it isn't a git worktree".into()

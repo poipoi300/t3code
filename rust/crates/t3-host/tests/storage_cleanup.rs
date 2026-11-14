@@ -25,12 +25,22 @@ struct Host {
     pr_lookups: AtomicUsize,
     lease_change: Mutex<Option<&'static str>>,
     pull_request: Mutex<Option<MergedPullRequest>>,
+    unavailable: Mutex<Option<&'static str>>,
+    scheduled: Mutex<BTreeSet<t3_contracts::base_schemas::ThreadId>>,
 }
 #[async_trait]
 impl CleanupHost for Host {
     async fn snapshot(&self) -> Result<CleanupSnapshot> {
         self.snapshot_reads.fetch_add(1, Ordering::SeqCst);
+        if let Some(source) = *self.unavailable.lock().await {
+            return Err(t3_host::Error::Refused(source));
+        }
         Ok(self.state.lock().await.clone())
+    }
+    async fn enabled_scheduled_threads(
+        &self,
+    ) -> Result<BTreeSet<t3_contracts::base_schemas::ThreadId>> {
+        Ok(self.scheduled.lock().await.clone())
     }
     async fn storage_cleanup_settings(&self) -> Result<StorageCleanupSettings> {
         Ok(self.state.lock().await.settings.storage_cleanup.clone())
@@ -40,6 +50,9 @@ impl CleanupHost for Host {
         if let Some(change) = self.lease_change.lock().await.take() {
             let mut state = self.state.lock().await;
             match change {
+                "unavailable" => {
+                    *self.unavailable.lock().await = Some("provider sessions unavailable");
+                }
                 "settings" => state.settings.storage_cleanup.worktree_after_days = None,
                 "thread" => {
                     state.threads[0].shell.active_run_id = Some(t3_contracts::base_schemas::RunId(
@@ -82,6 +95,8 @@ fn host() -> Arc<Host> {
         pr_lookups: AtomicUsize::new(0),
         lease_change: Mutex::new(None),
         pull_request: Mutex::new(None),
+        unavailable: Mutex::new(None),
+        scheduled: Mutex::new(BTreeSet::new()),
     })
 }
 fn write_old(path: &Path, bytes: &[u8], at: i64) {
@@ -1105,4 +1120,172 @@ async fn disabled_worktree_policy_does_not_report_orphans() {
     assert_eq!(report.entries.len(), 1);
     assert!(report.entries[0].reason.contains("No thread"));
     assert!(orphan.exists());
+}
+
+#[tokio::test]
+async fn scratch_retention_preserves_files_repositories_and_scheduled_work() {
+    for case in [
+        "remove",
+        "local",
+        "repository",
+        "nested",
+        "scheduled",
+        "not-due",
+        "terminal",
+        "late-terminal",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let scratch = temp.path().join("scratch");
+        let path = scratch.join("quiet-otter");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("notes.md"), "scratch\n").unwrap();
+        if case == "repository" {
+            std::fs::create_dir(path.join(".git")).unwrap();
+        }
+        if case == "nested" {
+            std::fs::create_dir_all(path.join("clone/.git")).unwrap();
+        }
+        let leftover = scratch.join("leftover");
+        std::fs::create_dir(&leftover).unwrap();
+        filetime::set_file_mtime(&leftover, filetime::FileTime::from_unix_time(1, 0)).unwrap();
+        let h = host();
+        {
+            let mut state = h.state.lock().await;
+            let mut thread = shell(&path);
+            thread.branch = None;
+            state.project_roots.push(scratch.clone());
+            state.threads.push(CleanupThread {
+                shell: thread,
+                deleted: false,
+                project_path: scratch.clone(),
+            });
+            state.settings.storage_cleanup.worktree_after_days =
+                Some(if case == "not-due" { 99999 } else { 1 });
+            if case != "local" {
+                state.settings.storage_cleanup.worktree_keep_when =
+                    WorktreeKeepWhen::TrackedChanges;
+            }
+            if case == "terminal" {
+                state.terminal_paths.push(path.join("missing"));
+            }
+        }
+        if case == "scheduled" {
+            h.scheduled.lock().await.insert("thread".into());
+        }
+        if case == "late-terminal" {
+            h.open_terminal_on_lease.store(true, Ordering::SeqCst);
+        }
+        let service = StorageCleanup::new(
+            temp.path().join("userdata"),
+            h.clone(),
+            Arc::new(Time(AtomicI64::new(NOW))),
+        );
+        let report = service.run_now().await.unwrap();
+        let row = report
+            .entries
+            .iter()
+            .find(|e| e.thread_id.is_some())
+            .unwrap();
+        assert_eq!(path.exists(), case != "remove", "{case}: {}", row.reason);
+        assert!(leftover.exists());
+        assert!(
+            report.entries.iter().any(|e| e
+                .path
+                .as_deref()
+                .and_then(|p| dunce::canonicalize(p).ok())
+                == dunce::canonicalize(&leftover).ok()
+                && e.reason == "No thread uses this folder"),
+            "{case}"
+        );
+        assert_eq!(
+            h.state.lock().await.threads[0]
+                .shell
+                .worktree_path
+                .as_ref()
+                .unwrap()
+                .0,
+            path.to_string_lossy()
+        );
+    }
+}
+
+#[tokio::test]
+async fn cleanup_never_deletes_when_an_authoritative_source_is_unavailable() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_, path, h, service) = linked_repository(temp.path()).await;
+    for source in [
+        "provider sessions unavailable",
+        "terminals unavailable",
+        "pending deletions unavailable",
+    ] {
+        *h.unavailable.lock().await = Some(source);
+        assert!(service.run_now().await.is_err());
+        assert!(path.join("tracked").exists());
+        assert!(service.latest_report().await.is_none());
+    }
+    *h.unavailable.lock().await = None;
+    *h.lease_change.lock().await = Some("unavailable");
+    let report = service.run_now().await.unwrap();
+    assert!(path.join("tracked").exists());
+    assert_eq!(
+        report.entries[0].outcome,
+        StorageCleanupReportEntryOutcome::Kept
+    );
+}
+
+#[tokio::test]
+async fn lost_git_link_is_kept_for_turn_startup_restoration() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_, path, _, service) = linked_repository(temp.path()).await;
+    std::fs::remove_file(path.join(".git")).unwrap();
+    std::fs::create_dir(path.join("node_modules")).unwrap();
+    let report = service.run_now().await.unwrap();
+    assert!(path.join("node_modules").exists());
+    assert_eq!(
+        report.entries[0].outcome,
+        StorageCleanupReportEntryOutcome::Kept
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unresponsive_safety_port_refuses_instead_of_hanging_the_sweep() {
+    struct Never;
+    #[async_trait]
+    impl CleanupHost for Never {
+        async fn snapshot(&self) -> Result<CleanupSnapshot> {
+            std::future::pending().await
+        }
+        async fn enabled_scheduled_threads(
+            &self,
+        ) -> Result<BTreeSet<t3_contracts::base_schemas::ThreadId>> {
+            unreachable!()
+        }
+        async fn storage_cleanup_settings(&self) -> Result<StorageCleanupSettings> {
+            unreachable!()
+        }
+        async fn acquire_workspace_lease(&self, _: &Path) -> Result<OwnedMutexGuard<()>> {
+            unreachable!()
+        }
+        async fn branch_pull_request(
+            &self,
+            _: &Path,
+            _: &str,
+        ) -> Result<Option<MergedPullRequest>> {
+            unreachable!()
+        }
+        async fn invalidate_git_status(&self, _: &Path) {
+            unreachable!()
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    write_old(&temp.path().join("logs/keep.log.1"), b"keep", 0);
+    let service = StorageCleanup::new(
+        temp.path().into(),
+        Arc::new(Never),
+        Arc::new(Time(AtomicI64::new(NOW))),
+    );
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(31), service.run_now()).await;
+    assert!(outcome.is_ok(), "cleanup must bound its own safety reads");
+    assert!(outcome.unwrap().is_err());
+    assert!(temp.path().join("logs/keep.log.1").exists());
 }
