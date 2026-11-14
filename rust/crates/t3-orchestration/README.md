@@ -106,7 +106,7 @@ armer or take the dispatcher's lane and recursively dispatch into that same lane
 ## Package 08 lifecycle integration
 
 Construct `ThreadManagementService::new(ThreadManagementServices { reader,
-dispatcher, committer, database, settings, hydrator, signals, clock })`. Clone this
+dispatcher, committer, database, settings, hydrator, worktree_restore, signals, clock })`. Clone this
 service to share its export admission limit and shutdown scope. Construct
 `ThreadStopService::new(ThreadStopServices { management, sessions, agent_scope,
 gate })` with the dispatcher's **same** `Arc<KeyedLanes>` as `gate`; alternatively,
@@ -138,7 +138,7 @@ shell command observations. No approximate production policy is installed.
 
 Construct `ThreadPullRequestService::new(ThreadPullRequestServices { projections,
 commands, committer, workspaces, pull_requests, identities, repository_selector,
-linked_threads_change, opportunistic_work, ids })` in an `Arc`. The repository
+linked_threads_change, opportunistic_work, ids, clock })` in an `Arc`. The repository
 selector must preserve each host's rules, including Azure's decoded repository
 name. The linked-thread detector comes from the PR application's event policy;
 it distinguishes changes from reorder-only notifications. Call `start` after
@@ -161,10 +161,15 @@ that token and join its own script processes. An accepted SQLite commit can
 outlive its canceled caller, so the sink must still drain. Pure project/deletion
 planners and the injected deletion cleanup runner own no background tasks.
 
-Package 08 verification: 138 tests pass in the normal all-feature build, one
-test per process: management 12, stop 9, title 9, settlement 27, watch 53, PR sync
-9, discovery 8, project 5, deletion/cleanup 3, runtime 3. This is partial source
-assertion coverage. Production PR persistence still requires prepared host
+Package 08 drift verification: 147 owned tests passed, one test per process:
+management 15, stop 10, title 9, settlement 29, watch 53, PR sync 9, discovery 10,
+project 5, deletion/cleanup 3, runtime 4. These ran against the actual source and
+canonical dependencies through an external harness while composition bindings
+were incomplete; its composition-only test restore is not a production adapter.
+The normal all-feature `ports` test target still needs package 09's HTTP fixture
+to supply `worktree_restore`. The host must supply the real workspace restore
+through `RuntimePorts::worktree_restore`. This is partial source assertion
+coverage. Production PR persistence still requires prepared host
 identities in the decision inputs; the current engine shim returns unsupported.
 The native command/URL policy, linked-reader detector, global change-feed bridge
 and shared project-read scope remain integration requirements.

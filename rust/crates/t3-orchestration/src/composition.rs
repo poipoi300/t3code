@@ -108,6 +108,9 @@ pub struct RuntimePorts {
     pub workspaces: Arc<dyn WorkspaceBackend>,
     /// Thread-owned agent processes (kill, OOM detection). Without it force-stop cannot kill.
     pub agent_scope: Option<Arc<dyn AgentScope>>,
+    /// Recreates a thread's missing worktree before a send (TS `restoreMissingWorktree`);
+    /// without it a send to a thread whose worktree was deleted fails at turn start.
+    pub worktree_restore: Option<Arc<dyn ThreadWorktreeRestore>>,
     /// MCP credentials for provider sessions (package 05's `SessionCredentials`, with
     /// `prepare_reserved` for managed leases); without it sessions start without them.
     pub credentials: Option<Arc<dyn SessionCredentials>>,
@@ -162,6 +165,7 @@ impl RuntimePorts {
             cleanup: Arc::new(Unbound),
             workspaces: Arc::new(Unbound),
             agent_scope: None,
+            worktree_restore: None,
             credentials: None,
             telemetry: None,
             titles: None,
@@ -244,6 +248,7 @@ impl OrchestrationRuntime {
             cleanup,
             workspaces,
             agent_scope,
+            worktree_restore,
             credentials,
             telemetry,
             titles,
@@ -369,10 +374,10 @@ impl OrchestrationRuntime {
             // Not the process-wide workspace lease: rollback holds that lease while it restores.
             Arc::new(WorkspaceLocks::default()),
         ));
-        let execution = Arc::new(RunExecutionService::new(
-            ingestor.clone(),
-            Some(checkpoint_backend),
-        ));
+        let execution = Arc::new(
+            RunExecutionService::new(ingestor.clone(), Some(checkpoint_backend))
+                .with_baseline_checkpoints(checkpoint_service.clone()),
+        );
         let operations = Arc::new(ComposedThreads {
             projections: reader.clone(),
             policy: policy.clone(),
@@ -461,6 +466,7 @@ impl OrchestrationRuntime {
             database: database.clone(),
             settings: settings.clone(),
             hydrator: Arc::new(NoLegacyTranscript),
+            worktree_restore: worktree_restore.unwrap_or_else(|| Arc::new(NoWorktreeRestore)),
             signals,
             clock: clock.clone(),
         });
@@ -1145,6 +1151,17 @@ impl SettingsService for StaticSettings {
     }
     fn subscribe(&self) -> Result<watch::Receiver<Arc<ServerSettings>>> {
         Ok(self.0.subscribe())
+    }
+}
+
+/// No worktree recreation before a send (TS's test layer): a missing worktree then fails the
+/// turn start on its own, as it did before upstream added the restore.
+pub struct NoWorktreeRestore;
+
+#[async_trait]
+impl ThreadWorktreeRestore for NoWorktreeRestore {
+    async fn restore(&self, _thread: OrchestrationV2AppThread) -> Result<()> {
+        Ok(())
     }
 }
 

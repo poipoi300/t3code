@@ -119,6 +119,16 @@ fn latest<'a>(dates: impl IntoIterator<Item = Option<&'a IsoDateTime>>) -> Optio
         .map(|(date, _)| date)
 }
 
+fn thread_activity_at(thread: &OrchestrationV2ThreadShell) -> &IsoDateTime {
+    latest([
+        thread.latest_user_message_at.as_ref(),
+        value(&thread.latest_run_requested_at),
+        value(&thread.latest_run_started_at),
+        value(&thread.latest_run_completed_at),
+    ])
+    .unwrap_or(&thread.created_at)
+}
+
 pub fn resolve_auto_settlement_at(
     candidate: &SettlementCandidate,
     pull_request: Option<&SettlementPullRequest>,
@@ -172,13 +182,7 @@ pub fn resolve_auto_settlement_at(
     if !is_auto_settlement_candidate(thread, now_ms) {
         return None;
     }
-    let activity = latest([
-        thread.latest_user_message_at.as_ref(),
-        value(&thread.latest_run_requested_at),
-        value(&thread.latest_run_started_at),
-        value(&thread.latest_run_completed_at),
-    ])
-    .unwrap_or(&thread.created_at);
+    let activity = thread_activity_at(thread);
     if let Some(pr) = pull_request {
         let terminal = match pr.state {
             PullRequestState::Closed => pr.closed_at.as_deref(),
@@ -283,7 +287,9 @@ use crate::{
         SettingsService, ThreadId,
     },
     projections::store::ProjectionStore,
-    runtime::threads::{ThreadProjectWorker, ThreadServiceScope, join_thread_reads},
+    runtime::threads::{
+        NoPullRequestRechecks, ThreadProjectWorker, ThreadServiceScope, join_thread_reads,
+    },
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -321,7 +327,7 @@ struct LookupState {
     ports: ThreadSettlementBackends,
     shell_closed: Mutex<BTreeSet<ThreadId>>,
     cleaned: Mutex<BTreeMap<ThreadId, i64>>,
-    rechecks: Mutex<BTreeMap<String, (i64, bool)>>,
+    rechecks: Mutex<NoPullRequestRechecks>,
     tasks: TaskTracker,
     cancellation: CancellationToken,
 }
@@ -358,7 +364,7 @@ impl ThreadSettlementService {
                 ports,
                 shell_closed: Mutex::new(BTreeSet::new()),
                 cleaned: Mutex::new(BTreeMap::new()),
-                rechecks: Mutex::new(BTreeMap::new()),
+                rechecks: Mutex::new(NoPullRequestRechecks::default()),
                 tasks: TaskTracker::new(),
                 cancellation: CancellationToken::new(),
             })
@@ -736,6 +742,7 @@ async fn sweep(
 struct LookupGroup {
     candidates: Vec<SettlementCandidate>,
     cwd: Option<PathBuf>,
+    read_at_ms: i64,
 }
 
 fn branch_result(result: &GitBranchPullRequest) -> Result<SettlementPullRequest> {
@@ -866,12 +873,10 @@ impl LookupState {
             .workspaces
             .branch_pull_request(query.clone())
             .await?;
-        if let Some(now) = date_ms(&services.clock.now().0) {
-            self.rechecks
-                .lock()
-                .await
-                .insert(key.into(), (now, remembered.is_some()));
-        }
+        self.rechecks
+            .lock()
+            .await
+            .record(key.into(), group.read_at_ms, remembered.is_some());
         let Some(remembered) = remembered else {
             return Ok(Some(None));
         };
@@ -909,6 +914,7 @@ impl LookupState {
             .into_iter()
             .map(|project| (project.id.0.clone(), project))
             .collect();
+        let now = date_ms(&services.clock.now().0).unwrap_or_default();
         let mut groups: BTreeMap<String, LookupGroup> = BTreeMap::new();
         for candidate in candidates {
             let thread = &candidate.thread;
@@ -942,6 +948,7 @@ impl LookupState {
                 .or_insert_with(|| LookupGroup {
                     candidates: Vec::new(),
                     cwd,
+                    read_at_ms: now,
                 })
                 .candidates
                 .push(candidate);
@@ -955,55 +962,28 @@ impl LookupState {
                 self.ports.workspaces.invalidate_status(cwd).await?;
             }
         }
-        let now = date_ms(&services.clock.now().0).unwrap_or_default();
-        let mut scheduled = BTreeSet::new();
-        if !immediate {
-            let mut reads = self.rechecks.lock().await;
-            let mut due = Vec::new();
-            for (key, group) in &groups {
-                if !key.starts_with("[\"branch\",") {
-                    continue;
-                }
-                let activity = group
-                    .candidates
-                    .iter()
-                    .map(|candidate| {
-                        let thread = &candidate.thread;
-                        latest([
-                            Some(&thread.created_at),
-                            thread.latest_user_message_at.as_ref(),
-                            value(&thread.latest_run_requested_at),
-                            value(&thread.latest_run_started_at),
-                            value(&thread.latest_run_completed_at),
-                        ])
-                        .and_then(|date| date_ms(&date.0))
-                        .unwrap_or_default()
-                    })
-                    .max()
-                    .unwrap_or_default();
-                if let Some((at, found)) = reads.get(key) {
-                    if *found {
-                        scheduled.insert(key.clone());
-                        continue;
-                    }
-                    let delay = ((now - activity) / 12).clamp(1_800_000, 86_400_000);
-                    if now - *at < delay {
-                        continue;
-                    }
-                }
-                due.push((
-                    reads.get(key).map_or(i64::MIN, |(at, _)| *at),
-                    std::cmp::Reverse(activity),
-                    key.clone(),
-                ));
-            }
-            due.sort();
-            for (_, _, key) in due.into_iter().take(4) {
-                reads.insert(key.clone(), (now, false));
-                scheduled.insert(key);
-            }
-            reads.retain(|key, _| groups.contains_key(key));
-        }
+        let scheduled = if immediate {
+            BTreeSet::new()
+        } else {
+            let branches = groups
+                .iter()
+                .filter(|(key, _)| key.starts_with("[\"branch\","))
+                .map(|(key, group)| {
+                    (
+                        key.clone(),
+                        group
+                            .candidates
+                            .iter()
+                            .filter_map(|candidate| {
+                                date_ms(&thread_activity_at(&candidate.thread).0)
+                            })
+                            .max()
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            self.rechecks.lock().await.select(now, branches)
+        };
         // Scoped futures borrow the snapshot; dropping the sweep cancels every group read.
         let slots = tokio::sync::Semaphore::new(8);
         let mut reads: Vec<
@@ -1042,6 +1022,9 @@ impl LookupState {
             }));
         }
         join_thread_reads(reads).await?;
+        if !immediate || merged {
+            self.rechecks.lock().await.retain(groups.keys().cloned());
+        }
         Ok(())
     }
 

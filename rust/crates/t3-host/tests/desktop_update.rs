@@ -163,3 +163,67 @@ async fn commit_replays_retained_failure_after_acceptance() {
     );
     assert!(accepted);
 }
+
+#[tokio::test]
+async fn checked_track_switch_forwards_target_and_refuses_an_older_control_adapter() {
+    let plain = control(vec![("downloaded", Some("ready-to-install"))], false);
+    let service = DesktopAppUpdate::new(true, plain.clone());
+    assert!(
+        service
+            .run_checked(
+                |_| Ok(()),
+                Some(DesktopUpdateChannelSchema::Nightly),
+                "1.1.0-nightly.20261101.1".into()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(plain.cancelled.load(Ordering::SeqCst), 1);
+    struct Checked {
+        inner: Arc<Control>,
+        received: Mutex<Option<(DesktopUpdateChannelSchema, String)>>,
+    }
+    #[async_trait]
+    impl DesktopControl for Checked {
+        async fn subscribe(&self) -> Result<Reports> {
+            self.inner.subscribe().await
+        }
+        async fn request(&self, _: &str, _: Option<DesktopUpdateChannelSchema>) -> Result<()> {
+            panic!("checked target must not be dropped")
+        }
+        async fn request_checked(
+            &self,
+            id: &str,
+            channel: DesktopUpdateChannelSchema,
+            target: &str,
+        ) -> Result<()> {
+            *self.received.lock().await = Some((channel, target.into()));
+            self.inner.request(id, None).await
+        }
+        fn cancel(&self, id: &str) {
+            self.inner.cancel(id)
+        }
+        async fn commit(&self, id: &str) -> Result<()> {
+            self.inner.commit(id).await
+        }
+    }
+    let checked = Arc::new(Checked {
+        inner: control(vec![("downloaded", Some("ready-to-install"))], false),
+        received: Mutex::new(None),
+    });
+    DesktopAppUpdate::new(true, checked.clone())
+        .run_checked(
+            |_| Ok(()),
+            Some(DesktopUpdateChannelSchema::Nightly),
+            "1.1.0-nightly.20261101.1".into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        *checked.received.lock().await,
+        Some((
+            DesktopUpdateChannelSchema::Nightly,
+            "1.1.0-nightly.20261101.1".into()
+        ))
+    );
+}

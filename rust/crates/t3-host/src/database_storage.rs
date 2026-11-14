@@ -253,10 +253,9 @@ impl DatabaseStorage {
                 "This database already shrinks on its own. Nothing to reclaim.".into(),
             ));
         }
-        let space = self
-            .host
-            .disk_space(&self.path)
+        let space = tokio::time::timeout(Duration::from_secs(30), self.host.disk_space(&self.path))
             .await
+            .map_err(|_| error("Could not prepare the repair. Try again.".into()))?
             .map_err(|_| error("Could not prepare the repair. Try again.".into()))?;
         if let Some((needed, free)) =
             space_shortfall(pages.saturating_sub(free).saturating_mul(size), space)

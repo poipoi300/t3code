@@ -192,3 +192,52 @@ async fn version_digits_are_ascii_and_integer_migration_metadata_accepts_json_de
         Some(91)
     );
 }
+
+#[tokio::test]
+async fn incomplete_output_and_registry_auth_failures_are_errors_and_cache_capacity_is_bounded() {
+    struct Broken(bool);
+    #[async_trait]
+    impl NpmReleaseHost for Broken {
+        async fn npm_command(&self) -> Option<PathBuf> {
+            Some("npm".into())
+        }
+        async fn npm_view(&self, _: &std::path::Path, _: &str) -> LookupResult<NpmOutput> {
+            Ok(if self.0 {
+                NpmOutput {
+                    code: 0,
+                    stdout: br#"{"version":"1.2.3"}"#.to_vec(),
+                    incomplete: true,
+                }
+            } else {
+                NpmOutput {
+                    code: 1,
+                    stdout: br#"{"error":{"code":"E401","detail":"sensitive"}}"#.to_vec(),
+                    incomplete: false,
+                }
+            })
+        }
+        async fn public_registry(&self, _: &str) -> LookupResult<(u16, Vec<u8>)> {
+            panic!("no fallback for an installed npm")
+        }
+    }
+    for broken in [true, false] {
+        let error = NpmRelease::new(Arc::new(Broken(broken)))
+            .get("latest")
+            .await
+            .unwrap_err();
+        assert!(!format!("{error:?}").contains("sensitive"));
+    }
+    let h = Arc::new(Host {
+        npm: true,
+        calls: AtomicUsize::new(0),
+        status: 404,
+        body: br#"{"error":{"code":"E404"}}"#.to_vec(),
+    });
+    let s = NpmRelease::new(h.clone());
+    for index in 0..33 {
+        assert!(s.get(&format!("1.0.{index}")).await.unwrap().is_none());
+    }
+    assert_eq!(h.calls.load(Ordering::SeqCst), 33);
+    assert!(s.get("1.0.0").await.unwrap().is_none());
+    assert_eq!(h.calls.load(Ordering::SeqCst), 34);
+}

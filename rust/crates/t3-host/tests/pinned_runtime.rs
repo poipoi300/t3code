@@ -265,34 +265,154 @@ async fn installing_never_deletes_a_runtime_published_by_another_process_during_
     );
 }
 
-#[tokio::test(start_paused=true)]
+#[tokio::test(start_paused = true)]
 async fn download_retries_redact_private_urls_and_failed_installs_can_be_retried() {
-    use std::sync::atomic::{AtomicU16,Ordering};
-    struct Http {delegate:Host,status:AtomicU16}
-    #[async_trait]impl RuntimeInstallHost for Http {
-        async fn fetch(&self,url:&str,limit:usize)->UpdateResult<ReleaseResponse>{let result=self.delegate.fetch(url,limit).await?;let status=self.status.load(Ordering::SeqCst);if status==200{Ok(result)}else{Ok(ReleaseResponse{status,body:b"private response body".to_vec()})}}
-        async fn preflight(&self,options:t3_process::ProcessOptions)->UpdateResult<Vec<u8>>{self.delegate.preflight(options).await}
+    use std::sync::atomic::{AtomicU16, Ordering};
+    struct Http {
+        delegate: Host,
+        status: AtomicU16,
     }
-    let temp=tempfile::tempdir().unwrap();let h=Arc::new(Http{delegate:Host{archive:archive("stem/t3.exe"),checksum:true,preflight:serde_json::json!({"status":"ready","version":"1.1.0","launcherProtocol":3}),urls:Mutex::new(vec![])},status:AtomicU16::new(503)});
-    let installer=PinnedRuntimeInstaller::new(temp.path().into(),"win32-x64".into(),h.clone());
-    let error=installer.ensure(request()).await.unwrap_err();assert_eq!(h.delegate.urls.lock().await.len(),4);
-    assert_eq!(error.reason.0,"Could not prepare t3@1.1.0 while downloading the t3 release checksums (HTTP 503 from mirror.example).");
-    for secret in ["password","token=secret","private response body"]{assert!(!format!("{error:?}").contains(secret));}
-    assert_eq!(std::fs::read_dir(temp.path().join("runtime/versions")).unwrap().count(),0);
-    h.status.store(200,Ordering::SeqCst);installer.ensure(request()).await.unwrap();
+    #[async_trait]
+    impl RuntimeInstallHost for Http {
+        async fn fetch(&self, url: &str, limit: usize) -> UpdateResult<ReleaseResponse> {
+            let result = self.delegate.fetch(url, limit).await?;
+            let status = self.status.load(Ordering::SeqCst);
+            if status == 200 {
+                Ok(result)
+            } else {
+                Ok(ReleaseResponse {
+                    status,
+                    body: b"private response body".to_vec(),
+                })
+            }
+        }
+        async fn preflight(&self, options: t3_process::ProcessOptions) -> UpdateResult<Vec<u8>> {
+            self.delegate.preflight(options).await
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let h = Arc::new(Http {
+        delegate: Host {
+            archive: archive("stem/t3.exe"),
+            checksum: true,
+            preflight: serde_json::json!({"status":"ready","version":"1.1.0","launcherProtocol":3}),
+            urls: Mutex::new(vec![]),
+        },
+        status: AtomicU16::new(503),
+    });
+    let installer = PinnedRuntimeInstaller::new(temp.path().into(), "win32-x64".into(), h.clone());
+    let error = installer.ensure(request()).await.unwrap_err();
+    assert_eq!(h.delegate.urls.lock().await.len(), 4);
+    assert_eq!(
+        error.reason.0,
+        "Could not prepare t3@1.1.0 while downloading the t3 release checksums (HTTP 503 from mirror.example)."
+    );
+    for secret in ["password", "token=secret", "private response body"] {
+        assert!(!format!("{error:?}").contains(secret));
+    }
+    assert_eq!(
+        std::fs::read_dir(temp.path().join("runtime/versions"))
+            .unwrap()
+            .count(),
+        0
+    );
+    h.status.store(200, Ordering::SeqCst);
+    installer.ensure(request()).await.unwrap();
 }
 
 #[tokio::test]
 async fn startup_prunes_only_owned_runtimes_and_preserves_the_installed_units_launcher() {
     struct References;
-    #[async_trait]impl RuntimeReferences for References{async fn running_executables(&self)->t3_host::Result<String>{Ok("other executable".into())}}
-    let temp=tempfile::tempdir().unwrap();let versions=temp.path().join("runtime/versions");let stale=versions.join("1.0.0");let current=versions.join("1.1.0");
-    for(path,version)in[(&stale,"1.0.0"),(&current,"1.1.0")]{std::fs::create_dir_all(path).unwrap();std::fs::write(path.join("t3.exe"),"runtime").unwrap();std::fs::write(path.join(".install-complete"),version).unwrap();filetime::set_file_mtime(path.join(".install-complete"),filetime::FileTime::from_unix_time(1,0)).unwrap();}
-    let installer=PinnedRuntimeInstaller::new(temp.path().into(),"win32-x64".into(),Arc::new(Host{archive:vec![],checksum:false,preflight:serde_json::Value::Null,urls:Mutex::new(vec![])}));
-    let search=LauncherSearch{windows:true,home:temp.path().into(),environment:Default::default()};
-    let unrelated=temp.path().join("other.exe");
-    assert!(installer.prune_on_start(RuntimeStartup{current_version:"1.1.0",managed:false,executable:&unrelated,unit_program:None},1800000000000,&References,&search).await.unwrap().is_empty());assert!(stale.exists());
-    let executable=dunce::canonicalize(current.join("t3.exe")).unwrap();let unit=stale.join("t3.exe");
-    assert!(installer.prune_on_start(RuntimeStartup{current_version:"1.1.0",managed:false,executable:&executable,unit_program:Some(&unit)},1800000000000,&References,&search).await.unwrap().is_empty());assert!(stale.exists());
-    assert_eq!(installer.prune_on_start(RuntimeStartup{current_version:"1.1.0",managed:true,executable:&executable,unit_program:None},1800000000000,&References,&search).await.unwrap(),vec!["1.0.0"]);assert!(current.exists());
+    #[async_trait]
+    impl RuntimeReferences for References {
+        async fn running_executables(&self) -> t3_host::Result<String> {
+            Ok("other executable".into())
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let versions = temp.path().join("runtime/versions");
+    let stale = versions.join("1.0.0");
+    let current = versions.join("1.1.0");
+    for (path, version) in [(&stale, "1.0.0"), (&current, "1.1.0")] {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join("t3.exe"), "runtime").unwrap();
+        std::fs::write(path.join(".install-complete"), version).unwrap();
+        filetime::set_file_mtime(
+            path.join(".install-complete"),
+            filetime::FileTime::from_unix_time(1, 0),
+        )
+        .unwrap();
+    }
+    let installer = PinnedRuntimeInstaller::new(
+        temp.path().into(),
+        "win32-x64".into(),
+        Arc::new(Host {
+            archive: vec![],
+            checksum: false,
+            preflight: serde_json::Value::Null,
+            urls: Mutex::new(vec![]),
+        }),
+    );
+    let search = LauncherSearch {
+        windows: true,
+        home: temp.path().into(),
+        environment: Default::default(),
+    };
+    let unrelated = temp.path().join("other.exe");
+    assert!(
+        installer
+            .prune_on_start(
+                RuntimeStartup {
+                    current_version: "1.1.0",
+                    managed: false,
+                    executable: &unrelated,
+                    unit_program: None
+                },
+                1800000000000,
+                &References,
+                &search
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(stale.exists());
+    let executable = dunce::canonicalize(current.join("t3.exe")).unwrap();
+    let unit = stale.join("t3.exe");
+    assert!(
+        installer
+            .prune_on_start(
+                RuntimeStartup {
+                    current_version: "1.1.0",
+                    managed: false,
+                    executable: &executable,
+                    unit_program: Some(&unit)
+                },
+                1800000000000,
+                &References,
+                &search
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(stale.exists());
+    assert_eq!(
+        installer
+            .prune_on_start(
+                RuntimeStartup {
+                    current_version: "1.1.0",
+                    managed: true,
+                    executable: &executable,
+                    unit_program: None
+                },
+                1800000000000,
+                &References,
+                &search
+            )
+            .await
+            .unwrap(),
+        vec!["1.0.0"]
+    );
+    assert!(current.exists());
 }

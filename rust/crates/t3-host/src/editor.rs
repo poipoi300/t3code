@@ -26,6 +26,9 @@ pub trait EditorDiscovery: Send + Sync {
     /// The same discovery used for server.config: trusted executables and server-owned workspace roots.
     /// Unavailable workspace/discovery reads must fail, never return a client-provided fallback.
     async fn discover(&self) -> Result<DiscoveredEditors>;
+    fn home_directory(&self) -> Option<PathBuf> {
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+    }
     async fn launch(&self, command: EditorCommand) -> Result<()> {
         launch_native(command).await
     }
@@ -296,7 +299,21 @@ impl ExternalLauncher {
         .map_err(|_| unsupported())?
         .map_err(|_| unsupported())?;
         let editor=discovered.editors.iter().find(|e|e.id==input.editor).ok_or_else(||Box::new(ExternalLauncherError::UnsupportedEditor(ExternalLauncherUnsupportedEditorError::ExternalLauncherUnsupportedEditorError{editor:input.editor})))?;
-        let (raw_path, position) = split_position(&input.cwd.0);
+        let expanded = if input.editor == EditorId::FileManager
+            && (input.cwd.0.starts_with("~/") || input.cwd.0.starts_with("~\\"))
+        {
+            self.discovery
+                .home_directory()
+                .map(|home| home.join(&input.cwd.0[2..]).to_string_lossy().into_owned())
+                .ok_or_else(unsupported)?
+        } else {
+            input.cwd.0.clone()
+        };
+        let (raw_path, position) = if input.editor == EditorId::FileManager {
+            (expanded.as_str(), None)
+        } else {
+            split_position(&expanded)
+        };
         let path = checked_path(raw_path, &discovered.roots).map_err(|_| unsupported())?;
         let project_root = input
             .project_root
@@ -590,7 +607,9 @@ pub fn editor_install_candidates(
         for root in roots {
             let mut bundles = names.iter().map(|n| format!("{n}.app")).collect::<Vec<_>>();
             if let Ok(entries) = std::fs::read_dir(&root) {
-                for entry in entries.flatten() {
+                let mut entries = entries.flatten().collect::<Vec<_>>();
+                entries.sort_by_key(|entry| entry.file_name());
+                for entry in entries {
                     let name = entry.file_name().to_string_lossy().into_owned();
                     if names.iter().any(|n| {
                         name.strip_prefix(&format!("{n} "))

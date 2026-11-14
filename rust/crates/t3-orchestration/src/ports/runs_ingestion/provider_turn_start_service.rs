@@ -142,9 +142,14 @@ impl RootTurnPreparation for HandoffStart {
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n");
+        turn.inline_context_length = None;
         if !goal {
-            turn.message.text =
-                context_handoff_delivery::with_inline_context(&context, &turn.message.text);
+            let text = context_handoff_delivery::with_inline_context(&context, &turn.message.text);
+            if text != turn.message.text {
+                turn.inline_context_length =
+                    Some(text.encode_utf16().count() - turn.message.text.encode_utf16().count());
+            }
+            turn.message.text = text;
         }
         if self.note_continuation {
             turn.restart_continuation_of_run_id = None;

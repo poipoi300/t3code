@@ -64,6 +64,13 @@ impl CommandDispatcher for Recorder {
         })
     }
 }
+pub(super) struct NoRestore;
+#[async_trait]
+impl ThreadWorktreeRestore for NoRestore {
+    async fn restore(&self, _: OrchestrationV2AppThread) -> Result<()> {
+        Ok(())
+    }
+}
 struct Hydration(mpsc::UnboundedSender<ThreadId>);
 #[async_trait]
 impl TranscriptHydrator for Hydration {
@@ -94,6 +101,7 @@ pub(super) fn service(
             committer: harness.sink.clone(),
             database: harness.database.stores.clone(),
             settings,
+            worktree_restore: Arc::new(NoRestore),
             hydrator: Arc::new(Hydration(sender)),
             signals: harness.sink.signals(),
             clock: harness.clock.clone(),
@@ -214,6 +222,141 @@ async fn project_disabled_dispatch_is_rejected_but_durable_receipt_replay_is_adm
         .await?;
     service.dispatch(command()).await?;
     assert_eq!(recorder.commands.lock().unwrap().len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn send_restores_before_start_but_live_steering_and_receipt_replay_survive_restore_failure()
+-> Result<()> {
+    struct Restore {
+        calls: std::sync::atomic::AtomicUsize,
+        commands: Arc<Recorder>,
+        fails: bool,
+        cancelled: bool,
+    }
+    #[async_trait]
+    impl ThreadWorktreeRestore for Restore {
+        async fn restore(&self, thread: OrchestrationV2AppThread) -> Result<()> {
+            assert_eq!(json!(thread.worktree_path), "C:/worktrees/gone");
+            assert!(self.commands.commands.lock().unwrap().is_empty());
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.cancelled {
+                return Err(Error::Cancelled);
+            }
+            if self.fails {
+                return Err(Error::Service {
+                    operation: "WorktreeRecreateError",
+                    detail: "branch_checked_out_in_worktree".into(),
+                });
+            }
+            Ok(())
+        }
+    }
+    for (mode, running, fresh, replay, fails, cancelled, restores, dispatched) in [
+        ("auto", false, false, false, true, false, 1, false),
+        ("auto", true, false, false, true, false, 0, true),
+        ("steer", true, false, false, true, false, 0, true),
+        ("queue", true, false, false, true, false, 1, false),
+        ("restart", true, false, false, true, false, 1, false),
+        ("steer", true, true, false, true, false, 1, false),
+        ("auto", false, false, true, true, false, 1, true),
+        ("auto", false, false, false, false, false, 1, true),
+        ("auto", false, false, true, false, true, 1, false),
+    ] {
+        let harness = Harness::new(None, false);
+        harness.create("thread").await?;
+        let mut thread = json!(
+            harness
+                .reader
+                .thread(ThreadId("thread".into()))
+                .await?
+                .unwrap()
+        );
+        thread["worktreePath"] = json!("C:/worktrees/gone");
+        thread["branch"] = json!("t3/gone");
+        emit(&harness, "worktree", "thread.metadata-updated", thread).await?;
+        if running {
+            emit(&harness, "run", "run.created", run("active", 1, "running")).await?;
+            let mut turn = sample("OrchestrationV2ProviderTurn");
+            turn["id"] = json!("turn");
+            turn["providerThreadId"] = json!("provider-thread");
+            turn["runAttemptId"] = json!("attempt");
+            turn["status"] = json!("running");
+            emit(&harness, "turn", "provider-turn.updated", turn).await?;
+        }
+        if replay {
+            harness
+                .database
+                .stores
+                .transaction(|db| {
+                    receipts::upsert(
+                        db,
+                        &CommandReceipt {
+                            command_id: CommandId("send".into()),
+                            aggregate: AggregateId::Thread(ThreadId("thread".into())),
+                            command_type: "message.dispatch".into(),
+                            accepted_at: TEST_TIME.into(),
+                            result_sequence: 1,
+                            status: ReceiptStatus::Accepted,
+                            error: None,
+                        },
+                    )
+                })
+                .await?;
+        }
+        let commands = Arc::new(Recorder {
+            commands: Mutex::new(Vec::new()),
+            downstream: None,
+        });
+        let restore = Arc::new(Restore {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            commands: commands.clone(),
+            fails,
+            cancelled,
+        });
+        let service = ThreadManagementService::new(ThreadManagementServices {
+            reader: harness.reader.clone(),
+            dispatcher: commands.clone(),
+            committer: harness.sink.clone(),
+            database: harness.database.stores.clone(),
+            settings: settings(json!({})),
+            hydrator: Arc::new(NoLegacyTranscript),
+            worktree_restore: restore.clone(),
+            signals: harness.sink.signals(),
+            clock: harness.clock.clone(),
+        });
+        let result=service.send_to_thread(serde_json::from_value(json!({"projectId":"project","threadId":"thread","commandId":"send","messageId":"new-message","text":"Reply with ok.","attachments":[],"mode":mode,"freshContext":fresh,"createdBy":"agent","creationSource":"mcp"}))?).await;
+        let error = result.err().expect("recorder creates no durable message");
+        if cancelled {
+            assert!(matches!(error, Error::Cancelled));
+        } else if dispatched {
+            assert!(
+                matches!(
+                    error,
+                    Error::Service {
+                        operation: "ThreadManagementDurableRunProjectionError",
+                        ..
+                    }
+                ),
+                "{error}"
+            );
+        } else {
+            assert!(
+                matches!(&error,Error::Service{operation:"ThreadManagementWorktreeRestoreError",detail} if detail.contains("thread")&&detail.contains("branch_checked_out_in_worktree")),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            restore.calls.load(std::sync::atomic::Ordering::SeqCst),
+            restores,
+            "{mode}/{running}/{fresh}/{replay}"
+        );
+        assert_eq!(
+            commands.commands.lock().unwrap().len(),
+            usize::from(dispatched)
+        );
+        service.shutdown().await;
+    }
     Ok(())
 }
 #[tokio::test]
@@ -430,6 +573,7 @@ async fn shutdown_cancels_exports_and_waits_across_clones_and_rejects_late_mutat
         committer: harness.sink.clone(),
         database: harness.database.stores.clone(),
         settings: settings(json!({})),
+        worktree_restore: Arc::new(NoRestore),
         hydrator: Arc::new(ExportHydrator {
             started: sender,
             gates: [("thread".into(), Arc::new(tokio::sync::Semaphore::new(0)))]
@@ -534,6 +678,7 @@ async fn transcript_export_limits_admission_and_releases_slots_on_errors_and_can
         committer: harness.sink.clone(),
         database: harness.database.stores.clone(),
         settings: settings(json!({})),
+        worktree_restore: Arc::new(NoRestore),
         hydrator: Arc::new(ExportHydrator {
             started: sender,
             gates: gates.clone(),
@@ -732,6 +877,7 @@ async fn settle_after_run_rechecks_guarded_dispatch_races_and_followup_provenanc
             committer: harness.sink.clone(),
             database: harness.database.stores.clone(),
             settings: settings(json!({})),
+            worktree_restore: Arc::new(NoRestore),
             hydrator: Arc::new(Hydration(hydration)),
             signals: harness.sink.signals(),
             clock: harness.clock.clone(),
@@ -859,6 +1005,7 @@ async fn settle_after_run_preserves_a_durable_rejection_and_uses_a_new_event_seq
         committer: harness.sink.clone(),
         database: harness.database.stores.clone(),
         settings: settings(json!({})),
+        worktree_restore: Arc::new(NoRestore),
         hydrator: Arc::new(Hydration(hydration)),
         signals: harness.sink.signals(),
         clock: harness.clock.clone(),
@@ -1085,5 +1232,131 @@ async fn delegated_stop_ends_remote_work_without_overwriting_results_and_contain
             assert_eq!(command["parentThreadId"], "thread");
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn metadata_continuation_checks_current_provider_and_remains_one_atomic_command() -> Result<()>
+{
+    for (continuation, disabled, replay, accepted) in [
+        (true, true, false, false),
+        (false, true, false, true),
+        (true, false, false, true),
+        (true, true, true, true),
+    ] {
+        let harness = Harness::new(None, false);
+        harness.create("thread").await?;
+        let (service, commands, _) = service(
+            &harness,
+            settings(
+                json!({"projectSettingsOverrides":{"project":{"providerInstances":{"codex":{"enabled":!disabled}}}}}),
+            ),
+            false,
+        );
+        if replay {
+            harness
+                .database
+                .stores
+                .transaction(|db| {
+                    receipts::upsert(
+                        db,
+                        &CommandReceipt {
+                            command_id: CommandId("handoff".into()),
+                            aggregate: AggregateId::Thread(ThreadId("thread".into())),
+                            command_type: "thread.metadata.update".into(),
+                            accepted_at: TEST_TIME.into(),
+                            result_sequence: 1,
+                            status: ReceiptStatus::Accepted,
+                            error: None,
+                        },
+                    )
+                })
+                .await?;
+        }
+        let mut command = json!({"type":"thread.metadata.update","commandId":"handoff","threadId":"thread","branch":"new-branch","worktreePath":"C:/new-worktree","expectedWorktreePath":null});
+        if continuation {
+            command["continuation"] =
+                json!({"messageId":"continuation","text":"Continue in the new workspace."});
+        }
+        let outcome = service
+            .dispatch(serde_json::from_value(command.clone())?)
+            .await;
+        if accepted {
+            outcome?;
+            assert_eq!(*commands.commands.lock().unwrap(), vec![command]);
+        } else {
+            assert!(matches!(
+                outcome,
+                Err(Error::Service {
+                    operation: "ThreadManagementProviderInstanceDisabledError",
+                    ..
+                })
+            ));
+            assert!(commands.commands.lock().unwrap().is_empty());
+        }
+        service.shutdown().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn project_listing_uses_lightweight_metadata_and_preserves_lineage_scope_and_locale_order()
+-> Result<()> {
+    let harness = Harness::new(None, false);
+    for (id, project, relation, side, archived, settled) in [
+        ("a", "project", Value::Null, false, false, true),
+        ("Z", "project", Value::Null, false, false, false),
+        ("child", "project", json!("subagent"), false, false, false),
+        ("side", "project", json!("subagent"), true, false, false),
+        ("archived", "project", Value::Null, false, true, false),
+        ("other", "other", Value::Null, false, false, false),
+    ] {
+        harness.create(id).await?;
+        let mut thread = json!(harness.reader.thread(ThreadId(id.into())).await?.unwrap());
+        thread["projectId"] = json!(project);
+        thread["lineage"]["relationshipToParent"] = relation;
+        thread["lineage"]["sideChat"] = json!(side);
+        if archived {
+            thread["archivedAt"] = json!(TEST_TIME);
+        }
+        if settled {
+            thread["settledOverride"] = json!("settled");
+            thread["settledAt"] = json!(TEST_TIME);
+        }
+        harness.sink.commit(CommitRequest{receipt:None,decision:Decision{events:vec![serde_json::from_value(json!({"id":format!("meta-{id}"),"threadId":id,"type":"thread.metadata-updated","occurredAt":TEST_TIME,"payload":thread}))?],..Default::default()},guard:CommitGuard::None}).await?;
+    }
+    harness.database.stores.transaction(|db|{
+        db.execute("UPDATE orchestration_v2_projection_threads SET payload_json=json_set(payload_json,'$.modelSelection',37) WHERE archived_at IS NULL",[])?;
+        db.execute("DROP TABLE orchestration_v2_projection_turn_item_counts",[])?;Ok(())
+    }).await?;
+    let (service, _, _) = service(&harness, settings(json!({})), false);
+    let ids = |rows: Value| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ids(json!(
+            service
+                .list_project_threads(Some(ProjectId("project".into())), false)
+                .await?
+        )),
+        ["Z", "a"]
+    );
+    assert_eq!(
+        ids(json!(
+            service
+                .list_project_threads(Some(ProjectId("project".into())), true)
+                .await?
+        )),
+        ["Z", "child", "a"]
+    );
+    assert_eq!(
+        ids(json!(service.list_project_threads(None, false).await?)),
+        ["Z", "other", "a"]
+    );
+    service.shutdown().await;
     Ok(())
 }

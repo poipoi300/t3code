@@ -81,6 +81,7 @@ fn intake(
             t3_contracts::settings::ServerSettings::default(),
         )),
         hydrator: Arc::new(NoLegacyTranscript),
+        worktree_restore: Arc::new(t3_orchestration::composition::NoWorktreeRestore),
         signals: h.sink.signals(),
         clock: h.clock.clone(),
     });

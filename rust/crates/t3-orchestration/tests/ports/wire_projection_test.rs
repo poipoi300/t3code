@@ -153,6 +153,41 @@ fn live_tools_retain_only_result_identities_and_failure_metadata() {
     );
     assert!(!output.to_string().contains("PRIVATE_BODY"));
     assert_eq!(wire(item(output.clone(), "dynamic_tool")), output);
+    for sent_message in [
+        "  Draft:\n\n> Hi Sam,\n\n**Keep this Markdown.**  ".to_owned(),
+        "界".repeat(4000),
+        "🦀".repeat(2000),
+    ] {
+        let result = json!({"sentMessage":sent_message,"message":"PRIVATE_ACK"});
+        for envelope in [
+            result.clone(),
+            json!(result.to_string()),
+            json!({"structuredContent":result,"content":"PRIVATE_ALTERNATIVE"}),
+            json!([{"type":"text","text":result.to_string()}]),
+        ] {
+            let projected = wire(tool(envelope));
+            assert_eq!(projected["output"], json!({"sentMessage":sent_message}));
+            assert!(!projected.to_string().contains("PRIVATE_ACK"));
+            assert_eq!(wire(item(projected.clone(), "dynamic_tool")), projected);
+        }
+    }
+    for sent_message in [
+        " \n\t\u{feff}".to_owned(),
+        "界".repeat(4001),
+        "🦀".repeat(2001),
+    ] {
+        assert!(
+            wire(tool(json!({"sentMessage":sent_message})))
+                .get("output")
+                .is_none()
+        );
+    }
+    assert_eq!(
+        wire(tool(
+            json!({"isError":true,"structuredContent":{"sentMessage":"Draft"}})
+        ))["output"],
+        json!({"isError":true,"sentMessage":"Draft"})
+    );
 }
 #[test]
 fn on_demand_tool_output_strips_image_bytes_and_keeps_markers_when_truncated() {

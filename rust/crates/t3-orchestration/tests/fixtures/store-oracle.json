@@ -13,8 +13,8 @@
     "packages/contracts/src/project.ts",
     "packages/contracts/src/baseSchemas.ts"
   ],
-  "sourceHash": "4daa564a42364f96",
-  "shapeHash": "3ab2f1353047d899",
+  "sourceHash": "4c2e0af849e7e688",
+  "shapeHash": "eec65a56d67a1b4b",
   "dates": [
     {
       "input": "2026-09-03T00:00:00.000Z",
@@ -789,12 +789,12 @@
       {
         "event": {
           "id": "raw:1:at0",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03T00:00:00Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         },
         "commandId": "command:raw"
@@ -802,12 +802,12 @@
       {
         "event": {
           "id": "raw:1:at1",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03T02:00:00.123456+02:00",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         },
         "commandId": "command:raw"
@@ -815,12 +815,12 @@
       {
         "event": {
           "id": "raw:1:at2",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         },
         "commandId": "command:raw"
@@ -828,12 +828,12 @@
       {
         "event": {
           "id": "raw:1:at3",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03T00:00:00",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         },
         "commandId": "command:raw"
@@ -841,12 +841,12 @@
       {
         "event": {
           "id": "raw:1:at4",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "+010000-01-01T00:00:00Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         },
         "commandId": "command:raw"
@@ -854,12 +854,12 @@
       {
         "event": {
           "id": "raw:1:at5",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-02-30T00:00:00Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         },
         "commandId": "command:raw"
@@ -867,12 +867,12 @@
       {
         "event": {
           "id": "raw:1:at6",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03 00:00Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         },
         "commandId": "command:raw"
@@ -880,12 +880,12 @@
       {
         "event": {
           "id": "raw:1:dates",
-          "threadId": "compat:thread:1",
-          "occurredAt": "+133794-12-17T17:51:08.022Z",
+          "threadId": "compat:thread:2",
+          "occurredAt": "-217480-05-28T21:51:18.757Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.9Z"
           }
         },
         "commandId": "command:raw"
@@ -893,12 +893,12 @@
       {
         "event": {
           "payload": {
-            "detachedAt": "+197920-05-28T14:38:05.332Z",
-            "providerSessionId": "S"
+            "detachedAt": "1969-12-31T23:59:59.985Z",
+            "providerSessionId": ")"
           },
           "type": "provider-session.detached",
-          "occurredAt": "+133794-12-17T17:51:08.022Z",
-          "threadId": "compat:thread:1",
+          "occurredAt": "-217480-05-28T21:51:18.757Z",
+          "threadId": "compat:thread:2",
           "id": "raw:1:order"
         },
         "commandId": "command:raw"
@@ -906,12 +906,12 @@
       {
         "event": {
           "id": "raw:1:metadata",
-          "threadId": "compat:thread:1",
-          "occurredAt": "+133794-12-17T17:51:08.022Z",
+          "threadId": "compat:thread:2",
+          "occurredAt": "-217480-05-28T21:51:18.757Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           },
           "runId": "run:raw",
           "nodeId": "node:raw",
@@ -924,12 +924,12 @@
       {
         "event": {
           "id": "raw:1:no-command",
-          "threadId": "compat:thread:1",
-          "occurredAt": "+133794-12-17T17:51:08.022Z",
+          "threadId": "compat:thread:2",
+          "occurredAt": "-217480-05-28T21:51:18.757Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         },
         "commandId": null
@@ -937,7 +937,7 @@
       {
         "event": {
           "id": "raw:2:at0",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "2026-09-03T00:00:00Z",
           "type": "subagent.updated",
           "payload": {
@@ -967,7 +967,7 @@
       {
         "event": {
           "id": "raw:2:at1",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "2026-09-03T02:00:00.123456+02:00",
           "type": "subagent.updated",
           "payload": {
@@ -997,7 +997,7 @@
       {
         "event": {
           "id": "raw:2:at2",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "2026-09-03",
           "type": "subagent.updated",
           "payload": {
@@ -1027,7 +1027,7 @@
       {
         "event": {
           "id": "raw:2:at3",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "2026-09-03T00:00:00",
           "type": "subagent.updated",
           "payload": {
@@ -1057,7 +1057,7 @@
       {
         "event": {
           "id": "raw:2:at4",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "+010000-01-01T00:00:00Z",
           "type": "subagent.updated",
           "payload": {
@@ -1087,7 +1087,7 @@
       {
         "event": {
           "id": "raw:2:at5",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "2026-02-30T00:00:00Z",
           "type": "subagent.updated",
           "payload": {
@@ -1117,7 +1117,7 @@
       {
         "event": {
           "id": "raw:2:at6",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "2026-09-03 00:00Z",
           "type": "subagent.updated",
           "payload": {
@@ -1147,7 +1147,7 @@
       {
         "event": {
           "id": "raw:2:dates",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "3715-01-23T20:54:33.6Z",
           "type": "subagent.updated",
           "payload": {
@@ -1199,7 +1199,7 @@
           },
           "type": "subagent.updated",
           "occurredAt": "3715-01-23T20:54:33.620Z",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "id": "raw:2:order"
         },
         "commandId": "command:raw"
@@ -1207,7 +1207,7 @@
       {
         "event": {
           "id": "raw:2:metadata",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "3715-01-23T20:54:33.620Z",
           "type": "subagent.updated",
           "payload": {
@@ -1242,7 +1242,7 @@
       {
         "event": {
           "id": "raw:2:no-command",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "3715-01-23T20:54:33.620Z",
           "type": "subagent.updated",
           "payload": {
@@ -1272,7 +1272,7 @@
       {
         "event": {
           "id": "raw:3:at0",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03T00:00:00Z",
           "type": "plan.updated",
           "payload": {
@@ -1290,7 +1290,7 @@
       {
         "event": {
           "id": "raw:3:at1",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03T02:00:00.123456+02:00",
           "type": "plan.updated",
           "payload": {
@@ -1308,7 +1308,7 @@
       {
         "event": {
           "id": "raw:3:at2",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03",
           "type": "plan.updated",
           "payload": {
@@ -1326,7 +1326,7 @@
       {
         "event": {
           "id": "raw:3:at3",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03T00:00:00",
           "type": "plan.updated",
           "payload": {
@@ -1344,7 +1344,7 @@
       {
         "event": {
           "id": "raw:3:at4",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "+010000-01-01T00:00:00Z",
           "type": "plan.updated",
           "payload": {
@@ -1362,7 +1362,7 @@
       {
         "event": {
           "id": "raw:3:at5",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-02-30T00:00:00Z",
           "type": "plan.updated",
           "payload": {
@@ -1380,7 +1380,7 @@
       {
         "event": {
           "id": "raw:3:at6",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03 00:00Z",
           "type": "plan.updated",
           "payload": {
@@ -1398,7 +1398,7 @@
       {
         "event": {
           "id": "raw:3:dates",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "-217480-05-28T21:51:18.757Z",
           "type": "plan.updated",
           "payload": {
@@ -1426,7 +1426,7 @@
           },
           "type": "plan.updated",
           "occurredAt": "-217480-05-28T21:51:18.757Z",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "id": "raw:3:order"
         },
         "commandId": "command:raw"
@@ -1434,7 +1434,7 @@
       {
         "event": {
           "id": "raw:3:metadata",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "-217480-05-28T21:51:18.757Z",
           "type": "plan.updated",
           "payload": {
@@ -1457,7 +1457,7 @@
       {
         "event": {
           "id": "raw:3:no-command",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "-217480-05-28T21:51:18.757Z",
           "type": "plan.updated",
           "payload": {
@@ -2791,15 +2791,15 @@
         "sequence": 12,
         "event_id": "raw:1:at0",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 0,
+        "stream_id": "compat:thread:2",
+        "stream_version": 11,
         "event_type": "provider-session.detached",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
         "causation_event_id": null,
         "correlation_id": "command:raw",
         "actor_kind": "server",
-        "payload_json": "{\"providerSessionId\":\"S\",\"detachedAt\":\"+197920-05-28T14:38:05.332Z\"}",
+        "payload_json": "{\"providerSessionId\":\")\",\"detachedAt\":\"1969-12-31T23:59:59.985Z\"}",
         "metadata_json": "{}",
         "application_event_version": 2
       },
@@ -2807,15 +2807,15 @@
         "sequence": 13,
         "event_id": "raw:1:at1",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 1,
+        "stream_id": "compat:thread:2",
+        "stream_version": 12,
         "event_type": "provider-session.detached",
         "occurred_at": "2026-09-03T00:00:00.123Z",
         "command_id": "command:raw",
         "causation_event_id": null,
         "correlation_id": "command:raw",
         "actor_kind": "server",
-        "payload_json": "{\"providerSessionId\":\"S\",\"detachedAt\":\"+197920-05-28T14:38:05.332Z\"}",
+        "payload_json": "{\"providerSessionId\":\")\",\"detachedAt\":\"1969-12-31T23:59:59.985Z\"}",
         "metadata_json": "{}",
         "application_event_version": 2
       },
@@ -2823,15 +2823,15 @@
         "sequence": 14,
         "event_id": "raw:1:at2",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 2,
+        "stream_id": "compat:thread:2",
+        "stream_version": 13,
         "event_type": "provider-session.detached",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
         "causation_event_id": null,
         "correlation_id": "command:raw",
         "actor_kind": "server",
-        "payload_json": "{\"providerSessionId\":\"S\",\"detachedAt\":\"+197920-05-28T14:38:05.332Z\"}",
+        "payload_json": "{\"providerSessionId\":\")\",\"detachedAt\":\"1969-12-31T23:59:59.985Z\"}",
         "metadata_json": "{}",
         "application_event_version": 2
       },
@@ -2839,15 +2839,15 @@
         "sequence": 15,
         "event_id": "raw:1:at3",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 3,
+        "stream_id": "compat:thread:2",
+        "stream_version": 14,
         "event_type": "provider-session.detached",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
         "causation_event_id": null,
         "correlation_id": "command:raw",
         "actor_kind": "server",
-        "payload_json": "{\"providerSessionId\":\"S\",\"detachedAt\":\"+197920-05-28T14:38:05.332Z\"}",
+        "payload_json": "{\"providerSessionId\":\")\",\"detachedAt\":\"1969-12-31T23:59:59.985Z\"}",
         "metadata_json": "{}",
         "application_event_version": 2
       },
@@ -2855,15 +2855,15 @@
         "sequence": 16,
         "event_id": "raw:1:at4",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 4,
+        "stream_id": "compat:thread:2",
+        "stream_version": 15,
         "event_type": "provider-session.detached",
         "occurred_at": "+010000-01-01T00:00:00.000Z",
         "command_id": "command:raw",
         "causation_event_id": null,
         "correlation_id": "command:raw",
         "actor_kind": "server",
-        "payload_json": "{\"providerSessionId\":\"S\",\"detachedAt\":\"+197920-05-28T14:38:05.332Z\"}",
+        "payload_json": "{\"providerSessionId\":\")\",\"detachedAt\":\"1969-12-31T23:59:59.985Z\"}",
         "metadata_json": "{}",
         "application_event_version": 2
       },
@@ -2871,15 +2871,15 @@
         "sequence": 17,
         "event_id": "raw:1:at5",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 5,
+        "stream_id": "compat:thread:2",
+        "stream_version": 16,
         "event_type": "provider-session.detached",
         "occurred_at": "2026-03-02T00:00:00.000Z",
         "command_id": "command:raw",
         "causation_event_id": null,
         "correlation_id": "command:raw",
         "actor_kind": "server",
-        "payload_json": "{\"providerSessionId\":\"S\",\"detachedAt\":\"+197920-05-28T14:38:05.332Z\"}",
+        "payload_json": "{\"providerSessionId\":\")\",\"detachedAt\":\"1969-12-31T23:59:59.985Z\"}",
         "metadata_json": "{}",
         "application_event_version": 2
       },
@@ -2887,15 +2887,15 @@
         "sequence": 18,
         "event_id": "raw:1:at6",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 6,
+        "stream_id": "compat:thread:2",
+        "stream_version": 17,
         "event_type": "provider-session.detached",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
         "causation_event_id": null,
         "correlation_id": "command:raw",
         "actor_kind": "server",
-        "payload_json": "{\"providerSessionId\":\"S\",\"detachedAt\":\"+197920-05-28T14:38:05.332Z\"}",
+        "payload_json": "{\"providerSessionId\":\")\",\"detachedAt\":\"1969-12-31T23:59:59.985Z\"}",
         "metadata_json": "{}",
         "application_event_version": 2
       },
@@ -2903,15 +2903,15 @@
         "sequence": 19,
         "event_id": "raw:1:dates",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 7,
+        "stream_id": "compat:thread:2",
+        "stream_version": 18,
         "event_type": "provider-session.detached",
-        "occurred_at": "+133794-12-17T17:51:08.022Z",
+        "occurred_at": "-217480-05-28T21:51:18.757Z",
         "command_id": "command:raw",
         "causation_event_id": null,
         "correlation_id": "command:raw",
         "actor_kind": "server",
-        "payload_json": "{\"providerSessionId\":\"S\",\"detachedAt\":\"+197920-05-28T14:38:05.332Z\"}",
+        "payload_json": "{\"providerSessionId\":\")\",\"detachedAt\":\"1969-12-31T23:59:59.900Z\"}",
         "metadata_json": "{}",
         "application_event_version": 2
       },
@@ -2919,15 +2919,15 @@
         "sequence": 20,
         "event_id": "raw:1:order",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 8,
+        "stream_id": "compat:thread:2",
+        "stream_version": 19,
         "event_type": "provider-session.detached",
-        "occurred_at": "+133794-12-17T17:51:08.022Z",
+        "occurred_at": "-217480-05-28T21:51:18.757Z",
         "command_id": "command:raw",
         "causation_event_id": null,
         "correlation_id": "command:raw",
         "actor_kind": "server",
-        "payload_json": "{\"providerSessionId\":\"S\",\"detachedAt\":\"+197920-05-28T14:38:05.332Z\"}",
+        "payload_json": "{\"providerSessionId\":\")\",\"detachedAt\":\"1969-12-31T23:59:59.985Z\"}",
         "metadata_json": "{}",
         "application_event_version": 2
       },
@@ -2935,15 +2935,15 @@
         "sequence": 21,
         "event_id": "raw:1:metadata",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 9,
+        "stream_id": "compat:thread:2",
+        "stream_version": 20,
         "event_type": "provider-session.detached",
-        "occurred_at": "+133794-12-17T17:51:08.022Z",
+        "occurred_at": "-217480-05-28T21:51:18.757Z",
         "command_id": "command:raw",
         "causation_event_id": null,
         "correlation_id": "command:raw",
         "actor_kind": "provider",
-        "payload_json": "{\"providerSessionId\":\"S\",\"detachedAt\":\"+197920-05-28T14:38:05.332Z\"}",
+        "payload_json": "{\"providerSessionId\":\")\",\"detachedAt\":\"1969-12-31T23:59:59.985Z\"}",
         "metadata_json": "{\"runId\":\"run:raw\",\"nodeId\":\"node:raw\",\"driver\":\"codex\",\"providerInstanceId\":\"codex\",\"rawEventId\":\"raw-event:raw\"}",
         "application_event_version": 2
       },
@@ -2951,15 +2951,15 @@
         "sequence": 22,
         "event_id": "raw:1:no-command",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 10,
+        "stream_id": "compat:thread:2",
+        "stream_version": 21,
         "event_type": "provider-session.detached",
-        "occurred_at": "+133794-12-17T17:51:08.022Z",
+        "occurred_at": "-217480-05-28T21:51:18.757Z",
         "command_id": null,
         "causation_event_id": null,
         "correlation_id": null,
         "actor_kind": "server",
-        "payload_json": "{\"providerSessionId\":\"S\",\"detachedAt\":\"+197920-05-28T14:38:05.332Z\"}",
+        "payload_json": "{\"providerSessionId\":\")\",\"detachedAt\":\"1969-12-31T23:59:59.985Z\"}",
         "metadata_json": "{}",
         "application_event_version": 2
       },
@@ -2967,8 +2967,8 @@
         "sequence": 23,
         "event_id": "raw:2:at0",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:2",
-        "stream_version": 11,
+        "stream_id": "compat:thread:0",
+        "stream_version": 0,
         "event_type": "subagent.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -2983,8 +2983,8 @@
         "sequence": 24,
         "event_id": "raw:2:at1",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:2",
-        "stream_version": 12,
+        "stream_id": "compat:thread:0",
+        "stream_version": 1,
         "event_type": "subagent.updated",
         "occurred_at": "2026-09-03T00:00:00.123Z",
         "command_id": "command:raw",
@@ -2999,8 +2999,8 @@
         "sequence": 25,
         "event_id": "raw:2:at2",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:2",
-        "stream_version": 13,
+        "stream_id": "compat:thread:0",
+        "stream_version": 2,
         "event_type": "subagent.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3015,8 +3015,8 @@
         "sequence": 26,
         "event_id": "raw:2:at3",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:2",
-        "stream_version": 14,
+        "stream_id": "compat:thread:0",
+        "stream_version": 3,
         "event_type": "subagent.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3031,8 +3031,8 @@
         "sequence": 27,
         "event_id": "raw:2:at4",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:2",
-        "stream_version": 15,
+        "stream_id": "compat:thread:0",
+        "stream_version": 4,
         "event_type": "subagent.updated",
         "occurred_at": "+010000-01-01T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3047,8 +3047,8 @@
         "sequence": 28,
         "event_id": "raw:2:at5",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:2",
-        "stream_version": 16,
+        "stream_id": "compat:thread:0",
+        "stream_version": 5,
         "event_type": "subagent.updated",
         "occurred_at": "2026-03-02T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3063,8 +3063,8 @@
         "sequence": 29,
         "event_id": "raw:2:at6",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:2",
-        "stream_version": 17,
+        "stream_id": "compat:thread:0",
+        "stream_version": 6,
         "event_type": "subagent.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3079,8 +3079,8 @@
         "sequence": 30,
         "event_id": "raw:2:dates",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:2",
-        "stream_version": 18,
+        "stream_id": "compat:thread:0",
+        "stream_version": 7,
         "event_type": "subagent.updated",
         "occurred_at": "3715-01-23T20:54:33.600Z",
         "command_id": "command:raw",
@@ -3095,8 +3095,8 @@
         "sequence": 31,
         "event_id": "raw:2:order",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:2",
-        "stream_version": 19,
+        "stream_id": "compat:thread:0",
+        "stream_version": 8,
         "event_type": "subagent.updated",
         "occurred_at": "3715-01-23T20:54:33.620Z",
         "command_id": "command:raw",
@@ -3111,8 +3111,8 @@
         "sequence": 32,
         "event_id": "raw:2:metadata",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:2",
-        "stream_version": 20,
+        "stream_id": "compat:thread:0",
+        "stream_version": 9,
         "event_type": "subagent.updated",
         "occurred_at": "3715-01-23T20:54:33.620Z",
         "command_id": "command:raw",
@@ -3127,8 +3127,8 @@
         "sequence": 33,
         "event_id": "raw:2:no-command",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:2",
-        "stream_version": 21,
+        "stream_id": "compat:thread:0",
+        "stream_version": 10,
         "event_type": "subagent.updated",
         "occurred_at": "3715-01-23T20:54:33.620Z",
         "command_id": null,
@@ -3143,8 +3143,8 @@
         "sequence": 34,
         "event_id": "raw:3:at0",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 11,
+        "stream_id": "compat:thread:2",
+        "stream_version": 22,
         "event_type": "plan.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3159,8 +3159,8 @@
         "sequence": 35,
         "event_id": "raw:3:at1",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 12,
+        "stream_id": "compat:thread:2",
+        "stream_version": 23,
         "event_type": "plan.updated",
         "occurred_at": "2026-09-03T00:00:00.123Z",
         "command_id": "command:raw",
@@ -3175,8 +3175,8 @@
         "sequence": 36,
         "event_id": "raw:3:at2",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 13,
+        "stream_id": "compat:thread:2",
+        "stream_version": 24,
         "event_type": "plan.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3191,8 +3191,8 @@
         "sequence": 37,
         "event_id": "raw:3:at3",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 14,
+        "stream_id": "compat:thread:2",
+        "stream_version": 25,
         "event_type": "plan.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3207,8 +3207,8 @@
         "sequence": 38,
         "event_id": "raw:3:at4",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 15,
+        "stream_id": "compat:thread:2",
+        "stream_version": 26,
         "event_type": "plan.updated",
         "occurred_at": "+010000-01-01T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3223,8 +3223,8 @@
         "sequence": 39,
         "event_id": "raw:3:at5",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 16,
+        "stream_id": "compat:thread:2",
+        "stream_version": 27,
         "event_type": "plan.updated",
         "occurred_at": "2026-03-02T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3239,8 +3239,8 @@
         "sequence": 40,
         "event_id": "raw:3:at6",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 17,
+        "stream_id": "compat:thread:2",
+        "stream_version": 28,
         "event_type": "plan.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3255,8 +3255,8 @@
         "sequence": 41,
         "event_id": "raw:3:dates",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 18,
+        "stream_id": "compat:thread:2",
+        "stream_version": 29,
         "event_type": "plan.updated",
         "occurred_at": "-217480-05-28T21:51:18.757Z",
         "command_id": "command:raw",
@@ -3271,8 +3271,8 @@
         "sequence": 42,
         "event_id": "raw:3:order",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 19,
+        "stream_id": "compat:thread:2",
+        "stream_version": 30,
         "event_type": "plan.updated",
         "occurred_at": "-217480-05-28T21:51:18.757Z",
         "command_id": "command:raw",
@@ -3287,8 +3287,8 @@
         "sequence": 43,
         "event_id": "raw:3:metadata",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 20,
+        "stream_id": "compat:thread:2",
+        "stream_version": 31,
         "event_type": "plan.updated",
         "occurred_at": "-217480-05-28T21:51:18.757Z",
         "command_id": "command:raw",
@@ -3303,8 +3303,8 @@
         "sequence": 44,
         "event_id": "raw:3:no-command",
         "aggregate_kind": "thread",
-        "stream_id": "compat:thread:1",
-        "stream_version": 21,
+        "stream_id": "compat:thread:2",
+        "stream_version": 32,
         "event_type": "plan.updated",
         "occurred_at": "-217480-05-28T21:51:18.757Z",
         "command_id": null,
@@ -3320,7 +3320,7 @@
         "event_id": "raw:4:at0",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 22,
+        "stream_version": 33,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3336,7 +3336,7 @@
         "event_id": "raw:4:at1",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 23,
+        "stream_version": 34,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.123Z",
         "command_id": "command:raw",
@@ -3352,7 +3352,7 @@
         "event_id": "raw:4:at2",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 24,
+        "stream_version": 35,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3368,7 +3368,7 @@
         "event_id": "raw:4:at3",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 25,
+        "stream_version": 36,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3384,7 +3384,7 @@
         "event_id": "raw:4:at4",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 26,
+        "stream_version": 37,
         "event_type": "turn-item.updated",
         "occurred_at": "+010000-01-01T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3400,7 +3400,7 @@
         "event_id": "raw:4:at5",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 27,
+        "stream_version": 38,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-03-02T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3416,7 +3416,7 @@
         "event_id": "raw:4:at6",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 28,
+        "stream_version": 39,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3432,7 +3432,7 @@
         "event_id": "raw:4:dates",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 29,
+        "stream_version": 40,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3448,7 +3448,7 @@
         "event_id": "raw:4:order",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 30,
+        "stream_version": 41,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3464,7 +3464,7 @@
         "event_id": "raw:4:metadata",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 31,
+        "stream_version": 42,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3480,7 +3480,7 @@
         "event_id": "raw:4:no-command",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 32,
+        "stream_version": 43,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": null,
@@ -3496,7 +3496,7 @@
         "event_id": "raw:5:at0",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 33,
+        "stream_version": 44,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3512,7 +3512,7 @@
         "event_id": "raw:5:at1",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 34,
+        "stream_version": 45,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.123Z",
         "command_id": "command:raw",
@@ -3528,7 +3528,7 @@
         "event_id": "raw:5:at2",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 35,
+        "stream_version": 46,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3544,7 +3544,7 @@
         "event_id": "raw:5:at3",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 36,
+        "stream_version": 47,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3560,7 +3560,7 @@
         "event_id": "raw:5:at4",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 37,
+        "stream_version": 48,
         "event_type": "turn-item.updated",
         "occurred_at": "+010000-01-01T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3576,7 +3576,7 @@
         "event_id": "raw:5:at5",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 38,
+        "stream_version": 49,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-03-02T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3592,7 +3592,7 @@
         "event_id": "raw:5:at6",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 39,
+        "stream_version": 50,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3608,7 +3608,7 @@
         "event_id": "raw:5:dates",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 40,
+        "stream_version": 51,
         "event_type": "turn-item.updated",
         "occurred_at": "+159705-12-24T10:22:19.261Z",
         "command_id": "command:raw",
@@ -3624,7 +3624,7 @@
         "event_id": "raw:5:order",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 41,
+        "stream_version": 52,
         "event_type": "turn-item.updated",
         "occurred_at": "+159705-12-24T10:22:19.261Z",
         "command_id": "command:raw",
@@ -3640,7 +3640,7 @@
         "event_id": "raw:5:metadata",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 42,
+        "stream_version": 53,
         "event_type": "turn-item.updated",
         "occurred_at": "+159705-12-24T10:22:19.261Z",
         "command_id": "command:raw",
@@ -3656,7 +3656,7 @@
         "event_id": "raw:5:no-command",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:2",
-        "stream_version": 43,
+        "stream_version": 54,
         "event_type": "turn-item.updated",
         "occurred_at": "+159705-12-24T10:22:19.261Z",
         "command_id": null,
@@ -3672,7 +3672,7 @@
         "event_id": "raw:6:at0",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:1",
-        "stream_version": 22,
+        "stream_version": 0,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3688,7 +3688,7 @@
         "event_id": "raw:6:at1",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:1",
-        "stream_version": 23,
+        "stream_version": 1,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.123Z",
         "command_id": "command:raw",
@@ -3704,7 +3704,7 @@
         "event_id": "raw:6:at2",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:1",
-        "stream_version": 24,
+        "stream_version": 2,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3720,7 +3720,7 @@
         "event_id": "raw:6:at3",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:1",
-        "stream_version": 25,
+        "stream_version": 3,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3736,7 +3736,7 @@
         "event_id": "raw:6:at4",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:1",
-        "stream_version": 26,
+        "stream_version": 4,
         "event_type": "turn-item.updated",
         "occurred_at": "+010000-01-01T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3752,7 +3752,7 @@
         "event_id": "raw:6:at5",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:1",
-        "stream_version": 27,
+        "stream_version": 5,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-03-02T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3768,7 +3768,7 @@
         "event_id": "raw:6:at6",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:1",
-        "stream_version": 28,
+        "stream_version": 6,
         "event_type": "turn-item.updated",
         "occurred_at": "2026-09-03T00:00:00.000Z",
         "command_id": "command:raw",
@@ -3784,7 +3784,7 @@
         "event_id": "raw:6:dates",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:1",
-        "stream_version": 29,
+        "stream_version": 7,
         "event_type": "turn-item.updated",
         "occurred_at": "+098151-06-25T14:53:34.533Z",
         "command_id": "command:raw",
@@ -3800,7 +3800,7 @@
         "event_id": "raw:6:order",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:1",
-        "stream_version": 30,
+        "stream_version": 8,
         "event_type": "turn-item.updated",
         "occurred_at": "+098151-06-25T14:53:34.533Z",
         "command_id": "command:raw",
@@ -3816,7 +3816,7 @@
         "event_id": "raw:6:metadata",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:1",
-        "stream_version": 31,
+        "stream_version": 9,
         "event_type": "turn-item.updated",
         "occurred_at": "+098151-06-25T14:53:34.533Z",
         "command_id": "command:raw",
@@ -3832,7 +3832,7 @@
         "event_id": "raw:6:no-command",
         "aggregate_kind": "thread",
         "stream_id": "compat:thread:1",
-        "stream_version": 32,
+        "stream_version": 10,
         "event_type": "turn-item.updated",
         "occurred_at": "+098151-06-25T14:53:34.533Z",
         "command_id": null,
@@ -4328,12 +4328,12 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:1:at0",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03T00:00:00.000Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         }
       },
@@ -4342,12 +4342,12 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:1:at1",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03T00:00:00.123Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         }
       },
@@ -4356,12 +4356,12 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:1:at2",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03T00:00:00.000Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         }
       },
@@ -4370,12 +4370,12 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:1:at3",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03T00:00:00.000Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         }
       },
@@ -4384,12 +4384,12 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:1:at4",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "+010000-01-01T00:00:00.000Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         }
       },
@@ -4398,12 +4398,12 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:1:at5",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-03-02T00:00:00.000Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         }
       },
@@ -4412,12 +4412,12 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:1:at6",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03T00:00:00.000Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         }
       },
@@ -4426,12 +4426,12 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:1:dates",
-          "threadId": "compat:thread:1",
-          "occurredAt": "+133794-12-17T17:51:08.022Z",
+          "threadId": "compat:thread:2",
+          "occurredAt": "-217480-05-28T21:51:18.757Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.900Z"
           }
         }
       },
@@ -4440,12 +4440,12 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:1:order",
-          "threadId": "compat:thread:1",
-          "occurredAt": "+133794-12-17T17:51:08.022Z",
+          "threadId": "compat:thread:2",
+          "occurredAt": "-217480-05-28T21:51:18.757Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         }
       },
@@ -4454,17 +4454,17 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:1:metadata",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "runId": "run:raw",
           "nodeId": "node:raw",
           "driver": "codex",
           "providerInstanceId": "codex",
           "rawEventId": "raw-event:raw",
-          "occurredAt": "+133794-12-17T17:51:08.022Z",
+          "occurredAt": "-217480-05-28T21:51:18.757Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         }
       },
@@ -4473,12 +4473,12 @@
         "commandId": null,
         "event": {
           "id": "raw:1:no-command",
-          "threadId": "compat:thread:1",
-          "occurredAt": "+133794-12-17T17:51:08.022Z",
+          "threadId": "compat:thread:2",
+          "occurredAt": "-217480-05-28T21:51:18.757Z",
           "type": "provider-session.detached",
           "payload": {
-            "providerSessionId": "S",
-            "detachedAt": "+197920-05-28T14:38:05.332Z"
+            "providerSessionId": ")",
+            "detachedAt": "1969-12-31T23:59:59.985Z"
           }
         }
       },
@@ -4487,7 +4487,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:2:at0",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "2026-09-03T00:00:00.000Z",
           "type": "subagent.updated",
           "payload": {
@@ -4518,7 +4518,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:2:at1",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "2026-09-03T00:00:00.123Z",
           "type": "subagent.updated",
           "payload": {
@@ -4549,7 +4549,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:2:at2",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "2026-09-03T00:00:00.000Z",
           "type": "subagent.updated",
           "payload": {
@@ -4580,7 +4580,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:2:at3",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "2026-09-03T00:00:00.000Z",
           "type": "subagent.updated",
           "payload": {
@@ -4611,7 +4611,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:2:at4",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "+010000-01-01T00:00:00.000Z",
           "type": "subagent.updated",
           "payload": {
@@ -4642,7 +4642,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:2:at5",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "2026-03-02T00:00:00.000Z",
           "type": "subagent.updated",
           "payload": {
@@ -4673,7 +4673,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:2:at6",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "2026-09-03T00:00:00.000Z",
           "type": "subagent.updated",
           "payload": {
@@ -4704,7 +4704,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:2:dates",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "3715-01-23T20:54:33.600Z",
           "type": "subagent.updated",
           "payload": {
@@ -4735,7 +4735,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:2:order",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "3715-01-23T20:54:33.620Z",
           "type": "subagent.updated",
           "payload": {
@@ -4766,7 +4766,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:2:metadata",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "runId": "run:raw",
           "nodeId": "node:raw",
           "driver": "codex",
@@ -4802,7 +4802,7 @@
         "commandId": null,
         "event": {
           "id": "raw:2:no-command",
-          "threadId": "compat:thread:2",
+          "threadId": "compat:thread:0",
           "occurredAt": "3715-01-23T20:54:33.620Z",
           "type": "subagent.updated",
           "payload": {
@@ -4833,7 +4833,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:3:at0",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03T00:00:00.000Z",
           "type": "plan.updated",
           "payload": {
@@ -4852,7 +4852,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:3:at1",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03T00:00:00.123Z",
           "type": "plan.updated",
           "payload": {
@@ -4871,7 +4871,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:3:at2",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03T00:00:00.000Z",
           "type": "plan.updated",
           "payload": {
@@ -4890,7 +4890,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:3:at3",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03T00:00:00.000Z",
           "type": "plan.updated",
           "payload": {
@@ -4909,7 +4909,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:3:at4",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "+010000-01-01T00:00:00.000Z",
           "type": "plan.updated",
           "payload": {
@@ -4928,7 +4928,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:3:at5",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-03-02T00:00:00.000Z",
           "type": "plan.updated",
           "payload": {
@@ -4947,7 +4947,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:3:at6",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "2026-09-03T00:00:00.000Z",
           "type": "plan.updated",
           "payload": {
@@ -4966,7 +4966,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:3:dates",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "-217480-05-28T21:51:18.757Z",
           "type": "plan.updated",
           "payload": {
@@ -4985,7 +4985,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:3:order",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "-217480-05-28T21:51:18.757Z",
           "type": "plan.updated",
           "payload": {
@@ -5004,7 +5004,7 @@
         "commandId": "command:raw",
         "event": {
           "id": "raw:3:metadata",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "runId": "run:raw",
           "nodeId": "node:raw",
           "driver": "codex",
@@ -5028,7 +5028,7 @@
         "commandId": null,
         "event": {
           "id": "raw:3:no-command",
-          "threadId": "compat:thread:1",
+          "threadId": "compat:thread:2",
           "occurredAt": "-217480-05-28T21:51:18.757Z",
           "type": "plan.updated",
           "payload": {

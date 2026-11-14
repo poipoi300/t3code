@@ -214,6 +214,7 @@ fn service(
             linked_threads_change: Arc::new(move |_| change),
             opportunistic_work: Arc::new(|| false),
             ids: Arc::new(SequenceIds::new("discovery")),
+            clock: harness.clock.clone(),
         })),
         commands,
         pull_requests,
@@ -519,6 +520,114 @@ async fn discovery_throttles_reordered_reader_notifications_and_parks_opportunis
     tokio::time::advance(std::time::Duration::from_secs(60)).await;
     service.drain().await;
     assert!(workspace.queries.lock().unwrap().is_empty());
+    service.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovery_empty_branch_waits_half_an_hour_while_children_and_thread_events_refresh_immediately()
+-> Result<()> {
+    let harness = Harness::new(None, false);
+    project(&harness, "C:/repo").await?;
+    thread(&harness, "parent", json!({})).await?;
+    thread(&harness,"child",json!({"branch":"child-feature","lineage":{"rootThreadId":"parent","parentThreadId":"parent","relationshipToParent":"subagent"}})).await?;
+    let workspace = Arc::new(Workspace::new());
+    *workspace.detected.lock().unwrap() = None;
+    let (service, _, _, _) = service(
+        &harness,
+        workspace.clone(),
+        false,
+        LinkedThreadsChange::None,
+    );
+    service.refresh(refresh(None, true)).await?;
+    for minute in 1..=29 {
+        harness
+            .clock
+            .set(&format!("2026-09-03T00:{minute:02}:00.000Z"));
+        service.refresh(refresh(None, false)).await?;
+    }
+    assert_eq!(
+        workspace
+            .queries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|q| q.branch.as_str())
+            .collect::<Vec<_>>(),
+        ["feature"]
+    );
+    harness.clock.set("2026-09-03T00:30:00.000Z");
+    service.refresh(refresh(None, false)).await?;
+    assert_eq!(
+        workspace
+            .queries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|q| q.branch.as_str())
+            .collect::<Vec<_>>(),
+        ["feature", "feature"]
+    );
+    service.refresh(refresh(Some("child"), false)).await?;
+    service.refresh(refresh(Some("parent"), false)).await?;
+    assert_eq!(
+        workspace
+            .queries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|q| q.branch.as_str())
+            .collect::<Vec<_>>(),
+        ["feature", "feature", "child-feature", "feature"]
+    );
+    service.shutdown().await;
+    Ok(())
+}
+#[tokio::test]
+async fn discovery_scheduled_empty_branches_get_four_recent_groups_then_every_other_group_a_turn()
+-> Result<()> {
+    let harness = Harness::new(None, false);
+    harness.clock.set("2026-09-03T01:00:00.000Z");
+    project(&harness, "C:/repo").await?;
+    for index in 0..10 {
+        thread(&harness,&format!("thread-{index}"),json!({"branch":format!("branch-{index}"),"updatedAt":format!("2026-09-03T00:{:02}:00.000Z",50-index)})).await?;
+    }
+    let workspace = Arc::new(Workspace::new());
+    *workspace.detected.lock().unwrap() = None;
+    let (service, _, _, _) = service(
+        &harness,
+        workspace.clone(),
+        false,
+        LinkedThreadsChange::None,
+    );
+    service.refresh(refresh(None, false)).await?;
+    assert_eq!(
+        workspace
+            .queries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|q| q.branch.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        (0..4).map(|i| format!("branch-{i}")).collect()
+    );
+    for minute in 1..=5 {
+        harness
+            .clock
+            .set(&format!("2026-09-03T01:{minute:02}:00.000Z"));
+        service.refresh(refresh(None, false)).await?;
+    }
+    assert_eq!(
+        workspace
+            .queries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|q| q.branch.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        (0..10).map(|i| format!("branch-{i}")).collect()
+    );
+    assert_eq!(workspace.queries.lock().unwrap().len(), 10);
     service.shutdown().await;
     Ok(())
 }

@@ -12,6 +12,7 @@ use t3_contracts::{orchestration_v2::*, orchestration_v2_id_table::IdOrIndex};
 pub const MAX_WIRE_CHECKPOINT_FILES: usize = 200;
 pub const MAX_DETAIL_STRING_BYTES: usize = 32_768;
 pub const MAX_DYNAMIC_VALUE_BYTES: usize = 16_384;
+const SEND_TO_USER_MAX_LENGTH: usize = 4_000;
 pub const MAX_ON_DEMAND_BYTES: usize = 256 * 1024;
 pub const TRUNCATION_MARKER: &str = "\n… output truncated for transport";
 
@@ -176,6 +177,9 @@ fn bounded_metadata(record: &serde_json::Map<String, Value>) -> Value {
             data.insert(key.into(), count.into());
         }
     }
+    if let Some(message) = record.get("sentMessage").and_then(bounded_sent_message) {
+        data.insert("sentMessage".into(), message.into());
+    }
     if let Some(id) = record
         .get("thread")
         .and_then(|thread| thread.get("threadId"))
@@ -275,6 +279,16 @@ fn read_result(value: &Value, budget: &mut ReadBudget, depth: usize) -> (Option<
 fn bounded_id(value: &Value) -> Option<&str> {
     value.as_str().filter(|s| {
         !t3_contracts::wire::trim_js(s).is_empty() && s.encode_utf16().take(257).count() <= 256
+    })
+}
+fn bounded_sent_message(value: &Value) -> Option<&str> {
+    value.as_str().filter(|message| {
+        message
+            .encode_utf16()
+            .take(SEND_TO_USER_MAX_LENGTH + 1)
+            .count()
+            <= SEND_TO_USER_MAX_LENGTH
+            && !t3_contracts::wire::trim_js(message).is_empty()
     })
 }
 
@@ -434,6 +448,9 @@ pub(crate) fn compact_dynamic_tool_output(value: &Value) -> Result<Option<Value>
             {
                 output.insert(key.into(), count.into());
             }
+        }
+        if let Some(message) = data.get("sentMessage").and_then(bounded_sent_message) {
+            output.insert("sentMessage".into(), message.into());
         }
         if let Some(id) = data
             .get("thread")

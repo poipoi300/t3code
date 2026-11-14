@@ -585,7 +585,7 @@ async fn ready_handoff(
     handoff["strategy"] = "full_thread_summary".into();
     handoff["transferId"] = serde_json::Value::Null;
     handoff.as_object_mut().unwrap().remove("delivery");
-    handoff["history"] = json!({"coverage":"Previous accepted work", "messages":[{"itemId":"item:previous","threadId":"thread:test","runId":"run:previous","providerThreadId":"pt:previous","role":"user","text":"Keep the 日本語 result", "status":"completed","kind":"user_message"}],"omittedItems":0});
+    handoff["history"] = json!({"coverage":"Previous accepted work", "messages":[{"itemId":"item:previous","threadId":"thread:test","runId":"run:previous","providerThreadId":"pt:previous","role":"user","text":"Keep the 日本語 result 🧪", "status":"completed","kind":"user_message"}],"omittedItems":0});
     h.write("context-handoff.updated", handoff).await?;
     let (base, _base_calls) = h.fake();
     let mut provider_session = base.runtime.session().clone();
@@ -616,6 +616,15 @@ async fn ready_handoff(
 async fn ready_handoff_is_delivered_with_the_prompt_and_recorded_after_acceptance() -> Result<()> {
     let h = Harness::new().await?;
     let (adapter, mut calls) = ready_handoff(&h).await?;
+    let user_text = "Current 🚀 request";
+    let mut message = h
+        .reader
+        .run_message(ThreadId("thread:test".into()), RunId("run:test".into()))
+        .await?
+        .unwrap();
+    message.text = user_text.into();
+    h.write("message.updated", t3_contracts::stored::to_value(&message)?)
+        .await?;
     let start = service(&h, sessions(adapter.clone()));
     let handle = start
         .start(
@@ -634,7 +643,18 @@ async fn ready_handoff_is_delivered_with_the_prompt_and_recorded_after_acceptanc
         panic!("expected prompted start")
     };
     assert!(turn.message.text.contains("Keep the 日本語 result"));
-    assert!(turn.message.text.ends_with("User message:\nHello provider"));
+    assert!(
+        turn.message
+            .text
+            .ends_with(&format!("User message:\n{user_text}"))
+    );
+    let text_units: Vec<_> = turn.message.text.encode_utf16().collect();
+    let prefix_units = text_units.len() - user_text.encode_utf16().count();
+    assert_eq!(turn.inline_context_length, Some(prefix_units));
+    assert_eq!(
+        String::from_utf16(&text_units[prefix_units..]).unwrap(),
+        user_text
+    );
     let projection = h
         .reader
         .projection(ThreadId("thread:test".into()))
@@ -683,6 +703,7 @@ async fn native_goal_defers_history_until_the_next_prompt_even_after_the_goal_ru
         panic!("expected goal start")
     };
     assert_eq!(goal.message.text, message.text);
+    assert_eq!(goal.inline_context_length, None);
     let projection = h
         .reader
         .projection(ThreadId("thread:test".into()))
@@ -1192,6 +1213,7 @@ async fn starts_adopting_the_persisted_provider_identity_and_awaits_acceptance()
         panic!("expected start");
     };
     assert_eq!(input.message.text, "Hello provider");
+    assert_eq!(input.inline_context_length, None);
     assert_eq!(input.model_selection.model, "model:test");
     assert_eq!(input.run_ordinal, 1);
     assert_eq!(input.provider_turn_ordinal, 1);

@@ -53,9 +53,60 @@ pub(crate) fn date_ms(value: &str) -> Option<i64> {
 }
 
 use crate::error::{Error, Result};
-use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+};
 use tokio::sync::{Mutex, Semaphore, watch};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+#[derive(Default)]
+pub(crate) struct NoPullRequestRechecks {
+    reads: BTreeMap<String, (i64, bool)>,
+}
+impl NoPullRequestRechecks {
+    pub fn select(
+        &mut self,
+        now: i64,
+        branches: impl IntoIterator<Item = (String, i64)>,
+    ) -> BTreeSet<String> {
+        let mut selected = BTreeSet::new();
+        let mut due = Vec::new();
+        for (order, (key, activity)) in branches.into_iter().enumerate() {
+            if let Some((read, found)) = self.reads.get(&key) {
+                if *found {
+                    selected.insert(key);
+                    continue;
+                }
+                let delay = ((now - activity) as f64 / 12.0).clamp(1_800_000.0, 86_400_000.0);
+                if ((now - *read) as f64) < delay {
+                    continue;
+                }
+            }
+            due.push((
+                self.reads.get(&key).map_or(i64::MIN, |(read, _)| *read),
+                std::cmp::Reverse(activity),
+                order,
+                key,
+            ));
+        }
+        due.sort();
+        for (_, _, _, key) in due.into_iter().take(4) {
+            self.reads.insert(key.clone(), (now, false));
+            selected.insert(key);
+        }
+        selected
+    }
+    pub fn record(&mut self, key: String, now: i64, found: bool) {
+        self.reads.insert(key, (now, found));
+    }
+    pub fn retain(&mut self, keys: impl IntoIterator<Item = String>) {
+        let keys: BTreeSet<_> = keys.into_iter().collect();
+        self.reads.retain(|key, _| keys.contains(key));
+    }
+}
 
 pub(crate) async fn join_thread_reads<'a>(
     reads: impl IntoIterator<Item = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>>,
@@ -273,6 +324,49 @@ mod tests {
     use super::{ThreadProjectWorker, date_ms};
 
     #[test]
+    fn negative_pr_rechecks_budget_fairness_found_results_pruning_and_fractional_threshold() {
+        let mut reads = super::NoPullRequestRechecks::default();
+        let branches = || {
+            (0..10)
+                .map(|index| (format!("branch-{index}"), -(index + 10) * 60_000))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            reads.select(0, branches()),
+            (0..4).map(|i| format!("branch-{i}")).collect()
+        );
+        assert_eq!(
+            reads.select(60_000, branches()),
+            (4..8).map(|i| format!("branch-{i}")).collect()
+        );
+        assert_eq!(
+            reads.select(120_000, branches()),
+            (8..10).map(|i| format!("branch-{i}")).collect()
+        );
+        reads.record("found".into(), 120_000, true);
+        let mut more: Vec<_> = (10..15).map(|i| (format!("branch-{i}"), 0)).collect();
+        more.push(("found".into(), 0));
+        assert_eq!(reads.select(180_000, more).len(), 5);
+        reads.retain(["branch-0".into()]);
+        assert_eq!(
+            reads.select(180_000, [("found".into(), 0)]),
+            ["found".into()].into_iter().collect()
+        );
+        let mut fractional = super::NoPullRequestRechecks::default();
+        fractional.select(0, [("fractional".into(), -44_000_005)]);
+        assert!(
+            fractional
+                .select(4_000_000, [("fractional".into(), -44_000_005)])
+                .is_empty()
+        );
+        assert!(
+            fractional
+                .select(4_000_001, [("fractional".into(), -44_000_005)])
+                .contains("fractional")
+        );
+    }
+
+    #[test]
     fn pull_request_keys_use_matching_url_authority_and_registry_aliases() {
         use crate::projections::write::{ParsedPullRequestKey, PullRequestIdentityRegistry};
         use serde_json::json;
@@ -280,7 +374,7 @@ mod tests {
         impl PullRequestIdentityRegistry for Registry {
             fn parse_change_request_url(&self, url: &str) -> Option<ParsedPullRequestKey> {
                 Some(ParsedPullRequestKey {
-                    key: serde_json::from_value(json!({"host":"forge.test","repository":if url=="different-repository" {"other/repo"} else {"owner/repo"},"number":if url=="different-number" {43} else {42}})).unwrap(),
+                    key: serde_json::from_value(json!({"host":"forge.test","repository":if url=="different-repository" {"other/repo"} else {"owner/repo"},"number":if url=="different-number" {43} else {42}})).expect("valid registry key"),
                     authority: Some("forge.test:8443".into()),
                 })
             }
@@ -294,14 +388,15 @@ mod tests {
         let original = serde_json::from_value(
             json!({"host":"Alias.Test","repository":"OWNER/Repo","number":42}),
         )
-        .unwrap();
+        .expect("valid original key");
         for (url, host) in [
             (None, "forge.test"),
             (Some("matching"), "forge.test:8443"),
             (Some("different-number"), "forge.test"),
             (Some("different-repository"), "forge.test"),
         ] {
-            let normalized = super::normalize_pull_request_key(&Registry, &original, url).unwrap();
+            let normalized = super::normalize_pull_request_key(&Registry, &original, url)
+                .expect("normalized registry key");
             assert_eq!(normalized.host.0, host);
             assert_eq!(normalized.repository.0, "owner/repo");
             assert_eq!(normalized.number, 42);
@@ -334,31 +429,31 @@ mod tests {
                 let calls = calls.clone();
                 async move {
                     let (complete, completed) = tokio::sync::oneshot::channel();
-                    calls.send((job, complete)).unwrap();
+                    calls.send((job, complete)).expect("job receiver is open");
                     let _ = completed.await;
                 }
             },
         );
-        worker.enqueue("a", 1).await.unwrap();
-        let (job, first) = received.recv().await.unwrap();
+        worker.enqueue("a", 1).await.expect("enqueue first job");
+        let (job, first) = received.recv().await.expect("first job starts");
         assert_eq!(job, 1);
-        worker.enqueue("a", 2).await.unwrap();
-        worker.enqueue("a", 3).await.unwrap();
-        worker.enqueue("b", 4).await.unwrap();
-        let (job, second) = received.recv().await.unwrap();
+        worker.enqueue("a", 2).await.expect("enqueue first rerun");
+        worker.enqueue("a", 3).await.expect("coalesce rerun");
+        worker.enqueue("b", 4).await.expect("enqueue other key");
+        let (job, second) = received.recv().await.expect("other key starts");
         assert_eq!(job, 4);
-        second.send(()).unwrap();
+        second.send(()).expect("complete other key");
         let draining = tokio::spawn({
             let worker = worker.clone();
             async move { worker.drain().await }
         });
         assert!(!draining.is_finished());
-        first.send(()).unwrap();
-        let (job, rerun) = received.recv().await.unwrap();
+        first.send(()).expect("complete first job");
+        let (job, rerun) = received.recv().await.expect("coalesced rerun starts");
         assert_eq!(job, 3);
         assert!(!draining.is_finished());
-        rerun.send(()).unwrap();
-        draining.await.unwrap();
+        rerun.send(()).expect("complete rerun");
+        draining.await.expect("drain task completes");
         assert!(received.try_recv().is_err());
         worker.shutdown().await;
         assert!(worker.enqueue("c", 5).await.is_err());

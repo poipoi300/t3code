@@ -289,6 +289,7 @@ async fn continuation_dispatch_is_durable_idempotent_and_respects_opt_out_stop_a
             database: h.database.stores.clone(),
             settings: settings.clone(),
             hydrator: Arc::new(NoLegacyTranscript),
+            worktree_restore: Arc::new(t3_orchestration::composition::NoWorktreeRestore),
             signals: h.sink.signals(),
             clock: h.clock.clone(),
         });

@@ -43,6 +43,7 @@ pub struct ThreadManagementServices {
     pub database: StoreDatabase,
     pub settings: Arc<dyn SettingsService>,
     pub hydrator: Arc<dyn TranscriptHydrator>,
+    pub worktree_restore: Arc<dyn ThreadWorktreeRestore>,
     pub signals: OutboxSignals,
     pub clock: Arc<dyn Clock>,
 }
@@ -361,6 +362,9 @@ impl ThreadManagementService {
             }
         }
         let target = match kind {
+            "thread.metadata.update" if value.get("continuation").is_some() => {
+                Some(("threadId", vec![]))
+            }
             "message.dispatch" => Some(("threadId", vec![])),
             "delegated_task.request" => Some(("parentThreadId", vec![])),
             "prepared-run.release" | "prepared-run.retry" => {
@@ -404,30 +408,46 @@ impl ThreadManagementService {
         &self,
         project_id: Option<ProjectId>,
         include_subagents: bool,
-    ) -> Result<Vec<OrchestrationV2ThreadShell>> {
-        let snapshot = self
-            .0
-            .reader
-            .thread_shells(ShellQuery {
-                project_id,
-                ..Default::default()
+    ) -> Result<Vec<crate::projections::read::ActiveThreadListEntry>> {
+        self.2
+            .run(async {
+                let threads = self
+                    .0
+                    .database
+                    .read(move |db| {
+                        crate::projections::read::list_active_threads(db, project_id.as_ref())
+                    })
+                    .await
+                    .map_err(|cause| {
+                        management_error(
+                            "ThreadManagementProjectThreadsListError",
+                            cause.to_string(),
+                        )
+                    })?;
+                let mut threads: Vec<_> = threads
+                    .into_iter()
+                    .filter(|thread| {
+                        let lineage = serde_json::to_value(&thread.lineage).unwrap_or(Value::Null);
+                        lineage["sideChat"] != true
+                            && (include_subagents || lineage["relationshipToParent"] != "subagent")
+                    })
+                    .collect();
+                let collator =
+                    icu_collator::Collator::try_new(Default::default(), Default::default())
+                        .map_err(|cause| {
+                            management_error(
+                                "ThreadManagementProjectThreadsListError",
+                                cause.to_string(),
+                            )
+                        })?;
+                threads.sort_by(|left, right| {
+                    date_ms(&right.updated_at.0)
+                        .cmp(&date_ms(&left.updated_at.0))
+                        .then_with(|| collator.compare(&right.id.0, &left.id.0))
+                });
+                Ok(threads)
             })
-            .await?;
-        let mut threads: Vec<_> = snapshot
-            .threads
-            .into_iter()
-            .filter(|thread| {
-                let lineage = serde_json::to_value(&thread.lineage).unwrap_or(Value::Null);
-                lineage["sideChat"] != true
-                    && (include_subagents || lineage["relationshipToParent"] != "subagent")
-            })
-            .collect();
-        threads.sort_by(|left, right| {
-            date_ms(&right.updated_at.0)
-                .cmp(&date_ms(&left.updated_at.0))
-                .then_with(|| right.id.0.cmp(&left.id.0))
-        });
-        Ok(threads)
+            .await
     }
     pub async fn send_to_thread(&self, input: SendInput) -> Result<SendResult> {
         self.2.run(self.send_to_thread_inner(input)).await
@@ -481,6 +501,22 @@ impl ThreadManagementService {
             SendMode::Queue => json!({"type":"queue_after_active"}),
             _ => json!({"type":"start_immediately"}),
         };
+        if dispatch_mode["type"] != "steer_active"
+            && let Err(cause) = self.0.worktree_restore.restore(target.thread.clone()).await
+        {
+            if matches!(cause, Error::Cancelled) {
+                return Err(cause);
+            }
+            if !self.has_receipt(input.command_id.clone()).await {
+                return Err(management_error(
+                    "ThreadManagementWorktreeRestoreError",
+                    format!(
+                        "Couldn't recreate the missing workspace of thread {}, so the message was not sent. {cause}",
+                        input.thread_id.0
+                    ),
+                ));
+            }
+        }
         let mut command = json!({"type":"message.dispatch","commandId":input.command_id,"threadId":input.thread_id,"messageId":input.message_id,"text":input.text,"attachments":input.attachments,"dispatchMode":dispatch_mode,"createdBy":input.created_by,"creationSource":input.creation_source});
         for (key, value) in [
             ("modelSelection", json!(input.model_selection)),

@@ -599,6 +599,138 @@ mod lookups {
         );
         Ok(())
     }
+    async fn branch_activity(
+        harness: &Harness,
+        id: &str,
+        branch: &str,
+        activity: &str,
+    ) -> Result<()> {
+        settlement_thread(harness, id).await?;
+        let mut thread = json!(harness.reader.thread(ThreadId(id.into())).await?.unwrap());
+        thread["branch"] = json!(branch);
+        let mut message = json!(super::super::command_policy_test::message(id));
+        message["threadId"] = json!(id);
+        message["runId"] = Value::Null;
+        message["nodeId"] = Value::Null;
+        message["createdAt"] = json!(activity);
+        message["updatedAt"] = json!(activity);
+        harness.sink.commit(CommitRequest{receipt:None,decision:Decision{events:vec![serde_json::from_value(json!({"id":format!("branch-{id}"),"threadId":id,"type":"thread.metadata-updated","occurredAt":TEST_TIME,"payload":thread}))?,serde_json::from_value(json!({"id":format!("activity-{id}"),"threadId":id,"type":"message.updated","occurredAt":TEST_TIME,"payload":message}))?],..Default::default()},guard:CommitGuard::None}).await?;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn settlement_negative_branch_rechecks_follow_idle_age_and_background_end_bypasses_the_delay()
+    -> Result<()> {
+        let harness = Harness::new(None, false);
+        harness.clock.set("2026-09-03T01:00:00.000Z");
+        project(&harness, "C:/repo").await?;
+        branch_activity(
+            &harness,
+            "recent",
+            "recent-feature",
+            "2026-09-03T00:30:00.000Z",
+        )
+        .await?;
+        branch_activity(&harness, "old", "old-feature", "2026-09-01T01:00:00.000Z").await?;
+        let workspace = Arc::new(Workspace::new());
+        *workspace.detected.lock().unwrap() = None;
+        let service = service(&harness, workspace.clone(), Arc::new(Backends::default()));
+        service.sweep(None).await?;
+        for minute in 1..=29 {
+            harness
+                .clock
+                .set(&format!("2026-09-03T01:{minute:02}:00.000Z"));
+            service.sweep(None).await?;
+        }
+        assert_eq!(workspace.queries.lock().unwrap().len(), 2);
+        harness.clock.set("2026-09-03T01:30:00.000Z");
+        service.sweep(None).await?;
+        assert_eq!(
+            workspace
+                .queries
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|q| q.branch == "recent-feature")
+                .count(),
+            2
+        );
+        assert_eq!(
+            workspace
+                .queries
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|q| q.branch == "old-feature")
+                .count(),
+            1
+        );
+        let event = serde_json::from_value(
+            json!({"id":"old-ended","threadId":"old","type":"run.background-work-cancelled","occurredAt":TEST_TIME,"payload":{"runId":"run-old","restartCancelledBackgroundWork":[]}}),
+        )?;
+        service.process_event(&event).await?;
+        service.drain().await;
+        assert_eq!(
+            workspace
+                .queries
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|q| q.branch == "old-feature")
+                .count(),
+            2
+        );
+        service.shutdown().await;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn settlement_negative_branch_sweep_starts_four_newest_then_gives_the_rest_a_turn()
+    -> Result<()> {
+        let harness = Harness::new(None, false);
+        harness.clock.set("2026-09-03T01:00:00.000Z");
+        project(&harness, "C:/repo").await?;
+        for i in 0..10 {
+            branch_activity(
+                &harness,
+                &format!("thread-{i}"),
+                &format!("branch-{}", 9 - i),
+                &format!("2026-09-03T00:{:02}:00.000Z", 50 - i),
+            )
+            .await?;
+        }
+        let workspace = Arc::new(Workspace::new());
+        *workspace.detected.lock().unwrap() = None;
+        let service = service(&harness, workspace.clone(), Arc::new(Backends::default()));
+        service.sweep(None).await?;
+        assert_eq!(
+            workspace
+                .queries
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|q| q.branch.clone())
+                .collect::<std::collections::BTreeSet<_>>(),
+            (6..10).map(|i| format!("branch-{i}")).collect()
+        );
+        for minute in 1..=5 {
+            harness
+                .clock
+                .set(&format!("2026-09-03T01:{minute:02}:00.000Z"));
+            service.sweep(None).await?;
+        }
+        assert_eq!(workspace.queries.lock().unwrap().len(), 10);
+        assert_eq!(
+            workspace
+                .queries
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|q| q.branch.clone())
+                .collect::<std::collections::BTreeSet<_>>(),
+            (0..10).map(|i| format!("branch-{i}")).collect()
+        );
+        service.shutdown().await;
+        Ok(())
+    }
 }
 
 async fn settlement_thread(harness: &Harness, id: &str) -> Result<()> {

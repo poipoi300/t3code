@@ -4,7 +4,7 @@ use crate::{
     projections::{
         read::PullRequestThread, store::ProjectionStore, write::PullRequestIdentityRegistry,
     },
-    runtime::threads::{ThreadProjectWorker, ThreadServiceScope, date_ms},
+    runtime::threads::{NoPullRequestRechecks, ThreadProjectWorker, ThreadServiceScope, date_ms},
     stores::projects,
 };
 use serde_json::json;
@@ -46,6 +46,7 @@ pub struct ThreadPullRequestServices {
     pub linked_threads_change: Arc<LinkedThreadsChangeDetector>,
     pub opportunistic_work: Arc<OpportunisticWork>,
     pub ids: Arc<dyn IdGenerator>,
+    pub clock: Arc<dyn Clock>,
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +59,7 @@ pub struct PullRequestRefresh {
 struct Context {
     services: ThreadPullRequestServices,
     backfill: Mutex<BTreeMap<ThreadId, u8>>,
+    rechecks: Mutex<NoPullRequestRechecks>,
     tasks: TaskTracker,
     cancellation: CancellationToken,
 }
@@ -128,6 +130,7 @@ impl ThreadPullRequestService {
         let context = Arc::new(Context {
             services,
             backfill: Mutex::new(BTreeMap::new()),
+            rechecks: Mutex::new(NoPullRequestRechecks::default()),
             tasks: tasks.clone(),
             cancellation: scope.cancellation(),
         });
@@ -316,6 +319,11 @@ impl Context {
                 .database
                 .read(|db| projects::list_shells(db, None))
         )?;
+        let now = self.services.clock.now();
+        let now_ms = date_ms(&now.0).ok_or_else(|| Error::Decode {
+            entity: "discovery clock",
+            detail: now.0.clone(),
+        })?;
         let projects: Arc<BTreeMap<_, _>> = Arc::new(
             projects
                 .into_iter()
@@ -376,12 +384,46 @@ impl Context {
                 .or_default()
                 .push(thread);
         }
+        let scheduled: Vec<_> = if request.thread_id.is_some() {
+            Vec::new()
+        } else {
+            groups
+                .iter()
+                .filter(|(_, group)| {
+                    group[0].branch.is_some()
+                        && group.iter().all(|thread| {
+                            thread
+                                .branch_pull_request
+                                .as_ref()
+                                .and_then(Option::as_ref)
+                                .is_none()
+                                && !pending.contains_key(&thread.id)
+                        })
+                })
+                .map(|(key, group)| {
+                    (
+                        key.clone(),
+                        group
+                            .iter()
+                            .filter_map(|thread| date_ms(&thread.updated_at.0))
+                            .max()
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect()
+        };
         drop(pending);
+        let scheduled_keys: BTreeSet<_> = scheduled.iter().map(|(key, _)| key.clone()).collect();
+        let selected = self.rechecks.lock().await.select(now_ms, scheduled);
+        let retained: Vec<_> = groups.keys().cloned().collect();
         let cancellation = self.cancellation.child_token();
         let _cancel = cancellation.clone().drop_guard();
         let slots = Arc::new(Semaphore::new(32));
         let mut jobs = Vec::new();
-        for group in groups.into_values() {
+        for (key, group) in groups {
+            if scheduled_keys.contains(&key) && !selected.contains(&key) {
+                continue;
+            }
             let permit = tokio::select! { biased; _ = cancellation.cancelled() => return Err(Error::Cancelled), permit = slots.clone().acquire_owned() => permit.map_err(|_|Error::Cancelled)? };
             let context = self.clone();
             let projects = projects.clone();
@@ -392,7 +434,7 @@ impl Context {
                 let _permit = permit;
                 tokio::select! { biased;
                     _ = cancellation.cancelled() => Err(Error::Cancelled),
-                    result = context.synchronize_group(&request,&group,&projects,sequence) => {
+                    result = context.synchronize_group(&request,&group,&projects,sequence,&key,now_ms) => {
                         if let Err(error) = &result && !matches!(error,Error::Cancelled) { context.fail_backfill(&group).await; }
                         result
                     }
@@ -407,6 +449,9 @@ impl Context {
                 Err(error) => eprintln!("thread pull request lookup task failed: {error}"),
             }
         }
+        if request.thread_id.is_none() {
+            self.rechecks.lock().await.retain(retained);
+        }
         Ok(())
     }
 
@@ -416,6 +461,8 @@ impl Context {
         group: &[PullRequestThread],
         projects: &BTreeMap<ProjectId, OrchestrationProjectShell>,
         sequence: u64,
+        group_key: &str,
+        now_ms: i64,
     ) -> Result<()> {
         let first = &group[0];
         let Some(project) = projects.get(&first.project_id) else {
@@ -457,6 +504,12 @@ impl Context {
             }
             None => None,
         };
+        if first.branch.is_some() {
+            self.rechecks
+                .lock()
+                .await
+                .record(group_key.into(), now_ms, detected.is_some());
+        }
         if detected
             .as_ref()
             .is_some_and(|detected| !self.matches_project(detected, identity.as_ref()))

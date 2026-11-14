@@ -926,3 +926,211 @@ async fn force_stop_keeps_a_promoted_run_on_the_same_session_during_teardown() -
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn stop_clears_a_finished_delegated_childs_stale_native_tree_and_preserves_its_result()
+-> Result<()> {
+    use t3_orchestration::testing::TEST_TIME;
+    struct Configured;
+    #[async_trait]
+    impl ProviderRegistry for Configured {
+        async fn metadata(&self, instance: ProviderInstanceId) -> Result<AdapterMetadata> {
+            assert_eq!(instance.0, "codex");
+            Ok(AdapterMetadata {
+                driver: serde_json::from_value(json!("codexAppServer"))?,
+                continuation_key: "configured-test".into(),
+                enabled: true,
+                capabilities: super::command_policy_test::capabilities(),
+            })
+        }
+        async fn adapter(
+            &self,
+            _: ProviderInstanceId,
+        ) -> Result<Arc<dyn t3_orchestration::provider::ProviderAdapter>> {
+            Err(Error::Unsupported("test starts no provider"))
+        }
+    }
+    let harness = Harness::with_providers(None, false, Arc::new(Configured));
+    super::thread_pull_request_service_test::project(&harness, "C:/repo").await?;
+    harness.create("thread").await?;
+    harness.dispatch(json!({"type":"message.dispatch","commandId":"parent-start","threadId":"thread","messageId":"parent-input","text":"Delegate work","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"})).await?;
+    let parent = json!(
+        harness
+            .reader
+            .projection(ThreadId("thread".into()))
+            .await?
+            .unwrap()
+    );
+    let parent_run = &parent["runs"][0];
+    harness.dispatch(json!({"type":"delegated_task.request","commandId":"delegate","parentThreadId":"thread","parentRunId":parent_run["id"],"parentNodeId":parent_run["rootNodeId"],"task":"Held child","modelSelection":{"instanceId":"codex","model":"a"},"runtimeMode":"approval-required","interactionMode":"default","createdBy":"agent","creationSource":"mcp"})).await?;
+    let parent = json!(
+        harness
+            .reader
+            .projection(ThreadId("thread".into()))
+            .await?
+            .unwrap()
+    );
+    let task = parent["subagents"][0].clone();
+    let child_id = task["childThreadId"].as_str().unwrap().to_owned();
+    let child = json!(
+        harness
+            .reader
+            .projection(ThreadId(child_id.clone()))
+            .await?
+            .unwrap()
+    );
+    let child_run = child["runs"][0].clone();
+    let root = child["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == child_run["rootNodeId"])
+        .expect("delegation creates a real execution root")
+        .clone();
+    for id in ["native", "nested"] {
+        harness.create(id).await?;
+    }
+    let mut native_root = root.clone();
+    native_root["id"] = json!("native-root");
+    native_root["rootNodeId"] = json!("native-root");
+    native_root["threadId"] = json!("native");
+    native_root["runId"] = serde_json::Value::Null;
+    native_root["parentNodeId"] = serde_json::Value::Null;
+    native_root["status"] = json!("running");
+    native_root["countsForRun"] = json!(false);
+    native_root["completedAt"] = serde_json::Value::Null;
+    let mut nested_root = native_root.clone();
+    nested_root["id"] = json!("nested-root");
+    nested_root["rootNodeId"] = json!("nested-root");
+    nested_root["threadId"] = json!("nested");
+    let mut native = task.clone();
+    native["id"] = json!("stale-native");
+    native["threadId"] = json!(child_id);
+    native["runId"] = child_run["id"].clone();
+    native["parentNodeId"] = child_run["rootNodeId"].clone();
+    native["origin"] = json!("provider_native");
+    native["providerThreadId"] = json!("native-provider");
+    native["childThreadId"] = json!("native");
+    native["status"] = json!("running");
+    native.as_object_mut().unwrap().remove("completionDelivery");
+    let mut nested = native.clone();
+    nested["id"] = json!("nested-native");
+    nested["threadId"] = json!("native");
+    nested["runId"] = serde_json::Value::Null;
+    nested["parentNodeId"] = json!("native-root");
+    nested["childThreadId"] = json!("nested");
+    let mut turn = sample("OrchestrationV2ProviderTurn");
+    turn["id"] = json!("native-turn");
+    turn["providerThreadId"] = json!("native-provider");
+    turn["nodeId"] = json!("native-root");
+    turn["runAttemptId"] = serde_json::Value::Null;
+    turn["status"] = json!("running");
+    turn["startedAt"] = json!(TEST_TIME);
+    turn["completedAt"] = serde_json::Value::Null;
+    let mut completed = child_run.clone();
+    completed["status"] = json!("completed");
+    completed["startedAt"] = json!(TEST_TIME);
+    completed["completedAt"] = json!(TEST_TIME);
+    let mut answer = json!(super::command_policy_test::message("result"));
+    answer["threadId"] = json!(child_id);
+    answer["runId"] = child_run["id"].clone();
+    answer["role"] = json!("assistant");
+    answer["text"] = json!("Finished child result");
+    answer["createdAt"] = json!(TEST_TIME);
+    answer["updatedAt"] = json!(TEST_TIME);
+    let mut events = Vec::new();
+    for (id, thread, kind, payload) in [
+        ("native-root", "native", "node.updated", native_root),
+        ("nested-root", "nested", "node.updated", nested_root),
+        ("native-turn", "native", "provider-turn.updated", turn),
+        (
+            "native-record",
+            child_id.as_str(),
+            "subagent.updated",
+            native,
+        ),
+        ("nested-record", "native", "subagent.updated", nested),
+        ("child-ended", child_id.as_str(), "run.updated", completed),
+        ("child-result", child_id.as_str(), "message.updated", answer),
+    ] {
+        events.push(serde_json::from_value(
+            json!({"id":id,"threadId":thread,"type":kind,"occurredAt":TEST_TIME,"payload":payload}),
+        )?);
+    }
+    harness
+        .sink
+        .commit(CommitRequest {
+            receipt: None,
+            decision: Decision {
+                events,
+                ..Default::default()
+            },
+            guard: CommitGuard::None,
+        })
+        .await?;
+    let recovered = harness.dispatcher.recover_delegated_tasks().await;
+    assert!(recovered.failures.is_empty(), "{recovered:?}");
+    let before = json!(
+        harness
+            .reader
+            .projection(ThreadId("thread".into()))
+            .await?
+            .unwrap()
+    );
+    assert_eq!(before["subagents"][0]["status"], "running");
+    harness.dispatch(json!({"type":"subagent.stop","commandId":"stop-row","threadId":"thread","runId":task["runId"],"subagentId":task["id"]})).await?;
+    let (management, _, _) = service(&harness, settings(json!({})), true);
+    management
+        .stop_thread(
+            CommandId("stop-child".into()),
+            ThreadId(child_id.clone()),
+            None,
+            true,
+        )
+        .await?;
+    let recovered = harness.dispatcher.recover_delegated_tasks().await;
+    assert!(recovered.failures.is_empty(), "{recovered:?}");
+    let parent = json!(
+        harness
+            .reader
+            .projection(ThreadId("thread".into()))
+            .await?
+            .unwrap()
+    );
+    let child = json!(
+        harness
+            .reader
+            .projection(ThreadId(child_id))
+            .await?
+            .unwrap()
+    );
+    let native = json!(
+        harness
+            .reader
+            .projection(ThreadId("native".into()))
+            .await?
+            .unwrap()
+    );
+    let nested = json!(
+        harness
+            .reader
+            .projection(ThreadId("nested".into()))
+            .await?
+            .unwrap()
+    );
+    assert_eq!(parent["subagents"][0]["status"], "completed");
+    assert!(
+        parent["subagents"][0]["result"]
+            .as_str()
+            .unwrap()
+            .contains("Finished child result")
+    );
+    assert_eq!(child["runs"][0]["status"], "completed");
+    assert_eq!(child["subagents"][0]["status"], "interrupted");
+    assert_eq!(native["nodes"][0]["status"], "interrupted");
+    assert_eq!(native["providerTurns"][0]["status"], "interrupted");
+    assert_eq!(native["subagents"][0]["status"], "interrupted");
+    assert_eq!(nested["nodes"][0]["status"], "interrupted");
+    management.shutdown().await;
+    Ok(())
+}

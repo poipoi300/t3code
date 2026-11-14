@@ -47,6 +47,15 @@ pub enum ProviderError {
     },
     #[error("provider subscription closed")]
     SubscriptionClosed,
+    /// The session's event stream ended in failure (TS `ProviderAdapterEventStreamError`).
+    /// `detached_thread_id` is set when T3 closed the session because that thread detached
+    /// from it, not because the provider failed.
+    #[error("provider event stream for {provider_session_id:?} failed: {detail}")]
+    EventStream {
+        provider_session_id: ProviderSessionId,
+        detached_thread_id: Option<ThreadId>,
+        detail: String,
+    },
     #[error("provider operation cancelled")]
     Cancelled,
 }

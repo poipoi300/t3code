@@ -3027,6 +3027,10 @@ async fn deferred_snapshot_work_carries_a_checked_inclusive_history_cursor() {
         ("mcp__t3_code__delegate_task", None),
         ("mcp__t3-code__send_to_user", None),
         (
+            "mcp__t3-code__send_to_user",
+            Some(serde_json::json!({"sentMessage":markdown}).to_string()),
+        ),
+        (
             "mcp__t3_code__send_to_user",
             Some(serde_json::json!({"sentMessage":markdown}).to_string()),
         ),

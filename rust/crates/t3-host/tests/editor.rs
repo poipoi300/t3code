@@ -282,3 +282,69 @@ fn windows_reveal_encodes_literal_paths_instead_of_shell_arguments() {
     assert!(source.contains("Invoke-Item -LiteralPath 'C:\\project'"));
     assert!(source.contains("Registry::HKEY_CLASSES_ROOT\\Directory\\shell"));
 }
+
+#[tokio::test]
+async fn file_manager_expands_home_and_requires_its_literal_discovered_target() {
+    use tokio::sync::Mutex;
+    struct Home {
+        root: PathBuf,
+        args: Mutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl EditorDiscovery for Home {
+        async fn discover(&self) -> Result<DiscoveredEditors> {
+            Ok(DiscoveredEditors {
+                roots: vec![self.root.clone()],
+                editors: vec![DiscoveredEditor {
+                    id: EditorId::FileManager,
+                    command: "trusted/file-manager".into(),
+                    base_args: vec![],
+                    style: EditorLaunchStyle::DirectPath,
+                }],
+            })
+        }
+        fn home_directory(&self) -> Option<PathBuf> {
+            Some(self.root.clone())
+        }
+        async fn launch(&self, c: EditorCommand) -> Result<()> {
+            *self.args.lock().await = c.args;
+            Ok(())
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("notes");
+    std::fs::write(&target, "notes").unwrap();
+    let d = Arc::new(Home {
+        root: temp.path().into(),
+        args: Mutex::new(vec![]),
+    });
+    let s = ExternalLauncher::new(d.clone());
+    s.launch_editor(&LaunchEditorInput {
+        cwd: "~/notes".into(),
+        editor: EditorId::FileManager,
+        project_root: None,
+        reveal: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        *d.args.lock().await,
+        vec![
+            dunce::canonicalize(&target)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        ]
+    );
+    assert!(
+        s.launch_editor(&LaunchEditorInput {
+            cwd: "~/notes:12".into(),
+            editor: EditorId::FileManager,
+            project_root: None,
+            reveal: None
+        })
+        .await
+        .is_err(),
+        "file manager must not interpret a filename as an editor position"
+    );
+}

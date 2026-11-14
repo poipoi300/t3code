@@ -1044,6 +1044,15 @@ async fn rows_written_by_rust_for_the_typescript_decoder() -> Result<()> {
             }
         }
     }
+    let mut selected_message = inputs
+        .iter()
+        .find(|(_, event)| event["type"] == "message.updated")
+        .expect("message fixture")
+        .1
+        .clone();
+    selected_message["payload"]["followsThreadSelection"] = true.into();
+    let selection_event_id = format!("rust:{}", inputs.len());
+    inputs.push(("raw".to_owned(), selected_message));
     let total = inputs.len();
     let database = TestDatabase::memory()?;
     let (rows, refused) = database
@@ -1072,6 +1081,18 @@ async fn rows_written_by_rust_for_the_typescript_decoder() -> Result<()> {
         })
         .await?;
     assert!(rows.len() + refused.values().sum::<usize>() == total);
+    let selection = rows
+        .iter()
+        .find(|row| row.event_id == selection_event_id)
+        .expect("selected message row");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&selection.payload_json)?["followsThreadSelection"],
+        true
+    );
+    assert_eq!(
+        t3_contracts::stored::to_value(&selection.decode_agent()?.event)?["payload"]["followsThreadSelection"],
+        true
+    );
     if let Ok(path) = std::env::var("T3_STORE_ROWS_OUT") {
         let mut out = String::new();
         for row in &rows {
