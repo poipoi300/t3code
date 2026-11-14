@@ -573,8 +573,26 @@ mod tests {
         let settings = &args[args.iter().position(|arg| arg == "--settings").unwrap() + 1];
         assert_eq!(settings, r#"{"disableAllHooks":true}"#);
         let investigating = claude_args(&run, "{}", true, false);
-        assert!(investigating.contains(&CLAUDE_INVESTIGATION_DENIED.to_owned()));
         assert!(!investigating.contains(&NO_SESSION_PERSISTENCE.to_owned()));
+        // The investigation policy, exactly: a widened allow list (e.g. plain `Bash`) must fail.
+        let value = |args: &[String], flag: &str| {
+            let at = args.iter().position(|arg| arg == flag).unwrap();
+            args[at + 1].clone()
+        };
+        assert_eq!(value(&investigating, "--tools"), "Read,Grep,Glob,Bash");
+        assert_eq!(
+            value(&investigating, "--allowedTools"),
+            "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
+        );
+        assert_eq!(
+            value(&investigating, "--disallowedTools"),
+            "Bash(git * --output*),Bash(git * -o *)"
+        );
+        // A checkout's own `.claude/settings*.json` never loads: `-p` skips the trust check, so
+        // its allow rules and `env` would otherwise apply (review H1).
+        for args in [&args, &investigating] {
+            assert_eq!(value(args, "--setting-sources"), "user", "{args:?}");
+        }
         assert_eq!(
             claude_structured_output(
                 br#"[{"type":"system"},{"type":"result","structured_output":{"title":"x"}}]"#
