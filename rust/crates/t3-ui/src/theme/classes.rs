@@ -103,6 +103,9 @@ pub(crate) fn rewrite(
             continue;
         }
         let mut utility = rewrite_utility(utility);
+        if utility.is_empty() {
+            continue;
+        }
         let color = color_utility(&utility, is_color);
         if light && color.is_none() && !light_color {
             variants.insert(0, "light".to_owned());
@@ -206,6 +209,22 @@ fn rewrite_utility(utility: &str) -> String {
     {
         return (*size).to_owned();
     }
+    // NSH has one overflow for both axes (`overflow-x-hidden` already clips both): clipping one
+    // axis clips the box, and making one axis visible is NSH's default.
+    match utility {
+        "overflow-x-clip" | "overflow-y-clip" => return "overflow-hidden".to_owned(),
+        "overflow-x-visible" | "overflow-y-visible" => return String::new(),
+        _ => {}
+    }
+    // `transition-[a,b]`: NSH animates the families colours, opacity, shadow and transform, all of
+    // which plain `transition` covers.
+    if let Some(list) = utility
+        .strip_prefix("transition-[")
+        .and_then(|rest| rest.strip_suffix(']'))
+        && list.split(',').all(|property| TRANSITION_FAMILIES.contains(&property.trim()))
+    {
+        return "transition".to_owned();
+    }
     // `h-[var(--x)]` is Tailwind v3's spelling of `h-(--x)`.
     if let Some((head, rest)) = utility.split_once("[var(")
         && let Some(name) = rest.strip_suffix(")]")
@@ -215,6 +234,19 @@ fn rewrite_utility(utility: &str) -> String {
     }
     utility.to_owned()
 }
+
+/// CSS properties NSH's `transition` animates (its colour, opacity, shadow and transform parts).
+const TRANSITION_FAMILIES: [&str; 9] = [
+    "color",
+    "background-color",
+    "border-color",
+    "outline-color",
+    "fill",
+    "stroke",
+    "opacity",
+    "box-shadow",
+    "transform",
+];
 
 /// `index.css`'s `--text-2xs`..`--text-5xs`, size and line height, at 16 px to the rem.
 const TEXT_SIZES: [(&str, &str); 4] = [

@@ -113,6 +113,7 @@ pub const NOW: &str = "2026-06-20T00:00:00.000Z";
 
 #[derive(Default)]
 pub struct ServerState {
+    pub extra_rpc: Option<Rc<dyn Fn(&Request) -> Option<HandlerOutput>>>,
     pub sockets_opened: usize,
     pub sockets_open: usize,
     /// Every `subscribeThread` request, in order.
@@ -148,6 +149,12 @@ pub struct ServerState {
     pub command_outputs_open: usize,
     /// The command keeps running: only the first frame is sent.
     pub command_running: bool,
+    /// Failure injection: secure records in this namespace fail to decrypt (disk damage, or a
+    /// row from another install).
+    pub undecryptable: Option<String>,
+    pub rpc_script: BTreeMap<String, std::collections::VecDeque<Result<Value, Value>>>,
+    pub rpc_calls: Vec<(String, Value)>,
+    pub thread_snapshots: BTreeMap<String, Value>,
     /// Ends every socket the server holds, as a dropped connection does.
     hangups: Vec<mpsc::UnboundedSender<()>>,
 }
@@ -308,6 +315,12 @@ pub fn thread_snapshot(id: &str) -> Value {
 
 impl Storage for TestPlatform {
     fn get(&self, area: StorageArea, key: StorageKey) -> HostFuture<'_, Option<Vec<u8>>> {
+        if area == StorageArea::Secure
+            && self.server.state.borrow().undecryptable.as_deref() == Some(key.namespace.as_str())
+        {
+            return async { Err(PlatformError::Storage("authentication tag mismatch".into())) }
+                .boxed_local();
+        }
         self.fake.get(area, key)
     }
     fn write(&self, area: StorageArea, writes: Vec<StorageWrite>) -> HostFuture<'_, ()> {
@@ -565,6 +578,20 @@ impl Handler for FakeHandler {
         };
         let environment = server.environment.clone();
         let tag = request.tag.as_str();
+        let extra = server.state.borrow().extra_rpc.clone();
+        if let Some(output) = extra.and_then(|extra| extra(&request)) {
+            return output;
+        }
+        let scripted = {
+            let mut state = server.state.borrow_mut();
+            state.rpc_calls.push((tag.to_owned(), request.payload.clone()));
+            state.rpc_script.get_mut(tag).and_then(|script| script.pop_front())
+        };
+        if let Some(answer) = scripted {
+            return HandlerOutput::Unary(async move { match answer {
+                Ok(value) => Exit::success(value), Err(error) => Exit::fail(error),
+            }}.boxed_local());
+        }
         if tag == self::tag::<WsServerGetConfigRpc>() {
             let config = config(&environment);
             HandlerOutput::Unary(async move { Exit::success(config) }.boxed_local())
@@ -635,7 +662,7 @@ impl Handler for FakeHandler {
                 thread: thread.clone(),
             };
             live(
-                vec![thread_snapshot(&thread), json!({"kind":"synchronized"})],
+                vec![server.state.borrow().thread_snapshots.get(&thread).cloned().unwrap_or_else(|| thread_snapshot(&thread)), json!({"kind":"synchronized"})],
                 guard,
             )
         } else {

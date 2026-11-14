@@ -764,7 +764,11 @@ fn lost_launch_reply_replays_the_same_workspace_and_holds_for_operation_access()
                     let launch = request(requests.next().await.expect("launch"));
                     assert_eq!(launch.tag, "orchestration.launchThread");
                     if edited {
-                        service.update_pending(&id, "Edited idea".into(), SendOptions::default()).now_or_never().expect("creation edits persist while the launch is in flight").expect("edit");
+                        service
+                            .update_pending(&id, "Edited idea".into(), SendOptions::default())
+                            .now_or_never()
+                            .expect("creation edits persist while the launch is in flight")
+                            .expect("edit");
                     }
                     peer.send(Ok(codec::encode(&ServerMessage::<Value>::Exit {
                         request_id: launch.id,
@@ -777,9 +781,16 @@ fn lost_launch_reply_replays_the_same_workspace_and_holds_for_operation_access()
                         .expect("lost reply");
                     launch.payload
                 };
-                let (original, pending) = match futures::future::select(service.step().boxed_local(), first.boxed_local()).await {
-                    futures::future::Either::Left((outcome,_)) => panic!("launch ended before the expected server requests: {outcome:?}"),
-                    futures::future::Either::Right((original,pending)) => (original,pending),
+                let (original, pending) = match futures::future::select(
+                    service.step().boxed_local(),
+                    first.boxed_local(),
+                )
+                .await
+                {
+                    futures::future::Either::Left((outcome, _)) => {
+                        panic!("launch ended before the expected server requests: {outcome:?}")
+                    }
+                    futures::future::Either::Right((original, pending)) => (original, pending),
                 };
                 let outcome = pending.await;
                 assert!(matches!(

@@ -715,8 +715,15 @@ fn failed_import_is_atomic_and_retry_journals_once_after_all_writes() {
         assert_eq!(report.status, ImportStatus::Imported);
         assert!(storage.has(StorageArea::Ordinary, "import-journal"));
         assert!(storage.has(StorageArea::Secure, "connection-credential"));
-        assert!(storage.has(StorageArea::Secure, "import-backup"));
-        let restored = load_connection_catalog(&storage).await.unwrap().unwrap();
+        assert!(
+            !storage.has(StorageArea::Secure, "import-backup"),
+            "a parsed entry keeps no raw copy of its credentials"
+        );
+        let restored = load_connection_catalog(&storage)
+            .await
+            .unwrap()
+            .unwrap()
+            .document;
         assert_eq!(restored.targets, vec![bearer(), relay()]);
         assert_eq!(restored.credentials[0]["credential"], credential());
         assert_eq!(restored.remote_dpop_tokens, vec![remote_token()]);
@@ -1277,4 +1284,55 @@ fn shell_origin_resume_requires_exact_origin_options_and_12_hour_freshness() {
     expected = origin.clone();
     expected.database_migration = Some(6);
     assert!(!origin.resumable(&expected, 100));
+}
+
+#[test]
+fn an_import_drops_older_raw_backups_and_removal_purges_copies_of_a_token() {
+    // Platform review M2.
+    block_on(async {
+        use base64::Engine;
+        let storage = Memory::default();
+        let token = credential()["token"].as_str().unwrap().to_owned();
+        let encode = |value: &Value| {
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(value).unwrap())
+        };
+        // An older build's backup, and a quarantined entry, each holding the token.
+        let copy = |namespace: &str, id: &str, raw: &Value| StorageWrite {
+            key: StorageKey::new(namespace, None, id),
+            value: Some(
+                t3_client::persistence::Record::new(namespace, None, id, 1, json!({"bytesBase64": encode(raw)}))
+                    .encode()
+                    .unwrap(),
+            ),
+        };
+        storage
+            .write(
+                StorageArea::Secure,
+                vec![copy("import-backup", "old", &catalog())],
+            )
+            .await
+            .unwrap();
+        import_namespace(&storage, &namespace(vec![catalog_entry()]))
+            .await
+            .unwrap();
+        assert!(!storage.has(StorageArea::Secure, "import-backup"));
+
+        storage
+            .write(
+                StorageArea::Secure,
+                vec![
+                    copy("quarantine", "bad", &catalog()),
+                    copy("quarantine", "unrelated", &json!({"environmentId": "other"})),
+                ],
+            )
+            .await
+            .unwrap();
+        let purged = t3_client::persistence::purge_environment_copies(&storage, &env(), &[token.clone()])
+            .await
+            .unwrap();
+        assert_eq!(purged, 1);
+        let quarantined = storage.list(StorageArea::Secure, "quarantine".into()).await.unwrap();
+        assert_eq!(quarantined.len(), 1, "other environments' quarantine stays");
+        assert_eq!(quarantined[0].record, "unrelated");
+    });
 }
