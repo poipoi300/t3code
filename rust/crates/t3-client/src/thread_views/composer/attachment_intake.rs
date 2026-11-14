@@ -220,6 +220,9 @@ pub fn uploads_to_release(attachments: &[Value]) -> Vec<Value> {
         .cloned()
         .collect()
 }
+pub fn uploaded_attachment(value: &Value) -> Result<ChatAttachment, ClientError> {
+    Ok(serde_json::from_value(json!({"type":value["type"],"id":value["uploadedAttachmentId"],"name":value["name"],"mimeType":value["mimeType"],"sizeBytes":value["sizeBytes"]}))?)
+}
 
 pub fn release_composer_draft_uploads(
     state: &Value,
@@ -331,7 +334,7 @@ impl Drop for PreparingBatch {
             .preparing
             .borrow_mut()
             .retain(|item| !self.ids.contains(&item.id));
-        self.session.changes.notify();
+        self.session.changed();
     }
 }
 impl Source {
@@ -365,6 +368,10 @@ pub fn resource_from_uri(uri: &str) -> Option<HostResource> {
     })
 }
 
+pub(crate) trait AttachmentDraftOwner {
+    fn writable(&self) -> bool;
+    fn changed(&self);
+}
 struct Session {
     platform: Rc<dyn Platform>,
     drafts: Rc<RefCell<Value>>,
@@ -379,6 +386,18 @@ struct Session {
     cleanup: Rc<super::cleanup::AttachmentCleanup>,
     pasted_names: RefCell<std::collections::BTreeSet<String>>,
     changes: Changes,
+    owner: RefCell<Option<Rc<dyn AttachmentDraftOwner>>>,
+}
+impl Session {
+    fn writable(&self) -> bool {
+        self.owner.borrow().as_ref().is_none_or(|owner| owner.writable())
+    }
+    fn changed(&self) {
+        if let Some(owner) = self.owner.borrow().as_ref() {
+            owner.changed();
+        }
+        self.changes.notify();
+    }
 }
 
 /// One draft's host intake. The shared draft document is owned by the client's draft binding.
@@ -406,6 +425,7 @@ impl AttachmentSession {
             cleanup: Rc::new(super::cleanup::AttachmentCleanup::default()),
             pasted_names: RefCell::new(std::collections::BTreeSet::new()),
             changes: Changes::default(),
+            owner: RefCell::new(None),
         }))
     }
     pub fn changes(&self) -> LocalBoxStream<'static, ()> {
@@ -413,6 +433,12 @@ impl AttachmentSession {
     }
     pub fn refresh(&self) {
         self.0.changes.notify();
+    }
+    pub(crate) fn bind_draft_owner(&self, owner: Rc<dyn AttachmentDraftOwner>) {
+        *self.0.owner.borrow_mut() = Some(owner);
+    }
+    fn changed(&self) {
+        self.0.changed();
     }
     pub fn cleanup(&self) -> Rc<super::cleanup::AttachmentCleanup> {
         self.0.cleanup.clone()
@@ -425,7 +451,7 @@ impl AttachmentSession {
         self.0
             .generation
             .set(self.0.generation.get().wrapping_add(1));
-        if !capabilities.uploads {
+        if capabilities.known && !capabilities.uploads && self.0.writable() {
             let mut drafts = self.0.drafts.borrow_mut();
             if let Some(images) = drafts
                 .get_mut("draftsByThreadKey")
@@ -448,7 +474,7 @@ impl AttachmentSession {
         }
         *self.0.capabilities.borrow_mut() = capabilities;
         *self.0.connection.borrow_mut() = connection;
-        self.refresh();
+        self.changed();
     }
     pub fn capabilities(&self) -> Capabilities {
         self.0.capabilities.borrow().clone()
@@ -525,6 +551,9 @@ impl AttachmentSession {
         .any(|reference| reference.context_id == context_id)
     }
     pub fn remove(&self, id: &str) {
+        if !self.0.writable() {
+            return;
+        }
         let draft = self.draft();
         let persisted_upload = ["images", "files"]
             .into_iter()
@@ -545,7 +574,7 @@ impl AttachmentSession {
         web_content::remove_file(&mut drafts, &self.0.key, id);
         self.0.uploads.borrow_mut().remove(id);
         drop(drafts);
-        self.refresh();
+        self.changed();
     }
     pub async fn pick(&self) -> Result<(), ClientError> {
         let files = self.pick_resources().await?;
@@ -633,6 +662,9 @@ impl AttachmentSession {
         }))
     }
     async fn intake_sources(&self, files: Vec<Source>) -> Result<(), ClientError> {
+        if !self.0.writable() {
+            return Err(ClientError::Cancelled);
+        }
         let mut reservations = Vec::new();
         let mut batch = PreparingBatch {
             session: self.0.clone(),
@@ -715,7 +747,7 @@ impl AttachmentSession {
             });
             reservations.push((id, source, kind));
         }
-        self.refresh();
+        self.changed();
         for (id, source, kind) in reservations {
             let file = source.metadata();
             let attachment_source = match &source {
@@ -744,6 +776,9 @@ impl AttachmentSession {
                 }
                 Source::Bytes(file) => Ok(file.bytes),
             };
+            if !self.0.writable() {
+                return Err(ClientError::Cancelled);
+            }
             let mut preparing = self.0.preparing.borrow_mut();
             let count = preparing.len();
             preparing.retain(|item| item.id != id);
@@ -865,9 +900,9 @@ impl AttachmentSession {
                     error = Some(failure.into());
                 }
             }
-            self.refresh();
+            self.changed();
         }
-        self.refresh();
+        self.changed();
         if let Some(error) = error {
             Err(error)
         } else {
@@ -875,6 +910,9 @@ impl AttachmentSession {
         }
     }
     pub async fn save_images(&self) {
+        if !self.0.writable() {
+            return;
+        }
         let draft = self.draft();
         let serialized = serialize_composer_images(
             self.0.platform.as_ref(),
@@ -885,6 +923,9 @@ impl AttachmentSession {
         )
         .await;
         let live = self.draft();
+        if !self.0.writable() {
+            return;
+        }
         let serialized: Vec<_> = serialized
             .into_iter()
             .filter(|image| {
@@ -898,9 +939,12 @@ impl AttachmentSession {
             &self.0.key,
             &serialized,
         );
-        self.refresh();
+        self.changed();
     }
     pub async fn upload(&self, id: &str) -> Result<(), ClientError> {
+        if !self.0.writable() {
+            return Err(ClientError::Cancelled);
+        }
         let connection = self
             .0
             .connection
@@ -927,7 +971,7 @@ impl AttachmentSession {
             .uploads
             .borrow_mut()
             .insert(id.into(), UploadState::Uploading);
-        self.refresh();
+        self.changed();
         let result = self.upload_inner(&connection, &attachment).await;
         if self.contains(id) {
             self.0.uploads.borrow_mut().insert(
@@ -938,7 +982,7 @@ impl AttachmentSession {
                 },
             );
         }
-        self.refresh();
+        self.changed();
         result
     }
     async fn upload_inner(
@@ -996,6 +1040,7 @@ impl AttachmentSession {
             attachment["mimeType"].as_str().unwrap_or_default(),
             |_| {
                 self.0.generation.get() == generation
+                    && self.0.writable()
                     && self.contains(id)
                     && self.capabilities().uploads
             },
@@ -1016,6 +1061,7 @@ impl AttachmentSession {
             }
         };
         if self.0.generation.get() != generation
+            || !self.0.writable()
             || !self.contains(id)
             || !self.capabilities().uploads
         {

@@ -233,12 +233,13 @@ pub async fn load_connection_catalog(
         .cloned()
         .collect();
     let dropped_targets = raw_targets.len() - targets.len();
-    let disabled_environment_ids =
-        serde_json::from_value(public.payload["disabledEnvironmentIds"].clone())
-            .unwrap_or_else(|_| {
-                damaged.push("disabled environments".to_owned());
-                Vec::new()
-            });
+    let disabled_environment_ids = serde_json::from_value(
+        public.payload["disabledEnvironmentIds"].clone(),
+    )
+    .unwrap_or_else(|_| {
+        damaged.push("disabled environments".to_owned());
+        Vec::new()
+    });
     let mut doc = ConnectionCatalogDocument {
         targets,
         disabled_environment_ids,
@@ -272,7 +273,11 @@ pub async fn load_connection_catalog(
                 &mut doc.profiles,
                 valid_profile as fn(&Value) -> bool,
             ),
-            ("connection-credential", &mut doc.credentials, valid_credential),
+            (
+                "connection-credential",
+                &mut doc.credentials,
+                valid_credential,
+            ),
         ] {
             let result = load_record::<Value>(
                 storage,
@@ -781,7 +786,10 @@ pub fn decode_catalog(bytes: &[u8]) -> Result<ConnectionCatalogDocument> {
         || doc.targets.iter().any(|v| !valid_target(v))
         || doc.profiles.iter().any(|v| !valid_profile(v))
         || doc.credentials.iter().any(|v| !valid_credential(v))
-        || doc.remote_dpop_tokens.iter().any(|v| !valid_remote_dpop_token(v))
+        || doc
+            .remote_dpop_tokens
+            .iter()
+            .any(|v| !valid_remote_dpop_token(v))
     {
         return invalid("connection catalog");
     }

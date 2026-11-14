@@ -34,7 +34,11 @@ pub fn desktop(platform: &str, app_version: &str) -> AuthClientPresentationMetad
 }
 
 /// The web app, served by the environment (`hosted: false`) or from the hosted site.
-pub fn web(identity: &BrowserIdentity, hosted: bool, app_version: &str) -> AuthClientPresentationMetadata {
+pub fn web(
+    identity: &BrowserIdentity,
+    hosted: bool,
+    app_version: &str,
+) -> AuthClientPresentationMetadata {
     AuthClientPresentationMetadata {
         label: text("T3 Code Web"),
         device_type: Some(browser_device_type(identity)),
@@ -103,7 +107,9 @@ fn text(value: &str) -> Option<TrimmedNonEmptyString> {
 
 /// Development builds report `0.0.0`, which the host should not show.
 fn version(app_version: &str) -> Option<TrimmedNonEmptyString> {
-    (app_version != "0.0.0").then(|| text(app_version)).flatten()
+    (app_version != "0.0.0")
+        .then(|| text(app_version))
+        .flatten()
 }
 
 fn has(haystack: &str, needles: &[&str]) -> bool {
@@ -143,7 +149,10 @@ fn browser_family(agent: &str) -> &'static str {
     let lower = agent.to_ascii_lowercase();
     if agent.trim().is_empty() {
         "unknown"
-    } else if ["edg/", "edge/", "edga/", "edgios/"].iter().any(|n| lower.contains(n)) {
+    } else if ["edg/", "edge/", "edga/", "edgios/"]
+        .iter()
+        .any(|n| lower.contains(n))
+    {
         "Edge"
     } else if has(agent, &["opr/", "opios/"]) {
         "Opera"
@@ -198,7 +207,10 @@ mod tests {
             desktop,
             serde_json::json!({"label":"T3 Code Desktop","deviceType":"desktop","os":"Windows","surface":"desktop","appVersion":"1.4.0"})
         );
-        assert!(super::desktop("linux", "0.0.0").app_version.is_none(), "dev builds hide their version");
+        assert!(
+            super::desktop("linux", "0.0.0").app_version.is_none(),
+            "dev builds hide their version"
+        );
 
         let chrome = identity(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36",
@@ -210,7 +222,13 @@ mod tests {
             serde_json::json!({"label":"T3 Code Web","deviceType":"desktop","os":"Windows","surface":"web","webDeployment":"hosted","browser":"Chrome","appVersion":"1.4.0"})
         );
 
-        let phone = super::mobile("ios", Some("18.2.1"), Some(" iPhone 16 "), DeviceType::Mobile, Some("1.4.0"));
+        let phone = super::mobile(
+            "ios",
+            Some("18.2.1"),
+            Some(" iPhone 16 "),
+            DeviceType::Mobile,
+            Some("1.4.0"),
+        );
         assert_eq!(
             serde_json::to_value(phone).unwrap(),
             serde_json::json!({"label":"T3 Code Mobile","deviceType":"mobile","os":"iOS","osMajorVersion":18,"deviceModel":"iPhone 16","surface":"mobile","appVersion":"1.4.0"})
@@ -223,13 +241,62 @@ mod tests {
     #[test]
     fn browsers_are_told_apart_by_their_user_agent() {
         for (agent, platform, touch, os, family, device) in [
-            ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.1 Safari/605.1.15", "MacIntel", 5, "iOS", "Safari", DeviceType::Tablet),
-            ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.1 Safari/605.1.15", "MacIntel", 0, "macOS", "Safari", DeviceType::Desktop),
-            ("Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/131.0 Mobile Safari/537.36", "Linux armv8l", 5, "Android", "Chrome", DeviceType::Mobile),
-            ("Mozilla/5.0 (Linux; Android 14; SM-X710) Chrome/131.0 Safari/537.36", "Linux", 5, "Android", "Chrome", DeviceType::Tablet),
-            ("Mozilla/5.0 (Windows NT 10.0) Chrome/131.0 Safari/537.36 Edg/131.0", "Win32", 0, "Windows", "Edge", DeviceType::Desktop),
-            ("Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) Chrome/131.0 Safari/537.36", "Linux", 0, "ChromeOS", "Chrome", DeviceType::Desktop),
-            ("Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0", "Linux x86_64", 0, "Linux", "Firefox", DeviceType::Desktop),
+            (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.1 Safari/605.1.15",
+                "MacIntel",
+                5,
+                "iOS",
+                "Safari",
+                DeviceType::Tablet,
+            ),
+            (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.1 Safari/605.1.15",
+                "MacIntel",
+                0,
+                "macOS",
+                "Safari",
+                DeviceType::Desktop,
+            ),
+            (
+                "Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/131.0 Mobile Safari/537.36",
+                "Linux armv8l",
+                5,
+                "Android",
+                "Chrome",
+                DeviceType::Mobile,
+            ),
+            (
+                "Mozilla/5.0 (Linux; Android 14; SM-X710) Chrome/131.0 Safari/537.36",
+                "Linux",
+                5,
+                "Android",
+                "Chrome",
+                DeviceType::Tablet,
+            ),
+            (
+                "Mozilla/5.0 (Windows NT 10.0) Chrome/131.0 Safari/537.36 Edg/131.0",
+                "Win32",
+                0,
+                "Windows",
+                "Edge",
+                DeviceType::Desktop,
+            ),
+            (
+                "Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) Chrome/131.0 Safari/537.36",
+                "Linux",
+                0,
+                "ChromeOS",
+                "Chrome",
+                DeviceType::Desktop,
+            ),
+            (
+                "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
+                "Linux x86_64",
+                0,
+                "Linux",
+                "Firefox",
+                DeviceType::Desktop,
+            ),
             ("", "", 0, "unknown", "unknown", DeviceType::Unknown),
         ] {
             let identity = identity(agent, platform, touch);

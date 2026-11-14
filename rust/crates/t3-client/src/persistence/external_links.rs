@@ -16,8 +16,14 @@ pub enum ExternalUrlSurface {
 }
 
 /// Remote-capable editors' schemes (`packages/contracts/src/editor.ts` `remoteSchemeOf`).
-const REMOTE_EDITOR_SCHEMES: &[&str] =
-    &["cursor", "vscode", "vscode-insiders", "vscodium", "zed", "jetbrains"];
+const REMOTE_EDITOR_SCHEMES: &[&str] = &[
+    "cursor",
+    "vscode",
+    "vscode-insiders",
+    "vscodium",
+    "zed",
+    "jetbrains",
+];
 /// `goto` editors with a remote scheme also open local files (`LOCAL_FILE_LINK_SCHEMES`).
 const LOCAL_FILE_LINK_SCHEMES: &[&str] = &["cursor", "vscode", "vscode-insiders", "vscodium"];
 
@@ -57,7 +63,11 @@ fn remote_editor(url: &url::Url) -> bool {
                 && path.strip_prefix('/').is_some_and(|rest| {
                     rest.split_once('/').is_some_and(|(address, _)| {
                         let machine = address.split_once('@').map_or(address, |(user, machine)| {
-                            if user.is_empty() || user.contains([':', '/']) { "" } else { machine }
+                            if user.is_empty() || user.contains([':', '/']) {
+                                ""
+                            } else {
+                                machine
+                            }
                         });
                         !machine.is_empty() && !machine.contains(['@', ':', '/'])
                     })
@@ -66,7 +76,9 @@ fn remote_editor(url: &url::Url) -> bool {
         "jetbrains" => {
             host == "gateway"
                 && path == "/ssh/environment"
-                && url.query_pairs().any(|(key, value)| key == "h" && !value.is_empty())
+                && url
+                    .query_pairs()
+                    .any(|(key, value)| key == "h" && !value.is_empty())
         }
         _ => {
             host == "vscode-remote"
@@ -114,9 +126,17 @@ mod tests {
     #[test]
     fn each_surface_opens_only_what_its_typescript_client_opens() {
         for (address, desktop, web) in CASES {
-            assert_eq!(safe_external_url(address, Desktop).is_some(), *desktop, "{address}");
+            assert_eq!(
+                safe_external_url(address, Desktop).is_some(),
+                *desktop,
+                "{address}"
+            );
             assert_eq!(safe_external_url(address, Web).is_some(), *web, "{address}");
-            assert_eq!(safe_external_url(address, Mobile).is_some(), *web, "{address}");
+            assert_eq!(
+                safe_external_url(address, Mobile).is_some(),
+                *web,
+                "{address}"
+            );
         }
     }
 }

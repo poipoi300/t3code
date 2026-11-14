@@ -1,3 +1,10 @@
+//! Shared settings rules, plus the settings pages' scope, search and composed service.
+pub mod scope;
+pub mod scoped;
+pub mod search;
+mod search_items;
+pub mod service;
+
 use crate::ClientError;
 use serde_json::{Value, json};
 use t3_contracts::{

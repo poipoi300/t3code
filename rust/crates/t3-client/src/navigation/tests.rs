@@ -1,6 +1,26 @@
 use super::*;
 use crate::view_logic::shell::navigation::is_thread_path;
 
+#[test]
+fn normalization_decodes_escaped_static_characters_and_preserves_segment_boundaries() {
+    assert_eq!(
+        normalize_app_path("/%73ettings/%67eneral?prompt=123#source"),
+        "/settings/general?prompt=123#source"
+    );
+    assert_eq!(
+        normalize_app_path("/env%20space/mcp%3Aexample%2Fpart%252F"),
+        "/env%20space/mcp%3Aexample%2Fpart%252F"
+    );
+    assert_eq!(normalize_app_path("/e/%"), "/e/%");
+    assert_eq!(normalize_app_path("/e/%5Bid%5D-%c3%a9"), "/e/[id]-%C3%A9");
+    assert_eq!(normalize_app_path("/e/%5c%25%2f"), "/e/%5c%25%2f");
+    assert_eq!(normalize_app_path("/%0a/evil"), "/evil");
+    assert_eq!(normalize_app_path("/e/%c3%a9%ZZ"), "/e/%c3%a9%ZZ");
+    assert_eq!(normalize_app_path("/e/café"), "/e/caf%C3%A9");
+    assert_eq!(normalize_app_path("/e/%F0%9F%98%80"), "/e/%F0%9F%98%80");
+    assert_eq!(normalize_app_path("/e/%C0%AF"), "/e/%C0%AF");
+}
+
 fn key(environment: &str, thread: &str) -> ThreadKey {
     ThreadKey {
         environment: EnvironmentId(environment.into()),
@@ -190,6 +210,7 @@ fn launch_paths_preserve_raw_queries_and_pairing_fragments() {
         ),
         ("HTTPS://h.test?x=1", "/?x=1"),
         ("t3code://settings/chat", "/settings/chat"),
+        ("t3code-dev://settings/chat", "/settings/chat"),
     ] {
         let path = app_path(url).expect("claimed app address");
         assert_eq!(path, expected);
@@ -267,5 +288,36 @@ fn closing_settings_prunes_its_back_and_forward_stops_without_duplicating_the_th
     assert_eq!(
         MainAppLocation::default().close_modal(0),
         CloseModal::Push("/".into())
+    );
+}
+
+#[test]
+fn the_launch_address_picks_the_first_route_and_unpaired_apps_start_at_pairing() {
+    assert_eq!(initial_route(None, true), Route::Home);
+    assert_eq!(initial_route(None, false), Route::Pair);
+    let thread = "https://app.t3.codes/e/t";
+    assert_eq!(
+        initial_route(Some(thread), true),
+        Route::Thread(key("e", "t"))
+    );
+    assert_eq!(initial_route(Some(thread), false), Route::Pair);
+    assert_eq!(
+        initial_route(Some("https://app.t3.codes/pair#token=x"), true),
+        Route::Pair
+    );
+    assert_eq!(
+        initial_route(Some("http://127.0.0.1:18765/?x=1"), true),
+        Route::Home
+    );
+    assert_eq!(
+        initial_route(Some("t3code://settings/chat"), true),
+        Route::Settings(SettingsPage::Chat)
+    );
+    assert_eq!(initial_route(Some("HTTPS://h.test"), true), Route::Home);
+    assert_eq!(path_of("https://h.test?q=1"), "/?q=1");
+    assert_eq!(path_of("new"), "new");
+    assert_eq!(
+        initial_route(Some("new"), true),
+        Route::NotFound("new".into())
     );
 }

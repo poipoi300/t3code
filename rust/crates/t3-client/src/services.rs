@@ -16,6 +16,7 @@ pub mod server;
 pub mod sessions;
 pub mod settings;
 pub mod terminal;
+pub mod terminal_sessions;
 pub mod updates;
 pub mod usage;
 pub mod views;

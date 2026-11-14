@@ -11,7 +11,7 @@ fn string<'a>(value: &'a Value, key: &str) -> &'a str {
 fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value[key].as_array().map_or(&[], Vec::as_slice)
 }
-fn truncate(text: &str, limit: usize, marker: &str) -> String {
+pub(super) fn truncate(text: &str, limit: usize, marker: &str) -> String {
     if text.encode_utf16().count() <= limit {
         return text.into();
     }
@@ -25,7 +25,7 @@ fn truncate(text: &str, limit: usize, marker: &str) -> String {
         .collect::<String>();
     format!("{prefix}{marker}")
 }
-fn label(text: &str, fallback: &str) -> String {
+pub(super) fn label(text: &str, fallback: &str) -> String {
     let clean = text
         .replace(['[', ']', '\\'], " ")
         .split(crate::view_logic::is_js_whitespace)

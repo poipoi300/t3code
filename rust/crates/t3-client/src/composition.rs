@@ -5,6 +5,8 @@
 //! store and call these methods; they never touch connections, sessions or credentials. The
 //! crate owns no executor, so the UI supplies a spawner for the futures it must keep running.
 mod composer;
+mod composer_updates;
+mod composer_attachments;
 use crate::{
     ClientError, ClientStore,
     authorization::RemoteAuthorization,
@@ -16,12 +18,12 @@ use crate::{
         supervise_saved,
     },
     environment::{EnvironmentRegistration, EnvironmentRegistry},
-    relay::{DpopSigner, HostDpopSigner, ManagedRelayClient, RelayDiscovery, RelayDiscoveryState},
     platform::{NetworkStatus, Platform},
+    relay::{DpopSigner, HostDpopSigner, ManagedRelayClient, RelayDiscovery, RelayDiscoveryState},
     rpc::{RpcEndpoint, RpcMethod, SessionEndpoint},
     services::{
         command_output::{
-            COMPLETED_OUTPUT_TTL_MS, CommandOutputCell, CommandOutputView, drive_command_output,
+            CommandOutputCell, CommandOutputShared, SettledCache, drive_command_output,
         },
         resources::{Resource, ResourcePolicy},
         sessions::{
@@ -54,6 +56,9 @@ pub struct EnvironmentEntry {
     /// Its saved routes in preference order: direct addresses (LAN, Tailscale, public), the
     /// relay, SSH. `connection::route_kind` names each.
     pub routes: Vec<Route>,
+    /// A saved record of this environment (its profile, credential or token) could not be read;
+    /// it may not connect until it is paired again or removed.
+    pub damaged: bool,
 }
 
 /// T3 Connect: the relay that reaches environments linked to the signed-in account.
@@ -121,15 +126,26 @@ struct Inner<P: Platform + Clone + 'static> {
     /// apply in the order asked, as TypeScript's registry lease does.
     registry: Mutex<()>,
     thread_operations: Rc<crate::thread_views::thread_ops::ThreadOpsState>,
+    terminals: Rc<crate::services::terminal_sessions::TerminalSessionsState>,
     /// Open command rows by identity, so every reader of one row shares one subscription.
     command_outputs: RefCell<BTreeMap<String, std::rc::Weak<CommandOutputShared>>>,
     /// Settled commands' final output, kept until the instant given after the last reader left.
-    settled_outputs: Rc<RefCell<BTreeMap<String, (CommandOutputView, u64)>>>,
+    settled_outputs: Rc<RefCell<BTreeMap<String, (Rc<CommandOutputCell>, u64)>>>,
     /// One authorization for every environment, as TypeScript's; relay-capable with a relay.
     authorization: RemoteAuthorization,
     relay: Option<Relay>,
+    /// Environments with a saved record the catalog could not read when they last started.
+    damaged: RefCell<std::collections::BTreeSet<EnvironmentId>>,
     composer_drafts: Rc<crate::thread_views::composer::draft_service::ComposerDraftService<P>>,
+    composer_preferences: Rc<crate::thread_views::composer::preferences::ComposerPreferences<P>>,
+    composer_models: Rc<crate::thread_views::composer::model_service::ComposerModelState>,
+    composer_updates: crate::services::updates::ServerUpdateService,
+    composer_stash: Rc<crate::thread_views::composer::stash_service::PromptStashState>,
+    composer_questions: Rc<crate::thread_views::composer::questions_service::PendingUserInputState>,
+    composer_attachments: RefCell<BTreeMap<(EnvironmentId,String),composer_attachments::AttachmentDriver>>,
     composer_task: AbortHandle,
+    navigation: crate::navigation::UrlClient<P>,
+    new_threads: Rc<crate::navigation::new_thread::NewThreadState>,
 }
 
 impl<P: Platform + Clone + 'static> Drop for Inner<P> {
@@ -224,13 +240,41 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         authorization: RemoteAuthorization,
         relay: Option<Relay>,
     ) -> Self {
-        let composer_drafts = Rc::new(crate::thread_views::composer::draft_service::ComposerDraftService::new(Rc::new(platform.clone())));
+        let composer_drafts = Rc::new(
+            crate::thread_views::composer::draft_service::ComposerDraftService::new(Rc::new(
+                platform.clone(),
+            )),
+        );
+        let composer_preferences = Rc::new(
+            crate::thread_views::composer::preferences::ComposerPreferences::new(Rc::new(
+                platform.clone(),
+            )),
+        );
         let (composer_task, composer_registration) = AbortHandle::new_pair();
-        spawn(Abortable::new(composer_drafts.clone().run(), composer_registration).map(|_| ()).boxed_local());
+        let draft_driver = composer_drafts.clone().run();
+        let preferences_driver = composer_preferences.clone().run();
+        spawn(
+            Abortable::new(
+                async move {
+                    futures::join!(draft_driver, preferences_driver);
+                },
+                composer_registration,
+            )
+            .map(|_| ())
+            .boxed_local(),
+        );
         Self {
             inner: Rc::new(Inner {
+                navigation: crate::navigation::UrlClient::new(platform.clone()),
+                new_threads: Rc::default(),
                 composer_drafts,
+                composer_preferences,
                 composer_task,
+                composer_models: Rc::default(),
+                composer_updates: Default::default(),
+                composer_stash: Rc::default(),
+                composer_questions: Rc::default(),
+                composer_attachments: RefCell::default(),
                 platform,
                 store,
                 git_panel: Rc::default(),
@@ -243,16 +287,24 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 queries: RefCell::new(BTreeMap::new()),
                 registry: Mutex::new(()),
                 thread_operations: Rc::default(),
+                terminals: Rc::default(),
                 command_outputs: RefCell::new(BTreeMap::new()),
                 settled_outputs: Rc::default(),
                 authorization,
                 relay,
+                damaged: RefCell::default(),
             }),
         }
     }
 
     pub fn navigation(&self) -> crate::navigation::UrlClient<P> {
-        crate::navigation::UrlClient::new(self.inner.platform.clone())
+        self.inner.navigation.clone()
+    }
+
+    pub fn new_threads(&self) -> crate::navigation::new_thread::NewThreadRuntime<P> {
+        crate::navigation::new_thread::NewThreadRuntime::new(
+            self.clone(), self.inner.platform.clone(), self.inner.new_threads.clone(),
+        )
     }
 
     pub fn store(&self) -> &ClientStore {
@@ -260,15 +312,81 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
     }
 
     pub fn git_panel(&self) -> crate::workspace::git_panel::GitPanel<P> {
-        crate::workspace::git_panel::GitPanel::new(self.clone(), self.inner.platform.clone(), self.inner.spawn.clone(), self.inner.git_panel.clone())
+        crate::workspace::git_panel::GitPanel::new(
+            self.clone(),
+            self.inner.platform.clone(),
+            self.inner.spawn.clone(),
+            self.inner.git_panel.clone(),
+        )
+    }
+
+    /// The right panel's diff view (DiffPanel.tsx), sharing the git panel's diff selection.
+    pub fn diff_panel(&self) -> crate::workspace::diff_panel::DiffPanelService<P> {
+        crate::workspace::diff_panel::DiffPanelService::new(
+            self.clone(),
+            self.inner.platform.clone(),
+            self.inner.git_panel.clone(),
+        )
+    }
+
+    pub fn branch_selector(
+        &self,
+        key: &ThreadKey,
+    ) -> crate::workspace::git_panel::branches::BranchSelectorLease<P> {
+        self.git_panel().branch_selector(key)
+    }
+
+    pub fn editor_picker(&self, key: &ThreadKey) -> crate::workspace::git_panel::editors::EditorPicker<P> {
+        self.git_panel().editor_picker(key)
+    }
+
+    pub fn project_scripts(&self, key: &ThreadKey) -> crate::workspace::git_panel::scripts::ProjectScripts<P> {
+        self.git_panel().project_scripts(key)
+    }
+
+    pub fn thread_details(&self) -> crate::workspace::git_panel::GitPanel<P> {
+        self.git_panel()
     }
 
     pub fn approval_services(&self) -> crate::thread_views::thread_ops::ThreadOperations<P> {
-        crate::thread_views::thread_ops::ThreadOperations::new(self.clone(), self.inner.platform.clone(), self.inner.thread_operations.clone())
+        crate::thread_views::thread_ops::ThreadOperations::new(
+            self.clone(),
+            self.inner.platform.clone(),
+            self.inner.thread_operations.clone(),
+        )
     }
 
     pub fn plan_services(&self) -> crate::thread_views::thread_ops::ThreadOperations<P> {
         self.approval_services()
+    }
+
+    pub fn thread_actions(&self) -> crate::thread_views::thread_ops::ThreadOperations<P> {
+        self.approval_services()
+    }
+
+    pub fn project_actions(&self) -> crate::thread_views::thread_ops::ThreadOperations<P> {
+        self.approval_services()
+    }
+
+    pub fn thread_header(&self) -> crate::thread_views::thread_ops::ThreadOperations<P> {
+        self.approval_services()
+    }
+
+    pub fn thread_metadata(&self) -> crate::thread_views::thread_ops::ThreadOperations<P> {
+        self.approval_services()
+    }
+
+    pub fn timeline_rewind(&self) -> crate::thread_views::thread_ops::ThreadOperations<P> {
+        self.approval_services()
+    }
+
+    /// Threads' terminals: tabs and groups, sessions, known sessions and commands.
+    pub fn terminals(&self) -> crate::services::terminal_sessions::TerminalSessions<P> {
+        crate::services::terminal_sessions::TerminalSessions::new(
+            self.clone(),
+            self.inner.platform.clone(),
+            self.inner.terminals.clone(),
+        )
     }
 
     /// Supervises every environment saved by an earlier run, in catalogue order, with its saved
@@ -356,7 +474,11 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
     /// Lists the signed-in account's environments again (discovery also refreshes when the
     /// host's credentials change).
     pub fn refresh_relay(&self) -> LocalBoxFuture<'static, ()> {
-        let Some(discovery) = self.inner.relay.as_ref().map(|relay| relay.discovery.clone())
+        let Some(discovery) = self
+            .inner
+            .relay
+            .as_ref()
+            .map(|relay| relay.discovery.clone())
         else {
             return futures::future::ready(()).boxed_local();
         };
@@ -597,6 +719,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                     },
                 },
                 routes: entry.routes.clone(),
+                damaged: self.inner.damaged.borrow().contains(&entry.id),
             })
             .collect()
     }
@@ -759,6 +882,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                     |_| {},
                 )
                 .await;
+                resource.close();
             }
             .boxed_local()
         };
@@ -832,31 +956,37 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         let settled = {
             let mut settled = self.inner.settled_outputs.borrow_mut();
             settled.retain(|_, (_, until)| *until > now);
-            settled.get(&identity).map(|(view, _)| view.clone())
+            settled.get(&identity).map(|(cell, _)| cell.clone())
         };
         let platform = self.inner.platform.clone();
         let (cell, driver) = match settled {
-            Some(view) => (Rc::new(CommandOutputCell::settled(view)), None),
+            Some(cell) => (cell, None),
             None => {
                 let cell = Rc::new(CommandOutputCell::default());
-                let input = t3_contracts::orchestration_v2::OrchestrationV2SubscribeCommandOutputInput {
-                    thread_id: key.thread.clone(),
-                    item_id: item.clone(),
-                };
+                let input =
+                    t3_contracts::orchestration_v2::OrchestrationV2SubscribeCommandOutputInput {
+                        thread_id: key.thread.clone(),
+                        item_id: item.clone(),
+                    };
                 let sessions = self
                     .query_connections(&key.environment)
                     .map(|connection| connection.session)
                     .boxed_local();
-                let frames = EnvironmentStream::new(key.environment.clone(), sessions, move |session| {
-                    session
-                        .endpoint
-                        .subscribe::<t3_contracts::rpc::WsOrchestrationV2SubscribeCommandOutputRpc>(
-                            input.clone(),
-                        )
-                });
                 let driven = cell.clone();
+                let environment = key.environment.clone();
+                let host = self.inner.platform.clone();
                 let driver = self.spawn(
                     async move {
+                        type Method = t3_contracts::rpc::WsOrchestrationV2SubscribeCommandOutputRpc;
+                        // A stream that ends or fails to decode on a healthy socket resubscribes
+                        // with the shared bounded retry (WP5), as TypeScript's subscriptions do.
+                        let frames = EnvironmentStream::recovering(
+                            environment,
+                            sessions,
+                            &host,
+                            <Method as RpcMethod>::NAME,
+                            move |session| session.endpoint.subscribe::<Method>(input.clone()),
+                        );
                         drive_command_output(driven, frames).await;
                     }
                     .boxed_local(),
@@ -865,11 +995,13 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             }
         };
         let shared = Rc::new(CommandOutputShared {
-            identity: identity.clone(),
             cell,
             driver,
-            settled: self.inner.settled_outputs.clone(),
-            now: Rc::new(move || platform.monotonic_ms()),
+            cache: Some(SettledCache {
+                identity: identity.clone(),
+                cells: self.inner.settled_outputs.clone(),
+                now: Rc::new(move || platform.monotonic_ms()),
+            }),
         });
         let mut outputs = self.inner.command_outputs.borrow_mut();
         outputs.retain(|_, output| output.strong_count() > 0);
@@ -877,7 +1009,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         CommandOutputLease { shared }
     }
 
-    fn query_connections(
+    pub(crate) fn query_connections(
         &self,
         environment: &EnvironmentId,
     ) -> LocalBoxStream<'static, QueryConnection<SessionEndpoint>> {
@@ -1002,6 +1134,11 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         else {
             return Ok(());
         };
+        if registry.is_damaged(id) {
+            self.inner.damaged.borrow_mut().insert(id.clone());
+        } else {
+            self.inner.damaged.borrow_mut().remove(id);
+        }
         // Relay and SSH routes have no saved address; their uploads take the RPC path.
         let origin = registration
             .routes
@@ -1015,7 +1152,13 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             id,
         )
         .await?;
-        self.attach(client, driver, registration.label, registration.routes, origin);
+        self.attach(
+            client,
+            driver,
+            registration.label,
+            registration.routes,
+            origin,
+        );
         Ok(())
     }
 
@@ -1023,6 +1166,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
     /// credentials, queued messages, store data, and a managed SSH backend. The caller holds
     /// the registry lease.
     async fn remove_locked(&self, environment: &EnvironmentId) -> Result<(), ClientError> {
+        self.inner.damaged.borrow_mut().remove(environment);
         self.inner
             .threads
             .borrow_mut()
@@ -1125,7 +1269,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         self.notify();
     }
 
-    fn spawn(&self, future: LocalBoxFuture<'static, ()>) -> AbortHandle {
+    pub(crate) fn spawn(&self, future: LocalBoxFuture<'static, ()>) -> AbortHandle {
         let (abort, registration) = AbortHandle::new_pair();
         (self.inner.spawn)(
             Abortable::new(future, registration)
@@ -1260,8 +1404,7 @@ fn bind_sessions<P: Platform + 'static>(
                         ),
                         None => send.connect(generation, Rc::new(endpoint), config),
                     };
-                    if connected.is_ok()
-                    {
+                    if connected.is_ok() {
                         bound = Some(generation);
                     }
                 }
@@ -1276,48 +1419,7 @@ fn bind_sessions<P: Platform + 'static>(
     .boxed_local()
 }
 
-struct CommandOutputShared {
-    identity: String,
-    cell: Rc<CommandOutputCell>,
-    driver: Option<AbortHandle>,
-    settled: Rc<RefCell<BTreeMap<String, (CommandOutputView, u64)>>>,
-    now: Rc<dyn Fn() -> u64>,
-}
-
-impl Drop for CommandOutputShared {
-    fn drop(&mut self) {
-        if let Some(driver) = &self.driver {
-            driver.abort();
-        }
-        if let Some(view) = self.cell.view().filter(|view| !view.running) {
-            self.settled.borrow_mut().insert(
-                std::mem::take(&mut self.identity),
-                (view, (self.now)().saturating_add(COMPLETED_OUTPUT_TTL_MS)),
-            );
-        }
-    }
-}
-
-/// One open command row's output; the subscription lasts while a lease is held.
-#[must_use = "the output streams only while its lease is held"]
-#[derive(Clone)]
-pub struct CommandOutputLease {
-    shared: Rc<CommandOutputShared>,
-}
-
-impl CommandOutputLease {
-    /// `None` while loading (no frame yet).
-    pub fn view(&self) -> Option<CommandOutputView> {
-        self.shared.cell.view()
-    }
-    /// Why the output could not be loaded ("Couldn't load output: …" in the web).
-    pub fn error(&self) -> Option<String> {
-        self.shared.cell.error()
-    }
-    pub fn changes(&self) -> LocalBoxStream<'static, ()> {
-        self.shared.cell.changes()
-    }
-}
+pub use crate::services::command_output::CommandOutputLease;
 
 struct QueryShared<T> {
     resource: Rc<Resource<T>>,

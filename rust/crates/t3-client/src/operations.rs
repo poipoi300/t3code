@@ -944,7 +944,7 @@ fn command_identity(input: &Value) -> Result<CommandId, OperationError> {
 }
 
 pub fn allocate_command_id(
-    platform: &impl Platform,
+    platform: &(impl Platform + ?Sized),
     existing: Option<CommandId>,
 ) -> Result<CommandId, ClientError> {
     if let Some(id) = existing {

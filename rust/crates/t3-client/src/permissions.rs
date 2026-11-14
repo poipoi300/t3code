@@ -37,6 +37,15 @@ impl PermissionPolicy for ContractPermissionPolicy {
         if method == "orchestration.launchThread" {
             scopes.push(AuthEnvironmentScope::OrchestrationOperate);
         }
+        match method {
+            "orchestration.dispatchCommand" => scopes.push(match input.get("type")?.as_str()? {
+                "thread.visit" | "thread.mark-unread" => AuthEnvironmentScope::OrchestrationRead,
+                _ => AuthEnvironmentScope::OrchestrationOperate,
+            }),
+            "projects.mutate" => scopes.push(AuthEnvironmentScope::OrchestrationOperate),
+            "projects.writeFile" => scopes.push(AuthEnvironmentScope::FilesystemWrite),
+            _ => {},
+        }
         if let Some(scope) = descriptor.required_scope
             && !scopes.contains(&scope)
         {
@@ -125,6 +134,7 @@ pub fn session_grants_scope(session: &AuthSessionState, scope: AuthEnvironmentSc
 impl From<&AuthSessionState> for SessionGrants {
     fn from(session: &AuthSessionState) -> Self {
         let mut candidates = Vec::new();
+        candidates.extend([AuthEnvironmentScope::FilesystemWrite, AuthEnvironmentScope::OrchestrationOperate, AuthEnvironmentScope::OrchestrationRead]);
         candidates.extend(WS_METHODS.iter().filter_map(|method| method.required_scope));
         candidates.extend(
             t3_contracts::client_rpc_permissions::CLIENT_GUARDED_RPC_SCOPES

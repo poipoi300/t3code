@@ -89,6 +89,9 @@ impl ConnectedClient {
     pub fn reconnect(&self) -> Result<(), ClientError> {
         self.send(ConnectionEvent::Restart)
     }
+    pub(crate) fn set_enabled(&self, enabled: bool) -> Result<(), ClientError> {
+        self.send(ConnectionEvent::SetEnabled(enabled))
+    }
     /// Follows `thread` (snapshot, then live events, into the store) while the lease is held and
     /// the connection has a session; every new session follows it again. Leases for one thread
     /// share one follow.

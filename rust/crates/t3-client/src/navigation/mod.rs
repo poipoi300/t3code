@@ -4,7 +4,13 @@ pub use crate::view_logic::shell::navigation::{
     Direction, HistoryAvailability, RouteTarget, encode_component, route_target,
 };
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+pub mod link_targets;
+#[cfg(test)]
+mod link_targets_tests;
+pub mod new_thread;
+mod normalize;
 pub mod prompt_links;
+pub use normalize::normalize_app_path;
 mod service;
 pub use service::UrlClient;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -371,7 +377,7 @@ pub fn path_for(route: &Route) -> Option<String> {
 }
 
 // TanStack stringifySearchWith JSON-quotes strings that JSON.parse would otherwise coerce.
-fn encode_search_string(value: &str) -> String {
+pub(crate) fn encode_search_string(value: &str) -> String {
     // RawValue accepts JSON numbers outside f64's range, just as JSON.parse does.
     let value = if serde_json::from_str::<Box<serde_json::value::RawValue>>(value).is_ok() {
         serde_json::Value::String(value.into()).to_string()
@@ -395,7 +401,7 @@ pub fn app_path(address: &str) -> Option<String> {
         return Some(address.into());
     }
     let (scheme, rest) = address.split_once("://")?;
-    if scheme.eq_ignore_ascii_case("t3code") {
+    if is_app_scheme(scheme) {
         return (!rest.starts_with('/')).then(|| format!("/{rest}"));
     }
     if !scheme.eq_ignore_ascii_case("https") && !scheme.eq_ignore_ascii_case("http") {
@@ -411,6 +417,14 @@ pub fn app_path(address: &str) -> Option<String> {
     } else {
         format!("/{tail}")
     })
+}
+
+pub(crate) fn is_app_scheme(scheme: &str) -> bool {
+    let scheme = scheme.to_ascii_lowercase();
+    scheme == "t3code"
+        || scheme.strip_prefix("t3code-").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|ch| ch.is_ascii_lowercase())
+        })
 }
 
 pub fn is_app_modal_page(pathname: &str) -> bool {
@@ -564,3 +578,18 @@ impl Route {
 
 #[cfg(test)]
 mod tests;
+
+/// Extracts a claimed app path; invalid addresses remain invalid for Route::parse.
+pub fn path_of(address: &str) -> String {
+    app_path(address).unwrap_or_else(|| address.into())
+}
+pub fn initial_route(address: Option<&str>, paired: bool) -> Route {
+    let route = address.map_or(Route::Home, |address| {
+        Route::parse(&normalize_app_path(&path_of(address)))
+    });
+    if route.is_standalone() || paired {
+        route
+    } else {
+        Route::Pair
+    }
+}

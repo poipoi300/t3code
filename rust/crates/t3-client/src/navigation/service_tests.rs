@@ -3,12 +3,15 @@ use crate::{platform::*, testing::FakePlatform};
 use futures::{channel::mpsc, executor::block_on};
 use std::{cell::RefCell, rc::Rc};
 
+type UrlReceiver = mpsc::UnboundedReceiver<Result<AppUrlSnapshot, PlatformError>>;
+
 #[derive(Clone, Default)]
 struct Host {
     fake: FakePlatform,
-    changes: Rc<RefCell<Option<mpsc::UnboundedReceiver<Result<AppUrlSnapshot, PlatformError>>>>>,
+    changes: Rc<RefCell<Option<UrlReceiver>>>,
     requests: Rc<RefCell<Vec<AppUrlRequest>>>,
     denied: Rc<RefCell<bool>>,
+    hold: Rc<RefCell<Option<futures::channel::oneshot::Receiver<()>>>>,
 }
 impl Storage for Host {
     fn get(&self, area: StorageArea, key: StorageKey) -> HostFuture<'_, Option<Vec<u8>>> {
@@ -62,10 +65,46 @@ impl Platform for Host {
                 return Err(PlatformError::Denied("navigation".into()));
             }
             self.requests.borrow_mut().push(request);
+            let hold = self.hold.borrow_mut().take();
+            if let Some(hold) = hold {
+                hold.await.map_err(|_| PlatformError::Closed)?;
+            }
             Ok(())
         }
         .boxed_local()
     }
+}
+
+#[test]
+fn traversal_and_following_navigation_are_serialized_and_cancellation_releases_the_lane() {
+    block_on(async {
+        let host = Host::default();
+        let (resume, held) = futures::channel::oneshot::channel();
+        *host.hold.borrow_mut() = Some(held);
+        let client = UrlClient::new(host.clone());
+        let mut close = client.navigate(AppUrlRequest::CloseModal(
+            super::super::CloseModal::GoThenPush {
+                delta: -2,
+                href: "/e/t".into(),
+            },
+        ));
+        let mut next = client
+            .clone()
+            .navigate(AppUrlRequest::Push("/usage".into()));
+        assert!(futures::poll!(close.as_mut()).is_pending());
+        assert!(futures::poll!(next.as_mut()).is_pending());
+        assert_eq!(host.requests.borrow().len(), 1);
+        resume.send(()).unwrap();
+        close.await.unwrap();
+        next.await.unwrap();
+        assert_eq!(host.requests.borrow().len(), 2);
+        let (_resume, held) = futures::channel::oneshot::channel();
+        *host.hold.borrow_mut() = Some(held);
+        let mut cancelled = client.navigate(AppUrlRequest::Go(-1));
+        assert!(futures::poll!(cancelled.as_mut()).is_pending());
+        drop(cancelled);
+        client.navigate(AppUrlRequest::Go(1)).await.unwrap();
+    });
 }
 fn snapshot(path: &str, index: u64) -> AppUrlSnapshot {
     AppUrlSnapshot {

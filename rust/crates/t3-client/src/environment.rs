@@ -361,6 +361,9 @@ pub struct EnvironmentRegistry<S> {
     retired: BTreeMap<EnvironmentId, (Generation, u64)>,
     catalog_bytes: Option<Vec<u8>>,
     authorization: Option<crate::authorization::RemoteAuthorization>,
+    /// Environments with a saved record that could not be read at load (an undecryptable or
+    /// unknown-shape profile, credential or token); they stay listed so they can be removed.
+    damaged: BTreeSet<EnvironmentId>,
 }
 impl<S> Default for EnvironmentRegistry<S> {
     fn default() -> Self {
@@ -368,6 +371,7 @@ impl<S> Default for EnvironmentRegistry<S> {
             entries: BTreeMap::new(),
             order: Vec::new(),
             retired: BTreeMap::new(),
+            damaged: BTreeSet::new(),
             catalog_bytes: None,
             authorization: None,
         }
@@ -436,6 +440,10 @@ impl<S> EnvironmentRegistry<S> {
                 .await?;
         }
         Ok((registry, change))
+    }
+    /// Whether a saved record of `environment` could not be read when the catalog loaded.
+    pub fn is_damaged(&self, environment: &EnvironmentId) -> bool {
+        self.damaged.contains(environment)
     }
     pub fn entries(&self) -> impl Iterator<Item = &EnvironmentRegistration> {
         self.order
@@ -976,9 +984,10 @@ impl<S> EnvironmentRegistry<S> {
             }
             // Unreadable: kept aside and replaced with an empty catalog, so pairing works again.
             Err(_) => {
-                let mut registry = Self::default();
-                registry.catalog_bytes = Some(quarantine_catalog(platform, bytes, time).await?);
-                return Ok(registry);
+                return Ok(Self {
+                    catalog_bytes: Some(quarantine_catalog(platform, bytes, time).await?),
+                    ..Self::default()
+                });
             }
         };
         if loaded.dropped_targets > 0 {
@@ -986,6 +995,24 @@ impl<S> EnvironmentRegistry<S> {
             quarantine_copy(platform, &bytes, time).await?;
         }
         let doc = loaded.document;
+        let mut damaged = BTreeSet::new();
+        for label in &loaded.damaged {
+            let Some((kind, id)) = label.split_once(' ') else {
+                continue;
+            };
+            match kind {
+                "connection-profile" | "connection-credential" => damaged.extend(
+                    doc.targets
+                        .iter()
+                        .filter(|target| target["connectionId"] == id)
+                        .filter_map(|target| target["environmentId"].as_str())
+                        .map(|environment| EnvironmentId(environment.into())),
+                ),
+                _ => {
+                    damaged.insert(EnvironmentId(id.into()));
+                }
+            }
+        }
         let mut registry = Self::default();
         let mut registrations: Vec<EnvironmentRegistration> = Vec::new();
         for target in doc.targets {
@@ -1048,6 +1075,7 @@ impl<S> EnvironmentRegistry<S> {
             registry.register_with_intent(registration, false, network, time, false)?;
         }
         registry.catalog_bytes = Some(bytes);
+        registry.damaged = damaged;
         Ok(registry)
     }
 }
@@ -1056,10 +1084,14 @@ fn quarantine_key(time: Time) -> StorageKey {
     StorageKey::new(
         "connection-catalog-quarantine",
         None,
-        &time.epoch_ms.to_string(),
+        time.epoch_ms.to_string(),
     )
 }
-async fn quarantine_copy(platform: &dyn Platform, bytes: &[u8], time: Time) -> Result<(), ClientError> {
+async fn quarantine_copy(
+    platform: &dyn Platform,
+    bytes: &[u8],
+    time: Time,
+) -> Result<(), ClientError> {
     platform
         .write(
             StorageArea::Ordinary,
@@ -1181,21 +1213,30 @@ async fn save_catalog_with(
                         environment: None,
                         record: route.id.clone(),
                     };
-                    let existing = platform.get(StorageArea::Secure, key.clone()).await?;
+                    // A profile that cannot be read (it failed authentication, or has a shape this
+                    // build does not know) keeps its route and its row as they are, so every
+                    // other environment can still be saved.
+                    let Ok(existing) = platform.get(StorageArea::Secure, key.clone()).await else {
+                        targets.push(target);
+                        continue;
+                    };
+                    let decoded = existing
+                        .as_ref()
+                        .map(|bytes| {
+                            crate::persistence::decode_record::<serde_json::Value>(bytes, &key, 1)
+                        })
+                        .transpose();
+                    let Ok(decoded) = decoded else {
+                        targets.push(target);
+                        continue;
+                    };
                     conditions.push(StorageCondition {
                         area: StorageArea::Secure,
                         key: key.clone(),
                         expected: existing.clone(),
                     });
-                    let mut profile = if let Some(bytes) = existing {
-                        crate::persistence::decode_record::<serde_json::Value>(&bytes, &key, 1)
-                            .map_err(|_| {
-                                ClientError::InvalidPayload(
-                                    "invalid saved connection profile; original record retained"
-                                        .into(),
-                                )
-                            })?
-                            .payload
+                    let mut profile = if let Some(record) = decoded {
+                        record.payload
                     } else {
                         serde_json::json!({"_tag":"BearerConnectionProfile", "connectionId":route.id, "environmentId":entry.id})
                     };

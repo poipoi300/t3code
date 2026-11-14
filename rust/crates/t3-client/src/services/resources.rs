@@ -592,6 +592,8 @@ impl<T> Stream for ResourceSubscription<T> {
         let mut observer = self.observer.borrow_mut();
         if let Some(revision) = observer.revision.take() {
             Poll::Ready(Some(revision))
+        } else if self.resource.is_closed() {
+            Poll::Ready(None)
         } else {
             observer.waker = Some(cx.waker().clone());
             Poll::Pending

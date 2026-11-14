@@ -397,15 +397,25 @@ pub trait Platform: Storage {
         async { Err(PlatformError::Unsupported("app URL".into())) }.boxed_local()
     }
     /// Current first, then resolved history/claimed-link changes. Drop releases host listeners.
-    fn app_url_changes(&self) -> LocalBoxStream<'static, Result<crate::navigation::AppUrlSnapshot, PlatformError>> {
-        futures::stream::once(async { Err(PlatformError::Unsupported("app URL history".into())) }).boxed_local()
+    fn app_url_changes(
+        &self,
+    ) -> LocalBoxStream<'static, Result<crate::navigation::AppUrlSnapshot, PlatformError>> {
+        futures::stream::once(async { Err(PlatformError::Unsupported("app URL history".into())) })
+            .boxed_local()
     }
     /// A GoThenPush reply settles only after traversal resolves and the push prunes forward history.
     fn navigate_app_url(&self, _request: crate::navigation::AppUrlRequest) -> HostFuture<'_, ()> {
         async { Err(PlatformError::Unsupported("app URL navigation".into())) }.boxed_local()
     }
-    fn text_download_supported(&self) -> bool { false }
-    fn download_text(&self, _filename: String, _contents: String, _media_type: String) -> HostFuture<'_, ()> {
+    fn text_download_supported(&self) -> bool {
+        false
+    }
+    fn download_text(
+        &self,
+        _filename: String,
+        _contents: String,
+        _media_type: String,
+    ) -> HostFuture<'_, ()> {
         async { Err(PlatformError::Unsupported("text download".into())) }.boxed_local()
     }
     fn notification_permission(&self) -> HostFuture<'_, bool> {
