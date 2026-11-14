@@ -368,3 +368,63 @@ async fn peer_link_registration_follows_the_linked_environments_setting_at_start
     assert_eq!(status, 200, "{body}");
     server.shutdown().await.unwrap();
 }
+
+/// Every request header the Rust clients send (t3-client and t3-platform's web and native HTTP)
+/// must pass a cross-origin preflight on every route group, with TypeScript's allow-list
+/// (`httpCors.ts`): GET/POST/OPTIONS, max-age 600, wildcard origin without credentials.
+#[tokio::test]
+async fn the_real_clients_preflight_passes_on_every_route_group() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = t3_server::runtime::start(inputs(temp.path())).await.unwrap();
+    let http = reqwest::Client::new();
+    let client_headers = [
+        "authorization",
+        "dpop",
+        "content-type",
+        "traceparent",
+        "x-t3-orchestration-protocol",
+    ];
+    for path in [
+        "/.well-known/t3/environment",
+        "/api/auth/session",
+        "/api/auth/browser-session",
+        "/api/auth/websocket-ticket/rpc",
+        "/api/orchestration/shell",
+        "/ws",
+    ] {
+        let preflight = http
+            .request(
+                reqwest::Method::OPTIONS,
+                format!("http://{}{path}", server.address),
+            )
+            .header("origin", "https://app.t3.codes")
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", client_headers.join(","))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(preflight.status(), 204, "{path}");
+        let headers = preflight.headers();
+        assert_eq!(headers["access-control-allow-origin"], "*", "{path}");
+        assert_eq!(headers["access-control-max-age"], "600", "{path}");
+        assert!(!headers.contains_key("access-control-allow-credentials"), "{path}");
+        let allowed = headers["access-control-allow-headers"].to_str().unwrap();
+        for header in client_headers {
+            assert!(allowed.split(',').any(|h| h.trim() == header), "{path}: {header}");
+        }
+        // TypeScript does not allow it either, so no client may send it cross-origin.
+        assert!(!allowed.contains("cache-control"), "{path}");
+        let methods = headers["access-control-allow-methods"].to_str().unwrap();
+        assert!(["GET", "POST", "OPTIONS"].iter().all(|m| methods.contains(m)), "{path}");
+    }
+    // The simple cross-origin read the descriptor needs carries the wildcard origin too.
+    let descriptor = http
+        .get(format!("http://{}/.well-known/t3/environment", server.address))
+        .header("origin", "https://app.t3.codes")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(descriptor.status(), 200);
+    assert_eq!(descriptor.headers()["access-control-allow-origin"], "*");
+    server.shutdown().await.unwrap();
+}

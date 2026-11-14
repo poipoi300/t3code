@@ -56,33 +56,41 @@ test(
             });
       if (index < 2) threads.unshift({ slug: index === 0 ? "thread-showcase" : "thread-multi-turn", thread });
     }
-    await t3.open();
     const settled = async () => {
       await expect(browser.locator("#boot-shell")).toBeHidden({ timeout: 120_000 });
       await expect(browser.locator("#root")).toHaveText(/\S/);
       await browser.evaluate("document.fonts.ready.then(() => true)");
     };
+    await t3.open();
+    await settled();
+    const environment = await browser.evaluate<string>(
+      'fetch("/.well-known/t3/environment").then((response) => response.json()).then((value) => value.environmentId)',
+    );
+    // Stay in the running client: reloading every route refetches the entire Vite module graph.
+    const navigate = (path: string) =>
+      browser.evaluate(
+        'async (path) => { await window.__TSR_ROUTER__.navigate({ to: path }); return true; }',
+        path,
+      );
     for (const size of SIZES) {
       await browser.setViewport({ width: size.width, height: size.height });
       for (const { slug, thread } of threads) {
-        await t3.open(thread);
+        await navigate(`/${environment}/${thread.threadId}`);
         await settled();
         await expect(browser.locator("#root")).toContainText(
           slug === "thread-showcase" ? "This turn is a replay." : "second fixture turn complete",
         );
+        if (slug === "thread-showcase") {
+          await expect(browser.locator(".chat-markdown-shiki")).toContainText("clamp(12, 0, 10)");
+        }
         await app.screenshot(`${size.name}-${slug}`);
       }
       for (const page of PAGES) {
-        if (page === "/settings/scheduled-tasks") {
-          await browser.locator('[data-settings-section="/settings/scheduled-tasks"]').tap();
-          await expect(browser).toHaveURL(/\/settings\/scheduled-tasks/);
-          await expect(browser.locator("#root")).toContainText("No scheduled tasks", {
-            timeout: 120_000,
-          });
-        } else {
-          await app.open(page);
-        }
+        await navigate(page);
         await settled();
+        if (page === "/connect-agent") {
+          await expect(browser.locator("#root")).toContainText("This sign-in cannot continue");
+        }
         await app.screenshot(`${size.name}-${page === "/" ? "home" : page.slice(1).replaceAll("/", "-")}`);
       }
     }

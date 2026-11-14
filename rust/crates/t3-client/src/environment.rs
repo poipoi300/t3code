@@ -137,7 +137,10 @@ pub async fn fetch_remote_environment_descriptor(
     let request = platform.http(HttpRequest {
         method: "GET".into(),
         url,
-        headers: BTreeMap::from([("cache-control".into(), "no-cache".into())]),
+        // No `cache-control`: the server's CORS allow-list (TypeScript `httpCors.ts`) does not
+        // include it, so a cross-origin browser preflight would refuse the descriptor read. The
+        // TypeScript client sends none, and the response carries no validators to cache on.
+        headers: BTreeMap::new(),
         body: Vec::new(),
         credentials: Credentials::Omit,
         max_response_bytes: 1024 * 1024,

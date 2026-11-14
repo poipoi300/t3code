@@ -118,13 +118,37 @@ impl InstanceSpec {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum UnavailableReason {
     Blocked(String),
     UnknownDriver,
     InvalidConfig(String),
     ReadingSecrets,
     UnreadableSecrets(Vec<String>),
+}
+impl std::fmt::Debug for UnavailableReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Blocked(_) => "Blocked([REDACTED])",
+            Self::UnknownDriver => "UnknownDriver",
+            Self::InvalidConfig(_) => "InvalidConfig([REDACTED])",
+            Self::ReadingSecrets => "ReadingSecrets",
+            Self::UnreadableSecrets(_) => "UnreadableSecrets([REDACTED])",
+        })
+    }
+}
+impl UnavailableReason {
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::Blocked(_) => "This provider is not available under the managed policy.",
+            Self::UnknownDriver => "This provider driver is not available.",
+            Self::InvalidConfig(_) => "This provider instance has invalid settings.",
+            Self::ReadingSecrets => "Reading provider secrets...",
+            Self::UnreadableSecrets(_) => {
+                "Could not read this provider instance's configured secrets."
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -197,6 +221,15 @@ impl InstanceRegistry {
             if !rebuild.contains(id)
                 && let Some(old) = previous.get(id)
                 && old.source == *entry
+                && match (&old.status, blocked.get(&entry.driver)) {
+                    (
+                        InstanceStatus::Unavailable(UnavailableReason::Blocked(previous)),
+                        Some(current),
+                    ) => previous == current,
+                    (InstanceStatus::Unavailable(UnavailableReason::Blocked(_)), None) => false,
+                    (_, Some(_)) => false,
+                    (_, None) => true,
+                }
                 && !matches!(
                     old.status,
                     InstanceStatus::Unavailable(UnavailableReason::ReadingSecrets)
@@ -332,8 +365,8 @@ impl InstanceRegistry {
             );
         }
         for (id, old) in &previous {
-            if matches!(old.status, InstanceStatus::Prepared(_))
-                && (rebuild.contains(id) || configs.get(id) != Some(&old.source))
+            if let InstanceStatus::Prepared(old)=&old.status
+                && !next.get(id).is_some_and(|next|matches!(&next.status,InstanceStatus::Prepared(next) if Arc::ptr_eq(old,next)))
             {
                 changes.retired.push(id.clone());
             }

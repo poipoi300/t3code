@@ -249,13 +249,56 @@ async fn config_field_secrets_are_resolved_and_deferred_or_invalid_instances_nev
 }
 
 #[tokio::test]
-async fn policy_changes_retire_live_instances_and_unblocking_rebuilds_unchanged_configuration(){
-    let registry=InstanceRegistry::new(core_driver_definitions());let fixture=Fixture::new(json!({}));let resolver=SecretResolver::new(OnePassword::with_executable(fixture.binary(),fixture.environment.clone()));let settings=settings(json!({}));let id=ProviderInstanceId("codex".into());let blocked=BTreeMap::from([("codex".into(),"Managed policy does not allow Codex.".into())]);
-    registry.reconcile(&settings,&resolver,&BTreeSet::new(),false,&BTreeMap::new()).await;
-    let changes=registry.reconcile(&settings,&resolver,&BTreeSet::new(),false,&blocked).await;assert_eq!(changes.retired,[id.clone()]);assert!(matches!(registry.get(&id).await.unwrap().status,InstanceStatus::Unavailable(UnavailableReason::Blocked(_))));
-    let changes=registry.reconcile(&settings,&resolver,&BTreeSet::new(),false,&BTreeMap::new()).await;assert_eq!(changes.prepared,[id.clone()]);prepared(&registry.get(&id).await.unwrap());assert!(fixture.calls().is_empty());
+async fn policy_changes_retire_live_instances_and_unblocking_rebuilds_unchanged_configuration() {
+    let registry = InstanceRegistry::new(core_driver_definitions());
+    let fixture = Fixture::new(json!({}));
+    let resolver = SecretResolver::new(OnePassword::with_executable(
+        fixture.binary(),
+        fixture.environment.clone(),
+    ));
+    let settings = settings(json!({}));
+    let id = ProviderInstanceId("codex".into());
+    let blocked = BTreeMap::from([(
+        "codex".into(),
+        "Managed policy does not allow Codex.".into(),
+    )]);
+    registry
+        .reconcile(
+            &settings,
+            &resolver,
+            &BTreeSet::new(),
+            false,
+            &BTreeMap::new(),
+        )
+        .await;
+    let changes = registry
+        .reconcile(&settings, &resolver, &BTreeSet::new(), false, &blocked)
+        .await;
+    assert_eq!(changes.retired, [id.clone()]);
+    assert!(matches!(
+        registry.get(&id).await.unwrap().status,
+        InstanceStatus::Unavailable(UnavailableReason::Blocked(_))
+    ));
+    let changes = registry
+        .reconcile(
+            &settings,
+            &resolver,
+            &BTreeSet::new(),
+            false,
+            &BTreeMap::new(),
+        )
+        .await;
+    assert_eq!(changes.prepared, [id.clone()]);
+    prepared(&registry.get(&id).await.unwrap());
+    assert!(fixture.calls().is_empty());
 }
 #[test]
-fn unavailable_reason_debug_does_not_echo_configuration_or_vault_details(){
-    for reason in [UnavailableReason::InvalidConfig("never-format-secret".into()),UnavailableReason::Blocked("never-format-secret".into()),UnavailableReason::UnreadableSecrets(vec!["never-format-secret".into()])]{assert!(!format!("{reason:?}").contains("never-format-secret"));}
+fn unavailable_reason_debug_does_not_echo_configuration_or_vault_details() {
+    for reason in [
+        UnavailableReason::InvalidConfig("never-format-secret".into()),
+        UnavailableReason::Blocked("never-format-secret".into()),
+        UnavailableReason::UnreadableSecrets(vec!["never-format-secret".into()]),
+    ] {
+        assert!(!format!("{reason:?}").contains("never-format-secret"));
+    }
 }
