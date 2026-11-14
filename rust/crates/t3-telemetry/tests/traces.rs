@@ -207,10 +207,8 @@ async fn local_spans_are_batched_off_the_ending_thread_and_keep_usage_counters()
         )
         .entered();
     });
-    // Ending the span only queues it; nothing reaches the sink until the batch is exported.
-    handle.sink.flush_sync().expect("flush sink");
-    let before = std::fs::read_to_string(&path).unwrap_or_default();
-    assert!(!before.contains("provider.turn"), "{before}");
+    // Ending the span only queues it in the processor; the sink receives it on export.
+    assert_eq!(handle.sink.buffered(), 0);
     handle.force_flush().await.expect("flush");
     let trace = std::fs::read_to_string(&path).expect("trace");
     let span: serde_json::Value = trace
@@ -303,4 +301,23 @@ async fn dropping_the_handle_without_shutdown_keeps_the_last_window() {
     drop(handle);
     let trace = std::fs::read_to_string(dir.path().join("server.trace.ndjson")).unwrap_or_default();
     assert_eq!(trace.matches("\"burst.span\"").count(), 3, "{trace}");
+}
+
+/// What `server.getTraceDiagnostics` does while the server runs: flush the sink, then read the
+/// file. Spans still queued in the local processor must be on disk by then, and after shutdown.
+#[tokio::test]
+async fn a_sink_flush_and_shutdown_write_spans_still_queued() {
+    let dir = tempfile::tempdir().expect("temp");
+    let path = dir.path().join("server.trace.ndjson");
+    let (dispatch, handle) = t3_telemetry::logging::build(local_logging(dir.path()))
+        .await
+        .expect("logging");
+    quiet_spans(&dispatch, 2);
+    handle.sink.flush().await.expect("sink flush");
+    let live = std::fs::read_to_string(&path).expect("trace file after a sink flush");
+    assert_eq!(live.matches("\"burst.span\"").count(), 2);
+    quiet_spans(&dispatch, 1);
+    handle.shutdown().await.expect("shutdown");
+    let after = std::fs::read_to_string(&path).expect("trace file after shutdown");
+    assert_eq!(after.matches("\"burst.span\"").count(), 3);
 }

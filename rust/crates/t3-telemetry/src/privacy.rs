@@ -4,7 +4,8 @@ use std::sync::LazyLock;
 
 // After a string start, quote or space, or opening a query, fragment (`/pair#token=`) or `;` part.
 static CREDENTIALS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(^|[?&#;\"\s])(wsTicket|dpop|token|access_token|refresh_token|id_token|api_key|apikey|password|secret)=([^&#\"\\\s]*)"#)
+    // A prefix is part of the name: `client_secret`, `private_token`, `auth_token`.
+    Regex::new(r#"(?i)(^|[?&#;\"\s])([\w-]*(?:wsTicket|dpop|token|api_key|apikey|password|secret))=([^&#\"\\\s]*)"#)
         .expect("static credential pattern")
 });
 // OAuth `code` and `state` only inside a URL's query or fragment: `exit code=1` stays readable.
@@ -12,10 +13,16 @@ static OAUTH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)([?&#;])(code|state)=([^&#\"\\\s]*)"#).expect("static OAuth pattern")
 });
 static BEARER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+").expect("static bearer pattern")
+    Regex::new(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+").expect("static bearer pattern")
 });
+// A header written out in text, such as `x-api-key: …` or `Authorization: …`: the rest of the line.
+static HEADER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?im)\b((?:proxy-)?authorization|(?:set-)?cookie|[\w-]*api[-_]?key|[\w-]*token|[\w-]*secret)[ \t]*:[ \t]*[^\r\n]+")
+        .expect("static header pattern")
+});
+// User info runs to the authority's last `@`, as WHATWG URL parsing splits it.
 static URL_USERINFO: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)([a-z][a-z0-9+.-]*://)[^/\s@\"\\]+@"#).expect("static URL user-info pattern")
+    Regex::new(r#"(?i)([a-z][a-z0-9+.-]*://)[^/?#\s\"\\]*@"#).expect("static URL user-info pattern")
 });
 static CLI_PRIVATE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)(^|\s)(--?(?:api[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token|token|password|secret|prompt|message|p))(=|\s+)(?:\"[^\"]*\"|'[^']*'|[^\s]+)"#)
@@ -26,7 +33,8 @@ pub fn redact_text(text: &str) -> String {
     let redacted = URL_USERINFO.replace_all(text, "$1<redacted>@");
     let redacted = CREDENTIALS.replace_all(&redacted, "$1$2=<redacted>");
     let redacted = OAUTH.replace_all(&redacted, "$1$2=<redacted>");
-    let redacted = BEARER.replace_all(&redacted, "Bearer <redacted>");
+    let redacted = BEARER.replace_all(&redacted, "$1 <redacted>");
+    let redacted = HEADER.replace_all(&redacted, "$1: <redacted>");
     CLI_PRIVATE
         .replace_all(&redacted, "$1$2$3<redacted>")
         .into_owned()

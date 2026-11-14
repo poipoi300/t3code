@@ -38,6 +38,8 @@ struct SinkState {
     write: Mutex<()>,
     dropped: AtomicU64,
     notify: tokio::sync::Notify,
+    /// Takes spans still queued in the local span processor into this sink.
+    upstream: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 struct Buffer {
     records: Vec<Vec<u8>>,
@@ -77,6 +79,7 @@ impl TraceSink {
                 write: Mutex::new(()),
                 dropped: AtomicU64::new(0),
                 notify: tokio::sync::Notify::new(),
+                upstream: std::sync::OnceLock::new(),
             }),
         })
     }
@@ -106,7 +109,21 @@ impl TraceSink {
     pub fn dropped(&self) -> u64 {
         self.inner.dropped.load(Ordering::Relaxed)
     }
+    /// Records waiting in this sink for the next write.
+    pub fn buffered(&self) -> usize {
+        self.inner
+            .buffer
+            .lock()
+            .map_or(0, |buffer| buffer.records.len())
+    }
+    fn set_upstream(&self, flush: impl Fn() + Send + Sync + 'static) {
+        let _ = self.inner.upstream.set(Box::new(flush));
+    }
+    /// Writes every record so far, including spans the local processor still queues.
     pub fn flush_sync(&self) -> Result<()> {
+        if let Some(upstream) = self.inner.upstream.get() {
+            upstream();
+        }
         let _write = self.inner.write.lock().map_err(|_| Error::WorkerStopped)?;
         let records = {
             let mut buffer = self.inner.buffer.lock().map_err(|_| Error::WorkerStopped)?;
@@ -265,6 +282,31 @@ fn clean_span(span: &mut SpanData, timing: bool) {
     if let Status::Error { description } = &mut span.status {
         *description = privacy::redact_text(description).into();
     }
+}
+
+/// The local span processor, which the sink also holds (weakly) so that every sink flush first
+/// takes the spans still queued: diagnostics reads, `Drop` without `shutdown`, and the writer.
+#[derive(Clone, Debug)]
+struct LocalProcessor(Arc<BatchSpanProcessor>);
+impl opentelemetry_sdk::trace::SpanProcessor for LocalProcessor {
+    fn on_start(&self, span: &mut opentelemetry_sdk::trace::Span, cx: &opentelemetry::Context) {
+        self.0.on_start(span, cx);
+    }
+    fn on_end(&self, span: SpanData) {
+        self.0.on_end(span);
+    }
+    fn force_flush(&self) -> OTelSdkResult {
+        self.0.force_flush()
+    }
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        self.0.shutdown_with_timeout(timeout)
+    }
+}
+/// The local queue must not be what drops a burst: the synchronous exporter it replaced kept
+/// every span the sink could hold, and the sink holds max(trace file size, 4 MiB) of records.
+/// A span record is at least about 256 bytes, so this many spans fill the sink first.
+fn local_queue_size(options: &TraceOptions) -> usize {
+    (options.max_bytes.max(4 * 1024 * 1024) / 256).max(2_048)
 }
 
 #[derive(Debug)]
@@ -594,9 +636,31 @@ pub async fn build(options: LoggingOptions) -> Result<(tracing::Dispatch, Teleme
     let sink = TraceSink::new(options.trace.clone())?;
     let resource = resource(&options);
     let config = options.telemetry.clone();
-    let local = sink.clone();
+    let local = LocalProcessor(Arc::new(
+        BatchSpanProcessor::builder(LocalExporter {
+            sink: sink.clone(),
+            timing: options.trace_timing_enabled,
+        })
+        .with_batch_config(
+            // Delay, queue and batch size are set, so no `OTEL_BSP_*` variable changes them.
+            opentelemetry_sdk::trace::BatchConfigBuilder::default()
+                .with_scheduled_delay(options.trace.batch_window)
+                .with_max_queue_size(local_queue_size(&options.trace))
+                .with_max_export_batch_size(512)
+                .build(),
+        )
+        .build(),
+    ));
+    sink.set_upstream({
+        let processor = Arc::downgrade(&local.0);
+        move || {
+            if let Some(processor) = processor.upgrade() {
+                let _ = opentelemetry_sdk::trace::SpanProcessor::force_flush(&*processor);
+            }
+        }
+    });
+    let local_processor = local;
     let timing = options.trace_timing_enabled;
-    let local_window = options.trace.batch_window;
     let (provider, meter_provider, logger_provider) =
         tokio::task::spawn_blocking(move || -> Result<_> {
             let client = crate::http::blocking_client_builder()
@@ -608,18 +672,7 @@ pub async fn build(options: LoggingOptions) -> Result<(tracing::Dispatch, Teleme
             let mut provider = SdkTracerProvider::builder()
                 .with_sampler(Sampler::AlwaysOn)
                 .with_resource(resource.clone())
-                .with_span_processor(
-                    BatchSpanProcessor::builder(LocalExporter {
-                        sink: local,
-                        timing,
-                    })
-                    .with_batch_config(
-                        opentelemetry_sdk::trace::BatchConfigBuilder::default()
-                            .with_scheduled_delay(local_window)
-                            .build(),
-                    )
-                    .build(),
-                );
+                .with_span_processor(local_processor);
             if let Some(endpoint) = otlp::endpoint(&config, OtlpSignal::Traces) {
                 let exporter = opentelemetry_otlp::SpanExporter::builder()
                     .with_http()
