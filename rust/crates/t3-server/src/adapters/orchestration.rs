@@ -94,7 +94,11 @@ pub struct OrchestrationAdapter {
     provider_source: Option<Arc<crate::adapters::native_providers::ProviderSource>>,
     /// Set by the first shutdown; native providers stop this runtime before the provider domain.
     stopped: std::sync::atomic::AtomicBool,
+    /// The repository each checkpoint scope was bound to (t3-git H-1), kept in the state folder.
+    repository_bindings: Option<Arc<RepositoryBindings>>,
 }
+
+type RepositoryBindings = t3_orchestration::runtime::repository_bindings::FileRepositoryBindings;
 
 type ProviderSnapshots = tokio::sync::watch::Sender<Arc<Vec<t3_contracts::server::ServerProvider>>>;
 
@@ -216,7 +220,20 @@ impl OrchestrationAdapter {
         }
         // Native instances join once the provider domain has started (`native_providers`).
         let provider_source = crate::adapters::native_providers::ProviderSource::new(registrations);
-        let checkpoints = Arc::new(GitCheckpointBackend::new(t3_git::Git::new));
+        // Every checkpoint operation runs against the repository saved for its scope, after
+        // restarts too (t3-git H-1).
+        let repository_bindings = Arc::new(RepositoryBindings::new(
+            context
+                .local
+                .config
+                .paths
+                .state_dir
+                .join("repository-bindings.json"),
+        ));
+        let checkpoints = Arc::new(
+            GitCheckpointBackend::new(t3_git::Git::new)
+                .with_repository_bindings(repository_bindings.clone()),
+        );
         let mut ports = RuntimePorts::new(
             StoreDatabase(context.database.clone()),
             Arc::new(AdapterRegistry::from_instance_source(
@@ -286,14 +303,36 @@ impl OrchestrationAdapter {
             tracing::warn!(phase = ?failure.phase, thread = ?failure.thread_id, error = %failure.cause, "delegated task recovery failed");
         }
         log_lifecycle_failures(&runtime);
+        let runtime = Arc::new(runtime);
+        bind_project_folders(&runtime, context.shutdown.clone())?;
         Ok(Arc::new(Self {
             transport: runtime.transport.clone(),
             events: Arc::new(runtime.events.clone()),
-            runtime: Some(Arc::new(runtime)),
+            runtime: Some(runtime),
             provider_snapshots: Some(provider_snapshots),
             provider_source: Some(provider_source),
             stopped: Default::default(),
+            repository_bindings: Some(repository_bindings),
         }))
+    }
+
+    /// The repository saved for `scope` (t3-git H-1), for Git reads outside checkpoint operations:
+    /// apply it with `Git::with_repository_binding`, which refuses with `RepositoryChanged` when
+    /// the folder now belongs elsewhere. `None` when the scope was never bound. Keys are the
+    /// folder exactly as the project or thread records it.
+    pub async fn repository_binding(
+        &self,
+        scope: &std::path::Path,
+    ) -> OrchestrationResult<Option<t3_git::RepositoryBinding>> {
+        use t3_orchestration::api::RepositoryBindingStore;
+        let Some(bindings) = &self.repository_bindings else {
+            return Ok(None);
+        };
+        Ok(bindings
+            .get(scope)
+            .await?
+            .map(serde_json::from_value)
+            .transpose()?)
     }
 
     /// Every committed project and orchestration event, shared rather than cloned per receiver.
@@ -413,6 +452,7 @@ impl OrchestrationAdapter {
             provider_snapshots: None,
             provider_source: None,
             stopped: Default::default(),
+            repository_bindings: None,
         }
     }
 
@@ -828,3 +868,59 @@ impl crate::services::DomainRuntime for OrchestrationAdapter {
         })
     }
 }
+
+/// Binds each project folder when a project is created or re-rooted (t3-git H-1): project
+/// commands from RPC, MCP, cloning and start-up bootstrap all commit here. A turn's first
+/// checkpoint operation binds the same way, so a folder is bound before any agent writes.
+#[cfg(feature = "local-services")]
+fn bind_project_folders(
+    runtime: &Arc<t3_orchestration::composition::OrchestrationRuntime>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> crate::Result<()> {
+    use t3_contracts::application_event::{ApplicationProjectEvent, ApplicationStoredEvent};
+    use t3_orchestration::api::EventCommitter;
+    use tokio::sync::broadcast::error::RecvError;
+    let mut events = runtime
+        .events
+        .subscribe_shared()
+        .map_err(|e| crate::Error::Service(e.to_string()))?;
+    let runtime = Arc::downgrade(runtime);
+    tokio::spawn(async move {
+        loop {
+            let event = tokio::select! {
+                () = shutdown.cancelled() => return,
+                event = events.recv() => event,
+            };
+            let root = match event {
+                Ok(event) => match event.as_ref() {
+                    ApplicationStoredEvent::Project(event) => match event.as_ref() {
+                        ApplicationProjectEvent::Created(event) => {
+                            Some(event.payload.workspace_root.0.clone())
+                        }
+                        ApplicationProjectEvent::MetaUpdated(event) => event
+                            .payload
+                            .workspace_root
+                            .clone()
+                            .flatten()
+                            .map(|root| root.0),
+                        ApplicationProjectEvent::Deleted(_) => None,
+                    },
+                    ApplicationStoredEvent::Orchestration(_) => None,
+                },
+                Err(RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "project binder missed events; their folders bind at first checkpoint");
+                    None
+                }
+                Err(RecvError::Closed) => return,
+            };
+            let (Some(root), Some(runtime)) = (root, runtime.upgrade()) else {
+                continue;
+            };
+            if let Err(error) = runtime.bind_repository(root.into()).await {
+                tracing::warn!(%error, "could not record a project folder's repository");
+            }
+        }
+    });
+    Ok(())
+}
+

@@ -1046,6 +1046,7 @@ async fn discovery_probes_once_for_calls_close_together() {
 async fn remote_status(s: &mut Server) -> Value {
     loop {
         let event = s.chunk().await;
+        eprintln!("status event: {event}");
         if !event["remote"].is_null() {
             return event["remote"].clone();
         }
@@ -1108,9 +1109,18 @@ async fn vcs_status_carries_the_pull_request_from_the_checkouts_forge() {
 
     for (name, setup) in [("no-forge", None), ("signed-out", Some("logged-out"))] {
         let repo = match setup {
+            // A remote no forge recognises: a local bare repository the branch tracks.
             None => {
                 let repo = s.home().join(name);
                 repository(&repo);
+                let plain = s.home().join(format!("{name}.git"));
+                bare(&plain, Some(&repo));
+                git(
+                    &repo,
+                    &["remote", "add", "origin", &plain.to_string_lossy()],
+                );
+                git(&repo, &["fetch", "-q", "origin"]);
+                git(&repo, &["branch", "--set-upstream-to=origin/main"]);
                 repo
             }
             Some(branch) => published(branch, name, &s),

@@ -12,7 +12,7 @@ use t3_workspace::scripts::{RunScriptResult, ScriptRunner, ScriptTrigger};
 pub struct ProjectSetupAdapter {
     runner: ProjectSetupScriptRunner,
     /// The terminal adapter's admission: a script waits while a file restore holds its thread.
-    gate: Arc<crate::adapters::terminal::ThreadGate>,
+    gate: Arc<crate::writers::FolderGate>,
 }
 
 /// The setup runner behind the terminal adapter's admission.
@@ -23,7 +23,15 @@ impl GatedRunner<'_> {
         &self,
         input: SetupScriptInput<'_>,
     ) -> Result<RunScriptResult, t3_project::Error> {
-        let _admitted = self.0.gate.enter(&input.thread_id.0).await;
+        let _admitted = self
+            .0
+            .gate
+            .enter(
+                "a setup script",
+                Some(&input.thread_id.0),
+                Some(Path::new(input.worktree_path)),
+            )
+            .await;
         self.0.runner.run_for_thread(input).await
     }
 }

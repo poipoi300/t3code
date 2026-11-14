@@ -42,6 +42,7 @@ fn main() -> ExitCode {
             "review_guides_check_out_in_isolation_and_leave_nothing_behind",
             || Box::pin(review_guides()),
         ),
+        ("diagnose_identity", || Box::pin(diagnose_identity())),
     ];
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.iter().any(|argument| argument == "--list") {
@@ -978,6 +979,29 @@ fn nothing_left(repo: &Path, worktrees: &Path, marker: &Path) {
     assert!(!marker.exists(), "the post-checkout hook ran");
 }
 
+/// The agent's report for a guide run, or the run's failure when it ended before an agent
+/// started (its cleanup arrives first).
+async fn agent_report(s: &mut Server, reports: &mut Reports, reference: &Value) -> Value {
+    enum First {
+        Report(Value),
+        Cleanup,
+    }
+    let first = tokio::select! {
+        report = reports.next() => First::Report(report),
+        _ = s.cleanups.recv() => First::Cleanup,
+    };
+    match first {
+        First::Report(report) => report,
+        First::Cleanup => {
+            let state = s.call("pullRequests.reviewGuide", reference.clone()).await;
+            panic!(
+                "the guide run ended before an agent started: {}",
+                serde_json::to_value(state).unwrap()
+            );
+        }
+    }
+}
+
 async fn review_guides() {
     use review::{Binder, Daemon, FakeHost};
     use std::sync::Arc;
@@ -1065,7 +1089,7 @@ async fn review_guides() {
         .call("pullRequests.generateReviewGuide", reference.clone())
         .await);
     assert_eq!(started["run"]["_tag"], "Running", "{started}");
-    let report = reports.next().await;
+    let report = agent_report(&mut s, &mut reports, &reference).await;
     let cwd = PathBuf::from(report["cwd"].as_str().unwrap());
     assert!(
         canonical(&cwd).starts_with(canonical(&worktrees)),
@@ -1104,7 +1128,7 @@ async fn review_guides() {
         s.call("pullRequests.generateReviewGuide", reference.clone())
             .await,
     );
-    assert_eq!(reports.next().await["mode"], "fail");
+    assert_eq!(agent_report(&mut s, &mut reports, &reference).await["mode"], "fail");
     s.cleanups.recv().await.expect("cleanup");
     let failed = ok(s.call("pullRequests.reviewGuide", reference.clone()).await);
     assert_eq!(failed["run"]["_tag"], "Failed", "{failed}");
@@ -1130,8 +1154,32 @@ async fn review_guides() {
         s.call("pullRequests.generateReviewGuide", reference.clone())
             .await,
     );
-    assert_eq!(reports.next().await["mode"], "hang");
+    assert_eq!(agent_report(&mut s, &mut reports, &reference).await["mode"], "hang");
     s.shutdown().await;
     nothing_left(&repo, &worktrees, &marker);
+    drop(daemon);
+}
+
+async fn diagnose_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let served = temp.path().join("served");
+    std::fs::create_dir_all(served.join("owner")).unwrap();
+    let seed = temp.path().join("seed");
+    repository(&seed);
+    git(&served.join("owner"), &["clone", "-q", "--bare", &seed.to_string_lossy(), "repo.git"]);
+    let daemon = review::Daemon::start(&served).await;
+    let remote = format!("git://127.0.0.1:{}/owner/repo.git", daemon.port);
+    let repo = temp.path().join("work").join("review");
+    std::fs::create_dir_all(repo.parent().unwrap()).unwrap();
+    git(temp.path(), &["clone", "-q", &remote, &repo.to_string_lossy()]);
+    let listing = git(&repo, &["remote", "-v"]);
+    println!("remote -v: {listing:?}");
+    let remotes = t3_project::identity::parse_fetch_urls(&listing);
+    println!("parsed: {remotes:?}");
+    println!("picked: {:?}", t3_project::identity::pick_primary_remote(&remotes, ""));
+    println!("key: {}", t3_git::remote_repository_key(&remote));
+    let resolver = t3_project::identity::RepositoryIdentityResolver::default();
+    let identity = resolver.resolve(&repo.to_string_lossy(), true).await;
+    println!("identity: {}", serde_json::to_string(&identity).unwrap());
     drop(daemon);
 }

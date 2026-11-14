@@ -386,6 +386,10 @@ async fn start_domains(
     )?;
     #[cfg(feature = "host")]
     domains.insert_runtime(crate::adapters::host::HostAdapter::start(&context).await?)?;
+    // Terminals, setup scripts, file writes and Git actions wait while a restore holds their
+    // folder (t3-git H-2).
+    let writer_gate = Arc::new(crate::writers::FolderGate::default());
+    domains.insert(writer_gate.clone())?;
     #[cfg(feature = "workspace")]
     let workspaces = crate::workspaces::EnvironmentWorkspaces::new(&context);
     #[cfg(any(feature = "providers", feature = "forge"))]
@@ -420,7 +424,10 @@ async fn start_domains(
     domains.insert(crate::workspaces::workspace_adapter(&context, workspaces).await?)?;
     #[cfg(feature = "terminal")]
     {
-        domains.insert_runtime(crate::adapters::terminal::TerminalAdapter::start(&context)?)?;
+        domains.insert_runtime(crate::adapters::terminal::TerminalAdapter::start(
+            &context,
+            writer_gate.clone(),
+        )?)?;
         domains.insert(crate::workspaces::terminal_transport())?;
     }
     #[cfg(feature = "preview")]
@@ -470,17 +477,14 @@ async fn start_domains(
     ))]
     let launch_ports = None;
     // A file restore holds the thread's terminals, setup scripts included (t3-git H-2).
-    #[cfg(all(feature = "orchestration", feature = "terminal", feature = "workspace"))]
+    #[cfg(all(feature = "orchestration", feature = "terminal"))]
     let writers = domains
         .get::<crate::adapters::terminal::TerminalAdapter>()
         .map(|terminal| {
             Arc::new(crate::adapters::terminal::TerminalWriters(terminal))
                 as Arc<dyn t3_orchestration::api::ThreadWriters>
         });
-    #[cfg(all(
-        feature = "orchestration",
-        not(all(feature = "terminal", feature = "workspace"))
-    ))]
+    #[cfg(all(feature = "orchestration", not(feature = "terminal")))]
     let writers = None;
     #[cfg(all(feature = "orchestration", feature = "workspace"))]
     let managed_worktrees = authority.managed_directories().await;

@@ -14,6 +14,7 @@ pub mod shutdown;
     any(feature = "workspace", feature = "terminal")
 ))]
 pub mod workspaces;
+pub mod writers;
 pub mod ws;
 
 #[derive(Debug, thiserror::Error)]

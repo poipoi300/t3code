@@ -110,8 +110,10 @@ impl Server {
             r#"{"schemaVersion":1,"organization":"Acme","limits":{"maxRuntimeMode":"auto-accept-edits"}}"#,
         )
         .unwrap();
+        // A real server's terminals inherit its full environment; setup scripts need at least
+        // `PATH` and, on Windows, `PATHEXT` (without it PowerShell loses native exit codes).
         let mut env: std::collections::BTreeMap<String, String> =
-            ["SystemRoot", "ComSpec", "WINDIR"]
+            ["SystemRoot", "ComSpec", "WINDIR", "PATH", "PATHEXT"]
                 .into_iter()
                 .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_owned(), v)))
                 .collect();
@@ -747,11 +749,9 @@ async fn setup_scripts_publish_output_and_their_end_on_the_setup_stream() {
     s.insert_project("project-pass", &passing, &script("echo t3-setup-output"));
     let failing = s.home().join("failing");
     repository(&failing);
-    // On Windows the terminal's shell is PowerShell, which sets the status itself here: a native
-    // child's exit code (`cmd.exe /c exit 3`) currently reaches the runner as 0 (t3-workspace
-    // request in `server-seam-requests.md`).
+    // A native program that exits non-zero, as a failing `npm install` would.
     let exit_three = if cfg!(windows) {
-        "$global:LASTEXITCODE = 3".to_owned()
+        "cmd.exe /c exit 3".to_owned()
     } else {
         "sh -c 'exit 3'".to_owned()
     };
