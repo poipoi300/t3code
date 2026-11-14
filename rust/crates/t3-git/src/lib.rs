@@ -23,7 +23,7 @@ mod worktree_progress;
 pub use actions::{CheckoutRefresh, parse_commit_message};
 pub use actions::{CommitOptions, PreparedCommit, PushTarget};
 pub use application::{GitActionEffects, GitActionSubscription, GitApplicationService};
-pub use binding::RepositoryBinding;
+pub use binding::{FileId, REPOSITORY_BINDING_VERSION, RepositoryBinding, RepositoryIds};
 pub use broadcaster::{
     DEFAULT_VCS_FETCH_INTERVAL, DisabledVcsPolling, VcsBranchChange, VcsBranchChangesSubscription,
     VcsBranchSubscription, VcsStatusBroadcaster, VcsStatusPolicy, VcsStatusSubscription,
@@ -567,7 +567,14 @@ impl Git {
         }
         let output = reader
             .execute(
-                &["status", "--porcelain=2", "--branch", "-z"],
+                // Re-review 4 F5: no Git (or planted configuration) runs inside submodules.
+                &[
+                    "status",
+                    "--porcelain=2",
+                    "--branch",
+                    "-z",
+                    "--ignore-submodules=dirty",
+                ],
                 ExecuteOptions {
                     max_output_bytes: 16 * 1024 * 1024,
                     output_mode: OutputMode::Error,

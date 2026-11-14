@@ -225,11 +225,70 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         file_link(&f.outside.join("flow.js"), &path);
         assert!(f.files.open(&path).is_err());
-        // The path's own identity is the link's, never the outside file's.
+        // The path's own identity is the link's: neither the recorded file's nor the target's.
         let now = f.files.lstat_identity(&path).unwrap();
         assert_ne!(now, recorded);
+        let target = ContainedFiles::new(&f.outside)
+            .open(&paths::canonicalize(f.outside.join("flow.js")).unwrap())
+            .unwrap()
+            .stat()
+            .unwrap()
+            .identity;
+        assert_ne!(now, target, "lstat_identity followed the link");
         let outside = f.files.open(&f.outside.join("flow.js"));
         assert!(outside.is_err(), "a path outside the root opens");
+    }
+
+    /// A hard link is the same file as its outside target, so no identity check can tell; a
+    /// regular file with more than one link is refused, as `ScopedDir::check_file` does.
+    #[test]
+    fn a_hard_linked_file_is_refused() {
+        let f = fixture();
+        let hard = f.root.join("session/hard.js");
+        std::fs::hard_link(f.outside.join("flow.js"), &hard).unwrap();
+        let path = f.files.realpath(&hard).unwrap();
+        assert!(f.files.open(&path).is_err(), "a hard link to an outside file opened");
+    }
+
+    /// Resolution itself is confined: a path not lexically inside the root is refused before any
+    /// filesystem call, the same way whether it exists, is missing or is a directory.
+    #[test]
+    fn paths_outside_the_root_are_refused_alike_before_resolution() {
+        let f = fixture();
+        std::fs::create_dir(f.outside.join("dir.js")).unwrap();
+        let mut kinds = Vec::new();
+        for path in [
+            f.outside.join("flow.js"),
+            f.outside.join("absent.js"),
+            f.outside.join("dir.js"),
+            f.root.join("session").join("..").join("..").join("outside").join("flow.js"),
+        ] {
+            let error = f.files.realpath(&path).expect_err("outside the root resolved");
+            kinds.push((error.kind(), error.to_string()));
+        }
+        assert!(kinds.windows(2).all(|pair| pair[0] == pair[1]), "{kinds:?}");
+        assert!(f.files.realpath(&f.root).is_ok());
+    }
+
+    /// While the file is open, Windows refuses to replace it (the handle denies delete sharing);
+    /// elsewhere the replacement lands and the path's identity no longer matches the handle's,
+    /// which the caller reports as `changed-during-read`.
+    #[test]
+    fn a_file_replaced_after_opening_is_detected_or_refused() {
+        let f = fixture();
+        let path = f.files.realpath(&f.root.join("session/flow.js")).unwrap();
+        let opened = f.files.open(&path).unwrap();
+        let identity = opened.stat().unwrap().identity;
+        let replacement = f.root.join("session/new.js");
+        std::fs::write(&replacement, "replaced").unwrap();
+        let replaced = std::fs::rename(&replacement, &path);
+        if cfg!(windows) {
+            assert!(replaced.is_err(), "an open file was replaced");
+            assert_eq!(f.files.lstat_identity(&path).unwrap(), identity);
+        } else {
+            replaced.unwrap();
+            assert_ne!(f.files.lstat_identity(&path).unwrap(), identity);
+        }
     }
 
     #[test]
@@ -247,6 +306,23 @@ mod tests {
         std::fs::rename(&nested, f.root.join("moved/old-inner")).unwrap();
         dir_link(&f.outside, &nested);
         assert!(f.files.open(&deep).is_err());
+    }
+
+    /// A junction (no privilege needed to create one) swapped into an ancestor is refused too.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_in_an_ancestor_is_refused() {
+        let f = fixture();
+        let path = f.files.realpath(&f.root.join("session/flow.js")).unwrap();
+        std::fs::rename(f.root.join("session"), f.root.join("moved")).unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(f.root.join("session"))
+            .arg(&f.outside)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+        assert!(f.files.open(&path).is_err());
     }
 
     #[test]

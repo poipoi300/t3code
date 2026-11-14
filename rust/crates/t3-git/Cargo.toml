@@ -31,7 +31,10 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "test-util", "net", "io-util"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_Ioctl"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_Ioctl", "Win32_Storage_FileSystem"] }
+# Volume serial number and file index from a handle (repository identity), without unsafe code.
+cap-std = "3"
+cap-fs-ext = "3"
 
 [target.'cfg(windows)'.dev-dependencies]
 junction = "2"
