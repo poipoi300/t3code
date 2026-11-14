@@ -75,7 +75,10 @@ struct HistoryMessage {
     created_at: Value,
 }
 
-/// TypeScript `messageEvents`.
+/// TypeScript `messageEvents`, except the provenance: a replayed session is the agent's account
+/// of the conversation, so its items say `creationSource: "provider"` (TypeScript: `"server"`).
+/// `createdBy` stays as TypeScript has it, so the thread reads the same; handoffs label these
+/// items (`context_handoff_service`, `context_handoff_delivery`).
 fn message_events(thread: &ThreadId, index: usize, message: &HistoryMessage) -> Vec<Value> {
     let suffix = format!("{index:06}");
     let message_id = format!("{}:{suffix}", thread.0);
@@ -92,7 +95,7 @@ fn message_events(thread: &ThreadId, index: usize, message: &HistoryMessage) -> 
     let user = message.role == "user";
     if user {
         item["createdBy"] = json!("user");
-        item["creationSource"] = json!("server");
+        item["creationSource"] = json!("provider");
         item["type"] = json!("user_message");
         item["inputIntent"] = json!("turn_start");
         item["attachments"] = json!([]);
@@ -103,7 +106,7 @@ fn message_events(thread: &ThreadId, index: usize, message: &HistoryMessage) -> 
     item["messageId"] = json!(message_id);
     item["text"] = json!(message.text);
     vec![
-        json!({"id":format!("{IMPORT_EVENT_PREFIX}:message:{}:{suffix}",thread.0),"type":"message.updated","threadId":thread,"occurredAt":at,"payload":{"createdBy":if user {"user"} else {"agent"},"creationSource":"server","id":message_id,"threadId":thread,"runId":null,"nodeId":null,"role":message.role,"text":message.text,"attachments":[],"streaming":false,"createdAt":at,"updatedAt":at}}),
+        json!({"id":format!("{IMPORT_EVENT_PREFIX}:message:{}:{suffix}",thread.0),"type":"message.updated","threadId":thread,"occurredAt":at,"payload":{"createdBy":if user {"user"} else {"agent"},"creationSource":"provider","id":message_id,"threadId":thread,"runId":null,"nodeId":null,"role":message.role,"text":message.text,"attachments":[],"streaming":false,"createdAt":at,"updatedAt":at}}),
         turn_item(item),
     ]
 }
@@ -114,6 +117,16 @@ fn read_failed(detail: impl std::fmt::Display) -> Error {
         detail: format!("Could not read the native session history: {detail}"),
         payload: None,
     })
+}
+
+/// Whether the history read may open the instance's session: only an enabled instance. Turns
+/// get the same refusal from the session manager; the import opens the adapter itself.
+pub fn history_read_admitted(enabled: bool) -> Result<()> {
+    if enabled {
+        Ok(())
+    } else {
+        Err(read_failed("the provider instance is disabled"))
+    }
 }
 
 /// Imports the native history of `thread` if it is still pending; returns how many messages
@@ -151,11 +164,16 @@ pub async fn import_native_history(
         serde_json::to_value(&provider_thread)?["nativeMetadata"]["itemIdentityVersion"]
             .as_u64()
             .and_then(|version| u8::try_from(version).ok());
+    let instance = records.thread.model_selection.instance_id.clone();
+    history_read_admitted(
+        runtime
+            .providers()
+            .metadata(instance.clone())
+            .await?
+            .enabled,
+    )?;
     // The registry admits this open against sign-in changes, like any other open.
-    let adapter = runtime
-        .providers()
-        .adapter(records.thread.model_selection.instance_id.clone())
-        .await?;
+    let adapter = runtime.providers().adapter(instance).await?;
     let cwd = app["worktreePath"]
         .as_str()
         .map(std::path::PathBuf::from)
@@ -170,13 +188,18 @@ pub async fn import_native_history(
                         runtime.ids().next(IdKind::ProviderSession),
                     ),
                     model_selection: records.thread.model_selection.clone(),
+                    // Reading history runs no turn; nothing it asks for may run unasked, and nobody
+                    // can answer during an import, so the read is approval-required whatever the
+                    // thread's mode (TypeScript passes the thread's mode).
                     runtime_policy: RuntimePolicy {
-                        runtime_mode: records.thread.runtime_mode,
+                        runtime_mode: t3_contracts::provider_policy::RuntimeMode::ApprovalRequired,
                         interaction_mode: records.thread.interaction_mode,
                         cwd: Some(cwd),
                         approval_policy: None,
                         sandbox_policy: None,
-                        max_runtime_mode: None,
+                        max_runtime_mode: Some(
+                            t3_contracts::provider_policy::RuntimeMode::ApprovalRequired,
+                        ),
                     },
                     prompt_suggestions: None,
                     resume_from_session: None,
@@ -251,4 +274,15 @@ pub async fn import_native_history(
         })
         .await?;
     Ok(messages.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_disabled_instance_s_history_is_not_read() {
+        assert!(history_read_admitted(true).is_ok());
+        assert!(history_read_admitted(false).is_err());
+    }
 }

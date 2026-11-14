@@ -764,6 +764,8 @@ struct TurnContext {
     input: TurnInput,
     provider_turn: OrchestrationV2ProviderTurn,
     cancellation: CancellationToken,
+    /// Open while the turn runs; closed when it settles, which withdraws its pending consent.
+    window: CancellationToken,
     tools: BTreeMap<String, Value>,
     ordinals: BTreeMap<String, u64>,
     next_ordinal: u64,
@@ -780,13 +782,19 @@ struct MappingState {
     execute_session: bool,
     execute_turn: Option<String>,
     failed: bool,
-    /// Thread setup in progress (`session/new` or `session/load`): sign-in consent is admitted.
-    setting_up: bool,
+    /// Thread setup in progress (`session/new` or `session/load`): sign-in consent is admitted
+    /// until the token closes with the setup.
+    setting_up: Option<CancellationToken>,
     /// The native session being loaded and the app thread it belongs to; the agent replays its
     /// history meanwhile.
     loading: Option<(String, ThreadId)>,
     history: BTreeMap<String, LoadedHistory>,
 }
+
+/// `initialize` and `session/new` are bounded like `t3-acp`'s `session/load` (90 s), so an agent
+/// that never answers cannot hold a turn, its session's operation lock and the startup guard.
+/// TypeScript bounds only `session/load`.
+const SETUP_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Bounds on a replayed history: it is agent content, kept in memory and imported as messages.
 const HISTORY_MAX_MESSAGES: usize = 2_000;
@@ -1314,25 +1322,30 @@ impl RequestHandler {
             return false;
         };
         let session = params["sessionId"].as_str();
-        let (admitted, turn) = {
+        // The window the consent belongs to: the setup in progress, or the running turn of the
+        // session it names. When the window closes the consent is declined and withdrawn.
+        let window = {
             let state = lock(&self.shared.state);
             let loading = state.loading.as_ref().map(|(native, _)| native.as_str());
-            let setup = state.setting_up && session.is_none_or(|s| loading.is_none_or(|l| l == s));
-            let active = state.active.as_deref();
-            let turn = active
+            let setup = state
+                .setting_up
+                .clone()
+                .filter(|_| session.is_none_or(|s| loading.is_none_or(|l| l == s)));
+            let turn = state
+                .active
+                .as_deref()
                 .filter(|active| session.is_none_or(|s| s == *active))
                 .and_then(|active| state.contexts.get(active))
-                .map(|context| context.cancellation.clone());
-            (setup || turn.is_some(), turn)
+                .map(|context| context.window.clone());
+            setup.or(turn).filter(|window| !window.is_cancelled())
         };
-        if !admitted {
+        let Some(window) = window else {
             return false;
-        }
+        };
         let message = params["message"].as_str().unwrap_or_default();
-        let turn = turn.unwrap_or_default();
         tokio::select! {
             _ = self.shared.cancellation.cancelled() => false,
-            _ = turn.cancelled() => false,
+            _ = window.cancelled() => false,
             accepted = hooks.url_consent(id, url, message) => accepted,
         }
     }
@@ -2161,7 +2174,7 @@ impl ProviderAdapter for AcpAdapter {
                 execute_session: false,
                 execute_turn: None,
                 failed: false,
-                setting_up: false,
+                setting_up: None,
                 loading: None,
                 history: BTreeMap::new(),
             }),
@@ -2187,7 +2200,13 @@ impl ProviderAdapter for AcpAdapter {
             events,
             commands,
         ));
-        let initialized = tokio::select! { _ = cancellation.cancelled() => Err(ProviderError::Cancelled), result = client.initialize(self.initialize.clone()) => result.map_err(native_error) };
+        let initialized = tokio::select! {
+            _ = cancellation.cancelled() => Err(ProviderError::Cancelled),
+            result = tokio::time::timeout(SETUP_TIMEOUT, client.initialize(self.initialize.clone())) => match result {
+                Ok(result) => result.map_err(native_error),
+                Err(_) => Err(protocol("The ACP agent did not answer initialize in time")),
+            },
+        };
         if let Err(error) = initialized {
             shared.cancellation.cancel();
             transport_stop.cancel();
@@ -2376,6 +2395,9 @@ async fn finish_turn(
         }
         state.threads.insert(native.into(), thread.clone());
         state.active = None;
+        if let Some(context) = state.contexts.get(native) {
+            context.window.cancel();
+        }
         state.execute_turn = None;
         (turn, thread, ordinal, outcome, disposition)
     };
@@ -2501,12 +2523,14 @@ impl AcpSessionRuntime {
         impl Drop for Setup<'_> {
             fn drop(&mut self) {
                 let mut state = lock(&self.0.state);
-                state.setting_up = false;
+                if let Some(window) = state.setting_up.take() {
+                    window.cancel();
+                }
                 state.loading = None;
             }
         }
         let setup = Setup(&self.shared);
-        lock(&self.shared.state).setting_up = true;
+        lock(&self.shared.state).setting_up = Some(CancellationToken::new());
         let native = if let Some(native) = resume_native {
             if !self
                 .client
@@ -2529,10 +2553,9 @@ impl AcpSessionRuntime {
                 .map_err(native_error)?;
             native
         } else {
-            let result = self
-                .client
-                .new_session(params)
+            let result = tokio::time::timeout(SETUP_TIMEOUT, self.client.new_session(params))
                 .await
+                .map_err(|_| protocol("The ACP agent did not answer session/new in time"))?
                 .map_err(native_error)?;
             result["sessionId"]
                 .as_str()
@@ -2754,6 +2777,7 @@ impl SessionRuntime for AcpSessionRuntime {
                     input: input.clone(),
                     provider_turn: turn.clone(),
                     cancellation: self.shared.cancellation.child_token(),
+                    window: CancellationToken::new(),
                     tools: BTreeMap::new(),
                     ordinals: BTreeMap::new(),
                     next_ordinal: 101,
@@ -3150,5 +3174,142 @@ impl ElicitationForm {
             }
         }
         Some(Value::Object(content))
+    }
+}
+
+#[cfg(test)]
+mod startup_bounds {
+    //! Review L1: an agent that never answers `initialize` or `session/new` cannot hold a turn
+    //! (and the session's operation lock and startup guard) forever.
+    use super::*;
+    use crate::testing::{ManualClock, SequenceIds, TEST_TIME};
+    use t3_contracts::{model_selection::ModelSelection, provider_policy::ProviderInteractionMode};
+
+    /// A peer that answers `initialize` only when `answers_initialize`, and nothing else.
+    struct Silent {
+        answers_initialize: bool,
+    }
+
+    #[async_trait]
+    impl AcpTransportFactory for Silent {
+        async fn connect(
+            &self,
+            _: &OpenSession,
+            cancellation: CancellationToken,
+        ) -> ProviderResult<AcpTransport> {
+            let (client, server) = tokio::io::duplex(64 * 1024);
+            let (reader, writer) = tokio::io::split(client);
+            let answers = self.answers_initialize;
+            let stop = cancellation.clone();
+            let completion = tokio::spawn(async move {
+                let (read, mut write) = tokio::io::split(server);
+                let mut lines = BufReader::new(read).lines();
+                loop {
+                    let line = tokio::select! {
+                        _ = stop.cancelled() => break,
+                        line = lines.next_line() => line.map_err(native_error)?,
+                    };
+                    let Some(line) = line else { break };
+                    let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                        continue;
+                    };
+                    if answers && message["method"] == "initialize" {
+                        let reply = json!({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":1,"agentCapabilities":{}}});
+                        let mut bytes = serde_json::to_vec(&reply).map_err(native_error)?;
+                        bytes.push(b'\n');
+                        write.write_all(&bytes).await.map_err(native_error)?;
+                    }
+                }
+                Ok(())
+            });
+            Ok(AcpTransport {
+                reader: Box::new(reader),
+                writer: Box::new(writer),
+                cancellation,
+                completion,
+            })
+        }
+    }
+
+    fn adapter(answers_initialize: bool) -> AcpAdapter {
+        let mut adapter = AcpAdapter::replay(
+            ProviderInstanceId("registry".into()),
+            Arc::new(ManualClock::new(TEST_TIME)),
+            Arc::new(SequenceIds::new("bounds")),
+            false,
+        );
+        adapter.transport = Arc::new(Silent { answers_initialize });
+        adapter
+    }
+
+    fn policy() -> RuntimePolicy {
+        RuntimePolicy {
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            interaction_mode: ProviderInteractionMode::Default,
+            cwd: Some(".".into()),
+            approval_policy: None,
+            sandbox_policy: None,
+            max_runtime_mode: None,
+        }
+    }
+
+    fn selection() -> ModelSelection {
+        serde_json::from_value(json!({"instanceId":"registry","model":"model"}))
+            .unwrap_or_else(|error| panic!("selection: {error}"))
+    }
+
+    fn open() -> OpenSession {
+        OpenSession {
+            thread_id: ThreadId("thread:bounds".into()),
+            provider_session_id: ProviderSessionId("session:bounds".into()),
+            model_selection: selection(),
+            runtime_policy: policy(),
+            prompt_suggestions: None,
+            resume_from_session: None,
+            initial_native_thread_id: None,
+            initial_provider_item_identity_version: None,
+        }
+    }
+
+    /// Ten minutes of virtual time: far past the bound, and a regression fails instead of hanging.
+    const OUTER: Duration = Duration::from_secs(600);
+
+    #[tokio::test(start_paused = true)]
+    async fn an_agent_that_never_answers_initialize_fails_the_open() {
+        let opened = tokio::time::timeout(
+            OUTER,
+            adapter(false).open_session(open(), CancellationToken::new()),
+        )
+        .await;
+        assert!(
+            matches!(opened, Ok(Err(_))),
+            "the open did not fail within its bound"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_agent_that_never_answers_session_new_fails_the_thread_setup() {
+        let runtime = adapter(true)
+            .open_session(open(), CancellationToken::new())
+            .await
+            .unwrap_or_else(|error| panic!("open: {error}"));
+        let setup = tokio::time::timeout(
+            OUTER,
+            runtime.ensure_thread(EnsureThread {
+                thread_id: ThreadId("thread:bounds".into()),
+                title: None,
+                model_selection: selection(),
+                runtime_policy: policy(),
+                provider_session_id: None,
+                existing_provider_thread: None,
+                force_new_native_thread: false,
+            }),
+        )
+        .await;
+        assert!(
+            matches!(setup, Ok(Err(_))),
+            "the setup did not fail within its bound"
+        );
+        let _ = runtime.close().await;
     }
 }
