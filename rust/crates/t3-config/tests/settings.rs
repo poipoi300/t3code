@@ -89,6 +89,32 @@ async fn sparse_writes_external_edit_and_invalid_file_protection() {
     );
     assert_eq!(updated["threadTitleInstructions"], "external");
     assert_eq!(updated["branchNamePrefix"], "custom");
+    let defaults = json!({
+        "defaultTheme": "aurora",
+        "defaultThemeSetAt": "2026-11-14T00:00:00.000Z",
+        "defaultAppearance": "dark",
+        "defaultAppearanceSetAt": "2026-11-14T00:01:00.000Z",
+        "requireConnectDeviceApproval": true
+    });
+    service.update(&patch(defaults.clone())).await.unwrap();
+    let client: t3_contracts::settings::ClientServerSettingsPatch = serde_json::from_value(json!({
+        "defaultTheme": "blocked",
+        "defaultThemeSetAt": "2026-11-14T01:00:00.000Z",
+        "defaultAppearance": "light",
+        "defaultAppearanceSetAt": "2026-11-14T01:01:00.000Z",
+        "threadTitleInstructions": "client title"
+    }))
+    .unwrap();
+    service.update(&client.0).await.unwrap();
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for (key, expected) in defaults.as_object().unwrap() {
+        assert_eq!(&saved[key], expected, "{key}");
+    }
+    assert_eq!(saved["threadTitleInstructions"], "client title");
+    assert_eq!(
+        value(service.reload().await.unwrap().settings)["defaultAppearance"],
+        "dark"
+    );
     write(&path, "{ truncated");
     let loaded = service.reload().await.unwrap();
     assert!(loaded.parse_failure.is_some());
