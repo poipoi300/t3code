@@ -5530,6 +5530,7 @@ dependencies = [
  "t3-persistence",
  "t3-process",
  "t3-provider",
+ "t3-workspace",
  "tar",
  "tempfile",
  "thiserror 2.0.21",
