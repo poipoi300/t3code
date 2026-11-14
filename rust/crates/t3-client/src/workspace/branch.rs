@@ -220,6 +220,13 @@ pub struct BranchSelectionTarget {
     pub checkout_cwd: String,
     pub next_worktree_path: Option<String>,
     pub reuse_existing_worktree: bool,
+    pub stays_in_active_checkout: bool,
+}
+pub fn default_worktree_base_branch(refs: &[VcsRef]) -> Option<&str> {
+    refs.iter()
+        .find(|reference| reference.is_default)
+        .or_else(|| refs.iter().find(|reference| reference.current))
+        .map(|reference| reference.name.0.as_str())
 }
 fn inside(path: &str, root: &str) -> bool {
     let windows = super::projects::is_windows_drive_path(root) || root.starts_with("\\\\");
@@ -267,6 +274,7 @@ pub fn branch_selection_target(
             checkout_cwd: path.0.clone(),
             next_worktree_path: (!project_checkout).then(|| path.0.clone()),
             reuse_existing_worktree: true,
+            stays_in_active_checkout: if project_checkout { active_worktree.is_none() } else { active_worktree == Some(path.0.as_str()) },
         };
     }
     let next = if active_worktree.is_some() && reference.is_default {
@@ -278,6 +286,7 @@ pub fn branch_selection_target(
         checkout_cwd: next.unwrap_or(project_cwd).into(),
         next_worktree_path: next.map(str::to_string),
         reuse_existing_worktree: false,
+        stays_in_active_checkout: next == active_worktree,
     }
 }
 pub fn worktree_change_blocked(

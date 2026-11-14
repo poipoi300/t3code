@@ -1,8 +1,8 @@
 //! Shared presentation decisions. Host operations and clocks are supplied by the caller.
-pub mod clock;
 pub mod auto_settle;
 #[path = "view_logic/chat_view.rs"]
 pub mod chat_view;
+pub mod clock;
 #[path = "view_logic/context_references.rs"]
 pub mod context_references;
 #[path = "view_logic/errors.rs"]

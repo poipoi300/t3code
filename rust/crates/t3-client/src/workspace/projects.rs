@@ -353,6 +353,22 @@ pub fn pickable_project_groups(groups: &[ProjectGroup]) -> Vec<&ProjectGroup> {
         .chain(groups.iter().filter(|g| !g.archived && !g.pinned))
         .collect()
 }
+pub fn home_project_filter_scope<'a>(
+    groups: &'a [ProjectGroup],
+    projects: &[EnvironmentProject],
+    selected: Option<LogicalProjectKey>,
+    mode: GroupingMode,
+) -> Option<&'a ProjectGroup> {
+    let settings = GroupingSettings {
+        mode,
+        overrides: BTreeMap::new(),
+    };
+    let key = resolve_scratch_scope(selected, projects, &settings)?;
+    pickable_project_groups(groups)
+        .into_iter()
+        .find(|group| group.key == key)
+}
+
 pub fn sort_projects_by_group_order(projects: &mut [EnvironmentProject], groups: &[ProjectGroup]) {
     let mut rank = BTreeMap::new();
     for (i, g) in groups.iter().enumerate() {

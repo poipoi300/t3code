@@ -10,6 +10,9 @@ struct ToolDefinition {
     action: &'static str,
 }
 include!("work_log_tool_tables.rs");
+#[cfg(test)]
+#[path = "theme_drift_tests.rs"]
+mod theme_drift_tests;
 pub fn normalize_compact_tool_label(value: &str) -> &str {
     let trimmed = value.js_trim_end();
     let lower = trimmed.to_ascii_lowercase();
@@ -949,6 +952,8 @@ pub fn summarize_t3_tool_calls(action: &str, calls: &[T3ToolSummaryCall]) -> T3T
         "project-list" => Some(("Listed", "list", "", "projects", true)),
         "environment-read" => Some(("Checked", "check", "", "environment preferences", true)),
         "environment-update" => Some(("Updated", "update", "", "environment preferences", true)),
+        "theme-read" => Some(("Checked", "check", "", "themes", true)),
+        "theme-set" => Some(("Set", "set", "", "the theme", true)),
         "environment-links" => Some(("Listed", "list", "", "linked environments", true)),
         "browser" => Some(("Used", "use", "", "browser", true)),
         "device" => Some(("Used", "use", "", "device controls", true)),
@@ -1214,6 +1219,7 @@ fn action_priority(action: &str) -> usize {
             | "project-delete"
             | "project-clone"
             | "environment-update"
+            | "theme-set"
             | "attachment-prepare"
             | "attachment-discard"
             | "attachment-send"

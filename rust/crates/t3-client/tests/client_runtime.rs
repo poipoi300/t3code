@@ -8,8 +8,8 @@ mod support {
 use support::fake_server::*;
 use t3_client::{
     ClientStore,
-    composition::{ClientRuntime, SendError},
-    connection::{PairingInput, Phase, Time},
+    composition::{ClientRuntime, RelayConfig, SendError, SshPairingInput},
+    connection::{ConnectionMode, PairingInput, Phase, Time},
     environment::EnvironmentRegistry,
     platform::{NetworkStatus, Storage, StorageArea},
     rpc::SessionEndpoint,
@@ -521,4 +521,249 @@ fn removing_an_environment_forgets_its_queued_messages() {
     harness.run(client.pair(pairing())).unwrap();
     harness.settle();
     assert!(client.pending_messages(&key("t1")).is_empty());
+}
+
+fn relay_runtime(harness: &Harness) -> ClientRuntime<TestPlatform> {
+    ClientRuntime::with_relay(
+        harness.platform.clone(),
+        ClientStore::default(),
+        OrchestrationV2CreationSource::Web,
+        harness.spawner(),
+        RelayConfig {
+            relay_url: RELAY.into(),
+            client_id: t3_contracts::relay::RelayPublicClientId::T3Web,
+        },
+    )
+}
+
+fn route_modes(client: &ClientRuntime<TestPlatform>) -> Vec<ConnectionMode> {
+    client.environments()[0]
+        .routes
+        .iter()
+        .map(|route| route.mode.clone())
+        .collect()
+}
+
+#[test]
+fn a_linked_environment_is_discovered_through_the_relay_and_connects_with_a_minted_credential() {
+    // C1: relay discovery, relay registration and the DPoP connect path, against a fake relay.
+    let mut harness = Harness::new(ENV);
+    harness.server().state.borrow_mut().signed_in = true;
+    let client = relay_runtime(&harness);
+    harness.run(client.restore()).unwrap();
+    harness.settle();
+    let discovered = client.relay_environments().unwrap();
+    assert!(discovered.listed, "{discovered:?}");
+    let linked = &discovered.environments[&environment(ENV)];
+    assert_eq!(linked.environment.label.0, "Fake host");
+    assert_eq!(
+        linked.availability,
+        t3_client::relay::RelayEnvironmentAvailability::Online,
+        "{:?} {:?}",
+        linked.error,
+        harness.server().state.borrow().relay
+    );
+
+    harness
+        .run(client.add_relay_environment(&environment(ENV), "Fake host"))
+        .unwrap();
+    harness.advance(5_000);
+    assert_eq!(route_modes(&client), [ConnectionMode::Relay]);
+    assert_eq!(
+        client.environments()[0].state.phase,
+        Phase::Connected,
+        "{:?}",
+        client.environments()[0].state
+    );
+    let relay = harness.server().state.borrow().relay.clone();
+    assert!(relay.contains(&"POST /v1/client/dpop-token".into()), "{relay:?}");
+    assert!(relay.contains(&"POST /v1/environments/env/connect".into()), "{relay:?}");
+    assert_eq!(
+        saved(&mut harness, StorageArea::Secure, "connection-credential"),
+        0,
+        "a relay route stores no credential; each connection is minted"
+    );
+    assert!(client.diagnosis(&environment(ENV), None).is_none(), "connected");
+
+    // The route is saved: a new run connects through the relay again.
+    drop(client);
+    harness.settle();
+    let restored = relay_runtime(&harness);
+    harness.run(restored.restore()).unwrap();
+    harness.advance(5_000);
+    assert_eq!(route_modes(&restored), [ConnectionMode::Relay]);
+    assert_eq!(restored.environments()[0].state.phase, Phase::Connected);
+}
+
+#[test]
+fn a_relay_that_will_not_connect_is_diagnosed_on_the_relay_path() {
+    let mut harness = Harness::new(ENV);
+    {
+        let mut state = harness.server().state.borrow_mut();
+        state.signed_in = true;
+        state.relay_refuses = true;
+    }
+    let client = relay_runtime(&harness);
+    harness.run(client.restore()).unwrap();
+    harness
+        .run(client.add_relay_environment(&environment(ENV), "Fake host"))
+        .unwrap();
+    harness.advance(5_000);
+    let entry = &client.environments()[0];
+    assert_ne!(entry.state.phase, Phase::Connected, "{:?}", entry.state);
+    let diagnosis = client.diagnosis(&environment(ENV), Some("1.0.0")).unwrap();
+    let failure = client.environments()[0].state.last_failure.clone().unwrap();
+    assert_eq!(failure.kind, t3_client::connection::FailureKind::EndpointUnavailable, "{failure:?}");
+    assert_eq!(failure.trace_id.as_deref(), Some("relay-trace"));
+    assert!(
+        diagnosis
+            .hops
+            .iter()
+            .any(|hop| hop.hop == t3_client::connection::ConnectionHop::Relay),
+        "{diagnosis:?}"
+    );
+    assert!(
+        diagnosis.headline.contains("Fake host"),
+        "{}",
+        diagnosis.headline
+    );
+
+    harness.server().state.borrow_mut().relay_refuses = false;
+    harness.advance(120_000);
+    assert_eq!(client.environments()[0].state.phase, Phase::Connected);
+}
+
+#[test]
+fn signing_out_of_t3_connect_drops_relay_routes_and_keeps_direct_ones() {
+    // TypeScript's removeRelayEnvironments: a relay-only environment goes; one with a direct
+    // route keeps it and reconnects over it.
+    let mut harness = Harness::new(ENV);
+    harness.server().state.borrow_mut().signed_in = true;
+    let client = relay_runtime(&harness);
+    harness.run(client.pair(pairing())).unwrap();
+    harness
+        .run(client.add_relay_environment(&environment(ENV), "Fake host"))
+        .unwrap();
+    harness.advance(5_000);
+    assert_eq!(
+        route_modes(&client),
+        [ConnectionMode::Remote, ConnectionMode::Relay]
+    );
+    harness.run(client.remove_relay_environments()).unwrap();
+    harness.advance(5_000);
+    assert_eq!(route_modes(&client), [ConnectionMode::Remote]);
+    assert_eq!(client.environments()[0].state.phase, Phase::Connected);
+
+    let mut harness = Harness::new(ENV);
+    harness.server().state.borrow_mut().signed_in = true;
+    let client = relay_runtime(&harness);
+    harness
+        .run(client.add_relay_environment(&environment(ENV), "Fake host"))
+        .unwrap();
+    harness.advance(5_000);
+    harness.run(client.remove_relay_environments()).unwrap();
+    harness.settle();
+    assert!(client.environments().is_empty());
+    assert_eq!(harness.server().state.borrow().sockets_open, 0);
+}
+
+#[test]
+fn t3_connect_needs_a_relay() {
+    let mut harness = Harness::new(ENV);
+    let client = runtime(&harness);
+    assert!(matches!(
+        harness.run(client.add_relay_environment(&environment(ENV), "Fake host")),
+        Err(t3_client::ClientError::Unsupported(_))
+    ));
+    assert!(client.relay_environments().is_none());
+}
+
+#[test]
+fn an_ssh_host_is_launched_by_the_desktop_reconnected_through_its_tunnel_and_torn_down_on_removal() {
+    let mut harness = Harness::new(ENV);
+    let client = runtime(&harness);
+    let id = harness
+        .run(client.pair_ssh(SshPairingInput {
+            target: serde_json::from_value(ssh_target("box")).unwrap(),
+            label: None,
+            expected_environment: None,
+        }))
+        .unwrap();
+    assert_eq!(id, environment(ENV));
+    harness.advance(5_000);
+    assert_eq!(route_modes(&client), [ConnectionMode::Ssh]);
+    assert_eq!(client.environments()[0].label, "box", "the alias when the host names nothing");
+    assert_eq!(client.environments()[0].state.phase, Phase::Connected);
+    assert_eq!(
+        harness.server().state.borrow().ssh,
+        ["provision box", "prepare box"]
+    );
+
+    harness.run(client.remove(&environment(ENV))).unwrap();
+    harness.settle();
+    assert_eq!(
+        harness.server().state.borrow().ssh.last().map(String::as_str),
+        Some("disconnect box"),
+        "the managed backend and tunnel outlive the session, so removal stops them"
+    );
+    assert_eq!(saved(&mut harness, StorageArea::Secure, "connection-credential"), 0);
+
+    let elsewhere = harness.run(client.pair_ssh(SshPairingInput {
+        target: serde_json::from_value(ssh_target("box")).unwrap(),
+        label: None,
+        expected_environment: Some(environment("other")),
+    }));
+    assert!(elsewhere.is_err(), "an SSH host that is a different machine is refused");
+}
+
+#[test]
+fn an_open_command_row_streams_its_output_and_a_settled_one_is_kept_for_five_minutes() {
+    // C6: TypeScript's commandOutput subscription rules (idle TTL 0, completed TTL 5 min).
+    let mut harness = Harness::new(ENV);
+    let client = paired(&mut harness);
+    assert!(client.command_output_streaming(&environment(ENV)));
+    let item = t3_contracts::base_schemas::TurnItemId("cmd-1".into());
+    harness.server().state.borrow_mut().command_running = true;
+    let running = client.command_output(&key("t1"), &item);
+    let second = client.command_output(&key("t1"), &item);
+    harness.settle();
+    let view = running.view().expect("the first frame");
+    assert_eq!(view.output.text, "install\n12%");
+    assert!(view.running);
+    assert_eq!(
+        harness.server().state.borrow().command_output_subscribes,
+        1,
+        "readers of one row share one subscription"
+    );
+    drop((running, second));
+    harness.settle();
+    assert_eq!(
+        harness.server().state.borrow().command_outputs_open,
+        0,
+        "a closed row receives nothing"
+    );
+
+    harness.server().state.borrow_mut().command_running = false;
+    let settled = client.command_output(&key("t1"), &item);
+    harness.settle();
+    let view = settled.view().unwrap();
+    assert_eq!(view.output.text, "install\n100%\n");
+    assert!(!view.running);
+    assert_eq!(
+        harness.server().state.borrow().command_outputs_open,
+        0,
+        "the subscription ends once the command settles"
+    );
+    drop(settled);
+    let reopened = client.command_output(&key("t1"), &item);
+    assert_eq!(reopened.view().unwrap().output.text, "install\n100%\n");
+    drop(reopened);
+    assert_eq!(harness.server().state.borrow().command_output_subscribes, 2);
+
+    harness.advance(5 * 60_000 + 1_000);
+    let expired = client.command_output(&key("t1"), &item);
+    assert!(expired.view().is_none(), "loading again after five minutes");
+    harness.settle();
+    assert!(expired.view().is_some());
+    assert_eq!(harness.server().state.borrow().command_output_subscribes, 3);
 }

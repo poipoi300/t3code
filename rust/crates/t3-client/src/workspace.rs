@@ -1,5 +1,6 @@
 use crate::types::{EnvironmentId, ProjectId};
 pub mod chat_canvas;
+pub mod ignored_files;
 #[path = "workspace/branch.rs"]
 pub mod branch;
 #[path = "workspace/git_actions.rs"]

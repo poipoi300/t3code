@@ -15,14 +15,18 @@ pub use work::*;
 #[path = "session/resources.rs"]
 mod resources;
 pub use resources::*;
+#[path = "session/floating_status.rs"]
+pub mod floating_status;
+#[path = "session/image_gallery.rs"]
+pub mod image_gallery;
 #[path = "session/links.rs"]
 pub mod links;
 #[path = "session/markdown_link_presentation.rs"]
 pub mod markdown_link_presentation;
 #[path = "session/markdown.rs"]
 pub mod markdown;
-#[path = "session/markdown_references.rs"] pub mod markdown_references;
-#[path = "session/image_gallery.rs"] pub mod image_gallery;
+#[path = "session/markdown_references.rs"]
+pub mod markdown_references;
 #[path = "session/questions.rs"]
 pub mod questions;
 #[path = "session/review.rs"]
@@ -31,10 +35,14 @@ pub mod review;
 pub mod terminal;
 #[path = "session/text.rs"]
 pub mod text;
+#[path = "session/thread_links.rs"]
+pub mod thread_links;
 #[path = "session/timestamps.rs"]
 pub mod timestamps;
 #[path = "session/version.rs"]
 pub mod version;
+#[path = "session/workspace_lookup.rs"]
+pub mod workspace_lookup;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

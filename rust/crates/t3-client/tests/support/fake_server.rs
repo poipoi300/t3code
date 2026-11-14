@@ -29,6 +29,86 @@ use t3_contracts::rpc::RpcMethod;
 use t3_rpc::{Exit, Frame, Handler, HandlerOutput, Request};
 
 pub const ORIGIN: &str = "https://server.test";
+/// The fake T3 Connect relay; its connect answer points at `ORIGIN`.
+pub const RELAY: &str = "https://relay.test";
+pub const ACCOUNT: &str = "account";
+
+/// A cloud session token for `account`, as the host's account store hands it out.
+pub fn cloud_token(account: &str) -> String {
+    use base64::Engine;
+    format!(
+        "e30.{}.sig",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&json!({"sub": account, "exp": 4_102_444_800u64})).unwrap())
+    )
+}
+
+/// The host's DPoP public key and its RFC 7638 thumbprint.
+pub fn dpop_key() -> (Value, String) {
+    use base64::Engine;
+    use sha2::Digest;
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let jwk = json!({"crv":"P-256","kty":"EC","x":encode(&[1; 32]),"y":encode(&[2; 32])});
+    let thumbprint = encode(&sha2::Sha256::digest(serde_json::to_vec(&jwk).unwrap()));
+    (jwk, thumbprint)
+}
+
+pub fn ssh_target(alias: &str) -> Value {
+    json!({"alias": alias, "hostname": format!("{alias}.example"), "username": "dev", "port": null})
+}
+
+fn ssh_bootstrap(alias: &str) -> Value {
+    json!({"target": ssh_target(alias), "httpBaseUrl": ORIGIN, "wsBaseUrl": "wss://server.test", "pairingToken": null, "remoteServerKind": "managed"})
+}
+
+fn relay_endpoint() -> Value {
+    json!({"httpBaseUrl": ORIGIN, "wsBaseUrl": "wss://server.test", "providerKind": "cloudflare_tunnel"})
+}
+
+fn form_value(body: &[u8], name: &str) -> Option<String> {
+    url::form_urlencoded::parse(body)
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.into_owned())
+}
+
+/// The relay's protocol surface the client uses: token exchange, list, status, connect.
+fn relay_response(server: &FakeServer, request: &HttpRequest, path: &str) -> HttpResponse {
+    let environment = server.environment.clone();
+    server
+        .state
+        .borrow_mut()
+        .relay
+        .push(format!("{} {path}", request.method));
+    let connect = format!("/v1/environments/{environment}/connect");
+    let status = format!("/v1/environments/{environment}/status");
+    match (request.method.as_str(), path) {
+        ("POST", "/v1/client/dpop-token") => response(
+            200,
+            json!({"access_token":"relay-access","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","token_type":"DPoP","expires_in":3600,"scope": form_value(&request.body, "scope").unwrap_or_default()}),
+        ),
+        ("GET", "/v1/environments") => response(
+            200,
+            json!({"environments":[{"environmentId": environment, "label": "Fake host", "endpoint": relay_endpoint(), "linkedAt": "2026-06-20T00:00:00.000Z"}]}),
+        ),
+        ("POST", path) if path == status => response(
+            200,
+            json!({"environmentId": environment, "endpoint": relay_endpoint(), "status": "online", "checkedAt": NOW}),
+        ),
+        ("POST", path) if path == connect => {
+            if server.state.borrow().relay_refuses {
+                return response(
+                    503,
+                    json!({"_tag":"RelayEnvironmentEndpointUnavailableError","code":"environment_endpoint_unavailable","reason":"endpoint_request_failed","traceId":"relay-trace"}),
+                );
+            }
+            response(
+                200,
+                json!({"environmentId": environment, "endpoint": relay_endpoint(), "credential": "relay-credential", "expiresAt": "2036-01-01T00:00:00.000Z"}),
+            )
+        }
+        _ => response(404, json!({})),
+    }
+}
 pub const NOW: &str = "2026-06-20T00:00:00.000Z";
 
 #[derive(Default)]
@@ -55,6 +135,19 @@ pub struct ServerState {
     pub outdated: bool,
     /// The client's host has no presentation to give when pairing.
     pub anonymous: bool,
+    /// The host is signed in to the cloud account `account` (identity, token, device id).
+    pub signed_in: bool,
+    /// Every request the fake relay at `RELAY` answered, as "METHOD /path".
+    pub relay: Vec<String>,
+    /// Failure injection: the relay refuses to connect this device to an environment.
+    pub relay_refuses: bool,
+    /// Every SSH host action, as "provision alias", "prepare alias", "disconnect alias".
+    pub ssh: Vec<String>,
+    /// `subscribeCommandOutput` requests answered, and how many are still being served.
+    pub command_output_subscribes: usize,
+    pub command_outputs_open: usize,
+    /// The command keeps running: only the first frame is sent.
+    pub command_running: bool,
     /// Ends every socket the server holds, as a dropped connection does.
     hangups: Vec<mpsc::UnboundedSender<()>>,
 }
@@ -176,7 +269,20 @@ pub fn config(environment: &str) -> Value {
     .unwrap();
     config["environment"]["environmentId"] = json!(environment);
     config["environment"]["label"] = json!("Fake host");
+    config["environment"]["capabilities"]["commandOutputStreaming"] = json!(true);
     config
+}
+
+struct OpenCommandOutput {
+    server: Weak<FakeServer>,
+}
+
+impl Drop for OpenCommandOutput {
+    fn drop(&mut self) {
+        if let Some(server) = self.server.upgrade() {
+            server.state.borrow_mut().command_outputs_open -= 1;
+        }
+    }
 }
 
 pub fn thread_json(id: &str) -> Value {
@@ -242,6 +348,9 @@ impl Platform for TestPlatform {
         async move {
             let url = url::Url::parse(&request.url).unwrap();
             let path = url.path().to_owned();
+            if url.host_str() == Some("relay.test") {
+                return Ok(relay_response(&server, &request, &path));
+            }
             server.state.borrow_mut().http.push(path.clone());
             if server.state.borrow().unreachable {
                 return Err(PlatformError::Network("host unreachable".into()));
@@ -266,7 +375,7 @@ impl Platform for TestPlatform {
                 }
                 ("POST", "/oauth/token") => response(
                     200,
-                    json!({"access_token":"paired-bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","token_type":"Bearer","expires_in":3600,"scope":"orchestration:read orchestration:operate"}),
+                    json!({"access_token":"paired-bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","token_type": if request.headers.keys().any(|name| name.eq_ignore_ascii_case("dpop")) { "DPoP" } else { "Bearer" },"expires_in":3600,"scope":"orchestration:read orchestration:operate"}),
                 ),
                 // Snapshots come over the socket; HTTP answers that it cannot serve them.
                 _ => response(503, json!({})),
@@ -314,6 +423,7 @@ impl Platform for TestPlatform {
                         (tag::<WsOrchestrationV2SubscribeThreadRpc>(), Stream),
                         (tag::<WsOrchestrationV2GetTurnDiffRpc>(), Unary),
                         (tag::<WsOrchestrationV2DispatchCommandRpc>(), Unary),
+                        (tag::<WsOrchestrationV2SubscribeCommandOutputRpc>(), Stream),
                     ] {
                         rpc.state.register(tag, kind);
                     }
@@ -338,12 +448,43 @@ impl Platform for TestPlatform {
         .boxed_local()
     }
     fn host(&self, action: HostAction) -> HostFuture<'_, HostReply> {
-        if matches!(action, HostAction::ClientPresentation) && !self.server.state.borrow().anonymous
-        {
+        let reply = |reply: HostReply| async move { Ok(reply) }.boxed_local();
+        let signed_in = self.server.state.borrow().signed_in;
+        let (jwk, thumbprint) = dpop_key();
+        let ssh = |kind: &str, alias: &str| {
+            self.server
+                .state
+                .borrow_mut()
+                .ssh
+                .push(format!("{kind} {alias}"));
+        };
+        match action {
             // Every client presents itself when pairing, as the TypeScript clients do.
-            return async { Ok(HostReply::Document(json!({"label":"Test client"}))) }.boxed_local();
+            HostAction::ClientPresentation if !self.server.state.borrow().anonymous => {
+                reply(HostReply::Document(json!({"label":"Test client"})))
+            }
+            HostAction::CloudIdentity => {
+                reply(HostReply::Text(signed_in.then(|| ACCOUNT.to_owned())))
+            }
+            HostAction::CloudToken => reply(HostReply::Text(signed_in.then(|| cloud_token(ACCOUNT)))),
+            HostAction::RelayDeviceId => reply(HostReply::Text(Some("device-1".into()))),
+            HostAction::DpopPublicJwk => reply(HostReply::Document(jwk)),
+            HostAction::DpopThumbprint => reply(HostReply::Text(Some(thumbprint))),
+            HostAction::DpopSign { .. } => reply(HostReply::Bytes(vec![3; 64])),
+            HostAction::SshProvision { target, .. } => {
+                ssh("provision", &target.alias);
+                reply(HostReply::Document(json!({"environmentId": self.server.environment, "label": "", "bootstrap": ssh_bootstrap(&target.alias), "bearerToken": "ssh-bearer"})))
+            }
+            HostAction::SshPrepare { target, .. } => {
+                ssh("prepare", &target.alias);
+                reply(HostReply::Document(json!({"bootstrap": ssh_bootstrap(&target.alias), "bearerToken": "ssh-bearer"})))
+            }
+            HostAction::SshDisconnect(target) => {
+                ssh("disconnect", &target.alias);
+                reply(HostReply::Unit)
+            }
+            action => self.fake.host(action),
         }
-        self.fake.host(action)
     }
 }
 
@@ -462,6 +603,26 @@ impl Handler for FakeHandler {
                 object.remove("ignoreWhitespace");
             }
             HandlerOutput::Unary(async move { Exit::success(answer) }.boxed_local())
+        } else if tag == self::tag::<WsOrchestrationV2SubscribeCommandOutputRpc>() {
+            let running = {
+                let mut state = server.state.borrow_mut();
+                state.command_output_subscribes += 1;
+                state.command_outputs_open += 1;
+                state.command_running
+            };
+            let mut frames =
+                vec![json!({"kind":"replace","text":"install\n12%","truncated":false,"running":true})];
+            if !running {
+                frames.push(
+                    json!({"kind":"append","text":"\r100%\n","truncated":false,"running":false}),
+                );
+            }
+            live(
+                frames,
+                OpenCommandOutput {
+                    server: self.server.clone(),
+                },
+            )
         } else if tag == self::tag::<WsOrchestrationV2SubscribeThreadRpc>() {
             let thread = request.payload["threadId"].as_str().unwrap().to_owned();
             {

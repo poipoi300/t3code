@@ -30,23 +30,52 @@ mod wp10_drift_tests {
     use super::*;
     #[test]
     fn typescript_diagnostics_keep_location_and_display_range() {
-        for path in ["src/main.ts", "/repo/src/main.ts", r"C:\repo\src\main.ts", "app/(auth)/page.tsx"] {
+        for path in [
+            "src/main.ts",
+            "/repo/src/main.ts",
+            r"C:\repo\src\main.ts",
+            "app/(auth)/page.tsx",
+        ] {
             for kind in ["error", "warning"] {
                 let text = format!("{path}(42,7)");
-                let links = extract_terminal_links(&format!("{text}: {kind} TS2322: Type mismatch"));
-                assert_eq!(links, [TerminalLinkMatch { kind: TerminalLinkKind::Path, text: format!("{path}:42:7"), start: 0, end: text.len() }]);
-                let target = if is_absolute(path) { path.into() } else { format!("/repo/{path}") };
-                assert_eq!(resolve_terminal_link_target(&links[0].text, "/repo"), format!("{target}:42:7"));
+                let links =
+                    extract_terminal_links(&format!("{text}: {kind} TS2322: Type mismatch"));
+                assert_eq!(
+                    links,
+                    [TerminalLinkMatch {
+                        kind: TerminalLinkKind::Path,
+                        text: format!("{path}:42:7"),
+                        start: 0,
+                        end: text.len()
+                    }]
+                );
+                let target = if is_absolute(path) {
+                    path.into()
+                } else {
+                    format!("/repo/{path}")
+                };
+                assert_eq!(
+                    resolve_terminal_link_target(&links[0].text, "/repo"),
+                    format!("{target}:42:7")
+                );
             }
         }
     }
     #[test]
     fn preserves_non_typescript_and_powershell_parentheses() {
-        for (line, expected) in [(r"PS C:\dev\folder (42,7)> ", r"C:\dev\folder (42,7)"),
+        for (line, expected) in [
+            (r"PS C:\dev\folder (42,7)> ", r"C:\dev\folder (42,7)"),
             ("/tmp/report(42,7)", "/tmp/report(42,7)"),
-            ("src/Program.cs(3,10): error CS1002: x", "/repo/src/Program.cs")] {
+            (
+                "src/Program.cs(3,10): error CS1002: x",
+                "/repo/src/Program.cs",
+            ),
+        ] {
             let links = extract_terminal_links(line);
-            assert_eq!(resolve_terminal_link_target(&links[0].text,"/repo"),expected);
+            assert_eq!(
+                resolve_terminal_link_target(&links[0].text, "/repo"),
+                expected
+            );
         }
     }
 }
@@ -119,6 +148,7 @@ fn relative_end(s: &str) -> Option<usize> {
     if !slash {
         return None;
     }
+    let before_position = index;
     for _ in 0..2 {
         if let Some(tail) = s[index..].strip_prefix(':') {
             let count = tail.bytes().take_while(|b| b.is_ascii_digit()).count();
@@ -129,7 +159,40 @@ fn relative_end(s: &str) -> Option<usize> {
             }
         }
     }
+    if index == before_position
+        && let Some(tail) = s[index..].strip_prefix('(')
+        && let Some(close) = tail.find(')')
+    {
+        let location = &tail[..close];
+        if compiler_location(location).is_some() && typescript_diagnostic(&tail[close + 1..]) {
+            index += close + 2;
+        }
+    }
     Some(index)
+}
+fn compiler_location(location: &str) -> Option<(&str, &str)> {
+    let (line, column) = location.split_once(',')?;
+    [line, column]
+        .iter()
+        .all(|s| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()))
+        .then_some((line, column))
+}
+fn typescript_diagnostic(suffix: &str) -> bool {
+    let Some(tail) = suffix.strip_prefix(':') else {
+        return false;
+    };
+    if !tail.starts_with(is_js_whitespace) {
+        return false;
+    }
+    let tail = tail.js_trim_start();
+    let Some(tail) = tail
+        .strip_prefix("error TS")
+        .or_else(|| tail.strip_prefix("warning TS"))
+    else {
+        return false;
+    };
+    let digits = tail.bytes().take_while(|c| c.is_ascii_digit()).count();
+    digits > 0 && tail[digits..].starts_with(':')
 }
 pub fn extract_terminal_links(line: &str) -> Vec<TerminalLinkMatch> {
     let mut ranges: Vec<(usize, usize, TerminalLinkKind, String)> = vec![];
@@ -275,11 +338,24 @@ pub fn extract_terminal_links(line: &str) -> Vec<TerminalLinkMatch> {
                 || (!excluded.iter().any(|(a, b)| start < b && a < end)
                     && !remote_tails.iter().any(|(a, b)| start >= a && end <= b))
         })
-        .map(|(start, end, kind, text)| TerminalLinkMatch {
-            kind,
-            text,
-            start: utf16_len(&line[..start]),
-            end: utf16_len(&line[..end]),
+        .map(|(start, end, kind, text)| {
+            let text = if kind == TerminalLinkKind::Path && typescript_diagnostic(&line[end..]) {
+                text.strip_suffix(')')
+                    .and_then(|s| s.rsplit_once('('))
+                    .and_then(|(path, location)| {
+                        compiler_location(location)
+                            .map(|(row, column)| format!("{path}:{row}:{column}"))
+                    })
+                    .unwrap_or(text)
+            } else {
+                text
+            };
+            TerminalLinkMatch {
+                kind,
+                text,
+                start: utf16_len(&line[..start]),
+                end: utf16_len(&line[..end]),
+            }
         })
         .collect()
 }

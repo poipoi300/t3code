@@ -880,6 +880,39 @@ pub fn create_local_dispatch_snapshot(
     }
 }
 
+pub struct LocalDispatchClock<'a> {
+    pub clocks: &'a crate::view_logic::clock::ServerClocks,
+    pub now_epoch_ms: u64,
+    pub environment: Option<&'a EnvironmentId>,
+    pub active_thread_environment: Option<&'a EnvironmentId>,
+}
+
+pub fn create_local_dispatch_snapshot_with_clock(
+    clock: LocalDispatchClock<'_>,
+    latest_run: Option<&RunDispatchView>,
+    runtime: Option<&RuntimeDispatchView>,
+    preparing_worktree: bool,
+    latest_user_message_id: Option<MessageId>,
+    submission_intent: SubmissionIntent,
+) -> LocalDispatchSnapshot {
+    let now = clock
+        .environment
+        .or(clock.active_thread_environment)
+        .map_or(clock.now_epoch_ms as f64, |environment| {
+            clock
+                .clocks
+                .to_server_clock(environment, clock.now_epoch_ms as f64)
+        });
+    create_local_dispatch_snapshot(
+        crate::time::iso_from_epoch_ms(now as u64),
+        latest_run,
+        runtime,
+        preparing_worktree,
+        latest_user_message_id,
+        submission_intent,
+    )
+}
+
 pub fn derive_committed_server_user_message_ids(
     rows: &[OrchestrationV2ProjectedTurnItem],
 ) -> Vec<t3_contracts::orchestration_v2_id_table::IdOrIndex<MessageId>> {

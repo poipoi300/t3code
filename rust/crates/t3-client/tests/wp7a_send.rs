@@ -701,6 +701,200 @@ fn creation_uses_the_real_launch_rpc_for_root_existing_and_new_worktrees() {
 }
 
 #[test]
+fn lost_launch_reply_replays_the_same_workspace_and_holds_for_operation_access() {
+    block_on(async {
+        for (pull_request, edited, restarted) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let platform = Rc::new(FakePlatform::default());
+            let (store, generation) = store();
+            let target = ThreadKey {
+                thread: ThreadId("new-thread".into()),
+                ..key()
+            };
+            let (wire, mut requests) = mpsc::unbounded::<Frame>();
+            let (mut peer, incoming) = mpsc::unbounded::<Result<Frame, mpsc::SendError>>();
+            let mut access = grants();
+            access.scopes.insert("source-control:write".into());
+            let (endpoint, driver) =
+                rpc::session(wire, incoming, key().environment, access.clone(), 0);
+            let endpoint = Rc::new(endpoint);
+            let service = Service::new(
+                key().environment,
+                platform.clone(),
+                store.clone(),
+                OrchestrationV2CreationSource::Mobile,
+            );
+            service
+                .connect(generation, endpoint.clone(), config())
+                .expect("connect");
+            let mut creation = json!({"projectId":"project","projectCwd":"/workspace","workspaceMode":"local","branch":null,"worktreePath":null});
+            if pull_request {
+                creation["pullRequestReference"] = json!("https://github.com/acme/repo/pull/123");
+            }
+            let options = SendOptions {
+                settings: Some(
+                    t3_client::thread_views::composer::delivery_policy::ThreadSettings {
+                        model_selection: serde_json::from_value(
+                            json!({"instanceId":"codex","model":"gpt-5.4"}),
+                        )
+                        .expect("model"),
+                        runtime_mode: t3_contracts::provider_policy::RuntimeMode::FullAccess,
+                        interaction_mode:
+                            t3_contracts::provider_policy::ProviderInteractionMode::Default,
+                    },
+                ),
+                creation: Some(serde_json::from_value(creation).expect("creation")),
+                ..Default::default()
+            };
+            let id = service
+                .submit(&target, "My dictated idea".into(), options)
+                .await
+                .expect("submit");
+            let scenario = async {
+                let first = async {
+                    if pull_request {
+                        let checkout = request(requests.next().await.expect("checkout"));
+                        assert_eq!(checkout.tag, "git.preparePullRequestThread");
+                        peer.send(Ok(codec::encode(&ServerMessage::<Value>::Exit { request_id: checkout.id, exit: Exit::success(json!({"pullRequest":{"number":123,"title":"PR","url":"https://github.com/acme/repo/pull/123","baseBranch":"main","headBranch":"pr-123","state":"open"},"branch":"pr-123","worktreePath":"/workspace/.t3/worktrees/pr-123","isOnPullRequestHead":true})) }).expect("encode"))).await.expect("checkout reply");
+                    }
+                    let launch = request(requests.next().await.expect("launch"));
+                    assert_eq!(launch.tag, "orchestration.launchThread");
+                    peer.send(Ok(codec::encode(&ServerMessage::<Value>::Exit {
+                        request_id: launch.id,
+                        exit: Exit::fail(
+                            json!({"_tag":"RpcClientError","message":"Socket is not connected"}),
+                        ),
+                    })
+                    .expect("encode")))
+                        .await
+                        .expect("lost reply");
+                    launch.payload
+                };
+                let (original, pending) = match futures::future::select(service.step().boxed_local(), first.boxed_local()).await {
+                    futures::future::Either::Left((outcome,_)) => panic!("launch ended before the expected server requests: {outcome:?}"),
+                    futures::future::Either::Right((original,pending)) => (original,pending),
+                };
+                let outcome = pending.await;
+                assert!(matches!(
+                    outcome.expect("lost reply"),
+                    Some(DeliveryResult::Retry | DeliveryResult::Wait)
+                ));
+                let mut shell = serde_json::to_value(
+                    store.snapshot().environments[&key().environment]
+                        .shell
+                        .snapshot
+                        .as_ref()
+                        .expect("shell")
+                        .as_ref(),
+                )
+                .expect("shell json");
+                let mut appeared = shell["threads"][0].clone();
+                appeared["id"] = json!(target.thread);
+                shell["threads"]
+                    .as_array_mut()
+                    .expect("threads")
+                    .push(appeared);
+                store.apply_shell(
+                    &key().environment,
+                    generation,
+                    vec![
+                        serde_json::from_value(json!({"kind":"snapshot","snapshot":shell}))
+                            .expect("shell"),
+                        serde_json::from_value(json!({"kind":"synchronized"}))
+                            .expect("synchronized"),
+                    ],
+                );
+                if edited || restarted {
+                    let active_service = if restarted {
+                        let fresh = Service::new(
+                            key().environment,
+                            platform.clone(),
+                            store.clone(),
+                            OrchestrationV2CreationSource::Mobile,
+                        );
+                        fresh
+                            .connect(generation, endpoint.clone(), config())
+                            .expect("reconnect");
+                        fresh
+                    } else {
+                        service
+                            .update_pending(&id, "Edited idea".into(), SendOptions::default())
+                            .await
+                            .expect("edit");
+                        service.clone()
+                    };
+                    active_service.wake();
+                    assert_eq!(active_service.step().await.expect("recover"), None);
+                    assert!(
+                        active_service
+                            .draft_text(&target)
+                            .expect("recovered draft")
+                            .contains(if edited {
+                                "Edited idea"
+                            } else {
+                                "My dictated idea"
+                            })
+                    );
+                    assert!(requests.try_recv().is_err());
+                    endpoint.invalidate();
+                    return;
+                }
+                access.scopes.remove("orchestration:operate");
+                endpoint.update_grants(access.clone());
+                service.wake();
+                let held = service
+                    .step()
+                    .now_or_never()
+                    .expect("a missing operation grant holds delivery without sending an RPC")
+                    .expect("hold");
+                assert!(
+                    matches!(held, Some(DeliveryResult::Wait | DeliveryResult::Retry)),
+                    "{held:?}"
+                );
+                assert!(requests.try_recv().is_err());
+                assert_eq!(service.pending_messages(&target).len(), 1);
+                assert!(service.draft_text(&target).is_none());
+                access.scopes.insert("orchestration:operate".into());
+                endpoint.update_grants(access);
+                service.wake();
+                let replay = async {
+                    let resent = request(requests.next().await.expect("resend"));
+                    assert_eq!(resent.tag, "orchestration.launchThread");
+                    assert_eq!(resent.payload, original);
+                    let mut projection: Value = serde_json::from_str(
+                        include_str!(
+                            "../../../fixtures/samples/OrchestrationV2ThreadProjection.jsonl"
+                        )
+                        .lines()
+                        .next()
+                        .expect("sample"),
+                    )
+                    .expect("projection");
+                    projection["thread"]["id"] = json!(target.thread);
+                    peer.send(Ok(codec::encode(&ServerMessage::<Value>::Exit { request_id: resent.id, exit: Exit::success(json!({"threadId":target.thread,"projection":projection,"resumed":false,"sequence":20})) }).expect("encode"))).await.expect("replayed reply");
+                };
+                let (outcome, ()) = futures::join!(service.step(), replay);
+                assert_eq!(
+                    outcome.expect("resend"),
+                    Some(DeliveryResult::Accepted(Some(20)))
+                );
+                assert_eq!(
+                    service.state(&id),
+                    Some(SendState::Accepted { sequence: Some(20) })
+                );
+                assert!(requests.try_recv().is_err());
+                endpoint.invalidate();
+            };
+            futures::join!(driver.run(futures::stream::pending(), || 0), scenario);
+        }
+    });
+}
+
+#[test]
 fn captured_settings_are_synchronized_before_the_message_dispatch() {
     block_on(async {
         let platform = Rc::new(FakePlatform::default());

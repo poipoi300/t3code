@@ -1,5 +1,15 @@
 fn tool_definition(name: &str) -> Option<ToolDefinition> {
     match name {
+        "t3_theme_read" => Some(ToolDefinition {
+            labels: ["Read", "Reading", "Read", "themes"],
+            icon: "t3-code",
+            action: "theme-read",
+        }),
+        "t3_theme_set" => Some(ToolDefinition {
+            labels: ["Set", "Setting", "Set", "the theme"],
+            icon: "t3-code",
+            action: "theme-set",
+        }),
         "link_pull_request" => Some(ToolDefinition {
             labels: ["Link", "Linking", "Linked", "a pull request"],
             icon: "pull-request",

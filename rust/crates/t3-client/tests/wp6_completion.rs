@@ -800,6 +800,7 @@ fn terminal_driver_preserves_unanswered_attach_input_and_resumes_only_after_a_re
         types::{ThreadId, ThreadKey},
     };
     let services = Services::default();
+    let platform = FakePlatform::default();
     let input: t3_contracts::terminal::TerminalAttachInput = decode(
         json!({"threadId":"thread","terminalId":"terminal","cwd":"/repo","restartIfNotRunning":true}),
     );
@@ -812,6 +813,7 @@ fn terminal_driver_preserves_unanswered_attach_input_and_resumes_only_after_a_re
     .unwrap();
     let mut driver = Box::pin(drive_terminal_attach(
         &services,
+        &platform,
         env(),
         rx.boxed_local(),
         input.clone(),
@@ -865,6 +867,7 @@ fn terminal_driver_preserves_unanswered_attach_input_and_resumes_only_after_a_re
 fn terminal_metadata_driver_has_no_authoritative_empty_seed_and_retains_data_on_reconnect() {
     use t3_client::services::server::drive_terminal_metadata;
     let services = Services::default();
+    let platform = FakePlatform::default();
     let (tx, rx) = mpsc::unbounded();
     let (first, events) = EventRpc::new();
     tx.unbounded_send(Some(ServiceSession {
@@ -872,7 +875,12 @@ fn terminal_metadata_driver_has_no_authoritative_empty_seed_and_retains_data_on_
         endpoint: first,
     }))
     .unwrap();
-    let mut driver = Box::pin(drive_terminal_metadata(&services, env(), rx.boxed_local()));
+    let mut driver = Box::pin(drive_terminal_metadata(
+        &services,
+        &platform,
+        env(),
+        rx.boxed_local(),
+    ));
     assert!(driver.as_mut().now_or_never().is_none());
     assert!(services.terminal_metadata(&env()).is_none());
     events.unbounded_send(json!({"type":"snapshot","terminals":[{"threadId":"thread","terminalId":"terminal","cwd":"/repo","worktreePath":null,"status":"running","pid":123,"exitCode":null,"exitSignal":null,"hasRunningSubprocess":false,"label":"Terminal","updatedAt":"2026-11-13T00:00:00Z"}]})).unwrap();

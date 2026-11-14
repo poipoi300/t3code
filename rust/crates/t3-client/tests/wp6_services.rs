@@ -672,7 +672,7 @@ fn terminal_chunks_preserve_bom_and_compaction_preserves_every_unread_character(
     );
 }
 #[test]
-fn terminal_reattach_clear_restart_and_fresh_seeds_invalidate_renderer_cursors() {
+fn terminal_reattach_restart_and_fresh_seeds_reset_while_clear_erases_in_place() {
     let mut generations = AttachGenerations::default();
     let mut buffer = generations.seed();
     let snapshot = attach_event("snapshot", json!({"snapshot":terminal_snapshot("hello")}));
@@ -689,8 +689,13 @@ fn terminal_reattach_clear_restart_and_fresh_seeds_invalidate_renderer_cursors()
     let cursor = buffer.output.read(cursor).cursor();
     buffer.apply(&attach_event("cleared", json!({})), 100, &mut generations);
     assert!(
-        matches!(buffer.output.read(cursor), TerminalOutputUpdate::Reset { data, .. } if data.is_empty())
+        matches!(buffer.output.read(cursor), TerminalOutputUpdate::Append { data, .. } if data == CLEAR_TERMINAL_TEXT)
     );
+    assert_eq!(
+        buffer.output.replay(),
+        format!("hello{CLEAR_TERMINAL_TEXT}")
+    );
+    assert_eq!(buffer.output.text(), "");
     buffer.apply(
         &attach_event("restarted", json!({"snapshot":terminal_snapshot("hello")})),
         100,

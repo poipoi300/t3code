@@ -8,11 +8,12 @@ use crate::{
 };
 use serde_json::Value;
 use std::{collections::BTreeMap, rc::Rc};
-use t3_contracts::composer_context::{ReviewCommentContextRecord, ThreadContextRecord};
+use t3_contracts::composer_context::{PreviewAnnotationContextRecord, ReviewCommentContextRecord, ThreadContextRecord};
 
 pub enum AnswerContextRecord<'a> {
     Thread(&'a ThreadContextRecord),
     Review(&'a ReviewCommentContextRecord),
+    Preview(&'a PreviewAnnotationContextRecord),
 }
 pub fn thread_contexts_referenced_by_answer<'a>(
     answer: &str,
@@ -43,6 +44,7 @@ pub fn project_pending_user_input_answer(
         let record = records.iter().rev().find(|record| match record {
             AnswerContextRecord::Thread(record) => record.context_id.0 == reference.context_id,
             AnswerContextRecord::Review(record) => record.context_id.0 == reference.context_id,
+            AnswerContextRecord::Preview(record) => record.context_id.0 == reference.context_id,
         });
         match record {
             Some(AnswerContextRecord::Thread(record)) if reference.kind == "thread" => {
@@ -113,6 +115,13 @@ pub fn project_pending_user_input_answer(
                     .join(" ");
                 let escape = crate::view_logic::context_references::escape_provider_context_payload;
                 output.push_str(&format!("[Review comment: {}; ref={}]\n\n<t3_context version=\"1\">\n<context kind=\"review-comment\" id=\"{}\">\n{}\n</context>\n</t3_context>",escape(&label),record.context_id.0,record.context_id.0,escape(&lines.join("\n"))));
+            }
+            Some(AnswerContextRecord::Preview(record)) if reference.kind == "preview-annotation" => {
+                let label = source.trim_start_matches('!').strip_prefix('[').and_then(|text| text.split_once("](")).map_or("", |(label,_)| label);
+                let label = label.replace(['\r', '\n', ';', ']'], " ").split(crate::view_logic::is_js_whitespace).filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ");
+                let escape = crate::view_logic::context_references::escape_provider_context_payload;
+                let payload = crate::thread_views::composer::answer_context::preview_payload(record);
+                output.push_str(&format!("[Preview annotation: {}; ref={}]\n\n<t3_context version=\"1\">\n<context kind=\"preview-annotation\" id=\"{}\">\n{}\n</context>\n</t3_context>",escape(&label),record.context_id.0,record.context_id.0,escape(&payload)));
             }
             _ => output.push_str(source),
         }
