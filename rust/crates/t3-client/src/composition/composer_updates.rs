@@ -57,7 +57,14 @@ impl<P: Platform + Clone + 'static> UpdateHost for ComposerUpdateHost<P> {
         let method = match config.environment.capabilities.server_self_update {
             Some(ServerSelfUpdateCapability::BootService) => ServerSelfUpdateMethod::BootService,
             Some(ServerSelfUpdateCapability::Respawn) => ServerSelfUpdateMethod::Respawn,
-            Some(ServerSelfUpdateCapability::DesktopManaged) => ServerSelfUpdateMethod::DesktopApp,
+            Some(ServerSelfUpdateCapability::DesktopManaged)
+                if config.environment.capabilities.desktop_app_update == Some(true) =>
+            {
+                ServerSelfUpdateMethod::DesktopApp
+            }
+            Some(ServerSelfUpdateCapability::DesktopManaged) => {
+                return Err(ClientError::Unsupported("desktop app update"));
+            }
             None => return Err(ClientError::Unsupported("server self-update")),
         };
         Ok(UpdateSession {

@@ -139,6 +139,73 @@ async fn persist(
     }
     Ok(())
 }
+fn plan_restore(
+    platform: &dyn Platform,
+    target: &ComposerTarget,
+    key: &str,
+    entry: &Entry,
+    expired: &std::collections::BTreeSet<String>,
+    mut next: Value,
+) -> Result<Value, ClientError> {
+    // Draft persistence can commit before stash removal fails; retries must reuse that restoration.
+    if next["draftsByThreadKey"][key]["restoredStashEntries"][&entry.id] == true {
+        return Ok(next);
+    }
+    let records: Vec<t3_contracts::composer_context::ComposerContextRecord> = entry
+        .metadata
+        .get("records")
+        .map(|records| serde_json::from_value(records.clone()))
+        .transpose()?
+        .unwrap_or_default();
+    let target_thread = target.thread_key(&next);
+    let thread = target_thread.as_ref();
+    let rewritten =
+        context_records::import_records(platform, &mut next, key, thread, &records, &[])?;
+    let prompt = context_records::rewrite_references(&entry.prompt, &rewritten);
+    let prior = next["draftsByThreadKey"][key]["prompt"]
+        .as_str()
+        .unwrap_or_default();
+    let prompt = if prompt.is_empty() {
+        prior.into()
+    } else if prior.js_trim().is_empty() {
+        prompt
+    } else {
+        format!("{}\n\n{}", prior.js_trim_end(), prompt)
+    };
+    web_models::set_prompt(&mut next, key, &prompt);
+    let mut files = vec![];
+    for file in entry.files.as_deref().unwrap_or_default() {
+        let mut value = serde_json::to_value(file)?;
+        value["type"] = json!("file");
+        value["file"] = Value::Null;
+        if !expired.contains(&file.attachment_id) {
+            value["uploadedAttachmentId"] = json!(file.attachment_id);
+            value["uploadEnvironmentId"] = json!(file.environment_id);
+        }
+        files.push(value);
+    }
+    web_content::add_files(&mut next, key, &files, false, true);
+    web_content::add_images(
+        &mut next,
+        key,
+        &entry
+            .attachments
+            .iter()
+            .map(|image| {
+                let mut image = serde_json::to_value(image).expect("stash image");
+                image["type"] = json!("image");
+                image["file"] = json!("memory");
+                image
+            })
+            .collect::<Vec<_>>(),
+        false,
+    );
+    if !next["draftsByThreadKey"][key]["restoredStashEntries"].is_object() {
+        next["draftsByThreadKey"][key]["restoredStashEntries"] = json!({});
+    }
+    next["draftsByThreadKey"][key]["restoredStashEntries"][&entry.id] = json!(true);
+    Ok(next)
+}
 impl PromptStashState {
     fn publish(&self, entries: Vec<Entry>) {
         let prior = self.entries.borrow().clone();
@@ -243,9 +310,10 @@ impl<P: Platform + Clone + 'static> PromptStashSession<P> {
             let images = raw["images"].as_array().cloned().unwrap_or_default();
             let files = raw["files"].as_array().cloned().unwrap_or_default();
             if !images.is_empty() {
-                return Err(ClientError::Unsupported(
-                    "stash image compression (Platform U9)",
-                ));
+                return Err(ClientError::Rejected {
+                    message: "Image stashing is not available.".into(),
+                    detail: None,
+                });
             }
             let mut prompt = captured.prompt.js_trim().to_owned();
             if crate::view_logic::context_references::collect_references(&captured.prompt)
@@ -429,63 +497,7 @@ impl<P: Platform + Clone + 'static> PromptStashSession<P> {
             let drafts = this.runtime.composer_drafts();
             let baseline = drafts.document().borrow().clone();
             let mut next = baseline.clone();
-            let records: Vec<t3_contracts::composer_context::ComposerContextRecord> = entry
-                .metadata
-                .get("records")
-                .map(|records| serde_json::from_value(records.clone()))
-                .transpose()?
-                .unwrap_or_default();
-            let thread = match &this.target {
-                ComposerTarget::Thread(key) => Some(key),
-                _ => None,
-            };
-            let rewritten = context_records::import_records(
-                &this.platform,
-                &mut next,
-                &key,
-                thread,
-                &records,
-                &[],
-            )?;
-            let prompt = context_records::rewrite_references(&entry.prompt, &rewritten);
-            let prior = next["draftsByThreadKey"][&key]["prompt"]
-                .as_str()
-                .unwrap_or_default();
-            let prompt = if prompt.is_empty() {
-                prior.into()
-            } else if prior.js_trim().is_empty() {
-                prompt
-            } else {
-                format!("{}\n\n{}", prior.js_trim_end(), prompt)
-            };
-            web_models::set_prompt(&mut next, &key, &prompt);
-            let mut files = vec![];
-            for file in entry.files.as_deref().unwrap_or_default() {
-                let mut value = serde_json::to_value(file)?;
-                value["type"] = json!("file");
-                value["file"] = Value::Null;
-                if !expired.contains(&file.attachment_id) {
-                    value["uploadedAttachmentId"] = json!(file.attachment_id);
-                    value["uploadEnvironmentId"] = json!(file.environment_id);
-                }
-                files.push(value);
-            }
-            web_content::add_files(&mut next, &key, &files, false, true);
-            web_content::add_images(
-                &mut next,
-                &key,
-                &entry
-                    .attachments
-                    .iter()
-                    .map(|image| {
-                        let mut image = serde_json::to_value(image).expect("stash image");
-                        image["type"] = json!("image");
-                        image["file"] = json!("memory");
-                        image
-                    })
-                    .collect::<Vec<_>>(),
-                false,
-            );
+            next=plan_restore(&this.platform,&this.target,&key,&entry,&expired,next)?;
             drafts.update(|document| {
                 *document = crate::thread_views::drafts::merge_web_states(&next, document, &baseline)?;
                 Ok(())

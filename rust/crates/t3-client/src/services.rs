@@ -1,4 +1,5 @@
 //! Resource lifetimes and client-held service projections, shared by every shell.
+pub mod asset_urls;
 pub mod assets;
 pub mod command_output;
 pub mod config;

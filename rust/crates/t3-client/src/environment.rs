@@ -364,6 +364,8 @@ pub struct EnvironmentRegistry<S> {
     /// Environments with a saved record that could not be read at load (an undecryptable or
     /// unknown-shape profile, credential or token); they stay listed so they can be removed.
     damaged: BTreeSet<EnvironmentId>,
+    /// The saved catalog was unreadable at load and was replaced with an empty one.
+    reset_catalog: bool,
 }
 impl<S> Default for EnvironmentRegistry<S> {
     fn default() -> Self {
@@ -372,6 +374,7 @@ impl<S> Default for EnvironmentRegistry<S> {
             order: Vec::new(),
             retired: BTreeMap::new(),
             damaged: BTreeSet::new(),
+            reset_catalog: false,
             catalog_bytes: None,
             authorization: None,
         }
@@ -444,6 +447,10 @@ impl<S> EnvironmentRegistry<S> {
     /// Whether a saved record of `environment` could not be read when the catalog loaded.
     pub fn is_damaged(&self, environment: &EnvironmentId) -> bool {
         self.damaged.contains(environment)
+    }
+    /// Whether this load found the saved catalog unreadable and started an empty one.
+    pub fn reset_catalog(&self) -> bool {
+        self.reset_catalog
     }
     pub fn entries(&self) -> impl Iterator<Item = &EnvironmentRegistration> {
         self.order
@@ -985,14 +992,15 @@ impl<S> EnvironmentRegistry<S> {
             // Unreadable: kept aside and replaced with an empty catalog, so pairing works again.
             Err(_) => {
                 return Ok(Self {
-                    catalog_bytes: Some(quarantine_catalog(platform, bytes, time).await?),
+                    catalog_bytes: Some(quarantine_catalog(platform, bytes).await?),
+                    reset_catalog: true,
                     ..Self::default()
                 });
             }
         };
         if loaded.dropped_targets > 0 {
             // Keep the original beside the catalog: its unknown targets are gone from the next save.
-            quarantine_copy(platform, &bytes, time).await?;
+            quarantine_copy(platform, &bytes).await?;
         }
         let doc = loaded.document;
         let mut damaged = BTreeSet::new();
@@ -1080,35 +1088,52 @@ impl<S> EnvironmentRegistry<S> {
     }
 }
 
-fn quarantine_key(time: Time) -> StorageKey {
-    StorageKey::new(
-        "connection-catalog-quarantine",
-        None,
-        time.epoch_ms.to_string(),
-    )
+/// Named by the catalog's own bytes, so loading the same catalog again keeps one copy.
+fn quarantine_key(bytes: &[u8]) -> StorageKey {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(bytes);
+    let record = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    StorageKey::new("connection-catalog-quarantine", None, record)
 }
-async fn quarantine_copy(
-    platform: &dyn Platform,
-    bytes: &[u8],
-    time: Time,
-) -> Result<(), ClientError> {
-    platform
-        .write(
-            StorageArea::Ordinary,
-            vec![StorageWrite {
-                key: quarantine_key(time),
-                value: Some(bytes.to_vec()),
-            }],
-        )
-        .await?;
+async fn quarantine_copy(platform: &dyn Platform, bytes: &[u8]) -> Result<(), ClientError> {
+    let key = quarantine_key(bytes);
+    if platform
+        .get(StorageArea::Ordinary, key.clone())
+        .await?
+        .is_none()
+    {
+        platform
+            .write(
+                StorageArea::Ordinary,
+                vec![StorageWrite {
+                    key,
+                    value: Some(bytes.to_vec()),
+                }],
+            )
+            .await?;
+    }
     Ok(())
 }
 /// Moves an unreadable catalog aside and starts an empty one, unless it changed meanwhile.
+/// The credentials, profiles and relay tokens go with it: no target can reach them any more,
+/// and TypeScript drops them with the document.
 async fn quarantine_catalog(
     platform: &dyn Platform,
     bytes: Vec<u8>,
-    time: Time,
 ) -> Result<Vec<u8>, ClientError> {
+    let mut secure = Vec::new();
+    for namespace in [
+        "connection-credential",
+        "connection-profile",
+        crate::persistence::REMOTE_DPOP_TOKEN_KIND,
+    ] {
+        for key in platform.list(StorageArea::Secure, namespace.into()).await? {
+            secure.push(StorageWrite { key, value: None });
+        }
+    }
     let empty = crate::persistence::Record::new(
         "connection-catalog",
         None,
@@ -1127,7 +1152,7 @@ async fn quarantine_catalog(
             }],
             ordinary: vec![
                 StorageWrite {
-                    key: quarantine_key(time),
+                    key: quarantine_key(&bytes),
                     value: Some(bytes),
                 },
                 StorageWrite {
@@ -1135,7 +1160,7 @@ async fn quarantine_catalog(
                     value: Some(empty.clone()),
                 },
             ],
-            secure: vec![],
+            secure,
         })
         .await?;
     if !committed {
@@ -1216,7 +1241,6 @@ async fn save_catalog_with(
                     // A profile that cannot be read (it failed authentication, or has a shape this
                     // build does not know) keeps its route and its row as they are, so every
                     // other environment can still be saved.
-                    platform.get(StorageArea::Secure, key.clone()).await?; // N2-PROBE
                     let Ok(existing) = platform.get(StorageArea::Secure, key.clone()).await else {
                         targets.push(target);
                         continue;
@@ -1271,7 +1295,12 @@ async fn save_catalog_with(
     }
     let mut ordinary = Vec::new();
     if let Some(previous_targets) = previous_targets {
-        for target in previous_targets {
+        // A target this build cannot read was left out of `targets`, not removed: its rows stay
+        // for the build that wrote it (the quarantined copy restores the target itself).
+        for target in previous_targets
+            .iter()
+            .filter(|target| crate::persistence::valid_target(target))
+        {
             let environment = EnvironmentId(
                 target["environmentId"]
                     .as_str()

@@ -509,6 +509,8 @@ impl<P: Platform, R: RpcEndpoint, L: SnapshotSource> ShellSync<P, R, L> {
         if !self.cache_loaded.get() {
             let _ = self.load_cache().await;
         }
+        // Per session and never reset by a value, as TypeScript's `streamFailureRetries`: a
+        // stream can emit before every chunk failure.
         let mut failures = 0_u32;
         loop {
             if !self.active() {
@@ -591,7 +593,6 @@ impl<P: Platform, R: RpcEndpoint, L: SnapshotSource> ShellSync<P, R, L> {
                     }
                 }
                 if !events.is_empty() {
-                    failures = 0;
                     if self.apply(events) == SyncAction::ReloadSnapshot {
                         reload = true;
                         break;
@@ -1003,7 +1004,6 @@ impl<P: Platform, R: RpcEndpoint, L: SnapshotSource> ThreadSync<P, R, L> {
                         }
                         _ => {}
                     }
-                    failures = 0;
                 }
                 if let Some(error) = failure {
                     if socket_only

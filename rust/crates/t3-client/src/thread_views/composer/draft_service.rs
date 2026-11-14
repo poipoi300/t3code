@@ -261,19 +261,29 @@ impl<P: Platform + 'static> ComposerDraftService<P> {
         prompt: String,
         cursor: usize,
     ) -> Result<(), ClientError> {
+        if !self.writable() {
+            return Err(ClientError::Cancelled);
+        }
         let id = super::web_sessions::resolve(
             &self.document.borrow(),
             super::web_sessions::Target::Draft(id),
         )
         .ok_or_else(|| ClientError::InvalidPayload("A composer draft is required.".into()))?;
         let cursor = cursor.min(prompt.encode_utf16().count());
-        self.update(|document| {
-            web_models::set_prompt(document, &id, &prompt);
+        {
+            let mut document = self.document.borrow_mut();
+            let prior = &document["draftsByThreadKey"][&id];
+            if prior["prompt"].as_str().unwrap_or_default() == prompt
+                && prior["cursor"].as_u64().unwrap_or(0) == cursor as u64
+            {
+                return Ok(());
+            }
+            web_models::set_prompt(&mut document, &id, &prompt);
             if document["draftsByThreadKey"].get(&id).is_some() {
                 document["draftsByThreadKey"][&id]["cursor"] = json!(cursor);
             }
-            Ok(())
-        })?;
+        }
+        self.attachment_changed(&id);
         Ok(())
     }
 

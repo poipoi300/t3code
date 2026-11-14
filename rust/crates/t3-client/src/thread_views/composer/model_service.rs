@@ -78,7 +78,7 @@ pub struct ComposerModelState {
     picks: RefCell<ModelPicks>,
     applied: RefCell<BTreeMap<ThreadKey, Rc<ModelSelection>>>,
     lanes: RefCell<BTreeMap<(EnvironmentId, String), crate::services::resources::LocalLimiter>>,
-    refresh_unavailable: RefCell<BTreeMap<EnvironmentId,crate::types::Generation>>,
+    refresh_unavailable: RefCell<BTreeMap<EnvironmentId, crate::types::Generation>>,
     favorites: RefCell<BTreeMap<(EnvironmentId, ProviderInstanceId, String), Favorite>>,
     failures: RefCell<BTreeMap<EnvironmentId, (crate::types::Generation, ModelCatalogState)>>,
     views: RefCell<BTreeMap<ThreadKey, Weak<ComposerModelsView>>>,
@@ -153,13 +153,47 @@ impl<P: Platform + Clone + 'static> ComposerModelsSession<P> {
             .ok_or(ClientError::Disconnected)
     }
     fn config(&self) -> Option<Rc<ServerConfig>> {
-        self.runtime
+        let config = self
+            .runtime
             .store()
             .snapshot()
             .environments
             .get(&self.key.environment)?
             .config
-            .clone()
+            .clone()?;
+        let Some(context) = self.runtime.git_panel().workspace_context(&self.key, None) else {
+            return Some(config);
+        };
+        let cwd = context
+            .worktree_path
+            .as_deref()
+            .unwrap_or(&context.project.workspace_root.0);
+        let replacements = config
+            .providers
+            .0
+            .iter()
+            .enumerate()
+            .filter_map(|(index, provider)| {
+                provider
+                    .workspace_snapshots
+                    .as_ref()?
+                    .iter()
+                    .find(|snapshot| snapshot.cwd.0 == cwd)?
+                    .models
+                    .as_ref()?
+                    .as_ref()
+                    .filter(|models| *models != &provider.models)
+                    .map(|models| (index, models))
+            })
+            .collect::<Vec<_>>();
+        if replacements.is_empty() {
+            return Some(config);
+        }
+        let mut next = (*config).clone();
+        for (index, models) in replacements {
+            next.providers.0[index].models = models.clone();
+        }
+        Some(Rc::new(next))
     }
     fn failure(&self, error: &ClientError) {
         let state = match error {
@@ -189,7 +223,7 @@ impl<P: Platform + Clone + 'static> ComposerModelsSession<P> {
             .acquire()
     }
     pub fn snapshot(&self) -> Rc<ComposerModelsView> {
-        let draft_id=self.runtime.composer_drafts().thread_draft_key(&self.key);
+        let draft_id = self.runtime.composer_drafts().thread_draft_key(&self.key);
         let config = self.config();
         let thread = self.runtime.store().shared_thread(&self.key);
         let pick = self.state.applied.borrow().get(&self.key).cloned();
@@ -230,10 +264,21 @@ impl<P: Platform + Clone + 'static> ComposerModelsSession<P> {
             })
             .unwrap_or_else(|| server_selection.cloned().unwrap_or(default_selection));
         let legacy = self.runtime.composer_preferences().snapshot();
-        let project = thread.as_ref().and_then(|p| match &p.thread.project_id {
-            IdOrIndex::Id(id) => Some(id),
-            _ => None,
-        });
+        let draft_project = (document["draftThreadsByThreadKey"][&key]["environmentId"]
+            == self.key.environment.0)
+            .then(|| {
+                document["draftThreadsByThreadKey"][&key]["projectId"]
+                    .as_str()
+                    .map(|id| t3_contracts::base_schemas::ProjectId(id.into()))
+            })
+            .flatten();
+        let project = thread
+            .as_ref()
+            .and_then(|p| match &p.thread.project_id {
+                IdOrIndex::Id(id) => Some(id),
+                _ => None,
+            })
+            .or(draft_project.as_ref());
         let projection = self
             .runtime
             .store()
@@ -469,7 +514,8 @@ impl<P: Platform + Clone + 'static> ComposerModelsSession<P> {
             .state
             .refresh_unavailable
             .borrow()
-              .get(&self.key.environment).is_some_and(|generation|*generation==self.generation())
+            .get(&self.key.environment)
+            .is_some_and(|generation| *generation == self.generation())
             && self.endpoint().is_ok_and(|endpoint| {
                 serde_json::from_value(json!({"modelCatalogOnly":true}))
                     .is_ok_and(|input| endpoint.available::<WsServerRefreshProvidersRpc>(&input))
@@ -528,7 +574,8 @@ impl<P: Platform + Clone + 'static> ComposerModelsSession<P> {
                 return Err(ClientError::Cancelled);
             }
             let drafts = this.runtime.composer_drafts();
-            let draft = drafts.view(&this.key);
+            let draft_key = drafts.thread_draft_key(&this.key);
+            let draft = drafts.view_key(&draft_key);
             let planned = super::model_traits::plan_model_trait_change(
                 &ModelTraitsInput {
                     descriptors: &view.traits.descriptors,
@@ -549,8 +596,8 @@ impl<P: Platform + Clone + 'static> ComposerModelsSession<P> {
                     .encode_utf16()
                     .count()
                     .saturating_sub(planned.prompt.encode_utf16().count());
-                drafts.set_prompt(
-                    &this.key,
+                drafts.set_prompt_key(
+                    &draft_key,
                     planned.prompt,
                     draft.cursor.saturating_sub(removed),
                 )?;
@@ -623,7 +670,13 @@ impl<P: Platform + Clone + 'static> ComposerModelsSession<P> {
         async move {
             let config = this.config().ok_or(ClientError::Disconnected)?;
             if config.environment.capabilities.model_catalog_refresh != Some(true)
-                || this.state.refresh_unavailable.borrow().get(&this.key.environment).is_some_and(|generation|*generation==this.generation()) {
+                || this
+                    .state
+                    .refresh_unavailable
+                    .borrow()
+                    .get(&this.key.environment)
+                    .is_some_and(|generation| *generation == this.generation())
+            {
                 return Err(ClientError::Unsupported("model catalog refresh"));
             }
             let endpoint = this.endpoint()?;
@@ -648,7 +701,7 @@ impl<P: Platform + Clone + 'static> ComposerModelsSession<P> {
                         this.state
                             .refresh_unavailable
                             .borrow_mut()
-                            .insert(this.key.environment.clone(),this.generation());
+                            .insert(this.key.environment.clone(), this.generation());
                         this.state.changes.notify();
                     }
                     Err(error)

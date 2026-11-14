@@ -36,25 +36,53 @@ impl<P: Platform + 'static> ComposerPreferences<P> {
     pub fn changes(&self) -> LocalBoxStream<'static, ()> {
         self.changes.subscribe()
     }
-    pub async fn update(&self, edit: impl FnOnce(&mut ClientSettingsSchema)) -> Result<(), ClientError> {
+    pub async fn update(
+        &self,
+        edit: impl FnOnce(&mut ClientSettingsSchema),
+    ) -> Result<(), ClientError> {
         use crate::platform::{StorageCondition, StorageTransaction, StorageWrite};
         let prior_bytes = self.platform.get(StorageArea::Ordinary, key()).await?;
         let prior = self.snapshot();
         let mut next = prior.as_ref().clone();
         edit(&mut next);
         let next = Rc::new(next);
-        let value = serde_json::to_vec(&Record::new("client-settings", None, key().record, 1, next.as_ref()))?;
+        let value = serde_json::to_vec(&Record::new(
+            "client-settings",
+            None,
+            key().record,
+            1,
+            next.as_ref(),
+        ))?;
         *self.settings.borrow_mut() = next.clone();
         self.changes.notify();
-        let written = self.platform.transaction(StorageTransaction {
-            conditions: vec![StorageCondition { area: StorageArea::Ordinary, key: key(), expected: prior_bytes }],
-            ordinary: vec![StorageWrite { key: key(), value: Some(value) }], secure: vec![],
-        }).await;
+        let written = self
+            .platform
+            .transaction(StorageTransaction {
+                conditions: vec![StorageCondition {
+                    area: StorageArea::Ordinary,
+                    key: key(),
+                    expected: prior_bytes,
+                }],
+                ordinary: vec![StorageWrite {
+                    key: key(),
+                    value: Some(value),
+                }],
+                secure: vec![],
+            })
+            .await;
         match written {
             Ok(true) => Ok(()),
             result => {
-                if Rc::ptr_eq(&self.snapshot(), &next) { *self.settings.borrow_mut() = prior; self.changes.notify(); }
-                match result { Err(error) => Err(error.into()), _ => Err(ClientError::InvalidPayload("Client settings changed concurrently; try again.".into())) }
+                if Rc::ptr_eq(&self.snapshot(), &next) {
+                    *self.settings.borrow_mut() = prior;
+                    self.changes.notify();
+                }
+                match result {
+                    Err(error) => Err(error.into()),
+                    _ => Err(ClientError::InvalidPayload(
+                        "Client settings changed concurrently; try again.".into(),
+                    )),
+                }
             }
         }
     }

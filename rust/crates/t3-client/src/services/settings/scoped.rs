@@ -872,6 +872,41 @@ pub fn dropped_setting_keys(write: &ScopedServerWrite, saved: &Value) -> Vec<Str
         .collect()
 }
 
+/// `requiredScopesForServerSettingsPatch` (packages/contracts/src/settings.ts).
+pub fn required_scopes_for_server_settings_patch(
+    patch: &SettingsPatch,
+) -> Vec<t3_contracts::auth::AuthEnvironmentScope> {
+    use t3_contracts::auth::AuthEnvironmentScope as Scope;
+    let (mut providers, mut settings, mut access) = (false, false, false);
+    for key in patch.keys() {
+        match key.as_str() {
+            "requireConnectDeviceApproval" => access = true,
+            "providers" | "providerInstances" | "usageLimitSources" | "textGenerators"
+            | "secretProviders" => providers = true,
+            _ => settings = true,
+        }
+    }
+    // Removing a secret provider also clears the settings fields that read from it.
+    if patch
+        .get("secretProviders")
+        .and_then(Value::as_object)
+        .is_some_and(|entries| entries.values().any(Value::is_null))
+    {
+        settings = true;
+    }
+    let mut scopes = Vec::new();
+    if settings || (!providers && !access) {
+        scopes.push(Scope::SettingsWrite);
+    }
+    if providers {
+        scopes.push(Scope::ProvidersManage);
+    }
+    if access {
+        scopes.push(Scope::AccessWrite);
+    }
+    scopes
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::scope::{ScopeGroup, ScopeLabel, ScopeMember, SettingsScopeSearch, resolve_settings_scope};
@@ -954,11 +989,11 @@ mod tests {
         let mut environments = vec![environment("a", "A", json!({})), environment("b", "B", json!({}))];
         environments[1].phase = Phase::Backoff;
         let all = resolve_settings_scope(&SettingsScopeSearch::default(), &[], &environments);
-        let plan = plan_scoped_settings_patch(&all, &environments, &patch(json!({"responseStreamingMode": "final"})), false);
+        let plan = plan_scoped_settings_patch(&all, &environments, &patch(json!({"responseStreamingMode": "paragraph"})), false);
         assert_eq!(plan.server_writes.len(), 1);
         assert_eq!(plan.server_writes[0].environment_id.0, "a");
         environments[0].phase = Phase::Offline;
-        let none = plan_scoped_settings_patch(&all, &environments, &patch(json!({"responseStreamingMode": "final"})), false);
+        let none = plan_scoped_settings_patch(&all, &environments, &patch(json!({"responseStreamingMode": "paragraph"})), false);
         assert_eq!(
             none.unavailable_reason.map(|r| r.key),
             Some("Connect an environment to save this setting.")
@@ -969,7 +1004,7 @@ mod tests {
             &environments,
         );
         assert_eq!(one.label, ScopeLabel::Content("B".into()));
-        let reason = plan_scoped_settings_patch(&one, &environments, &patch(json!({"responseStreamingMode": "final"})), false)
+        let reason = plan_scoped_settings_patch(&one, &environments, &patch(json!({"responseStreamingMode": "paragraph"})), false)
             .unavailable_reason
             .expect("disconnected");
         assert_eq!(reason.english(), "Connect B to save this setting.");
@@ -978,7 +1013,7 @@ mod tests {
     #[test]
     fn project_overrides_complete_partial_objects_and_inherit_with_null() {
         let environments = [
-            environment("a", "A", json!({"projectSettingsOverrides": {"p1": {"sidebarAutoSettleOnMerge": true, "responseStreamingMode": "final"}}})),
+            environment("a", "A", json!({"projectSettingsOverrides": {"p1": {"sidebarAutoSettleOnMerge": true, "responseStreamingMode": "paragraph"}}})),
             environment("b", "B", json!({})),
         ];
         let scope = project_scope(&environments);
@@ -995,7 +1030,7 @@ mod tests {
     #[test]
     fn sources_and_mixed_values_follow_the_targets() {
         let environments = [
-            environment("a", "A", json!({"projectSettingsOverrides": {"p1": {"responseStreamingMode": "final"}}})),
+            environment("a", "A", json!({"projectSettingsOverrides": {"p1": {"responseStreamingMode": "turn"}}})),
             environment("b", "B", json!({})),
         ];
         let scope = project_scope(&environments);
@@ -1041,6 +1076,24 @@ mod tests {
         assert_eq!(
             for_destination(&json!({"compactIdleThreads": true}), patch(json!({"idleCompaction": "beforeCacheExpires"}))),
             patch(json!({"compactIdleThreads": true}))
+        );
+    }
+
+    #[test]
+    fn patch_scopes_follow_the_keys_they_change() {
+        use t3_contracts::auth::AuthEnvironmentScope as Scope;
+        assert_eq!(required_scopes_for_server_settings_patch(&patch(json!({}))), vec![Scope::SettingsWrite]);
+        assert_eq!(
+            required_scopes_for_server_settings_patch(&patch(json!({"providerInstances": {}}))),
+            vec![Scope::ProvidersManage]
+        );
+        assert_eq!(
+            required_scopes_for_server_settings_patch(&patch(json!({"requireConnectDeviceApproval": false, "wordWrap": true}))),
+            vec![Scope::SettingsWrite, Scope::AccessWrite]
+        );
+        assert_eq!(
+            required_scopes_for_server_settings_patch(&patch(json!({"secretProviders": {"x": null}}))),
+            vec![Scope::SettingsWrite, Scope::ProvidersManage]
         );
     }
 

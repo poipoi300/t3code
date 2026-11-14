@@ -221,7 +221,9 @@ pub fn uploads_to_release(attachments: &[Value]) -> Vec<Value> {
         .collect()
 }
 pub fn uploaded_attachment(value: &Value) -> Result<ChatAttachment, ClientError> {
-    Ok(serde_json::from_value(json!({"type":value["type"],"id":value["uploadedAttachmentId"],"name":value["name"],"mimeType":value["mimeType"],"sizeBytes":value["sizeBytes"]}))?)
+    Ok(serde_json::from_value(
+        json!({"type":value["type"],"id":value["uploadedAttachmentId"],"name":value["name"],"mimeType":value["mimeType"],"sizeBytes":value["sizeBytes"]}),
+    )?)
 }
 
 pub fn release_composer_draft_uploads(
@@ -390,7 +392,10 @@ struct Session {
 }
 impl Session {
     fn writable(&self) -> bool {
-        self.owner.borrow().as_ref().is_none_or(|owner| owner.writable())
+        self.owner
+            .borrow()
+            .as_ref()
+            .is_none_or(|owner| owner.writable())
     }
     fn changed(&self) {
         if let Some(owner) = self.owner.borrow().as_ref() {
@@ -974,10 +979,17 @@ impl AttachmentSession {
         self.changed();
         let result = self.upload_inner(&connection, &attachment).await;
         if self.contains(id) {
+            let missing = self.draft()["files"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|file| file["id"] == id && web_content::needs_reattach(file));
             self.0.uploads.borrow_mut().insert(
                 id.into(),
                 match &result {
                     Ok(()) => UploadState::Ready,
+                    Err(_) if missing => UploadState::Idle,
+                    Err(ClientError::InvalidPayload(reason)) => UploadState::Failed(reason.clone()),
                     Err(error) => UploadState::Failed(error.to_string()),
                 },
             );
@@ -993,6 +1005,48 @@ impl AttachmentSession {
         let generation = self.0.generation.get();
         let id = attachment["id"].as_str().ok_or(ClientError::Cancelled)?;
         let image = attachment["type"] == "image";
+        if !image
+            && attachment["uploadEnvironmentId"] == self.0.environment.0
+            && let Some(persisted) = attachment["uploadedAttachmentId"].as_str()
+        {
+            let verification =
+                assets::verify_persisted_attachment(&connection.endpoint, persisted.into()).await;
+            if self.0.generation.get() != generation || !self.0.writable() || !self.contains(id) {
+                return Err(ClientError::Cancelled);
+            }
+            let has_bytes = attachment["fileUri"]
+                .as_str()
+                .is_some_and(|uri| !uri.is_empty())
+                || attachment["dataUrl"].is_string();
+            match verification {
+                assets::AttachmentVerification::Verified => {
+                    self.0
+                        .uploaded
+                        .borrow_mut()
+                        .insert(id.into(), persisted.into());
+                    return Ok(());
+                }
+                assets::AttachmentVerification::Missing if !has_bytes => {
+                    web_content::mark_file_upload_missing(
+                        &mut self.0.drafts.borrow_mut(),
+                        &self.0.key,
+                        id,
+                        &self.0.environment.0,
+                        persisted,
+                    );
+                    return Err(ClientError::InvalidPayload(
+                        "Uploaded file expired. Remove it and attach it again.".into(),
+                    ));
+                }
+                assets::AttachmentVerification::Failed(_) => {
+                    return Err(ClientError::InvalidPayload(
+                        "Uploaded file could not be verified. Retry when the server reconnects."
+                            .into(),
+                    ));
+                }
+                assets::AttachmentVerification::Missing => {}
+            }
+        }
         let limit = if image {
             PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
         } else {

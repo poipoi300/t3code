@@ -8,6 +8,8 @@ pub mod link_targets;
 #[cfg(test)]
 mod link_targets_tests;
 pub mod new_thread;
+pub mod project_flow;
+pub mod ignored_selection;
 mod normalize;
 pub mod prompt_links;
 pub use normalize::normalize_app_path;

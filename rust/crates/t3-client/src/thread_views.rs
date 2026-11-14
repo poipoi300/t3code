@@ -22,6 +22,7 @@ pub mod timeline_events;
 pub mod undo;
 pub mod user_message;
 pub mod visits;
+pub mod worktree_setup;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadShelf {
     Active,

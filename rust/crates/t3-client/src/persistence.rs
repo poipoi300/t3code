@@ -810,7 +810,7 @@ fn valid_remote_dpop_token(v: &Value) -> bool {
 fn has_strings(v: &Value, fields: &[&str]) -> bool {
     fields.iter().all(|key| v[*key].is_string())
 }
-fn valid_target(v: &Value) -> bool {
+pub(crate) fn valid_target(v: &Value) -> bool {
     has_strings(v, &["environmentId", "label"])
         && match v["_tag"].as_str() {
             Some("BearerConnectionTarget" | "SshConnectionTarget") => v["connectionId"].is_string(),
@@ -1884,9 +1884,12 @@ pub async fn import_namespace(
 /// Deletes the import copies (old backups, quarantined entries, import conflicts) that mention
 /// `environment` or contain any of `secrets`, so removing an environment leaves no copy of its
 /// token. A copy that cannot be read cannot be inspected and stays.
+/// `connections` are the environment's route and connection ids: an import conflict for a
+/// credential row names only its connection id, and an unreadable credential gives no secret.
 pub async fn purge_environment_copies(
     storage: &(impl Storage + ?Sized),
     environment: &EnvironmentId,
+    connections: &[String],
     secrets: &[String],
 ) -> Result<usize> {
     use base64::Engine;
@@ -1919,9 +1922,10 @@ pub async fn purge_environment_copies(
                 embedded(&value, &mut text);
             }
             if text.contains(&environment.0)
-                || secrets
+                || connections
                     .iter()
-                    .any(|secret| !secret.is_empty() && text.contains(secret.as_str()))
+                    .chain(secrets)
+                    .any(|needle| !needle.is_empty() && text.contains(needle.as_str()))
             {
                 deletes.push(StorageWrite { key, value: None });
             }

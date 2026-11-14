@@ -677,7 +677,8 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
         );
         let store = self.store.clone();
         let environment = self.environment.clone();
-        let session = lease.session;
+        let endpoint = lease.session.endpoint();
+        let platform = self.platform.clone();
         self.schedule(
             Key::Config(generation.0),
             async move {
@@ -685,8 +686,14 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
                     Ok(input) => input,
                     Err(error) => return Outcome::Ended(Err(error.into())),
                 };
-                let mut stream =
-                    session.subscribe::<t3_contracts::rpc::WsSubscribeServerConfigRpc>(input);
+                // A failed request on a healthy socket resubscribes on it (WP5's policy); the
+                // socket job ending is what replaces the session.
+                let mut stream = endpoint
+                    .subscribe_recovering::<t3_contracts::rpc::WsSubscribeServerConfigRpc, _>(
+                        &platform,
+                        input,
+                        Default::default(),
+                    );
                 let mut current = None;
                 while let Some(event) = stream.next().await {
                     let event = match event {

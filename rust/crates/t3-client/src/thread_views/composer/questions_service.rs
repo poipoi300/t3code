@@ -55,6 +55,36 @@ pub struct PendingUserInputState {
     progress: RefCell<BTreeMap<(ThreadKey, RuntimeRequestId), Progress>>,
     views: RefCell<BTreeMap<ThreadKey, Rc<PendingUserInputView>>>,
     changes: Changes,
+    driver: RefCell<Option<futures::future::AbortHandle>>,
+}
+impl PendingUserInputState {
+    pub(crate) fn driver_bound(&self) -> bool {
+        self.driver.borrow().is_some()
+    }
+    pub(crate) fn bind_driver(&self, handle: futures::future::AbortHandle) -> bool {
+        let mut driver = self.driver.borrow_mut();
+        if driver.is_some() {
+            return false;
+        }
+        *driver = Some(handle);
+        true
+    }
+    pub(crate) fn active_keys(&self) -> Vec<ThreadKey> {
+        self.progress
+            .borrow()
+            .keys()
+            .map(|(key, _)| key.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+}
+impl Drop for PendingUserInputState {
+    fn drop(&mut self) {
+        if let Some(driver) = self.driver.get_mut().take() {
+            driver.abort();
+        }
+    }
 }
 #[derive(Clone)]
 pub struct PendingUserInputSession<P: Platform + Clone + 'static> {
@@ -209,7 +239,8 @@ impl<P: Platform + Clone + 'static> PendingUserInputSession<P> {
             let draft_id = question_attachment_draft_id(&self.key, &request.0, &question.id);
             let saved = drafts.view_key(&draft_id);
             let answer = progress.answers.entry(question.id.clone()).or_default();
-            if saved.revision == 0
+            if question.allow_custom_answer
+                && saved.revision == 0
                 && saved.prompt.is_empty()
                 && let Some(initial) = &question.initial_answer
             {
@@ -308,6 +339,10 @@ impl<P: Platform + Clone + 'static> PendingUserInputSession<P> {
         Some(next)
     }
     fn return_resolved(&self, pending: &[RuntimeRequestId], answered: &[RuntimeRequestId]) {
+        let drafts = self.runtime.composer_drafts();
+        if !drafts.writable() {
+            return;
+        }
         let removed = {
             let mut states = self.state.progress.borrow_mut();
             let keys = states
@@ -319,7 +354,6 @@ impl<P: Platform + Clone + 'static> PendingUserInputSession<P> {
                 .filter_map(|key| states.remove(&key).map(|progress| (key.1, progress)))
                 .collect::<Vec<_>>()
         };
-        let drafts = self.runtime.composer_drafts();
         let normal = drafts.thread_draft_key(&self.key);
         for (request, progress) in removed {
             if !progress.submitted && !answered.contains(&request) {
@@ -380,21 +414,15 @@ impl<P: Platform + Clone + 'static> PendingUserInputSession<P> {
                     Ok(())
                 });
             }
-            let prefix =
-                crate::view_logic::session::questions::question_attachment_draft_prefix(&self.key);
-            let encoded = crate::persistence::encode_uri_component(
-                &serde_json::to_string(&request.0).expect("request id"),
-            );
+            let keys = progress
+                .order
+                .iter()
+                .map(|id| question_attachment_draft_id(&self.key, &request.0, id))
+                .collect::<Vec<_>>();
+            self.runtime.retire_composer_attachments(&keys);
             let _ = drafts.update(|document| {
-                let keys = document["draftsByThreadKey"]
-                    .as_object()
-                    .into_iter()
-                    .flat_map(|drafts| drafts.keys())
-                    .filter(|key| key.starts_with(&prefix) && key.contains(&encoded))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                for key in keys {
-                    super::web_models::clear_content(document, &key);
+                for key in &keys {
+                    super::web_models::clear_content(document, key);
                 }
                 Ok(())
             });

@@ -1,12 +1,7 @@
 use super::{
     attachment_intake::AttachmentItem, context_records::draft_chip_records, target::ComposerTarget,
 };
-use crate::{
-    ClientError,
-    composition::ClientRuntime,
-    platform::Platform,
-    types::{ThreadId, ThreadKey},
-};
+use crate::{ClientError, composition::ClientRuntime, platform::Platform, types::ThreadKey};
 use futures::{StreamExt, stream::LocalBoxStream};
 use std::{
     cell::RefCell,
@@ -42,24 +37,8 @@ impl<P: Platform + Clone + 'static> ComposerChipsSession<P> {
         }
     }
     fn key(&self) -> Option<ThreadKey> {
-        match &self.target {
-            ComposerTarget::Thread(key) => Some(key.clone()),
-            ComposerTarget::Draft {
-                draft_id,
-                environment_id,
-            } => {
-                let document = self.runtime.composer_drafts().document();
-                let document = document.borrow();
-                Some(ThreadKey {
-                    environment: environment_id.clone()?,
-                    thread: ThreadId(
-                        document["draftThreadsByThreadKey"][draft_id]["threadId"]
-                            .as_str()?
-                            .into(),
-                    ),
-                })
-            }
-        }
+        self.target
+            .thread_key(&self.runtime.composer_drafts().document().borrow())
     }
     pub fn snapshot(&self) -> Result<Rc<ComposerChipsView>, ClientError> {
         let drafts = self.runtime.composer_drafts();

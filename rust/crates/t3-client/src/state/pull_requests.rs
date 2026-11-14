@@ -40,7 +40,7 @@ fn canonical(host: &str, repository: &str, number: u64) -> ThreadPullRequestKey 
     }
 }
 
-fn parsed_key(value: &str) -> Option<(ThreadPullRequestKey, bool)> {
+pub(crate) fn parsed_key(value: &str) -> Option<(ThreadPullRequestKey, bool)> {
     let url = Url::parse(value).ok()?;
     if !matches!(url.scheme(), "http" | "https") {
         return None;

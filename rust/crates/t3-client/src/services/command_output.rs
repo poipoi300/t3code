@@ -188,7 +188,11 @@ impl Display {
     /// The fold keeps up to twice the cap settled before it trims; drop whole head blocks so
     /// what is shown stays within the cap, as the snapshot text does.
     fn keep_within_cap(&mut self) {
-        let live: usize = self.live.iter().map(|line| line.encode_utf16().count() + 1).sum();
+        let live: usize = self
+            .live
+            .iter()
+            .map(|line| line.encode_utf16().count() + 1)
+            .sum();
         while self.blocks.len() > 1 && self.settled_units + live > TERMINAL_OUTPUT_TAIL_CHARS {
             if let Some(block) = self.blocks.pop_front() {
                 self.settled_units = self
@@ -263,7 +267,10 @@ impl CommandOutputCell {
     }
     /// False once the command settled; `None` while loading.
     pub fn running(&self) -> Option<bool> {
-        self.display.borrow().as_ref().map(|display| display.running)
+        self.display
+            .borrow()
+            .as_ref()
+            .map(|display| display.running)
     }
     /// The whole output as one string (copying it): proportional to the output.
     pub fn text(&self) -> Option<String> {
@@ -318,10 +325,14 @@ pub async fn drive_command_output(
     }
 }
 
+/// Settled commands' final output by identity, each with the instant it may be dropped.
+pub(crate) type SettledCells =
+    Rc<RefCell<std::collections::BTreeMap<String, (Rc<CommandOutputCell>, u64)>>>;
+
 /// Keeps a settled row's cell for [`COMPLETED_OUTPUT_TTL_MS`] after its last reader leaves.
 pub(crate) struct SettledCache {
     pub identity: String,
-    pub cells: Rc<RefCell<std::collections::BTreeMap<String, (Rc<CommandOutputCell>, u64)>>>,
+    pub cells: SettledCells,
     pub now: Rc<dyn Fn() -> u64>,
 }
 
@@ -341,7 +352,10 @@ impl Drop for CommandOutputShared {
         {
             cache.cells.borrow_mut().insert(
                 cache.identity,
-                (self.cell.clone(), (cache.now)().saturating_add(COMPLETED_OUTPUT_TTL_MS)),
+                (
+                    self.cell.clone(),
+                    (cache.now)().saturating_add(COMPLETED_OUTPUT_TTL_MS),
+                ),
             );
         }
     }
@@ -464,12 +478,19 @@ mod tests {
         assert!(first.reset);
         assert!(first.blocks.iter().all(|block| block.lines <= BLOCK_LINES));
         let total: usize = first.blocks.iter().map(|block| block.lines).sum();
-        assert_eq!(total + first.live.len(), cell.text().unwrap().lines().count() + 1);
+        assert_eq!(
+            total + first.live.len(),
+            cell.text().unwrap().lines().count() + 1
+        );
 
         cell.apply(&frame(CommandOutputFrameKind::Append, "next\n50%", true));
         let delta = cell.read(Some(first.revision)).unwrap();
         assert!(!delta.reset);
-        assert_eq!(delta.blocks.len(), 1, "only the block the new line landed in");
+        assert_eq!(
+            delta.blocks.len(),
+            1,
+            "only the block the new line landed in"
+        );
         assert!(delta.blocks[0].lines <= BLOCK_LINES);
         // The window keeps the newest 64 lines; the line it pushed out settles.
         assert!(
@@ -505,7 +526,11 @@ mod tests {
         let line = "x".repeat(99) + "\n";
         let lines = TERMINAL_OUTPUT_TAIL_CHARS / line.len() + 400;
         for _ in 0..lines / 100 {
-            cell.apply(&frame(CommandOutputFrameKind::Append, &line.repeat(100), true));
+            cell.apply(&frame(
+                CommandOutputFrameKind::Append,
+                &line.repeat(100),
+                true,
+            ));
         }
         let delta = cell.read(None).unwrap();
         assert!(delta.truncated);

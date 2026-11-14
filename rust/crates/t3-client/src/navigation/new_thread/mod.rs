@@ -3,6 +3,7 @@ mod default_project;
 mod drafts;
 pub use default_project::default_project;
 mod links;
+pub use links::{LinkAction, LinkChoice, LinkText};
 mod open;
 mod policy;
 mod submit;
@@ -84,9 +85,19 @@ pub struct DraftView {
 #[derive(Clone, Debug, PartialEq)]
 pub enum NewThreadView {
     Loading,
-    Empty { can_start_scratch: bool },
+    Empty {
+        can_start_scratch: bool,
+    },
     StartFailed,
-    LinkFailed { title: String, message: String },
+    LinkFailed {
+        title: String,
+        message: String,
+    },
+    LinkChoice {
+        title: LinkText,
+        message: LinkText,
+        choices: Vec<LinkChoice>,
+    },
     Draft(Rc<DraftView>),
     Navigate(Destination),
 }
@@ -101,6 +112,7 @@ pub struct NewThreadState {
     grouping: RefCell<GroupingSettings>,
     project_order: RefCell<Vec<String>>,
     last_used: RefCell<Option<String>>,
+    links: RefCell<BTreeMap<String, links::LinkSession>>,
 }
 impl Default for NewThreadState {
     fn default() -> Self {
@@ -115,6 +127,7 @@ impl Default for NewThreadState {
             grouping: RefCell::default(),
             project_order: RefCell::default(),
             last_used: RefCell::default(),
+            links: RefCell::default(),
         }
     }
 }
@@ -267,6 +280,14 @@ impl<P: Platform + Clone + 'static> NewThreadRuntime<P> {
             })
             .ok()
     }
+    pub fn model_session(
+        &self,
+        id: &str,
+    ) -> Result<crate::thread_views::composer::model_service::ComposerModelsSession<P>, ClientError>
+    {
+        let key = self.draft_key(id).ok_or(ClientError::Cancelled)?;
+        Ok(self.runtime.composer_models(&key))
+    }
     pub fn can_operate(&self, key: &ThreadKey) -> bool {
         let input: OrchestrationV2Command = serde_json::from_value(
             json!({"type":"thread.stop","commandId":"availability","threadId":key.thread}),
@@ -374,9 +395,24 @@ impl<P: Platform + Clone + 'static> NewThreadRuntime<P> {
             .as_deref()
             .and_then(|id| self.draft_key(id))
             .map(|k| k.environment);
+        let project = self.open_scratch_project(fallback.as_ref()).await?;
+        let destination = self
+            .open_project(project.key(), id.as_deref(), None)
+            .await?;
+        self.state.destinations.borrow_mut().insert(
+            id.map_or(Target::Home, Target::Draft),
+            Destination::Draft(destination),
+        );
+        self.state.changed.invalidate();
+        Ok(())
+    }
+    async fn open_scratch_project(
+        &self,
+        fallback: Option<&EnvironmentId>,
+    ) -> Result<EnvironmentProject, ClientError> {
         let environment = self
-            .scratch_environment(fallback.as_ref())
-            .ok_or_else(|| ClientError::Unsupported("scratch project"))?;
+            .scratch_environment(fallback)
+            .ok_or(ClientError::Unsupported("scratch project"))?;
         let endpoint = self
             .runtime
             .client(&environment)
@@ -406,14 +442,6 @@ impl<P: Platform + Clone + 'static> NewThreadRuntime<P> {
             )
             .await
             .map_err(|e| ClientError::InvalidPayload(e.to_string()))?;
-        let destination = self
-            .open_project(project.key(), id.as_deref(), None)
-            .await?;
-        self.state.destinations.borrow_mut().insert(
-            id.map_or(Target::Home, Target::Draft),
-            Destination::Draft(destination),
-        );
-        self.state.changed.invalidate();
-        Ok(())
+        Ok(project)
     }
 }

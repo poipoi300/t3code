@@ -10,14 +10,13 @@ impl<P: Platform + Clone + 'static> NewThreadRuntime<P> {
             .get("promotedTo")
             .filter(|d| !d.is_null())
             .or_else(|| doc["promotedDraftRedirects"].get(id));
-        if let Some(destination) = destination.and_then(policy::session_key) {
-            if self
+        if let Some(destination) = destination.and_then(policy::session_key)
+            && self
                 .shell(&destination)
                 .as_ref()
                 .is_some_and(|shell| web_drafts::promotion_ready(Some(shell), false))
-            {
-                return Ok(NewThreadView::Navigate(Destination::Thread(destination)));
-            }
+        {
+            return Ok(NewThreadView::Navigate(Destination::Thread(destination)));
         }
         let Some(key) = policy::session_key(session) else {
             return Ok(NewThreadView::StartFailed);

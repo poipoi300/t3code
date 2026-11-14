@@ -8,6 +8,23 @@ impl Drop for Busy {
     }
 }
 impl<P: Platform + Clone + 'static> NewThreadRuntime<P> {
+    fn ensure_submission_target(&self, id: &str, captured: &Value) -> Result<(), ClientError> {
+        let document = self.drafts.document();
+        let changed = ["environmentId", "threadId", "projectId"]
+            .iter()
+            .any(|field| {
+                document.borrow()["draftThreadsByThreadKey"][id][*field] != captured[*field]
+            });
+        if !changed {
+            return Ok(());
+        }
+        let id = id.to_owned();
+        self.drafts.update(Box::new(move |doc| {
+            web_drafts::mark_promoting(doc, &id, Some(&Value::Null));
+            Ok(())
+        }))?;
+        Err(ClientError::Cancelled)
+    }
     pub async fn submit(
         &self,
         id: String,
@@ -86,6 +103,10 @@ impl<P: Platform + Clone + 'static> NewThreadRuntime<P> {
                 environment_id: Some(key.environment.clone()),
             })?
             .draft_attachments()?;
+        let context = crate::thread_views::composer::context_records::outgoing_message_context(
+            &saved["draftsByThreadKey"][id],
+            &attachments,
+        )?;
         let send = self
             .runtime
             .messages(&key.environment)
@@ -93,19 +114,30 @@ impl<P: Platform + Clone + 'static> NewThreadRuntime<P> {
         let mut changes =
             futures::stream::select(send.changes(), self.runtime.store().subscribe().map(|_| ()))
                 .boxed_local();
-        let creation = QueuedCreation {
-            project_id: project.project.id,
-            project_title: Some(project.project.title.0),
-            project_cwd: Some(project.project.workspace_root.0),
-            workspace_mode: serde_json::from_value(session["envMode"].clone())
-                .unwrap_or(t3_contracts::environment::ThreadEnvMode::Local),
-            branch: session["branch"].as_str().map(str::to_owned),
-            worktree_path: session["worktreePath"].as_str().map(str::to_owned),
-            start_from_origin: session["startFromOrigin"].as_bool(),
-            pull_request_reference: session["checkoutPullRequest"]["reference"]
-                .as_str()
-                .map(str::to_owned),
-        };
+        let creation = self.drafts.creation(
+            QueuedCreation {
+                project_id: project.project.id,
+                project_title: Some(project.project.title.0),
+                project_cwd: Some(project.project.workspace_root.0),
+                workspace_mode: if session["worktreePath"]
+                    .as_str()
+                    .is_some_and(|path| !path.is_empty())
+                {
+                    t3_contracts::environment::ThreadEnvMode::Local
+                } else {
+                    serde_json::from_value(session["envMode"].clone())
+                        .unwrap_or(t3_contracts::environment::ThreadEnvMode::Local)
+                },
+                branch: session["branch"].as_str().map(str::to_owned),
+                worktree_path: session["worktreePath"].as_str().map(str::to_owned),
+                start_from_origin: session["startFromOrigin"].as_bool(),
+                pull_request_reference: session["checkoutPullRequest"]["reference"]
+                    .as_str()
+                    .map(str::to_owned),
+                checkout_pull_request_url: None,
+            },
+            web_sessions::checkout_pull_request_url(session).map(str::to_owned),
+        )?;
         if self.drafts.view(id).revision != revision {
             return Err(ClientError::Cancelled);
         }
@@ -115,6 +147,7 @@ impl<P: Platform + Clone + 'static> NewThreadRuntime<P> {
                 authority.prompt.to_string(),
                 SendOptions {
                     attachments,
+                    context,
                     settings: Some(settings),
                     creation: Some(creation),
                     dispatch_mode: Some(match mode {
@@ -130,12 +163,14 @@ impl<P: Platform + Clone + 'static> NewThreadRuntime<P> {
             )
             .await?;
         self.drafts.clear_revision(id, revision)?;
+        self.ensure_submission_target(id, session)?;
         let id_owned = id.to_owned();
         self.drafts.update(Box::new(move |doc| {
             web_drafts::mark_promoting(doc, &id_owned, None);
             Ok(())
         }))?;
         loop {
+            self.ensure_submission_target(id, session)?;
             if let Some(SendState::Restored { draft_key, reason }) = send.state(&message) {
                 let id = id.to_owned();
                 let session = session.clone();

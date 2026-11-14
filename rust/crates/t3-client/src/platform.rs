@@ -135,6 +135,23 @@ pub enum Credentials {
     SameOrigin,
     Include,
 }
+/// Saved data the host's storage could not keep when it opened.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StorageReport {
+    /// Secure records (credentials, tokens) discarded because their key was gone or unreadable.
+    pub discarded_secure_records: usize,
+    /// The storage key was unreadable and was replaced.
+    pub replaced_unreadable_key: bool,
+    /// The database was damaged; it was moved aside and a new one started.
+    pub recreated_database: bool,
+}
+
+impl StorageReport {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     pub method: String,
@@ -177,6 +194,10 @@ pub enum PlatformEvent {
     CredentialsChanged,
     RegistrationsChanged,
     StorageChanged(StorageKey),
+    /// The OS handed the running app a link (a mobile deep link such as `t3code://…?pairingUrl=`,
+    /// or a claimed web link). Navigation reads it from the host's app URL history; pairing
+    /// links are picked out with `connection::pairing_link`.
+    OpenedLink(String),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MimeData {
@@ -475,6 +496,11 @@ pub trait Platform: Storage {
             }
         }
         .boxed_local()
+    }
+    /// What opening this host's storage had to discard, once per launch; empty where storage
+    /// never discards (the browser).
+    fn storage_report(&self) -> StorageReport {
+        StorageReport::default()
     }
     /// Which links this host hands to the OS (`external_links::safe_external_url`).
     fn external_url_surface(&self) -> crate::persistence::external_links::ExternalUrlSurface {

@@ -41,10 +41,15 @@ fn no_credentials(url: &url::Url) -> bool {
     url.username().is_empty() && url.password().is_none()
 }
 
+/// TypeScript compares `url.host`, which keeps a port: `cursor://file:8080/x` is not `file`.
+fn host_is(url: &url::Url, name: &str) -> bool {
+    url.port().is_none() && url.host_str() == Some(name)
+}
+
 /// "Use T3 Code in another app" launches exactly `grokbot://app/v1/prompt?text=…`.
 fn app_launch(url: &url::Url) -> bool {
     url.scheme() == "grokbot"
-        && url.host_str() == Some("app")
+        && host_is(url, "app")
         && url.path() == "/v1/prompt"
         && no_credentials(url)
         && url.fragment().is_none_or(str::is_empty)
@@ -53,6 +58,9 @@ fn app_launch(url: &url::Url) -> bool {
 
 fn remote_editor(url: &url::Url) -> bool {
     if !REMOTE_EDITOR_SCHEMES.contains(&url.scheme()) || !no_credentials(url) {
+        return false;
+    }
+    if url.port().is_some() {
         return false;
     }
     let (host, path) = (url.host_str().unwrap_or_default(), url.path());
@@ -91,9 +99,12 @@ fn remote_editor(url: &url::Url) -> bool {
 
 fn local_editor_file(url: &url::Url) -> bool {
     LOCAL_FILE_LINK_SCHEMES.contains(&url.scheme())
-        && url.host_str() == Some("file")
+        && host_is(url, "file")
         && no_credentials(url)
         && url.path().len() > 1
+        // Beyond TypeScript: `//server/share` is a UNC path, which the editor reads over SMB on
+        // Windows and so can send the user's NTLM credentials to that server.
+        && !url.path()[1..].starts_with(['/', '\\'])
 }
 
 #[cfg(test)]
@@ -120,6 +131,17 @@ mod tests {
         ("cursor://file/home/me/a.rs:3:4", true, false),
         ("zed://file/home/me/a.rs", false, false),
         ("vscode://user:pw@file/home/me/a.rs", false, false),
+        ("cursor://file:8080/home/me/a.rs", false, false),
+        ("grokbot://app:1/v1/prompt?text=hi", false, false),
+        (
+            "vscode://vscode-remote:22/ssh-remote+box/home/me",
+            false,
+            false,
+        ),
+        ("jetbrains://gateway:1/ssh/environment?h=box", false, false),
+        ("vscode://file//server/share/a.rs", false, false),
+        ("vscode://file/\\\\server\\share\\a.rs", false, false),
+        ("vscode://file/C:/Users/me/a.rs:3", true, false),
         ("not a url", false, false),
     ];
 

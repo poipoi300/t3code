@@ -161,6 +161,85 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> DeliveryTransport
     }
 }
 impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
+    pub(super) async fn link_checkout_pull_request(&self, message: &QueuedMessage) {
+        let Some(url) = message
+            .creation
+            .as_ref()
+            .and_then(|creation| creation.checkout_pull_request_url.clone())
+        else {
+            return;
+        };
+        {
+            let mut links = self.inner.checkout_links.borrow_mut();
+            if links.contains_key(&message.message_id) {
+                return;
+            }
+            links.insert(message.message_id.clone(), None);
+        }
+        let weak = Rc::downgrade(&self.inner);
+        let message_id = message.message_id.clone();
+        let thread_id = message.thread_id.clone();
+        let task = async move {
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            let service = Self { inner };
+            if service.inner.disposed.get() {
+                return;
+            }
+            let result = service.link_checkout_url(thread_id, url).await;
+            service
+                .inner
+                .checkout_links
+                .borrow_mut()
+                .insert(message_id, result.err().map(Rc::new));
+            service.inner.changes.notify();
+        }
+        .boxed_local();
+        let spawn = self.inner.background_spawn.borrow().clone();
+        if let Some(spawn) = spawn {
+            spawn(task);
+        } else {
+            task.await;
+        }
+    }
+    async fn link_checkout_url(
+        &self,
+        thread_id: crate::types::ThreadId,
+        url: String,
+    ) -> Result<(), ClientError> {
+        let (key, _) =
+            crate::state::pull_requests::parsed_key(&url).ok_or_else(|| ClientError::Rejected {
+                message: "The pull request is not available in this environment.".into(),
+                detail: None,
+            })?;
+        let command =
+            OrchestrationV2Command::ThreadPullRequestLink(Box::new(CommandThreadPullRequestLink {
+                command_id: crate::operations::allocate_command_id(
+                    self.inner.platform.as_ref(),
+                    None,
+                )?,
+                thread_id,
+                host: key.host,
+                repository: key.repository,
+                number: key.number,
+                url: t3_contracts::base_schemas::TrimmedNonEmptyString(url),
+                source: t3_contracts::thread_pull_request::ThreadPullRequestLinkSource::Manual,
+                repository_web_url: None,
+            }));
+        let endpoint = self
+            .inner
+            .session
+            .borrow()
+            .as_ref()
+            .map(|session| session.endpoint.clone())
+            .ok_or(ClientError::Disconnected)?;
+        endpoint
+            .command::<WsOrchestrationV2DispatchCommandRpc>(command)
+            .await
+            .map(|_| ())
+            .map_err(RpcCallError::into_client_error)
+    }
     pub(super) fn schedule_retry(
         &self,
         id: &t3_contracts::base_schemas::MessageId,
@@ -870,7 +949,9 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         let mut restored_text = None;
         let draft_key = if let Some(drafts) = web_drafts {
             let key = drafts.recover_message(message).await?;
-            restored_text = drafts.document().borrow()["draftsByThreadKey"][&key]["prompt"].as_str().map(str::to_owned);
+            restored_text = drafts.document().borrow()["draftsByThreadKey"][&key]["prompt"]
+                .as_str()
+                .map(str::to_owned);
             key
         } else if let Some(drafts) = drafts {
             drafts.load().await?;
@@ -1224,6 +1305,9 @@ fn recover_document(
         if let Some(creation) = &message.creation {
             incoming["project"] = json!({"environmentId":message.environment_id,"projectId":creation.project_id,"createdAt":message.created_at});
             incoming["workspaceSelection"] = json!({"mode":creation.workspace_mode,"branch":creation.branch,"worktreePath":creation.worktree_path,"startFromOrigin":creation.start_from_origin,"pullRequestReference":creation.pull_request_reference});
+            if let Some(url) = &creation.checkout_pull_request_url {
+                incoming["workspaceSelection"]["checkoutPullRequestUrl"] = json!(url);
+            }
         }
         document["drafts"][&draft_key] = if let Some(existing) = document["drafts"].get(&draft_key)
         {

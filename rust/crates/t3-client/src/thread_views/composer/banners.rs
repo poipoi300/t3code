@@ -7,7 +7,7 @@ use crate::{
     platform::Platform,
 };
 use futures::{FutureExt, StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BannerVariant {
@@ -20,12 +20,22 @@ pub struct BannerAction {
     pub id: String,
     pub label: String,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BannerIcon {
+    Disconnected,
+    UpdateRunning,
+    UpdateFailed,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ComposerNotice {
     pub id: String,
     pub variant: BannerVariant,
     pub title: String,
+    pub title_template: &'static str,
+    pub title_arguments: BTreeMap<String, String>,
+    pub icon: BannerIcon,
     pub description: Option<String>,
+    pub description_is_key: bool,
     pub actions: Vec<BannerAction>,
     pub dismiss_label: Option<String>,
 }
@@ -34,13 +44,19 @@ pub enum BannerOutcome {
     Unchanged,
     NavigateHome,
 }
+pub(crate) type UpdateDismissals = Rc<
+    RefCell<
+        crate::view_logic::session::version::UpdateFailureDismissals<
+            crate::services::updates::ServerUpdateState,
+        >,
+    >,
+>;
 #[derive(Default)]
 struct State {
     reconnect_since: Option<u64>,
     unavailable_since: Option<u64>,
     notices: Vec<Rc<ComposerNotice>>,
     changes: Changes,
-    dismissed_update: Option<crate::services::updates::ServerUpdateState>,
     client_version: Option<String>,
 }
 #[derive(Clone)]
@@ -49,14 +65,17 @@ pub struct ComposerBannersSession<P: Platform + Clone + 'static> {
     platform: P,
     target: ComposerTarget,
     state: Rc<RefCell<State>>,
+    dismissals: UpdateDismissals,
 }
 impl<P: Platform + Clone + 'static> ComposerBannersSession<P> {
     pub fn new(runtime: ClientRuntime<P>, platform: P, target: ComposerTarget) -> Self {
+        let dismissals = runtime.composer_update_dismissals();
         Self {
             runtime,
             platform,
             target,
             state: Rc::default(),
+            dismissals,
         }
     }
     pub async fn load_client_version(&self) {
@@ -90,13 +109,9 @@ impl<P: Platform + Clone + 'static> ComposerBannersSession<P> {
             .environments
             .get(id)
             .and_then(|environment| environment.config.as_deref());
+        let current_update = update_resource.snapshot().value;
         let update = crate::services::updates::update_state_for_server_version(
-            update_resource
-                .snapshot()
-                .value
-                .as_deref()
-                .cloned()
-                .unwrap_or_default(),
+            current_update.as_deref().cloned().unwrap_or_default(),
             config.map(|config| config.environment.server_version.0.as_str()),
         );
         let updating = matches!(
@@ -116,13 +131,22 @@ impl<P: Platform + Clone + 'static> ComposerBannersSession<P> {
             state.unavailable_since = None;
         }
         let mut next = vec![];
+        let can_disconnect = unavailable
+            && state
+                .unavailable_since
+                .is_some_and(|start| now.saturating_sub(start) >= 20_000)
+            && !entry
+                .routes
+                .iter()
+                .any(|route| route.mode == crate::connection::ConnectionMode::Local);
         if unavailable
             && (presentation.awaiting_approval
                 || !reconnecting
-                || !updating && state.reconnect_since.is_some_and(|start| {
-                    now.saturating_sub(start)
-                        >= crate::view_logic::chat_view::ENVIRONMENT_RECONNECT_WARNING_GRACE_MS
-                }))
+                || !updating
+                    && state.reconnect_since.is_some_and(|start| {
+                        now.saturating_sub(start)
+                            >= crate::view_logic::chat_view::ENVIRONMENT_RECONNECT_WARNING_GRACE_MS
+                    }))
         {
             let mut actions = vec![];
             if presentation.phase != PresentationPhase::Connecting {
@@ -136,14 +160,7 @@ impl<P: Platform + Clone + 'static> ComposerBannersSession<P> {
                     .into(),
                 });
             }
-            if state
-                .unavailable_since
-                .is_some_and(|start| now.saturating_sub(start) >= 20_000)
-                && !entry
-                    .routes
-                    .iter()
-                    .any(|route| route.mode == crate::connection::ConnectionMode::Local)
-            {
+            if can_disconnect {
                 actions.push(BannerAction {
                     id: "disconnect".into(),
                     label: "Disconnect server".into(),
@@ -156,6 +173,15 @@ impl<P: Platform + Clone + 'static> ComposerBannersSession<P> {
                 } else {
                     BannerVariant::Warning
                 },
+                icon: BannerIcon::Disconnected,
+                title_template: if presentation.awaiting_approval {
+                    "{environment} is waiting to approve this device"
+                } else if reconnecting {
+                    "{environment} is reconnecting"
+                } else {
+                    "{environment} is offline"
+                },
+                title_arguments: BTreeMap::from([("environment".into(), entry.label.clone())]),
                 title: if presentation.awaiting_approval {
                     format!("{} is waiting to approve this device", entry.label)
                 } else {
@@ -176,12 +202,18 @@ impl<P: Platform + Clone + 'static> ComposerBannersSession<P> {
                         .diagnosis(id, None)
                         .map(|diagnosis| diagnosis.headline)
                 },
+                description_is_key: false,
                 actions,
                 dismiss_label: None,
             });
         }
         use crate::services::updates::{ServerUpdateStage, ServerUpdateState};
-        if state.dismissed_update.as_ref() != Some(&update)
+        let dismissed = current_update.as_ref().is_some_and(|current| {
+            self.dismissals
+                .borrow()
+                .contains(current, matches!(update, ServerUpdateState::Failed { .. }))
+        });
+        if !dismissed
             && let ServerUpdateState::Running { stage, .. }
             | ServerUpdateState::Failed { stage, .. } = &update
         {
@@ -204,8 +236,9 @@ impl<P: Platform + Clone + 'static> ComposerBannersSession<P> {
             let can_retry = failed
                 && state.client_version.as_ref().is_some_and(|version| {
                     config.is_some_and(|config| {
-                        &config.environment.server_version.0 != version
-                            && config.environment.capabilities.server_self_update.is_some()
+                        crate::view_logic::session::version::resolve_server_config_version_mismatch(Some(config),version).is_some()
+                            && config.environment.capabilities.server_self_update.as_ref().is_some_and(|capability|*capability!=t3_contracts::environment::ServerSelfUpdateCapability::DesktopManaged||crate::view_logic::session::version::supports_desktop_app_update(Some(config)))
+                            && self.runtime.client(id).and_then(|client|client.session()).is_some_and(|endpoint|endpoint.available::<t3_contracts::rpc::WsServerUpdateServerRpc>(&t3_contracts::server::ServerSelfUpdateInput{target_version:t3_contracts::base_schemas::TrimmedNonEmptyString(version.clone()),channel:None,target_database_migration:None}))
                     })
                 });
             next.push(ComposerNotice {
@@ -215,6 +248,17 @@ impl<P: Platform + Clone + 'static> ComposerBannersSession<P> {
                 } else {
                     BannerVariant::Default
                 },
+                icon: if failed {
+                    BannerIcon::UpdateFailed
+                } else {
+                    BannerIcon::UpdateRunning
+                },
+                title_template: if failed {
+                    "Could not update {server}"
+                } else {
+                    "Updating {server}"
+                },
+                title_arguments: BTreeMap::from([("server".into(), label.clone())]),
                 title: format!(
                     "{} {}",
                     if failed {
@@ -225,10 +269,16 @@ impl<P: Platform + Clone + 'static> ComposerBannersSession<P> {
                     label
                 ),
                 description: Some(description),
+                description_is_key: !failed,
                 actions: if can_retry {
                     vec![BannerAction {
                         id: "update".into(),
                         label: "Retry".into(),
+                    }]
+                } else if !failed && can_disconnect {
+                    vec![BannerAction {
+                        id: "disconnect".into(),
+                        label: "Disconnect server".into(),
                     }]
                 } else {
                     vec![]
@@ -319,12 +369,17 @@ impl<P: Platform + Clone + 'static> ComposerBannersSession<P> {
                         .composer_server_updates()
                         .state(id.clone())
                         .snapshot()
-                        .value
-                        .as_deref()
-                        .cloned();
-                    let mut state = this.state.borrow_mut();
-                    state.dismissed_update = update;
-                    state.changes.notify();
+                        .value;
+                    if let Some(update) = update {
+                        this.dismissals.borrow_mut().dismiss(
+                            &update,
+                            matches!(
+                                update.as_ref(),
+                                crate::services::updates::ServerUpdateState::Failed { .. }
+                            ),
+                        );
+                    }
+                    this.state.borrow().changes.notify();
                     Ok(BannerOutcome::Unchanged)
                 }
                 "update" => {

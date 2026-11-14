@@ -24,6 +24,17 @@ pub trait DraftAuthority {
     fn load(&self) -> LocalBoxFuture<'static, Result<(), ClientError>>;
     fn flush(&self) -> LocalBoxFuture<'static, Result<bool, ClientError>>;
     fn attachments(&self, target: &ComposerTarget) -> Result<AttachmentSession, ClientError>;
+    fn creation(
+        &self,
+        mut creation: crate::thread_views::outbox::QueuedCreation,
+        checkout_pull_request_url: Option<String>,
+    ) -> Result<crate::thread_views::outbox::QueuedCreation, ClientError> {
+        if let Some(url) = checkout_pull_request_url {
+            creation.checkout_pull_request_url = Some(url);
+            creation.pull_request_reference = None;
+        }
+        Ok(creation)
+    }
 }
 
 pub(super) struct ComposerAuthority<P: Platform + Clone + 'static>(pub ClientRuntime<P>);

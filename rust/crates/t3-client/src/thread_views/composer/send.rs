@@ -158,7 +158,9 @@ impl Drop for Changes {
         for slot in self.slots.get_mut().iter().filter_map(Weak::upgrade) {
             let mut slot = slot.borrow_mut();
             slot.closed = true;
-            if let Some(waker) = slot.waker.take() { waker.wake(); }
+            if let Some(waker) = slot.waker.take() {
+                waker.wake();
+            }
         }
     }
 }
@@ -196,6 +198,8 @@ pub(super) struct SendInner<P: Platform, E: RpcEndpoint> {
             ),
         >,
     >,
+    pub background_spawn: RefCell<Option<crate::composition::Spawner>>,
+    pub checkout_links: RefCell<BTreeMap<MessageId, Option<Rc<ClientError>>>>,
     pub fanout_prepared: RefCell<BTreeMap<String, PreparedAttachments>>,
     pub failure: RefCell<Option<super::send_transport::Failure>>,
     pub drafts: RefCell<Option<Rc<super::mobile_store::MobileDraftStore<P>>>>,
@@ -252,6 +256,8 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                 interrupted: Changes::default(),
                 prepared: RefCell::new(BTreeMap::new()),
                 launches: RefCell::new(BTreeMap::new()),
+                background_spawn: RefCell::new(None),
+                checkout_links: RefCell::new(BTreeMap::new()),
                 fanout_prepared: RefCell::new(BTreeMap::new()),
                 failure: RefCell::new(None),
                 drafts: RefCell::new(None),
@@ -265,6 +271,17 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
     }
     pub fn attach_drafts(&self, drafts: Rc<super::mobile_store::MobileDraftStore<P>>) {
         *self.inner.drafts.borrow_mut() = Some(drafts);
+    }
+    pub(crate) fn attach_background_spawner(&self, spawn: crate::composition::Spawner) {
+        *self.inner.background_spawn.borrow_mut() = Some(spawn);
+    }
+    pub fn checkout_pull_request_link_error(&self, id: &MessageId) -> Option<Rc<ClientError>> {
+        self.inner
+            .checkout_links
+            .borrow()
+            .get(id)
+            .cloned()
+            .flatten()
     }
     pub fn state(&self, id: &MessageId) -> Option<SendState> {
         self.inner.states.borrow().get(id).cloned()
@@ -630,8 +647,21 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             ));
         }
         let captured_draft = self.capture_web_draft(key, &text);
-        if let Some(validation) = super::submission::get_composer_prompt_length_validation_message(&text)? {
-            return Err(ClientError::Rejected { message: format!("Prompt is {} {} over the 120,000-character limit. Shorten or split it before sending.", validation.excess, if validation.excess == 1 { "character" } else { "characters" }), detail: None });
+        if let Some(validation) =
+            super::submission::get_composer_prompt_length_validation_message(&text)?
+        {
+            return Err(ClientError::Rejected {
+                message: format!(
+                    "Prompt is {} {} over the 120,000-character limit. Shorten or split it before sending.",
+                    validation.excess,
+                    if validation.excess == 1 {
+                        "character"
+                    } else {
+                        "characters"
+                    }
+                ),
+                detail: None,
+            });
         }
         self.load().await?;
         let settings = options
@@ -643,7 +673,9 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         let command_id =
             crate::operations::allocate_command_id(self.inner.platform.as_ref(), None)?;
         let mut extra = serde_json::Map::new();
-        if let Some((_, draft)) = &captured_draft { extra.insert("composerDraft".into(), draft.clone()); }
+        if let Some((_, draft)) = &captured_draft {
+            extra.insert("composerDraft".into(), draft.clone());
+        }
         if let Some(group) = fanout_group {
             extra.insert("fanoutGroup".into(), serde_json::Value::String(group));
         }
@@ -740,7 +772,9 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             .rev()
             .find(|entry| entry.message.thread_key() == *key)?;
         if let Some(drafts) = self.inner.web_drafts.borrow().as_ref() {
-            return drafts.document().borrow()["draftsByThreadKey"][&entry.draft_key]["prompt"].as_str().map(str::to_owned);
+            return drafts.document().borrow()["draftsByThreadKey"][&entry.draft_key]["prompt"]
+                .as_str()
+                .map(str::to_owned);
         }
         match self.inner.drafts.borrow().as_ref() {
             Some(drafts) => drafts.snapshot()["drafts"][&entry.draft_key]["text"]
@@ -904,6 +938,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                 self.inner.prepared.borrow_mut().remove(&message.message_id);
                 self.inner.attempts.borrow_mut().remove(&message.message_id);
                 self.inner.launches.borrow_mut().remove(&message.message_id);
+                self.link_checkout_pull_request(&message).await;
                 DeliveryResult::Accepted(sequence)
             }
             Ok(result) => result,

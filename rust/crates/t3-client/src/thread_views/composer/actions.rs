@@ -75,11 +75,7 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
 
     pub fn changes(&self) -> LocalBoxStream<'static, ()> {
         futures::stream::select_all(vec![
-            self.runtime
-                .store()
-                .subscribe_environment(&self.key.environment)
-                .map(|_| ())
-                .boxed_local(),
+            self.runtime.timeline_rewind().changes(&self.key),
             self.runtime.composer_drafts().changes(),
             self.runtime.message_changes(),
             self.runtime.composer_preferences().changes(),
@@ -228,6 +224,13 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
         );
         let reason = if !can_operate {
             Some("This connection cannot change threads.".into())
+        } else if self
+            .runtime
+            .timeline_rewind()
+            .rewind_state(&self.key)
+            .reverting
+        {
+            Some("Rewinding conversation".into())
         } else if projection.is_none() {
             Some("Messages loading".into())
         } else {

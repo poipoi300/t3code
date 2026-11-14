@@ -3,6 +3,7 @@ pub mod scope;
 pub mod scoped;
 pub mod search;
 mod search_items;
+pub mod panels;
 pub mod service;
 
 use crate::ClientError;

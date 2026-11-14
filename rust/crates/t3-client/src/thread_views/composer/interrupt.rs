@@ -64,9 +64,13 @@ pub async fn interrupt_thread<P: Platform>(
     if endpoint.destination() != Some(key.environment.clone()) {
         return Err(ClientError::EnvironmentMismatch);
     }
-    let availability = serde_json::from_value(serde_json::json!({"type":"thread.stop","commandId":"availability","threadId":key.thread}))?;
+    let availability = serde_json::from_value(
+        serde_json::json!({"type":"thread.stop","commandId":"availability","threadId":key.thread}),
+    )?;
     if !endpoint.available::<WsOrchestrationV2DispatchCommandRpc>(&availability) {
-        return Err(ClientError::PermissionDenied { method: "orchestration.dispatchCommand".into() });
+        return Err(ClientError::PermissionDenied {
+            method: "orchestration.dispatchCommand".into(),
+        });
     }
     let input = InterruptInput {
         command_id: operations::allocate_command_id(platform, None)?,

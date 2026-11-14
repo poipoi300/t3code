@@ -31,6 +31,39 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         &self,
         key: &ThreadKey,
     ) -> crate::thread_views::composer::questions_service::PendingUserInputSession<P> {
+        if !self.inner.composer_questions.driver_bound() {
+            let (handle, registration) = AbortHandle::new_pair();
+            if self.inner.composer_questions.bind_driver(handle) {
+                let weak = Rc::downgrade(&self.inner);
+                let mut changes = futures::stream::select(
+                    self.store().subscribe().map(Some),
+                    self.composer_drafts().changes().map(|_| None),
+                );
+                (self.inner.spawn)(Abortable::new(async move {
+                    let mut last_ready=false;
+                    while let Some(change)=changes.next().await {
+                        let Some(inner)=weak.upgrade() else {break;};
+                        let runtime=ClientRuntime{inner};
+                        let ready=runtime.composer_drafts().writable();
+                        if change.is_none()&&ready==last_ready {continue;}
+                        last_ready=ready;
+                        for key in runtime.inner.composer_questions.active_keys() {
+                            let relevant=change.as_ref().is_none_or(|change|change.scopes.iter().any(|scope|match scope {
+                                crate::store::Scope::All=>true,
+                                crate::store::Scope::Thread(changed)=>changed==&key,
+                                crate::store::Scope::Environment(environment)=>environment==&key.environment,
+                                crate::store::Scope::Shell(_)=>false,
+                            }));
+                            if !relevant {continue;}
+                            crate::thread_views::composer::questions_service::PendingUserInputSession::new(
+                                runtime.clone(),runtime.inner.platform.clone(),key,
+                                runtime.inner.composer_questions.clone(),runtime.inner.spawn.clone(),
+                            ).view();
+                        }
+                    }
+                },registration).map(|_|()).boxed_local());
+            }
+        }
         crate::thread_views::composer::questions_service::PendingUserInputSession::new(
             self.clone(),
             self.inner.platform.clone(),
@@ -48,6 +81,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             self.clone(),
             key.clone(),
             cwd,
+            self.inner.platform.now_epoch_ms() as f64,
         )
     }
     pub fn prompt_stash(
@@ -71,6 +105,11 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
     }
     pub fn composer_server_updates(&self) -> crate::services::updates::ServerUpdateService {
         self.inner.composer_updates.clone()
+    }
+    pub(crate) fn composer_update_dismissals(
+        &self,
+    ) -> crate::thread_views::composer::banners::UpdateDismissals {
+        self.inner.composer_update_dismissals.clone()
     }
     pub fn update_composer_server(
         &self,

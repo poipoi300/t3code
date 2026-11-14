@@ -12,17 +12,18 @@ use super::{
     },
     scoped::{
         ProjectOverrideEntry, ScopedEnvironments, ScopedSettingsPlan, ScopedSettingsTarget,
-        SettingsPatch, SettingsText, dropped_setting_keys, plan_project_overrides_clear,
+        SettingsPatch, SettingsText, dropped_setting_keys, required_scopes_for_server_settings_patch, plan_project_overrides_clear,
         plan_scoped_settings_clear, plan_scoped_settings_patch, resolve_scoped_settings_targets,
         select_scoped_settings_environments,
     },
+    panels::{LAST_ENABLED_PROJECT_GROUPING_MODE_KEY, last_enabled_project_grouping_mode},
     search::{is_device_only_settings_page, is_single_environment_settings_page},
 };
 use crate::{
     ClientError,
     composition::ClientRuntime,
     connection::ConnectionMode,
-    platform::Platform,
+    platform::{Platform, StorageArea, StorageKey, StorageWrite},
     rpc::RpcEndpoint,
     services::resources::LocalLimiter,
     types::EnvironmentId,
@@ -36,6 +37,7 @@ use futures::{FutureExt, StreamExt, future::LocalBoxFuture, stream::LocalBoxStre
 use serde_json::{Value, json};
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 use t3_contracts::{
+    auth::AuthEnvironmentScope,
     rpc::WsServerUpdateSettingsRpc,
     settings::{ClientSettingsSchema, ServerSettings, SidebarProjectGroupingMode},
 };
@@ -128,6 +130,7 @@ struct SettingsState {
 #[derive(Clone)]
 pub struct SettingsService<P: Platform + Clone + 'static> {
     runtime: ClientRuntime<P>,
+    platform: Rc<P>,
     state: Rc<SettingsState>,
 }
 
@@ -144,18 +147,70 @@ fn grouping_mode(mode: &SidebarProjectGroupingMode) -> GroupingMode {
 }
 
 impl<P: Platform + Clone + 'static> SettingsService<P> {
-    pub fn new(runtime: ClientRuntime<P>) -> Self {
+    pub fn new(runtime: ClientRuntime<P>, platform: Rc<P>) -> Self {
         Self {
             runtime,
+            platform,
             state: Rc::default(),
         }
     }
 
+    fn grouping_key() -> StorageKey {
+        StorageKey::new("ui-preference", None, LAST_ENABLED_PROJECT_GROUPING_MODE_KEY)
+    }
+
+    /// `readLastEnabledProjectGroupingMode`: "repository" when unset or unreadable.
+    pub fn last_enabled_grouping_mode(&self) -> LocalBoxFuture<'static, &'static str> {
+        let platform = self.platform.clone();
+        async move {
+            let stored = platform
+                .get(StorageArea::Ordinary, Self::grouping_key())
+                .await
+                .ok()
+                .flatten();
+            last_enabled_project_grouping_mode(stored.as_deref())
+        }
+        .boxed_local()
+    }
+
+    /// `rememberEnabledProjectGroupingMode`: failures are ignored, as the web's are.
+    pub fn remember_enabled_grouping_mode(&self, mode: &str) -> LocalBoxFuture<'static, ()> {
+        let platform = self.platform.clone();
+        let mode = mode.to_owned();
+        async move {
+            if mode == "separate" {
+                return;
+            }
+            let _ = platform
+                .write(
+                    StorageArea::Ordinary,
+                    vec![StorageWrite {
+                        key: Self::grouping_key(),
+                        value: Some(mode.into_bytes()),
+                    }],
+                )
+                .await;
+        }
+        .boxed_local()
+    }
+
     /// Fires whenever any read below may answer differently. Coalesce and re-read.
+    /// Thread streams are not read here, so their changes are skipped.
     pub fn changes(&self) -> LocalBoxStream<'static, ()> {
+        use crate::store::Scope;
         futures::stream::select_all(vec![
             self.runtime.changes(),
-            self.runtime.store().subscribe().map(|_| ()).boxed_local(),
+            self.runtime
+                .store()
+                .subscribe()
+                .filter_map(|change| async move {
+                    change
+                        .scopes
+                        .iter()
+                        .any(|scope| !matches!(scope, Scope::Thread(_)))
+                        .then_some(())
+                })
+                .boxed_local(),
             self.runtime.composer_preferences().changes(),
         ])
         .boxed_local()
@@ -291,12 +346,11 @@ impl<P: Platform + Clone + 'static> SettingsService<P> {
         self.runtime.client(environment).and_then(|c| c.session())
     }
 
+    /// `useEnvironmentsWithScope(…, AuthSettingsWriteScope)`: a confirmed settings grant.
     fn can_write_settings(&self, environment: &EnvironmentId) -> bool {
-        let probe = serde_json::from_value(json!({"patch": {}}));
-        match (self.session(environment), probe) {
-            (Some(session), Ok(probe)) => session.available::<WsServerUpdateSettingsRpc>(&probe),
-            _ => false,
-        }
+        self.session(environment)
+            .and_then(|session| session.grants_scope(AuthEnvironmentScope::SettingsWrite))
+            == Some(true)
     }
 
     /// `SettingsRow`'s `canWriteSettings` and connection checks for a server-scoped row.
@@ -455,13 +509,18 @@ impl<P: Platform + Clone + 'static> SettingsService<P> {
         let this = self.clone();
         let environment = environment.clone();
         async move {
-            let input = serde_json::from_value(json!({ "patch": patch }))
+            let input = serde_json::from_value(json!({ "patch": &patch }))
                 .map_err(|error| ClientError::from(error).to_string())?;
             let _permit = lane.await;
             let session = this
                 .session(&environment)
                 .ok_or_else(|| ClientError::Disconnected.to_string())?;
-            if !session.available::<WsServerUpdateSettingsRpc>(&input) {
+            // The contract leaves `server.updateSettings` unguarded; the web checks the scopes
+            // the patch needs (`requiredScopesForServerSettingsPatch`) before sending.
+            let granted = required_scopes_for_server_settings_patch(&patch)
+                .into_iter()
+                .all(|scope| session.grants_scope(scope) == Some(true));
+            if !granted || !session.available::<WsServerUpdateSettingsRpc>(&input) {
                 return Err(MISSING_PERMISSION.to_owned());
             }
             match session.command::<WsServerUpdateSettingsRpc>(input).await {
@@ -504,9 +563,3 @@ async fn persist_client_patch<P: Platform + 'static>(
     decoded
 }
 
-impl<P: Platform + Clone + 'static> ClientRuntime<P> {
-    /// The settings pages' service.
-    pub fn settings(&self) -> SettingsService<P> {
-        SettingsService::new(self.clone())
-    }
-}

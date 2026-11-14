@@ -22,8 +22,10 @@ use std::collections::BTreeMap;
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 use url::{Host, Url};
 
+pub mod pairing_link;
 pub mod presentation;
 pub mod runtime;
+pub mod saved_environment;
 pub mod socket;
 pub mod threads;
 pub use runtime::{
@@ -1192,6 +1194,32 @@ pub struct PairingInput {
     pub pairing_code: Option<String>,
     pub expected_environment: Option<EnvironmentId>,
 }
+/// The pairing a link asks for, as the mobile app reads it
+/// (`apps/mobile/src/features/connection/pairing.ts` `extractPairingUrlFromQrPayload`): a
+/// `t3code`-scheme link carries the pairing URL in its `pairingUrl` parameter; a web link with a
+/// `token` in its fragment or query is itself a pairing URL. `None` for any other link.
+pub fn pairing_link(link: &str) -> Option<PairingInput> {
+    let trimmed = link.trim();
+    let url = Url::parse(trimmed).ok()?;
+    let pairing_url = if matches!(url.scheme(), "t3code" | "t3code-dev" | "t3code-preview") {
+        url.query_pairs()
+            .find(|(key, _)| key == "pairingUrl")
+            .map(|(_, value)| value.trim().to_owned())
+            .filter(|value| !value.is_empty())?
+    } else if matches!(url.scheme(), "http" | "https") {
+        let token = |text: &str| url::form_urlencoded::parse(text.as_bytes()).any(|(key, value)| key == "token" && !value.is_empty());
+        if !url.fragment().is_some_and(token) && !url.query().is_some_and(token) {
+            return None;
+        }
+        trimmed.to_owned()
+    } else {
+        return None;
+    };
+    Some(PairingInput {
+        pairing_url: Some(pairing_url),
+        ..PairingInput::default()
+    })
+}
 pub struct ResolvedPairingTarget {
     pub credential: crate::authorization::Sensitive<String>,
     pub http_base: String,
@@ -2269,7 +2297,9 @@ impl Supervisor {
                 return Vec::new();
             }
             PlatformEvent::CredentialsChanged => ConnectionEvent::Wake(Wakeup::CredentialsChanged),
-            PlatformEvent::RegistrationsChanged | PlatformEvent::StorageChanged(_) => {
+            PlatformEvent::RegistrationsChanged
+            | PlatformEvent::StorageChanged(_)
+            | PlatformEvent::OpenedLink(_) => {
                 return Vec::new();
             }
         };

@@ -286,8 +286,13 @@ pub fn resolve_model_traits(input: &ModelTraitsInput<'_>) -> ModelTraitsView {
         labels.join(" · ")
     };
     let reasoning = descriptors
-        .iter().filter(|d|matches!(d,ProviderOptionDescriptor::Select(_)))
-        .chain(descriptors.iter().filter(|d|matches!(d,ProviderOptionDescriptor::Boolean(_))))
+        .iter()
+        .filter(|d| matches!(d, ProviderOptionDescriptor::Select(_)))
+        .chain(
+            descriptors
+                .iter()
+                .filter(|d| matches!(d, ProviderOptionDescriptor::Boolean(_))),
+        )
         .find(|d| is_reasoning_control(d))
         .cloned();
     let reasoning_value = reasoning
@@ -305,7 +310,9 @@ pub fn resolve_model_traits(input: &ModelTraitsInput<'_>) -> ModelTraitsView {
         others: descriptors
             .iter()
             .filter(|d| {
-                  reasoning.as_ref().is_none_or(|reasoning|descriptor_id(reasoning)!=descriptor_id(d))
+                reasoning
+                    .as_ref()
+                    .is_none_or(|reasoning| descriptor_id(reasoning) != descriptor_id(d))
                     && !matches!(descriptor_id(d), "fastMode" | "serviceTier" | "ultracode")
             })
             .cloned()

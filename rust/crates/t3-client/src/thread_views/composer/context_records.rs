@@ -65,6 +65,76 @@ pub fn draft_chip_records(
         })
         .collect()
 }
+pub fn outgoing_message_context(
+    captured_draft: &Value,
+    attachments: &[crate::thread_views::outbox::DraftAttachment],
+) -> Result<Option<t3_contracts::composer_context::OrchestrationMessageContext>, ClientError> {
+    let lookup = draft_chip_records(captured_draft)?;
+    let mut records = Vec::new();
+    for (field, kind) in [
+        ("terminalContexts", Some("terminal")),
+        ("reviewComments", Some("review-comment")),
+        ("threadContexts", None),
+        ("environmentContexts", None),
+    ] {
+        for raw in array(captured_draft, field) {
+            let id = kind.map_or_else(
+                || string(raw, "contextId").to_owned(),
+                |kind| kind_scoped_id(kind, string(raw, "id")),
+            );
+            if let Some(record) = lookup.get(&id) {
+                if matches!(record, ComposerContextRecord::Terminal(record) if record.text.is_empty())
+                {
+                    continue;
+                }
+                records.push(serde_json::to_value(record)?);
+            }
+        }
+    }
+    if let Some(record) = lookup.get(string(&captured_draft["replyTo"], "contextId")) {
+        records.push(serde_json::to_value(record)?);
+    }
+    for annotation in array(captured_draft, "previewAnnotations") {
+        let id = kind_scoped_id("preview-annotation", string(annotation, "id"));
+        if let Some(record) = lookup.get(&id) {
+            let mut record = serde_json::to_value(record)?;
+            if attachments.iter().any(|attachment| {
+                !attachment.is_file() && attachment.id() == string(annotation, "id")
+            }) {
+                record["screenshotContextId"] =
+                    json!(kind_scoped_id("image", string(annotation, "id")));
+            } else {
+                record
+                    .as_object_mut()
+                    .expect("serialized context record")
+                    .remove("screenshotContextId");
+            }
+            records.push(record);
+        }
+    }
+    for attachment in attachments {
+        let raw = attachment.value();
+        let kind = string(raw, "type");
+        // Delivery binds local ids after verifying or replacing their uploaded assets.
+        records.push(json!({
+            "version":1,
+            "kind":kind,
+            "contextId":kind_scoped_id(kind, attachment.id()),
+            "label":answer_context::label(attachment.name(), kind),
+            "attachmentId":attachment.id(),
+            "name":attachment.name(),
+            "mimeType":raw["mimeType"],
+            "sizeBytes":raw["sizeBytes"],
+        }));
+    }
+    if records.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_value(
+        json!({"version":1,"records":records}),
+    )?))
+}
+
 fn payload(mut raw: Value) -> Value {
     if let Some(raw) = raw.as_object_mut() {
         raw.remove("contextId");

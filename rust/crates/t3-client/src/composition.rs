@@ -7,6 +7,7 @@
 mod composer;
 mod composer_updates;
 mod composer_attachments;
+mod settings;
 use crate::{
     ClientError, ClientStore,
     authorization::RemoteAuthorization,
@@ -59,6 +60,16 @@ pub struct EnvironmentEntry {
     /// A saved record of this environment (its profile, credential or token) could not be read;
     /// it may not connect until it is paired again or removed.
     pub damaged: bool,
+}
+
+/// What the first restore found it could not keep, for the UI to tell the user once.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StorageNotice {
+    pub storage: crate::platform::StorageReport,
+    /// The saved environment list was unreadable; it was set aside and started empty.
+    pub reset_catalog: bool,
+    /// Saved environments with a record that could not be read.
+    pub damaged: Vec<EnvironmentId>,
 }
 
 /// T3 Connect: the relay that reaches environments linked to the signed-in account.
@@ -131,16 +142,20 @@ struct Inner<P: Platform + Clone + 'static> {
     /// Open command rows by identity, so every reader of one row shares one subscription.
     command_outputs: RefCell<BTreeMap<String, std::rc::Weak<CommandOutputShared>>>,
     /// Settled commands' final output, kept until the instant given after the last reader left.
-    settled_outputs: Rc<RefCell<BTreeMap<String, (Rc<CommandOutputCell>, u64)>>>,
+    settled_outputs: crate::services::command_output::SettledCells,
     /// One authorization for every environment, as TypeScript's; relay-capable with a relay.
     authorization: RemoteAuthorization,
     relay: Option<Relay>,
     /// Environments with a saved record the catalog could not read when they last started.
     damaged: RefCell<std::collections::BTreeSet<EnvironmentId>>,
+    /// Built by the first restore, taken once by the UI.
+    storage_notice: RefCell<Option<StorageNotice>>,
+    restored: std::cell::Cell<bool>,
     composer_drafts: Rc<crate::thread_views::composer::draft_service::ComposerDraftService<P>>,
     composer_preferences: Rc<crate::thread_views::composer::preferences::ComposerPreferences<P>>,
     composer_models: Rc<crate::thread_views::composer::model_service::ComposerModelState>,
     composer_updates: crate::services::updates::ServerUpdateService,
+    composer_update_dismissals: crate::thread_views::composer::banners::UpdateDismissals,
     composer_stash: Rc<crate::thread_views::composer::stash_service::PromptStashState>,
     composer_questions: Rc<crate::thread_views::composer::questions_service::PendingUserInputState>,
     composer_attachments: RefCell<BTreeMap<(EnvironmentId,String),composer_attachments::AttachmentDriver>>,
@@ -273,6 +288,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 composer_task,
                 composer_models: Rc::default(),
                 composer_updates: Default::default(),
+                composer_update_dismissals: Rc::default(),
                 composer_stash: Rc::default(),
                 composer_questions: Rc::default(),
                 composer_attachments: RefCell::default(),
@@ -295,6 +311,8 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 authorization,
                 relay,
                 damaged: RefCell::default(),
+                storage_notice: RefCell::default(),
+                restored: std::cell::Cell::default(),
             }),
         }
     }
@@ -307,6 +325,19 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         crate::navigation::new_thread::NewThreadRuntime::new(
             self.clone(), self.inner.platform.clone(), self.inner.new_threads.clone(),
         )
+    }
+
+    pub fn add_project(&self) -> crate::navigation::project_flow::AddProjectSession<P> {
+        let runtime = self.clone();
+        crate::navigation::project_flow::AddProjectSession::new(
+            self.clone(), self.inner.platform.clone(), Rc::new(move |future| {
+                runtime.spawn(future);
+            }),
+        )
+    }
+
+    pub fn ignored_files(&self, project: crate::workspace::ProjectKey) -> crate::navigation::ignored_selection::IgnoredFilesSession<P> {
+        crate::navigation::ignored_selection::IgnoredFilesSession::new(self.clone(), self.inner.platform.clone(), project)
     }
 
     pub fn store(&self) -> &ClientStore {
@@ -391,6 +422,24 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         self.approval_services()
     }
 
+    /// The setup card of a thread's new worktree (useWorktreeSetup): snapshot, cancel, terminal.
+    pub fn worktree_setup(&self) -> crate::thread_views::worktree_setup::WorktreeSetup<P> {
+        crate::thread_views::worktree_setup::WorktreeSetup::new(
+            self.clone(),
+            self.inner.platform.clone(),
+        )
+    }
+
+    /// Signed asset URLs (useAssetUrlState), shared by every reader of one resource.
+    pub fn asset_urls(&self) -> crate::services::asset_urls::AssetUrls<P> {
+        crate::services::asset_urls::AssetUrls::new(self.clone(), self.inner.platform.clone())
+    }
+
+    /// The thread sidebar's stored width (`chat_thread_sidebar_width`).
+    pub fn sidebar_width(&self) -> crate::view_logic::shell::sidebar_width::SidebarWidth<P> {
+        crate::view_logic::shell::sidebar_width::SidebarWidth::new(self.inner.platform.clone())
+    }
+
     /// Threads' terminals: tabs and groups, sessions, known sessions and commands.
     pub fn terminals(&self) -> crate::services::terminal_sessions::TerminalSessions<P> {
         crate::services::terminal_sessions::TerminalSessions::new(
@@ -407,9 +456,9 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         let this = self.clone();
         async move {
             let _lease = this.inner.registry.lock().await;
-            let saved: Vec<_> = this
-                .load_registry()
-                .await?
+            let registry = this.load_registry().await?;
+            let reset_catalog = registry.reset_catalog();
+            let saved: Vec<_> = registry
                 .entries()
                 .map(|registration| (registration.id.clone(), registration.label.clone()))
                 .collect();
@@ -419,11 +468,44 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                     this.fail(&id, session_failure(&error));
                 }
             }
+            if !this.inner.restored.replace(true) {
+                let notice = StorageNotice {
+                    storage: this.inner.platform.storage_report(),
+                    reset_catalog,
+                    damaged: this.inner.damaged.borrow().iter().cloned().collect(),
+                };
+                if notice != StorageNotice::default() {
+                    this.inner.storage_notice.replace(Some(notice));
+                }
+            }
             drop(_lease);
             this.refresh_relay().await;
             Ok(())
         }
         .boxed_local()
+    }
+
+    /// Saved data the first restore could not keep (a reset environment list, unreadable
+    /// records, discarded credentials), once; `None` after it was taken or when nothing was lost.
+    pub fn take_storage_notice(&self) -> Option<StorageNotice> {
+        self.inner.storage_notice.take()
+    }
+
+    /// Pairing requests from links the OS hands the running app (mobile deep links), for the
+    /// UI to confirm and pass to [`Self::pair`].
+    pub fn pairing_links(&self) -> LocalBoxStream<'static, PairingInput> {
+        self.inner
+            .platform
+            .events()
+            .filter_map(|event| async move {
+                match event {
+                    crate::platform::PlatformEvent::OpenedLink(link) => {
+                        crate::connection::pairing_link(&link)
+                    }
+                    _ => None,
+                }
+            })
+            .boxed_local()
     }
 
     /// Launches T3 Code on an SSH host through the desktop (`Platform::ssh_provision`), saves it
@@ -567,23 +649,25 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 })
                 .map(|registration| (registration.id.clone(), registration.routes.len() == 1))
                 .collect();
-            let mut kept = Vec::new();
-            for (environment, only_route) in relayed {
-                if only_route {
-                    this.remove_locked(&environment).await?;
-                } else {
-                    registry.remove_route(
-                        &environment,
-                        RELAY_ROUTE_ID,
-                        Time::from_platform(&platform),
-                    )?;
-                    kept.push(environment);
-                }
+            // Drop the relay routes of environments that keep a direct route and save that
+            // first: each removal below loads and saves the catalog itself, which would leave
+            // this registry's copy stale.
+            let (only_relay, kept): (Vec<_>, Vec<_>) =
+                relayed.into_iter().partition(|(_, only_route)| *only_route);
+            for (environment, _) in &kept {
+                registry.remove_route(
+                    environment,
+                    RELAY_ROUTE_ID,
+                    Time::from_platform(&platform),
+                )?;
             }
             if !kept.is_empty() {
                 registry.save(&platform).await?;
             }
-            for environment in kept {
+            for (environment, _) in only_relay {
+                this.remove_locked(&environment).await?;
+            }
+            for (environment, _) in kept {
                 this.start_saved(&environment).await?;
             }
             Ok(())
@@ -1194,15 +1278,21 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             let _ = finished.await;
         }
         self.inner.store.remove_environment(environment);
+        self.inner.thread_operations.forget_environment(environment);
         self.notify();
         self.notify_messages();
         let platform = self.inner.platform.clone();
         let mut registry = self.load_registry().await?;
         let mut ssh_targets = Vec::new();
         let mut secrets = Vec::new();
+        let mut connections = Vec::new();
         if let Some(handle) = registry.get(environment) {
             let stores = ConnectionStores::new(Rc::new(platform.clone()));
             for route in handle.registration().routes.clone() {
+                // The relay route's id is the shared word "relay", not an identifier.
+                if route.mode != ConnectionMode::Relay {
+                    connections.push(route.id.clone());
+                }
                 if let Ok(Some(credential)) = stores.credential(environment, &route.id).await {
                     secrets.push(credential.token().expose().clone());
                 }
@@ -1221,9 +1311,14 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         for target in ssh_targets {
             let _ = platform.ssh_disconnect(target).await;
         }
-        crate::persistence::purge_environment_copies(&platform, environment, &secrets)
-            .await
-            .map_err(|_| ClientError::InvalidPayload("could not purge imported copies".into()))?;
+        crate::persistence::purge_environment_copies(
+            &platform,
+            environment,
+            &connections,
+            &secrets,
+        )
+        .await
+        .map_err(|_| ClientError::InvalidPayload("could not purge imported copies".into()))?;
         // A later pairing of the same server must not deliver what was queued for this one.
         SendService::<P, SessionEndpoint>::forget_saved(Rc::new(platform), environment).await
     }
@@ -1322,6 +1417,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             self.inner.source.clone(),
         );
         send.attach_web_drafts(self.composer_drafts());
+        send.attach_background_spawner(self.inner.spawn.clone());
         let delivery = send.run();
         let mut message_changes = send.changes();
         let message_listeners = self.inner.message_listeners.clone();

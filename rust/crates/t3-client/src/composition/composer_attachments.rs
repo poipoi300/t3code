@@ -17,6 +17,12 @@ impl Drop for AttachmentDriver {
     }
 }
 impl<P: Platform + Clone + 'static> ClientRuntime<P> {
+    pub(crate) fn retire_composer_attachments(&self, keys: &[String]) {
+        self.inner
+            .composer_attachments
+            .borrow_mut()
+            .retain(|(_, key), _| !keys.contains(key));
+    }
     pub fn composer_attachments(
         &self,
         target: &ComposerTarget,
