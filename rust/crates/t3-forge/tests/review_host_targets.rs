@@ -123,9 +123,24 @@ async fn targets_remote_follows_typescript_for_every_forge_kind() {
     let registry = ForgeRegistry::new(forges);
     // (kind, origin, repository asked about, TypeScript's answer)
     let rows = [
-        ("github", "https://github.com/acme/web.git", "acme/web", true),
-        ("github", "https://github.com/acme/web.git", "other/repo", false),
-        ("gitlab", "https://gitlab.com/acme/web.git", "other/repo", true),
+        (
+            "github",
+            "https://github.com/acme/web.git",
+            "acme/web",
+            true,
+        ),
+        (
+            "github",
+            "https://github.com/acme/web.git",
+            "other/repo",
+            false,
+        ),
+        (
+            "gitlab",
+            "https://gitlab.com/acme/web.git",
+            "other/repo",
+            true,
+        ),
         (
             "bitbucket",
             "https://bitbucket.org/acme/web.git",
@@ -138,7 +153,12 @@ async fn targets_remote_follows_typescript_for_every_forge_kind() {
             "other/repo",
             true,
         ),
-        ("gitcafe", "https://git.cafe/acme/web.git", "other/repo", true),
+        (
+            "gitcafe",
+            "https://git.cafe/acme/web.git",
+            "other/repo",
+            true,
+        ),
         (
             "forgejo",
             "https://codeberg.org/acme/web.git",

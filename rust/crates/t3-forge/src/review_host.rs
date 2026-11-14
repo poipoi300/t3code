@@ -179,6 +179,11 @@ impl t3_git::ReviewHost for ForgeReviewHost {
         remote: &str,
         repository: Option<&str>,
     ) -> std::result::Result<bool, GitError> {
+        // TypeScript's `targetsRemote`: a provider without `createsChangeRequestsIn` creates
+        // change requests in the remote. Only GitHub has one.
+        if !self.forge.supports("creates_change_requests_in") {
+            return Ok(true);
+        }
         if self
             .context
             .as_ref()
