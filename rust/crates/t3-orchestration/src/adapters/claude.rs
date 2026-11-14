@@ -1412,6 +1412,7 @@ impl ProviderAdapter for ClaudeAdapterV2 {
                 )),
                 subscribers: Mutex::new(Vec::new()),
                 pending: Mutex::new(BTreeMap::new()),
+                permission_policy: Mutex::new(None),
                 attachments: Mutex::new(AttachmentBudget::default()),
                 wake: Mutex::new(NativeWake::default()),
                 continuation_requests: self.options.host.continuation_requests.clone(),
@@ -1459,6 +1460,12 @@ struct RuntimeInner {
     projection: Mutex<ClaudeProjection>,
     subscribers: Mutex<Subscribers>,
     pending: Mutex<BTreeMap<String, Callback>>,
+    permission_policy: Mutex<
+        Option<(
+            ClaudeRuntimeQueryPolicy,
+            t3_claude_cli::control::PermissionMode,
+        )>,
+    >,
     attachments: Mutex<AttachmentBudget>,
     wake: Mutex<NativeWake>,
     continuation_requests: Option<mpsc::Sender<ContinuationRequest>>,
@@ -1950,6 +1957,22 @@ impl RuntimeInner {
                         .await
                         .map_err(protocol);
                 }
+                let automatic = {
+                    let projection = lock(&self.projection);
+                    let policy = lock(&self.permission_policy);
+                    projection
+                        .permission_runtime_policy(
+                            request.agent_id.as_deref(),
+                            &request.tool_use_id,
+                        )
+                        .zip(policy.as_ref())
+                        .and_then(|(runtime, (query, active_mode))| {
+                            automatic_permission_result(&request, runtime, query, *active_mode)
+                        })
+                };
+                if let Some(decision) = automatic {
+                    return responder.respond(decision).await.map_err(protocol);
+                }
                 let kind = if request.tool_name == "AskUserQuestion" {
                     "user_input"
                 } else {
@@ -1969,7 +1992,7 @@ impl RuntimeInner {
                 let name = request.tool_name.clone();
                 let native = request.tool_use_id.clone();
                 let managed = lock(&self.projection)
-                    .active_policy()
+                    .permission_runtime_policy(request.agent_id.as_deref(), &request.tool_use_id)
                     .is_some_and(|p| p.max_runtime_mode.is_some());
                 (
                     Callback::Permission {
@@ -2087,6 +2110,120 @@ impl RuntimeInner {
         Ok(())
     }
 }
+fn automatic_permission_result(
+    request: &t3_claude_cli::control::ToolPermission,
+    runtime: &RuntimePolicy,
+    query: &ClaudeRuntimeQueryPolicy,
+    active_mode: t3_claude_cli::control::PermissionMode,
+) -> Option<PermissionDecision> {
+    use t3_claude_cli::control::PermissionMode;
+    use t3_contracts::provider_policy::ProviderInteractionMode;
+    if matches!(
+        request.tool_name.as_str(),
+        "AskUserQuestion" | "ExitPlanMode"
+    ) {
+        return None;
+    }
+    let deny = |message| PermissionDecision::Deny {
+        message,
+        interrupt: None,
+        decision_classification: None,
+    };
+    if runtime.interaction_mode == ProviderInteractionMode::Plan
+        && runtime
+            .approval_policy
+            .as_ref()
+            .is_some_and(|policy| policy == "never")
+    {
+        return Some(deny(
+            "This tool requires approval in Plan mode, but approvals are disabled for this thread."
+                .into(),
+        ));
+    }
+    if !query.install_permission_callback
+        && query.permission_mode != PermissionMode::BypassPermissions
+    {
+        return Some(PermissionDecision::Allow {
+            updated_input: request.input.clone(),
+            updated_permissions: None,
+            decision_classification: None,
+        });
+    }
+    let reason = strip_claude_vt_controls(request.decision_reason.as_deref().unwrap_or_default());
+    let reason = reason.trim();
+    let lower = reason.to_ascii_lowercase();
+    let removal_prefix = ["dangerous rmdir", "dangerous rm"]
+        .into_iter()
+        .any(|prefix| {
+            lower.strip_prefix(prefix).is_some_and(|tail| {
+                tail.chars()
+                    .next()
+                    .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+            })
+        });
+    if request.tool_name == "Bash"
+        && active_mode == PermissionMode::BypassPermissions
+        && request.matched_ask_rule.is_none()
+        && (removal_prefix
+            || matches!(
+                reason,
+                "This shell -c script runs rm and could not be checked"
+                    | "A permission rule denies a command in this shell -c script"
+            ))
+    {
+        return Some(deny(format!(
+            "Claude Code's removal safety check denied this command; the user did not reject it. The command did not run. Do not bypass the check by splitting the removal, putting it in a script, or using another tool or shell. If the warning below supplies a safe rewrite, use it and let the same check evaluate it. Otherwise continue the rest of the task without the removal and tell the user what you needed to delete and why. Warning: {reason}"
+        )));
+    }
+    None
+}
+
+fn strip_claude_vt_controls(text: &str) -> String {
+    let mut chars = text.chars().peekable();
+    let mut result = String::new();
+    while let Some(c) = chars.next() {
+        let sequence = if c == '\u{1b}' { chars.next() } else { Some(c) };
+        match sequence {
+            Some(marker) if (c == '\u{1b}' && marker == '[') || marker == '\u{9b}' => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(marker)
+                if (c == '\u{1b}' && matches!(marker, ']' | 'P' | 'X' | '^' | '_'))
+                    || marker == '\u{9d}' =>
+            {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' || c == '\u{9c}' {
+                        break;
+                    }
+                    if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            Some(' '..='/') if c == '\u{1b}' => {
+                for c in chars.by_ref() {
+                    if ('0'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some('@'..='_') if c == '\u{1b}' => {}
+            Some(next) if c == '\u{1b}' => {
+                result.push(c);
+                result.push(next);
+            }
+            Some(c) => result.push(c),
+            None => result.push(c),
+        }
+    }
+    result
+}
+
 fn approval_only_schema(schema: Option<&Value>) -> bool {
     schema
         .and_then(|v| v["properties"].as_object())
@@ -2339,6 +2476,7 @@ impl ClaudeSessionRuntime {
             let mut wake = lock(&self.inner.wake);
             wake.clear_schedule();
         }
+        *lock(&self.inner.permission_policy) = Some((policy.clone(), policy.permission_mode));
         let connection = self
             .options
             .connector
@@ -2424,6 +2562,13 @@ async fn run_query(
         let result = match result {
             Some(Ok(Event::Message(message))) => {
                 let frame = lock(&inner.projection).observe_result(message.raw());
+                if frame["type"] == "system"
+                    && matches!(frame["subtype"].as_str(), Some("init" | "status"))
+                    && let Ok(mode) = serde_json::from_value(frame["permissionMode"].clone())
+                    && let Some((_, active_mode)) = lock(&inner.permission_policy).as_mut()
+                {
+                    *active_mode = mode;
+                }
                 match inner.buffer_native_wake(&frame).await {
                     Ok(true) => continue,
                     Ok(false) => {}

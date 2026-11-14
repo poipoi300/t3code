@@ -219,7 +219,7 @@ reach a stand-in that fails with `Error::Unsupported("<Trait>.<method>")`.
 | --- | --- | --- |
 | `ids` | `RandomIds` (`<prefix>:<uuid v4>`) | Production-ready |
 | `settings` | Unsupported | `thread.create`, `message.dispatch` with a new provider, launches and settlement fail: they read provider enablement. Supply the settings service (`StaticSettings` for fixed settings) |
-| `policy` | `BaseRuntimePolicy` | Turns run with the thread's own runtime and interaction modes, with no project root, managed ceiling or reasoning effort. Production: `ports::decisions::runtime_policy::ProjectRuntimePolicy::configured(database, Arc::new(SnapshotRuntimeModes::new(provider_snapshots)), managed_policy, overrides, reasoning_effort)` over the host's provider snapshot watch and managed policy |
+| `policy` | `BaseRuntimePolicy` | Turns run with the thread's own runtime and interaction modes, with no project root or reasoning effort. Production: `ports::decisions::runtime_policy::ProjectRuntimePolicy::configured(database, Arc::new(SnapshotRuntimeModes::new(provider_snapshots)), None, overrides, reasoning_effort)`. Whatever is supplied, `start` wraps it: a mode the provider does not offer becomes approval-required (`SupportedModesRuntimePolicy`), and `managed_policy`'s ceiling refuses turns above it and sets `max_runtime_mode` (`CeilingRuntimePolicy`) |
 | `attachments` | Unsupported | Messages and launches carrying attachments fail before dispatch; messages without attachments work |
 | `cleanup` | Unsupported | Terminal, preview, scheduled-task and attachment cleanup effects fail and retry; thread deletion leaves those resources |
 | `workspaces` | Unsupported | Worktree launches fail; settlement branch and PR confirmation is unavailable |
@@ -227,17 +227,19 @@ reach a stand-in that fails with `Error::Unsupported("<Trait>.<method>")`.
 | `worktree_restore` | `NoWorktreeRestore` | A send to a thread whose worktree was deleted is not repaired first; turn start then fails (TS test behaviour). Production: the host's `restoreMissingWorktree` port |
 | `agent_scope` | `None` | Force-stop cannot kill thread-owned agent processes; OOM detection is off |
 | `telemetry` | `None` | No usage refresh or completed-turn analytics |
-| `titles` | `None` | Title-generation effects fail and retry; threads keep their given title. Production: a `TitleGenerator` implementing `generate_with_input(TitleGenerationInput, CancellationToken) -> Result<String>` (the `t3-textgen` bridge); 03's routing is complete |
+| `titles` | `None` | Title-generation effects fail and retry; threads keep their given title. Production: `t3_textgen::orchestration::OrchestrationTitleGenerator` (feature `orchestration-host`); recipe in the server seam brief |
 | `message_context` | `None` | `message.dispatch` is decided without composer context (04's `MessageContextPreparer`) |
-| `thread_find_text` | `None` | In-thread find (`ProjectionReader::search`) fails Unsupported; one store, and one find cache, serves the runtime when given |
-| `terminal_output` | `None` | `runtime.command_output` is absent: no command-output subscription |
-| `search_policy` | `None` | `runtime.thread_search` is absent: no cross-thread search |
+| `thread_find_text` | `t3-shared` `NativeThreadFindText` | Production-ready; one store, and one find cache, serves the runtime. `None` makes in-thread find fail Unsupported |
+| `terminal_output` | `t3-shared` `NativeTerminalOutputFold` | Production-ready: `runtime.command_output` is present. `None` removes it |
+| `search_policy` | `t3-shared` `NativeThreadSearchPolicy::default()` | Production-ready: `runtime.thread_search` is present. `None` removes it |
 | `launch` | `None` | `launch_thread` fails Unsupported |
 | `pull_request_identities` | `None` | Projected PR links keep their persisted identity; no host alias or authority normalisation |
 | `pull_requests` | `None` | No PR watch reactor runs |
 | `rollback_workspaces` | `None` | Provider-thread rollback effects fail Unsupported |
 | `finalization_observer` | Unsupported | After each run, VCS status refresh is skipped (the failure is not surfaced) |
-| `runtime_mode_ceiling` | `None` | Thread creation and mode changes are not capped; load it from the same managed policy given to `ProjectRuntimePolicy::configured` |
+| `managed_policy` | `None` | No ceiling. Production: the loaded `ManagedPolicyDocument`; its `limits.maxRuntimeMode` caps thread creation, mode changes and every turn start (TS `serverSettings.managedPolicy`, the one source) |
+| `runtime_mode_ceiling` | `None` | Transitional, removed once the host sets `managed_policy`: applies as the document's ceiling; a different value from the document fails `start` |
+| `provider_snapshots` | `None` | Each adapter's own `ProviderAdapter::supported_runtime_modes` applies (none declares one yet). Production: the host's provider snapshot watch, whose `supportedRuntimeModes` win |
 | `sessions` | `SessionManagerOptions::default()` | TS timeouts (30 min idle, 15 s interrupt) |
 | `worker` | `WorkerOptions::default()` | 4 slots, 5 attempts, 30 s liveness poll |
 
@@ -474,6 +476,7 @@ These are additive contracts. Existing struct literals and required trait signat
 | `ProjectionReader::provider_target(ProviderTargetQuery) -> Result<Option<ControlContext>>` with exact thread/provider-thread/provider-turn and optional attempt/message IDs | 06 | 02 exact historical control read; 06 consumes. No new `ControlQuery` variant, preserving exhaustive leaf matches |
 | `RuntimePolicyOptions { reasoning_effort: Option<String> }`, `ConfiguredRuntimePolicy { policy: RuntimePolicy, options: RuntimePolicyOptions }`; sync `RuntimePolicy::with_reasoning_effort(Option<String>) -> ConfiguredRuntimePolicy` | 04 | 04 policy resolver/preloading; 10/11/12 adapters consume |
 | `ProviderAdapter::open_session_with_policy(OpenSession, RuntimePolicyOptions, CT) -> ProviderResult<Arc<dyn SessionRuntime>>`; `SessionRuntime::{ensure_thread_with_policy(EnsureThread, RuntimePolicyOptions), resume_thread_with_policy(ResumeThread, RuntimePolicyOptions), fork_with_policy(ForkInput, RuntimePolicyOptions)} -> ProviderResult<OrchestrationV2ProviderThread>`; `start_turn_with_policy(TurnInput, RuntimePolicyOptions) -> ProviderResult<()>` | 04 | 05 session wrappers must forward; 10/11/12 native adapters implement supported reasoning options. Defaults forward only absent reasoning effort |
+| `ProviderAdapter::supported_runtime_modes() -> Option<Vec<RuntimeMode>>` (default `None`) | security M2 | 12 declares Kiro, Grok, FX, Muse and Pi lists (TS `supportedRuntimeModes`); composition's `SupportedModesRuntimePolicy` runs any other thread mode as approval-required unless the host snapshot lists it |
 | `ProviderRegistry::metadata(ProviderInstanceId) -> Result<AdapterMetadata>`; `list() -> Result<Vec<ProviderInstanceId>>`; metadata re-exports 05's existing type | 05 | 05 registry; 04/05 consumers |
 | `ProviderError::Setup(Box<t3_contracts::provider_setup::ProviderSetupError>)` | 05 | 05 registry/credential admission; canonical payload reused |
 | `SessionDirectory::detach_thread(DetachSession) -> Result<()>`; `DetachSession { provider_session_id, thread_id, detail, revoke_credential }` | 05 (+ 08) | 05 pooled session manager; 03/08 consume. Existing whole-session `detach` unchanged |
@@ -566,7 +569,7 @@ Construct `WorkspaceCoordination::global()` once and pass it to
 `CoordinatedTurnStart::new(turn_start, projections, database, coordination.clone())`.
 Use that wrapper for every provider start (including retries); it reserves the project
 root or worktree through startup and returns the execution handle before settlement.
-Call `start_configured` with the full resolver result to preserve reasoning effort.
+Composition calls `start_resolving` with the policy resolver, which keeps reasoning effort and settles a ceiling refusal as a failed run (TS `runtime-mode-above-ceiling`); a caller that resolved the policy itself uses `start_configured`.
 Wrap the host `WorkspaceBackend` in `CoordinatedWorkspaces::new(backend, coordination)`
 for launch cleanup and storage cleanup; direct host removals must instead call
 `coordination.cleanup(path, token, removal)`. Rollback uses these same global
@@ -610,6 +613,11 @@ Name the T3 MCP server `t3-code`. The adapter adds the exact upstream `send_to_u
 
 For native background wakes, inject `ClaudeHostOptions::continuation_requests` with the sender consumed by the shared `ProviderContinuationService`. The adapter buffers the native wake until the allocated provider-created run calls `start_turn`; that call consumes native frames without sending another prompt. Keep the same session alive while its pending-background predicate is true. Continuation callbacks retire cancelled, unstarted wakes and guard against stale delivery. Preserve Monitor `updated` notifications through continuation admission so progress does not become a delegated parent follow-up.
 
+Known Claude differences:
+
+- Outside a managed ceiling, explicitly accepting a native `setMode` suggestion for the session can raise Claude's permission mode above the thread's displayed mode. This behavior is inherited from TypeScript (review L4); the thread mode is not changed by that native session grant. With `max_runtime_mode` present, every `setMode` suggestion is filtered.
+- Empty, filtered-away or currently undecodable session suggestions grant only the current call. TypeScript creates a whole-tool rule when no suggestions remain; this stricter behavior is intentional. Forwarding unknown native suggestions losslessly still needs the native client's raw permission-response seam.
+
 ## Package 09 transport — server contract (2026-11-13)
 
 The composed shell and thread services are implemented. Every subscription below owns its cancellation: drop cancels work; shell/command `close().await` also joins the worker. Pull shared live item values through the RPC encoder without cloning their whole payloads.
@@ -628,14 +636,7 @@ The composed shell and thread services are implemented. Every subscription below
 
 HTTP transcript export uses the existing management service, including scope enforcement before reads, full persisted history, the supplied environment identity, a 400 response for over-budget exports and 404 for missing threads. The export preserves tool output rather than applying wire previews. The server owner still needs to connect its HTTP route to this call.
 
-`command_output_hub::NativeTerminalOutputFold` is the sole package-09 ANSI implementation, in its child `terminal_output.rs`. Construct it once with `Arc::new(NativeTerminalOutputFold)` and supply `RuntimePorts.terminal_output`; package 12's recorder consumes this same `TerminalOutputFold`. It handles split escapes/string controls, cursor/erase/save/restore, SGR, carriage-return progress, a 64-line mutable window, 2,048 style runs and UTF-16 tail budgets. The hub retains 64 live and 16 finished tails, bounds subscriber appends at 16 Ki units, throttles append/replacement frames, observes committed item snapshots, normalizes legacy Bash results, and fails on missing/non-command rows or event loss. Provider ingestion must deliver ephemeral chunks to this exact hub's `append(target, chunk)` and call `finish(target)` before settled item publication. Its current `CommandOutput` branch still discards chunks; that hookup belongs to 06/composition.
-
-The concrete native search helpers are staged in owned leaves, **not yet declared in the production module tree**, because their requested dependencies have not landed in the frozen manifest:
-
-- `find_text.rs`, `find_directives.rs`, `find_legacy.rs`: `NativeThreadFindText`, rendered Markdown/plan boundaries, citations and comments, Codex directives/templates, legacy and structured context, skill labels, file labels, occurrence counting, and the existing bounded HTML/MCP parser from `wire_projection.rs`.
-- `search_policy.rs`, `palette_search.rs`: `NativeThreadSearchPolicy::default()`, Unicode normalization/categories, CJK/short-token narrowing, accent and case matching with UTF-16 offsets, phrase/proximity grading, hex identifiers, palette title/PR matching, picks/use/recency ranking, and a bounded prepared-query cache.
-
-After the integrator adds `regex = "1"`, `unicode-normalization = "0.1"`, `unicode-general-category = "1"` and `pulldown-cmark = "0.13"`, declare each helper as the `native` child in its owned `thread_find.rs` / `thread_search.rs` and re-export its struct (exact lines in the seam brief). Configure `RuntimePorts.thread_find_text = Some(Arc::new(NativeThreadFindText))` and `RuntimePorts.search_policy = Some(Arc::new(NativeThreadSearchPolicy::default()))`. Composition already constructs one store with one Find cache and one search service. The progressive Find accessor is still requested from store owner 02. Missing backends remain explicitly Unsupported.
+The ANSI terminal fold, rendered find text and search policy come from `t3-shared` (`terminal_output`, `find_text`, `search_policy`), shared with the client. `ports/transport/shared_helpers.rs` implements this crate's three ports for them, and `RuntimePorts::new` installs them, so `runtime.command_output` and `runtime.thread_search` exist for every host. The hub retains 64 live and 16 finished tails, bounds subscriber appends at 16 Ki units, throttles append/replacement frames, observes committed item snapshots, normalizes legacy Bash results, and fails on missing/non-command rows or event loss. Provider ingestion must deliver ephemeral chunks to this exact hub's `append(target, chunk)` and call `finish(target)` before settled item publication. Its current `CommandOutput` branch still discards chunks; that hookup belongs to 06/composition.
 
 `ThreadFind` retains the snapshot/revision-bound scan, progressive early/complete frames, relative selection/wrapping, folded question answers, bounded navigation, 8,192/32 parsed-text caches, eight completed scans and one-minute idle expiry. The store supplies its real visible-index/candidate payload snapshot in one transaction. `ThreadSearch` uses bounded real SQLite FTS/scan reads, excludes placeholders/notices/streams/hidden threads and async answers, counts the best-quality hits, scopes projects and returns older settled shell rows coherently. `message_search_index.rs` supplies create/recreate/rebuild and trigger predicates, including legacy databases without `search_text`.
 
@@ -644,9 +645,9 @@ Source mapping and checks:
 | TypeScript | Rust | Focused test coverage |
 | --- | --- | --- |
 | `orchestration-v2/ShellStream.ts`, shell part of `ws.ts` | `shell_stream.rs`, `transport/service.rs` | 14 baseline shell tests |
-| `orchestration-v2/CommandOutputHub.ts`; `shared/terminalOutput.ts` | `command_output_hub.rs`, `terminal_output.rs` | 7 tests including one 1,204-case executed-TS oracle; all five current external hub tests pass |
-| `orchestration-v2/ThreadFind.ts`; shared find/count/context/directive helpers | `thread_find.rs`, `find_text.rs`, `find_directives.rs`, `find_legacy.rs` | 5 baseline service/cache tests; 2 new native tests covering 888 rendered cases, 480 embed cases and 80 occurrence cases |
-| `orchestration-v2/ThreadSearch.ts`; `shared/paletteSearch.ts`, PR helpers | `thread_search.rs`, `search_policy.rs`, `palette_search.rs` | 3 baseline SQL/snippet tests; 3 native tests covering 196 message, 14 title and 8 message-ranking cases |
+| `orchestration-v2/CommandOutputHub.ts`; `shared/terminalOutput.ts` | `command_output_hub.rs`, `t3-shared` `terminal_output` | 7 tests including one 1,204-case executed-TS oracle; all five current external hub tests pass |
+| `orchestration-v2/ThreadFind.ts`; shared find/count/context/directive helpers | `thread_find.rs`, `t3-shared` `find_text` | 5 baseline service/cache tests; 2 new native tests covering 888 rendered cases, 480 embed cases and 80 occurrence cases |
+| `orchestration-v2/ThreadSearch.ts`; `shared/paletteSearch.ts`, PR helpers | `thread_search.rs`, `t3-shared` `search_policy` | 3 baseline SQL/snippet tests; 3 native tests covering 196 message, 14 title and 8 message-ranking cases |
 | `orchestration-v2/messageSearchIndex.ts` | `message_search_index.rs` | Real migrated SQLite FTS and scan coverage in the search tests |
 | `orchestration-v2/http.ts` | `http.rs` | 4 tests, including authorized full export, denied scope, missing thread and size bound |
 

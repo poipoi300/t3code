@@ -766,6 +766,44 @@ async fn permission_callback_auto_without_callback_allows_without_asking() {
 }
 
 #[tokio::test]
+async fn permission_callback_keeps_forwarded_ask_rules_and_native_downgrades_pending() {
+    for (tool, reason, matched, downgrade) in [
+        ("Bash", "Dangerous rm operation", true, false),
+        ("Bash", "Dangerous rm operation", false, true),
+        ("Write", "Dangerous rm operation", false, false),
+        (
+            "Bash",
+            "Dangerous rmdirSuffix is not a removal warning",
+            false,
+            false,
+        ),
+    ] {
+        let (runtime, mut subscription, mut peer) = running().await;
+        if downgrade {
+            peer.send(
+                json!({"type":"system","subtype":"status","status":null,"permissionMode":"auto"}),
+            )
+            .await;
+        }
+        let mut frame = control("still-ask", tool, json!({"command":"pwd"}));
+        frame["request"]["decision_reason"] = json!(reason);
+        if matched {
+            frame["request"]["matched_ask_rule"] =
+                json!({"toolName":"Bash","ruleContent":"*","source":"userSettings"});
+        }
+        peer.send(frame).await;
+        let (asked, reply) =
+            callback_reply_or_pending(&runtime, &mut subscription, &mut peer).await;
+        runtime.close().await.unwrap();
+        assert!(
+            asked,
+            "a forwarded request lost its user decision: {tool}, matched={matched}, downgrade={downgrade}"
+        );
+        assert_eq!(reply["decisionClassification"], "user_reject");
+    }
+}
+
+#[tokio::test]
 async fn permission_callback_max_runtime_mode_filters_native_set_mode_suggestions() {
     use t3_contracts::provider_policy::RuntimeMode;
     let mut input = fixture_turn_input().unwrap();
@@ -797,7 +835,32 @@ async fn permission_callback_max_runtime_mode_filters_native_set_mode_suggestion
         .await
         .unwrap();
     let reply = peer.read().await;
+    let mut only_mode = control("managed-only-mode", "Bash", json!({"command":"pwd"}));
+    only_mode["request"]["permission_suggestions"] = json!([
+        {"type":"setMode","mode":"bypassPermissions","destination":"userSettings"}
+    ]);
+    peer.send(only_mode).await;
+    let id = request(&mut subscription).await;
+    runtime
+        .respond(RuntimeResponse {
+            request_id: id,
+            decision: Some(ProviderApprovalDecision::AcceptForSession),
+            feedback: None,
+            answers: None,
+        })
+        .await
+        .unwrap();
+    let filtered = peer.read().await;
     runtime.close().await.unwrap();
+    assert!(
+        filtered["response"]["response"]
+            .get("updatedPermissions")
+            .is_none()
+    );
+    assert_eq!(
+        filtered["response"]["response"]["decisionClassification"],
+        "user_temporary"
+    );
     assert_eq!(
         reply["response"]["response"]["updatedPermissions"],
         json!([

@@ -275,16 +275,20 @@ impl CommandInputs for RuntimeCommandInputs {
                     }
                 }
                 // TS `runtimePolicyCeilingCause`: refused like the dispatch ceiling, unrecorded.
-                let resolved = self.policy.resolve(thread, selection).await.map_err(|error| {
-                    if !crate::ports::decisions::runtime_policy::is_above_ceiling(&error) {
-                        return error;
-                    }
-                    let reason = match error {
-                        Error::Service { detail, .. } => detail,
-                        other => other.to_string(),
-                    };
-                    Error::Rejected { command_id, reason }
-                })?;
+                let resolved = self
+                    .policy
+                    .resolve(thread, selection)
+                    .await
+                    .map_err(|error| {
+                        if !crate::ports::decisions::runtime_policy::is_above_ceiling(&error) {
+                            return error;
+                        }
+                        let reason = match error {
+                            Error::Service { detail, .. } => detail,
+                            other => other.to_string(),
+                        };
+                        Error::Rejected { command_id, reason }
+                    })?;
                 prepared.context.inputs.runtime_policy = Some(resolved);
             }
             let mut sessions = std::collections::BTreeMap::new();

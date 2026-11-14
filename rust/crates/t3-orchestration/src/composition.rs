@@ -155,9 +155,8 @@ pub struct RuntimePorts {
         Option<crate::ports::decisions::dispatch_mode_limit::RuntimeModeCeiling>,
     /// The host's provider status snapshots (TS `instance.snapshot`), for each instance's
     /// `supportedRuntimeModes`. Without it an adapter's own `supported_runtime_modes` applies.
-    pub provider_snapshots: Option<
-        tokio::sync::watch::Receiver<Arc<Vec<t3_contracts::server::ServerProvider>>>,
-    >,
+    pub provider_snapshots:
+        Option<tokio::sync::watch::Receiver<Arc<Vec<t3_contracts::server::ServerProvider>>>>,
     pub sessions: SessionManagerOptions,
     pub worker: WorkerOptions,
 }
@@ -412,7 +411,6 @@ impl OrchestrationRuntime {
                 .with_baseline_checkpoints(checkpoint_service.clone()),
         );
         let operations = Arc::new(ComposedThreads {
-            projections: reader.clone(),
             policy: policy.clone(),
             turn_start: ProviderTurnStartService {
                 projections: reader.clone(),
@@ -831,7 +829,6 @@ impl OrchestrationRuntime {
 /// The thread operations the effect worker routes to: turn start (06), run finalization and
 /// checkpoint capture (06/07), title generation and delegated stops (08).
 struct ComposedThreads {
-    projections: Arc<dyn ProjectionReader>,
     policy: Arc<dyn RuntimePolicyResolver>,
     turn_start: ProviderTurnStartService,
     finalization: RunFinalizationService,

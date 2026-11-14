@@ -745,10 +745,8 @@ fn decisions_never_upgrade_refusals_and_session_grants_are_session_scoped() {
         true,
     ))
     .unwrap();
-    assert_eq!(
-        answer["updatedPermissions"],
-        json!([{"type":"addRules","rules":[{"toolName":"Bash"}],"behavior":"allow","destination":"session"}])
-    );
+    assert!(answer.get("updatedPermissions").is_none());
+    assert_eq!(answer["decisionClassification"], "user_temporary");
     assert!(matches!(
         permission_result_from_decision(&request, ProviderApprovalDecision::Accept, None, false),
         PermissionDecision::Allow {

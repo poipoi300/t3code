@@ -9,21 +9,22 @@ use std::{
     sync::Arc,
 };
 use t3_contracts::{
-    managed_policy::ManagedPolicyDocument, provider_policy::RuntimeMode,
+    managed_policy::ManagedPolicyDocument,
+    provider_instance::{ProviderDriverKind, ProviderInstanceId},
+    provider_policy::RuntimeMode,
     settings::ServerSettings,
 };
 use t3_orchestration::{
     adapters::acp::{DEV_REPLAY_INSTANCE_ID, dev_replay_registration},
     api::*,
     composition::{CheckpointPort, OrchestrationRuntime, RandomIds, RuntimePorts, StaticSettings},
-    effects::{EffectRequest, EffectStatus},
     error::{Error, Result},
-    provider::*,
     ports::{
         checkpoints_forks::checkpoint_service::CheckpointMetadata,
         sessions_recovery::provider_adapter_registry::AdapterRegistry,
         transport::live_stream_budget::LiveStreamLimits,
     },
+    provider::*,
     stores::StoreDatabase,
     testing::ManualClock,
     transport::service::ThreadSubscription,
@@ -355,5 +356,233 @@ async fn a_turn_in_a_git_repository_captures_its_checkpoint() -> Result<()> {
             ])
             .await?;
     }
+    Ok(())
+}
+
+const CEILING_REFUSAL: &str = "Acme limits threads to Auto-accept edits.";
+
+fn managed_ceiling() -> Result<ManagedPolicyDocument> {
+    Ok(serde_json::from_value(json!({
+        "schemaVersion": 1,
+        "organization": "Acme",
+        "limits": {"maxRuntimeMode": "auto-accept-edits"},
+    }))?)
+}
+
+async fn create_project(runtime: &OrchestrationRuntime, workspace: &Workspace) -> Result<()> {
+    runtime
+        .project_command(serde_json::from_value(json!({"type":"project.create","commandId":"command:project","projectId":"project:runtime","title":"Runtime","workspaceRoot":workspace.path}))?)
+        .await?;
+    Ok(())
+}
+
+fn create_thread(id: &str, mode: &str, model: &str) -> Result<OrchestrationV2ServerCommand> {
+    command(
+        json!({"type":"thread.create","commandId":format!("command:{id}"),"threadId":id,"projectId":"project:runtime","title":"Runtime thread","modelSelection":{"instanceId":DEV_REPLAY_INSTANCE_ID,"model":model},"runtimeMode":mode,"interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"}),
+    )
+}
+
+fn send(thread: &str, id: &str) -> Result<OrchestrationV2ServerCommand> {
+    command(
+        json!({"type":"message.dispatch","commandId":format!("command:{id}"),"threadId":thread,"messageId":format!("message:{id}"),"text":"Hello","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"}),
+    )
+}
+
+fn refusal<T: std::fmt::Debug>(result: Result<T>) -> String {
+    match result {
+        Err(Error::Rejected { reason, .. }) => reason,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// The managed document alone, with the default policy, caps thread creation and mode changes.
+#[tokio::test]
+async fn a_managed_ceiling_refuses_creating_or_switching_a_thread_above_it() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let workspace = Workspace::plain(directory.path())?;
+    let policy = managed_ceiling()?;
+    let runtime = start_with(
+        &directory.path().join("statev2.sqlite"),
+        workspace.checkpoints.clone(),
+        NOW,
+        |adapter| adapter,
+        |ports| ports.managed_policy = Some(policy),
+    )
+    .await?;
+    create_project(&runtime, &workspace).await?;
+    let refused = runtime
+        .dispatch_command(create_thread("thread:full", "full-access", MODEL)?)
+        .await;
+    assert_eq!(refusal(refused), CEILING_REFUSAL);
+    runtime
+        .dispatch_command(create_thread(THREAD, "approval-required", MODEL)?)
+        .await?;
+    let raise = |mode: &str| {
+        command(
+            json!({"type":"thread.runtime-mode.set","commandId":format!("command:{mode}"),"threadId":THREAD,"runtimeMode":mode}),
+        )
+    };
+    let refused = runtime.dispatch_command(raise("full-access")?).await;
+    assert_eq!(refusal(refused), CEILING_REFUSAL);
+    runtime
+        .dispatch_command(raise("auto-accept-edits")?)
+        .await?;
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+/// A thread created full-access before the policy: after a restart under the policy its next
+/// message is refused with the turn text, and lowering the thread's mode lets the turn run.
+/// (A turn start pending at shutdown does not survive: recovery cancels it with its run.)
+#[tokio::test]
+async fn a_thread_above_a_new_ceiling_is_refused_after_a_restart_until_its_mode_is_lowered()
+-> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("statev2.sqlite");
+    let workspace = Workspace::plain(directory.path())?;
+    let runtime = start(&database, workspace.checkpoints.clone()).await?;
+    create_project(&runtime, &workspace).await?;
+    runtime
+        .dispatch_command(create_thread(THREAD, "full-access", MODEL)?)
+        .await?;
+    runtime.shutdown().await?;
+    drop(runtime);
+
+    let policy = managed_ceiling()?;
+    let restarted = start_with(
+        &database,
+        workspace.checkpoints.clone(),
+        NOW,
+        |adapter| adapter,
+        |ports| ports.managed_policy = Some(policy),
+    )
+    .await?;
+    let refused = restarted.dispatch_command(send(THREAD, "refused")?).await;
+    assert_eq!(
+        refusal(refused),
+        format!("{CEILING_REFUSAL} Switch this thread's mode to continue.")
+    );
+    restarted
+        .dispatch_command(command(json!({"type":"thread.runtime-mode.set","commandId":"command:lower","threadId":THREAD,"runtimeMode":"approval-required"}))?)
+        .await?;
+    let mut subscription = restarted
+        .transport
+        .subscribe_thread(
+            serde_json::from_value(json!({"threadId":THREAD}))?,
+            LiveStreamLimits::default(),
+        )
+        .await?;
+    restarted.dispatch_command(send(THREAD, "lowered")?).await?;
+    await_completed_turn(&mut subscription).await?;
+    subscription.close().await?;
+    restarted.shutdown().await?;
+    Ok(())
+}
+
+/// The Replay adapter declaring a mode list; records the mode each session opens with.
+struct Probe {
+    inner: Arc<dyn ProviderAdapter>,
+    modes: Vec<RuntimeMode>,
+    opened: std::sync::Mutex<Vec<RuntimeMode>>,
+}
+
+impl Probe {
+    fn record(&self, input: &OpenSession) {
+        self.opened
+            .lock()
+            .expect("modes lock")
+            .push(input.runtime_policy.runtime_mode);
+    }
+}
+
+#[async_trait]
+impl ProviderAdapter for Probe {
+    fn instance_id(&self) -> &ProviderInstanceId {
+        self.inner.instance_id()
+    }
+    fn driver(&self) -> ProviderDriverKind {
+        self.inner.driver()
+    }
+    async fn capabilities(&self) -> ProviderResult<OrchestrationV2ProviderCapabilities> {
+        self.inner.capabilities().await
+    }
+    async fn plan_selection_transition(
+        &self,
+        input: SelectionTransitionInput,
+    ) -> ProviderResult<SelectionTransitionPlan> {
+        self.inner.plan_selection_transition(input).await
+    }
+    async fn open_session(
+        &self,
+        input: OpenSession,
+        cancellation: CancellationToken,
+    ) -> ProviderResult<Arc<dyn SessionRuntime>> {
+        self.record(&input);
+        self.inner.open_session(input, cancellation).await
+    }
+    async fn open_session_with_policy(
+        &self,
+        input: OpenSession,
+        options: RuntimePolicyOptions,
+        cancellation: CancellationToken,
+    ) -> ProviderResult<Arc<dyn SessionRuntime>> {
+        self.record(&input);
+        self.inner
+            .open_session_with_policy(input, options, cancellation)
+            .await
+    }
+    fn supported_runtime_modes(&self) -> Option<Vec<RuntimeMode>> {
+        Some(self.modes.clone())
+    }
+}
+
+/// With no host provider snapshot, an `auto` thread on a provider offering only
+/// approval-required and full access runs as approval-required, as TypeScript's snapshot makes it.
+#[tokio::test]
+async fn a_mode_the_provider_does_not_offer_runs_as_approval_required() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let workspace = Workspace::plain(directory.path())?;
+    let wrapped = std::sync::Mutex::new(None::<Arc<Probe>>);
+    let runtime = start_with(
+        &directory.path().join("statev2.sqlite"),
+        workspace.checkpoints.clone(),
+        NOW,
+        |inner| {
+            // Muse's offered modes (`provider-muse/src/server/status.ts`).
+            let adapter = Arc::new(Probe {
+                inner,
+                modes: vec![RuntimeMode::ApprovalRequired, RuntimeMode::FullAccess],
+                opened: Default::default(),
+            });
+            *wrapped.lock().expect("adapter lock") = Some(adapter.clone());
+            adapter
+        },
+        |_| {},
+    )
+    .await?;
+    let adapter = wrapped
+        .lock()
+        .expect("adapter lock")
+        .clone()
+        .expect("adapter wrapped");
+    create_project(&runtime, &workspace).await?;
+    runtime
+        .dispatch_command(create_thread(THREAD, "auto", MODEL)?)
+        .await?;
+    let mut subscription = runtime
+        .transport
+        .subscribe_thread(
+            serde_json::from_value(json!({"threadId":THREAD}))?,
+            LiveStreamLimits::default(),
+        )
+        .await?;
+    runtime.dispatch_command(send(THREAD, "auto")?).await?;
+    await_completed_turn(&mut subscription).await?;
+    subscription.close().await?;
+    runtime.shutdown().await?;
+    assert_eq!(
+        *adapter.opened.lock().expect("modes lock"),
+        vec![RuntimeMode::ApprovalRequired]
+    );
     Ok(())
 }

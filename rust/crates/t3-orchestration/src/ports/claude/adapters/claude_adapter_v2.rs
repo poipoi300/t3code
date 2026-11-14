@@ -4,8 +4,7 @@ use crate::provider::{ProviderError, ProviderOperation, ProviderResult, RuntimeP
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use t3_claude_cli::control::{
-    PermissionDecision, PermissionMode, PermissionRule, PermissionUpdate, RuleBehavior,
-    ToolPermission,
+    PermissionDecision, PermissionMode, PermissionUpdate, ToolPermission,
 };
 use t3_contracts::{
     orchestration_v2::*,
@@ -184,37 +183,31 @@ pub fn permission_result_from_decision(
     use ProviderApprovalDecision::*;
     if matches!(decision, Accept | AcceptForSession) {
         let updated_permissions = if decision == AcceptForSession {
-            let mut updates = request
+            let updates = request
                 .permission_suggestions
                 .as_deref()
                 .unwrap_or_default()
                 .iter()
                 .filter(|v| !(managed_ceiling && v["type"] == "setMode"))
-                .filter_map(|v| {
+                .map(|v| {
                     let mut value = v.clone();
-                    value["destination"] = json!("session");
-                    serde_json::from_value::<PermissionUpdate>(value).ok()
+                    if value.is_object() {
+                        value["destination"] = json!("session");
+                    }
+                    serde_json::from_value::<PermissionUpdate>(value)
                 })
-                .collect::<Vec<_>>();
-            if updates.is_empty() {
-                updates.push(PermissionUpdate::AddRules {
-                    rules: vec![PermissionRule {
-                        tool_name: request.tool_name.clone(),
-                        rule_content: None,
-                    }],
-                    behavior: RuleBehavior::Allow,
-                    destination: "session".into(),
-                });
-            }
-            Some(updates)
+                .collect::<Result<Vec<_>, _>>()
+                .ok();
+            updates.filter(|updates| !updates.is_empty())
         } else {
             None
         };
+        let standing_grant = updated_permissions.is_some();
         PermissionDecision::Allow {
             updated_input: request.input.clone(),
             updated_permissions,
             decision_classification: Some(
-                if decision == AcceptForSession {
+                if standing_grant {
                     "user_permanent"
                 } else {
                     "user_temporary"
@@ -2576,6 +2569,19 @@ impl ClaudeProjection {
                         .is_some_and(|task| task["status"] == "running")
             }
             None => self.active.is_some(),
+        }
+    }
+    pub fn permission_runtime_policy(
+        &self,
+        agent: Option<&str>,
+        tool: &str,
+    ) -> Option<&RuntimePolicy> {
+        match agent.or_else(|| self.tool_owners.get(tool).map(String::as_str)) {
+            Some(id) => self
+                .children
+                .get(id)
+                .map(|child| &child.input.runtime_policy),
+            None => self.active_policy(),
         }
     }
     pub fn pending_request_for_agent(

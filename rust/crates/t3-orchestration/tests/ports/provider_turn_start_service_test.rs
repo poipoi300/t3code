@@ -1495,3 +1495,79 @@ async fn recovers_an_abandoned_turn_before_opening_and_preserves_its_original_ru
     handle.settled().await?;
     service.execution.shutdown().await
 }
+
+/// TS `ProviderTurnStartService.ts` "runtime-mode-above-ceiling": the run settles failed with
+/// one error item, even when the effect would retry, and a second execution changes nothing.
+#[tokio::test]
+async fn a_turn_above_the_managed_ceiling_settles_failed_once_instead_of_retrying() -> Result<()> {
+    use t3_contracts::provider_policy::RuntimeMode;
+    use t3_orchestration::{
+        composition::BaseRuntimePolicy,
+        ports::decisions::{
+            dispatch_mode_limit::RuntimeModeCeiling, runtime_policy::CeilingRuntimePolicy,
+        },
+    };
+    let h = Harness::new().await?;
+    seed(&h).await?;
+    let thread_id = ThreadId("thread:test".into());
+    let run_id = RunId("run:test".into());
+    let mut thread = h
+        .reader
+        .projection(thread_id.clone())
+        .await?
+        .expect("seeded thread")
+        .thread;
+    thread.runtime_mode = RuntimeMode::FullAccess;
+    h.write(
+        "thread.runtime-mode-updated",
+        t3_contracts::stored::to_value(&thread)?,
+    )
+    .await?;
+    let policy = CeilingRuntimePolicy {
+        base: Arc::new(BaseRuntimePolicy),
+        ceiling: RuntimeModeCeiling {
+            organization: "Acme".into(),
+            max_runtime_mode: RuntimeMode::AutoAcceptEdits,
+        },
+    };
+    let (adapter, mut calls) = h.fake();
+    let service = service(&h, sessions(Arc::new(adapter)));
+    let errors = || async {
+        let projection = h
+            .reader
+            .projection(thread_id.clone())
+            .await?
+            .expect("seeded thread");
+        let errors: Vec<_> = projection
+            .turn_items
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|item| item["type"] == "error")
+            .collect();
+        Ok::<_, Error>((projection.runs[0].status.clone(), errors))
+    };
+    for _ in 0..2 {
+        let started = service
+            .start_resolving(
+                thread_id.clone(),
+                run_id.clone(),
+                &policy,
+                true,
+                CancellationToken::new(),
+            )
+            .await?;
+        assert!(started.is_none());
+        let (status, errors) = errors().await?;
+        assert_eq!(status, OrchestrationV2RunStatus::Failed);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0]["title"], "Thread mode is above the policy limit");
+        assert_eq!(
+            errors[0]["failure"]["message"],
+            "Acme limits threads to Auto-accept edits. Switch this thread's mode to continue."
+        );
+    }
+    assert!(calls.try_recv().is_err());
+    service.execution.shutdown().await
+}

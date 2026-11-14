@@ -482,6 +482,13 @@ pub mod native {
     #[async_trait::async_trait]
     pub trait FixtureAdapterFactory: Send + Sync {
         async fn create(&self, input: FixtureAdapterInput) -> Result<Arc<dyn FixtureAdapter>>;
+        async fn assert_live(
+            &self,
+            _services: &super::super::orchestrator_scenario::ScenarioServices,
+            _result: &ScenarioResult,
+        ) -> Result<()> {
+            Ok(())
+        }
         fn runtime_instructions(&self, harness: &str, model: &str) -> String;
         fn materialize_workspace(
             &self,
@@ -603,6 +610,7 @@ pub mod native {
             let services = scenario_services_for_runtime(runtime.clone(), database.stores.clone(), clock, gate);
             let assertion = prepared.variant.assert_output.clone();
             let result = run_prepared_fixture(prepared, &services, |result, transcript| factory.assert_output(&assertion, result, transcript)).await?;
+            factory.assert_live(&services, &result).await?;
             Ok::<_, Error>(result)
         }.await;
         let shutdown = runtime.shutdown().await;

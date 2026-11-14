@@ -20,7 +20,7 @@ use t3_contracts::{
     orchestration_v2::*,
     orchestration_v2_id_table::IdOrIndex,
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
-    provider_policy::{ProviderApprovalDecision, RuntimeMode},
+    provider_policy::{ProviderApprovalDecision, ProviderApprovalOption, RuntimeMode},
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
@@ -465,6 +465,143 @@ pub enum PermissionDisposition {
     Deny,
 }
 
+pub fn approval_options(driver: &str, request: &Value) -> Option<Vec<ProviderApprovalOption>> {
+    let native = request["options"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let has = |kind: &str| {
+        native.iter().any(|option| {
+            option["kind"] == kind
+                && (driver != "kiro"
+                    || option["optionId"]
+                        .as_str()
+                        .is_some_and(|id| !t3_contracts::wire::trim_js(id).is_empty()))
+        })
+    };
+    let option = |decision, label: &str| ProviderApprovalOption {
+        decision,
+        label: label.into(),
+        warning: None,
+    };
+    use ProviderApprovalDecision::*;
+    match driver {
+        "kiro" => {
+            let mut choices = Vec::new();
+            if has("allow_once") {
+                choices.push(option(Accept, "Allow once"));
+            } else if has("allow_always") {
+                choices.push(option(AcceptForSession, "Always allow"));
+            }
+            if has("reject_once") {
+                choices.push(option(Decline, "Deny"));
+            }
+            choices.push(option(Cancel, "Cancel"));
+            Some(choices)
+        }
+        "grok" => {
+            let mut choices = vec![option(Cancel, "Cancel")];
+            if has("reject_once") {
+                choices.push(option(Decline, "Decline"));
+            }
+            if native.iter().any(|option| {
+                option["kind"] == "allow_always"
+                    && option["optionId"]
+                        .as_str()
+                        .is_some_and(|id| t3_contracts::wire::trim_js(id) == "allow-edits-session")
+            }) {
+                choices.push(option(AcceptForSession, "Allow all edits this session"));
+            }
+            if has("allow_once") {
+                choices.push(option(Accept, "Approve"));
+            }
+            Some(choices)
+        }
+        _ => None,
+    }
+}
+
+fn permission_policy(policy: &RuntimePolicy, modes: Option<&[RuntimeMode]>) -> RuntimePolicy {
+    let mut policy = policy.clone();
+    if !modes.is_some_and(|modes| modes.contains(&policy.runtime_mode)) {
+        policy.runtime_mode = RuntimeMode::ApprovalRequired;
+        policy.approval_policy = None;
+    }
+    policy
+}
+
+pub fn permission_disposition_for_driver(
+    driver: &str,
+    policy: &RuntimePolicy,
+    request: &Value,
+    modes: Option<&[RuntimeMode]>,
+) -> PermissionDisposition {
+    if !modes.is_some_and(|modes| modes.contains(&policy.runtime_mode))
+        && permission_disposition(
+            policy,
+            request["toolCall"]["kind"].as_str().unwrap_or("other"),
+            request["toolCall"].get("locations"),
+        ) == PermissionDisposition::Deny
+    {
+        return PermissionDisposition::Deny;
+    }
+    let mut policy = permission_policy(policy, modes);
+    let automatic = policy.runtime_mode == RuntimeMode::Auto
+        && policy.approval_policy.is_none()
+        && policy.sandbox_policy.is_none();
+    if matches!(driver, "grok" | "fx") && automatic {
+        return PermissionDisposition::Ask;
+    }
+    if driver == "fx" {
+        policy.runtime_mode = RuntimeMode::ApprovalRequired;
+    }
+    let disposition = permission_disposition(
+        &policy,
+        request["toolCall"]["kind"].as_str().unwrap_or("other"),
+        request["toolCall"].get("locations"),
+    );
+    if driver == "kiro"
+        && disposition == PermissionDisposition::Allow
+        && !request["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|option| {
+                option["kind"] == "allow_once"
+                    && option["optionId"]
+                        .as_str()
+                        .is_some_and(|id| !t3_contracts::wire::trim_js(id).is_empty())
+            })
+    {
+        PermissionDisposition::Ask
+    } else {
+        disposition
+    }
+}
+
+pub fn mcp_tool_approval_disposition(
+    policy: &RuntimePolicy,
+    request: &Value,
+    native_id: Option<&str>,
+) -> Option<PermissionDisposition> {
+    if request["mode"] != "form"
+        || (request["_meta"]["codex_approval_kind"] != "mcp_tool_call"
+            && !native_id.is_some_and(|id| id.starts_with("mcp_tool_call_approval_")))
+    {
+        return None;
+    }
+    Some(
+        if policy.approval_policy.as_ref().map_or(
+            policy.runtime_mode == RuntimeMode::ApprovalRequired,
+            |approval| approval != "never",
+        ) {
+            PermissionDisposition::Ask
+        } else {
+            PermissionDisposition::Allow
+        },
+    )
+}
+
 pub fn permission_disposition(
     policy: &RuntimePolicy,
     kind: &str,
@@ -650,6 +787,7 @@ struct Shared {
     session_id: ProviderSessionId,
     item_identity_version: Mutex<u8>,
     policy: Mutex<RuntimePolicy>,
+    supported_runtime_modes: Option<Vec<RuntimeMode>>,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGenerator>,
     state: Mutex<MappingState>,
@@ -896,7 +1034,10 @@ impl ClientHandler for RequestHandler {
                         state.execute_session || (key.is_some() && key == state.execute_turn);
                     (key, allowed)
                 };
-                let policy = lock(&self.shared.policy).clone();
+                let policy = permission_policy(
+                    &lock(&self.shared.policy),
+                    self.shared.supported_runtime_modes.as_deref(),
+                );
                 let context = AcpEffectContext {
                     request: wire,
                     policy,
@@ -939,8 +1080,12 @@ impl RequestHandler {
             .unwrap_or("other")
             .to_owned();
         let policy = lock(&self.shared.policy).clone();
-        let disposition =
-            permission_disposition(&policy, &kind, params["toolCall"].get("locations"));
+        let disposition = permission_disposition_for_driver(
+            &self.shared.driver.0,
+            &policy,
+            &params,
+            self.shared.supported_runtime_modes.as_deref(),
+        );
         let decision = match disposition {
             PermissionDisposition::Allow => ProviderApprovalDecision::Accept,
             PermissionDisposition::Deny => ProviderApprovalDecision::Decline,
@@ -950,41 +1095,54 @@ impl RequestHandler {
                 .decision
                 .ok_or_else(RpcError::invalid_params)?,
         };
+        let decision = if decision == ProviderApprovalDecision::AcceptForSession
+            && approval_options(&self.shared.driver.0, &params).is_some_and(|options| {
+                !options
+                    .iter()
+                    .any(|option| option.decision == ProviderApprovalDecision::AcceptForSession)
+            }) {
+            ProviderApprovalDecision::Accept
+        } else {
+            decision
+        };
         if decision == ProviderApprovalDecision::Cancel {
             return Ok(json!({"outcome":{"outcome":"cancelled"}}));
         }
         let preferred = match decision {
             ProviderApprovalDecision::Accept => "allow_once",
-            ProviderApprovalDecision::AcceptForSession | ProviderApprovalDecision::AcceptAlways => {
-                "allow_always"
-            }
+            ProviderApprovalDecision::AcceptForSession => "allow_always",
             _ => "reject_once",
         };
         let options = params["options"]
             .as_array()
             .ok_or_else(RpcError::invalid_params)?;
-        let option = options.iter().find(|o| o["kind"] == preferred).or_else(|| {
-            let fallback = if matches!(
-                decision,
-                ProviderApprovalDecision::Accept
-                    | ProviderApprovalDecision::AcceptForSession
-                    | ProviderApprovalDecision::AcceptAlways
-            ) {
-                "allow_once"
-            } else {
-                "reject_always"
-            };
-            options.iter().find(|o| o["kind"] == fallback)
+        let id_of_kind = |kind: &str| {
+            options
+                .iter()
+                .find(|option| {
+                    option["kind"] == kind
+                        && !(decision == ProviderApprovalDecision::AcceptForSession
+                            && self.shared.driver.0 == "grok"
+                            && option["optionId"].as_str().is_none_or(|id| {
+                                t3_contracts::wire::trim_js(id) != "allow-edits-session"
+                            }))
+                })
+                .and_then(|option| option["optionId"].as_str())
+                .map(t3_contracts::wire::trim_js)
+                .filter(|id| !id.is_empty())
+        };
+        let option_id = id_of_kind(preferred).or_else(|| {
+            (decision == ProviderApprovalDecision::AcceptForSession)
+                .then(|| id_of_kind("allow_once"))
+                .flatten()
         });
-        let Some(option_id) = option.and_then(|o| o["optionId"].as_str()) else {
+        let Some(option_id) = option_id else {
             return Ok(json!({"outcome":{"outcome":"cancelled"}}));
         };
         if kind == "execute"
             && matches!(
                 decision,
-                ProviderApprovalDecision::Accept
-                    | ProviderApprovalDecision::AcceptForSession
-                    | ProviderApprovalDecision::AcceptAlways
+                ProviderApprovalDecision::Accept | ProviderApprovalDecision::AcceptForSession
             )
         {
             let mut state = lock(&self.shared.state);
@@ -1000,7 +1158,37 @@ impl RequestHandler {
         }
         Ok(json!({"outcome":{"outcome":"selected","optionId":option_id}}))
     }
-    async fn elicitation(&self, params: Value, wire: RequestContext) -> Result<Value, RpcError> {
+    async fn elicitation(
+        &self,
+        mut params: Value,
+        wire: RequestContext,
+    ) -> Result<Value, RpcError> {
+        {
+            let state = lock(&self.shared.state);
+            let native = state
+                .active
+                .as_deref()
+                .ok_or_else(RpcError::invalid_params)?;
+            let context = state
+                .contexts
+                .get(native)
+                .ok_or_else(RpcError::invalid_params)?;
+            if context.cancellation.is_cancelled()
+                || params["sessionId"].as_str().is_some_and(|id| id != native)
+            {
+                return Err(RpcError::invalid_params());
+            }
+            params["sessionId"] = json!(native);
+        }
+        let policy = permission_policy(
+            &lock(&self.shared.policy),
+            self.shared.supported_runtime_modes.as_deref(),
+        );
+        if mcp_tool_approval_disposition(&policy, &params, Some(&wire.id.identity()))
+            == Some(PermissionDisposition::Allow)
+        {
+            return Ok(json!({"action":"accept","content":{}}));
+        }
         if params["mode"] != "form" {
             return Ok(json!({"action":"decline"}));
         }
@@ -1079,21 +1267,9 @@ impl RequestHandler {
                 item["type"] = json!("approval_request");
                 item["requestKind"] = json!(kind);
                 item["prompt"] = params["toolCall"]["title"].clone();
-                let options: Vec<_> = params["options"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|o| {
-                        let decision = match o["kind"].as_str()? {
-                            "allow_once" => "accept",
-                            "allow_always" => "acceptForSession",
-                            "reject_once" | "reject_always" => "decline",
-                            _ => return None,
-                        };
-                        Some(json!({"decision":decision,"label":o["name"]}))
-                    })
-                    .collect();
-                item["options"] = json!(options);
+                if let Some(options) = approval_options(&self.shared.driver.0, params) {
+                    item["options"] = json!(options);
+                }
             }
             let node = self
                 .shared
@@ -1208,6 +1384,7 @@ pub struct AcpAdapter {
     pub clock: Arc<dyn Clock>,
     pub ids: Arc<dyn IdGenerator>,
     pub initialize: Value,
+    pub supported_runtime_modes: BTreeMap<ProviderDriverKind, Vec<RuntimeMode>>,
 }
 
 pub const DEV_REPLAY_INSTANCE_ID: &str = "devReplay";
@@ -1248,6 +1425,23 @@ impl AcpAdapter {
             clock,
             ids,
             initialize: json!({"protocolVersion":2,"clientInfo":{"name":"t3-code","version":"1"},"clientCapabilities":{}}),
+            supported_runtime_modes: {
+                use RuntimeMode::*;
+                [
+                    (
+                        "acpRegistry",
+                        vec![ApprovalRequired, AutoAcceptEdits, Auto, FullAccess],
+                    ),
+                    ("grok", vec![ApprovalRequired, Auto, FullAccess]),
+                    ("kiro", vec![ApprovalRequired, FullAccess]),
+                    ("muse", vec![ApprovalRequired, FullAccess]),
+                    ("pi", vec![ApprovalRequired, AutoAcceptEdits, FullAccess]),
+                    ("fx", vec![ApprovalRequired, Auto]),
+                ]
+                .into_iter()
+                .map(|(driver, modes)| (ProviderDriverKind(driver.into()), modes))
+                .collect()
+            },
         }
     }
 }
@@ -1489,6 +1683,9 @@ impl ProviderAdapter for AcpAdapter {
     fn driver(&self) -> ProviderDriverKind {
         self.driver.clone()
     }
+    fn supported_runtime_modes(&self) -> Option<Vec<RuntimeMode>> {
+        self.supported_runtime_modes.get(&self.driver).cloned()
+    }
     async fn capabilities(&self) -> ProviderResult<OrchestrationV2ProviderCapabilities> {
         let mut capabilities = acp_capabilities()?;
         if self.driver.0 == "grok" {
@@ -1549,6 +1746,7 @@ impl ProviderAdapter for AcpAdapter {
                 ),
             ),
             policy: Mutex::new(input.runtime_policy.clone()),
+            supported_runtime_modes: self.supported_runtime_modes.get(&self.driver).cloned(),
             clock: self.clock.clone(),
             ids: self.ids.clone(),
             state: Mutex::new(MappingState {

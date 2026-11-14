@@ -1,6 +1,6 @@
 # ACP and replay package status
 
-Package 12 has 178 populated and 4 empty mapped leaves. Native provider and
+Package 12 has 179 populated and 3 empty mapped leaves. Native provider and
 host-composition seams still block source-complete integration suites. Nonempty
 mapped files are not automatically complete ports. The exact 182-row audit is external at
 `C:/Users/Administrator/t3code-rust-notes/briefs/orch-e-remaining.md`.
@@ -177,9 +177,9 @@ scenario cancellation cleanup and JavaScript numeric matching. The only
 authorized shared-test edit removes Replay's ignore in tests/runtime.rs.
 
 Provider order confirmed by the coordinator: generic ACP/registry, Cursor,
-OpenCode, Grok, Kiro, Pi, Muse, fx. The four empty leaves and every partial suite
-are individually identified in the external audit; the Claude leaf is reserved
-to its concurrent owner. No controller test is counted as full native integration.
+OpenCode, Grok, Kiro, Pi, Muse, fx. The three empty leaves and every partial suite
+are individually identified in the external audit. No controller test is counted
+as full native integration.
 
 Known source behavior retained: OpenCode response/event waits at transcript EOF
 wait for advancement/cancellation; Pi/Muse runtime-exit status is ignored by their
@@ -219,11 +219,11 @@ The earlier unscoped all-targets Clippy attempt stopped in sibling
 t3-codex-app-server on result_large_err/large_enum_variant diagnostics; those
 files belong to that crate's owner. Scoped Clippy above checked this library.
 
-The four empty leaves are KiroAdapterV2.test, restart-background-note,
-thread-fork and merge-back. Claude native-child refusal and provider-switch
-handoff now have compiled conformance entry points for the upstream drift;
-their full source suites remain partial and require fixture/host bindings.
-Kiro now has an exact callback shim for cancel-held/decided/written milestones;
+The three empty leaves are restart-background-note, thread-fork and merge-back.
+Claude native-child refusal now executes through the native recorded connector;
+provider-switch handoff has compiled conformance assertions. Their full source
+suites remain partial and require further fixture/host bindings.
+Kiro has security regressions and an exact callback shim for cancel-held/decided/written milestones;
 its full native cases still need the native factory and extension mappings.
 Exact per-file stopping points and requested owner signatures are external in
 orch-e-remaining.md and orchestration-seam-requests.md. Cursor remains first in
@@ -264,27 +264,70 @@ roster, checks the whole result map and strict transcript completeness. Its
 ResumedCallFactory binding belongs to the native OpenCode2/provider owner;
 these four native executions have not run.
 
-Claude's native-child message/metadata-continuation refusal checks now cover
-unchanged event sequence, messages, zero runs and title. The provider-switch
-handoff entry point waits for the committed waiting state, drains again, then
-checks completed run, interrupted/timestamped tool and no pending work. These
-are compiled conformance entry points, not executed integration passes: native
-child/held-session fixture binding and the full-projection shared pending-work
-helper remain required, together with owners 04/05/06/08's continuation and
-session-detach behavior. Rust's canonical Rejected reason carries the TypeScript
+Claude's native-child message/metadata-continuation refusal checks cover
+unchanged event sequence, messages, zero runs and title. They now pass through
+the actual Claude replay connector, registered native adapter, composed runtime,
+SQLite and isolated Git host. The provider-switch handoff entry point waits for
+the committed waiting state, drains again, then checks completed run,
+interrupted/timestamped tool and no pending work. These assertions await the
+held-session fixture binding and full-projection shared pending-work helper,
+together with owners 04/05/06/08's continuation and session-detach behavior.
+Rust's canonical Rejected reason carries the TypeScript
 native-child error meaning rather than cloning its internal error class.
 
 The per-owner hand-out confirms the same five drift paths across all 141
 upstream commits. Exact stopping points and signatures are in the external audit
 and dated seam requests. The initial contract ThreadVisitRecorded build break
 was repaired mechanically by the contracts owner; its projection/fanout behavior
-remains those owners' work. The current focused rerun passes all 53 tests, and the owned-test all-targets
+remains those owners' work. That drift round passed all 53 focused tests, and the owned-test all-targets
 --no-deps Clippy -D warnings run passes. The default library check passes.
 Library Clippy reports no package-12 diagnostics; two package-08 diagnostics
 block its -D warnings result (pull_request_sync_reactor.rs:605 and
 thread_settlement_service.rs:843). Both composed-runtime tests pass: Replay turn/restart recovery and real Git
 checkpoint capture (2 passed, 0 failed/ignored).
 No sccache failure occurred in these commands.
+
+## Approval security round (2026-11-14)
+
+The review's M3, L2, M2 adapter finding and MCP elicitation difference were
+confirmed against Rust and the current TypeScript before editing. All four
+native-response regressions failed first, then passed after the fixes. The Kiro
+test leaf now exercises the shared adapter over strict in-memory ACP transcripts;
+it does not claim the remaining native Kiro configuration/cancel/HTML suite.
+
+Kiro/Grok cards use their vendor approval options. A stale session answer is
+downgraded before native selection and execution grants when the card did not
+offer it. Decline selects only reject_once, otherwise cancelled. Grok session
+approval selects allow-edits-session explicitly even if a broader allow_always
+option precedes it. This honors its vendor session scope rather than the generic
+TypeScript selector's first-match behavior on that mixed option set.
+
+Native factories must supply their declared or observed modes through
+`AcpAdapter.supported_runtime_modes`, keyed by driver. Missing/empty lists and
+unoffered modes require approval for non-read requests, including when an
+explicit never override was attached. The Replay constructor supplies the source
+mode lists for the built-in test flavors; unknown drivers inherit no list.
+The `ProviderAdapter::supported_runtime_modes` method exposes the same active
+driver's list to composition when the host has no provider snapshot.
+Recognized MCP-tool approval forms match TypeScript's automatic answer outside
+approval-required, respect explicit overrides and require an active turn.
+
+Ten focused security tests include comparisons against actual TypeScript for
+70 vendor option sets, 216 MCP policy/form/ID combinations and five native mode
+lists. Cross-turn client callbacks verify that downgraded session answers do not
+leave a standing execution grant. Full native Kiro still waits on
+KiroAdapterFactoryWithTestHooks; native Cursor and OpenCode2 factories and the
+full-projection shared pending-work binding remain absent. Exact requests and
+verification results are maintained in the external audit.
+
+The security-round focused suite passes 64 tests, including the native Claude
+case and all ten security tests. Standard crate Clippy with all targets/features
+and warnings denied passes; formatting passes for all 181 owned Rust files.
+The normal locked-workspace ports target passes all 11 selected security/Claude
+tests, and all five composed-runtime tests pass, including Replay/restart, Git
+checkpoint capture, managed ceilings and a provider's unoffered mode.
+The default library check without optional adapters passes.
+The workspace HTTP constructor blocker was repaired by its owner.
 
 ## ISAAC redistribution notices
 
