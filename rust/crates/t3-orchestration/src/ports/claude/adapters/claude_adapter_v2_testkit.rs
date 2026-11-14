@@ -379,6 +379,7 @@ pub fn fixture_turn_input() -> ProviderResult<TurnInput> {
             max_runtime_mode: None,
         },
         app_context: vec![],
+        inline_context_length: None,
     })
 }
 

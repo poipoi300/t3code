@@ -159,6 +159,9 @@ pub struct TurnInput {
     pub model_selection: ModelSelection,
     pub runtime_policy: RuntimePolicy,
     pub app_context: Vec<(String, String)>,
+    /// Leading characters of `message.text` that are inline handoff context, not the
+    /// user's words (TS `inlineContextLength`).
+    pub inline_context_length: Option<usize>,
 }
 #[derive(Debug, Clone)]
 pub struct SteerInput {

@@ -84,14 +84,16 @@ fn attachment_message_reserves_images_before_pdfs_and_keeps_paths_when_full() {
 fn launch_settings_consume_owned_flags_without_exposing_inline_settings_errors() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("append.txt"), "File instructions\r\n").unwrap();
-    let mut launch = t3_claude_cli::launch::LaunchOptions::default();
-    launch.extra_args = vec![
+    let mut launch = t3_claude_cli::launch::LaunchOptions {
+        extra_args: vec![
         ("append-system-prompt-file".into(), Some("append.txt".into())),
         ("append-system-prompt".into(), Some("Inline instructions".into())),
         ("settings".into(), Some("{\"permissions\":{\"disableBypassPermissionsMode\":\"disable\",},/* hi */\"env\":{\"X\":\"//value\"}}".into())),
         ("add-dir".into(), Some("extra".into())),
         ("debug-to-stderr".into(), None),
-    ];
+        ],
+        ..Default::default()
+    };
     let mut input = fixture_turn_input().unwrap();
     input.runtime_policy.cwd = Some(directory.path().to_owned());
     let host = ClaudeHostOptions {
@@ -141,6 +143,57 @@ fn launch_settings_consume_owned_flags_without_exposing_inline_settings_errors()
 }
 
 #[test]
+fn launch_settings_pin_auto_tool_search_without_overriding_explicit_modes() {
+    use t3_claude_cli::launch::{LaunchOptions, Settings};
+    for (mode, expected) in [
+        (Some("auto"), Some("true")),
+        (Some("auto:10"), Some("true")),
+        (Some("auto:99.5"), Some("true")),
+        (Some("auto:x"), Some("true")),
+        (Some("auto:Infinity"), Some("true")),
+        (Some("auto:1e-1"), Some("true")),
+        (Some("auto:1e1"), Some("true")),
+        (Some("auto:1,00"), Some("true")),
+        (None, None),
+        (Some("true"), None),
+        (Some("false"), None),
+        (Some("auto:0"), None),
+        (Some("auto:-5"), None),
+        (Some("auto:100"), None),
+        (Some("auto:1e2"), None),
+        (Some("auto:1_000"), None),
+        (Some("auto:1,000"), None),
+        (Some("auto:1\u{202f}000"), None),
+        (Some("AUTO"), None),
+    ] {
+        let base = LaunchOptions {
+            env: mode
+                .into_iter()
+                .map(|value| ("ENABLE_TOOL_SEARCH".into(), value.into()))
+                .collect(),
+            settings: Some(Settings::Json(json!({"env":{"OTHER":"kept"}}))),
+            ..Default::default()
+        };
+        let prepared = prepare_claude_launch(
+            &base,
+            &fixture_turn_input().unwrap(),
+            &RuntimePolicyOptions::default(),
+            &ClaudeHostOptions::default(),
+        )
+        .unwrap();
+        let Some(Settings::Json(settings)) = prepared.options.settings else {
+            panic!("expected compiled settings")
+        };
+        assert_eq!(settings["env"]["OTHER"], "kept");
+        assert_eq!(
+            settings["env"]["ENABLE_TOOL_SEARCH"].as_str(),
+            expected,
+            "{mode:?}"
+        );
+    }
+}
+
+#[test]
 fn managed_and_file_restrictions_survive_selection_settings_and_cwd_changes() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join(".claude")).unwrap();
@@ -186,6 +239,98 @@ fn managed_and_file_restrictions_survive_selection_settings_and_cwd_changes() {
     )
     .unwrap();
     assert_eq!(compiled.policy.permission_mode.as_str(), "auto");
+}
+
+#[test]
+fn native_tool_non_execution_metadata_controls_status_without_inferring_from_text() {
+    for kind in [
+        Some("cancelled"),
+        Some("interrupted"),
+        Some("denied"),
+        Some("permission_denied"),
+        None,
+    ] {
+        let mut projection = fixture_projection(
+            Arc::new(ManualClock::new(FIXTURE_DATE)),
+            Arc::new(SequenceIds::new("non-execution")),
+        );
+        projection.begin(fixture_turn_input().unwrap()).unwrap();
+        projection.handle_frame(&json!({"type":"assistant","uuid":"calls","message":{"content":[
+            {"type":"tool_use","id":"error","name":"Read","input":{"file_path":"error.txt"}},
+            {"type":"tool_use","id":"ok","name":"Read","input":{"file_path":"ok.txt"}}
+        ]}})).unwrap();
+        let mut frame = json!({"type":"user","message":{"content":[
+            {"type":"tool_result","tool_use_id":"error","is_error":true,"content":"STOP and wait for the user."},
+            {"type":"tool_result","tool_use_id":"ok","content":"OK"}
+        ]}});
+        if let Some(kind) = kind {
+            frame["tool_result_meta"] = json!([
+                {"id":"error","non_execution_kind":kind},
+                {"id":"ok","non_execution_kind":null}
+            ]);
+        }
+        projection.handle_frame(&frame).unwrap();
+        let error = serde_json::to_value(
+            &projection.items[&provider_id("turn-item", "native-item", "error")],
+        )
+        .unwrap();
+        assert_eq!(
+            error["status"],
+            kind.filter(|kind| matches!(*kind, "cancelled" | "interrupted"))
+                .unwrap_or("failed")
+        );
+        assert_eq!(error["toolNonExecutionKind"].as_str(), kind);
+        let ok =
+            serde_json::to_value(&projection.items[&provider_id("turn-item", "native-item", "ok")])
+                .unwrap();
+        assert_eq!(ok["status"], "completed");
+        assert!(!ok.as_object().unwrap().contains_key("toolNonExecutionKind"));
+    }
+}
+
+#[test]
+fn query_exit_settles_unanswered_root_tools_without_changing_finished_tools() {
+    for interrupted in [true, false] {
+        let mut projection = fixture_projection(
+            Arc::new(ManualClock::new(FIXTURE_DATE)),
+            Arc::new(SequenceIds::new("query-exit")),
+        );
+        projection.begin(fixture_turn_input().unwrap()).unwrap();
+        projection.handle_frame(&json!({"type":"assistant","uuid":"calls","message":{
+            "content":[
+                {"type":"tool_use","id":"pending","name":"Bash","input":{"command":"node -e wait"}},
+                {"type":"tool_use","id":"finished","name":"Read","input":{"file_path":"done.txt"}}
+            ]
+        }})).unwrap();
+        projection
+            .handle_frame(&json!({"type":"user","message":{"content":[
+                {"type":"tool_result","tool_use_id":"finished","content":"done"}
+            ]}}))
+            .unwrap();
+        if interrupted {
+            projection.interrupt();
+        }
+        let events = projection.query_ended().unwrap();
+        let pending = serde_json::to_value(
+            &projection.items[&provider_id("turn-item", "native-item", "pending")],
+        )
+        .unwrap();
+        assert_eq!(
+            pending["status"],
+            if interrupted { "interrupted" } else { "failed" }
+        );
+        assert_eq!(pending["completedAt"], FIXTURE_DATE);
+        let finished = serde_json::to_value(
+            &projection.items[&provider_id("turn-item", "native-item", "finished")],
+        )
+        .unwrap();
+        assert_eq!(finished["status"], "completed");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(&event.kind, ProviderEventKind::TurnItem { .. }))
+        );
+    }
 }
 
 #[tokio::test]

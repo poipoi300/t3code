@@ -1716,6 +1716,7 @@ pub(super) fn turn_input(input: &OpenSession, ordinal: u64) -> Result<TurnInput>
         model_selection: input.model_selection.clone(),
         runtime_policy: input.runtime_policy.clone(),
         app_context: vec![],
+        inline_context_length: None,
     })
 }
 

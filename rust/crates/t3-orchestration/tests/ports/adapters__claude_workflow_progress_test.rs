@@ -7,13 +7,13 @@ fn merge(
     entries: Vec<Value>,
 ) -> OrchestrationV2SubagentWorkflow {
     merge_claude_workflow_progress(previous, None, None, &json!({"workflow_progress":entries}))
-        .unwrap()
+        .expect("workflow progress snapshot")
 }
 fn agent(state: &str) -> Value {
     json!({"type":"workflow_agent","index":1,"label":"alpha:one","state":state,"phaseIndex":1,"phaseTitle":"Alpha"})
 }
 fn value(workflow: &OrchestrationV2SubagentWorkflow) -> Value {
-    serde_json::to_value(workflow).unwrap()
+    serde_json::to_value(workflow).expect("encode workflow progress")
 }
 
 #[test]

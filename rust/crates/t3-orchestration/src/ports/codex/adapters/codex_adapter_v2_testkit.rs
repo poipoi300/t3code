@@ -125,6 +125,7 @@ pub fn turn_input(native: &str, ordinal: u64, prompt: &str) -> ProviderResult<Tu
         model_selection: selection,
         runtime_policy: policy(),
         app_context: vec![],
+        inline_context_length: None,
     })
 }
 

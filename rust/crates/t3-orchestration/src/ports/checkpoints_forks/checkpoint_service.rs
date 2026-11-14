@@ -104,6 +104,15 @@ pub struct Capture {
 // This fills low-level operations absent from the frozen CheckpointBackend seam.
 #[async_trait]
 pub trait CheckpointMetadata: Send + Sync {
+    async fn query_diff(
+        &self,
+        _cwd: PathBuf,
+        _from: CheckpointRef,
+        _to: CheckpointRef,
+        _ignore_whitespace: bool,
+    ) -> Result<String> {
+        Err(Error::Unsupported("CheckpointMetadata.query_diff"))
+    }
     fn reference(&self, scope: &CheckpointScopeId, ordinal: u64) -> CheckpointRef;
     async fn is_repository(&self, cwd: PathBuf) -> Result<bool>;
     async fn delete_refs(

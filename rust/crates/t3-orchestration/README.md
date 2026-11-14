@@ -259,7 +259,7 @@ Shutdown (packages 05 and 08's order): close admission; stop the PR watch, settl
 | Project create, update and delete (`ProjectService`) | `runtime.project_command(ProjectCommand)` |
 | MCP `send_to_thread` | `runtime.intake.send_to_thread(input)` |
 | Transcript export (HTTP) | `OrchestrationHttpRead { service: &runtime.transport }` |
-| `getTurnDiff`, `getFullThreadDiff` | not available yet: `CheckpointDiffQuery.ts` is being ported by 07 into `ports::checkpoints_forks::checkpoint_diff_query` |
+| `getTurnDiff`, `getFullThreadDiff` | `runtime.checkpoint_diffs.{get_turn_diff, get_full_thread_diff}` (07); typed `CheckpointDiffQueryError` |
 
 Admission: client commands pass the runtime layer's gate (closed before recovery and during
 shutdown); the host's `Lifecycle::admit_command` stays in front. `command_dispatcher()` and
@@ -510,6 +510,9 @@ These are additive contracts. Existing struct literals and required trait signat
 | `Error::StopWorkflow(Box<OrchestrationV2StopWorkflowError>)`, `Error::ForceStopThread(Box<OrchestrationV2ForceStopThreadError>)`; `OrchestrationRuntime::{stop_workflow(OrchestrationV2StopWorkflowInput) -> Result<()>, force_stop_thread(OrchestrationV2ForceStopThreadInput) -> Result<OrchestrationV2ForceStopThreadResult>}` (sixth batch, 19:50) | Server (typed RPC failures) | Composition translates 08's operation codes until 08 returns the variants from `ThreadStopService` |
 | `RuntimePorts::credentials: Option<Arc<dyn SessionCredentials>>`; manager receives the ingestor; recovery `with_restart_settings`; layer `with_run_execution` and staged shutdown | 05 | Composition |
 | `tests/runtime.rs` requires `acp-adapter` (`[[test]] required-features`) and runs on Replay | Coordinator | Integrator |
+| `ThreadWorktreeRestore::restore(OrchestrationV2AppThread) -> Result<()>` (new trait); `testing::FakeThreadWorktreeRestore` (seventh batch, 22:45, upstream drift) | Upstream `runtimeLayer.ts` | 08 adds `worktree_restore` to `ThreadManagementServices`; host supplies the restore; composition binds it once 08's field exists |
+| `TurnInput::inline_context_length: Option<usize>` (upstream `inlineContextLength`) | Upstream `ProviderAdapter.ts` | 06 fills it in turn start; 11 uses it for skill-mention dispatch. Mechanical `None` added to the five literals (05, 06, 10, 11, 12) |
+| `OrchestrationRuntime::{thread_lanes(), clock(), ids()}`; `checkpoint_diffs: Arc<CheckpointDiffQuery>` | Server integrator (kept); 07 | Composition |
 | `testing::Script<I,O>::push(Result<O>)`, `next_call().await -> Option<I>`; `Fake*` implementations for every new service, policy methods on existing fake adapter/runtime, `FakeEventCommitter::new(StoreDatabase)` | Integrator requirement | Implemented in `testing.rs`. Unscripted calls fail with typed Unsupported; prepared fake commits run callbacks on real migrated SQLite and roll back on callback/script errors |
 
 Transaction implementation contract for 03: perform receipt dedupe and guards before invoking preparation; run normalization, callback mutations, marker/position writes, events, projections, receipt and outbox on the **same** writer transaction. Preparation must not replace the receipt identity or weaken the supplied guard; validate any newly prepared guard before append. A guard rejection after callback mutation must roll those mutations back. Publish and signal only after durable commit, retaining the publication lane when the caller drops. The callback is synchronous and must not perform external I/O. The fake demonstrates rollback, not production dedupe, guard enforcement, event append or publication.
@@ -529,6 +532,27 @@ Fifth batch (17:10): not applied. 02's `CheckpointRollbackContext::target_attemp
 
 
 ## Package 07 host integration
+
+Package 07 current coverage: `CheckpointDiffQuery.ts` maps to
+`checkpoint_diff_query.rs` (4 SQLite cases); `ThreadLaunchService.ts` maps to
+`thread_launch_service.rs` (19 cases). Checkpoint/fork/safety/branch coordination
+has 72 default integration cases and 9 additional Git-feature cases. The normal crate's
+checkpoint selection runs 42 cases; native fork/fallback is covered in package
+06's existing provider-start cases. Git has 97 tests, including 5 checkpoint drift
+cases and the 1,600-file aggregate query. A real current-TypeScript/Rust probe
+confirmed both writers' checkpoints can be read by both readers.
+
+`runtime.checkpoint_diffs` serves turn and full-thread diff queries from thin checkpoint
+metadata. The injected `CheckpointMetadata::query_diff` must preserve authored-file
+filtering, Windows path batching and the shared 10 MB UTF-8 limit; the Git adapter
+uses `t3-git::filtered_checkpoint_diff`. Forward `CheckpointDiffQueryError::cause()`
+when building the RPC error envelope so range and missing-ref details survive.
+
+The Git adapter passes the preceding scope ref when capturing ordinal > 0. Capture
+and diff use TypeScript's `T3-Head-Moved-At` trailer and synthetic second-parent
+format; unreadable/older metadata retains the literal baseline. Do not strip these
+parents or replace the trailer with wall-clock capture time.
+
 
 Construct `WorkspaceCoordination::global()` once and pass it to
 `CoordinatedTurnStart::new(turn_start, projections, database, coordination.clone())`.
@@ -574,7 +598,9 @@ Inject the configured instance id and `LaunchOptions` (resolved executable and c
 
 `ClaudeHostOptions` supplies the host home/settings directories, attachment directory for native access, current auto-compact override, and authoritative runtime/MCP/device instructions. Inject `compile_model` from the provider model catalog to preserve catalog defaults, aliases, effort maps, and model suffixes; the same compiler handles launch and live effort/fast-mode updates; the direct-model fallback only applies explicit native options. `managed_settings` must include the native OS/server effective policy snapshots for this instance, including restrictions resolved outside ordinary settings files. The adapter combines these restrictions monotonically with custom-home, project/local and launch-file restrictions; launch settings cannot re-enable a disabled mode. No JavaScript SDK sidecar is used.
 
-For native background wakes, inject `ClaudeHostOptions::continuation_requests` with the sender consumed by the shared `ProviderContinuationService`. The adapter buffers the native wake until the allocated provider-created run calls `start_turn`; that call consumes native frames without sending another prompt. Keep the same session alive while its pending-background predicate is true. Continuation callbacks retire cancelled, unstarted wakes and guard against stale delivery.
+Name the T3 MCP server `t3-code`. The adapter adds the exact upstream `send_to_user` guidance and the annotated read-only allowlist. Its host server must expose `send_to_user` as read-only with `anthropic/alwaysLoad: true`, preserving the exact Markdown in `sentMessage`; theme reads are allowed, while theme writes remain governed by the MCP host's access checks.
+
+For native background wakes, inject `ClaudeHostOptions::continuation_requests` with the sender consumed by the shared `ProviderContinuationService`. The adapter buffers the native wake until the allocated provider-created run calls `start_turn`; that call consumes native frames without sending another prompt. Keep the same session alive while its pending-background predicate is true. Continuation callbacks retire cancelled, unstarted wakes and guard against stale delivery. Preserve Monitor `updated` notifications through continuation admission so progress does not become a delegated parent follow-up.
 
 ## Package 09 transport — server contract (2026-11-13)
 

@@ -69,6 +69,16 @@ fn existing(db: &Connection, table: &str, column: &str, id: &Value) -> Result<Op
     Ok(raw.map(|raw| serde_json::from_str(&raw)).transpose()?)
 }
 
+fn apply_visit(
+    thread: &mut t3_contracts::orchestration_v2::OrchestrationV2AppThread,
+    visit: &t3_contracts::orchestration_v2::OrchestrationV2ThreadVisit,
+) {
+    thread.last_visited_at = visit.last_visited_at.clone();
+    if visit.opens.is_some() {
+        thread.opens = visit.opens.clone();
+    }
+}
+
 pub fn apply(tx: &Transaction<'_>, stored: &OrchestrationV2StoredEvent) -> Result<()> {
     apply_with_registry(tx, stored, None)
 }
@@ -170,7 +180,28 @@ pub fn apply_with_registry(
     }
     let payload_json = crate::stores::event_store::encode_json(&payload)?;
     let statement: Option<(&str, Vec<SqlValue>)> = match &stored.event {
-        ThreadVisitRecorded(_) => None,
+        ThreadVisitRecorded(visit) => {
+            let mut thread = super::read::require_thread(tx, &visit.thread_id)?;
+            apply_visit(&mut thread, &visit.payload);
+            let replay = OrchestrationV2StoredEvent {
+                sequence: stored.sequence,
+                command_id: stored.command_id.clone(),
+                event: ThreadVisited(Box::new(
+                    t3_contracts::orchestration_v2::DomainEventThreadCreated {
+                        id: visit.id.clone(),
+                        thread_id: visit.thread_id.clone(),
+                        run_id: visit.run_id.clone(),
+                        node_id: visit.node_id.clone(),
+                        driver: visit.driver.clone(),
+                        provider_instance_id: visit.provider_instance_id.clone(),
+                        raw_event_id: visit.raw_event_id.clone(),
+                        occurred_at: visit.occurred_at.clone(),
+                        payload: thread,
+                    },
+                )),
+            };
+            return apply_with_registry(tx, &replay, registry);
+        }
         ThreadCreated(_)
         | ThreadArchived(_)
         | ThreadUnarchived(_)
@@ -782,7 +813,11 @@ pub fn apply_to_projection_with_registry(
     value["thread"]["updatedAt"] = event_value["occurredAt"].clone();
     value["updatedAt"] = event_value["occurredAt"].clone();
     let field = match event {
-        ThreadVisitRecorded(_) => return Ok(projection.clone()),
+        ThreadVisitRecorded(visit) => {
+            let mut result = projection.clone();
+            apply_visit(&mut result.thread, &visit.payload);
+            return Ok(result);
+        }
         ThreadPullRequestLinkUpdated(_) => {
             value = t3_contracts::stored::to_value(projection)?;
             update_pull_request(&mut value["thread"], payload, registry);

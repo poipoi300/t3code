@@ -110,6 +110,14 @@ pub trait LaunchEnvironment: Send + Sync {
     async fn has_commit(&self, cwd: PathBuf, reference: &str) -> Result<bool>;
     async fn has_ref(&self, cwd: PathBuf, reference: &str) -> Result<bool>;
     async fn remote_for_base(&self, cwd: PathBuf, reference: &str) -> Result<Option<String>>;
+    async fn fetch_worktree_base(
+        &self,
+        _cwd: PathBuf,
+        _reference: &str,
+        _remote: &str,
+    ) -> Result<bool> {
+        Err(Error::Unsupported("launch.fetch-worktree-base"))
+    }
     async fn local_branches(&self, cwd: PathBuf) -> Result<Vec<String>>;
     async fn temporary_branch(&self, project: &ProjectId) -> Result<String>;
     async fn generate_branch(
@@ -456,30 +464,63 @@ impl ThreadLaunchService {
             return Ok(());
         };
         let s = &self.0.services;
-        if s.environment.is_scratch(&project_id).await? {
+        let (scratch, receipt, project) = tokio::join!(
+            s.environment.is_scratch(&project_id),
+            async {
+                match command_id {
+                    Some(command) => self.receipt(&command).await.ok().flatten(),
+                    None => None,
+                }
+            },
+            async {
+                let project_id = project_id.clone();
+                s.database
+                    .read(move |db| projects::get(db, &project_id, false))
+                    .await
+                    .ok()
+                    .flatten()
+            }
+        );
+        if scratch? || receipt.is_some_and(|receipt| receipt.status == ReceiptStatus::Accepted) {
             return Ok(());
         }
-        if let Some(command) = command_id
-            && self
-                .receipt(&command)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|r| r.status == ReceiptStatus::Accepted)
-        {
-            return Ok(());
-        }
-        let project = s
-            .database
-            .read(move |db| projects::get(db, &project_id, false))
-            .await
-            .ok()
-            .flatten();
         let Some(project) = project else {
             return Ok(());
         };
         let cwd = PathBuf::from(&project.workspace_root);
-        if matches!(s.environment.repository_root(cwd.clone()).await, Ok(None)) {
+        let reference = strategy.base_ref.0.as_str();
+        let requested = strategy
+            .branch
+            .as_ref()
+            .and_then(Option::as_ref)
+            .filter(|branch| !temporary(&branch.0));
+        let (repository, has_base, branches) = tokio::join!(
+            s.environment.repository_root(cwd.clone()),
+            async {
+                if reference.starts_with(':') {
+                    true
+                } else {
+                    s.environment
+                        .has_commit(
+                            cwd.clone(),
+                            if reference == "-" { "@{-1}" } else { reference },
+                        )
+                        .await
+                        .unwrap_or(true)
+                }
+            },
+            async {
+                if requested.is_some() {
+                    s.environment
+                        .local_branches(cwd.clone())
+                        .await
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            }
+        );
+        if matches!(repository, Ok(None)) {
             return Err(failure(
                 "thread-launch.not-repository",
                 format!(
@@ -488,23 +529,18 @@ impl ThreadLaunchService {
                 ),
             ));
         }
-        let reference = strategy.base_ref.0.as_str();
         let resolves: Result<bool> = async {
-            if reference.starts_with(':')
-                || s.environment
-                    .has_commit(
-                        cwd.clone(),
-                        if reference == "-" { "@{-1}" } else { reference },
-                    )
-                    .await?
-            {
+            if has_base {
                 return Ok(true);
             }
             if strategy.start_from_origin == Some(Some(true))
-                && s.environment
+                && let Some(remote) = s
+                    .environment
                     .remote_for_base(cwd.clone(), reference)
                     .await?
-                    .is_some()
+                && s.environment
+                    .fetch_worktree_base(cwd.clone(), reference, &remote)
+                    .await?
             {
                 return Ok(true);
             }
@@ -526,7 +562,7 @@ impl ThreadLaunchService {
         if let Some(Some(requested)) = &strategy.branch
             && !temporary(&requested.0)
         {
-            for existing in s.environment.local_branches(cwd).await.unwrap_or_default() {
+            for existing in branches {
                 if existing.starts_with(&format!("{}/", requested.0))
                     || requested.0.starts_with(&format!("{existing}/"))
                 {
@@ -751,39 +787,53 @@ impl ThreadLaunchService {
                 ));
             }
         }
+        if run_id.is_some() || launch_receipt.is_none() {
+            let current = match &run_id {
+                Some(id) => Some(
+                    s.projections
+                        .records(
+                            thread_id.clone(),
+                            vec![RecordKind::Runs],
+                            RecordFilter {
+                                run_ids: Some(vec![id.clone()]),
+                                ..Default::default()
+                            },
+                        )
+                        .await?,
+                ),
+                None => None,
+            };
+            let preparing=current.as_ref().is_none_or(|records|records.records.iter().any(|set|matches!(set,ProjectionRecordSet::Runs(runs) if runs.iter().any(|run|expanded_id(&run.id).ok().as_ref() == run_id.as_ref() && run.status == OrchestrationV2RunStatus::Preparing))));
+            if preparing {
+                if launch_receipt.is_some()
+                    && matches!(
+                        strategy,
+                        OrchestrationV2ThreadLaunchWorkspaceStrategy::Root(_)
+                    )
+                    && let Some(path) = current
+                        .as_ref()
+                        .and_then(|records| records.thread.worktree_path.as_ref())
+                {
+                    strategy = serde_json::from_value(
+                        json!({"type":"existing_worktree","worktreePath":path,"branch":branch(&strategy)}),
+                    )?;
+                }
+                self.schedule(Preparation {
+                    command_id: input.command_id,
+                    project_id: input.project_id,
+                    thread_id: thread_id.clone(),
+                    run_id,
+                    strategy,
+                    message: input.initial_message.clone(),
+                    reused: false,
+                })?;
+            }
+        }
         let projection = s
             .projections
             .projection(thread_id.clone())
             .await?
             .ok_or_else(|| failure("create-thread", "Thread not found."))?;
-        let preparing = run_id.as_ref().is_some_and(|id| {
-            projection.runs.iter().any(|r| {
-                expanded_id(&r.id).as_ref().ok() == Some(id)
-                    && r.status == OrchestrationV2RunStatus::Preparing
-            })
-        });
-        if (run_id.is_none() && launch_receipt.is_none()) || preparing {
-            if launch_receipt.is_some()
-                && matches!(
-                    strategy,
-                    OrchestrationV2ThreadLaunchWorkspaceStrategy::Root(_)
-                )
-                && let Some(path) = &projection.thread.worktree_path
-            {
-                strategy = serde_json::from_value(
-                    json!({"type":"existing_worktree","worktreePath":path,"branch":branch(&strategy)}),
-                )?;
-            }
-            self.schedule(Preparation {
-                command_id: input.command_id,
-                project_id: input.project_id,
-                thread_id: thread_id.clone(),
-                run_id,
-                strategy,
-                message: input.initial_message.clone(),
-                reused: false,
-            })?;
-        }
         Ok(LaunchResult {
             thread_id,
             projection,

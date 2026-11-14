@@ -56,5 +56,6 @@ pub fn make_turn_input(
         model_selection: selection,
         runtime_policy: policy,
         app_context: Vec::new(),
+        inline_context_length: None,
     })
 }

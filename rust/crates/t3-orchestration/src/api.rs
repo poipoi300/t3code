@@ -1241,6 +1241,13 @@ pub trait SettleScriptRunner: Send + Sync {
     }
 }
 
+/// TS `ThreadWorktreeRestore`: recreates a thread's missing worktree under its workspace lease
+/// before a send starts a turn.
+#[async_trait]
+pub trait ThreadWorktreeRestore: Send + Sync {
+    async fn restore(&self, thread: OrchestrationV2AppThread) -> Result<()>;
+}
+
 #[async_trait]
 pub trait AgentScope: Send + Sync {
     async fn kill(&self, _thread_id: ThreadId) -> Result<bool> {

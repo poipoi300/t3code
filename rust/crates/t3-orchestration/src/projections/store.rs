@@ -30,6 +30,16 @@ impl ProjectionStore {
         ));
         self
     }
+    pub async fn search_thread_stream(
+        &self,
+        input: OrchestrationV2SearchThreadInput,
+    ) -> Result<crate::ports::transport::thread_find::ThreadFindSubscription> {
+        self.find
+            .as_ref()
+            .ok_or(Error::Unsupported("thread find text backend"))?
+            .search_thread_stream(input)
+            .await
+    }
     pub async fn open_remote_delegated_tasks(&self) -> Result<Vec<read::RemoteDelegatedTask>> {
         self.read_snapshot(read::open_remote_delegated_tasks).await
     }
@@ -52,6 +62,13 @@ impl ProjectionStore {
     }
     pub async fn count_threads(&self) -> Result<u64> {
         self.read_snapshot(read::count_threads).await
+    }
+    pub async fn list_active_threads(
+        &self,
+        project_id: Option<ProjectId>,
+    ) -> Result<Vec<read::ActiveThreadListEntry>> {
+        self.read_snapshot(move |db| read::list_active_threads(db, project_id.as_ref()))
+            .await
     }
     pub async fn active_subagent_thread_ids(&self) -> Result<Vec<ThreadId>> {
         self.read_snapshot(read::active_subagent_thread_ids).await

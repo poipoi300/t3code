@@ -2816,7 +2816,7 @@ impl Inner {
             return Ok(receipt);
         }
         let mut prepared = self.services.inputs.prepare(&command).await?;
-        if matches!(
+        let needs_project_context = matches!(
             command_type.as_str(),
             "prepared-run.release"
                 | "thread.project.adopt-folder"
@@ -2826,7 +2826,8 @@ impl Inner {
                 | "link_request.record"
                 | "thread.pull-request-watch.sync"
                 | "runtime-request.respond"
-        ) || crate::ports::decisions::orchestrator::metadata_update_continuation(&command)?.is_some() { if let Some(projection) = &prepared.context.context.projection {
+        ) || crate::ports::decisions::orchestrator::metadata_update_continuation(&command)?.is_some();
+        if needs_project_context && let Some(projection) = &prepared.context.context.projection {
             let project_id =
                 crate::ports::checkpoints_forks::checkpoint_restore_safety::expanded_id(
                     &projection.thread.project_id,
@@ -2843,7 +2844,7 @@ impl Inner {
                 .read(move |db| crate::stores::projects::list(db, Some(&project_ids), true))
                 .await?;
             prepared.context.inputs.projects.extend(projects);
-        } }
+        }
         if command_type == "checkpoint.rollback"
             && crate::decision::engine::stored_value(&command)?["restoreFiles"] != false
             && let Some(projection) = &prepared.context.context.projection

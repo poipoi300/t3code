@@ -762,12 +762,68 @@ fn claude_settings_files(cwd: Option<&std::path::Path>, host: &ClaudeHostOptions
     files
 }
 
-fn resolve_claude_auto_compact_window(
+fn claude_tool_search_override(value: &str) -> Option<&'static str> {
+    if value == "auto" {
+        return Some("true");
+    }
+    let percent = value.strip_prefix("auto:")?;
+    let percent = percent.trim_matches(|c| {
+        matches!(c,
+        '\u{0009}'..='\u{000d}' | ' ' | '\u{00a0}' | '\u{1680}' |
+        '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' |
+        '\u{205f}' | '\u{3000}' | '\u{feff}')
+    });
+    let unsigned = percent.strip_prefix(['+', '-']).unwrap_or(percent);
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let scientific = unsigned
+        .split_once(['e', 'E'])
+        .is_some_and(|(base, exponent)| {
+            let base_valid = base.split_once('.').map_or_else(
+                || digits(base),
+                |(whole, fraction)| {
+                    (digits(whole) && (fraction.is_empty() || digits(fraction)))
+                        || (whole.is_empty() && digits(fraction))
+                },
+            );
+            base_valid && digits(exponent.strip_prefix(['+', '-']).unwrap_or(exponent))
+        });
+    let grouped = unsigned
+        .find(['_', ',', '\u{00a0}', '\u{202f}', ' '])
+        .and_then(|index| {
+            let separator = unsigned[index..].chars().next()?;
+            let groups = unsigned.split(separator).collect::<Vec<_>>();
+            (groups[0].len() <= 3
+                && digits(groups[0])
+                && groups[1..]
+                    .iter()
+                    .all(|group| group.len() == 3 && digits(group)))
+            .then(|| percent.replace(separator, ""))
+        });
+    let number = if percent.encode_utf16().count() <= 32 && scientific {
+        percent
+            .parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite() && n.fract() == 0.0)
+    } else if percent.encode_utf16().count() <= 32 && grouped.is_some() {
+        grouped.and_then(|value| value.parse::<f64>().ok())
+    } else {
+        let length = unsigned.bytes().take_while(u8::is_ascii_digit).count();
+        let sign = percent.len() - unsigned.len();
+        (length > 0)
+            .then(|| percent[..sign + length].parse::<f64>().ok())
+            .flatten()
+    };
+    number
+        .is_none_or(|n| n > 0.0 && n < 100.0)
+        .then_some("true")
+}
+
+fn resolve_claude_settings(
     options: &LaunchOptions,
     host: &ClaudeHostOptions,
     launch: &Value,
     model: &str,
-) -> Option<u64> {
+) -> (Option<u64>, Option<&'static str>) {
     let settings = claude_settings_files(options.cwd.as_deref(), host)
         .into_iter()
         .filter_map(|path| std::fs::read_to_string(path).ok())
@@ -789,6 +845,9 @@ fn resolve_claude_auto_compact_window(
             .or_else(|| options.env.get(name).map(String::as_str))
             .map(str::to_owned)
     };
+    let tool_search = environment("ENABLE_TOOL_SEARCH")
+        .as_deref()
+        .and_then(claude_tool_search_override);
     for name in ["DISABLE_COMPACT", "DISABLE_AUTO_COMPACT"] {
         if environment(name).is_some_and(|value| {
             matches!(
@@ -796,7 +855,7 @@ fn resolve_claude_auto_compact_window(
                 "1" | "true" | "yes" | "on"
             )
         }) {
-            return None;
+            return (None, tool_search);
         }
     }
     let enabled = launch["autoCompactEnabled"].as_bool().or_else(|| {
@@ -805,14 +864,17 @@ fn resolve_claude_auto_compact_window(
             .find_map(|(_, strict)| strict["autoCompactEnabled"].as_bool())
     });
     if enabled == Some(false) {
-        return None;
+        return (None, tool_search);
     }
     if let Some(window) = host
         .auto_compact_window
         .as_ref()
         .filter(|value| !value.is_empty())
     {
-        return window.parse::<u64>().ok().filter(|value| *value > 0);
+        return (
+            window.parse::<u64>().ok().filter(|value| *value > 0),
+            tool_search,
+        );
     }
     let valid = |value: &Value| {
         value
@@ -824,7 +886,7 @@ fn resolve_claude_auto_compact_window(
         .and_then(|value| value.trim().parse::<f64>().ok())
         .and_then(|value| valid(&json!(value)))
     {
-        return Some(window);
+        return (Some(window), tool_search);
     }
     let model = model
         .strip_suffix("[1m]")
@@ -839,9 +901,12 @@ fn resolve_claude_auto_compact_window(
             .or_else(|| valid(&settings["autoCompactWindow"]))
             .map(Some)
     };
-    window_from(launch)
-        .or_else(|| settings.iter().find_map(|(_, strict)| window_from(strict)))
-        .flatten()
+    (
+        window_from(launch)
+            .or_else(|| settings.iter().find_map(|(_, strict)| window_from(strict)))
+            .flatten(),
+        tool_search,
+    )
 }
 
 fn parse_claude_settings(text: &str) -> ProviderResult<Value> {
@@ -1034,35 +1099,33 @@ fn read_claude_append_files(
     cwd: Option<&std::path::Path>,
     host: &ClaudeHostOptions,
 ) -> ProviderResult<Vec<String>> {
-    base.extra_args
+    let mut texts = Vec::new();
+    for (_, file) in base
+        .extra_args
         .iter()
         .filter(|(key, _)| key == "append-system-prompt-file")
-        .filter_map(|(_, file)| {
-            let result = (|| {
-                let file = file.as_deref().ok_or_else(|| {
-                    operation(ProviderOperation::Open, "Missing Claude append prompt file")
-                })?;
-                let path = claude_flag_path(file, cwd, host.home_directory.as_deref())?;
-                let mut text = std::fs::read_to_string(path).map_err(|_| {
-                    operation(
-                        ProviderOperation::Open,
-                        "Could not read Claude append prompt file",
-                    )
-                })?;
-                if text.ends_with('\n') {
-                    text.pop();
-                    if text.ends_with('\r') {
-                        text.pop();
-                    }
-                }
-                Ok(text)
-            })();
-            match result {
-                Ok(text) if text.is_empty() => None,
-                result => Some(result),
+    {
+        let file = file.as_deref().ok_or_else(|| {
+            operation(ProviderOperation::Open, "Missing Claude append prompt file")
+        })?;
+        let path = claude_flag_path(file, cwd, host.home_directory.as_deref())?;
+        let mut text = std::fs::read_to_string(path).map_err(|_| {
+            operation(
+                ProviderOperation::Open,
+                "Could not read Claude append prompt file",
+            )
+        })?;
+        if text.ends_with('\n') {
+            text.pop();
+            if text.ends_with('\r') {
+                text.pop();
             }
-        })
-        .collect()
+        }
+        if !text.is_empty() {
+            texts.push(text);
+        }
+    }
+    Ok(texts)
 }
 
 fn prepare_claude_launch_settings(
@@ -1235,7 +1298,7 @@ fn prepare_claude_launch_settings(
     let policy = runtime_query_policy(&input.runtime_policy, availability);
     options.permission_mode = Some(policy.permission_mode);
     options.allow_dangerously_skip_permissions = policy.allow_dangerously_skip_permissions;
-    let auto_compact_window = resolve_claude_auto_compact_window(
+    let (auto_compact_window, tool_search) = resolve_claude_settings(
         &options,
         host,
         match &options.settings {
@@ -1244,6 +1307,12 @@ fn prepare_claude_launch_settings(
         },
         &model.model,
     );
+    if let (Some(value), Some(Settings::Json(settings))) = (tool_search, &mut options.settings) {
+        if !settings["env"].is_object() {
+            settings["env"] = json!({});
+        }
+        settings["env"]["ENABLE_TOOL_SEARCH"] = json!(value);
+    }
     Ok(PreparedClaudeSettings {
         launch: PreparedClaudeLaunch {
             options,
@@ -1418,6 +1487,11 @@ struct NativeWake {
     early_scheduled_wake: bool,
 }
 impl NativeWake {
+    fn clear_schedule(&mut self) {
+        self.scheduled_calls.clear();
+        self.scheduled_at = None;
+        self.early_scheduled_wake = false;
+    }
     fn root_start(frame: &Value) -> bool {
         frame["type"] == "system" && frame["subtype"] == "init"
     }
@@ -1448,10 +1522,11 @@ impl NativeWake {
             }
         } else if frame["type"] == "assistant" {
             for block in frame["message"]["content"].as_array().into_iter().flatten() {
-                if block["type"] == "tool_use" && block["name"] == "ScheduleWakeup" {
-                    if let Some(id) = block["id"].as_str() {
-                        self.scheduled_calls.insert(id.into());
-                    }
+                if block["type"] == "tool_use"
+                    && block["name"] == "ScheduleWakeup"
+                    && let Some(id) = block["id"].as_str()
+                {
+                    self.scheduled_calls.insert(id.into());
                 }
             }
         } else if frame["type"] == "user" {
@@ -2262,9 +2337,7 @@ impl ClaudeSessionRuntime {
         lock(&self.inner.projection).reset_process_usage();
         {
             let mut wake = lock(&self.inner.wake);
-            wake.scheduled_calls.clear();
-            wake.scheduled_at = None;
-            wake.early_scheduled_wake = false;
+            wake.clear_schedule();
         }
         let connection = self
             .options
@@ -2429,6 +2502,7 @@ async fn run_query(
         }
     }
     cancellation.cancel();
+    lock(&inner.wake).clear_schedule();
     let ids = lock(&inner.pending).keys().cloned().collect::<Vec<_>>();
     lock(&inner.pending).clear();
     for id in ids {

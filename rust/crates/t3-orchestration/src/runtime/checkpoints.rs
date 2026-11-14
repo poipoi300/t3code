@@ -146,7 +146,17 @@ impl CheckpointBackend for GitCheckpointBackend {
         let git = self
             .git(cwd.clone())
             .with_cancellation(cancellation.clone());
-        let result = git.capture_checkpoint(&reference.0).await;
+        let previous = input
+            .ordinal
+            .checked_sub(1)
+            .map(|ordinal| Self::reference(&input.scope, ordinal))
+            .transpose()?;
+        let result = git
+            .capture_checkpoint_with_previous(
+                &reference.0,
+                previous.as_ref().map(|reference| reference.0.as_str()),
+            )
+            .await;
         git.drain_operations().await;
         if cancellation.is_cancelled() {
             return Err(Error::Cancelled);
@@ -261,6 +271,19 @@ impl CheckpointBackend for GitCheckpointBackend {
 
 #[async_trait]
 impl CheckpointMetadata for GitCheckpointBackend {
+    async fn query_diff(
+        &self,
+        cwd: PathBuf,
+        from: CheckpointRef,
+        to: CheckpointRef,
+        ignore_whitespace: bool,
+    ) -> Result<String> {
+        self.git(cwd)
+            .filtered_checkpoint_diff(&from.0, &to.0, ignore_whitespace, t3_git::DIFF_MAX_BYTES)
+            .await
+            .map_err(git_error)
+    }
+
     fn reference(&self, scope: &CheckpointScopeId, ordinal: u64) -> CheckpointRef {
         CheckpointRef(t3_git::checkpoint_ref(&scope.0, ordinal))
     }
@@ -364,6 +387,25 @@ impl LaunchEnvironment for GitLaunchEnvironment {
             .resolve_worktree_base_remote(reference)
             .await
             .map(|target| target.map(|(remote, _)| remote))
+            .map_err(git_error)
+    }
+    async fn fetch_worktree_base(
+        &self,
+        cwd: PathBuf,
+        reference: &str,
+        remote: &str,
+    ) -> Result<bool> {
+        let git = self.backend.git(cwd);
+        let Some((_, branch)) = git
+            .resolve_worktree_base_remote(reference)
+            .await
+            .map_err(git_error)?
+        else {
+            return Ok(false);
+        };
+        git.fetch_worktree_base_commit(reference, Some((remote, &branch)))
+            .await
+            .map(|commit| commit.is_some())
             .map_err(git_error)
     }
     async fn local_branches(&self, cwd: PathBuf) -> Result<Vec<String>> {
@@ -1027,6 +1069,37 @@ mod tests {
                 .has_checkpoint(&reference.0)
                 .await
                 .map_err(git_error)?
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn backend_supplies_the_previous_scope_ref_for_branch_aware_query_diffs() -> Result<()> {
+        let repo = Repository::new().await?;
+        std::fs::write(repo.root.join("f.txt"), "base\n")?;
+        repo.command(&["add", "."]).await?;
+        repo.command(&["commit", "-m", "base"]).await?;
+        repo.command(&["branch", "b"]).await?;
+        repo.command(&["checkout", "-b", "a"]).await?;
+        std::fs::write(repo.root.join("only-a.txt"), "branch A\n")?;
+        repo.command(&["add", "."]).await?;
+        repo.command(&["commit", "-m", "a"]).await?;
+        let scope = repo.scope("scope:branch-query");
+        let from = repo.capture(scope.clone(), 0).await?;
+        repo.command(&["checkout", "b"]).await?;
+        std::fs::write(repo.root.join("f.txt"), "agent edit\n")?;
+        let to = repo.capture(scope, 1).await?;
+        let patch = repo
+            .backend
+            .query_diff(repo.root.clone(), from, to.clone(), false)
+            .await?;
+        assert!(patch.contains("-base\n+agent edit\n"));
+        assert!(!patch.contains("only-a.txt"));
+        assert_eq!(
+            repo.command(&["log", "-1", "--format=%P", &to.0])
+                .await?
+                .split_whitespace()
+                .count(),
+            2
         );
         Ok(())
     }

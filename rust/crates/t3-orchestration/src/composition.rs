@@ -219,6 +219,9 @@ pub struct OrchestrationRuntime {
     /// Legacy V1 import: shells are reconciled before admission; the host drives
     /// `import_pending_transcripts` and its lifecycle events after start.
     pub legacy: Arc<LegacyV1ThreadImporter>,
+    /// `orchestration.getTurnDiff` and `getFullThreadDiff` (package 07).
+    pub checkpoint_diffs:
+        Arc<crate::ports::checkpoints_forks::checkpoint_diff_query::CheckpointDiffQuery>,
     /// `orchestration.subscribeCommandOutput`; present when `terminal_output` was supplied.
     pub command_output: Option<crate::ports::transport::command_output_hub::CommandOutputHub>,
     /// `orchestration.searchThreads`; present when `search_policy` was supplied.
@@ -354,6 +357,12 @@ impl OrchestrationRuntime {
 
         let checkpoint_backend: Arc<dyn CheckpointBackend> = checkpoints.clone();
         let checkpoint_metadata: Arc<dyn CheckpointMetadata> = checkpoints;
+        let checkpoint_diffs = Arc::new(
+            crate::ports::checkpoints_forks::checkpoint_diff_query::CheckpointDiffQuery::new(
+                reader.clone(),
+                checkpoint_metadata.clone(),
+            ),
+        );
         let checkpoint_service = Arc::new(CheckpointService::new(
             checkpoint_backend.clone(),
             checkpoint_metadata,
@@ -585,6 +594,7 @@ impl OrchestrationRuntime {
             settlement,
             watch,
             legacy,
+            checkpoint_diffs,
             command_output,
             thread_search,
         })
@@ -602,11 +612,14 @@ impl OrchestrationRuntime {
 
     /// The dispatcher's thread lanes, for host services (such as project deletion) whose
     /// cascades must not race thread commands.
+    /// The dispatcher's thread lanes, for host services (`ProjectService`) that must serialize
+    /// with thread commands.
     pub fn thread_lanes(&self) -> Arc<KeyedLanes> {
         self.thread_lanes.clone()
     }
 
     /// The runtime's clock and id generator, for host services that commit alongside it.
+    /// The clock and id generator the runtime was started with.
     pub fn clock(&self) -> Arc<dyn Clock> {
         self.clock.clone()
     }

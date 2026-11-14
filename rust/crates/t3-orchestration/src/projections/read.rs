@@ -199,6 +199,81 @@ pub fn thread_worktree_paths(
         })?
         .collect::<std::result::Result<_, _>>()?)
 }
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveThreadListEntry {
+    pub id: ThreadId,
+    pub project_id: ProjectId,
+    pub title: String,
+    pub lineage: OrchestrationV2AppThreadLineage,
+    pub settled_override: Option<AppThreadSettledOverride>,
+    pub settled_at: Option<IsoDateTime>,
+    pub snoozed_until: Option<IsoDateTime>,
+    pub updated_at: IsoDateTime,
+}
+pub fn list_active_threads(
+    db: &Connection,
+    project_id: Option<&ProjectId>,
+) -> Result<Vec<ActiveThreadListEntry>> {
+    let project_filter = if project_id.is_some() {
+        " AND t.project_id=?1"
+    } else {
+        ""
+    };
+    let entries: Vec<Value> = rows(
+        db,
+        &format!(
+            r#"SELECT json_object(
+      'id',t.thread_id,'projectId',t.project_id,'title',t.title,'updatedAt',t.updated_at,
+      'lineage',json_extract(t.payload_json,'$.lineage'),
+      'settledOverride',json_extract(t.payload_json,'$.settledOverride'),
+      'settledAt',json_extract(t.payload_json,'$.settledAt'),
+      'snoozedUntil',json_extract(t.payload_json,'$.snoozedUntil'))
+      FROM orchestration_v2_projection_threads t
+      WHERE t.deleted_at IS NULL AND t.archived_at IS NULL{project_filter}"#
+        ),
+        t3_persistence::rusqlite::params_from_iter(project_id.map(|id| &id.0)),
+    )?;
+    entries
+        .into_iter()
+        .map(|row| {
+            Ok(ActiveThreadListEntry {
+                id: serde_json::from_value(row["id"].clone())?,
+                project_id: serde_json::from_value(row["projectId"].clone())?,
+                title: serde_json::from_value(row["title"].clone())?,
+                updated_at: serde_json::from_value(row["updatedAt"].clone())?,
+                lineage: shell_index_lineage(&row["lineage"])?,
+                settled_override: shell_index_settled_override(&row["settledOverride"]),
+                settled_at: serde_json::from_value(row["settledAt"].clone())?,
+                snoozed_until: serde_json::from_value(row["snoozedUntil"].clone())?,
+            })
+        })
+        .collect()
+}
+
+fn shell_index_lineage(lineage: &Value) -> Result<OrchestrationV2AppThreadLineage> {
+    let mut normalized = serde_json::json!({
+        "parentThreadId": lineage["parentThreadId"],
+        "relationshipToParent": match lineage["relationshipToParent"].as_str() {
+            Some("fork" | "subagent") => lineage["relationshipToParent"].clone(),
+            _ => Value::Null,
+        },
+        "rootThreadId": lineage["rootThreadId"],
+    });
+    if !lineage["sideChat"].is_null() {
+        normalized["sideChat"] = (lineage["sideChat"] == true || lineage["sideChat"] == 1).into();
+    }
+    Ok(serde_json::from_value(normalized)?)
+}
+
+fn shell_index_settled_override(value: &Value) -> Option<AppThreadSettledOverride> {
+    match value.as_str() {
+        Some("settled") => Some(AppThreadSettledOverride::Settled),
+        Some("active") => Some(AppThreadSettledOverride::Active),
+        _ => None,
+    }
+}
+
 pub fn thread_titles(db: &Connection, ids: &[ThreadId]) -> Result<OrchestrationV2ThreadTitles> {
     let mut statement=db.prepare("SELECT thread_id,title FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL AND thread_id IN(SELECT value FROM json_each(?1)) ORDER BY thread_id")?;
     Ok(statement
@@ -1514,7 +1589,7 @@ fn work_rows(db: &Connection, rows: &mut [TimelineRow]) -> Result<()> {
         .collect();
     let metadata: Vec<Value> = crate::projections::read::rows(
         db,
-        "SELECT json_object('id',item.turn_item_id,'threadId',item.thread_id,'runStatus',run.status,'attemptId',attempt.attempt_id,'attemptStatus',attempt.status,'persistentOutput',item.status='completed' AND item.type='dynamic_tool' AND(item.payload_json LIKE '%htmlRender%' OR item.payload_json LIKE '%t3McpApp%' OR item.payload_json LIKE '%\"viewedImagePath\"%' OR item.payload_json LIKE '%\"toolName\":\"%delegate_task\"%')) FROM json_each(?1) wanted CROSS JOIN orchestration_v2_projection_turn_items item ON item.turn_item_id=json_extract(wanted.value,'$.id') AND item.thread_id=json_extract(wanted.value,'$.threadId') LEFT JOIN orchestration_v2_projection_runs run ON run.run_id=item.run_id LEFT JOIN orchestration_v2_projection_nodes node ON node.node_id=item.node_id LEFT JOIN orchestration_v2_projection_run_attempts attempt ON attempt.attempt_id=(SELECT attempt_id FROM orchestration_v2_projection_run_attempts WHERE run_id=item.run_id AND root_node_id=COALESCE(node.root_node_id,item.node_id) ORDER BY attempt_ordinal DESC LIMIT 1)",
+        "SELECT json_object('id',item.turn_item_id,'threadId',item.thread_id,'runStatus',run.status,'attemptId',attempt.attempt_id,'attemptStatus',attempt.status,'persistentOutput',item.status='completed' AND item.type='dynamic_tool' AND(item.payload_json LIKE '%htmlRender%' OR item.payload_json LIKE '%t3McpApp%' OR item.payload_json LIKE '%\"viewedImagePath\"%' OR item.payload_json LIKE '%\"toolName\":\"%delegate_task\"%' OR item.payload_json LIKE '%\"toolName\":\"%send_to_user\"%' OR item.payload_json LIKE '%sentMessage%')) FROM json_each(?1) wanted CROSS JOIN orchestration_v2_projection_turn_items item ON item.turn_item_id=json_extract(wanted.value,'$.id') AND item.thread_id=json_extract(wanted.value,'$.threadId') LEFT JOIN orchestration_v2_projection_runs run ON run.run_id=item.run_id LEFT JOIN orchestration_v2_projection_nodes node ON node.node_id=item.node_id LEFT JOIN orchestration_v2_projection_run_attempts attempt ON attempt.attempt_id=(SELECT attempt_id FROM orchestration_v2_projection_run_attempts WHERE run_id=item.run_id AND root_node_id=COALESCE(node.root_node_id,item.node_id) ORDER BY attempt_ordinal DESC LIMIT 1)",
         [serde_json::to_string(&sources)?],
     )?;
     let metadata: BTreeMap<_, _> = metadata
@@ -3433,6 +3508,7 @@ pub struct PullRequestThread {
     pub project_id: ProjectId,
     pub lineage: OrchestrationV2AppThreadLineage,
     pub created_at: IsoDateTime,
+    pub updated_at: IsoDateTime,
     #[serde(with = "t3_contracts::wire::nullable")]
     pub branch: Option<TrimmedNonEmptyString>,
     #[serde(with = "t3_contracts::wire::nullable")]
@@ -3597,8 +3673,8 @@ pub fn active_shell_index(db: &Connection) -> Result<Vec<ActiveShellIndexEntry>>
             Ok(ActiveShellIndexEntry {
                 id: serde_json::from_value(row["id"].clone())?,
                 project_id: serde_json::from_value(row["projectId"].clone())?,
-                lineage: serde_json::from_value(row["lineage"].clone())?,
-                settled_override: serde_json::from_value(row["settledOverride"].clone())?,
+                lineage: shell_index_lineage(&row["lineage"])?,
+                settled_override: shell_index_settled_override(&row["settledOverride"]),
                 settled_at: serde_json::from_value(row["settledAt"].clone())?,
                 pinned_at: Some(serde_json::from_value(row["pinnedAt"].clone())?),
                 snoozed_until: Some(serde_json::from_value(row["snoozedUntil"].clone())?),
@@ -4585,7 +4661,7 @@ WITH config AS (SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13), eligible AS 
                       OVER (PARTITION BY run_id ORDER BY ordinal) AS segment,
                     CASE WHEN status = 'completed' AND (run_status = 'completed' OR attempt_status = 'superseded')
                       AND type IN ('command_execution','reasoning','file_change','file_search','web_search','dynamic_tool')
-                      AND NOT (item.type = 'dynamic_tool' AND (item.payload_json LIKE '%htmlRender%' OR item.payload_json LIKE '%t3McpApp%' OR item.payload_json LIKE '%"viewedImagePath"%' OR item.payload_json LIKE '%"toolName":"%delegate_task"%'))
+                      AND NOT (item.type = 'dynamic_tool' AND (item.payload_json LIKE '%htmlRender%' OR item.payload_json LIKE '%t3McpApp%' OR item.payload_json LIKE '%"viewedImagePath"%' OR item.payload_json LIKE '%"toolName":"%delegate_task"%' OR item.payload_json LIKE '%"toolName":"%send_to_user"%' OR item.payload_json LIKE '%sentMessage%'))
                       AND run_id NOT IN (SELECT run_id FROM blocked_runs)
                       THEN 1 ELSE 0 END AS can_defer
                   FROM eligible AS item

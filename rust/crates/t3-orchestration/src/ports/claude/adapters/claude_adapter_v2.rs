@@ -989,6 +989,7 @@ impl ClaudeProjection {
         }
     }
     pub fn query_ended(&mut self) -> ProviderResult<Vec<ProviderEvent>> {
+        self.running_monitors.clear();
         let Some(active) = &self.active else {
             return Ok(vec![]);
         };
@@ -1373,6 +1374,7 @@ impl ClaudeProjection {
                             Some(kind) if kind.ends_with("tool_result") => self.tool_result(
                                 block,
                                 frame.get("tool_use_result"),
+                                frame,
                                 &now,
                                 &mut events,
                             )?,
@@ -1403,6 +1405,7 @@ impl ClaudeProjection {
                             self.tool_result(
                                 block,
                                 frame.get("tool_use_result"),
+                                frame,
                                 &now,
                                 &mut events,
                             )?;
@@ -1622,6 +1625,7 @@ impl ClaudeProjection {
         &mut self,
         block: &Value,
         structured: Option<&Value>,
+        frame: &Value,
         now: &str,
         events: &mut Vec<ProviderEvent>,
     ) -> ProviderResult<()> {
@@ -1649,7 +1653,26 @@ impl ClaudeProjection {
             || block["content"]["type"]
                 .as_str()
                 .is_some_and(|s| s.ends_with("_error"));
-        item["status"] = json!(if failed { "failed" } else { "completed" });
+        let non_execution = frame["tool_result_meta"]
+            .as_array()
+            .filter(|entries| {
+                entries.iter().all(|entry| {
+                    entry["id"].is_string()
+                        && (entry["non_execution_kind"].is_null()
+                            || entry["non_execution_kind"].is_string())
+                })
+            })
+            .and_then(|entries| entries.iter().find(|entry| entry["id"] == native))
+            .and_then(|entry| entry["non_execution_kind"].as_str());
+        item["status"] = json!(match non_execution {
+            Some("cancelled") => "cancelled",
+            Some("interrupted") => "interrupted",
+            _ if failed => "failed",
+            _ => "completed",
+        });
+        if let Some(kind) = non_execution {
+            item["toolNonExecutionKind"] = json!(kind);
+        }
         item["completedAt"] = json!(now);
         item["updatedAt"] = json!(now);
         let output = structured
@@ -2371,6 +2394,39 @@ impl ClaudeProjection {
             }
         }
         let mut turn = self.context()?.turn.clone();
+        let pending_tools = self
+            .context()?
+            .ordinals
+            .keys()
+            .filter_map(|native| {
+                self.items
+                    .get(&provider_id("turn-item", "native-item", native))
+            })
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| operation(ProviderOperation::Stream, "Invalid tool item"))?;
+        for mut item in pending_tools {
+            if item["providerTurnId"] != turn["id"]
+                || !matches!(
+                    item["type"].as_str(),
+                    Some("command_execution" | "dynamic_tool" | "file_change" | "web_search")
+                )
+                || !matches!(
+                    item["status"].as_str(),
+                    Some("running" | "pending" | "waiting")
+                )
+            {
+                continue;
+            }
+            item["status"] = json!(if status == "completed" {
+                "failed"
+            } else {
+                status
+            });
+            item["completedAt"] = json!(now);
+            item["updatedAt"] = json!(now);
+            self.emit_tool_item(item, events)?;
+        }
         turn["status"] = json!(status);
         turn["completedAt"] = json!(now);
         let run = &self.context()?.input.run_id;

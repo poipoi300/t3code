@@ -584,6 +584,10 @@ scripted_service! { FakeEventIngestor: EventIngestor {
     ingest(session_id: ProviderSessionId, instance_id: ProviderInstanceId, thread_id: ThreadId, event: ProviderEvent) -> ();
 } }
 
+scripted_service! { FakeThreadWorktreeRestore: ThreadWorktreeRestore {
+    restore(thread: OrchestrationV2AppThread) -> ();
+} }
+
 scripted_service! { FakeSessionRetentionCheck: SessionRetentionCheck {
     keep() -> bool;
 } }

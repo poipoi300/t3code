@@ -3629,75 +3629,82 @@ async fn a_user_message_keeps_run_one_while_its_lineage_read_yields_to_a_later_a
         runtime::dispatch::*,
         testing::{FakeProviderRegistry, SequenceIds},
     };
-    let harness = message_harness().await;
-    let providers = Arc::new(FakeProviderRegistry::default());
-    for _ in 0..2 {
-        providers.metadata.push(Ok(AdapterMetadata {
-            driver: t3_contracts::provider_instance::ProviderDriverKind("codex".into()),
-            continuation_key: "test".into(),
-            enabled: true,
-            capabilities: super::command_policy_test::capabilities(),
-        }));
-    }
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let inputs = Arc::new(GatedLineageInputs {
-        base: ProjectionCommandInputs {
-            reader: harness.reader.clone(),
-            providers,
-            clock: harness.clock.clone(),
-            ids: Arc::new(SequenceIds::new("ordered")),
-        },
-        entered: entered.clone(),
-        release: release.clone(),
-        gated: AtomicBool::new(false),
-    });
-    let recovery = Arc::new(Recovery::default());
-    let dispatcher = Dispatcher::new(
-        DispatchServices {
-            database: harness.database.stores.clone(),
-            inputs,
-            engine: Arc::new(PureDecisionEngine),
-            committer: harness.sink.clone(),
-            recovery,
-            clock: harness.clock.clone(),
-        },
-        None,
-    );
-    let user = {
-        let dispatcher = dispatcher.clone();
-        tokio::spawn(async move {
-            dispatcher.dispatch(command(json!({"type":"message.dispatch","commandId":"ordered-user","threadId":"thread","messageId":"user-first","text":"User first","attachments":[],"dispatchMode":{"type":"defer_start"},"createdBy":"user","creationSource":"web"}))).await
-        })
-    };
-    entered.notified().await;
-    let (attempted, arrived) = tokio::sync::oneshot::channel();
-    let agent = tokio::spawn(async move {
-        attempted.send(()).unwrap();
-        dispatcher.dispatch(command(json!({"type":"message.dispatch","commandId":"ordered-agent","threadId":"thread","messageId":"agent-second","text":"Agent second","attachments":[],"dispatchMode":{"type":"queue_after_active"},"createdBy":"agent","creationSource":"mcp"}))).await
-    });
-    arrived.await.unwrap();
-    release.notify_one();
-    user.await.unwrap().unwrap();
-    agent.await.unwrap().unwrap();
-    let projection = harness
-        .reader
-        .projection(ThreadId("thread".into()))
-        .await
-        .unwrap()
-        .unwrap();
-    let ids: Vec<_> = projection
-        .runs
-        .iter()
-        .map(|run| t3_contracts::stored::to_value(&run.user_message_id).unwrap())
-        .collect();
-    assert_eq!(
-        ids,
-        json!(["user-first", "agent-second"])
-            .as_array()
+    for atomic_continuation in [false, true] {
+        let harness = message_harness().await;
+        let providers = Arc::new(FakeProviderRegistry::default());
+        for _ in 0..2 {
+            providers.metadata.push(Ok(AdapterMetadata {
+                driver: t3_contracts::provider_instance::ProviderDriverKind("codex".into()),
+                continuation_key: "test".into(),
+                enabled: true,
+                capabilities: super::command_policy_test::capabilities(),
+            }));
+        }
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let inputs = Arc::new(GatedLineageInputs {
+            base: ProjectionCommandInputs {
+                reader: harness.reader.clone(),
+                providers,
+                clock: harness.clock.clone(),
+                ids: Arc::new(SequenceIds::new("ordered")),
+            },
+            entered: entered.clone(),
+            release: release.clone(),
+            gated: AtomicBool::new(false),
+        });
+        let recovery = Arc::new(Recovery::default());
+        let dispatcher = Dispatcher::new(
+            DispatchServices {
+                database: harness.database.stores.clone(),
+                inputs,
+                engine: Arc::new(PureDecisionEngine),
+                committer: harness.sink.clone(),
+                recovery,
+                clock: harness.clock.clone(),
+            },
+            None,
+        );
+        let user = {
+            let dispatcher = dispatcher.clone();
+            tokio::spawn(async move {
+                let request = if atomic_continuation {
+                    json!({"type":"thread.metadata.update","commandId":"ordered-user","threadId":"thread","worktreePath":"C:/ordered-worktree","expectedWorktreePath":"C:/work/thread","continuation":{"messageId":"user-first","text":"User first"}})
+                } else {
+                    json!({"type":"message.dispatch","commandId":"ordered-user","threadId":"thread","messageId":"user-first","text":"User first","attachments":[],"dispatchMode":{"type":"defer_start"},"createdBy":"user","creationSource":"web"})
+                };
+                dispatcher.dispatch(command(request)).await
+            })
+        };
+        entered.notified().await;
+        let (attempted, arrived) = tokio::sync::oneshot::channel();
+        let agent = tokio::spawn(async move {
+            attempted.send(()).unwrap();
+            dispatcher.dispatch(command(json!({"type":"message.dispatch","commandId":"ordered-agent","threadId":"thread","messageId":"agent-second","text":"Agent second","attachments":[],"dispatchMode":{"type":"queue_after_active"},"createdBy":"agent","creationSource":"mcp"}))).await
+        });
+        arrived.await.unwrap();
+        release.notify_one();
+        user.await.unwrap().unwrap();
+        agent.await.unwrap().unwrap();
+        let projection = harness
+            .reader
+            .projection(ThreadId("thread".into()))
+            .await
             .unwrap()
-            .clone()
-    );
+            .unwrap();
+        let ids: Vec<_> = projection
+            .runs
+            .iter()
+            .map(|run| t3_contracts::stored::to_value(&run.user_message_id).unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            json!(["user-first", "agent-second"])
+                .as_array()
+                .unwrap()
+                .clone()
+        );
+    }
 }
 
 #[test]
@@ -4400,5 +4407,189 @@ fn drift_cancellation_marks_completed_followup_when_awaited_work_keeps_it_open()
         delegated_cancellation_marker(&child, &child, task, &parent.context.now)
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn drift_pending_result_reads_awaited_work_from_sqlite_for_followups_and_original_tasks() {
+    let (harness, child, run_id) = completed_delegate_harness().await;
+    let before = harness
+        .reader
+        .projection(child.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let tagged = change(
+        &before.runs[0],
+        json!({"delegatedTaskId":"pending-followup"}),
+    );
+    let mut provider = change(
+        &before.provider_threads[0],
+        json!({"pendingBackgroundTasks":[{"taskId":"check","kind":"command","awaited":true}]}),
+    );
+    let event = |id: &str, kind: &str, payload: serde_json::Value| -> OrchestrationV2DomainEvent {
+        serde_json::from_value(json!({"id":id,"threadId":child,"type":kind,"runId":run_id,"occurredAt":TEST_TIME,"payload":payload})).unwrap()
+    };
+    harness
+        .sink
+        .commit(CommitRequest {
+            receipt: None,
+            guard: CommitGuard::None,
+            decision: Decision {
+                events: vec![
+                    event(
+                        "tag-pending",
+                        "run.updated",
+                        t3_contracts::stored::to_value(&tagged).unwrap(),
+                    ),
+                    event(
+                        "awaited-provider",
+                        "provider-thread.updated",
+                        t3_contracts::stored::to_value(&provider).unwrap(),
+                    ),
+                ],
+                ..Default::default()
+            },
+        })
+        .await
+        .unwrap();
+    let task = Some(NodeId("pending-followup".into()));
+    assert!(
+        harness
+            .dispatcher
+            .delegated_task_result_pending(child.clone(), task.clone())
+            .await
+            .unwrap()
+    );
+    assert!(
+        harness
+            .dispatcher
+            .delegated_task_result_pending(child.clone(), None)
+            .await
+            .unwrap()
+    );
+    provider = change(&provider, json!({"pendingBackgroundTasks":[]}));
+    harness
+        .sink
+        .commit(CommitRequest {
+            receipt: None,
+            guard: CommitGuard::None,
+            decision: Decision {
+                events: vec![event(
+                    "settled-provider",
+                    "provider-thread.updated",
+                    t3_contracts::stored::to_value(&provider).unwrap(),
+                )],
+                ..Default::default()
+            },
+        })
+        .await
+        .unwrap();
+    assert!(
+        !harness
+            .dispatcher
+            .delegated_task_result_pending(child.clone(), task)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !harness
+            .dispatcher
+            .delegated_task_result_pending(child, None)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn drift_context_preparation_uses_the_new_workspace_without_rewriting_metadata_preconditions()
+{
+    use std::sync::Arc;
+    use t3_orchestration::{
+        decision::engine::{MessageContextPreparer, PreparedMessageContext},
+        runtime::dispatch::{CommandInputs, ContextCommandInputs, PreparedCommand},
+    };
+    struct Base(PreparedDecisionContext);
+    #[async_trait::async_trait]
+    impl CommandInputs for Base {
+        async fn lock_keys(
+            &self,
+            _: &OrchestrationV2ServerCommand,
+        ) -> t3_orchestration::error::Result<Vec<ThreadId>> {
+            Ok(vec![])
+        }
+        async fn prepare(
+            &self,
+            _: &OrchestrationV2ServerCommand,
+        ) -> t3_orchestration::error::Result<PreparedCommand> {
+            Ok(PreparedCommand {
+                context: self.0.clone(),
+                guard: CommitGuard::None,
+            })
+        }
+    }
+    struct WorkspaceContext;
+    #[async_trait::async_trait]
+    impl MessageContextPreparer for WorkspaceContext {
+        async fn prepare(
+            &self,
+            context: &PreparedDecisionContext,
+            command: &OrchestrationV2ServerCommand,
+        ) -> t3_orchestration::error::Result<Option<PreparedMessageContext>> {
+            assert_eq!(
+                context
+                    .context
+                    .projection
+                    .as_ref()
+                    .unwrap()
+                    .thread
+                    .worktree_path
+                    .as_ref()
+                    .unwrap()
+                    .0,
+                "C:/new-workspace"
+            );
+            let command = t3_contracts::stored::to_value(command).unwrap();
+            assert_eq!(command["type"], "message.dispatch");
+            assert_eq!(command["dispatchMode"]["type"], "queue_after_active");
+            assert_eq!(command["commandId"], "workspace-prepare");
+            Ok(None)
+        }
+    }
+    let mut projection = projection();
+    projection.thread = change(
+        &projection.thread,
+        json!({"worktreePath":"C:/old-workspace"}),
+    );
+    let base = prepared_with_adapter(projection, "codex");
+    let inputs = ContextCommandInputs {
+        base: Arc::new(Base(base)),
+        preparer: Arc::new(WorkspaceContext),
+    };
+    let command = command(
+        json!({"type":"thread.metadata.update","commandId":"workspace-prepare","threadId":"thread","expectedWorktreePath":"C:/old-workspace","worktreePath":"C:/new-workspace","continuation":{"messageId":"workspace-prompt","text":"Continue"}}),
+    );
+    let prepared = inputs.prepare(&command).await.unwrap();
+    assert_eq!(
+        prepared
+            .context
+            .context
+            .projection
+            .as_ref()
+            .unwrap()
+            .thread
+            .worktree_path
+            .as_ref()
+            .unwrap()
+            .0,
+        "C:/old-workspace"
+    );
+    assert!(
+        PureDecisionEngine
+            .decide_prepared(&prepared.context, &command)
+            .unwrap()
+            .events
+            .iter()
+            .any(|event| t3_contracts::stored::to_value(event).unwrap()["type"] == "run.created")
     );
 }

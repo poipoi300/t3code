@@ -32,6 +32,8 @@ mod background_work_stop_integration_test;
 mod bounded_snapshot_transport_test;
 #[path = "ports/checkpoint_capture_service_test.rs"]
 mod checkpoint_capture_service_test;
+#[path = "ports/checkpoint_diff_query_test.rs"]
+mod checkpoint_diff_query_test;
 #[path = "ports/checkpoint_restore_safety_test.rs"]
 mod checkpoint_restore_safety_test;
 #[path = "ports/checkpoint_rollback_service_test.rs"]

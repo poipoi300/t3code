@@ -24,12 +24,20 @@ struct Peer {
 }
 impl Peer {
     async fn send(&mut self, value: Value) {
-        let mut bytes = serde_json::to_vec(&value).unwrap();
+        let mut bytes = serde_json::to_vec(&value).expect("encode peer frame");
         bytes.push(b'\n');
-        self.write.write_all(&bytes).await.unwrap();
+        self.write.write_all(&bytes).await.expect("send peer frame");
     }
     async fn read(&mut self) -> Value {
-        serde_json::from_str(&self.read.next_line().await.unwrap().expect("peer frame")).unwrap()
+        serde_json::from_str(
+            &self
+                .read
+                .next_line()
+                .await
+                .expect("read peer frame")
+                .expect("peer frame"),
+        )
+        .expect("decode peer frame")
     }
 }
 async fn running() -> (Arc<dyn SessionRuntime>, EventSubscription, Peer) {
@@ -44,7 +52,7 @@ async fn running_with_host(
             cli_path: Some("fixture-claude".into()),
             ..Default::default()
         },
-        fixture_turn_input().unwrap(),
+        fixture_turn_input().expect("fixture turn input"),
     )
     .await
 }
@@ -88,8 +96,11 @@ async fn running_with_input(
             CancellationToken::new(),
         )
         .await
-        .unwrap();
-    let subscription = runtime.subscribe().await.unwrap();
+        .expect("open Claude fixture session");
+    let subscription = runtime
+        .subscribe()
+        .await
+        .expect("subscribe to Claude fixture");
     let mut peer = Peer {
         read: BufReader::new(peer_read).lines(),
         write: peer_write,
@@ -105,7 +116,10 @@ async fn running_with_input(
     peer.send(json!({"type":"control_response","response":{"subtype":"success","request_id":init["request_id"],"response":{}}})).await;
     let user = peer.read().await;
     assert_eq!(user["type"], "user");
-    start.await.unwrap().unwrap();
+    start
+        .await
+        .expect("join fixture start")
+        .expect("start fixture turn");
     (runtime, subscription, peer)
 }
 
@@ -322,12 +336,18 @@ async fn failed_parallel_preparation_keeps_the_query_alive_and_compiles_selectio
     std::fs::write(append, "File instructions\n").unwrap();
     let handle = runtime.clone();
     let mut start = tokio::spawn(async move { handle.start_turn(input).await });
-    let prompt = tokio::select! {result=&mut start=>panic!("start ended before a prompt: {result:?}"),frame=peer.read()=>frame};
+    let mut started = false;
+    let prompt = tokio::select! {
+        result = &mut start => {result.unwrap().unwrap(); started = true; peer.read().await},
+        frame = peer.read() => frame,
+    };
     assert_eq!(
         prompt["type"], "user",
         "valid retry must reuse the old initialized native query"
     );
-    start.await.unwrap().unwrap();
+    if !started {
+        start.await.unwrap().unwrap();
+    }
     peer.send(result("second")).await;
     loop {
         if let ProviderEventKind::Terminal { run_ordinal, .. } =
@@ -612,11 +632,14 @@ async fn request(subscription: &mut EventSubscription) -> RuntimeRequestId {
             .recv()
             .await
             .expect("provider event")
-            .unwrap();
+            .expect("provider event result");
         if let ProviderEventKind::RuntimeRequest { request, .. } = event.kind
             && request.status == t3_contracts::orchestration_v2::RuntimeRequestStatus::Pending
         {
-            return serde_json::from_value(serde_json::to_value(request.id).unwrap()).unwrap();
+            return serde_json::from_value(
+                serde_json::to_value(request.id).expect("encode request ID"),
+            )
+            .expect("decode request ID");
         }
     }
 }

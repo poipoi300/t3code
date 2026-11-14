@@ -829,6 +829,7 @@ impl ProviderTurnStartService {
                         model_selection: state.run.model_selection,
                         runtime_policy,
                         app_context: Vec::new(),
+                        inline_context_length: None,
                     },
                     session: runtime,
                     inherited_background_items: inherited,

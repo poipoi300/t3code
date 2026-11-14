@@ -1637,8 +1637,9 @@ impl Plan<'_> {
         self.native_goal(&message, &run["providerInstanceId"])?;
         let follows = crate::ports::decisions::orchestrator::follows_current_conversation(&message);
         let fresh = run["freshContext"] == true;
-        if follows && !fresh {
-            if let Some(current) = self
+        if follows
+            && !fresh
+            && let Some(current) = self
                 .records("providerThreads")
                 .iter()
                 .find(|candidate| {
@@ -1654,9 +1655,8 @@ impl Plan<'_> {
                                 && candidate["providerInstanceId"] == run["providerInstanceId"]
                         })
                 })
-            {
-                owner = current.clone();
-            }
+        {
+            owner = current.clone();
         }
         if owner["providerInstanceId"] != run["providerInstanceId"]
             || fresh && (!owner["firstRunOrdinal"].is_null() || !owner["nativeThreadRef"].is_null())

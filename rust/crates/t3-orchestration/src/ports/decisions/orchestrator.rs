@@ -1074,12 +1074,21 @@ pub fn current_pull_request_watch_wake(
 pub fn metadata_update_continuation(
     command: &OrchestrationV2ServerCommand,
 ) -> Result<Option<OrchestrationV2ServerCommand>> {
-    let value = t3_contracts::stored::to_value(command)?;
-    if value["type"] != "thread.metadata.update" || value.get("continuation").is_none() {
+    let OrchestrationV2ServerCommand::Client(command) = command else {
         return Ok(None);
-    }
+    };
+    let OrchestrationV2Command::ThreadMetadataUpdate(command) = command.as_ref() else {
+        return Ok(None);
+    };
+    let Some(continuation) = &command.continuation else {
+        return Ok(None);
+    };
+    let continuation = continuation.as_ref().ok_or_else(|| Error::Decode {
+        entity: "workspace continuation",
+        detail: "continuation must be an object".into(),
+    })?;
     Ok(Some(serde_json::from_value(
-        serde_json::json!({"type":"message.dispatch","commandId":value["commandId"],"threadId":value["threadId"],"messageId":value["continuation"]["messageId"],"text":value["continuation"]["text"],"attachments":[],"dispatchMode":{"type":"queue_after_active"},"createdBy":"agent","creationSource":"mcp"}),
+        serde_json::json!({"type":"message.dispatch","commandId":command.command_id,"threadId":command.thread_id,"messageId":continuation.message_id,"text":continuation.text,"attachments":[],"dispatchMode":{"type":"queue_after_active"},"createdBy":"agent","creationSource":"mcp"}),
     )?))
 }
 
@@ -1137,17 +1146,7 @@ pub fn queue_tail_model_selection(
     Ok(projection.thread.model_selection.clone())
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ActiveThreadListEntry {
-    pub id: ThreadId,
-    pub project_id: ProjectId,
-    pub title: t3_contracts::base_schemas::TrimmedNonEmptyString,
-    pub lineage: OrchestrationV2AppThreadLineage,
-    pub settled_override: Option<AppThreadSettledOverride>,
-    pub settled_at: Option<IsoDateTime>,
-    pub snoozed_until: Option<Option<IsoDateTime>>,
-    pub updated_at: IsoDateTime,
-}
+pub use crate::projections::read::ActiveThreadListEntry;
 
 fn terminal_task_run(status: &OrchestrationV2RunStatus) -> bool {
     matches!(

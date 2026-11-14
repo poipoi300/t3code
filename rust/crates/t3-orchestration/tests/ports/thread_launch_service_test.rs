@@ -212,6 +212,10 @@ mod support {
         pub branches: Mutex<Vec<String>>,
         pub refs: Mutex<HashSet<String>>,
         pub remote: AtomicBool,
+        pub fetched: AtomicBool,
+        pub repository_gate: Mutex<Option<Arc<Gate>>>,
+        pub commit_gate: Mutex<Option<Arc<Gate>>>,
+        pub branches_gate: Mutex<Option<Arc<Gate>>>,
         pub setup_count: AtomicUsize,
         pub setup_entered: Semaphore,
         pub setup_gate: Mutex<Option<Arc<Gate>>>,
@@ -233,6 +237,10 @@ mod support {
                 branches: Mutex::new(vec![]),
                 refs: Mutex::new(HashSet::from(["main".into()])),
                 remote: AtomicBool::new(false),
+                fetched: AtomicBool::new(true),
+                repository_gate: Mutex::new(None),
+                commit_gate: Mutex::new(None),
+                branches_gate: Mutex::new(None),
                 setup_count: AtomicUsize::new(0),
                 setup_entered: Semaphore::new(0),
                 setup_gate: Mutex::new(None),
@@ -280,9 +288,17 @@ mod support {
             Ok(self.folder.lock().expect("folder").clone())
         }
         async fn repository_root(&self, cwd: PathBuf) -> Result<Option<PathBuf>> {
+            let wait = self
+                .repository_gate
+                .lock()
+                .expect("repository gate")
+                .clone();
+            gate(wait, CancellationToken::new()).await?;
             Ok(self.repository.load(Ordering::SeqCst).then_some(cwd))
         }
         async fn has_commit(&self, _: PathBuf, reference: &str) -> Result<bool> {
+            let wait = self.commit_gate.lock().expect("commit gate").clone();
+            gate(wait, CancellationToken::new()).await?;
             if self.probe_failure.load(Ordering::SeqCst) {
                 return Err(Error::Unsupported("reference probing unavailable"));
             }
@@ -301,7 +317,12 @@ mod support {
                 .load(Ordering::SeqCst)
                 .then(|| "upstream".into()))
         }
+        async fn fetch_worktree_base(&self, _: PathBuf, _: &str, _: &str) -> Result<bool> {
+            Ok(self.fetched.load(Ordering::SeqCst))
+        }
         async fn local_branches(&self, _: PathBuf) -> Result<Vec<String>> {
+            let wait = self.branches_gate.lock().expect("branches gate").clone();
+            gate(wait, CancellationToken::new()).await?;
             Ok(self.branches.lock().expect("branches").clone())
         }
         async fn temporary_branch(&self, _: &ProjectId) -> Result<String> {
@@ -549,7 +570,9 @@ use t3_orchestration::ports::checkpoints_forks::thread_launch_service::{
     PreparationObserver, SetupStage, StageStatus, StageUpdate, ThreadLaunchService,
 };
 use t3_orchestration::{
-    api::*, error::Result, ports::checkpoints_forks::checkpoint_restore_safety::expanded_id,
+    api::*,
+    error::{Error, Result},
+    ports::checkpoints_forks::checkpoint_restore_safety::expanded_id,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -682,15 +705,17 @@ async fn scratch_worktree_request_allocates_own_folder_and_persists_root_prepara
 async fn worktree_base_validation_matches_git_exceptions_and_branch_namespace_conflicts()
 -> Result<()> {
     let h = LaunchHarness::new().await?;
-    for (base, from_origin, head, remote, accepted) in [
-        ("main", false, true, false, true),
-        ("missing", false, true, false, false),
-        ("missing", false, false, false, true),
-        ("missing", true, true, true, true),
-        (":/initial", false, true, false, true),
+    for (base, from_origin, head, remote, fetched, accepted) in [
+        ("main", false, true, false, true, true),
+        ("missing", false, true, false, true, false),
+        ("missing", false, false, false, true, true),
+        ("missing", true, true, true, true, true),
+        ("origin/deleted", true, true, true, false, false),
+        (":/initial", false, true, false, true, true),
     ] {
         h.environment.head.store(head, Ordering::SeqCst);
         h.environment.remote.store(remote, Ordering::SeqCst);
+        h.environment.fetched.store(fetched, Ordering::SeqCst);
         let strategy = serde_json::from_value(
             json!({"type":"worktree","baseRef":base,"startFromOrigin":from_origin}),
         )?;
@@ -1195,5 +1220,237 @@ async fn shutdown_waits_for_foreground_launch_and_rejects_future_launches() -> R
         Err(t3_orchestration::error::Error::Cancelled)
     ));
     assert_eq!(h.commands.calls.lock().expect("calls").len(), before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn launch_preflight_overlaps_independent_checks_and_keeps_error_priority() -> Result<()> {
+    let h = LaunchHarness::new().await?;
+    let repo = blocked();
+    let commit = blocked();
+    let branches = blocked();
+    *h.environment.repository_gate.lock().expect("repo") = Some(repo.clone());
+    *h.environment.commit_gate.lock().expect("commit") = Some(commit.clone());
+    *h.environment.branches_gate.lock().expect("branches") = Some(branches.clone());
+    h.environment.repository.store(false, Ordering::SeqCst);
+    *h.environment.branches.lock().expect("branches") = vec!["feature".into()];
+    let strategy = serde_json::from_value(
+        json!({"type":"worktree","baseRef":"missing","branch":"feature/child"}),
+    )?;
+    let service = h.service.clone();
+    let mut check = tokio::spawn(async move {
+        service
+            .check_worktree_base(ProjectId("project:test".into()), &strategy, None)
+            .await
+    });
+    tokio::select! {permit=repo.entered.acquire()=>permit.expect("repository entered").forget(), result=&mut check=>panic!("preflight ended before gate: {result:?}")};
+    assert_eq!(
+        commit.entered.available_permits(),
+        1,
+        "base checked alongside repository"
+    );
+    assert_eq!(
+        branches.entered.available_permits(),
+        1,
+        "branch checked alongside repository"
+    );
+    repo.release.add_permits(1);
+    commit.release.add_permits(2);
+    branches.release.add_permits(1);
+    assert!(matches!(
+        check.await.expect("preflight"),
+        Err(Error::Service {
+            operation: "thread-launch.not-repository",
+            ..
+        })
+    ));
+    Ok(())
+}
+
+struct ReplyFailure {
+    inner: Arc<dyn ProjectionReader>,
+}
+#[async_trait::async_trait]
+impl ProjectionReader for ReplyFailure {
+    async fn projection(&self, _: ThreadId) -> Result<Option<OrchestrationV2ThreadProjection>> {
+        Err(Error::Unsupported("scripted reply projection failure"))
+    }
+    async fn records(
+        &self,
+        thread_id: ThreadId,
+        fields: Vec<RecordKind>,
+        filter: RecordFilter,
+    ) -> Result<ProjectionRecords> {
+        self.inner.records(thread_id, fields, filter).await
+    }
+    async fn snapshot(
+        &self,
+        thread_id: ThreadId,
+        window: Option<SnapshotWindow>,
+    ) -> Result<ProjectionSnapshot> {
+        self.inner.snapshot(thread_id, window).await
+    }
+    async fn history(&self, query: HistoryQuery) -> Result<OrchestrationV2ThreadHistoryPage> {
+        self.inner.history(query).await
+    }
+    async fn search(
+        &self,
+        query: OrchestrationV2SearchThreadInput,
+    ) -> Result<OrchestrationV2SearchThreadResult> {
+        self.inner.search(query).await
+    }
+    async fn thread_shells(&self, query: ShellQuery) -> Result<OrchestrationV2ThreadShellSnapshot> {
+        self.inner.thread_shells(query).await
+    }
+    async fn checkpoint_capture(
+        &self,
+        thread_id: ThreadId,
+        run_id: RunId,
+        scope_id: CheckpointScopeId,
+    ) -> Result<CheckpointCaptureContext> {
+        self.inner
+            .checkpoint_capture(thread_id, run_id, scope_id)
+            .await
+    }
+    async fn checkpoint_rollback(
+        &self,
+        thread_id: ThreadId,
+        provider_thread_id: ProviderThreadId,
+        checkpoint_id: CheckpointId,
+        scope_id: CheckpointScopeId,
+    ) -> Result<CheckpointRollbackContext> {
+        self.inner
+            .checkpoint_rollback(thread_id, provider_thread_id, checkpoint_id, scope_id)
+            .await
+    }
+    async fn runtime_request(
+        &self,
+        thread_id: ThreadId,
+        request_id: RuntimeRequestId,
+    ) -> Result<Option<OrchestrationV2RuntimeRequest>> {
+        self.inner.runtime_request(thread_id, request_id).await
+    }
+    async fn turn_item(
+        &self,
+        thread_id: ThreadId,
+        item_id: TurnItemId,
+    ) -> Result<Option<OrchestrationV2TurnItem>> {
+        self.inner.turn_item(thread_id, item_id).await
+    }
+    async fn plan(
+        &self,
+        thread_id: ThreadId,
+        plan_id: PlanId,
+    ) -> Result<Option<OrchestrationV2PlanArtifact>> {
+        self.inner.plan(thread_id, plan_id).await
+    }
+    async fn held_queued_runs(&self, thread_id: ThreadId) -> Result<Vec<OrchestrationV2Run>> {
+        self.inner.held_queued_runs(thread_id).await
+    }
+    async fn app_owned_child_threads(&self, thread_id: ThreadId) -> Result<Vec<ThreadId>> {
+        self.inner.app_owned_child_threads(thread_id).await
+    }
+    async fn pending_delegated_completion(&self, child_thread_id: ThreadId) -> Result<bool> {
+        self.inner
+            .pending_delegated_completion(child_thread_id)
+            .await
+    }
+    async fn turn_start_history(
+        &self,
+        thread_id: ThreadId,
+        run_ids: Option<Vec<RunId>>,
+    ) -> Result<Vec<OrchestrationV2TurnItem>> {
+        self.inner.turn_start_history(thread_id, run_ids).await
+    }
+    async fn unpaired_interrupt(
+        &self,
+        thread_id: ThreadId,
+        request_id: TurnItemId,
+        result_id: TurnItemId,
+    ) -> Result<bool> {
+        self.inner
+            .unpaired_interrupt(thread_id, request_id, result_id)
+            .await
+    }
+    async fn attachment_ids(&self, thread_id: ThreadId) -> Result<Vec<String>> {
+        self.inner.attachment_ids(thread_id).await
+    }
+    async fn transcript_byte_floor(&self, thread_id: ThreadId, limit: u64) -> Result<u64> {
+        self.inner.transcript_byte_floor(thread_id, limit).await
+    }
+    async fn thread(&self, thread_id: ThreadId) -> Result<Option<OrchestrationV2AppThread>> {
+        self.inner.thread(thread_id).await
+    }
+    async fn shell(&self, thread_id: ThreadId) -> Result<Option<OrchestrationV2ThreadShell>> {
+        self.inner.shell(thread_id).await
+    }
+    async fn shell_snapshot(
+        &self,
+        project_ids: Option<Vec<ProjectId>>,
+        root_thread_id: Option<ThreadId>,
+    ) -> Result<OrchestrationV2ShellSnapshot> {
+        self.inner.shell_snapshot(project_ids, root_thread_id).await
+    }
+    async fn control(&self, query: ControlQuery) -> Result<Option<ControlContext>> {
+        self.inner.control(query).await
+    }
+    async fn timeline(&self, query: TimelineQuery) -> Result<TimelinePage> {
+        self.inner.timeline(query).await
+    }
+    async fn run(&self, thread_id: ThreadId, run_id: RunId) -> Result<Option<OrchestrationV2Run>> {
+        self.inner.run(thread_id, run_id).await
+    }
+    async fn run_message(
+        &self,
+        thread_id: ThreadId,
+        run_id: RunId,
+    ) -> Result<Option<OrchestrationV2ConversationMessage>> {
+        self.inner.run_message(thread_id, run_id).await
+    }
+    async fn can_start_queued_run(&self, thread_id: ThreadId, run_id: RunId) -> Result<bool> {
+        self.inner.can_start_queued_run(thread_id, run_id).await
+    }
+    async fn recovery_thread_ids(&self) -> Result<Vec<ThreadId>> {
+        self.inner.recovery_thread_ids().await
+    }
+    async fn unreadable_thread_ids(&self) -> Result<Vec<ThreadId>> {
+        self.inner.unreadable_thread_ids().await
+    }
+    async fn next_turn_item_ordinal(
+        &self,
+        thread_id: ThreadId,
+        run_id: Option<RunId>,
+    ) -> Result<u64> {
+        self.inner.next_turn_item_ordinal(thread_id, run_id).await
+    }
+}
+#[tokio::test]
+async fn preparation_starts_even_when_the_full_reply_projection_fails() -> Result<()> {
+    let h = LaunchHarness::new().await?;
+    let service = ThreadLaunchService::new(LaunchServices {
+        database: h.h.db.stores.clone(),
+        projections: Arc::new(ReplyFailure {
+            inner: h.h.reader.clone(),
+        }),
+        events: h.h.sink.clone(),
+        commands: h.commands.clone(),
+        workspaces: h.workspaces.clone(),
+        environment: h.environment.clone(),
+        ids: h.h.ids.clone(),
+        clock: h.h.clock.clone(),
+    });
+    let result = service
+        .launch(h.input("reply-failure", json!({"type":"root"}), true))
+        .await;
+    assert!(matches!(
+        result,
+        Err(Error::Unsupported("scripted reply projection failure"))
+    ));
+    service.drain().await;
+    assert_eq!(
+        h.workspaces.prepares.load(Ordering::SeqCst),
+        1,
+        "preparation was scheduled before reading the full reply"
+    );
     Ok(())
 }

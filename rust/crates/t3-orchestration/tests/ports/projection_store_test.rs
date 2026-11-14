@@ -83,6 +83,12 @@ const EVENT_SAMPLES: &[(&str, &str)] = &[
         ),
     ),
     (
+        "thread.visit-recorded",
+        include_str!(
+            "../../../../fixtures/stored/OrchestrationV2DomainEventJson.thread.visit-recorded.jsonl"
+        ),
+    ),
+    (
         "thread.visited",
         include_str!(
             "../../../../fixtures/samples/OrchestrationV2DomainEvent.thread.visited.jsonl"
@@ -1790,6 +1796,15 @@ async fn metadata_reads_keep_archive_delete_guest_and_minimal_pull_request_scope
             .len(),
         1
     );
+    assert!(
+        store
+            .pull_request_snapshot(None, false)
+            .await
+            .unwrap()
+            .threads
+            .iter()
+            .all(|thread| thread.updated_at.0 == NOW)
+    );
 }
 
 #[tokio::test]
@@ -2944,7 +2959,10 @@ async fn attachment_collection_keeps_live_fork_files_and_collects_pending_guest_
 #[tokio::test]
 async fn deferred_snapshot_work_carries_a_checked_inclusive_history_cursor() {
     use t3_orchestration::{
-        api::*, ports::transport::thread_history_paging::decode_thread_history_cursor,
+        api::*,
+        ports::transport::thread_history_paging::{
+            ThreadHistoryCursorPayload, decode_thread_history_cursor, encode_thread_history_cursor,
+        },
         projections::store::ProjectionStore,
     };
     let db = TestDatabase::memory().unwrap();
@@ -3002,6 +3020,105 @@ async fn deferred_snapshot_work_carries_a_checked_inclusive_history_cursor() {
     assert_eq!(cursor.si, "item:work:159");
     assert_eq!(cursor.inclusive, Some(true));
     assert_eq!(items.len(), 3);
+    let markdown = "## Draft\n\n**Exactly** this Markdown.\n\n```rust\nlet ready = true;\n```";
+    let mut omitted_sent_messages = Vec::new();
+    for (name, output) in [
+        ("t3-code.delegate_task", None),
+        ("mcp__t3_code__delegate_task", None),
+        ("mcp__t3-code__send_to_user", None),
+        (
+            "mcp__t3_code__send_to_user",
+            Some(serde_json::json!({"sentMessage":markdown}).to_string()),
+        ),
+        (
+            "send_to_user",
+            Some(serde_json::json!({"sentMessage":markdown}).to_string()),
+        ),
+        (
+            "execute",
+            Some(serde_json::json!({"sentMessage":markdown}).to_string()),
+        ),
+    ] {
+        let expected_output = output.clone();
+        store.database.transaction(move|tx|{tx.execute("UPDATE orchestration_v2_projection_turn_items SET payload_json=json_set(payload_json,'$.toolName',?1,'$.output',?2) WHERE turn_item_id='item:work:000'",t3_persistence::rusqlite::params![name,output])?;Ok(())}).await.unwrap();
+        let snapshot = store
+            .snapshot(
+                ThreadId("thread:test".into()),
+                Some(SnapshotWindow {
+                    row_limit: 502,
+                    user_turn_limit: Some(10),
+                    defer_work: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let items = t3_contracts::stored::to_value(&snapshot.projection.turn_items).unwrap();
+        let inline = items
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["ordinal"] == 1)
+            .unwrap();
+        assert!(
+            inline.get("deferredWork").is_none(),
+            "{name} must remain inline"
+        );
+        assert_eq!(inline["output"], serde_json::json!(expected_output));
+        assert_eq!(
+            items
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row.get("deferredWork").is_some())
+                .unwrap()["ordinal"],
+            2
+        );
+        let cursor = encode_thread_history_cursor(&ThreadHistoryCursorPayload {
+            v: 1,
+            seq: 0,
+            st: "thread:test".into(),
+            si: "item:next".into(),
+            p: 161,
+            inclusive: None,
+        })
+        .unwrap();
+        for through in [None, Some("item:work:000".into())] {
+            let page = store
+                .history(HistoryQuery {
+                    thread_id: ThreadId("thread:test".into()),
+                    cursor: cursor.clone(),
+                    through_entry_id: through,
+                    conversation_only: false,
+                    work_mode: Some(HistoryWorkMode::Deferred),
+                })
+                .await
+                .unwrap();
+            let rows = t3_contracts::stored::to_value(&page.items).unwrap();
+            let inline = rows
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["sourceItemId"] == "item:work:000")
+                .unwrap();
+            assert!(
+                inline["item"].get("deferredWork").is_none(),
+                "{name} history must remain inline"
+            );
+            let expected = if expected_output.is_some() {
+                serde_json::json!({"sentMessage":markdown})
+            } else {
+                Value::Null
+            };
+            if inline["item"]["output"] != expected {
+                omitted_sent_messages.push(name);
+            }
+        }
+    }
+    assert!(
+        omitted_sent_messages.is_empty(),
+        "transport wire compaction lost exact sentMessage for {omitted_sent_messages:?}"
+    );
 }
 
 #[tokio::test]
@@ -3162,7 +3279,7 @@ async fn timeline_pages_keep_global_positions_and_attachment_owners() {
     use t3_orchestration::ports::transport::thread_find::{
         ThreadFindSnapshotReader, ThreadFindText,
     };
-    struct PlainFindText;
+    struct PlainFindText(std::sync::Arc<std::sync::atomic::AtomicUsize>);
     impl ThreadFindText for PlainFindText {
         fn segments(
             &self,
@@ -3170,6 +3287,7 @@ async fn timeline_pages_keep_global_positions_and_attachment_owners() {
             _cwd: Option<&str>,
             _skills: &[SearchThreadInputSkillsItem],
         ) -> t3_orchestration::error::Result<Vec<String>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(match item {
                 OrchestrationV2TurnItem::UserMessage(item) => vec![item.text.clone()],
                 _ => vec![],
@@ -3210,12 +3328,34 @@ async fn timeline_pages_keep_global_positions_and_attachment_owners() {
             "thread find text backend"
         ))
     ));
+    let rendered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let search = store
         .clone()
-        .with_thread_find_text(std::sync::Arc::new(PlainFindText));
-    let result = ProjectionReader::search(&search, input).await.unwrap();
+        .with_thread_find_text(std::sync::Arc::new(PlainFindText(rendered.clone())));
+    let result = ProjectionReader::search(&search, input.clone())
+        .await
+        .unwrap();
     assert_eq!(result.total_matches, 6);
     assert_eq!(result.r#match.unwrap().entry_id.0, "message:0");
+    let rendered_before = rendered.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(rendered_before > 0);
+    let mut stream = search.search_thread_stream(input.clone()).await.unwrap();
+    let mut final_result = None;
+    while let Some(result) = stream.pull().await.unwrap() {
+        final_result = Some(result);
+    }
+    assert_eq!(final_result.unwrap().total_matches, 6);
+    assert_eq!(
+        rendered.load(std::sync::atomic::Ordering::SeqCst),
+        rendered_before,
+        "progressive Find must reuse the normal search cache"
+    );
+    assert!(matches!(
+        store.search_thread_stream(input).await,
+        Err(t3_orchestration::error::Error::Unsupported(
+            "thread find text backend"
+        ))
+    ));
     store
         .database
         .transaction(|tx| {
@@ -3833,10 +3973,140 @@ async fn every_turn_item_variant_matches_typescript_payload_bytes() {
 }
 
 #[tokio::test]
-async fn activity_clocks_and_memory_projection_preserve_thread_state() {
+async fn upstream_active_listing_reads_metadata_without_shells_or_transcripts() {
+    use t3_orchestration::{api::*, projections::store::ProjectionStore};
+    let db = TestDatabase::memory().unwrap();
+    let mut events = Vec::new();
+    for (name, project, archived, deleted) in [
+        ("root", "project:one", false, false),
+        ("child", "project:one", false, false),
+        ("other", "project:two", false, false),
+        ("archived", "project:one", true, false),
+        ("deleted", "project:one", false, true),
+    ] {
+        let id = format!("thread:list:{name}");
+        let mut event = fixture("thread.created", &id);
+        event["threadId"] = id.clone().into();
+        event["payload"]["projectId"] = project.into();
+        event["payload"]["title"] = name.into();
+        if archived {
+            event["payload"]["archivedAt"] = NOW.into();
+        }
+        if deleted {
+            event["payload"]["deletedAt"] = NOW.into();
+        }
+        if name == "child" {
+            event["payload"]["lineage"] = serde_json::json!({"rootThreadId":"thread:list:root","parentThreadId":"thread:list:root","relationshipToParent":"subagent","sideChat":true});
+            event["payload"]["snoozedUntil"] = "2026-11-14T10:00:00.000Z".into();
+            event["payload"]["settledOverride"] = "settled".into();
+            event["payload"]["settledAt"] = NOW.into();
+        }
+        events.push(event);
+    }
+    apply_values(&db, events).await;
+    db.stores.transaction(|tx|{
+        tx.execute("UPDATE orchestration_v2_projection_threads SET payload_json=json_set(payload_json,'$.modelSelection',37,'$.title',37) WHERE deleted_at IS NULL AND archived_at IS NULL",[])?;
+        tx.execute("DROP TABLE orchestration_v2_projection_turn_item_counts",[])?;
+        Ok(())
+    }).await.unwrap();
+    let store = ProjectionStore::new(db.stores.clone());
+    assert!(store.thread_shells(ShellQuery::default()).await.is_err());
+    let all = store.list_active_threads(None).await.unwrap();
+    let ids = all
+        .iter()
+        .map(|row| row.id.0.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        ids,
+        ["thread:list:root", "thread:list:child", "thread:list:other"]
+            .into_iter()
+            .collect()
+    );
+    let root = all.iter().find(|row| row.title == "root").unwrap();
+    assert_eq!(root.updated_at.0, NOW);
+    assert_eq!(root.lineage.side_chat, None);
+    let child = all.iter().find(|row| row.title == "child").unwrap();
+    assert_eq!(
+        t3_contracts::stored::to_value(&child.lineage).unwrap(),
+        serde_json::json!({"parentThreadId":"thread:list:root","relationshipToParent":"subagent","rootThreadId":"thread:list:root","sideChat":true})
+    );
+    assert_eq!(
+        child.settled_override,
+        Some(AppThreadSettledOverride::Settled)
+    );
+    assert_eq!(
+        child.snoozed_until.as_ref().unwrap().0,
+        "2026-11-14T10:00:00.000Z"
+    );
+    let scoped = store
+        .list_active_threads(Some(ProjectId("project:two".into())))
+        .await
+        .unwrap();
+    assert_eq!(scoped.len(), 1);
+    assert_eq!(scoped[0].title, "other");
+    store.database.transaction(|tx| {
+        tx.execute("UPDATE orchestration_v2_projection_threads SET payload_json=json_set(payload_json,'$.lineage.relationshipToParent','unknown','$.lineage.sideChat',2,'$.settledOverride','unknown') WHERE thread_id='thread:list:root'", [])?;
+        Ok(())
+    }).await.unwrap();
+    let all = store.list_active_threads(None).await.unwrap();
+    let root = all.iter().find(|row| row.title == "root").unwrap();
+    assert_eq!(root.lineage.relationship_to_parent, None);
+    assert_eq!(root.lineage.side_chat, Some(Some(false)));
+    assert_eq!(root.settled_override, None);
+    let index = store
+        .read_snapshot(t3_orchestration::projections::read::active_shell_index)
+        .await
+        .unwrap();
+    let root_index = index.iter().find(|row| row.id == root.id).unwrap();
+    assert_eq!(root_index.lineage, root.lineage);
+    assert_eq!(root_index.settled_override, None);
+}
+
+#[tokio::test]
+async fn upstream_message_selection_flag_survives_sql_and_memory_projection() {
     use t3_orchestration::{api::*, projections::store::ProjectionStore};
     let db = TestDatabase::memory().unwrap();
     let created = fixture("thread.created", "thread:test");
+    let mut memory =
+        write::empty_projection(&serde_json::from_value(created.clone()).unwrap()).unwrap();
+    apply_values(&db, vec![created]).await;
+    let store = ProjectionStore::new(db.stores.clone());
+    for flag in [Some(true), None] {
+        let mut message = fixture("message.updated", "message:selection");
+        if let Some(flag) = flag {
+            message["payload"]["followsThreadSelection"] = flag.into();
+        } else {
+            message["payload"]
+                .as_object_mut()
+                .unwrap()
+                .remove("followsThreadSelection");
+        }
+        let event = serde_json::from_value(message.clone()).unwrap();
+        memory = write::apply_to_projection(&memory, &event).unwrap();
+        apply_values(&db, vec![message]).await;
+        let projected = store
+            .projection(ThreadId("thread:test".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected, memory);
+        let payload=db.stores.read(|db|Ok(db.query_row::<String,_,_>("SELECT payload_json FROM orchestration_v2_projection_messages WHERE message_id='message:selection'",[],|r|r.get(0))?)).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&payload)
+                .unwrap()
+                .get("followsThreadSelection")
+                .cloned(),
+            flag.map(Value::Bool)
+        );
+    }
+}
+
+#[tokio::test]
+async fn activity_clocks_and_memory_projection_preserve_thread_state() {
+    use t3_orchestration::{api::*, projections::store::ProjectionStore};
+    let db = TestDatabase::memory().unwrap();
+    let mut created = fixture("thread.created", "thread:test");
+    created["payload"]["opens"] = serde_json::json!({"openedAt":123,"score":2,"picks":[]});
     let mut run = fixture("run.created", "run:test");
     run["occurredAt"] = "2026-11-13T12:00:00.000Z".into();
     let mut memory =
@@ -3863,6 +4133,58 @@ async fn activity_clocks_and_memory_projection_preserve_thread_state() {
         .unwrap();
     assert_eq!(projected, memory);
     assert_eq!(projected.updated_at.0, "2026-11-13T12:00:00.000Z");
+    let visits = include_str!(
+        "../../../../fixtures/stored/OrchestrationV2DomainEventJson.thread.visit-recorded.jsonl"
+    );
+    let mut payloads = visits
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["payload"].clone())
+        .collect::<Vec<_>>();
+    payloads.extend([
+        serde_json::json!({"lastVisitedAt":NOW,"opens":{"openedAt":456,"score":3,"picks":[]}}),
+        serde_json::json!({"lastVisitedAt":null}),
+        serde_json::json!({"lastVisitedAt":NOW,"opens":null}),
+    ]);
+    for (n, payload) in payloads.into_iter().enumerate() {
+        let raw = serde_json::json!({"id":format!("event:compact-visit:{n}"),"threadId":"thread:test","occurredAt":"2026-11-13T15:00:00.000Z","type":"thread.visit-recorded","payload":payload});
+        let event: OrchestrationV2DomainEvent = serde_json::from_value(raw.clone()).unwrap();
+        let encoded = t3_contracts::stored::to_value(&event).unwrap();
+        let before = t3_contracts::stored::to_value(&memory).unwrap();
+        apply_values(&db, vec![raw]).await;
+        let sql = store
+            .projection(ThreadId("thread:test".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        let actual = t3_contracts::stored::to_value(&sql).unwrap();
+        assert_eq!(
+            actual["thread"]["lastVisitedAt"], encoded["payload"]["lastVisitedAt"],
+            "compact visit {n}"
+        );
+        assert_eq!(
+            actual["thread"]["opens"],
+            encoded["payload"]
+                .get("opens")
+                .unwrap_or(&before["thread"]["opens"])
+                .clone()
+        );
+        let mut unchanged = actual.clone();
+        unchanged["thread"]["lastVisitedAt"] = before["thread"]["lastVisitedAt"].clone();
+        if let Some(opens) = before["thread"].get("opens") {
+            unchanged["thread"]["opens"] = opens.clone();
+        } else {
+            unchanged["thread"].as_object_mut().unwrap().remove("opens");
+        }
+        assert_eq!(
+            unchanged, before,
+            "visit must preserve every other projected field"
+        );
+        memory = write::apply_to_projection(&memory, &event).unwrap();
+        assert_eq!(sql, memory);
+        let clocks=db.stores.read(|db|Ok(db.query_row::<String,_,_>("SELECT updated_at FROM orchestration_v2_projection_threads WHERE thread_id='thread:test'",[],|row|row.get(0))?)).await.unwrap();
+        assert_eq!(clocks, "2026-11-13T12:00:00.000Z");
+    }
 }
 
 #[tokio::test]
@@ -5259,6 +5581,42 @@ const TYPESCRIPT_PROJECTION_ROWS: &str = r###"{
         "archived_at": null,
         "deleted_at": null,
         "payload_json": "{\"createdBy\":\"system\",\"creationSource\":\"mcp\",\"id\":\"\\u0000\",\"projectId\":\"g\",\"title\":\"*\",\"providerInstanceId\":\"e\",\"modelSelection\":{\"instanceId\":\"E\",\"model\":\"4\"},\"runtimeMode\":\"auto\",\"interactionMode\":\"plan\",\"branch\":\")\",\"worktreePath\":\"5\",\"pullRequests\":[],\"activeProviderThreadId\":null,\"lineage\":{\"parentThreadId\":\"O\",\"relationshipToParent\":\"fork\",\"rootThreadId\":\"S\"},\"forkedFrom\":{\"type\":\"provider_thread\",\"providerThreadId\":\"y\"},\"createdAt\":\"-015330-10-12T21:32:11.979Z\",\"updatedAt\":\"+119264-02-25T06:19:34.002Z\",\"archivedAt\":null,\"settledOverride\":\"settled\",\"settledAt\":\"+275760-09-12T23:59:59.988Z\",\"lastVisitedAt\":null,\"deletedAt\":null}",
+        "provider_instance_id": "e"
+      }
+    ],
+    "runs": [],
+    "run_attempts": [],
+    "nodes": [],
+    "subagents": [],
+    "provider_sessions": [],
+    "provider_session_bindings": [],
+    "provider_threads": [],
+    "provider_turns": [],
+    "runtime_requests": [],
+    "messages": [],
+    "plans": [],
+    "turn_items": [],
+    "checkpoint_scopes": [],
+    "checkpoints": [],
+    "context_handoffs": [],
+    "context_transfers": [],
+    "turn_item_counts": []
+  },
+  "thread.visit-recorded": {
+    "threads": [
+      {
+        "thread_id": "0",
+        "project_id": "g",
+        "title": "*",
+        "default_provider": "e",
+        "runtime_mode": "auto",
+        "interaction_mode": "plan",
+        "active_provider_thread_id": null,
+        "created_at": "-015330-10-12T21:32:11.979Z",
+        "updated_at": "+119264-02-25T06:19:34.002Z",
+        "archived_at": null,
+        "deleted_at": null,
+        "payload_json": "{\"createdBy\":\"system\",\"creationSource\":\"mcp\",\"id\":\"0\",\"projectId\":\"g\",\"title\":\"*\",\"providerInstanceId\":\"e\",\"modelSelection\":{\"instanceId\":\"E\",\"model\":\"4\"},\"runtimeMode\":\"auto\",\"interactionMode\":\"plan\",\"branch\":\")\",\"worktreePath\":\"5\",\"activeProviderThreadId\":null,\"lineage\":{\"parentThreadId\":\"O\",\"relationshipToParent\":\"fork\",\"rootThreadId\":\"S\"},\"forkedFrom\":{\"type\":\"provider_thread\",\"providerThreadId\":\"y\"},\"createdAt\":\"-015330-10-12T21:32:11.979Z\",\"updatedAt\":\"+119264-02-25T06:19:34.002Z\",\"archivedAt\":null,\"settledOverride\":\"settled\",\"settledAt\":\"+275760-09-12T23:59:59.988Z\",\"lastVisitedAt\":\"1969-12-31T23:59:59.991Z\",\"deletedAt\":null}",
         "provider_instance_id": "e"
       }
     ],
