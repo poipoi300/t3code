@@ -9,7 +9,7 @@ use std::{
 
 pub type ProbeFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'a>>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProviderInstance {
     pub provider: P,
     pub home_path: Option<PathBuf>,
@@ -273,6 +273,9 @@ pub enum MuseHome {
 }
 
 pub trait ProviderUsageProbe: Send + Sync {
+    fn instances(&self) -> Option<Vec<ProviderInstance>> {
+        None
+    }
     fn muse_home<'a>(
         &'a self,
         _instance: &'a ProviderInstance,

@@ -93,6 +93,20 @@ on Windows and detect changes even when mtimes are restored.
 
 ## Runtime integrations
 
+`runtime::UsageRuntime::new(UsageRuntimeInputs)` assembles the shared scan service,
+bounded rate fetcher and hub-source snapshots from explicit host dependencies.
+`ProviderUsageDiscovery` supplies coherent safe provider statuses and private
+resolved history inputs through a watch receiver; scans capture the current
+inputs once, including in concurrent-request identity. Config subscriptions emit
+an initial snapshot and typed provider/source changes. `UsageEndpoint` captures
+the effective origin for a turn's later reset fallback. The host owns refresh
+scheduling, authentication and subscription lifetime.
+
+`http::RateHttpClient` supplies streamed responses to `BoundedRateFetcher`.
+The fetcher bounds the whole exchange to ten seconds and 8 MiB, rejects non-2xx
+responses and oversized/deep JSON, and parses on a blocking worker. Tests inject
+HTTP responses; they never contact a rate endpoint.
+
 `RateFetcher` supplies the two LiteLLM URLs; `Clock` makes freshness deterministic.
 `ProviderUsageProbe` supplies Muse read-only SDK home discovery, Cursor account
 scans, and optional Codex historical tiers (the SQLite helper can supply these).

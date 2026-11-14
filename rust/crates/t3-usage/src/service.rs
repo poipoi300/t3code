@@ -284,7 +284,17 @@ impl UsageService {
     ) -> Result<UsageSummary, Error> {
         input.model_filter = canonical_model_filter(input.model_filter.flatten()).map(Some);
         validate_window(&input)?;
-        let key = json!([input, settings.model_aliases, settings.price_overrides]).to_string();
+        let instances = self
+            .provider_probe
+            .instances()
+            .unwrap_or_else(|| self.config.instances.clone());
+        let key = json!([
+            input,
+            settings.model_aliases,
+            settings.price_overrides,
+            instances
+        ])
+        .to_string();
         let mut inflight = self.inflight.lock().await;
         let mut receiver = if let Some(existing) = inflight.get(&key) {
             existing.clone()
@@ -294,7 +304,7 @@ impl UsageService {
             let service = self.clone();
             tokio::spawn(async move {
                 let result = service
-                    .perform_read(input, settings)
+                    .perform_read(input, settings, instances)
                     .await
                     .map_err(|e| e.to_string());
                 let mut inflight = service.inflight.lock().await;
@@ -317,6 +327,7 @@ impl UsageService {
         &self,
         input: UsageSummaryInput,
         settings: UsageSettings,
+        instances: Vec<ProviderInstance>,
     ) -> Result<UsageSummary, Error> {
         let service = self.clone();
         // The scan owns its state after spawning, so a disconnected caller cannot cancel cache warming.
@@ -327,7 +338,7 @@ impl UsageService {
             let mut state = service.state.lock().await.clone();
             let mut sources = service.config.sources.clone();
             let await_refresh = input.await_refresh == Some(Some(true));
-            for instance in &service.config.instances {
+            for instance in &instances {
                 let muse_home = if instance.provider == P::Muse {
                     match service
                         .provider_probe
@@ -386,12 +397,7 @@ impl UsageService {
             }
             let external = service
                 .provider_probe
-                .scan(
-                    &service.config.instances,
-                    window_start,
-                    started,
-                    await_refresh,
-                )
+                .scan(&instances, window_start, started, await_refresh)
                 .await
                 .map_err(|_| Error::Probe("Provider usage scan failed".into()))?;
             let config = service.config.clone();
