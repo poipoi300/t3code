@@ -7,7 +7,7 @@ pub mod orchestration;
 pub mod scheduler;
 #[cfg(feature = "orchestration")]
 pub mod threads;
-#[cfg(feature = "delegation")]
+#[cfg(feature = "orchestration")]
 pub mod delegation;
 #[cfg(feature = "git")]
 pub mod worktree;

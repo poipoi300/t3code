@@ -12,8 +12,6 @@ workspace = ["dep:t3-workspace"]
 forge = ["dep:t3-forge"]
 scheduler = ["dep:t3-scheduler"]
 git = ["dep:t3-git", "orchestration"]
-# Staging gate for delegated tasks (`adapters/delegation.rs`); off until it builds.
-delegation = ["orchestration"]
 
 [dependencies]
 t3-contracts = { path = "../t3-contracts" }
