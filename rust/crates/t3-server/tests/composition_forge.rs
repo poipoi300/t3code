@@ -564,6 +564,22 @@ fn destination_refused(exit: Exit) {
     );
 }
 
+/// Without the project or forge services the clone methods are still registered, as unimplemented:
+/// the client gets Effect's unknown-request answer and treats cloning as unsupported, as for the
+/// other optional groups. TypeScript always serves them (its clone tracker is always built).
+#[test]
+fn clone_methods_are_unimplemented_not_missing_without_their_services() {
+    let registry = t3_server::handlers::registry().unwrap();
+    for tag in [
+        "projectClone.start",
+        "projectClone.cancel",
+        "projectClone.retry",
+        "subscribeProjectClones",
+    ] {
+        assert_eq!(registry.disposition(tag), Some(false), "{tag}");
+    }
+}
+
 #[tokio::test]
 async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_registry() {
     let (github, _) = github_stand_in().await;

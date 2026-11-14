@@ -257,7 +257,12 @@ impl GitAdapter {
             .map_err(|e| error(e, "vcs.init"))?
             .init_repository()
             .await
-            .map_err(|e| error(e, "vcs.init"))
+            .map_err(|e| error(e, "vcs.init"))?;
+        // The user asked the server to create this repository: it is trusted in the same
+        // operation (keyed by the folder as the client names it, which is how it is recorded).
+        #[cfg(feature = "local-services")]
+        self.trust_repository(Path::new(&input.cwd.0)).await?;
+        Ok(())
     }
 
     pub async fn remove_worktree(
@@ -521,7 +526,8 @@ impl GitAdapter {
                 ..command_error(OPERATION)
             })));
         }
-        vcs.application
+        let created = vcs
+            .application
             .create_worktree(&VcsCreateWorktreeInput {
                 cwd: input.cwd,
                 ref_name: input.ref_name,
@@ -530,7 +536,11 @@ impl GitAdapter {
                 path: None,
             })
             .await
-            .map_err(|e| error(e, OPERATION))
+            .map_err(|e| error(e, OPERATION))?;
+        // The server created this checkout: trusted in the same operation.
+        self.trust_repository(Path::new(&created.worktree.path.0))
+            .await?;
+        Ok(created)
     }
 }
 
@@ -1089,11 +1099,58 @@ pub mod vcs {
     #[async_trait::async_trait]
     impl GitWorkflowFactory for CheckoutWorkflows {
         async fn for_checkout(&self, cwd: &Path) -> Result<GitWorkflowService, GitError> {
-            match self.forge.get() {
-                Some(forge) => forge.for_checkout(cwd).await,
-                None => Ok(self.root.at(cwd)),
+            let workflow = match self.forge.get() {
+                Some(forge) => forge.for_checkout(cwd).await?,
+                None => self.root.at(cwd),
+            };
+            let Some(bindings) = self.bindings.get() else {
+                return Ok(workflow);
+            };
+            // Re-review 4 H-1 item 4: every status, branch and worktree read of the folder runs
+            // on a handle pinned to its saved binding, whoever asks.
+            match saved_repository(bindings.as_ref(), cwd).await? {
+                SavedRepository::NotRecorded => Ok(workflow),
+                SavedRepository::Repository(binding) => {
+                    workflow.with_repository_binding(binding).await
+                }
+                SavedRepository::NotRepository => {
+                    if workflow.git().bind_repository().await?.is_some() {
+                        return Err(GitError::RepositoryChanged {
+                            path: cwd.to_owned(),
+                            detail: "A Git repository was created in this folder after T3 Code first saw it without one.",
+                        });
+                    }
+                    Ok(workflow)
+                }
             }
         }
+    }
+
+    /// The saved state of `cwd`, by the folder as recorded and, failing that, by its real path.
+    async fn saved_repository(
+        bindings: &dyn SavedRepositoryBindings,
+        cwd: &Path,
+    ) -> Result<SavedRepository, GitError> {
+        let saved = bindings
+            .saved_repository(cwd)
+            .await
+            .map_err(|_| saved_bindings_unreadable(cwd))?;
+        if !matches!(saved, SavedRepository::NotRecorded) {
+            return Ok(saved);
+        }
+        let owned = cwd.to_owned();
+        let Ok(Ok(real)) =
+            tokio::task::spawn_blocking(move || t3_workspace::paths::canonicalize(owned)).await
+        else {
+            return Ok(saved);
+        };
+        if real == cwd {
+            return Ok(saved);
+        }
+        bindings
+            .saved_repository(&real)
+            .await
+            .map_err(|_| saved_bindings_unreadable(cwd))
     }
 
     async fn follow(

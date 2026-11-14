@@ -14,6 +14,10 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
+/// Payloads for `RUST_ONLY_METHODS`, which have no generated samples: (tag, payload, streams).
+const RUST_ONLY_SAMPLES: &[(&str, &str, bool)] =
+    &[("vcs.trustRepository", r#"{"threadId":"thread:sweep"}"#, false)];
+
 /// A payload the guard accepts, from the method's schema samples.
 fn sample(tag: &str, schema: &str) -> Option<(Value, Vec<AuthEnvironmentScope>)> {
     let path = format!(
@@ -283,6 +287,27 @@ async fn sweep(env: std::collections::BTreeMap<String, String>, expected_unserve
             )
             .or_default()
             .push((tag, payload, streams));
+    }
+    // The methods with no TypeScript fixture row carry their own sample.
+    for tag in t3_contracts::rpc::RUST_ONLY_METHODS {
+        if !served.contains(tag) {
+            continue;
+        }
+        let Some((_, payload, streams)) = RUST_ONLY_SAMPLES.iter().find(|(name, ..)| name == tag)
+        else {
+            unchecked.push(tag);
+            continue;
+        };
+        let payload: Value = serde_json::from_str(payload).unwrap();
+        let required = required_scopes_for_rpc_call(tag, &payload).unwrap();
+        let Some(scope) = required.iter().find(|s| held.contains(s)) else {
+            unchecked.push(tag);
+            continue;
+        };
+        by_scope
+            .entry(serde_json::to_value(scope).unwrap().as_str().unwrap().to_owned())
+            .or_default()
+            .push((tag, payload, *streams));
     }
     assert!(
         unchecked.is_empty(),

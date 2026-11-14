@@ -14,6 +14,7 @@ pub mod project_clone;
 pub mod projects;
 pub mod providers;
 pub mod pull_requests;
+pub mod repository_trust;
 pub mod source_control;
 pub mod telemetry;
 mod unsupported;
@@ -52,6 +53,7 @@ pub fn registry_with(domains: &Domains) -> crate::Result<HandlerRegistry> {
     providers::register_with(&mut registry, domains)?;
     acp_registry::register_with(&mut registry, domains)?;
     vcs::register_with(&mut registry, domains)?;
+    repository_trust::register_with(&mut registry, domains)?;
     pull_requests::register_with(&mut registry, domains)?;
     mcp_apps::register_with(&mut registry, domains)?;
     git_actions::register_with(&mut registry, domains)?;

@@ -874,3 +874,145 @@ async fn cancelling_a_launch_ends_its_setup_scripts_child_processes() {
         "the setup script's child survived the cancel: {read:?} {byte:?}"
     );
 }
+
+
+/// The server's saved repository bindings (`<state>/repository-bindings.json`).
+fn bindings_file(s: &Server) -> PathBuf {
+    s.home().join("userdata").join("repository-bindings.json")
+}
+
+/// t3-git re-review 4, H-1 item 5: a new worktree is created through the project root's saved
+/// binding. A repository planted at the bound root (here: the original `.git` moved aside and a
+/// new repository made in its place, with a hook and a smudge filter that write a marker) makes
+/// a worktree launch refuse with `checkpoint.git.repository-changed` before any Git command runs
+/// against it: no marker, no worktree, no branch in the planted repository.
+#[tokio::test]
+async fn a_repository_planted_at_the_bound_project_root_refuses_a_worktree_launch() {
+    let mut s = Server::start().await;
+    let project = s.home().join("planted");
+    repository(&project);
+    s.insert_project("project-planted", &project, "[]");
+
+    // A launch in the project folder binds the root (the runtime binds a launch's workspace).
+    ok(s.call(
+        "orchestration.launchThread",
+        launch("thread:bind", "project-planted", json!({"type": "root"}), "auto-accept-edits"),
+    )
+    .await);
+    first_turn_completes(&mut s, "thread:bind").await;
+    assert!(
+        std::fs::read_to_string(bindings_file(&s)).unwrap_or_default().contains("planted"),
+        "the project root was not bound"
+    );
+
+    // Plant: the real repository moves aside, a hostile one takes its place.
+    std::fs::rename(project.join(".git"), project.join(".git-original")).unwrap();
+    let marker = s.home().join("planted-marker");
+    let marker_text = marker.to_string_lossy().replace('\\', "/");
+    git(&project, &["init", "-q", "-b", "main"]);
+    git(&project, &["add", "hello.txt"]);
+    git(&project, &["commit", "-q", "-m", "planted"]);
+    std::fs::write(project.join(".gitattributes"), "*.txt filter=t3\n").unwrap();
+    git(&project, &["add", ".gitattributes"]);
+    git(&project, &["commit", "-q", "-m", "attributes"]);
+    let hook = format!("#!/bin/sh\necho hook >> '{marker_text}'\n");
+    for name in ["post-checkout", "reference-transaction"] {
+        std::fs::write(project.join(".git").join("hooks").join(name), &hook).unwrap();
+    }
+    git(
+        &project,
+        &[
+            "config",
+            "filter.t3.smudge",
+            &format!("sh -c 'echo filter >> \"{marker_text}\"; cat'"),
+        ],
+    );
+
+    let launched = s
+        .call(
+            "orchestration.launchThread",
+            launch(
+                "thread:planted",
+                "project-planted",
+                json!({"type": "worktree", "baseRef": "main", "branch": "feature/planted"}),
+                "auto-accept-edits",
+            ),
+        )
+        .await;
+    if matches!(launched, Exit::Success { .. }) {
+        // Before the fix the launch was accepted; let its preparation finish so the planted
+        // hooks have had their chance to run.
+        let setup = s.subscribe(
+            "subscribeWorktreeSetup",
+            json!({"threadId": "thread:planted"}),
+        );
+        s.until(&setup, |snapshot| {
+            !snapshot.is_null() && snapshot["phase"] != "running"
+        })
+        .await;
+    }
+    assert!(!marker.exists(), "a planted hook or filter ran");
+    assert!(
+        !git(&project, &["branch", "--list"]).contains("feature/planted"),
+        "a branch was created in the planted repository"
+    );
+    let trees = s.home().join("worktrees").join("planted");
+    assert!(
+        std::fs::read_dir(&trees).map_or(true, |mut entries| entries.next().is_none()),
+        "a worktree was created"
+    );
+    let error = launch_refused(launched, "no longer belongs to the repository");
+    assert!(
+        error.to_string().contains("checkpoint.git.repository-changed"),
+        "{error}"
+    );
+    s.runtime.take().unwrap().shutdown().await.unwrap();
+}
+
+/// A normal worktree launch records the new checkout's binding before its setup script runs
+/// (and so before the first turn): the script itself looks for its folder in the bindings file.
+#[tokio::test]
+async fn a_launched_worktree_is_bound_before_its_setup_script_runs() {
+    let mut s = Server::start().await;
+    let project = s.home().join("bound");
+    repository(&project);
+    let file = bindings_file(&s).to_string_lossy().into_owned();
+    let command = if cfg!(windows) {
+        format!(
+            "$leaf = Split-Path -Leaf (Get-Location).Path; if (Select-String -Quiet -SimpleMatch -Pattern $leaf -Path '{file}') {{ Write-Output t3-bound-before-setup }} else {{ Write-Output t3-not-bound }}"
+        )
+    } else {
+        format!(
+            "if grep -qF \"$(basename \"$PWD\")\" '{file}'; then echo t3-bound-before-setup; else echo t3-not-bound; fi"
+        )
+    };
+    let scripts = json!([{"id":"setup","name":"Setup","command":command,"icon":"configure","runOnWorktreeCreate":true,"async":false}]).to_string();
+    s.insert_project("project-bound", &project, &scripts);
+    let setup = s.subscribe("subscribeWorktreeSetup", json!({"threadId": "thread:bound"}));
+    ok(s.call(
+        "orchestration.launchThread",
+        launch(
+            "thread:bound",
+            "project-bound",
+            json!({"type": "worktree", "baseRef": "main", "branch": "feature/bound"}),
+            "auto-accept-edits",
+        ),
+    )
+    .await);
+    let done = s
+        .until(&setup, |snapshot| {
+            !snapshot.is_null() && snapshot["phase"] != "running"
+        })
+        .await;
+    assert_eq!(done["phase"], "done", "{done}");
+    let tail = stage(&done, "setup-script")["tail"].to_string();
+    assert!(tail.contains("t3-bound-before-setup"), "{done}");
+    first_turn_completes(&mut s, "thread:bound").await;
+    let leaf = PathBuf::from(done["worktreePath"].as_str().unwrap())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(std::fs::read_to_string(bindings_file(&s)).unwrap().contains(&leaf));
+    s.runtime.take().unwrap().shutdown().await.unwrap();
+}

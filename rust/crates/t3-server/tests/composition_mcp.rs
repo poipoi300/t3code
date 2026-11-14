@@ -1336,6 +1336,47 @@ async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
         "{again}"
     );
 
+    // create_threads: an ordinary thread on Replay in the parent's project, idempotent per request,
+    // never broader than the parent.
+    let created = mcp
+        .call(
+            &token,
+            "create_threads",
+            json!({"threads":[{"prompt":"Write the changelog","target":{"providerInstanceId":"devReplay","model":"multi-turn"}}],"clientRequestId":"create-1"}),
+        )
+        .await;
+    assert!(!is_error(&created), "{created}");
+    let first = created["result"]["structuredContent"]["threads"][0].clone();
+    assert_eq!(first["providerInstanceId"], "devReplay", "{first}");
+    assert_eq!(first["model"], "multi-turn", "{first}");
+    assert_eq!(first["title"], "Write the changelog", "{first}");
+    assert_eq!(first["createdBy"], "agent", "{first}");
+    assert_eq!(first["creationSource"], "mcp", "{first}");
+    let again_created = mcp
+        .call(
+            &token,
+            "create_threads",
+            json!({"threads":[{"prompt":"Write the changelog","target":{"providerInstanceId":"devReplay","model":"multi-turn"}}],"clientRequestId":"create-1"}),
+        )
+        .await;
+    assert_eq!(
+        again_created["result"]["structuredContent"]["threads"][0]["threadId"], first["threadId"],
+        "{again_created}"
+    );
+    let broader_created = mcp
+        .call(
+            &token,
+            "create_threads",
+            json!({"threads":[{"title":"Broader","target":{"providerInstanceId":"devReplay","model":"multi-turn"},"runtimeMode":"full-access"}]}),
+        )
+        .await;
+    assert!(
+        broader_created.to_string().contains(
+            "Child runtime mode full-access is broader than parent mode approval-required."
+        ),
+        "{broader_created}"
+    );
+
     // The child runs to completion on Replay.
     let watched = client
         .start(
@@ -1425,5 +1466,288 @@ async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
         is_error(&idle) && idle.to_string().contains("parent_not_active"),
         "{idle}"
     );
+    let idle_create = mcp
+        .call(
+            &stranger.authorization_header,
+            "create_threads",
+            json!({"threads":[{"title":"More"}]}),
+        )
+        .await;
+    assert!(
+        idle_create.to_string().contains(
+            "Thread creation requires an active run owned by this MCP provider session."
+        ),
+        "{idle_create}"
+    );
     runtime.shutdown().await.unwrap();
+}
+
+
+/// A server running a live parent thread on the holding stand-in, with Replay (dev) available as a
+/// child provider and, optionally, a managed policy file.
+#[cfg(feature = "providers")]
+struct DelegationWorld {
+    _temp: tempfile::TempDir,
+    runtime: t3_server::runtime::RunningServer,
+    origin: String,
+    cookie: String,
+    database: std::path::PathBuf,
+    mcp: Mcp,
+    socket: Socket,
+    client: Client,
+    token: String,
+}
+
+#[cfg(feature = "providers")]
+async fn delegation_world(parent: &str, mode: &str, policy: Option<&str>) -> DelegationWorld {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().to_path_buf();
+    std::fs::create_dir_all(home.join("userdata")).unwrap();
+    let settings = json!({"providerInstances":{
+        "replay":{"driver":"replay","enabled":true},
+        "devReplay":{"driver":"acpRegistry","displayName":"Replay (dev)","enabled":true,
+            "config":{"source":"local","commandPath":std::env::current_exe().unwrap(),"commandArgs":["--list"],"customModels":["multi-turn"]}}
+    }});
+    std::fs::write(
+        home.join("userdata").join("settings.json"),
+        settings.to_string(),
+    )
+    .unwrap();
+    let workspace = home.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let sessions = Arc::new(McpSessions::default());
+    let seen = Arc::new(Seen::default());
+    let (changed, mut changes) = watch::channel(0_u64);
+    let adapter = HoldingAdapter {
+        instance: ProviderInstanceId("replay".into()),
+        capabilities: serde_json::from_value(
+            sample("OrchestrationV2ProviderSession")["capabilities"].clone(),
+        )
+        .unwrap(),
+        sessions: sessions.clone(),
+        seen: seen.clone(),
+        changed,
+    };
+    let mut config = inputs(&home);
+    if let Some(policy) = policy {
+        let path = home.join("policy.json");
+        std::fs::write(&path, policy).unwrap();
+        config.env.insert(
+            "T3CODE_DEV_MANAGED_POLICY_PATH".into(),
+            path.to_string_lossy().into_owned(),
+        );
+    }
+    let runtime = t3_server::runtime::start_with(
+        config,
+        StartOptions {
+            providers: vec![Arc::new(adapter)],
+            dev_replay: true,
+            mcp_sessions: Some(sessions.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let origin = format!("http://{}", runtime.address);
+    let http = reqwest::Client::new();
+    let layout = t3_config::home::HomeLayout {
+        base_dir: home.clone(),
+        state_dir: home.join("userdata"),
+    };
+    t3_persistence::rusqlite::Connection::open(layout.database())
+        .unwrap()
+        .execute(
+            "INSERT INTO projection_projects
+             (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+             VALUES ('project:mcp', 'MCP', ?1, '[]', '2026-11-14T12:00:00.000Z', '2026-11-14T12:00:00.000Z')",
+            [workspace.to_string_lossy()],
+        )
+        .unwrap();
+    let cookie = http
+        .post(format!("{origin}/api/auth/browser-session"))
+        .json(&json!({"credential": runtime.pairing_credential}))
+        .send()
+        .await
+        .unwrap()
+        .headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let ticket: Value = http
+        .post(format!("{origin}/api/auth/websocket-ticket/rpc"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{}/ws?orchestrationProtocol=2&wsTicket={}",
+        runtime.address,
+        ticket["ticket"].as_str().unwrap()
+    ))
+    .await
+    .unwrap();
+    let mut client = Client::new(0, Default::default());
+    command(&mut socket, &mut client, json!({"type":"thread.create","commandId":format!("create:{parent}"),"threadId":parent,"projectId":"project:mcp","title":"Parent","modelSelection":{"instanceId":"replay","model":"replay-model"},"runtimeMode":mode,"interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"})).await;
+    command(&mut socket, &mut client, json!({"type":"message.dispatch","commandId":format!("command:{parent}"),"threadId":parent,"messageId":format!("message:{parent}"),"text":"Delegate","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"})).await;
+    changes
+        .wait_for(|_| seen.turns.lock().unwrap().iter().any(|t| t.0 == parent))
+        .await
+        .unwrap();
+    let token = sessions
+        .read(&ThreadId(parent.into()))
+        .expect("the parent session's credential")
+        .authorization_header;
+    DelegationWorld {
+        _temp: temp,
+        runtime,
+        origin: origin.clone(),
+        cookie,
+        database: layout.database(),
+        mcp: Mcp {
+            http,
+            url: format!("{origin}/mcp"),
+        },
+        socket,
+        client,
+        token,
+    }
+}
+
+/// The organisation's managed ceiling bounds what a delegating thread starts: the parent runs at the
+/// ceiling, its child inherits no more, and asking for more is refused before anything starts. (A
+/// parent cannot run above the ceiling, so the runtime's ceiling check on the child's creation event
+/// is the backstop behind this one; the orchestration runtime's tests cover that check.)
+#[cfg(feature = "providers")]
+#[tokio::test]
+async fn a_managed_ceiling_bounds_what_a_delegating_thread_starts() {
+    let world = delegation_world(
+        "thread:mcp-ceiling-parent",
+        "auto-accept-edits",
+        Some(
+            r#"{"schemaVersion":1,"organization":"Acme","limits":{"maxRuntimeMode":"auto-accept-edits"}}"#,
+        ),
+    )
+    .await;
+    let (mcp, token) = (&world.mcp, world.token.as_str());
+    let delegated = mcp
+        .call(
+            token,
+            "delegate_task",
+            json!({"task":"Summarise","target":{"providerInstanceId":"devReplay","model":"multi-turn"}}),
+        )
+        .await;
+    assert!(!is_error(&delegated), "{delegated}");
+    let child = delegated["result"]["structuredContent"]["childThreadId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let read = mcp
+        .call(token, "t3_thread_read", json!({"threadId": child}))
+        .await;
+    assert_eq!(
+        read["result"]["structuredContent"]["thread"]["runtimeMode"], "auto-accept-edits",
+        "{read}"
+    );
+    for (tool, input) in [
+        (
+            "delegate_task",
+            json!({"task":"More","target":{"providerInstanceId":"devReplay","model":"multi-turn"},"runtimeMode":"auto"}),
+        ),
+        (
+            "create_threads",
+            json!({"threads":[{"title":"More","target":{"providerInstanceId":"devReplay","model":"multi-turn"},"runtimeMode":"full-access"}]}),
+        ),
+    ] {
+        let refused = mcp.call(token, tool, input).await;
+        assert!(
+            is_error(&refused)
+                && refused
+                    .to_string()
+                    .contains("runtime_mode_escalation_denied"),
+            "{tool}: {refused}"
+        );
+    }
+    world.runtime.shutdown().await.unwrap();
+}
+
+/// The link fence carries over to a delegated child: a parent started through a link paired below
+/// full access delegates, its child carries the same link origin, and the parent may change that
+/// child but not a thread its link did not start. (A linked environment starts such a thread with
+/// `t3_thread_launch`, which is not ported; the test writes the parent's link origin into its
+/// projection, as a link-started launch would have recorded it.)
+#[cfg(feature = "providers")]
+#[tokio::test]
+async fn a_delegated_child_inherits_its_parents_link_fence() {
+    const PARENT: &str = "thread:mcp-linked-parent";
+    const USER_THREAD: &str = "thread:mcp-user";
+    let mut world = delegation_world(PARENT, "approval-required", None).await;
+    let link = json!({"sessionId":"link-session","label":"Laptop","access":"approval-required"});
+    t3_persistence::rusqlite::Connection::open(&world.database)
+        .unwrap()
+        .execute(
+            "UPDATE orchestration_v2_projection_threads SET payload_json = json_set(payload_json, '$.linkOrigin', json(?1)) WHERE thread_id = ?2",
+            [link.to_string(), PARENT.to_owned()],
+        )
+        .unwrap();
+    command(&mut world.socket, &mut world.client, json!({"type":"thread.create","commandId":"create:user","threadId":USER_THREAD,"projectId":"project:mcp","title":"Mine","modelSelection":{"instanceId":"replay","model":"replay-model"},"runtimeMode":"approval-required","interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"})).await;
+    let (mcp, token) = (&world.mcp, world.token.as_str());
+    let delegated = mcp
+        .call(
+            token,
+            "delegate_task",
+            json!({"task":"Summarise","target":{"providerInstanceId":"devReplay","model":"multi-turn"}}),
+        )
+        .await;
+    assert!(!is_error(&delegated), "{delegated}");
+    let child = delegated["result"]["structuredContent"]["childThreadId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // The child carries the parent's link origin.
+    let snapshot: Value = reqwest::Client::new()
+        .get(format!("{}/api/orchestration/threads/{child}", world.origin))
+        .header("cookie", &world.cookie)
+        .header("x-t3-orchestration-protocol", "2")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let found = snapshot.to_string();
+    assert!(
+        found.contains("\"sessionId\":\"link-session\"") && found.contains("\"label\":\"Laptop\""),
+        "{snapshot}"
+    );
+    // The fenced parent may change its link's child, not the user's thread.
+    let renamed = mcp
+        .call(
+            token,
+            "t3_thread_update",
+            json!({"threadId": child, "action":"rename", "title":"Linked child"}),
+        )
+        .await;
+    assert!(!is_error(&renamed), "{renamed}");
+    let fenced = mcp
+        .call(
+            token,
+            "t3_thread_update",
+            json!({"threadId": USER_THREAD, "action":"rename", "title":"Not yours"}),
+        )
+        .await;
+    assert!(
+        is_error(&fenced)
+            && fenced.to_string().contains("capability_denied")
+            && fenced.to_string().contains(
+                "This work was started from Laptop through a linked environment, so it may change only threads that link started. A link paired with full access is not limited this way."
+            ),
+        "{fenced}"
+    );
+    world.runtime.shutdown().await.unwrap();
 }

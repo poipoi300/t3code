@@ -1383,4 +1383,93 @@ mod tests {
         assert!(create_verified(&destination).is_err());
         assert!(!target.join("git").exists());
     }
+
+    /// A fake `glab`: `mr list` answers merge request 7 for branch `feature`.
+    struct FakeGlab;
+    #[async_trait::async_trait]
+    impl t3_forge::cli::ForgeCli for FakeGlab {
+        async fn run(
+            &self,
+            request: t3_forge::cli::CliRequest,
+        ) -> t3_forge::Result<t3_forge::cli::CliResponse> {
+            assert_eq!(
+                request.args.get(..2),
+                Some(&["mr".into(), "list".into()][..])
+            );
+            let listed = serde_json::json!([{
+                "iid": 7, "title": "Fixture change", "state": "opened",
+                "web_url": "https://gitlab.com/acme/web/-/merge_requests/7",
+                "source_branch": "feature", "target_branch": "main",
+                "source_project_id": 42, "target_project_id": 42,
+                "source_project": {"path_with_namespace": "acme/web"},
+                "target_project": {"path_with_namespace": "acme/web"},
+            }]);
+            Ok(t3_forge::cli::CliResponse {
+                stdout: listed.to_string().into_bytes(),
+                stderr: Vec::new(),
+                code: 0,
+                truncated: false,
+            })
+        }
+    }
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=t3", "-c", "user.email=t3@example.invalid"])
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", cwd.join(".no-global-config"))
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// TypeScript resolves the checkout's forge for every status lookup (`sourceControlProvider`
+    /// in `findLatestPrForHeadContext`, behind the registry's five-second detection cache), so a
+    /// remote added after the checkout's status worker started is used at the next read.
+    #[tokio::test]
+    async fn status_uses_a_remote_added_after_the_checkouts_workflow_was_made() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("repo");
+        std::fs::create_dir(&cwd).unwrap();
+        git(&cwd, &["init", "-q", "-b", "main"]);
+        git(&cwd, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        git(&cwd, &["switch", "-q", "-c", "feature"]);
+        let isolated = |path: &Path| {
+            t3_git::Git::new(path).with_environment(BTreeMap::from([
+                (
+                    "GIT_CONFIG_GLOBAL".into(),
+                    Some(path.join(".no-global-config").into_os_string()),
+                ),
+                ("GIT_CONFIG_NOSYSTEM".into(), Some("1".into())),
+            ]))
+        };
+        let gitlab: Arc<dyn Forge> = Arc::new(
+            GitLab::new(isolated(&cwd))
+                .unwrap()
+                .with_cli(Arc::new(FakeGlab)),
+        );
+        let registry = Arc::new(ForgeRegistry::new([gitlab]));
+        let factory = ForgeWorkflows {
+            registry: registry.clone(),
+            template: t3_git::GitWorkflowService::new(isolated(&cwd)),
+            lenient_lookups: true,
+        };
+        use t3_git::GitWorkflowFactory;
+        let workflow = factory.for_checkout(&cwd).await.unwrap();
+        let before = workflow.remote_status(false).await.unwrap();
+        assert!(before.is_none_or(|remote| remote.pr.is_none()));
+
+        git(
+            &cwd,
+            &["remote", "add", "origin", "git@gitlab.com:acme/web.git"],
+        );
+        git(&cwd, &["update-ref", "refs/remotes/origin/feature", "HEAD"]);
+        git(&cwd, &["branch", "--set-upstream-to=origin/feature"]);
+        // The registry's five-second detection cache, which TypeScript's registry also has.
+        registry.invalidate_detection();
+        let after = workflow.remote_status(false).await.unwrap().unwrap();
+        assert_eq!(after.pr.map(|pr| pr.number), Some(7));
+    }
 }

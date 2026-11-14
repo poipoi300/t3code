@@ -18,5 +18,9 @@ fn every_fixture_method_has_exactly_one_disposition_and_kind() {
         );
     }
     assert_eq!(tags.len(), 220);
+    for tag in t3_contracts::rpc::RUST_ONLY_METHODS {
+        assert!(tags.insert(tag), "{tag} exists in TypeScript");
+        assert!(registry.disposition(tag).is_some(), "{tag}");
+    }
     assert_eq!(tags.len(), WS_METHODS.len());
 }

@@ -149,6 +149,67 @@ mod authority {
             let _ = self.git.set(root);
         }
 
+        /// The folder a live project or thread owns, exactly as recorded, with its live project's
+        /// root: a thread's worktree, else its project's root. `None` for an unknown or deleted
+        /// record. For actions that name a folder by its owner, never by a client path.
+        pub async fn owned_folder(
+            &self,
+            project_id: Option<&str>,
+            thread_id: Option<&str>,
+        ) -> Option<(PathBuf, PathBuf)> {
+            let (project_id, thread_id) =
+                (project_id.map(str::to_owned), thread_id.map(str::to_owned));
+            let read = self
+                .database
+                .reader(move |connection| {
+                    use t3_persistence::rusqlite::OptionalExtension;
+                    let row = |row: &t3_persistence::rusqlite::Row<'_>| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                        ))
+                    };
+                    Ok(match (project_id, thread_id) {
+                        (None, Some(thread)) => connection
+                            .query_row(
+                                "SELECT json_extract(t.payload_json, '$.worktreePath'), p.workspace_root
+                                 FROM orchestration_v2_projection_threads t
+                                 JOIN projection_projects p
+                                   ON p.project_id = t.project_id AND p.deleted_at IS NULL
+                                 WHERE t.thread_id = ?1 AND t.deleted_at IS NULL",
+                                [thread],
+                                row,
+                            )
+                            .optional()?,
+                        (Some(project), None) => connection
+                            .query_row(
+                                "SELECT NULL, workspace_root FROM projection_projects
+                                 WHERE project_id = ?1 AND deleted_at IS NULL",
+                                [project],
+                                row,
+                            )
+                            .optional()?,
+                        _ => None,
+                    })
+                })
+                .await;
+            match read {
+                Ok(Some((worktree, Some(root)))) => Some((
+                    PathBuf::from(
+                        worktree
+                            .filter(|path| !path.is_empty())
+                            .unwrap_or_else(|| root.clone()),
+                    ),
+                    PathBuf::from(root),
+                )),
+                Ok(_) => None,
+                Err(error) => {
+                    tracing::warn!(%error, "cannot read the folder's owner");
+                    None
+                }
+            }
+        }
+
         /// `project/threadWorkspaceRoot.ts`: the thread's worktree, else its live project's root;
         /// a deleted thread, or a failed read, has none.
         pub async fn thread_workspace_root(&self, thread_id: &str) -> Option<PathBuf> {
