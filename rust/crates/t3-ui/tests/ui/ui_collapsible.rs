@@ -225,3 +225,68 @@ fn section_header_activates_with_the_keyboard_and_reports_both_states() {
         assert!(!app.screen().shows("Project details"));
     }
 }
+
+// ---- Ownership: the panel as timeline rows mount it (a row built untracked inside a region,
+// a controlled handle, `dynamic` content, no animation). `strict()` fails the engine on any
+// panic it catches. ----
+
+#[component]
+fn RowLikePanel() -> impl IntoElement {
+    t3_ui::engine_panics::strict();
+    theme::install(&Default::default());
+    let expanded = signal(false);
+    let mounted = signal(true);
+    view()
+        .child(
+            nsh_base::button()
+                .accessibility_label(t("Unmount"))
+                .on_press(move || mounted.set(false))
+                .child(text(t("Unmount"))),
+        )
+        .child(dynamic(move || {
+            mounted.get().then(|| {
+                untracked(|| {
+                    let handle = CollapsibleHandle::controlled(
+                        move || expanded.get(),
+                        || false,
+                        move |open| expanded.set(open),
+                    );
+                    let panel = dynamic(move || {
+                        expanded
+                            .get()
+                            .then(|| text("Inside the panel").into_element())
+                    });
+                    collapsible(
+                        view()
+                            .child(collapsible_trigger(handle, "Group".into(), text("Group"), ""))
+                            .child(collapsible_panel(handle, false, panel)),
+                    )
+                    .into_element()
+                })
+            })
+        }))
+}
+
+#[test]
+fn a_row_like_panel_opens_closes_and_unmounts_without_an_engine_panic() {
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: {
+            let mut sets = t3_ui::registries();
+            let mut fixtures = Registry::new();
+            fixtures.register::<RowLikePanel>();
+            sets.push(fixtures);
+            sets
+        },
+        viewport: size(px(DESKTOP.0), px(DESKTOP.1)),
+        ..EngineConfig::new(Root::of::<RowLikePanel>())
+    })
+    .expect("fixture");
+    app.wait_for("role:button[Group]").expect("mounted");
+    app.press("role:button[Group]").expect("open");
+    app.wait_for("Inside the panel").expect("opened");
+    app.press("role:button[Group]").expect("close");
+    app.settle();
+    app.press("role:button[Unmount]").expect("unmount");
+    app.settle();
+    assert!(!app.screen().shows("Group"), "unmounted");
+}

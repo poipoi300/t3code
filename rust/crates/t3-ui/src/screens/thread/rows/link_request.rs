@@ -38,6 +38,8 @@ use crate::ui::wizard::{
     wizard_steps,
 };
 
+use crate::runtime::tasks::watch;
+
 /// `peerLinkEnvironment.answerRequest`, its permission, and the machine list.
 pub trait LinkRequestClient {
     fn can_answer(&self, environment: &EnvironmentId, input: &PeerLinkRequestAnswerInput) -> bool;
@@ -161,7 +163,7 @@ fn pending_link_request(
                 .as_ref()
                 .map(|service| service.0.answer(environment.clone(), input));
             owner.run(|| {
-                spawn(async move {
+                watch(async move {
                     let result = match answer {
                         Some(answer) => answer.await,
                         None => Err(LinkAnswerError::Failed(LINK_REQUEST_FAILURE.into())),
@@ -298,7 +300,7 @@ fn link_request_dialog(
         effect(move || {
             if open.get() {
                 let machines = service.0.machines(environment.clone());
-                spawn(async move {
+                watch(async move {
                     let machines = machines.await;
                     let _ = listed.try_set(machines);
                 });
@@ -439,7 +441,7 @@ fn link_request_dialog(
             let answer = service.0.answer(environment.clone(), input);
             let close = close.clone();
             owner.run(|| {
-                spawn(async move {
+                watch(async move {
                     // Set here, not in the press: "Linking…" rebuilds the pressed button.
                     let _ = busy.try_set(true);
                     let result = answer.await;
@@ -467,7 +469,7 @@ fn link_request_dialog(
                 submit();
             } else if current.machine_ready {
                 owner.run(|| {
-                    spawn(async move {
+                    watch(async move {
                         let _ = step.try_set(LinkStep::Access);
                     })
                 });
@@ -640,7 +642,7 @@ fn link_request_dialog(
                                         move || busy.get(),
                                         move || {
                                             owner.run(|| {
-                                                spawn(async move {
+                                                watch(async move {
                                                     let _ = step.try_set(LinkStep::Machine);
                                                     let _ = error.try_set(None);
                                                 })

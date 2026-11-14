@@ -43,6 +43,8 @@ use crate::i18n::{Text, t};
 use crate::state::nav::Navigator;
 use crate::theme::{cn, palette, tw};
 
+use crate::runtime::tasks::watch;
+
 pub type Slot = Rc<dyn Fn() -> AnyElement>;
 pub type Callback = Rc<dyn Fn()>;
 
@@ -561,7 +563,7 @@ fn subscribe(manager: &ToastManager) -> Signal<Vec<Entry>> {
     let entries = signal(initial);
     // Timers started by the subscription task still belong to the host's reactive lifetime.
     let owner = Owner::current();
-    spawn(async move {
+    watch(async move {
         while let Some(mut next) = updates.next().await {
             for (index, old) in entries.get_untracked().into_iter().enumerate() {
                 if next.iter().any(|entry| entry.id == old.id) {

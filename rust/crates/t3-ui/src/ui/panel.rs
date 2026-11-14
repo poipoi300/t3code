@@ -21,6 +21,8 @@ use crate::i18n::t;
 use crate::state::layout::{LayoutClass, layout_class};
 use crate::theme::tw;
 
+use crate::runtime::tasks::watch;
+
 /// The adaptive container; the caller owns visibility, route changes and the content's state.
 pub fn panel(
     open: impl Fn() -> bool + 'static,
@@ -108,7 +110,7 @@ pub fn right_panel_sheet(
             duration as f32,
             Easing::EaseInOut,
         );
-        spawn(async move {
+        watch(async move {
             if end.await && !open.get_untracked() {
                 shown.set(false);
             }

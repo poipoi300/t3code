@@ -1140,7 +1140,7 @@ fn workspace_preparation_retry(
                     let key = key.clone();
                     let run = run.clone();
                     owner.run(|| {
-                        spawn(async move {
+                        crate::runtime::tasks::watch(async move {
                             if let Err(error) =
                                 crate::runtime::services::thread_ops::retry_workspace_preparation_run(
                                     &client, key, t3_contracts::base_schemas::RunId(run.clone()),

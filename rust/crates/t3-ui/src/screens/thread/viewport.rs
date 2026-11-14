@@ -15,6 +15,8 @@ use t3_client::types::ThreadKey;
 
 use crate::runtime::Shared;
 
+use crate::runtime::tasks::watch;
+
 /// Port of timelineViewport.ts TimelineFollow and transitionTimelineFollow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimelineFollow {
@@ -318,7 +320,7 @@ impl TimelineViewport {
             .mr(move || safe_area().right)
             .on_layout(move |_: &Bounds<Points>| {
                 self.position();
-                spawn(async move {
+                watch(async move {
                     let frame = self.element.measure().await;
                     self.visit.with(|v| v.frame = frame);
                 });
@@ -460,7 +462,7 @@ impl TimelineViewport {
             None => self.element.scroll_to_end(false),
         }
         let navigation = self.visit.with(|v| v.navigation);
-        spawn(async move {
+        watch(async move {
             let measured = self.element.measure_scroll_position().await;
             self.visit.with(|v| {
                 if v.navigation == navigation && measured.is_some() {
@@ -521,7 +523,7 @@ impl TimelineViewport {
         let Some(serial) = serial else { return };
         let keys = self.keys.get_untracked();
         let count = self.row_count();
-        spawn(async move {
+        watch(async move {
             let position = self.element.measure_scroll_position().await;
             let current_keys = self.keys.get_untracked();
             let current_count = self.row_count();

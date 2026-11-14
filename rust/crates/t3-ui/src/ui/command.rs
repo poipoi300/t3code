@@ -40,6 +40,8 @@ use crate::theme::{Scope, cn, metrics, palette, tw, tw_with};
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::Icon;
 
+use crate::runtime::tasks::watch;
+
 /// Values are stable, untranslated keys. Labels are `i18n::Text`: a literal is a key, client
 /// data (thread titles, project names, paths) is content. Keywords provide additional filter
 /// text. `group` names the `command_group` the item belongs to (its label's source text).
@@ -394,7 +396,7 @@ pub fn command_dialog<E: IntoElement>(
             } else {
                 let ended = dialog_transition(popup_motion, false, true).start();
                 drop(dialog_transition(backdrop_motion, false, false).start());
-                spawn(async move {
+                watch(async move {
                     let _ = ended.await;
                     if generation.get() == current && !open.get_untracked() {
                         mounted.set(false);

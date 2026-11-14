@@ -51,6 +51,8 @@ use t3_client::thread_views::threads::turn_detail_announcement::{
 };
 use t3_contracts::orchestration_v2::{RuntimeRequestKind, RuntimeRequestKindMember2};
 
+use crate::runtime::tasks::watch;
+
 /// What ChatView passes MessagesTimeline about the run (`latestRun`, `runningRunId`, `isWorking`,
 /// `activeTurnStartedAt`), read from the client's presentation of the thread shell.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -190,7 +192,7 @@ fn client_settings() -> Signal<Rc<ClientSettingsSchema>> {
         SignalEquals::Never,
     );
     if let Some(service) = service {
-        spawn(async move {
+        watch(async move {
             let mut changes = service.0.changes();
             while changes.next().await.is_some() {
                 let _ = settings.try_set(service.0.client_settings());
@@ -626,7 +628,7 @@ fn plan_context(key: &ThreadKey) -> PlanContext {
     if let Some(client) = rt().backend().client() {
         let root = signal(client.plan_services().plan_workspace_root(key));
         let mut roots = client.plan_services().watch_plan_workspace(key.clone());
-        spawn(async move {
+        watch(async move {
             while let Some(value) = roots.next().await {
                 root.set(value);
             }

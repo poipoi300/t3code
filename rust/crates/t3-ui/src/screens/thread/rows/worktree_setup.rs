@@ -28,6 +28,8 @@ use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::middle_truncate::{Options as TruncateOptions, middle_truncate};
 use crate::ui::skeleton::{SpinnerSize, Tone, spinner};
 
+use crate::runtime::tasks::watch;
+
 /// The client row's data: `{ kind: "worktree-setup", snapshot, embedded }`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorktreeSetupRow {
@@ -239,7 +241,7 @@ fn worktree_setup_card(row: WorktreeSetupRow, context: WorktreeSetupContext) -> 
                 // ChatView's `void cancelWorktreeSetup()`: the web reports no failure here.
                 let cancelled = client.0.cancel(&key, &setup);
                 owner.run(|| {
-                    spawn(async move {
+                    watch(async move {
                         let _ = cancelled.await;
                     })
                 });

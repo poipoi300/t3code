@@ -58,7 +58,7 @@ impl UrlState {
         };
         let mut changes = client.watch();
         let observer = client.clone();
-        spawn(async move {
+        crate::runtime::tasks::watch(async move {
             while let Some(request) = receiver.next().await {
                 if !state.available.get_untracked() {
                     continue;
@@ -77,7 +77,7 @@ impl UrlState {
                 }
             }
         });
-        spawn(async move {
+        crate::runtime::tasks::watch(async move {
             while let Some(change) = changes.next().await {
                 let location = Location::resolve(&change.path, change.policy);
                 if location.href() != change.path {

@@ -27,6 +27,8 @@ use crate::ui::icon::{Icon, icon_with_class, provider_icon};
 use crate::ui::middle_truncate::{Font, Options, middle_truncate_with_font};
 use crate::ui::tooltip::{TooltipOptions, Variant, tooltip, tooltip_create_handle};
 
+use crate::runtime::tasks::watch;
+
 #[derive(Clone, Debug)]
 pub struct SubagentRow {
     pub event: EventRow,
@@ -499,7 +501,7 @@ fn environment_config(parent: ThreadKey) -> Memo<Option<Shared<ServerConfig>>> {
             .map(Shared)
     };
     let config = signal(read());
-    spawn(async move {
+    watch(async move {
         while let Some(change) = changes.next().await {
             if change
                 .scopes

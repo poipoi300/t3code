@@ -519,7 +519,7 @@ fn retained_while_closed<M: 'static, E: IntoChild<M> + 'static>(
             }
             let ended = transition(popup_motion, true, offset, false).start();
             drop(transition(backdrop_motion, true, offset, true).start());
-            spawn(async move {
+            watch(async move {
                 let _ = ended.await;
                 if generation.get() == current
                     && state.open.get_untracked()
@@ -531,7 +531,7 @@ fn retained_while_closed<M: 'static, E: IntoChild<M> + 'static>(
         } else if mounted.get_untracked() {
             let ended = transition(popup_motion, false, offset, false).start();
             drop(transition(backdrop_motion, false, offset, true).start());
-            spawn(async move {
+            watch(async move {
                 let _ = ended.await;
                 if generation.get() == current && !state.open.get_untracked() {
                     mounted.set(false);
@@ -768,6 +768,8 @@ pub fn dialog_viewport<M>(options: PopupOptions, children: impl IntoChild<M>) ->
 }
 
 pub use dialog_viewport as alert_dialog_viewport;
+
+use crate::runtime::tasks::watch;
 
 fn popup_surface(
     state: DialogState,

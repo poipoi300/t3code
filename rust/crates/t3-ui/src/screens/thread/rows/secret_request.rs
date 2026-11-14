@@ -24,6 +24,8 @@ use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::input::masked_text_field;
 
+use crate::runtime::tasks::watch;
+
 /// `serverEnvironment.answerSecretRequest`.
 pub trait SecretRequestClient {
     fn answer(
@@ -117,7 +119,7 @@ fn pending_secret_request_form(
                 .as_ref()
                 .map(|service| service.0.answer(environment.clone(), input));
             owner.run(|| {
-                spawn(async move {
+                watch(async move {
                     let result = match answer {
                         Some(answer) => answer.await,
                         None => Err(SecretAnswerError::Failed(

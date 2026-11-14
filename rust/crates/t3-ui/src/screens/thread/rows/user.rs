@@ -89,7 +89,7 @@ impl UserRowState {
         }
         set_clipboard(source.clone());
         self.2.run(|| {
-            spawn(async move {
+            crate::runtime::tasks::watch(async move {
                 if clipboard_string().await != source {
                     return;
                 }
@@ -441,7 +441,7 @@ fn committed_image_urls(
                 };
                 let id = attachment_id.0.clone();
                 let mut states = assets.0.watch(environment.clone(), resource);
-                spawn(async move {
+                crate::runtime::tasks::watch(async move {
                     while let Some(state) = states.next().await {
                         let url = match state {
                             AssetUrlState::Success { url, .. } => Some(url),

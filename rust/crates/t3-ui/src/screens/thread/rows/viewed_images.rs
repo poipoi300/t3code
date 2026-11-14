@@ -170,7 +170,7 @@ fn chat_markdown_asset_image(
     if let Some(assets) = assets {
         let mut urls = assets.0.watch(environment, image.resource.clone());
         // Owned by this image: unmounting it ends the read and releases the shared mint.
-        spawn(async move {
+        crate::runtime::tasks::watch(async move {
             while let Some(next) = urls.next().await {
                 state.set(next);
             }

@@ -27,6 +27,8 @@ use t3_client::view_logic::session::text::{
 };
 use t3_contracts::wire::trim_js;
 
+use crate::runtime::tasks::watch;
+
 pub struct PlanRow<'a> {
     pub id: &'a str,
     pub markdown: &'a str,
@@ -84,7 +86,7 @@ impl PlanContext {
             let mut changes = service.changes(&thread);
             can_write.set(service.can_write(&thread));
             let destination = thread.clone();
-            spawn(async move {
+            watch(async move {
                 while changes.next().await.is_some() {
                     can_write.set(service.can_write(&destination));
                 }
@@ -373,7 +375,7 @@ fn proposed_plan_card(
                         if let Some((name, source)) = contents(row) {
                             let download = download.clone();
                             owner.run(|| {
-                                spawn(async move {
+                                watch(async move {
                                     if let Err(error) = download(name, source).await {
                                         plan_toast(
                                             toast::Variant::Error,
@@ -639,7 +641,7 @@ fn save_plan_to_workspace_form(
             contents,
         };
         owner.run(|| {
-            spawn(async move {
+            watch(async move {
                 let result = write(request).await;
                 state.saving.set(false);
                 match result {

@@ -150,7 +150,7 @@ pub fn sheet_popup<E: IntoElement>(
             duration as f32,
             Easing::EaseInOut,
         );
-        spawn(async move {
+        watch(async move {
             if end.await && !state.open.get_untracked() {
                 shown.set(false);
             }
@@ -354,6 +354,8 @@ pub fn sheet_backdrop(state: SheetState, progress: AnimatedValue) -> impl IntoEl
 }
 
 pub use sheet_backdrop as sheet_overlay;
+
+use crate::runtime::tasks::watch;
 
 pub fn sheet_viewport(
     side: Side,
