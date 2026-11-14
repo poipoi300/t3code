@@ -5143,6 +5143,7 @@ dependencies = [
  "jni 0.21.1",
  "js-sys",
  "keyring",
+ "log",
  "open",
  "reqwest",
  "ring",
