@@ -80,14 +80,44 @@ async fn status_static_config_reads_support_worktrees_backed_by_bare_repositorie
         "release",
     ])
     .await?;
+    let trace = repo.temp.path().join("bare-status-trace.jsonl");
     let status = repo
         .git
         .at(&tree)
+        .with_environment(
+            [(
+                "GIT_TRACE2_EVENT".into(),
+                Some(trace.as_os_str().to_owned()),
+            )]
+            .into(),
+        )
         .status_details_local(LocalStatusOptions::default())
         .await?;
     assert!(status.has_origin_remote);
     assert!(status.is_default_branch);
     assert_eq!(status.branch.as_deref(), Some("release"));
+    let mut checked = 0;
+    for line in std::fs::read_to_string(trace)?.lines() {
+        let event: serde_json::Value = serde_json::from_str(line)?;
+        if event["event"] != "start" {
+            continue;
+        }
+        let args: Vec<_> = event["argv"]
+            .as_array()
+            .expect("argv")
+            .iter()
+            .filter_map(|arg| arg.as_str())
+            .collect();
+        assert!(args.contains(&"core.fsmonitor=false"), "{args:?}");
+        if !args.contains(&"--absolute-git-dir") {
+            assert!(
+                args.contains(&"--git-dir") && args.contains(&"--work-tree"),
+                "{args:?}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0);
     Ok(())
 }
 

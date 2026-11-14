@@ -130,7 +130,7 @@ fn bindings() -> &'static Bindings {
 impl Git {
     pub async fn bind_repository(&self) -> Result<Option<RepositoryBinding>, GitError> {
         Ok(self
-            .repository_reader()
+            .repository_operation()
             .await?
             .bound_repository
             .as_ref()
@@ -157,8 +157,23 @@ impl Git {
         Ok(reader)
     }
 
+    pub(crate) async fn repository_operation(&self) -> Result<Self, GitError> {
+        let expected = self
+            .bound_repository
+            .as_ref()
+            .map(|bound| bound.identity.clone());
+        let mut reader = self.without_fsmonitor();
+        reader.bound_repository = None;
+        reader.bound_repository = reader.resolve_repository_binding(expected.as_ref()).await?;
+        Ok(reader)
+    }
+
     pub(crate) async fn checkpoint_reader(&self) -> Result<Self, GitError> {
-        let mut reader = self.repository_reader().await?;
+        let mut reader = if self.checkpoint_mode {
+            self.repository_reader().await?
+        } else {
+            self.repository_operation().await?
+        };
         reader.checkpoint_mode = true;
         Ok(reader)
     }

@@ -122,7 +122,11 @@ enumeration, explicit file list or link removal.
 Checkpoint operations and automatic status/branch reads pin a `RepositoryBinding`
 (canonical top-level, per-worktree Git directory and common directory). Commands
 use explicit `--git-dir` and `--work-tree`; discovery uses only `rev-parse` with
-fsmonitor disabled. A changed discovery result, `.git` added or redirected between
+fsmonitor disabled. `GIT_COMMON_DIR` also pins the recorded common directory, so
+linked-worktree commands do not re-resolve it through a mutable pointer.
+Shared-ref/config reads may select the recorded common
+directory while keeping the recorded worktree and its identity checks.
+A changed discovery result, `.git` added or redirected between
 the scope and top-level, or a changed `commondir` pointer refuses the operation and
 names the changed path. Descendant submodules and nested worktrees remain leaves
 of their containing scope and may have their own bindings.
@@ -140,7 +144,9 @@ fsmonitor, and all produced diffs disable external diff and textconv helpers.
 Capture's `add` may run clean/process filters; restore may run smudge/process
 filters, and its worktree comparisons/index reset may run clean/process filters.
 Status and untracked totals may also run clean/process filters. These preserve
-Git/LFS behavior. Clean itself runs no configured filter. These helpers come from
+Git/LFS behavior. The low-level `status` helper can also run `post-index-change`
+when Git refreshes its index; detailed status suppresses optional index writes
+with `GIT_OPTIONAL_LOCKS=0`. Clean itself runs no configured filter. Helpers come from
 the pinned repository's configuration hierarchy, including user/system settings;
 workspace attributes can select an already configured filter. Missing objects in
 a partial clone may trigger Git's lazy fetch, including transport/credential

@@ -339,9 +339,30 @@ impl Git {
             let mut process = ProcessOptions::new(self.program.clone());
             process.args = vec!["-C".into(), self.cwd.as_os_str().to_owned()];
             if let Some(binding) = &self.bound_repository {
+                let directory = match &self.git_dir {
+                    None => &binding.identity.git_dir,
+                    Some(directory)
+                        if core::git_path(directory)
+                            == core::git_path(&binding.identity.common_dir) =>
+                    {
+                        &binding.identity.common_dir
+                    }
+                    Some(directory)
+                        if core::git_path(directory)
+                            == core::git_path(&binding.identity.git_dir) =>
+                    {
+                        &binding.identity.git_dir
+                    }
+                    Some(directory) => {
+                        return Err(GitError::RepositoryChanged {
+                            path: directory.clone(),
+                            detail: "Git directory override is outside the recorded repository.",
+                        });
+                    }
+                };
                 process.args.extend([
                     "--git-dir".into(),
-                    core::git_path(&binding.identity.git_dir).into_os_string(),
+                    core::git_path(directory).into_os_string(),
                     "--work-tree".into(),
                     core::git_path(&binding.identity.top_level).into_os_string(),
                 ]);
@@ -358,6 +379,12 @@ impl Git {
             process.args.extend(args.iter().cloned());
             // -C lets Git diagnose a deleted workspace without a spawn-cwd failure.
             process.env = git_environment(&self.environment, &options.env);
+            if let Some(binding) = &self.bound_repository {
+                process.env.insert(
+                    "GIT_COMMON_DIR".into(),
+                    Some(core::git_path(&binding.identity.common_dir).into_os_string()),
+                );
+            }
             if self.checkpoint_mode
                 || options.capture
                 || options
@@ -446,7 +473,13 @@ impl Git {
     }
 
     pub async fn detect_repository(&self) -> Result<Option<Repository>, GitError> {
-        let reader = self.repository_reader().await?;
+        let reader = self.repository_operation().await?;
+        if let Some(binding) = &reader.bound_repository {
+            return Ok(Some(Repository {
+                root: core::git_path(&binding.identity.top_level),
+                common_dir: core::git_path(&binding.identity.common_dir),
+            }));
+        }
         let result = match reader
             .execute(
                 &[
@@ -519,8 +552,8 @@ impl Git {
     }
 
     pub async fn status(&self) -> Result<Status, GitError> {
-        let reader = self.repository_reader().await?;
-        if !reader.is_repository().await? {
+        let reader = self.repository_operation().await?;
+        if reader.bound_repository.is_none() {
             return Ok(Status::default());
         }
         let index = reader.text(&["rev-parse", "--git-path", "index"]).await?;
@@ -545,7 +578,7 @@ impl Git {
         parse_status(&output.stdout_text())
     }
     pub async fn current_branch(&self) -> Result<Option<String>, GitError> {
-        let reader = self.repository_reader().await?;
+        let reader = self.repository_operation().await?;
         let result = reader
             .execute(
                 &["symbolic-ref", "--quiet", "HEAD"],
@@ -562,7 +595,7 @@ impl Git {
         }
     }
     pub async fn list_refs(&self, prefixes: &[&str]) -> Result<Vec<GitRef>, GitError> {
-        let reader = self.repository_reader().await?;
+        let reader = self.repository_operation().await?;
         let mut args = vec![
             "for-each-ref",
             "--format=%(refname)%00%(objectname)%00%(upstream)%00%(HEAD)",

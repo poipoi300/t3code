@@ -948,7 +948,8 @@ impl Git {
         validate_revision(checkpoint_ref)?;
         let revision = format!("{checkpoint_ref}^{{commit}}");
         let output = self
-            .without_fsmonitor()
+            .checkpoint_reader()
+            .await?
             .execute(
                 &["rev-parse", "--verify", "--quiet", &revision],
                 ExecuteOptions {

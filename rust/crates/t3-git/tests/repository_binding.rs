@@ -325,3 +325,39 @@ async fn a_recreated_git_handle_cannot_forget_the_scope_identity() -> TestResult
     ));
     Ok(())
 }
+
+#[tokio::test]
+async fn persisted_handles_revalidate_discovery_before_each_operation() -> TestResult {
+    let repo = Repository::new().await?;
+    repo.write("pkg/f", "real\n")?;
+    repo.commit("real").await?;
+    let identity = repo.git.bind_repository().await?.expect("repository");
+    let scope = repo
+        .git
+        .at(repo.root().join("pkg"))
+        .with_repository_binding(identity)
+        .await?;
+    let other = repo.temp.path().join("other-worktree");
+    std::fs::create_dir(&other)?;
+    repo.command(&["config", "core.worktree", &other.to_string_lossy()])
+        .await?;
+    assert!(matches!(
+        scope.status().await,
+        Err(t3_git::GitError::RepositoryChanged { .. })
+    ));
+    assert!(matches!(
+        scope.resolve_checkpoint("HEAD").await,
+        Err(t3_git::GitError::RepositoryChanged { .. })
+    ));
+    assert!(matches!(
+        scope
+            .capture_checkpoint(&checkpoint_ref("changed-top-level", 0))
+            .await,
+        Err(t3_git::GitError::RepositoryChanged { .. })
+    ));
+    assert!(matches!(
+        scope.restore_checkpoint("HEAD", false).await,
+        Err(t3_git::GitError::RepositoryChanged { .. })
+    ));
+    Ok(())
+}

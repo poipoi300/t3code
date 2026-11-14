@@ -824,7 +824,7 @@ impl Git {
         &self,
         options: LocalStatusOptions,
     ) -> Result<GitStatusDetails, GitError> {
-        let reader = self.repository_reader().await?;
+        let reader = self.repository_operation().await?;
         let paths = reader.repository_paths(false).await?;
         let Some(paths) = paths else {
             return Ok(GitStatusDetails::default());
@@ -952,18 +952,7 @@ impl Git {
         };
         let common = path_key(&paths.repository.common_dir);
         let common_git = reader
-            .at(
-                if paths
-                    .repository
-                    .common_dir
-                    .file_name()
-                    .is_some_and(|name| name == ".git")
-                {
-                    paths.repository.common_dir.parent().unwrap_or(reader.cwd())
-                } else {
-                    &paths.repository.common_dir
-                },
-            )
+            .clone()
             .with_git_dir(paths.repository.common_dir.clone());
         let default = reader
             .core
@@ -1072,7 +1061,7 @@ impl Git {
             .await
     }
     pub async fn cached_local_status(&self) -> Result<GitStatusDetails, GitError> {
-        self.repository_reader().await?;
+        self.repository_operation().await?;
         let key = path_key(&physical_path(self.cwd()));
         self.core
             .local_status
@@ -1088,7 +1077,7 @@ impl Git {
         &self,
         refresh_upstream: bool,
     ) -> Result<RemoteStatusDetails, GitError> {
-        let reader = self.repository_reader().await?;
+        let reader = self.repository_operation().await?;
         if refresh_upstream {
             let _ = reader.refresh_status_upstream().await;
         }
@@ -1158,7 +1147,7 @@ impl Git {
         })
     }
     pub async fn refresh_status_upstream(&self) -> Result<(), GitError> {
-        let reader = self.repository_reader().await?;
+        let reader = self.repository_operation().await?;
         let head = reader
             .core_text(
                 "GitVcsDriver.refreshStatusUpstreamIfStale.headRef",
@@ -1406,8 +1395,8 @@ impl Git {
         &self,
         input: &VcsListRefsInput,
     ) -> Result<VcsListRefsResult, GitError> {
-        let reader = self.repository_reader().await?;
-        let git = reader.at(&input.cwd.0).repository_reader().await?;
+        let reader = self.repository_operation().await?;
+        let git = reader.at(&input.cwd.0).repository_operation().await?;
         let refresh = input.refresh.flatten() == Some(true);
         let Some(paths) = git.repository_paths(refresh).await? else {
             return Ok(VcsListRefsResult {
