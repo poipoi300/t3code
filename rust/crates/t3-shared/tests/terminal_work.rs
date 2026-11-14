@@ -85,4 +85,25 @@ fn rewrites_and_colour_runs_on_a_long_line_do_not_copy_the_line_per_write() {
     let snapshot = output.snapshot();
     assert!(snapshot.truncated);
     assert!(snapshot.text.ends_with("C\x1b[0m"));
+
+    // A pen that alternates in the middle of a long run splits it and merges it back on every
+    // cycle. TypeScript's sliced and concatenated strings stay flat in the line's length here
+    // (3.6 to 4.2 µs per cycle at 1K and at 64K one-byte units); copying half the line per write
+    // is about 660 MB.
+    let mut output = TerminalOutput::new(TERMINAL_OUTPUT_TAIL_CHARS);
+    output.push(&"L".repeat(TERMINAL_OUTPUT_TAIL_CHARS));
+    output.push("\x1b[32769G");
+    let cycles: Vec<String> = (0..10)
+        .map(|_| "\x1b[31mX\x08\x1b[0mL\x08".repeat(1_000))
+        .collect();
+    let alternating = allocated_by(|| {
+        for chunk in &cycles {
+            output.push(chunk);
+        }
+    });
+    assert!(
+        alternating < 4 << 20,
+        "{alternating} bytes for 10,000 alternating-pen cycles"
+    );
+    assert_eq!(output.snapshot().text, "L".repeat(TERMINAL_OUTPUT_TAIL_CHARS));
 }
