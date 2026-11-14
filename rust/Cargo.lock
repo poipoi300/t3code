@@ -5266,6 +5266,7 @@ dependencies = [
  "unicode-normalization",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5498,6 +5499,8 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "tracing",
+ "tracing-subscriber",
  "unicode-normalization",
  "unicode-segmentation",
  "uuid",
@@ -5512,6 +5515,7 @@ dependencies = [
  "chrono",
  "file-id",
  "fs4",
+ "futures",
  "getrandom 0.3.4",
  "regex",
  "reqwest",
@@ -5531,6 +5535,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "unicode-normalization",
  "url",
  "uuid",
@@ -5648,6 +5654,7 @@ dependencies = [
  "t3-provider",
  "t3-rpc",
  "t3-scheduler",
+ "t3-shared",
  "t3-telemetry",
  "t3-terminal",
  "t3-usage",
