@@ -1134,6 +1134,96 @@ async fn a_missing_key_keeps_its_records_for_when_it_returns() {
     assert_eq!(*deleted.lock().unwrap(), vec![first_id], "the recovered entry goes");
 }
 
+/// A key store whose existing keys read as temporarily unavailable while failing, as a
+/// corrupted Keystore entry does; a key stored after that reads normally.
+struct UnavailableSecrets {
+    inner: Arc<EphemeralSecretStore>,
+    stored: Arc<std::sync::Mutex<Vec<String>>>,
+    failing: Arc<std::sync::Mutex<Vec<String>>>,
+}
+impl t3_platform::SecretKeyStore for UnavailableSecrets {
+    fn load(
+        &self,
+        id: &str,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, t3_platform::SecretStoreError> {
+        if self.failing.lock().unwrap().iter().any(|failing| failing == id) {
+            return Err(t3_platform::SecretStoreError::Unavailable("keystore error".into()));
+        }
+        self.inner.load(id)
+    }
+    fn store(&self, id: &str, secret: &[u8]) -> Result<(), t3_platform::SecretStoreError> {
+        self.stored.lock().unwrap().push(id.to_owned());
+        self.inner.store(id, secret)
+    }
+    fn delete(&self, id: &str) -> Result<(), t3_platform::SecretStoreError> {
+        self.inner.delete(id)
+    }
+}
+
+#[tokio::test]
+async fn a_key_that_fails_three_launches_running_is_replaced_and_its_records_kept() {
+    // Coordinator, round 6: a corrupted Android key below API 33 arrives as a keystore error,
+    // which counts as temporary; without a bound that user never gets storage back.
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(EphemeralSecretStore::default());
+    let stored = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let failing = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let open = || {
+        let mut config = config(dir.path(), &secrets);
+        config.secrets = Box::new(UnavailableSecrets {
+            inner: secrets.clone(),
+            stored: stored.clone(),
+            failing: failing.clone(),
+        });
+        NativePlatform::open(config)
+    };
+    let fail = |on: bool| {
+        *failing.lock().unwrap() = if on {
+            stored.lock().unwrap().clone()
+        } else {
+            Vec::new()
+        };
+    };
+    let secure = key("connection-credential", "c");
+    let platform = open().await.unwrap();
+    platform
+        .write(StorageArea::Secure, vec![put(&secure, b"token")])
+        .await
+        .unwrap();
+    drop(platform);
+    // Two failing launches, then one that reads the key: the count starts again.
+    fail(true);
+    assert!(open().await.is_err());
+    assert!(open().await.is_err());
+    fail(false);
+    let read = open().await.unwrap();
+    assert_eq!(read.open_report().retained_secure_records, 0);
+    drop(read);
+    // Two failing launches stay unavailable and keep the key and its records.
+    fail(true);
+    assert!(open().await.is_err());
+    assert!(open().await.is_err());
+    // The third replaces the key under a new id and keeps the records aside.
+    let replaced = open().await.unwrap();
+    let report = replaced.open_report();
+    assert!(report.replaced_unreadable_key);
+    assert_eq!(report.retained_secure_records, 1);
+    assert_eq!(replaced.get(StorageArea::Secure, secure.clone()).await.unwrap(), None);
+    drop(replaced);
+    // When the old key reads again, its records come back.
+    fail(false);
+    let recovered = open().await.unwrap();
+    assert_eq!(recovered.open_report().recovered_secure_records, 1);
+    assert_eq!(
+        recovered
+            .get(StorageArea::Secure, secure)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(&b"token"[..])
+    );
+}
+
 #[tokio::test]
 async fn two_instances_opening_a_new_directory_share_one_key() {
     // Second re-review A4: both read "no key" unlocked; only one may create it.

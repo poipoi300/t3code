@@ -194,6 +194,8 @@ fn prepare(path: &Path) -> rusqlite::Result<Connection> {
 
 /// Secure records whose key the OS store could not give back, kept for when it reads again.
 const RETAINED_AREA: i64 = 2;
+/// Consecutive launches whose key read failed as temporary before the key is given up on.
+const UNAVAILABLE_LAUNCHES: u32 = 3;
 
 fn aad(encoded_key: &str) -> Vec<u8> {
     [AAD_PREFIX, encoded_key.as_bytes()].concat()
@@ -368,16 +370,39 @@ impl Store {
         // 2. Every read of the OS store runs with no database lock held: a keychain or Secret
         //    Service prompt must not keep another process waiting on the database.
         let recorded = meta(&connection, "secure-key-check")?;
-        let secret = match read_key(secrets, &key_id)? {
-            KeyRead::Present(secret)
+        let failures = meta(&connection, "unavailable-key-launches")?;
+        let read = match read_key(secrets, &key_id) {
+            // A key that fails as temporary on launch after launch is given up on at the third,
+            // as an unreadable one is: a corrupted Android Keystore entry below API 33 looks
+            // exactly like a keystore error. Its rows are kept, so a wrong call costs nothing.
+            Err(error @ SecretStoreError::Unavailable(_)) => {
+                let count = failures
+                    .as_deref()
+                    .and_then(|count| count.parse::<u32>().ok())
+                    .unwrap_or(0)
+                    + 1;
+                set_meta(&connection, "unavailable-key-launches", Some(&count.to_string()))?;
+                if count < UNAVAILABLE_LAUNCHES {
+                    return Err(error.into());
+                }
+                None
+            }
+            other => Some(other?),
+        };
+        let secret = match read {
+            Some(KeyRead::Present(secret))
                 if recorded.as_deref().is_none_or(|check| check == key_check(&secret)) =>
             {
                 if recorded.is_none() {
                     set_meta(&connection, "secure-key-check", Some(&key_check(&secret)))?;
                 }
+                if failures.is_some() {
+                    set_meta(&connection, "unavailable-key-launches", None)?;
+                }
                 secret
             }
-            _ => Self::create_key(&mut connection, secrets, &random, &mut report)?,
+            Some(_) => Self::create_key(&mut connection, secrets, &random, &mut report, false)?,
+            None => Self::create_key(&mut connection, secrets, &random, &mut report, true)?,
         };
         let key = unbound(&secret)?;
         // 3. Rows kept under a key that could not be read come back once it reads again, on a
@@ -400,11 +425,14 @@ impl Store {
     /// A key that is missing or unreadable may come back (a roaming credential, a collection
     /// still unlocking, a Keystore error), so its rows are kept and the new key takes a new id;
     /// the old entry is never overwritten.
+    /// `give_up`: the key has failed as temporary for `UNAVAILABLE_LAUNCHES` launches running;
+    /// treat it as unreadable, and replace the device key that wraps it.
     fn create_key(
         connection: &mut Connection,
         secrets: &dyn SecretKeyStore,
         random: &SystemRandom,
         report: &mut OpenReport,
+        give_up: bool,
     ) -> Result<zeroize::Zeroizing<Vec<u8>>, OpenError> {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -412,7 +440,11 @@ impl Store {
         let key_id = meta(&transaction, "secure-key-id")?
             .ok_or_else(|| OpenError::Database("the storage key id disappeared".into()))?;
         let recorded = meta(&transaction, "secure-key-check")?;
-        let unreadable = match read_key(secrets, &key_id)? {
+        let current = match read_key(secrets, &key_id) {
+            Err(SecretStoreError::Unavailable(_)) if give_up => KeyRead::Unreadable,
+            other => other?,
+        };
+        let unreadable = match current {
             KeyRead::Present(secret) => {
                 // Matching: another instance created it meanwhile. Not matching: the rows were
                 // sealed with a key that is gone for good (an older build overwrote this id);
@@ -424,6 +456,7 @@ impl Store {
                         .map_err(database_error)?;
                 }
                 set_meta(&transaction, "secure-key-check", Some(&check))?;
+                set_meta(&transaction, "unavailable-key-launches", None)?;
                 transaction.commit().map_err(database_error)?;
                 if report.discarded_secure_records > 0 {
                     checkpoint(connection);
@@ -460,6 +493,9 @@ impl Store {
         };
         let mut fresh = zeroize::Zeroizing::new([0_u8; 32]);
         random.fill(fresh.as_mut()).map_err(|_| OpenError::Random)?;
+        if give_up {
+            secrets.replace_device_key()?;
+        }
         secrets.store(&id, fresh.as_ref())?;
         let stored = secrets.load(&id)?.ok_or(SecretStoreError::Corrupt)?;
         if stored.as_slice() != fresh.as_ref() {
@@ -467,6 +503,7 @@ impl Store {
         }
         set_meta(&transaction, "secure-key-id", Some(&id))?;
         set_meta(&transaction, "secure-key-check", Some(&key_check(&stored)))?;
+        set_meta(&transaction, "unavailable-key-launches", None)?;
         transaction.commit().map_err(database_error)?;
         report.discarded_secure_records += discarded;
         if discarded > 0 {

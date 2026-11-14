@@ -35,8 +35,10 @@ ring provider, and on Windows, macOS and Linux the OS trust store through
 `NativeConfig::extra_roots` adds a deployment's own CA without touching the OS store. It was already in the workspace lockfile through three crates, so it adds no new
 transitive dependencies, and it runs on the tokio runtime the socket needs anyway. Redirects are
 off (`Policy::none()`, the 3xx is returned unfollowed), there is no cookie store, no HTTP/2,
-HTTP follows the system proxy on desktop (environment variables, Windows proxy settings, macOS
-network settings) and none on mobile, connect and whole-request timeouts come from `Timeouts`, and the body is
+HTTP follows the system proxy on desktop as Chromium does: on Windows and macOS the OS settings
+only, never environment variables, with the OS bypass list and its "simple hostnames go direct"
+rule (`<local>`); on Linux the environment. Loopback and link-local addresses, in every spelling,
+always go direct. Mobile uses no proxy, connect and whole-request timeouts come from `Timeouts`, and the body is
 read chunk by chunk so a response over `max_response_bytes` fails with `TooLarge` without
 being buffered, with or without a `Content-Length`. `ureq` is smaller but blocking, and a raw
 hyper client would mean owning connection and TLS setup code.
@@ -72,15 +74,27 @@ Only the storage key lives in the OS store (service `T3 Code client storage`, ac
 and stay inside the cross-area transaction. If the OS store is unavailable, `open` fails with
 `OpenError::SecretStore`; nothing is written in plaintext. If the key is gone (the user cleared
 the keychain) or unreadable (a damaged Android wrapped key, a Keystore key that no longer opens
-it, a wrong length), the unreadable secure rows are deleted at open, a new key replaces it, and
-both are counted in `NativePlatform::open_report()`. The OS store is read with no database lock
-held, a missing key gets a second read before it counts as gone, and the key id is committed
-before a new key is stored, so a failed open reuses it. A database file SQLite reports as not a
-database or corrupt, at open or in `PRAGMA quick_check`, is moved aside as
-`client-storage.sqlite.corrupt-<seconds>` and a new one started (`recreated_database`); the next
-open deletes the copy, sealed rows and all. The report reaches the UI once, through
-`Platform::storage_report` and `ClientRuntime::take_storage_notice`. On Unix the data directory is created `0700`; deleted secure rows
-are overwritten (`secure_delete`) and the WAL is checkpointed after secure deletes.
+it, a wrong length), a new key replaces it under a **new** id and the secure rows are kept,
+unreadable, under the old one (`retained_secure_records` in `NativePlatform::open_report()`):
+a key that is missing for now (a roaming credential, a collection still unlocking, a Keystore
+error) is no proof it is gone. When the old key reads again on a later launch, its rows are
+re-sealed under the current key (`recovered_secure_records`), a newer row of the same key
+winning, and the old entry is deleted. One generation is kept; rows of an older one, or of a key
+an older build overwrote, are discarded (`discarded_secure_records`).
+
+Every read of the OS store runs with no database lock held, so a keychain or Secret Service
+prompt never keeps another process waiting. Writing a new key, the rare path (first run, a key
+lost), takes the database's write lock and first re-reads the key and its recorded fingerprint,
+so two instances starting together share one key. The key id is committed before a key is
+stored, so a failed open reuses it, and switching the database to WAL retries while another
+instance holds it. A database file SQLite reports as not a database or corrupt, at open or in
+`PRAGMA quick_check`, is moved aside as `client-storage.sqlite.corrupt-<seconds>` and a new one
+started (`recreated_database`); the next open deletes the copy, sealed rows and all, and then
+the old key's OS entry when the copy's key id could be read. A copy that cannot be deleted is
+logged and left. The report reaches the UI once, through `Platform::storage_report` and
+`ClientRuntime::take_storage_notice`, which keeps it on disk until the UI has taken it. On Unix
+the data directory is created `0700`; deleted secure rows are overwritten (`secure_delete`) and
+the WAL is checkpointed after every secure delete, the open's own included.
 
 **Shell requirement (iOS keychain accessibility).** `KeychainStore` sets only class, service and
 account, so the item gets the system defaults: accessible when unlocked, migratable to a new
@@ -144,7 +158,7 @@ Implemented here:
 | `RelayDeviceId` | `None`, as the desktop app sends today | the same persisted id, as the mobile app | `None`, as today |
 | `ClientPresentation` | from `NativeConfig::presentation` | same | from `WebConfig::presentation` |
 | `ClipboardRead` / `ClipboardWrite` | `arboard`, `text/plain` and `text/html` | extension | async clipboard API, `text/plain` and `text/html` |
-| `OpenUrl` | `open`, only `http`, `https`, `mailto` | extension | `window.open(…, "noopener,noreferrer")`, same schemes |
+| `OpenUrl` | `open`, what `external_links::safe_external_url` allows for the desktop (web links, editor and app-launch links; never `mailto`) | extension | `window.open(…, "noopener,noreferrer")`, web links only (`http`, `https`) |
 
 Everything else goes to the shell's `HostExtension`, or fails with
 `PlatformError::Unsupported("host action <Name> is not available on this host; …")` when there

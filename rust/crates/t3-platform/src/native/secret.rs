@@ -28,6 +28,12 @@ pub trait SecretKeyStore: Send + Sync + 'static {
     fn delete(&self, _id: &str) -> Result<(), SecretStoreError> {
         Ok(())
     }
+    /// Called before a new key is stored in place of one that failed launch after launch. A
+    /// store that wraps every key with one device key (Android's Keystore alias) replaces it,
+    /// since a broken one fails every new key too; one with an entry per key has nothing to do.
+    fn replace_device_key(&self) -> Result<(), SecretStoreError> {
+        Ok(())
+    }
 }
 
 /// What a failed Android Keystore call means. `secret/android.rs` gathers the facts from the
@@ -61,8 +67,12 @@ pub(crate) mod keystore_failure {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) enum Cause {
         None,
-        /// An `android.security.KeyStoreException`, with its `isTransientFailure()` (API 33+).
-        KeyStore { transient: Option<bool> },
+        /// An `android.security.KeyStoreException`, with its `isTransientFailure()` and
+        /// `getNumericErrorCode()` (both API 33+).
+        KeyStore {
+            transient: Option<bool>,
+            code: Option<i32>,
+        },
         Other,
     }
 
@@ -82,14 +92,27 @@ pub(crate) mod keystore_failure {
         Transient,
     }
 
+    /// `KeyStoreException.ERROR_KEY_DOES_NOT_EXIST` and `ERROR_KEY_CORRUPTED` (android.jar,
+    /// API 34).
+    const KEY_DOES_NOT_EXIST: i32 = 6;
+    const KEY_CORRUPTED: i32 = 7;
+
     pub(crate) fn classify(facts: &Facts) -> Failure {
         match (facts.site, facts.thrown, facts.cause) {
             (_, Thrown::KeyPermanentlyInvalidated, _)
             // keystore2's getKey rethrows an invalidated key, or one of an unknown algorithm,
             // as UnrecoverableKeyException with no cause.
-            | (Site::GetKey, Thrown::UnrecoverableKey, Cause::None) => {
-                Failure::Permanent { replace_key: true }
-            }
+            | (Site::GetKey, Thrown::UnrecoverableKey, Cause::None)
+            // API 33+ names a corrupted or vanished key; below 33 that looks like any other
+            // keystore error, which the store gives up on after three launches running.
+            | (
+                Site::GetKey,
+                _,
+                Cause::KeyStore {
+                    code: Some(KEY_CORRUPTED | KEY_DOES_NOT_EXIST),
+                    ..
+                },
+            ) => Failure::Permanent { replace_key: true },
             (Site::DoFinal, Thrown::AeadBadTag, _) => Failure::Permanent { replace_key: false },
             _ => Failure::Transient,
         }
@@ -113,14 +136,10 @@ pub(crate) mod keystore_failure {
                 // (:103-127) raises SYSTEM_ERROR, wrapped by `loadAndroidKeyStoreKeyFromKeystore`
                 // (:350-365). API 31-32 have no `isTransientFailure`; API 33+ answers false.
                 (
-                    facts(Site::GetKey, Thrown::UnrecoverableKey, Cause::KeyStore { transient: None }),
-                    Failure::Transient,
-                ),
-                (
                     facts(
                         Site::GetKey,
                         Thrown::UnrecoverableKey,
-                        Cause::KeyStore { transient: Some(false) },
+                        Cause::KeyStore { transient: None, code: None },
                     ),
                     Failure::Transient,
                 ),
@@ -128,7 +147,41 @@ pub(crate) mod keystore_failure {
                     facts(
                         Site::GetKey,
                         Thrown::UnrecoverableKey,
-                        Cause::KeyStore { transient: Some(true) },
+                        Cause::KeyStore { transient: Some(false), code: Some(4) },
+                    ),
+                    Failure::Transient,
+                ),
+                (
+                    facts(
+                        Site::GetKey,
+                        Thrown::UnrecoverableKey,
+                        Cause::KeyStore { transient: Some(true), code: Some(4) },
+                    ),
+                    Failure::Transient,
+                ),
+                // API 33+: the code says the key is corrupted, or gone.
+                (
+                    facts(
+                        Site::GetKey,
+                        Thrown::UnrecoverableKey,
+                        Cause::KeyStore { transient: Some(false), code: Some(7) },
+                    ),
+                    replace,
+                ),
+                (
+                    facts(
+                        Site::GetKey,
+                        Thrown::UnrecoverableKey,
+                        Cause::KeyStore { transient: Some(false), code: Some(6) },
+                    ),
+                    replace,
+                ),
+                // A code at another call says nothing about the key itself.
+                (
+                    facts(
+                        Site::DoFinal,
+                        Thrown::Other,
+                        Cause::KeyStore { transient: Some(false), code: Some(7) },
                     ),
                     Failure::Transient,
                 ),

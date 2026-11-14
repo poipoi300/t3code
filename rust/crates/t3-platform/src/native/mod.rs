@@ -5,6 +5,8 @@
 //! Network work runs as runtime tasks and storage on its blocking pool; dropping a returned
 //! future cancels the request, and a dropped storage call still commits or rolls back whole.
 mod history;
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+mod proxy;
 mod host;
 mod http;
 mod secret;

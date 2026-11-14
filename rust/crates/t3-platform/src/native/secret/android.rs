@@ -128,7 +128,7 @@ fn classify_exception(env: &mut JNIEnv<'_>, site: Site) -> JavaFailure {
     {
         Ok(cause) if cause.is_null() => Cause::None,
         Ok(cause) if is_instance(env, &cause, "android/security/KeyStoreException") => {
-            // API 33+; older devices raise NoSuchMethodError, cleared below.
+            // Both API 33+; older devices raise NoSuchMethodError, cleared after each.
             let transient = env
                 .call_method(&cause, "isTransientFailure", "()Z", &[])
                 .and_then(|value| value.z())
@@ -136,7 +136,14 @@ fn classify_exception(env: &mut JNIEnv<'_>, site: Site) -> JavaFailure {
             if env.exception_check().unwrap_or(false) {
                 let _ = env.exception_clear();
             }
-            Cause::KeyStore { transient }
+            let code = env
+                .call_method(&cause, "getNumericErrorCode", "()I", &[])
+                .and_then(|value| value.i())
+                .ok();
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_clear();
+            }
+            Cause::KeyStore { transient, code }
         }
         Ok(_) => Cause::Other,
         Err(_) => {
@@ -369,6 +376,13 @@ fn do_final(
 }
 
 impl SecretKeyStore for AndroidKeystoreStore {
+    /// Every id's wrapped key is wrapped by the one Keystore key: a key that failed launch after
+    /// launch fails every new one too, so it goes first. Wrapped keys of other ids then read as
+    /// unreadable; the store has already set their records aside.
+    fn replace_device_key(&self) -> Result<(), SecretStoreError> {
+        self.java(|env, _| delete_keystore_key(env))
+            .map_err(failure_to_secret_error)
+    }
     /// The wrapped key file; the Keystore key is shared by every id and stays.
     fn delete(&self, id: &str) -> Result<(), SecretStoreError> {
         match std::fs::remove_file(self.path(id)) {

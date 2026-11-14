@@ -7,19 +7,25 @@ use t3_client::platform::{HttpRequest, HttpResponse, PlatformError};
 #[derive(Clone)]
 pub(crate) struct HttpClient {
     client: reqwest::Client,
-    /// Loopback never goes through a proxy, as Chromium's implicit `<-loopback>` bypass does
-    /// in the TypeScript desktop app; the system proxy settings do not say so on their own.
+    /// Loopback and link-local never go through a proxy, as Chromium's implicit bypass does in
+    /// the TypeScript desktop app; the system proxy settings do not say so on their own.
     direct: reqwest::Client,
 }
 
-fn is_loopback(host: &url::Host<&str>) -> bool {
+/// Hosts Chromium never sends through a proxy: loopback and link-local, in every spelling.
+pub(crate) fn always_direct(host: &url::Host<&str>) -> bool {
+    let v4 = |address: std::net::Ipv4Addr| address.is_loopback() || address.is_link_local();
     match host {
         url::Host::Domain(name) => {
             let name = name.trim_end_matches('.').to_ascii_lowercase();
             name == "localhost" || name.ends_with(".localhost")
         }
-        url::Host::Ipv4(address) => address.is_loopback(),
-        url::Host::Ipv6(address) => address.is_loopback(),
+        url::Host::Ipv4(address) => v4(*address),
+        url::Host::Ipv6(address) => {
+            address.is_loopback()
+                || address.segments()[0] & 0xffc0 == 0xfe80
+                || address.to_ipv4_mapped().is_some_and(v4)
+        }
     }
 }
 
@@ -44,9 +50,16 @@ impl HttpClient {
                 .connect_timeout(timeouts.connect)
                 .timeout(timeouts.http)
         };
-        // Desktop follows the system proxy (environment, Windows settings, macOS network
-        // settings) as the TypeScript desktop app does; mobile does not use one yet.
-        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        // Desktop follows the system proxy as the TypeScript desktop app (Chromium) does: on
+        // Windows and macOS the OS settings only, on Linux the environment. Mobile uses none yet.
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        let client = match super::proxy::system() {
+            Some(proxy) => builder()
+                .proxy(reqwest::Proxy::custom(move |url| proxy.proxy_for(url)))
+                .build()?,
+            None => builder().no_proxy().build()?,
+        };
+        #[cfg(target_os = "linux")]
         let client = builder().build()?;
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         let client = builder().no_proxy().build()?;
@@ -60,7 +73,7 @@ impl HttpClient {
         if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
             return Err(PlatformError::InvalidData("HTTP URL scheme".into()));
         }
-        let client = if url.host().as_ref().is_some_and(is_loopback) {
+        let client = if url.host().as_ref().is_some_and(always_direct) {
             &self.direct
         } else {
             &self.client
@@ -120,7 +133,7 @@ impl HttpClient {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::is_loopback;
+    use super::always_direct;
 
     #[test]
     fn loopback_hosts_are_the_ones_chromium_never_proxies() {
@@ -144,7 +157,7 @@ mod tests {
             ("http://[::ffff:10.0.0.1]/", false),
         ] {
             let parsed = url::Url::parse(url).unwrap();
-            assert_eq!(is_loopback(&parsed.host().unwrap()), loopback, "{url}");
+            assert_eq!(always_direct(&parsed.host().unwrap()), loopback, "{url}");
         }
     }
 }
