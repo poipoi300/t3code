@@ -454,7 +454,7 @@ fn draft_chat_view(
                                     view()
                                         .app_class(tw("absolute inset-x-0 bottom-full pb-4"))
                                         .child(dynamic(move || {
-                                            headline_mode.get();
+                                            let _ = headline_mode.get();
                                             untracked(|| {
                                                 draft_hero_headline(current, client, error)
                                             })

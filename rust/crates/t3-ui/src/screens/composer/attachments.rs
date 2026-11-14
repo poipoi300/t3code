@@ -475,6 +475,8 @@ pub fn composer_attachment_file_list(state: ComposerAttachments) -> impl IntoEle
                 } else {
                     t("Remove to send")
                 }
+            } else if item.upload == UploadState::Preparing {
+                t("Preparing")
             } else if item.upload == UploadState::Uploading {
                 t("Uploading")
             } else {

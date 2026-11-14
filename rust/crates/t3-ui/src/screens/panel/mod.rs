@@ -85,7 +85,7 @@ impl Default for WorkspaceSession {
     }
 }
 
-/// Session history until C12 connects durable storage and the reopen command.
+/// Closed-tab history for the default in-memory workspace session.
 pub fn workspace_panel_history() -> Signal<t3_client::view_logic::shell::closed_views::ClosedViews>
 {
     global::<WorkspaceSession>().get_untracked().history
@@ -193,17 +193,6 @@ fn MountedThreadWorkspace(props: MountedThreadWorkspaceProps) -> impl IntoElemen
         details_height,
         make_slots(),
     );
-    effect(move || {
-        if inline.get() && host.thread_panel_open(&selected.get(), false) {
-            host.apply(
-                &selected.get(),
-                Action::SetThreadPanel {
-                    inline: false,
-                    open: false,
-                },
-            );
-        }
-    });
     let header = nsh_base::popover()
         .open(move || Some(!inline.get() && host.thread_panel_open(&selected.get(), false)))
         .on_open_change(move |event: &nsh_base::PopoverEvent| {
@@ -222,7 +211,7 @@ fn MountedThreadWorkspace(props: MountedThreadWorkspaceProps) -> impl IntoElemen
         })
         .placement(Placement::Bottom)
         .align(Align::End)
-        .offset(px(4.0))
+        .offset(px(0.0))
         .trigger(header::thread_header(key.clone()))
         .child(dynamic(move || {
             (!inline.get()).then(|| {
@@ -342,7 +331,7 @@ impl PartialEq for PanelHost {
     }
 }
 
-/// The runtime persists the client record and passes closed tabs to its reopen-history service.
+/// The runtime binding receives the client record and actual closed tabs for persistence/history.
 pub struct PanelChange {
     pub thread: ThreadKey,
     pub state: PanelStore,

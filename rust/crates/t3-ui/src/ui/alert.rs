@@ -5,7 +5,8 @@
 //! and `ControlAlignment::{Center, FirstLine}` have the TSX names and defaults. There is no
 //! `Size` prop in the source. All slots accept arbitrary elements. SVG callers apply the
 //! supplied Context's icon size/tint; `alert_icon` does this for a Lucide icon.
-//! Text is translated by the caller.
+//! Element slots preserve caller content. Accessible label slots take `i18n::Text`: keys
+//! resolve in the UI language; runtime and already-translated strings stay literal.
 //! `alert_title`, `alert_description` and `alert_action` own their styling and return opaque
 //! elements. Pass the supplied `Context` to descriptions so parent variant selectors apply.
 //! `Props::scope` selects the sidebar's redeclared tokens when mounted there.
@@ -234,7 +235,7 @@ pub fn alert_action(content: impl IntoElement) -> impl IntoElement {
 /// Flex span slots become views because NSH text cannot host their row/grid layout.
 pub mod composer_banner {
     use super::*;
-    use crate::i18n::t;
+    use crate::i18n::Text;
     use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -611,11 +612,11 @@ pub mod composer_banner {
             .child(slots.actions)
     }
 
-    /// Row's useRender button alternative from ComposerBanner.tsx; label is translated at display.
+    /// Row's useRender button alternative from ComposerBanner.tsx; only label keys are translated.
     pub fn row_button(
         context: Context,
         layout: Layout,
-        label: impl Fn() -> String + 'static,
+        label: impl Fn() -> Text + 'static,
         disabled: impl Fn() -> bool + 'static,
         on_press: impl Fn() + 'static,
         build: impl FnOnce(RowContext) -> RowSlots,
@@ -627,7 +628,7 @@ pub mod composer_banner {
             actions: slots.actions.is_some(),
         });
         nsh_base::button()
-            .accessibility_label(move || Some(SharedString::from(t(&label()))))
+            .accessibility_label(move || Some(label().resolve()))
             .disabled(disabled)
             .on_press(on_press)
             // The shared adaptive contract adds a 44pt coarse target without changing row layout.
@@ -769,7 +770,7 @@ pub mod composer_banner {
 
     /// Dismiss from ComposerBanner.tsx. The caller owns removal and its accessible label.
     pub fn dismiss(
-        label: String,
+        label: Text,
         disabled: impl Fn() -> bool + 'static,
         on_press: impl Fn() + 'static,
     ) -> impl IntoElement {
@@ -777,7 +778,7 @@ pub mod composer_banner {
         button(
             ButtonContent::Icon {
                 icon: Icon::X,
-                label: t(&label),
+                label: label.resolve().to_string(),
             },
             ButtonVariant::Ghost,
             ButtonSize::IconXs,

@@ -49,6 +49,15 @@ pub fn install(choice: &ThemeChoice) {
     set_color_scheme(scheme_for(choice));
 }
 
+/// The active appearance's `html[data-theme-id]` presence; read in a binding to follow changes.
+pub fn has_theme_id() -> bool {
+    tokens().number(if dark() {
+        "theme-catalogue-dark"
+    } else {
+        "theme-catalogue-light"
+    }) == Some(1.0)
+}
+
 /// The appearance NSH shows: the system's while the theme has both halves and the user follows
 /// the system, else the one the theme or the user forces.
 pub fn scheme_for(choice: &ThemeChoice) -> Appearance {
@@ -95,6 +104,16 @@ pub fn tokens_for(choice: &ThemeChoice) -> Tokens {
 /// (clear in dark, for `light:`), and lengths are points.
 fn pair(light: &ResolvedTheme, dark: &ResolvedTheme) -> Tokens {
     let mut tokens = Tokens::default();
+    for (appearance, resolved) in [("light", light), ("dark", dark)] {
+        tokens.set_number(
+            &format!("theme-catalogue-{appearance}"),
+            f32::from(resolved.theme_id.is_some()),
+        );
+        tokens.set_number(
+            &format!("theme-t3-chat-{appearance}"),
+            f32::from(resolved.theme_id.as_deref() == Some("t3-chat")),
+        );
+    }
     for (scope, light_values, dark_values) in [
         ("", &light.tokens.root, &dark.tokens.root),
         (
@@ -104,27 +123,38 @@ fn pair(light: &ResolvedTheme, dark: &ResolvedTheme) -> Tokens {
         ),
     ] {
         // Plain names first, so a `--color-X` alias overrides `--X` under the class name `X`.
-        let mut names: Vec<_> = light_values.keys().collect();
+        let mut names: Vec<_> = light_values.keys().chain(dark_values.keys()).collect();
+        names.sort();
+        names.dedup();
         names.sort_by_key(|name| name.starts_with("--color-"));
         for name in names {
             let Some(key) = name.strip_prefix("--") else {
                 continue;
             };
-            match (&light_values[name], dark_values.get(name)) {
-                (Value::Color { color: l }, Some(Value::Color { color: d })) => {
-                    let color = AdaptiveColor::new(hsla_of(l), hsla_of(d));
-                    if scope.is_empty() {
-                        tokens.set_color(key, color);
-                    }
-                    let class = key.strip_prefix("color-").unwrap_or(key);
-                    tokens.set_color(&format!("{scope}{class}"), color);
+            let color = match (light_values.get(name), dark_values.get(name)) {
+                (Some(Value::Color { color: l }), Some(Value::Color { color: d })) => {
+                    Some(AdaptiveColor::new(hsla_of(l), hsla_of(d)))
                 }
-                (value, _) if scope.is_empty() => {
-                    if let Some(px) = value.px(light.root_font_px) {
-                        tokens.set_number(key, px as f32);
-                    }
+                // Raw catalogue roles can exist in only one selected appearance.
+                (Some(Value::Color { color }), None) if name.starts_with("--app-theme-") => Some(
+                    AdaptiveColor::new(hsla_of(color), AdaptiveColor::TRANSPARENT.dark),
+                ),
+                (None, Some(Value::Color { color })) if name.starts_with("--app-theme-") => Some(
+                    AdaptiveColor::new(AdaptiveColor::TRANSPARENT.light, hsla_of(color)),
+                ),
+                _ => None,
+            };
+            if let Some(color) = color {
+                if scope.is_empty() {
+                    tokens.set_color(key, color);
                 }
-                _ => {}
+                let class = key.strip_prefix("color-").unwrap_or(key);
+                tokens.set_color(&format!("{scope}{class}"), color);
+            } else if scope.is_empty()
+                && let Some(value) = light_values.get(name)
+                && let Some(px) = value.px(light.root_font_px)
+            {
+                tokens.set_number(key, px as f32);
             }
         }
     }
@@ -188,6 +218,143 @@ mod tests {
             byte(r) << 24 | byte(g) << 16 | byte(b) << 8 | byte(a)
         };
         (pack(color.light), pack(color.dark))
+    }
+
+    #[test]
+    fn identity_tokens_follow_each_resolved_id_even_when_colours_are_identical() {
+        let mut light = resolve_theme(&ThemeInput::new(None, ThemeAppearance::Light));
+        let mut dark = resolve_theme(&ThemeInput::new(None, ThemeAppearance::Dark));
+        let stock = pair(&light, &dark);
+        for (light_id, dark_id, expected) in [
+            (None, None, [0.0, 0.0, 0.0, 0.0]),
+            (Some("ocean"), None, [1.0, 0.0, 0.0, 0.0]),
+            (None, Some("t3-chat"), [0.0, 1.0, 0.0, 1.0]),
+            (Some("t3-chat"), Some("ocean"), [1.0, 1.0, 1.0, 0.0]),
+            (Some(""), Some("t3-chat"), [1.0, 1.0, 0.0, 1.0]),
+        ] {
+            light.theme_id = light_id.map(str::to_owned);
+            dark.theme_id = dark_id.map(str::to_owned);
+            let tokens = pair(&light, &dark);
+            assert_eq!(
+                [
+                    "theme-catalogue-light",
+                    "theme-catalogue-dark",
+                    "theme-t3-chat-light",
+                    "theme-t3-chat-dark",
+                ]
+                .map(|name| tokens.number(name)),
+                expected.map(Some)
+            );
+            for (name, color) in stock.colors() {
+                assert_eq!(
+                    hex(tokens.color(name).expect("existing colour")),
+                    hex(AdaptiveColor::new(color.light, color.dark)),
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    fn assert_one_sided_app_colour(appearance: ThemeAppearance) {
+        let mut light = resolve_theme(&ThemeInput::new(None, ThemeAppearance::Light));
+        let mut dark = resolve_theme(&ThemeInput::new(None, ThemeAppearance::Dark));
+        let side = if appearance == ThemeAppearance::Light {
+            &mut light.tokens.root
+        } else {
+            &mut dark.tokens.root
+        };
+        let value = Value::Color {
+            color: Color::parse("#123456").expect("colour"),
+        };
+        side.insert("--app-theme-bridge-one-sided".into(), value.clone());
+        side.insert("--bridge-one-sided".into(), value);
+        let tokens = pair(&light, &dark);
+        assert_eq!(
+            hex(tokens
+                .color("app-theme-bridge-one-sided")
+                .expect("raw role")),
+            if appearance == ThemeAppearance::Light {
+                (0x123456ff, 0)
+            } else {
+                (0, 0x123456ff)
+            }
+        );
+        assert!(tokens.color("bridge-one-sided").is_none());
+    }
+
+    #[test]
+    fn one_sided_app_theme_colour_keeps_the_light_half() {
+        assert_one_sided_app_colour(ThemeAppearance::Light);
+    }
+
+    #[test]
+    fn one_sided_app_theme_colour_keeps_the_dark_half() {
+        assert_one_sided_app_colour(ThemeAppearance::Dark);
+    }
+
+    #[test]
+    fn two_sided_colours_keep_their_values_and_alias_precedence_in_both_scopes() {
+        let catalog = ThemeCatalog {
+            custom: &[],
+            environment: &[],
+        };
+        for (light_id, dark_id) in [
+            ("", ""),
+            ("ocean", "ocean"),
+            ("", "ocean"),
+            ("ocean", ""),
+            ("grove", "t3-chat"),
+        ] {
+            let resolve = |id, appearance| {
+                let mut input = ThemeInput::new(catalog.get(id), appearance);
+                input.contrast = 160;
+                resolve_theme(&input)
+            };
+            let light = resolve(light_id, ThemeAppearance::Light);
+            let dark = resolve(dark_id, ThemeAppearance::Dark);
+            let tokens = pair(&light, &dark);
+            for (scope, left, right) in [
+                ("", &light.tokens.root, &dark.tokens.root),
+                (
+                    SIDEBAR_COLOR_PREFIX,
+                    &light.tokens.sidebar,
+                    &dark.tokens.sidebar,
+                ),
+            ] {
+                let paired = |name: &str| match (left.get(name), right.get(name)) {
+                    (Some(Value::Color { color: l }), Some(Value::Color { color: d })) => {
+                        Some(AdaptiveColor::new(hsla_of(l), hsla_of(d)))
+                    }
+                    _ => None,
+                };
+                for name in left.keys() {
+                    let Some(original) = paired(name) else {
+                        continue;
+                    };
+                    let key = name.strip_prefix("--").expect("CSS token");
+                    let class = key.strip_prefix("color-").unwrap_or(key);
+                    let expected = paired(&format!("--color-{class}")).unwrap_or(original);
+                    assert_eq!(
+                        hex(tokens
+                            .color(&format!("{scope}{class}"))
+                            .expect("class colour")),
+                        hex(expected),
+                        "{light_id}/{dark_id}: {scope}{class}"
+                    );
+                    if scope.is_empty() {
+                        assert_eq!(
+                            hex(tokens.color(key).expect("raw colour")),
+                            hex(if key.starts_with("color-") {
+                                original
+                            } else {
+                                expected
+                            }),
+                            "{light_id}/{dark_id}: {key}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -258,5 +425,83 @@ mod tests {
             pick(&stock, "muted-foreground"),
             pick(&high, "muted-foreground")
         );
+    }
+
+    mod identity_tests {
+        use crate::theme::{ThemeChoice, has_theme_id, install};
+        use nsh_core::prelude::*;
+        use nsh_engine::{EngineConfig, Root};
+        use nsh_testing::Headless;
+        use t3_theme::palette::ThemeHalves;
+
+        #[component]
+        fn ThemeIdentityProbe() -> impl IntoElement {
+            install(&ThemeChoice {
+                halves: Some(ThemeHalves {
+                    light: Some(String::new()),
+                    dark: Some("ocean".into()),
+                }),
+                ..Default::default()
+            });
+            view()
+                .child(text(move || {
+                    if has_theme_id() {
+                        crate::i18n::ts("Has theme")
+                    } else {
+                        crate::i18n::ts("No theme")
+                    }
+                }))
+                .child(
+                    nsh_base::button()
+                        .accessibility_label(Some(crate::i18n::ts("Catalogue theme")))
+                        .child(text(crate::i18n::ts("Catalogue theme")))
+                        .on_press(|| {
+                            install(&ThemeChoice {
+                                theme: "ocean".into(),
+                                ..Default::default()
+                            })
+                        }),
+                )
+                .child(
+                    nsh_base::button()
+                        .accessibility_label(Some(crate::i18n::ts("Stock theme")))
+                        .child(text(crate::i18n::ts("Stock theme")))
+                        .on_press(|| install(&ThemeChoice::default())),
+                )
+        }
+
+        #[test]
+        fn host_identity_follows_appearance_and_theme_installation() {
+            for (width, height) in [(390.0, 844.0), (1280.0, 800.0)] {
+                let mut sets = crate::registries();
+                let mut fixtures = Registry::new();
+                fixtures.register::<ThemeIdentityProbe>();
+                sets.push(fixtures);
+                let mut app = Headless::start(EngineConfig {
+                    ui_sets: sets,
+                    viewport: size(px(width), px(height)),
+                    ..EngineConfig::new(Root::of::<ThemeIdentityProbe>())
+                })
+                .expect("theme identity probe starts");
+                app.wait_for("No theme").expect("stock light half");
+                app.set_environment("dark appearance", |env| {
+                    env.color_scheme = nsh_core::platform::ColorScheme::Dark
+                })
+                .expect("set dark");
+                app.wait_for("Has theme").expect("catalogue dark half");
+                app.set_environment("light appearance", |env| {
+                    env.color_scheme = nsh_core::platform::ColorScheme::Light
+                })
+                .expect("set light");
+                app.wait_for("No theme").expect("stock light half again");
+                app.press("role:button[Catalogue theme]")
+                    .expect("install catalogue");
+                app.wait_for("Has theme")
+                    .expect("tokens update host identity");
+                app.press("role:button[Stock theme]")
+                    .expect("install stock");
+                app.wait_for("No theme").expect("clear host identity");
+            }
+        }
     }
 }

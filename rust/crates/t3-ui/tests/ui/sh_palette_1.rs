@@ -1,1 +1,280 @@
-//! SH-PALETTE-1: headless tests of Command palette: shell, modes, focus restore. Start the app with `crate::support`.
+//! Port of CommandPalette.browser.test.tsx and commandPaletteCommands.browser.test.tsx shell cases.
+
+use nsh_core::{keymap::When, prelude::*};
+use nsh_engine::{EngineConfig, Root};
+use nsh_testing::Headless;
+use t3_client::view_logic::shell::shortcuts::DispatchEvent;
+use t3_ui::i18n::t;
+use t3_ui::screens::palette::{
+    Intent, OpenDetail, OpenPage, OverlayMode, UiAction, command_palette, open_command_palette,
+    palette_controller,
+};
+use t3_ui::theme::{self, ThemeChoice};
+
+use crate::support::{DESKTOP, PHONE};
+
+#[component]
+fn PaletteFixture() -> impl IntoElement {
+    theme::install(&ThemeChoice::default());
+    let palette = palette_controller();
+    let mounted = signal(true);
+    let workspace_value = signal(String::new());
+    for (stroke, mode) in [("f3", OverlayMode::Files), ("f4", OverlayMode::Content)] {
+        on_key_with(
+            stroke,
+            KeyOptions {
+                when: When::Always,
+                ..Default::default()
+            },
+            move |_| {
+                palette.open_child_search(
+                    mode,
+                    t3_ui::screens::palette::ReturnContext {
+                        query: "https://github.com/acme/web/pull/7".into(),
+                        linked_search: Some(Intent::Search {
+                            query: "https://github.com/acme/web/pull/7".into(),
+                            linked_threads: Some(vec![]),
+                        }),
+                    },
+                );
+            },
+        );
+    }
+    on_key_with(
+        "f5",
+        KeyOptions {
+            when: When::Always,
+            ..Default::default()
+        },
+        move |_| {
+            palette.dispatch(UiAction::OpenIntent(Intent::Search {
+                query: "replacement".into(),
+                linked_threads: None,
+            }));
+        },
+    );
+    on_key_with(
+        "f6",
+        KeyOptions {
+            when: When::Always,
+            ..Default::default()
+        },
+        move |_| mounted.update(|mounted| *mounted = !*mounted),
+    );
+    let file_toggle = palette.command_handlers().remove("filePicker.toggle").expect("file toggle handler");
+    on_key_with(
+        "f7",
+        KeyOptions {
+            when: When::Always,
+            ..Default::default()
+        },
+        move |_| {
+            let mut event = DispatchEvent { key: Default::default(), default_prevented: false, propagation_stopped: false, inside_confirmation: false };
+            file_toggle(&mut event);
+        },
+    );
+    on_key_with(
+        "f8",
+        KeyOptions {
+            when: When::Always,
+            ..Default::default()
+        },
+        move |_| palette.dispatch(UiAction::SetOpen(true)),
+    );
+    view()
+        .w_full()
+        .h_full()
+        .child(text(move || format!("mounted: {}", palette.is_mounted())))
+        .child(text(move || format!("presented: {}", palette.is_open())))
+        .child(text(move || format!("mode: {:?}", palette.state().mode)))
+        .child(when(mounted, move || {
+            untracked(move || {
+                command_palette(
+                    view()
+                        .w_full()
+                        .h_full()
+                        .child(
+                            nsh_base::input()
+                                .label(move || SharedString::from(t("Workspace")))
+                                .value(move || workspace_value.get())
+                                .on_change(move |value: &str| {
+                                    workspace_value.set(value.to_owned())
+                                }),
+                        )
+                        .child(trigger("Open", OpenDetail::default))
+                        .child(trigger("New thread in", || OpenDetail {
+                            open: Some(OpenPage::NewThreadIn),
+                            ..Default::default()
+                        }))
+                        .child(trigger("Search", || OpenDetail {
+                            query: Some("acme".into()),
+                            ..Default::default()
+                        })),
+                )
+            })
+        }))
+}
+
+fn trigger(label: &'static str, detail: impl Fn() -> OpenDetail + 'static) -> impl IntoElement {
+    nsh_base::button()
+        .accessibility_label(move || Some(SharedString::from(t(label))))
+        .on_press(move || open_command_palette(detail()))
+        .child(text(move || SharedString::from(t(label))))
+}
+
+fn fixture(size_: (f32, f32)) -> Headless {
+    let mut registry = Registry::new();
+    registry.register::<PaletteFixture>();
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: vec![nsh_base::registry(), registry],
+        viewport: size(px(size_.0), px(size_.1)),
+        clock: nsh_core::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH),
+        ..EngineConfig::new(Root::of::<PaletteFixture>())
+    })
+    .expect("palette fixture starts");
+    app.wait_for("role:button[Open]")
+        .expect("palette fixture mounts");
+    app
+}
+
+fn input_value(app: &Headless) -> String {
+    app.screen()
+        .input_text("role:combobox[Command palette]")
+        .expect("palette query")
+        .expect("input text")
+        .to_owned()
+}
+
+#[test]
+fn a_new_thread_intent_focuses_the_search_input_and_back_restores_root() {
+    for size_ in [PHONE, DESKTOP] {
+        let mut app = fixture(size_);
+        app.press("role:button[New thread in]")
+            .expect("open submenu intent");
+        app.wait_for("Search...").expect("submenu input");
+        app.press_key("r")
+            .expect("type without explicitly focusing input");
+        assert_eq!(input_value(&app), "r");
+        app.type_text("role:combobox[Command palette]", "emote project")
+            .expect("continue typing");
+        assert_eq!(input_value(&app), "remote project");
+        app.press_key("backspace").expect("delete within submenu");
+        assert_eq!(input_value(&app), "remote projec");
+        assert!(app.screen().shows("Search..."));
+        app.clear("role:combobox[Command palette]")
+            .expect("clear query");
+        app.press_key("backspace").expect("empty submenu goes back");
+        app.wait_for("Search commands, projects, and threads...")
+            .expect("root");
+        app.press_key("escape").expect("root closes");
+        assert_eq!(app.screen().count("role:dialog"), Ok(0));
+    }
+}
+
+#[test]
+fn a_search_intent_seeds_the_input_and_another_intent_replaces_the_open_session() {
+    let mut app = fixture(DESKTOP);
+    app.press("role:button[Search]").expect("search intent");
+    assert_eq!(input_value(&app), "acme");
+    app.press_key("f5").expect("new intent while open");
+    app.wait_for("replacement").expect("new query");
+    assert_eq!(input_value(&app), "replacement");
+    app.press_key("escape").expect("close");
+    app.press("role:button[Open]").expect("plain reopen");
+    assert_eq!(input_value(&app), "");
+}
+
+#[test]
+fn child_search_escape_restores_the_parent_and_the_replacement_input_owns_typing() {
+    for size_ in [PHONE, DESKTOP] {
+        for key in ["f3", "f4"] {
+            let mut app = fixture(size_);
+            app.press("role:button[Search]").expect("open parent");
+            let dialog = app.screen().id("role:dialog").expect("modal");
+            app.press_key(key).expect("open child search");
+            assert_eq!(app.screen().count("role:combobox"), Ok(0));
+            app.press_key("escape").expect("return from child");
+            assert_eq!(
+                app.screen().id("role:dialog"),
+                Ok(dialog),
+                "mode changes reuse modal"
+            );
+            assert_eq!(input_value(&app), "https://github.com/acme/web/pull/7");
+            app.press_key("x").expect("type into remounted input");
+            assert!(input_value(&app).contains('x'));
+            assert_eq!(app.screen().input_text("label:Workspace"), Ok(Some("")));
+            app.press_key("escape").expect("then close root");
+            assert_eq!(app.screen().count("role:dialog"), Ok(0));
+        }
+    }
+}
+
+#[test]
+fn outside_closes_a_child_and_discards_the_return_context() {
+    for size_ in [PHONE, DESKTOP] {
+        let mut app = fixture(size_);
+        app.press("role:button[Search]").expect("open");
+        app.press_key("f3").expect("child");
+        app.press("id:command-dialog-backdrop")
+            .expect("outside dismissal");
+        assert_eq!(app.screen().count("role:dialog"), Ok(0));
+        app.press("role:button[Open]").expect("fresh root");
+        assert_eq!(input_value(&app), "");
+    }
+}
+
+#[test]
+fn requests_without_a_mounted_palette_are_dropped_and_unmount_clears_open_state() {
+    let mut app = fixture(DESKTOP);
+    app.press("role:button[Search]").expect("open");
+    app.press_key("f6").expect("unmount shell while open");
+    app.wait_for("text:mounted: false")
+        .expect("mount counter reset");
+    assert_eq!(app.screen().count("role:dialog"), Ok(0));
+    app.press_key("f5")
+        .expect("ignored intent while no palette mounted");
+    app.press_key("f8")
+        .expect("ignored plain open while absent");
+    app.press_key("f7").expect("registered overlay handler also stays inert");
+    app.press_key("f6").expect("remount shell");
+    app.wait_for("text:mounted: true").expect("mounted again");
+    assert_eq!(
+        app.screen().count("role:dialog"),
+        Ok(0),
+        "no stale request pops later"
+    );
+    app.press("role:button[Open]")
+        .expect("open usable fresh shell");
+    assert_eq!(input_value(&app), "");
+}
+
+#[test]
+fn toggling_an_open_child_mode_closes_it_and_the_next_toggle_opens_cleanly() {
+    let mut app = fixture(PHONE);
+    app.press_key("f7").expect("open files directly");
+    app.wait_for("text:mode: Files").expect("files mode");
+    app.press_key("f7").expect("same mode closes");
+    assert_eq!(app.screen().count("role:dialog"), Ok(0));
+    app.press_key("f7").expect("reopen files");
+    app.press_key("escape")
+        .expect("direct child escapes to root");
+    assert_eq!(input_value(&app), "");
+}
+
+#[test]
+fn dismissal_returns_keyboard_focus_to_the_unchanged_workspace() {
+    let mut app = fixture(DESKTOP);
+    app.type_text("label:Workspace", "draft")
+        .expect("workspace input takes focus");
+    app.press_key("f8")
+        .expect("open without changing opener focus");
+    app.press_key("p").expect("palette input takes typing");
+    assert_eq!(input_value(&app), "p");
+    app.press_key("escape").expect("close palette");
+    app.press_key("x")
+        .expect("type after returning to workspace");
+    assert_eq!(
+        app.screen().input_text("label:Workspace"),
+        Ok(Some("draftx"))
+    );
+}

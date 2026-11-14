@@ -1,3 +1,4 @@
+pub mod subscription;
 use crate::{
     ClientError,
     permissions::{ContractPermissionPolicy, DestinationSessions, SessionGrants},

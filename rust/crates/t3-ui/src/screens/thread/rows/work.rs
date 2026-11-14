@@ -3,9 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
 use t3_client::thread_views::messages_timeline::work_entry::{
-    action as tool_group_action, plain_output, trim as js_trim,
+    action as tool_group_action, has_detail, plain_output, trim as js_trim,
 };
 use t3_client::thread_views::messages_timeline::{
     MessagesTimelineRow, MessagesTimelineRowContent, live_work_entry_label,
@@ -384,7 +385,7 @@ fn work_entry_log_row(
     let header = dynamic(move || {
         let row = row.get()?;
         let open = expanded.get();
-        Some(untracked(|| work_entry_header(&row, open, &header_context)))
+        Some(work_entry_header(&row, open, &header_context))
     });
     let detail_kind = computed(move || {
         row.with(|row| {
@@ -606,14 +607,14 @@ fn can_expand_projected_item(row: &WorkEntryRow, preview: &str) -> bool {
             || row.question_answer.is_some()
             || item.is_some_and(turn_item_needs_detail_fetch);
     }
-    if let Some(item) = item {
+    if item.is_some() {
         return if entry.item_type.as_deref() == Some("reasoning") {
             entry
                 .detail
                 .as_ref()
                 .is_some_and(|detail| !js_trim(detail).is_empty())
         } else {
-            image || row.question_answer.is_some() || turn_item_has_detail(item)
+            image || row.question_answer.is_some() || has_detail(entry)
         };
     }
     !js_trim(preview).is_empty()
@@ -1051,42 +1052,89 @@ fn work_log_details(kind: &str, content: AnyElement) -> impl IntoElement {
 
 fn fallback_icon(name: &str, class: &str, muted: bool) -> AnyElement {
     let class = class.to_owned();
-    let glyph = Icon::from_name(name);
+    let source = match name {
+        "browser" | "computer" => Some(browser_app_icon()),
+        "t3-code" => Some(t3_wordmark()),
+        name => Icon::from_name(match name {
+            "code" => "code-xml",
+            "device" => "smartphone",
+            "pull-request" => "git-pull-request-arrow",
+            name => name,
+        })
+        .map(Icon::asset),
+    };
     view()
         .app_class(tw("flex size-4 items-center justify-center"))
-        .child(glyph.map(|glyph| {
-            icon(glyph, 16.0, move || {
-                let palette = crate::theme::palette();
-                let color = match class.as_str() {
-                    "text-warning" => palette.warning,
-                    "text-destructive" => palette.destructive,
-                    "text-muted-foreground" => palette.muted_foreground,
-                    "text-foreground/92" => palette.foreground.opacity(0.92),
-                    "text-tool-error-icon/40" => crate::theme::current_tokens()
-                        .color("tool-error-icon")
-                        .unwrap_or(palette.destructive)
-                        .opacity(0.4),
-                    _ => palette.icon_muted,
-                };
-                if !muted {
-                    return color;
-                }
-                // NSH cannot resolve light:brightness-60; apply the same light RGB multiplier.
-                let Rgba { r, g, b, a } = color.light.into();
-                AdaptiveColor {
-                    light: Rgba {
-                        r: r * 0.6,
-                        g: g * 0.6,
-                        b: b * 0.6,
-                        a,
+        .child(source.map(|source| {
+            image(source)
+                .w(px(16.0))
+                .h(px(16.0))
+                .flex_shrink_0()
+                .accessible(false)
+                .tint_color(move || {
+                    let palette = crate::theme::palette();
+                    let color = match class.as_str() {
+                        "text-warning" => palette.warning,
+                        "text-destructive" => palette.destructive,
+                        "text-muted-foreground" => palette.muted_foreground,
+                        "text-foreground/92" => palette.foreground.opacity(0.92),
+                        "text-tool-error-icon/40" => crate::theme::current_tokens()
+                            .color("tool-error-icon")
+                            .unwrap_or(palette.destructive)
+                            .opacity(0.4),
+                        _ => palette.icon_muted,
+                    };
+                    if !muted {
+                        return color;
                     }
-                    .into(),
-                    dark: color.dark,
-                }
-                .opacity(0.7)
-            })
+                    // NSH cannot resolve light:brightness-60; apply the same light RGB multiplier.
+                    let Rgba { r, g, b, a } = color.light.into();
+                    AdaptiveColor {
+                        light: Rgba {
+                            r: r * 0.6,
+                            g: g * 0.6,
+                            b: b * 0.6,
+                            a,
+                        }
+                        .into(),
+                        dark: color.dark,
+                    }
+                    .opacity(0.7)
+                })
         }))
         .into_element()
+}
+
+/// Port of TimelineToolActivityIcon.tsx BrowserAppIcon.
+fn browser_app_icon() -> ImageSrc {
+    ImageSrc::svg_markup(
+        r##"<svg xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.9"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden
+    >
+      <path d="M8.5 19H7.2C4.4 19 3 17.5 3 14.6V7.4C3 4.5 4.5 3 7.4 3h8.2C18.5 3 20 4.5 20 7.4v2.4" />
+      <circle cx="7.4" cy="7.2" r="0.75" fill="currentColor" stroke="none" />
+      <path d="M11.2 7.2h4.3" />
+      <path d="m12.4 11.4 7.5 2.6-3.4 1.6-1.5 3.6z" fill="currentColor" stroke="none" />
+    </svg>"##,
+    )
+}
+
+/// Port of apps/web/src/components/T3Wordmark.tsx T3Wordmark.
+fn t3_wordmark() -> ImageSrc {
+    ImageSrc::svg_markup(
+        r##"<svg  viewBox="15.5309 37 94.3941 56.96" xmlns="http://www.w3.org/2000/svg">
+      <path
+        d="M33.4509 93V47.56H15.5309V37H64.3309V47.56H46.4109V93H33.4509ZM86.7253 93.96C82.832 93.96 78.9653 93.4533 75.1253 92.44C71.2853 91.3733 68.032 89.88 65.3653 87.96L70.4053 78.04C72.5386 79.5867 75.0186 80.8133 77.8453 81.72C80.672 82.6267 83.5253 83.08 86.4053 83.08C89.6586 83.08 92.2186 82.44 94.0853 81.16C95.952 79.88 96.8853 78.12 96.8853 75.88C96.8853 73.7467 96.0586 72.0667 94.4053 70.84C92.752 69.6133 90.0853 69 86.4053 69H80.4853V60.44L96.0853 42.76L97.5253 47.4H68.1653V37H107.365V45.4L91.8453 63.08L85.2853 59.32H89.0453C95.9253 59.32 101.125 60.8667 104.645 63.96C108.165 67.0533 109.925 71.0267 109.925 75.88C109.925 79.0267 109.099 81.9867 107.445 84.76C105.792 87.48 103.259 89.6933 99.8453 91.4C96.432 93.1067 92.0586 93.96 86.7253 93.96Z"
+        fill="currentColor"
+      />
+    </svg>"##,
+    )
 }
 
 /// Port of TimelineWorkEntryRow.logic.ts workToneIcon.
@@ -1128,6 +1176,13 @@ pub fn work_entry_icon_name(entry: &WorkLogEntry) -> String {
         .and_then(serde_json::Value::as_str)
     {
         return surface.into();
+    }
+    if let Some(OrchestrationV2TurnItem::DynamicTool(tool)) = entry.structured_payload.as_deref()
+        && t3_client::thread_views::messages_timeline::work_entry::is_javascript_repl_tool(
+            tool.tool_name.as_ref().map(|name| name.0.as_str()),
+        )
+    {
+        return "code".into();
     }
     if let Some(presentation) = resolve_work_entry_tool_presentation(entry, None) {
         return presentation.icon;

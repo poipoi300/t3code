@@ -393,7 +393,7 @@ fn stop_generation_button(
 
 /// The web's action group. Callback implementations are client operations, never RPC handlers.
 pub fn composer_primary_actions(props: PrimaryActionsProps) -> impl IntoElement {
-    let stop = use_stop_phase(props.state.clone());
+    let stop = use_stop_phase(props.state);
     view()
         .app_class(tw("flex items-center justify-end gap-2"))
         .child(dynamic(move || {
@@ -462,7 +462,7 @@ fn pending_actions(
                 Some("inline-flex shrink-0 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-full bg-message-action font-medium text-base text-message-action-foreground shadow-xs shadow-message-action/24 outline-none hover:bg-message-action-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 disabled:shadow-none sm:text-sm h-8 sm:h-7"),
                 Some(if state.compact { "px-3" } else { "px-4" }),
             ])))
-            .disabled({ let state = props.state.clone(); move || send_disabled(&state.get()) })
+            .disabled({ let state = props.state; move || send_disabled(&state.get()) })
             .on_press(move || {
                 let state = submit.state.get();
                 if !send_disabled(&state) && stop.get_untracked().phase != StopPhase::Landed {
@@ -474,16 +474,16 @@ fn pending_actions(
 }
 
 fn send_button(props: PrimaryActionsProps, stop: Signal<StopState>) -> impl IntoElement {
-    let status = props.state.clone();
+    let status = props.state;
     let disabled = props.clone();
     let action = props.clone();
-    let glyph = props.state.clone();
+    let glyph = props.state;
     let hint = tooltip_create_handle();
     view().app_class(tw("inline-flex"))
         .tooltip(tooltip(hint, TooltipOptions::default(), text({
-            let state = props.state.clone();
-            let modifier = props.modifier_label.clone();
-            let shortcut = props.alternate_shortcut_label.clone();
+            let state = props.state;
+            let modifier = props.modifier_label;
+            let shortcut = props.alternate_shortcut_label;
             move || {
                 let state = state.get();
                 submit_tooltip(&state, modifier.get(), shortcut.get())
@@ -541,13 +541,13 @@ fn send_button(props: PrimaryActionsProps, stop: Signal<StopState>) -> impl Into
 }
 
 fn compact_toggle(props: PrimaryActionsProps) -> impl IntoElement {
-    let state = props.state.clone();
+    let state = props.state;
     let enabled = props.clone();
     let action = props.clone();
-    let pressed = props.state.clone();
+    let pressed = props.state;
     let hint = tooltip_create_handle();
-    let first_line = props.state.clone();
-    let second_line = props.state.clone();
+    let first_line = props.state;
+    let second_line = props.state;
     view().app_class(tw("inline-flex"))
         .tooltip(tooltip(hint, TooltipOptions::default(), view()
             .child(text(move || {
@@ -560,7 +560,7 @@ fn compact_toggle(props: PrimaryActionsProps) -> impl IntoElement {
                 t("Click to compact first")
             } else { t("Click to keep full history") }))))
         .child(nsh_base::button()
-        .accessibility_label({ let state = state.clone(); move || Some(tr(
+        .accessibility_label({ move || Some(tr(
             "Compact {tokens} tokens of history before sending",
             &[("tokens", Value::from(state.get().compact_tokens.unwrap_or_default()))],
         ).into()) })
@@ -573,10 +573,10 @@ fn compact_toggle(props: PrimaryActionsProps) -> impl IntoElement {
             Some("flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-(--control-radius) px-2 font-medium text-base text-foreground/80 tabular-nums outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-64 sm:text-sm"),
             (!pressed.get().keep_full_history).then_some("bg-accent/60 text-foreground"),
         ]))))
-        .selected({ let state = state.clone(); move || !state.get().keep_full_history })
+        .selected(move || !state.get().keep_full_history)
         .child(icon_with_class(Icon::Minimize2, "size-4 text-muted-foreground pointer-events-none"))
         // The source's named 480px container query becomes a binding to its measured surface.
-        .child(dynamic({ let state = state.clone(); move || (props.composer_surface_width.get() > 480.0).then(||
+        .child(dynamic({ move || (props.composer_surface_width.get() > 480.0).then(||
             text(if state.get().keep_full_history { t("Keep") } else { t("Compact") })) }))
         .child(text(move || SharedString::from(state.get().compact_tokens.unwrap_or_default()))
             .app_class(tw("text-muted-foreground"))))
@@ -587,7 +587,7 @@ pub fn collapsed_composer_stop_action(
     props: PrimaryActionsProps,
     children: impl Fn() -> AnyElement + 'static,
 ) -> impl IntoElement {
-    let stop = use_stop_phase(props.state.clone());
+    let stop = use_stop_phase(props.state);
     view()
         .app_class(tw("flex shrink-0"))
         .child(dynamic(move || {

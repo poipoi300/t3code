@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use futures::StreamExt;
 use nsh_base::rich_editor::{
+    commands::helpers::is_active,
     model::{Fragment, Node, ResolvedPos, Schema, SchemaError, SchemaSpec, Slice},
     state::{
         EditorState, EditorStateConfig, KeyEvent, Plugin, PluginSpec, Selection, StateError,
@@ -51,7 +52,8 @@ impl PartialEq for ComposerSubmitCallback {
 }
 
 #[derive(Clone)]
-pub struct ComposerCommandKeyCallback(Rc<dyn Fn(&KeyEvent, bool) -> bool>);
+pub struct ComposerCommandKeyCallback(Rc<CommandKeyFn>);
+type CommandKeyFn = dyn Fn(&KeyEvent, bool) -> bool;
 
 impl ComposerCommandKeyCallback {
     pub fn new(callback: impl Fn(&KeyEvent, bool) -> bool + 'static) -> Self {
@@ -417,6 +419,15 @@ pub struct ComposerSnapshot {
     pub cursor_adjacent_to_mention: bool,
 }
 
+impl ComposerSnapshot {
+    fn matches_change(&self, next: &Self) -> bool {
+        self.value == next.value
+            && self.cursor == next.cursor
+            && self.expanded_cursor == next.expanded_cursor
+            && self.context_ids == next.context_ids
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaretEdge {
     Start,
@@ -553,7 +564,10 @@ impl ComposerEditor {
     }
 
     fn is_controlled_snapshot(&self, snapshot: &ComposerSnapshot) -> bool {
-        lock(&self.data).controlled_snapshot.take().as_ref() == Some(snapshot)
+        lock(&self.data)
+            .controlled_snapshot
+            .take()
+            .is_some_and(|controlled| controlled.matches_change(snapshot))
     }
 
     pub fn read_selection_range(&self) -> SourceSelection {
@@ -1227,9 +1241,12 @@ impl PluginSpec for ComposerDocumentPlugin {
         dispatch: &mut dyn FnMut(Transaction),
     ) -> bool {
         let command = lock(&self.0).command_key.clone();
-        let at = state.selection().resolved_from();
-        let in_list = (1..=at.depth)
-            .any(|depth| matches!(at.node(depth).ty().name(), "listItem" | "taskItem"));
+        let in_list = if event.key == "Enter" {
+            let attrs = Default::default();
+            is_active(state, Some("taskItem"), &attrs) || is_active(state, Some("listItem"), &attrs)
+        } else {
+            false
+        };
         if command.is_some_and(|command| command(event, in_list)) {
             return true;
         }
@@ -1489,7 +1506,7 @@ fn composer_prompt_editor_tiptap_inner(
     spawn(async move {
         while changes.next().await.is_some() {
             let next = editor.read_snapshot();
-            if snapshot.get_untracked() != next {
+            if !snapshot.get_untracked().matches_change(&next) {
                 snapshot.set(next.clone());
                 if !editor.is_controlled_snapshot(&next) {
                     on_change(next);

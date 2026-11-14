@@ -122,6 +122,8 @@ impl Font {
     }
 }
 
+type Measure = Rc<dyn Fn(&str, &str) -> Points>;
+
 struct Prepared {
     raw: SharedString,
     head: SharedString,
@@ -133,7 +135,7 @@ struct Prepared {
     ellipsis_width: f32,
     boundaries: Vec<usize>,
     widths: RefCell<BTreeMap<usize, f32>>,
-    measure: Rc<dyn Fn(&str, &str) -> Points>,
+    measure: Measure,
 }
 
 impl PartialEq for Prepared {
@@ -150,12 +152,7 @@ impl Prepared {
         Self::with_measurer(raw, tail, font, Rc::new(text_measurer()))
     }
 
-    fn with_measurer(
-        raw: SharedString,
-        tail: Option<usize>,
-        font: Font,
-        measure: Rc<dyn Fn(&str, &str) -> Points>,
-    ) -> Self {
+    fn with_measurer(raw: SharedString, tail: Option<usize>, font: Font, measure: Measure) -> Self {
         let split = split_for_middle_truncate(&raw, tail).map(collapse_segments);
         let (head, tail) = match split {
             Some(split) => (
@@ -211,7 +208,9 @@ impl Prepared {
 
     fn fit(&self, width: f32) -> Fit {
         let width = width.max(0.0);
-        let overflowing = self.tail.is_some() && self.head_width + self.tail_width > width;
+        // Layout frames are pixel-rounded, like the DOM's integer client/scroll dimensions.
+        let overflowing =
+            self.tail.is_some() && (self.head_width + self.tail_width).round() > width.round();
         let capacity = if self.tail.is_some() {
             (width
                 - self.tail_width
@@ -505,6 +504,18 @@ mod tests {
             measured.get(),
             count,
             "wide layout needs no prefix measurements"
+        );
+        let fractional = Prepared::with_measurer(
+            "abcdefghi/tail".into(),
+            Some(4),
+            prepared.font.clone(),
+            Rc::new(|_, text| px(text.chars().count() as f32 * 10.16)),
+        );
+        assert!(
+            !fractional
+                .fit((fractional.head_width + fractional.tail_width).round())
+                .overflowing,
+            "an unconstrained natural width must not overflow after pixel rounding"
         );
     }
 }

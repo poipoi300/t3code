@@ -8,7 +8,7 @@ use nsh_core::prelude::*;
 use super::new_thread::Destination;
 use crate::i18n::{Text, Value, t, tr};
 use crate::state::nav::{Route, navigator};
-use crate::theme::{palette, tw};
+use crate::theme::{cn, palette, tw};
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::dialog::{PopupOptions, dialog, dialog_popup};
 use crate::ui::icon::{Icon, icon};
@@ -16,7 +16,7 @@ use crate::ui::icon::{Icon, icon};
 #[derive(Clone, Debug, PartialEq)]
 pub struct IgnoredFileChoice {
     pub file: t3_contracts::project::ProjectIgnoredFile,
-    pub size_label: String,
+    pub size_label: Text,
     pub selected: bool,
     pub disabled: bool,
 }
@@ -91,11 +91,15 @@ pub fn ignored_files(client: Rc<dyn IgnoredFilesClient>) -> AnyElement {
             .child(dynamic(move || {
                 let mut rows = view();
                 let Some(value) = current.get() else { return rows; };
-                for choice in &value.files {
+                for (index, choice) in value.files.iter().enumerate() {
                     let path = choice.file.path.0.clone();
                     let current_path = path.clone();
                     let disabled_path = path.clone();
-                    rows = rows.child(view().app_class(tw("flex items-center gap-2 px-3 py-2"))
+                    rows = rows.child(view().app_class(tw(&cn([
+                        Some("flex cursor-pointer items-center gap-2 px-2.5 py-1.5 text-sm"),
+                        (index + 1 < value.files.len()).then_some("border-b"),
+                        choice.disabled.then_some("cursor-not-allowed opacity-64"),
+                    ])))
                         // UI-FORM's Checkbox translates runtime labels; file paths are content.
                         .child(nsh_base::checkbox().accessibility_label(Some(path.clone().into()))
                             .checked(move || current.get().is_some_and(|value| value.files.iter().any(|file| file.file.path.0 == current_path && file.selected)))
@@ -105,7 +109,7 @@ pub fn ignored_files(client: Rc<dyn IgnoredFilesClient>) -> AnyElement {
                                     && let Err(message) = client.get().toggle_file(&path, *checked) { error.set(Some(message)); }
                             }))
                         .child(text(choice.file.path.0.clone()).app_class(tw("min-w-0 flex-1 truncate font-mono text-xs")))
-                        .child(text(choice.size_label.clone()).app_class(tw("shrink-0 text-muted-foreground text-xs"))));
+                        .child(text(choice.size_label.resolve()).app_class(tw("shrink-0 text-muted-foreground text-xs tabular-nums"))));
                 }
                 rows
             })))
@@ -259,6 +263,7 @@ pub fn command_palette_add_project(client: Rc<dyn AddProjectClient>) -> AnyEleme
             let input_submit = submit.clone();
             let button_submit = submit.clone();
             let completed = complete.clone();
+            let folder_complete = complete.clone();
             view().label(t("Command palette"))
                 .app_class(tw("flex min-h-0 w-full flex-col overflow-hidden"))
                 .child(view().app_class(tw("relative flex items-center gap-2 px-4 py-3"))
@@ -332,7 +337,7 @@ pub fn command_palette_add_project(client: Rc<dyn AddProjectClient>) -> AnyEleme
                         groups
                     })))
                 .child(dynamic(move || {
-                    let complete = complete.clone();
+                    let complete = folder_complete.clone();
                     current.get().and_then(|value| value.folder_picker_label.clone()).map(|label| {
                         button(ButtonContent::Label(label.resolve().to_string()), ButtonVariant::GhostMuted, ButtonSize::Xs,
                             move || busy.get() || current.get().is_none_or(|value| !value.can_pick_folder), move || {

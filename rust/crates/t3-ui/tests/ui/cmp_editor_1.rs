@@ -107,7 +107,7 @@ fn Harness(props: HarnessProps) -> impl IntoElement {
                 ))),
                 on_command_key_down: Prop::new(Some(ComposerCommandKeyCallback::new(
                     move |event: &nsh_base::rich_editor::state::KeyEvent, in_list| {
-                        if event.key.eq_ignore_ascii_case("F2") {
+                        if event.key == "Enter" {
                             commands.set(Some(in_list));
                             true
                         } else {
@@ -544,10 +544,16 @@ fn submit_uses_current_text_defers_during_ime_and_clear_retains_same_draft_undo(
         app.press("text:Submit").expect("disabled submit");
         assert!(app.screen().shows("Submissions 1 \"new draft\""));
         app.press("text:Read only").expect("enable");
+        let committed_sink = app
+            .screen()
+            .input_text("id:composer-editor")
+            .expect("native input")
+            .expect("input text")
+            .to_owned();
         app.compose("id:composer-editor", "に").expect("preedit");
         app.press("text:Submit").expect("deferred submit");
         assert!(app.screen().shows("Submissions 1 \"new draft\""));
-        ime_text(&mut app, "new ");
+        ime_text(&mut app, &committed_sink);
         app.compose("id:composer-editor", "")
             .expect("cancel composition");
         app.press("text:Reset after send").expect("accepted send");
@@ -563,12 +569,14 @@ fn submit_uses_current_text_defers_during_ime_and_clear_retains_same_draft_undo(
 #[test]
 fn native_command_keys_forward_list_context_without_a_fixture_key_plugin() {
     for window in [DESKTOP, PHONE] {
-        let mut app = start_editor(window, "- item");
-        app.type_text("id:composer-editor", "").expect("focus");
-        app.press_key("F2").expect("native command");
-        app.wait_for("Command list Some(true)")
-            .expect("web command context");
-        source(&mut app, "- item");
+        for (value, in_list) in [("- item", true), ("plain", false)] {
+            let mut app = start_editor(window, value);
+            app.type_text("id:composer-editor", "").expect("focus");
+            app.press_key("Enter").expect("native command");
+            app.wait_for(&format!("Command list Some({in_list})"))
+                .expect("web command context");
+            source(&mut app, value);
+        }
     }
 }
 

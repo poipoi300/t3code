@@ -46,12 +46,53 @@ struct StreamData {
     blocks: BTreeMap<usize, Rc<Block>>,
     definitions: BTreeMap<(bool, String), Rc<DefinitionFact>>,
     context_version: usize,
+    reference_blocks: ReferenceBlocks,
+}
+
+#[derive(Clone, Default)]
+struct ReferenceBlocks(Rc<RefCell<BTreeMap<usize, BlockId>>>);
+
+impl PartialEq for ReferenceBlocks {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for ReferenceBlocks {}
+
+/// Only bracket-bearing prose/table/document blocks can depend on reference definitions.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferenceInvalidation {
+    pub identifier: String,
+    pub footnote: bool,
+    pub context_version: usize,
+    blocks: ReferenceBlocks,
+    before: usize,
+}
+
+impl ReferenceInvalidation {
+    /// Enumerate affected earlier IDs only when reconciling reference bindings: O(candidates).
+    pub fn for_each_block(&self, mut apply: impl FnMut(&BlockId)) {
+        for id in self
+            .blocks
+            .0
+            .borrow()
+            .range(..self.before)
+            .map(|(_, id)| id)
+        {
+            apply(id);
+        }
+    }
+
+    pub fn affects(&self, id: &BlockId) -> bool {
+        id.index < self.before && self.blocks.0.borrow().get(&id.index) == Some(id)
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct DefinitionFact {
     pub node: Rc<MarkdownNode>,
     pub source: Rc<str>,
+    pub source_range: SourceRange,
 }
 
 /// A shared document, read by row index or source range without copying the message.
@@ -121,6 +162,7 @@ pub struct BlockDelta {
     pub old_count: usize,
     pub rows: Vec<Rc<Block>>,
     pub context_version: usize,
+    pub invalidations: Vec<ReferenceInvalidation>,
 }
 
 struct Continuation {
@@ -141,6 +183,8 @@ struct AppendState {
     work: FlattenWork,
     output_line_base: usize,
     finished: bool,
+    active_definitions: Vec<(bool, String)>,
+    invalidations: Vec<ReferenceInvalidation>,
 }
 
 impl AppendState {
@@ -154,7 +198,7 @@ impl AppendState {
                     index: 0,
                 },
                 kind: BlockKind::Header,
-                text: Some(Rc::from("")),
+                text: None,
                 source: SourceRange {
                     bytes: 0..0,
                     utf16: 0..0,
@@ -173,6 +217,8 @@ impl AppendState {
             work: FlattenWork::default(),
             output_line_base: 0,
             finished: false,
+            active_definitions: Vec::new(),
+            invalidations: Vec::new(),
         }
     }
 
@@ -185,6 +231,7 @@ impl AppendState {
                 old_count,
                 rows: Vec::new(),
                 context_version: self.document.context_version(),
+                invalidations: Vec::new(),
             };
         }
         self.finished = false;
@@ -226,7 +273,7 @@ impl AppendState {
         });
         let local_stable = stable_prefix(&local.blocks, &source, self.output, false);
         let mut group_header = header.to_owned();
-        self.publish_definitions(&local, local_stable, false);
+        self.publish_definitions(&local);
         let mut continuing = self.continuation.is_some();
         let mut freeze = None;
         let mut mapped = Vec::with_capacity(local.blocks.len().saturating_sub(1));
@@ -292,6 +339,15 @@ impl AppendState {
             self.base_byte += cut;
             self.base_utf16 += end.utf16.end - header_utf16;
             self.stable += local_stable - 1;
+            self.work.visited_rows += self.active_definitions.len();
+            {
+                let data = self.document.0.borrow();
+                self.active_definitions.retain(|key| {
+                    data.definitions
+                        .get(key)
+                        .is_some_and(|fact| fact.source_range.bytes.start >= self.base_byte)
+                });
+            }
             self.continuation = freeze;
             self.local = Box::new(MessageFlattener::new(&self.local.message_id));
         }
@@ -313,6 +369,22 @@ impl AppendState {
             }
         }
         self.work.visited_rows += data.blocks.len().saturating_sub(self.stable);
+        {
+            let mut candidates = data.reference_blocks.0.borrow_mut();
+            candidates.split_off(&self.stable);
+            for block in &mapped {
+                if matches!(
+                    block.kind,
+                    BlockKind::Prose | BlockKind::Document | BlockKind::Table
+                ) {
+                    let text = block.text.as_deref().unwrap_or_default();
+                    self.work.split_bytes += text.len();
+                    if text.contains('[') {
+                        candidates.insert(block.id.index, block.id.clone());
+                    }
+                }
+            }
+        }
         let _removed = data.blocks.split_off(&self.stable);
         data.blocks.extend(
             mapped
@@ -332,11 +404,52 @@ impl AppendState {
             old_count,
             rows,
             context_version: data.context_version,
+            invalidations: std::mem::take(&mut self.invalidations),
         }
     }
 
-    fn publish_definitions(&mut self, local: &MessageBlocks, stable: usize, finished: bool) {
-        let stable_end = local.blocks[stable.saturating_sub(1)].source.utf16.end;
+    fn publish_definitions(&mut self, local: &MessageBlocks) {
+        let header_bytes = self
+            .continuation
+            .as_ref()
+            .map_or(0, |context| context.header.len());
+        let header_utf16 = self
+            .continuation
+            .as_ref()
+            .map_or(0, |context| context.header.encode_utf16().count());
+        self.work.visited_rows += local.definition_nodes.len() * 2 + self.active_definitions.len();
+        let candidates: BTreeMap<_, _> = local
+            .definition_nodes
+            .iter()
+            .filter_map(|node| {
+                let identifier = node.data.get("identifier")?.as_str()?;
+                let start = node.position.as_ref()?.start.offset?;
+                Some((
+                    (node.kind == "footnoteDefinition", identifier.to_owned()),
+                    self.base_byte + self.local.index.byte(start).saturating_sub(header_bytes),
+                ))
+            })
+            .rev()
+            .collect();
+        {
+            let mut data = self.document.0.borrow_mut();
+            for key in self.active_definitions.drain(..) {
+                if let Some(fact) = data.definitions.get(&key)
+                    && fact.source_range.bytes.start >= self.base_byte
+                    && candidates.get(&key) != Some(&fact.source_range.bytes.start)
+                {
+                    data.definitions.remove(&key);
+                    data.context_version += 1;
+                    self.invalidations.push(ReferenceInvalidation {
+                        identifier: key.1.clone(),
+                        footnote: key.0,
+                        context_version: data.context_version,
+                        blocks: data.reference_blocks.clone(),
+                        before: self.stable,
+                    });
+                }
+            }
+        }
         for node in local.definition_nodes.iter() {
             let Some(position) = &node.position else {
                 continue;
@@ -346,10 +459,6 @@ impl AppendState {
             };
             let footnote = node.kind == "footnoteDefinition";
             let byte_end = self.local.index.byte(end);
-            let closed = !footnote && local.source[byte_end..].starts_with("\n\n");
-            if !finished && end > stable_end && !closed {
-                continue;
-            }
             let Some(identifier) = node
                 .data
                 .get("identifier")
@@ -358,21 +467,50 @@ impl AppendState {
                 continue;
             };
             let key = (footnote, identifier.to_owned());
+            let bytes = self.base_byte + self.local.index.byte(start).saturating_sub(header_bytes)
+                ..self.base_byte + byte_end.saturating_sub(header_bytes);
+            let range = SourceRange {
+                bytes,
+                utf16: self.base_utf16 + start.saturating_sub(header_utf16)
+                    ..self.base_utf16 + end.saturating_sub(header_utf16),
+            };
             let mut data = self.document.0.borrow_mut();
-            if data.definitions.contains_key(&key) {
-                continue;
+            if data
+                .definitions
+                .get(&key)
+                .is_none_or(|previous| previous.source_range.bytes.start == range.bytes.start)
+            {
+                self.active_definitions.push(key.clone());
+            }
+            if let Some(previous) = data.definitions.get(&key) {
+                if previous.source_range.bytes.start != range.bytes.start {
+                    continue;
+                }
+                if previous.source_range.bytes.end == range.bytes.end
+                    && previous.node.data == node.data
+                {
+                    continue;
+                }
             }
             let source = &local.source[self.local.index.byte(start)..byte_end];
             self.work.copied_bytes += source.len();
             self.work.visited_rows += 1;
+            data.context_version += 1;
+            self.invalidations.push(ReferenceInvalidation {
+                identifier: key.1.clone(),
+                footnote: key.0,
+                context_version: data.context_version,
+                blocks: data.reference_blocks.clone(),
+                before: self.stable,
+            });
             data.definitions.insert(
                 key,
                 Rc::new(DefinitionFact {
                     node: node.clone(),
                     source: Rc::from(source),
+                    source_range: range,
                 }),
             );
-            data.context_version += 1;
         }
     }
 }
@@ -473,6 +611,9 @@ pub enum BlockKind {
     /// The web keeps document-wide syntax and Insight callouts together.
     Document,
     Table,
+    Definition {
+        footnote: bool,
+    },
     Code(CodeChunk),
     Output {
         text: String,
@@ -579,9 +720,19 @@ impl MessageFlattener {
 
     /// A validated append from a delta-aware caller; no prefix comparison or snapshot copy.
     pub fn append(&mut self, delta: &str) -> BlockDelta {
-        self.stream
+        let initializing = self.stream.is_none();
+        let mut result = self
+            .stream
             .get_or_insert_with(|| AppendState::new(&self.message_id, false))
-            .push(delta)
+            .push(delta);
+        if initializing {
+            result.changed_from = 0;
+            result.old_count = 0;
+            result
+                .rows
+                .insert(0, result.document.block(0).expect("header"));
+        }
+        result
     }
 
     /// Publish an unterminated final definition block once, without rereading settled source.
@@ -610,7 +761,7 @@ impl MessageFlattener {
             copied_bytes: after.copied_bytes - before.copied_bytes,
             visited_rows: after.visited_rows - before.visited_rows,
         });
-        state.publish_definitions(&local, local.blocks.len(), true);
+        state.publish_definitions(&local);
         state.finished = true;
         let count = state.document.block_count();
         Some(BlockDelta {
@@ -619,6 +770,7 @@ impl MessageFlattener {
             old_count: count,
             rows: Vec::new(),
             context_version: state.document.context_version(),
+            invalidations: std::mem::take(&mut state.invalidations),
         })
     }
 
@@ -690,7 +842,7 @@ impl MessageFlattener {
                     index: 0,
                 },
                 kind: BlockKind::Header,
-                text: Some(Rc::from("")),
+                text: None,
                 source: SourceRange {
                     bytes: 0..0,
                     utf16: 0..0,
@@ -714,7 +866,12 @@ impl MessageFlattener {
             let nodes: Vec<_> = root
                 .children
                 .iter()
-                .filter(|n| matches!(n.kind.as_str(), "code" | "table"))
+                .filter(|n| {
+                    matches!(
+                        n.kind.as_str(),
+                        "code" | "table" | "definition" | "footnoteDefinition"
+                    )
+                })
                 .filter_map(|node| {
                     let position = node.position.as_ref()?;
                     Some((
@@ -737,7 +894,7 @@ impl MessageFlattener {
                     while node_at < nodes.len() && nodes[node_at].0.start < end {
                         node_at += 1;
                     }
-                    if flags_outside_code(source, offset..end, &nodes[first..node_at]).0
+                    if flags_outside_code(source, offset..end, &nodes[first..node_at]).1
                         || part.split('\n').any(|line| insight(line, true).is_some())
                     {
                         self.push(
@@ -763,8 +920,7 @@ impl MessageFlattener {
         self.work.copied_bytes += blocks
             .iter()
             .skip(stable.min(blocks.len()))
-            .filter_map(|block| block.text.as_ref())
-            .map(|text| text.len())
+            .map(|block| block.text.as_ref().map_or(0, |text| text.len()))
             .sum::<usize>();
         self.work.visited_rows += blocks.len().saturating_sub(stable);
         self.work.visited_rows += blocks.len();
@@ -803,11 +959,12 @@ impl MessageFlattener {
         kind: BlockKind,
         blocks: &mut Vec<Rc<Block>>,
     ) {
-        let text = Some(Rc::from(match &kind {
-            BlockKind::Code(code) => code.text.as_str(),
-            BlockKind::Output { text, .. } => text.as_str(),
-            _ => &source[range.clone()],
-        }));
+        let text = match &kind {
+            BlockKind::Header | BlockKind::Definition { .. } => None,
+            BlockKind::Code(code) => Some(Rc::from(code.text.as_str())),
+            BlockKind::Output { text, .. } => Some(Rc::from(text.as_str())),
+            _ => Some(Rc::from(&source[range.clone()])),
+        };
         blocks.push(Rc::new(Block {
             id: BlockId {
                 message_id: self.message_id.clone(),
@@ -837,15 +994,37 @@ impl MessageFlattener {
             if start < range.start
                 || end > range.end
                 || end <= resume
-                || !matches!(node.kind.as_str(), "code" | "table")
+                || !matches!(
+                    node.kind.as_str(),
+                    "code" | "table" | "definition" | "footnoteDefinition"
+                )
             {
                 continue;
             }
             if cursor < start {
-                self.push(source, cursor..start, BlockKind::Prose, blocks);
+                if source[cursor..start].trim().is_empty() && blocks.len() > 1 {
+                    let previous = blocks.pop().expect("content row");
+                    self.push(
+                        source,
+                        previous.source.bytes.start..start,
+                        previous.kind.clone(),
+                        blocks,
+                    );
+                } else {
+                    self.push(source, cursor..start, BlockKind::Prose, blocks);
+                }
                 cursor = start;
             }
-            if node.kind == "table" {
+            if matches!(node.kind.as_str(), "definition" | "footnoteDefinition") {
+                self.push(
+                    source,
+                    cursor..end,
+                    BlockKind::Definition {
+                        footnote: node.kind == "footnoteDefinition",
+                    },
+                    blocks,
+                );
+            } else if node.kind == "table" {
                 self.push(source, cursor..end, BlockKind::Table, blocks);
             } else {
                 self.code_chunks(source, node, start..end, cursor, blocks);
@@ -853,6 +1032,24 @@ impl MessageFlattener {
             cursor = end;
         }
         if cursor < range.end {
+            let tail = &source[cursor..range.end];
+            let whitespace = tail
+                .bytes()
+                .take_while(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+                .count();
+            if let Some(newline) = tail[..whitespace].rfind(['\r', '\n'])
+                && blocks.len() > 1
+                && !tail.trim().is_empty()
+            {
+                let previous = blocks.pop().expect("content row");
+                cursor += newline + 1;
+                self.push(
+                    source,
+                    previous.source.bytes.start..cursor,
+                    previous.kind.clone(),
+                    blocks,
+                );
+            }
             if source[cursor..range.end].trim().is_empty() && blocks.len() > 1 {
                 let last = blocks.pop().expect("a content block exists");
                 self.push(
@@ -1001,7 +1198,7 @@ fn stable_prefix(blocks: &[Rc<Block>], source: &str, output: bool, document_wide
             let block = &blocks[stable - 1];
             if let BlockKind::Code(code) = &block.kind
                 && code.last
-                && !source[block.source.bytes.clone()].ends_with("\n\n")
+                && !ends_with_blank_line(&source[block.source.bytes.clone()])
             {
                 stable -= 1;
             } else {
@@ -1020,6 +1217,17 @@ fn stable_prefix(blocks: &[Rc<Block>], source: &str, output: bool, document_wide
         }
     }
     stable
+}
+
+fn ends_with_blank_line(source: &str) -> bool {
+    let source = source.trim_end_matches([' ', '\t']);
+    let Some(before) = source
+        .strip_suffix("\r\n")
+        .or_else(|| source.strip_suffix(['\r', '\n']))
+    else {
+        return false;
+    };
+    before.trim_end_matches([' ', '\t']).ends_with(['\r', '\n'])
 }
 
 fn collect_definitions(node: &MarkdownNode, source: &str, index: &SourceIndex, out: &mut String) {
@@ -1259,7 +1467,10 @@ fn split_structural_blocks(text: &str) -> Vec<&str> {
     for line in text.split('\n') {
         let opener = fence(line);
         if let Some(current) = &mut compound {
-            if current.closes(line) { compound = None; after_blank = false; }
+            if current.closes(line) {
+                compound = None;
+                after_blank = false;
+            }
         } else if let Some(current) = open_fence {
             if line.chars().take(fence_indent).any(|c| !js_whitespace(c)) {
                 break;
@@ -1293,7 +1504,9 @@ fn split_structural_blocks(text: &str) -> Vec<&str> {
             if let Some(opener) = opener {
                 fence_indent = line.find(opener).unwrap_or(0);
             }
-            if open_fence.is_none() && insight_indent.is_none() { compound = CompoundBlock::open(line); }
+            if open_fence.is_none() && insight_indent.is_none() {
+                compound = CompoundBlock::open(line);
+            }
         }
         line_start += line.len() + 1;
     }
@@ -1311,20 +1524,54 @@ enum CompoundBlock {
 impl CompoundBlock {
     fn open(line: &str) -> Option<Self> {
         let trimmed = line.trim_start_matches(' ');
-        if line.len() - trimmed.len() > 3 { return None; }
+        if line.len() - trimmed.len() > 3 {
+            return None;
+        }
         if let Some(tail) = trimmed.strip_prefix("$$") {
-            return (!tail.contains("$$")).then(|| Self::Math(trimmed.bytes().take_while(|b| *b == b'$').count()));
+            return (!tail.contains("$$"))
+                .then(|| Self::Math(trimmed.bytes().take_while(|b| *b == b'$').count()));
         }
         if let Some(tail) = trimmed.strip_prefix(":::") {
             return (!tail.trim().is_empty()).then_some(Self::Directive(1));
         }
         for (opener, closer) in [("<!--", "-->"), ("<?", "?>"), ("<![CDATA[", "]]>")] {
-            if trimmed.starts_with(opener) { return (!trimmed.contains(closer)).then_some(Self::Until(closer)); }
+            if trimmed.starts_with(opener) {
+                return (!trimmed.contains(closer)).then_some(Self::Until(closer));
+            }
         }
-        let tag = trimmed.strip_prefix('<')?.chars().take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | ':')).collect::<String>().to_ascii_lowercase();
-        if tag.is_empty() || matches!(tag.as_str(), "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input" | "link" | "meta" | "param" | "source" | "track" | "wbr") || trimmed.trim_end().ends_with("/>") { return None; }
+        let tag = trimmed
+            .strip_prefix('<')?
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | ':'))
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if tag.is_empty()
+            || matches!(
+                tag.as_str(),
+                "area"
+                    | "base"
+                    | "br"
+                    | "col"
+                    | "embed"
+                    | "hr"
+                    | "img"
+                    | "input"
+                    | "link"
+                    | "meta"
+                    | "param"
+                    | "source"
+                    | "track"
+                    | "wbr"
+            )
+            || trimmed.trim_end().ends_with("/>")
+        {
+            return None;
+        }
         let (opens, closes) = html_tags(line, &tag);
-        (opens > closes).then_some(Self::Html { tag, depth: opens.saturating_sub(closes) })
+        (opens > closes).then_some(Self::Html {
+            tag,
+            depth: opens.saturating_sub(closes),
+        })
     }
 
     fn closes(&mut self, line: &str) -> bool {
@@ -1333,8 +1580,11 @@ impl CompoundBlock {
             Self::Math(length) => trimmed.len() >= *length && trimmed.bytes().all(|b| b == b'$'),
             Self::Directive(depth) => {
                 if trimmed.starts_with(":::") {
-                    if trimmed.bytes().all(|b| b == b':') { *depth = depth.saturating_sub(1); }
-                    else { *depth += 1; }
+                    if trimmed.bytes().all(|b| b == b':') {
+                        *depth = depth.saturating_sub(1);
+                    } else {
+                        *depth += 1;
+                    }
                 }
                 *depth == 0
             }
@@ -1351,8 +1601,17 @@ impl CompoundBlock {
 fn html_tags(line: &str, tag: &str) -> (usize, usize) {
     let line = line.to_ascii_lowercase();
     let opener = format!("<{tag}");
-    let opens = line.match_indices(&opener).filter(|(at, _)| line[at + opener.len()..].chars().next().is_some_and(|ch| ch.is_ascii_whitespace() || matches!(ch, '>' | '/'))).count();
-    (opens, line.matches(&format!("</{tag}> ").trim_end()).count())
+    let opens = line
+        .match_indices(&opener)
+        .filter(|(at, _)| {
+            line[at + opener.len()..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_whitespace() || matches!(ch, '>' | '/'))
+        })
+        .count();
+    let closer = format!("</{tag}>");
+    (opens, line.matches(closer.as_str()).count())
 }
 
 fn js_whitespace(c: char) -> bool {
@@ -1777,4 +2036,13 @@ mod tests {
             BlockKind::Code(_)
         ));
     }
+}
+
+#[cfg(test)]
+mod package_tests {
+    use crate as t3_ui;
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/ui/tl_blocks_1.rs"
+    ));
 }

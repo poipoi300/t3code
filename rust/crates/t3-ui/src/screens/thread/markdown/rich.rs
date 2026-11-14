@@ -193,6 +193,7 @@ pub fn chat_markdown_image(
                     .on_load(move |_: &Size<DevicePixels>| { state.loaded_src.set(Some(loaded.clone())); state.failed_src.set(None); })
                     .on_error(move |_: &str| { state.failed_src.set(Some(rejected.clone())); state.loaded_src.set(None); })
                     .app_class(tw(if settled { "h-auto w-auto object-contain max-h-[30rem] max-w-[30rem]" } else { "invisible absolute inset-0 size-full" }))
+                    .style_with(move |style| media_size_style(style, size))
                     .when(size.is_some_and(|size| size.width.is_some() && size.aspect_ratio.is_some()), |image| image.w_full().h_full());
                 let frame = if settled { frame } else { frame.role(AccessibilityRole::Group).label(t("Loading image")) };
                 frame.child(img)
@@ -329,9 +330,12 @@ pub fn chat_markdown_video(
                 return view().role(AccessibilityRole::Alert)
                     .app_class(tw("flex aspect-video max-h-full w-full flex-col items-center justify-center gap-3 rounded-lg border border-border/40 bg-muted/40 p-4 text-center text-sm text-muted-foreground"))
                     .child(chat_markdown_media_unavailable_label(props, MediaKind::Video))
-                    .child(can_retry.then(|| dynamic(move || {
+                    .child(can_retry.then(|| {
                         let retry = retry.clone();
-                        button(ButtonContent::Label(if retrying.get() { t("Retrying…") } else { t("Retry video") }), ButtonVariant::Secondary, ButtonSize::Sm, move || retrying.get(), move || {
+                        // Button's text slot is static; retain both states instead of disposing a pending button prop.
+                        view()
+                          .child(view().app_class(move || Some(tw(if retrying.get() { "hidden" } else { "flex" })))
+                          .child(button(ButtonContent::Label(t("Retry video")), ButtonVariant::Secondary, ButtonSize::Sm, move || retrying.get(), move || {
                             if retrying.get_untracked() { return; }
                             retrying.set(true);
                             let retry = retry.clone();
@@ -340,8 +344,10 @@ pub fn chat_markdown_video(
                                 if result.is_ok() { failed_src.set(None); attempt.update(|n| *n += 1); }
                                 retrying.set(false);
                             }));
-                        }).into_element()
-                    }))).into_element();
+                          })))
+                          .child(view().app_class(move || Some(tw(if retrying.get() { "flex" } else { "hidden" })))
+                            .child(button(ButtonContent::Label(t("Retrying…")), ButtonVariant::Secondary, ButtonSize::Sm, || true, || {})))
+                    })).into_element();
             }
             if let Some(src) = current.src {
                 let rejected = src.clone();
@@ -476,10 +482,10 @@ fn table_cell(
             })
             .classes(TextViewClasses { paragraph: Some(tw("m-0")), ..Default::default() })
             .app_class(tw(match align {
-                ColumnAlign::Center => "w-full text-center",
-                ColumnAlign::Right => "w-full text-right",
-                ColumnAlign::Left => "w-full text-left",
-                ColumnAlign::None => "w-full text-start",
+                ColumnAlign::Center => "w-full text-center text-foreground/90",
+                ColumnAlign::Right => "w-full text-right text-foreground/90",
+                ColumnAlign::Left => "w-full text-left text-foreground/90",
+                ColumnAlign::None => "w-full text-start text-foreground/90",
             })))
 }
 
@@ -879,6 +885,11 @@ pub fn markdown_mermaid_code_block(
                 move |wrapped| {
                     text(move || code.with(|p| SharedString::from(p.code.clone())))
                         .select_text()
+                        .text_size(move || {
+                            px(tokens()
+                                .number("font-size-code")
+                                .unwrap_or(t3_theme::fonts::DEFAULT_CODE_FONT_SIZE as f32))
+                        })
                         .app_class(move || {
                             Some(tw(if wrapped.get() {
                                 "px-[0.9rem] py-[0.8rem] font-mono leading-snug whitespace-normal"

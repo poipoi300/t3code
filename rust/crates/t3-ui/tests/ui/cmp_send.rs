@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use nsh_core::prelude::*;
+use nsh_core::time::Clock;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
 use t3_client::ClientStore;
@@ -21,8 +22,9 @@ use t3_ui::{i18n::t, theme};
 
 use crate::support::{DESKTOP, PHONE};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PropEnum)]
 enum Mode {
+    #[default]
     Resume,
     Draft,
     Question,
@@ -170,7 +172,9 @@ fn start(window: (f32, f32), mode: Mode) -> Headless {
     } else {
         nsh_core::platform::Idiom::Desktop
     };
-    Headless::start(config).expect("component starts")
+    let mut app = Headless::start(config).expect("component starts");
+    app.wait_for("Interrupts: 0").expect("component mounted");
+    app
 }
 
 fn assert_disabled(app: &mut Headless, selector: &str) {

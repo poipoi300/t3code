@@ -40,6 +40,10 @@ pub struct Props {
 }
 
 /// Explicit SVG slots apply the source's descendant selectors, preserving sibling order.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Mount-only descriptors become NSH's inline AnyElement children; preserve the unboxed element slot."
+)]
 pub enum Child {
     Text(Text),
     Icon(Icon),
@@ -50,6 +54,12 @@ pub enum Child {
 impl From<Text> for Child {
     fn from(text: Text) -> Self {
         Self::Text(text)
+    }
+}
+
+impl From<AnyElement> for Child {
+    fn from(element: AnyElement) -> Self {
+        Self::Element(element)
     }
 }
 
@@ -68,9 +78,18 @@ pub(crate) fn children(children: Vec<Child>, icon_classes: &str) -> Vec<AnyEleme
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
+                let enforced = icon_classes
+                    .split_whitespace()
+                    .filter(|class| matches!(*class, "pointer-events-none" | "shrink-0"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 icon_with_class(
                     icon,
-                    &cn([Some(defaults.as_str()), Some(class_name.as_str())]),
+                    &cn([
+                        Some(defaults.as_str()),
+                        Some(class_name.as_str()),
+                        Some(enforced.as_str()),
+                    ]),
                 )
                 .into_element()
             }
