@@ -14,7 +14,7 @@ pub(crate) struct MemoryHistory {
     entry_keys: Vec<u64>,
     next_entry_key: u64,
     index: usize,
-    policy: RoutePolicy,
+    policy: Option<RoutePolicy>,
     listeners: Vec<Listener>,
 }
 
@@ -26,7 +26,7 @@ impl MemoryHistory {
             entry_keys: vec![0],
             next_entry_key: 1,
             index: 0,
-            policy: RoutePolicy::default(),
+            policy: None,
             listeners: Vec::new(),
         }
     }
@@ -59,8 +59,8 @@ impl MemoryHistory {
     }
 
     pub(crate) fn set_policy(&mut self, policy: RoutePolicy) {
-        if self.policy != policy {
-            self.policy = policy;
+        if self.policy != Some(policy) {
+            self.policy = Some(policy);
             self.notify();
         }
     }
@@ -204,7 +204,8 @@ mod tests {
             ..RoutePolicy::default()
         };
         let mut changes = history.changes();
-        let _ = changes.next().now_or_never();
+        let first = changes.next().now_or_never().flatten().unwrap().unwrap();
+        assert_eq!(first.policy, None, "unknown until the client publishes one");
         history.set_policy(policy);
         assert_eq!(
             changes
@@ -214,7 +215,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .policy,
-            policy
+            Some(policy)
         );
     }
 }

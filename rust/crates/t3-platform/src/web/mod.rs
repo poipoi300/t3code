@@ -166,12 +166,6 @@ impl WebPlatform {
         self.inner.events.clone()
     }
 
-    /// What the client's auth and config allow (`t3_client::navigation::RoutePolicy`); the
-    /// location stream republishes it.
-    pub fn set_route_policy(&self, policy: t3_client::navigation::RoutePolicy) {
-        self.inner.history.set_policy(policy);
-    }
-
     /// `navigator.onLine` as the supervisor's starting network status.
     pub fn network_status(&self) -> NetworkStatus {
         if self.inner.window.navigator().on_line() {
@@ -401,6 +395,9 @@ impl Platform for WebPlatform {
     }
     fn can_pick_resources(&self) -> bool {
         true
+    }
+    fn set_route_policy(&self, policy: t3_client::navigation::RoutePolicy) {
+        self.inner.history.set_policy(policy);
     }
     fn app_url(&self) -> HostFuture<'_, Option<String>> {
         let launch = self.inner.history.launch_url();

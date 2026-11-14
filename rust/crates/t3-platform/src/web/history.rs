@@ -34,7 +34,7 @@ fn keyed_state(index: u64, key: &str) -> Result<js_sys::Object, PlatformError> {
 struct State {
     /// The furthest entry this tab knows is ahead of the first (pushed or traversed to).
     forward_limit: u64,
-    policy: RoutePolicy,
+    policy: Option<RoutePolicy>,
     listeners: Vec<mpsc::UnboundedSender<Result<AppUrlSnapshot, PlatformError>>>,
     traversal: Option<oneshot::Sender<()>>,
 }
@@ -147,8 +147,8 @@ impl BrowserHistory {
 
     pub(crate) fn set_policy(&self, policy: RoutePolicy) {
         let mut state = self.state.borrow_mut();
-        if state.policy != policy {
-            state.policy = policy;
+        if state.policy != Some(policy) {
+            state.policy = Some(policy);
             notify(&self.window, &mut state);
         }
     }

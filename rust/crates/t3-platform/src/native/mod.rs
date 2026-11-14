@@ -265,12 +265,6 @@ impl NativePlatform {
         self.inner.events.emit(PlatformEvent::OpenedLink(link));
     }
 
-    /// What the client's auth and config allow (`t3_client::navigation::RoutePolicy`); the
-    /// location stream republishes it.
-    pub fn set_route_policy(&self, policy: t3_client::navigation::RoutePolicy) {
-        self.inner.history.borrow_mut().set_policy(policy);
-    }
-
     async fn blocking<T: Send + 'static>(
         &self,
         work: impl FnOnce(&store::Store, &EventSender) -> Result<T, PlatformError> + Send + 'static,
@@ -392,6 +386,9 @@ impl Platform for NativePlatform {
     }
     fn can_pick_resources(&self) -> bool {
         self.inner.file_dialog.is_some()
+    }
+    fn set_route_policy(&self, policy: t3_client::navigation::RoutePolicy) {
+        self.inner.history.borrow_mut().set_policy(policy);
     }
     fn storage_report(&self) -> t3_client::platform::StorageReport {
         let report = self.inner.report;
