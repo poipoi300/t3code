@@ -89,6 +89,9 @@ fn main() -> ExitCode {
         ("managed_codex_runs_signed_in_and_stops_on_sign_out", || {
             Box::pin(managed_codex())
         }),
+        ("claude_gets_t3_mcp_only_over_stdin_and_never_echoes_it", || {
+            Box::pin(claude_mcp_over_stdin())
+        }),
     ];
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.iter().any(|argument| argument == "--list") {
@@ -1025,6 +1028,94 @@ async fn disallowed_driver() {
     server.stop().await;
 }
 
+/// TypeScript sends Claude's MCP servers over stdin after initialize ("to keep them out of SDK
+/// argv and inherited command environments", `ClaudeAdapterV2.ts:1357`), and a failed
+/// registration logs server names only and continues (`:1499-1518`). For each CLI answer
+/// (accepted, rejected with an error quoting the servers, accepted with per-server errors
+/// quoting them): the thread's T3 server arrives in an `mcp_set_servers` control request after
+/// `initialize`, its URL and token are in neither the CLI's argv nor its environment, the turn
+/// goes on, and the token reaches no client frame and not the snapshot.
+async fn claude_mcp_over_stdin() {
+    for failure in [None, Some("error"), Some("partial")] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_path_buf();
+        let mut claude = instance(Provider::Claude, &home, None, true);
+        if let Some(failure) = failure {
+            claude["environment"].as_array_mut().unwrap().push(
+                json!({"name":"T3_FAKE_MCP_FAILURE","value":failure,"sensitive":false}),
+            );
+        }
+        let mut server =
+            Server::start(&home, &settings_with(json!({ "claudeAgent": claude })), None).await;
+        server
+            .create_thread(Provider::Claude, "approval-required")
+            .await
+            .unwrap();
+        server.subscribe();
+        server.send("first", "Write the fixture file.").await.unwrap();
+        let outcome = server
+            .until(|values| {
+                if !objects(values, &|value| {
+                    value["responseCapability"].is_object() && value["status"] == "pending"
+                })
+                .is_empty()
+                {
+                    return Some("pending".to_owned());
+                }
+                run_status(values).filter(|status| {
+                    !matches!(status.as_str(), "queued" | "starting" | "running" | "waiting")
+                })
+            })
+            .await;
+        let streamed = Value::Array(server.thread.clone()).to_string();
+
+        // What the CLI was given on stdin, in order.
+        let wire: Vec<Value> = std::fs::read_dir(home.join("reports"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().to_string_lossy().ends_with(".wire.log"))
+            .flat_map(|entry| {
+                std::fs::read_to_string(entry.path())
+                    .unwrap()
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("<- "))
+                    .filter_map(|line| serde_json::from_str(line).ok())
+                    .collect::<Vec<Value>>()
+            })
+            .collect();
+        let initialize = wire
+            .iter()
+            .position(|m| m["request"]["subtype"] == "initialize")
+            .expect("initialize");
+        let registration = wire
+            .iter()
+            .position(|m| m["request"]["subtype"] == "mcp_set_servers")
+            .unwrap_or_else(|| panic!("no mcp_set_servers ({failure:?}): {wire:?}"));
+        assert!(initialize < registration, "{wire:?}");
+        let t3 = &wire[registration]["request"]["servers"]["t3-code"];
+        let url = t3["url"].as_str().unwrap().to_owned();
+        let authorization = t3["headers"]["Authorization"].as_str().unwrap().to_owned();
+        assert_eq!(url, format!("{}/mcp", server.origin));
+        let token = authorization
+            .strip_prefix("Bearer ")
+            .expect("bearer")
+            .to_owned();
+
+        let launch = &launches(&home)[0];
+        let argv = launch["args"].to_string();
+        let env = launch["env"].to_string();
+        for secret in [&token, &authorization, &url] {
+            assert!(!argv.contains(secret.as_str()), "{failure:?} argv: {argv}");
+            assert!(!env.contains(secret.as_str()), "{failure:?} env has the T3 MCP server");
+        }
+        assert_eq!(outcome, "pending", "{failure:?}: {streamed}");
+        let snapshot = server.snapshot().await;
+        assert!(!snapshot.to_string().contains(&token), "{failure:?}");
+        let (_, received) = server.stop().await;
+        assert!(!received.contains(&token), "{failure:?}: token reached a client");
+    }
+}
+
 const MANAGED_TOKEN: &str = "managed-access-token-9c41e7";
 
 /// Managed Codex (`setupMode: "managed"`, `CodexManagedRuntime`): the session runs the
@@ -1442,6 +1533,7 @@ mod fake {
                 "pid": std::process::id(),
                 "args": std::env::args().skip(1).collect::<Vec<_>>(),
                 "entrypoint": std::env::var("CLAUDE_CODE_ENTRYPOINT").ok(),
+                "env": std::env::vars().collect::<std::collections::BTreeMap<_, _>>(),
             })
             .to_string(),
         )
@@ -1582,10 +1674,22 @@ mod fake {
         let mut tool_use = String::from("toolu_fixture");
         let mut permissions = 0;
         let mut pending_permission = None::<String>;
+        let echo_mcp_failure = std::env::var("T3_FAKE_MCP_FAILURE").ok();
         let respond = |wire: &mut Wire, message: &Value| {
-            if message["type"] == "control_request" {
-                wire.write(&json!({"type":"control_response","response":{"subtype":"success","request_id":message["request_id"],"response":{}}}));
+            if message["type"] != "control_request" {
+                return;
             }
+            if message["request"]["subtype"] == "mcp_set_servers" {
+                let servers = &message["request"]["servers"];
+                // A CLI that rejects the servers can quote them back, headers included.
+                match echo_mcp_failure.as_deref() {
+                    Some("error") => wire.write(&json!({"type":"control_response","response":{"subtype":"error","request_id":message["request_id"],"error":format!("invalid MCP configuration: {servers}")}})),
+                    Some("partial") => wire.write(&json!({"type":"control_response","response":{"subtype":"success","request_id":message["request_id"],"response":{"added":[],"removed":[],"errors":{"t3-code":format!("connection refused for {servers}")}}}})),
+                    _ => wire.write(&json!({"type":"control_response","response":{"subtype":"success","request_id":message["request_id"],"response":{"added":["t3-code"],"removed":[],"errors":{}}}})),
+                }
+                return;
+            }
+            wire.write(&json!({"type":"control_response","response":{"subtype":"success","request_id":message["request_id"],"response":{}}}));
         };
         for step in steps {
             let frame = &step["frame"];

@@ -1182,13 +1182,14 @@ async fn the_managed_policy_caps_thread_runtime_modes() {
 }
 
 /// Waits on `subscribeThread` for the first chunk whose text contains every part of one of
-/// `outcomes`, and returns that outcome's first part.
+/// `outcomes`, and returns that outcome's first part with the chunk. List every way the awaited
+/// step can end, failures included, or a failure waits forever.
 async fn thread_outcome(
     socket: &mut Socket,
     client: &mut Client,
     subscription: &t3_rpc::RequestId,
     outcomes: &[&[&'static str]],
-) -> &'static str {
+) -> (&'static str, String) {
     loop {
         match event(socket, client).await {
             CallEvent::Chunk { id, values } if id == *subscription => {
@@ -1198,7 +1199,7 @@ async fn thread_outcome(
                     .iter()
                     .find(|parts| parts.iter().all(|part| text.contains(part)))
                 {
-                    return outcome[0];
+                    return (outcome[0], text);
                 }
             }
             CallEvent::Chunk { id, .. } => client.acknowledge(id),
@@ -1324,13 +1325,19 @@ async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
     )
     .await;
     assert_eq!(sent["_tag"], "Success", "{sent}");
-    thread_outcome(
+    let turn = thread_outcome(
         &mut socket,
         &mut client,
         &subscription,
-        &[&["\"run.updated\"", "\"completed\""]],
+        &[
+            &["\"run.updated\"", "\"completed\""],
+            &["\"run.updated\"", "\"failed\""],
+            &["\"run.updated\"", "\"interrupted\""],
+        ],
     )
     .await;
+    assert_eq!(turn.0, "\"run.updated\"", "{}", turn.1);
+    assert!(turn.1.contains("\"completed\""), "the turn did not complete: {}", turn.1);
 
     // The thread-start checkpoint, as the client's rewind picks it.
     let origin = format!("http://{}", server.address);
@@ -1369,18 +1376,21 @@ async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
     )
     .await;
     assert_eq!(refused["_tag"], "Success", "{refused}");
-    assert_eq!(
-        thread_outcome(
-            &mut socket,
-            &mut client,
-            &subscription,
-            &[
-                &["still writing to its folder: terminal `"],
-                &["\"rolled_back\""]
-            ],
-        )
-        .await,
-        "still writing to its folder: terminal `",
+    // The refusal and any other failure end the wait; only the named terminal passes.
+    let (outcome, text) = thread_outcome(
+        &mut socket,
+        &mut client,
+        &subscription,
+        &[
+            &["\"rollbackFailure\":{\"requestId\":\"command:rollback-refused\""],
+            &["\"rolled_back\""],
+        ],
+    )
+    .await;
+    assert!(
+        outcome.starts_with("\"rollbackFailure\"")
+            && text.contains("still writing to its folder: terminal `writer`"),
+        "{text}"
     );
 
     let closed = call_exit(
@@ -1399,19 +1409,16 @@ async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
     )
     .await;
     assert_eq!(restored["_tag"], "Success", "{restored}");
-    assert_eq!(
-        thread_outcome(
-            &mut socket,
-            &mut client,
-            &subscription,
-            &[
-                &["\"rolled_back\""],
-                &["could not roll back"],
-                &["Files can't be restored"],
-            ],
-        )
-        .await,
-        "\"rolled_back\"",
-    );
+    let (outcome, text) = thread_outcome(
+        &mut socket,
+        &mut client,
+        &subscription,
+        &[
+            &["\"rolled_back\""],
+            &["\"rollbackFailure\":{\"requestId\":\"command:rollback\""],
+        ],
+    )
+    .await;
+    assert_eq!(outcome, "\"rolled_back\"", "{text}");
     server.shutdown().await.unwrap();
 }

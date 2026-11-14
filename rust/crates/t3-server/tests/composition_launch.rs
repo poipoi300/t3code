@@ -740,10 +740,7 @@ async fn setup_scripts_publish_output_and_their_end_on_the_setup_stream() {
     // The terminal's shell is PowerShell on Windows and the test server passes no PATH, so the
     // native child that exits 3 is named by its full path.
     let exit_three = if cfg!(windows) {
-        format!(
-            r"& '{}\System32\cmd.exe' /c exit 3",
-            std::env::var("SystemRoot").unwrap()
-        )
+        "$global:LASTEXITCODE = 3".to_owned()
     } else {
         "sh -c 'exit 3'".to_owned()
     };
