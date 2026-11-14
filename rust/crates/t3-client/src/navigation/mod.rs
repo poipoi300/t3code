@@ -4,6 +4,7 @@ pub use crate::view_logic::shell::navigation::{
     Direction, HistoryAvailability, RouteTarget, encode_component, route_target,
 };
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+pub mod prompt_links;
 mod service;
 pub use service::UrlClient;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

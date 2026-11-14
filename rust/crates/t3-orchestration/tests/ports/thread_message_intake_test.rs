@@ -32,7 +32,10 @@ struct Dispatch {
 impl CommandDispatcher for Dispatch {
     async fn dispatch(&self, command: OrchestrationV2ServerCommand) -> Result<CommandReceipt> {
         let value = t3_contracts::stored::to_value(&command)?;
-        self.commands.lock().unwrap().push(value.clone());
+        self.commands
+            .lock()
+            .expect("test value")
+            .push(value.clone());
         let command_id = serde_json::from_value(value["commandId"].clone())?;
         if self.mode == "reject" {
             return Err(Error::Rejected {
@@ -55,7 +58,7 @@ impl CommandDispatcher for Dispatch {
         Ok(CommandReceipt {
             command_id,
             aggregate: AggregateId::Thread(serde_json::from_value(value["threadId"].clone())?),
-            command_type: value["type"].as_str().unwrap().into(),
+            command_type: value["type"].as_str().expect("test value").into(),
             accepted_at: TEST_TIME.into(),
             result_sequence: 1,
             status: ReceiptStatus::Accepted,
@@ -96,12 +99,16 @@ fn intake(
     )
 }
 fn upload(directory: &Path) -> ChatAttachment {
-    let attachment:ChatAttachment=serde_json::from_value(json!({"type":"image","id":format!("pending-{}",uuid::Uuid::new_v4()),"name":"screen.png","mimeType":"image/png","sizeBytes":3})).unwrap();
-    std::fs::write(attachment_path(directory, &attachment).unwrap(), [1, 2, 3]).unwrap();
+    let attachment:ChatAttachment=serde_json::from_value(json!({"type":"image","id":format!("pending-{}",uuid::Uuid::new_v4()),"name":"screen.png","mimeType":"image/png","sizeBytes":3})).expect("test value");
+    std::fs::write(
+        attachment_path(directory, &attachment).expect("test value"),
+        [1, 2, 3],
+    )
+    .expect("test value");
     attachment
 }
 fn respond(attachment: &ChatAttachment) -> OrchestrationV2ServerCommand {
-    serde_json::from_value(json!({"type":"runtime-request.respond","commandId":"command:answer","threadId":"thread:test","requestId":"request:one","answers":{"q":["Selected option"]},"attachmentsByQuestionId":{"q":[attachment]}})).unwrap()
+    serde_json::from_value(json!({"type":"runtime-request.respond","commandId":"command:answer","threadId":"thread:test","requestId":"request:one","answers":{"q":["Selected option"]},"attachmentsByQuestionId":{"q":[attachment]}})).expect("test value")
 }
 
 #[tokio::test]

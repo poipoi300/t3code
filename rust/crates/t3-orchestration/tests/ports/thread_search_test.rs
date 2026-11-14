@@ -69,7 +69,7 @@ async fn message(
     streaming: bool,
 ) {
     let payload = json!({"id":id,"threadId":thread,"runId":null,"nodeId":null,"role":role,"text":text,"attachments":[],"streaming":streaming,"createdBy":if agent{"agent"}else{"user"},"creationSource":"web","createdAt":TEST_TIME,"updatedAt":TEST_TIME});
-    commit(sink,vec![serde_json::from_value(json!({"id":format!("event-{id}-{text}"),"threadId":thread,"type":"message.updated","occurredAt":TEST_TIME,"payload":payload})).unwrap()]).await.unwrap();
+    commit(sink,vec![serde_json::from_value(json!({"id":format!("event-{id}-{text}"),"threadId":thread,"type":"message.updated","occurredAt":TEST_TIME,"payload":payload})).expect("test value")]).await.expect("test value");
 }
 #[tokio::test]
 async fn indexed_and_scan_search_pick_user_messages_and_exclude_streams_notices_and_hidden_threads()
@@ -218,7 +218,7 @@ async fn triggers_rebuild_exclude_bootstrap_and_notice_rows_and_remove_settled_r
     .await;
     fixture
         .stores
-        .transaction(|tx| rebuild_message_search(tx))
+        .transaction(rebuild_message_search)
         .await
         .unwrap();
     let search = ThreadSearch::new(fixture.stores.clone(), Arc::new(PlainPolicy));

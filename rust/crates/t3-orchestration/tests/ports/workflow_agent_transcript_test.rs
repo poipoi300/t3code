@@ -25,13 +25,13 @@ pub struct MemoryFile {
 impl WorkflowOpenFile for MemoryFile {
     async fn stat(&self) -> io::Result<WorkflowFileStat> {
         Ok(WorkflowFileStat {
-            size: self.bytes.lock().unwrap().len() as u64,
+            size: self.bytes.lock().expect("test value").len() as u64,
             identity: self.identity.clone(),
             regular: self.regular,
         })
     }
     async fn read_at(&self, offset: u64, length: usize) -> io::Result<Vec<u8>> {
-        let bytes = self.bytes.lock().unwrap();
+        let bytes = self.bytes.lock().expect("test value");
         Ok(bytes
             .iter()
             .skip(offset as usize)
@@ -53,7 +53,10 @@ impl MemoryFiles {
             identity: WorkflowFileIdentity { device: 1, inode },
             regular,
         });
-        self.files.lock().unwrap().insert(path, file.clone());
+        self.files
+            .lock()
+            .expect("test value")
+            .insert(path, file.clone());
         file
     }
 }
@@ -63,7 +66,7 @@ impl WorkflowFileBackend for MemoryFiles {
         Ok(self
             .aliases
             .lock()
-            .unwrap()
+            .expect("test value")
             .get(path)
             .cloned()
             .unwrap_or_else(|| path.to_owned()))
@@ -71,22 +74,22 @@ impl WorkflowFileBackend for MemoryFiles {
     async fn open_nonblocking(&self, path: &Path) -> io::Result<Arc<dyn WorkflowOpenFile>> {
         self.files
             .lock()
-            .unwrap()
+            .expect("test value")
             .get(path)
             .cloned()
             .map(|file| file as Arc<dyn WorkflowOpenFile>)
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
     }
     async fn lstat_identity(&self, path: &Path) -> io::Result<WorkflowFileIdentity> {
-        if let Some(identity) = self.swapped.lock().unwrap().clone() {
+        if let Some(identity) = self.swapped.lock().expect("test value").clone() {
             return Ok(identity);
         }
         Ok(self
             .files
             .lock()
-            .unwrap()
+            .expect("test value")
             .get(path)
-            .unwrap()
+            .expect("test value")
             .identity
             .clone())
     }

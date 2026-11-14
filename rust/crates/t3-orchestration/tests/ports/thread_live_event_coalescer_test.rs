@@ -58,7 +58,7 @@ fn latest_states(
             let OrchestrationV2ThreadStreamItem::Event(item) = item else {
                 return None;
             };
-            let event = t3_contracts::stored::to_value(&item.event).unwrap();
+            let event = t3_contracts::stored::to_value(&item.event).expect("test value");
             Some((
                 format!("{}:{}", event["type"], event["payload"]["id"]),
                 event["payload"].clone(),

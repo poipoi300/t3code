@@ -4,15 +4,15 @@ use t3_contracts::orchestration_v2::*;
 use t3_orchestration::ports::transport::wire_projection::*;
 fn item(mut value: Value, kind: &str) -> OrchestrationV2TurnItem {
     value["type"] = kind.into();
-    serde_json::from_value(value).unwrap()
+    serde_json::from_value(value).expect("test value")
 }
 fn wire(mut value: OrchestrationV2TurnItem) -> Value {
-    project_turn_item_for_wire(&mut value).unwrap();
-    serde_json::to_value(value).unwrap()
+    project_turn_item_for_wire(&mut value).expect("test value");
+    serde_json::to_value(value).expect("test value")
 }
 fn detail(mut value: OrchestrationV2TurnItem) -> Value {
-    project_turn_item_for_detail(&mut value).unwrap();
-    serde_json::to_value(value).unwrap()
+    project_turn_item_for_detail(&mut value).expect("test value");
+    serde_json::to_value(value).expect("test value")
 }
 fn tool(output: Value) -> OrchestrationV2TurnItem {
     let mut value = command("tool", 1);

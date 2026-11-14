@@ -13,7 +13,7 @@ pub fn projection_value(count: usize) -> Value {
     json!({"thread":{"id":"thread","projectId":"project","title":"Test","providerInstanceId":"codex","modelSelection":{"instanceId":"codex","model":"gpt-5"},"runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":null,"activeProviderThreadId":null,"lineage":{"parentThreadId":null,"relationshipToParent":null,"rootThreadId":"thread"},"forkedFrom":null,"createdBy":"user","creationSource":"web","createdAt":"2026-09-08T00:00:00.000Z","updatedAt":"2026-09-08T00:00:00.000Z","archivedAt":null,"settledOverride":null,"settledAt":null,"deletedAt":null},"runs":[],"attempts":[],"nodes":[],"subagents":[],"providerSessions":[],"providerThreads":[],"providerTurns":[],"runtimeRequests":[],"messages":[],"plans":[],"turnItems":items,"checkpointScopes":[],"checkpoints":[],"contextHandoffs":[],"contextTransfers":[],"visibleTurnItems":rows,"updatedAt":"2026-09-08T00:00:00.000Z"})
 }
 pub fn projection(count: usize) -> OrchestrationV2ThreadProjection {
-    serde_json::from_value(projection_value(count)).unwrap()
+    serde_json::from_value(projection_value(count)).expect("test value")
 }
 
 #[test]
