@@ -819,83 +819,6 @@ async fn noncone_sparse_checkout_refuses_fresh_index_rebuild() -> TestResult {
     Ok(())
 }
 
-#[cfg(windows)]
-#[tokio::test]
-async fn checkpoint_never_reads_writes_or_cleans_external_directory_links() -> TestResult {
-    for symlink in [false, true] {
-        for replace_tracked in [false, true] {
-            let repo = Repository::new().await?;
-            repo.write("safe", "base\n")?;
-            if replace_tracked {
-                repo.write("LINKED/keep", "tracked\n")?;
-            }
-            repo.commit("initial").await?;
-            let reference = checkpoint_ref("external-links", 0);
-            if replace_tracked {
-                repo.git.capture_checkpoint(&reference).await?;
-            }
-            let outside = repo.temp.path().join("outside");
-            std::fs::create_dir(&outside)?;
-            std::fs::write(outside.join("keep"), b"external\0bytes\xff")?;
-            let link = repo.root().join("linked");
-            if replace_tracked {
-                std::fs::remove_dir_all(&link)?;
-            }
-            if symlink {
-                match std::os::windows::fs::symlink_dir(&outside, &link) {
-                    Ok(()) => {}
-                    Err(error) if error.raw_os_error() == Some(1314) => {
-                        eprintln!("directory symlink unavailable: {error}");
-                        continue;
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            } else {
-                junction::create(&outside, &link)?;
-            }
-            let captured = checkpoint_ref("external-links", 1);
-            repo.git.capture_checkpoint(&captured).await?;
-            let paths = repo
-                .command(&["ls-tree", "-r", "--name-only", &captured])
-                .await?;
-            assert!(
-                !paths.lines().any(|path| path.eq_ignore_ascii_case("linked")
-                    || path.to_ascii_lowercase().starts_with("linked/")),
-                "outside link was captured: {paths}"
-            );
-            assert_eq!(std::fs::read(outside.join("keep"))?, b"external\0bytes\xff");
-            std::fs::write(outside.join("new"), b"must survive\0")?;
-            let before_index = repo.index()?;
-            repo.write("safe", "changed\n")?;
-            let result = repo
-                .git
-                .restore_checkpoint(
-                    if replace_tracked {
-                        &reference
-                    } else {
-                        &captured
-                    },
-                    false,
-                )
-                .await;
-            assert!(
-                matches!(result, Err(GitError::UnsafeRestore(_))),
-                "{result:?}"
-            );
-            assert_eq!(repo.index()?, before_index);
-            assert_eq!(std::fs::read(repo.root().join("safe"))?, b"changed\n");
-            assert_eq!(std::fs::read(outside.join("keep"))?, b"external\0bytes\xff");
-            assert_eq!(std::fs::read(outside.join("new"))?, b"must survive\0");
-            if symlink {
-                std::fs::remove_dir(link)?;
-            } else {
-                junction::delete(link)?;
-            }
-        }
-    }
-    Ok(())
-}
-
 #[tokio::test]
 async fn nested_recovery_is_bounded_by_commands_and_candidates_not_a_wall_clock_budget()
 -> TestResult {
@@ -959,9 +882,14 @@ async fn checkpoint_ref_writes_and_prunes_never_follow_symbolic_refs() -> TestRe
     assert!(!repo.git.has_checkpoint(&alias).await?);
     let lock = repo.root().join(format!(".git/{foreign}.lock"));
     std::fs::write(&lock, "owned test lock")?;
-    repo.git.delete_checkpoint_refs(&[&foreign, &reference]).await?;
+    repo.git
+        .delete_checkpoint_refs(&[&foreign, &reference])
+        .await?;
     assert!(repo.git.has_checkpoint(&foreign).await?);
-    assert!(!repo.git.has_checkpoint(&reference).await?, "a locked ref must not prevent pruning other refs");
+    assert!(
+        !repo.git.has_checkpoint(&reference).await?,
+        "a locked ref must not prevent pruning other refs"
+    );
     Ok(())
 }
 

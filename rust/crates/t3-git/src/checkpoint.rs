@@ -158,22 +158,6 @@ impl IndexScan {
     }
 }
 
-fn checkpoint_path_contains(parent: &str, path: &str) -> bool {
-    let (parent, path) = if cfg!(windows) {
-        (parent.to_lowercase(), path.to_lowercase())
-    } else {
-        (parent.to_owned(), path.to_owned())
-    };
-    path == parent || path.starts_with(&format!("{parent}/"))
-}
-
-fn stage_pathspecs(paths: &[String]) -> Vec<u8> {
-    paths
-        .iter()
-        .flat_map(|path| format!(":(literal){path}\0").into_bytes())
-        .collect()
-}
-
 impl Git {
     async fn capture_execute(
         &self,
@@ -364,79 +348,6 @@ impl Git {
         Ok(true)
     }
 
-    async fn capture_stage_paths(
-        &self,
-        prefix: &str,
-        exclusions: &[String],
-        commit_env: &Environment,
-        tracked_only: bool,
-        files: &[String],
-    ) -> Result<Vec<String>, GitError> {
-        let mut paths = std::collections::BTreeSet::new();
-        if !tracked_only {
-            paths.extend(files.iter().cloned());
-        }
-        let mut args = INDEX_CONFIG.to_vec();
-        args.extend(["ls-files", "--cached", "--full-name", "-v", "-z", "--", "."]);
-        let cached = self
-            .execute(
-                &args,
-                ExecuteOptions {
-                    env: commit_env.clone(),
-                    capture: true,
-                    max_output_bytes: 16 * 1024 * 1024,
-                    output_mode: OutputMode::Error,
-                    ..Default::default()
-                },
-            )
-            .await?;
-        let cached = cached.stdout_text();
-        for entry in cached.split('\0').filter(|entry| !entry.is_empty()) {
-            let path = entry
-                .get(2..)
-                .ok_or_else(|| GitError::InvalidOutput("checkpoint cached path".into()))?;
-            if !entry.starts_with(['S', 's']) {
-                paths.insert(path.to_owned());
-            }
-        }
-        paths.retain(|path| {
-            !exclusions
-                .iter()
-                .any(|excluded| checkpoint_path_contains(excluded, path))
-        });
-        let mut paths: Vec<_> = paths
-            .into_iter()
-            .map(|path| {
-                path.strip_prefix(prefix)
-                    .map(str::to_owned)
-                    .ok_or_else(|| GitError::InvalidOutput("checkpoint path outside scope".into()))
-            })
-            .collect::<Result<_, _>>()?;
-        if !paths.is_empty() {
-            let ignored = self
-                .execute(
-                    &["check-ignore", "-z", "--stdin"],
-                    ExecuteOptions {
-                        env: commit_env.clone(),
-                        capture: true,
-                        stdin: Some(format!("{}\0", paths.join("\0")).into_bytes()),
-                        allow_nonzero: true,
-                        max_output_bytes: 16 * 1024 * 1024,
-                        output_mode: OutputMode::Error,
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            if !matches!(ignored.code, Some(0 | 1)) {
-                return Err(self.vcs_exit("GitVcsDriver.filterIgnoredPaths", 3, &ignored));
-            }
-            let ignored = ignored.stdout_text();
-            let ignored: std::collections::HashSet<_> = ignored.split('\0').collect();
-            paths.retain(|path| !ignored.contains(path.as_str()));
-        }
-        Ok(paths)
-    }
-
     pub async fn capture_checkpoint(&self, checkpoint_ref: &str) -> Result<(), GitError> {
         self.capture_checkpoint_with_previous(checkpoint_ref, None)
             .await
@@ -590,10 +501,6 @@ impl Git {
                 self.capture_execute(&args, &commit_env, None).await?;
             }
         }
-        let scan = self
-            .checkpoint_scan(repository.head.then_some("HEAD"), &[], &commit_env)
-            .await?;
-        let exclusions = &scan.exclusions;
         let ignored = if repository.prefix.is_empty() {
             false
         } else {
@@ -696,53 +603,6 @@ impl Git {
                 ));
             }
         }
-        if !exclusions.is_empty() {
-            let specs: Vec<_> = exclusions
-                .iter()
-                .map(|path| {
-                    format!(
-                        ":(top,literal{}){path}",
-                        if cfg!(windows) { ",icase" } else { "" }
-                    )
-                })
-                .collect();
-            let mut args = INDEX_CONFIG.to_vec();
-            args.extend(["ls-files", "--cached", "-z", "--"]);
-            args.extend(specs.iter().map(String::as_str));
-            let paths = self
-                .execute(
-                    &args,
-                    ExecuteOptions {
-                        env: commit_env.clone(),
-                        max_output_bytes: 16 * 1024 * 1024,
-                        output_mode: OutputMode::Error,
-                        ..Default::default()
-                    },
-                )
-                .await?
-                .stdout;
-            if !paths.is_empty() {
-                let mut args = INDEX_CONFIG.to_vec();
-                args.extend(["update-index", "--force-remove", "-z", "--stdin"]);
-                self.capture_execute(&args, &commit_env, Some(paths))
-                    .await?;
-            }
-        }
-        // A fixed file list cannot expose a scanned link when ignore rules change during staging.
-        let stage_paths = if exclusions.is_empty() && scan.pruned.is_empty() {
-            None
-        } else {
-            Some(
-                self.capture_stage_paths(
-                    &repository.prefix,
-                    exclusions,
-                    &commit_env,
-                    ignored,
-                    &scan.files,
-                )
-                .await?,
-            )
-        };
         let mut stage_args = INDEX_CONFIG.to_vec();
         stage_args.extend(durable_write());
         stage_args.extend(long_paths());
@@ -751,28 +611,11 @@ impl Git {
             stage_args.push("--sparse");
         }
         stage_args.push(if ignored { "-u" } else { "-A" });
-        if stage_paths.is_some() {
-            stage_args.extend(["--pathspec-from-file=-", "--pathspec-file-nul"]);
-        } else {
-            stage_args.extend(["--", "."]);
-        }
-        match self
-            .capture_execute(
-                &stage_args,
-                &commit_env,
-                stage_paths.as_deref().map(stage_pathspecs),
-            )
-            .await
-        {
+        stage_args.extend(["--", "."]);
+        match self.capture_execute(&stage_args, &commit_env, None).await {
             Err(original @ GitError::Vcs(_)) => {
                 let recovery = async {
-                    let candidates: Vec<String> = if let Some(paths) = &stage_paths {
-                        paths
-                            .iter()
-                            .filter(|path| path.ends_with('/'))
-                            .cloned()
-                            .collect()
-                    } else {
+                    let candidates: Vec<String> = {
                         let mut args = long_paths().to_vec();
                         args.extend([
                             "ls-files",
@@ -818,29 +661,13 @@ impl Git {
                     if exclusions.is_empty() {
                         return Ok(false);
                     }
-                    let args = stage_args.clone();
-                    let stdin = if let Some(paths) = &stage_paths {
-                        let paths: Vec<_> = paths
-                            .iter()
-                            .filter(|path| {
-                                !exclusions.iter().any(|excluded| {
-                                    checkpoint_path_contains(excluded.trim_end_matches('/'), path)
-                                })
-                            })
-                            .cloned()
-                            .collect();
-                        Some(stage_pathspecs(&paths))
-                    } else {
-                        let specs: Vec<_> = exclusions
-                            .iter()
-                            .map(|path| format!(":(exclude,literal){path}"))
-                            .collect();
-                        let mut retry = args.clone();
-                        retry.extend(specs.iter().map(String::as_str));
-                        self.capture_execute(&retry, &commit_env, None).await?;
-                        return Ok(true);
-                    };
-                    self.capture_execute(&args, &commit_env, stdin).await?;
+                    let specs: Vec<_> = exclusions
+                        .iter()
+                        .map(|path| format!(":(exclude,literal){path}"))
+                        .collect();
+                    let mut retry = stage_args.clone();
+                    retry.extend(specs.iter().map(String::as_str));
+                    self.capture_execute(&retry, &commit_env, None).await?;
                     Ok::<_, GitError>(true)
                 };
                 match recovery.await {
@@ -1174,16 +1001,31 @@ impl Git {
             }
         }
         if !commands.is_empty() {
-            self.execute(
-                &["update-ref", "--no-deref", "--stdin"],
-                ExecuteOptions {
-                    capture: true,
-                    stdin: Some(commands.into_bytes()),
-                    allow_nonzero: true,
-                    ..Default::default()
-                },
-            )
-            .await?;
+            let output = self
+                .execute(
+                    &["update-ref", "--no-deref", "--stdin"],
+                    ExecuteOptions {
+                        capture: true,
+                        stdin: Some(commands.into_bytes()),
+                        allow_nonzero: true,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            if output.code != Some(0) {
+                // A locked ref must not defeat the original best-effort pruning policy.
+                for reference in seen {
+                    self.execute(
+                        &["update-ref", "--no-deref", "-d", reference],
+                        ExecuteOptions {
+                            capture: true,
+                            allow_nonzero: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                }
+            }
         }
         Ok(())
     }
@@ -1217,6 +1059,18 @@ impl Git {
         reference: &str,
         fallback_to_head: bool,
     ) -> Result<bool, GitError> {
+        let reference = reference.to_owned();
+        self.owned_operation(move |git| async move {
+            git.restore_checkpoint_owned(&reference, fallback_to_head)
+                .await
+        })
+        .await
+    }
+    async fn restore_checkpoint_owned(
+        &self,
+        reference: &str,
+        fallback_to_head: bool,
+    ) -> Result<bool, GitError> {
         let commit = match self.resolve_checkpoint(reference).await? {
             Some(commit) => Some(commit),
             None if fallback_to_head => self.head_commit().await?,
@@ -1225,98 +1079,87 @@ impl Git {
         let Some(commit) = commit else {
             return Ok(false);
         };
-        let with_tree = format!("--with-tree={commit}");
+        let scope = self.restore_scope().await?;
+        let sparse = self.checkpoint_sparse_enabled().await?;
         let tracked = self
-            .text(&[
-                "ls-files",
-                "--cached",
-                "--full-name",
-                &with_tree,
-                "-z",
-                "--",
-                ".",
-            ])
+            .check_restore_writes(&scope, &commit, sparse, None)
             .await?;
-        let tracked_paths: Vec<_> = tracked
-            .split('\0')
-            .filter(|path| !path.is_empty())
-            .map(str::to_owned)
-            .collect();
-        let containment = self
-            .checkpoint_scan(Some(&commit), &tracked_paths, &Environment::new())
-            .await?;
-        containment.recheck(&self.cancellation).await?;
-        if !tracked.is_empty() {
-            let sparse = self
-                .execute(
-                    &["config", "--bool", "core.sparseCheckout"],
-                    ExecuteOptions {
-                        allow_nonzero: true,
-                        ..Default::default()
-                    },
-                )
-                .await?
-                .stdout_text()
-                .trim()
-                == "true";
-            let mut restore = long_paths().to_vec();
-            restore.extend([
-                "-c",
-                "core.hooksPath=/dev/null",
-                "restore",
-                "--source",
-                &commit,
-                "--worktree",
-                "--staged",
-            ]);
-            let mut args = restore.clone();
-            if !sparse {
-                args.push("--ignore-skip-worktree-bits");
-            }
-            args.extend(["--", "."]);
-            containment.recheck(&self.cancellation).await?;
-            self.text(&args).await?;
-            if sparse {
-                let manual = self.manual_sparse_paths().await.unwrap_or_default();
-                if !manual.is_empty() {
-                    let mut args = restore;
-                    args.extend([
-                        "--ignore-skip-worktree-bits",
-                        "--pathspec-from-file=-",
-                        "--pathspec-file-nul",
-                    ]);
-                    let stdin = manual
-                        .iter()
-                        .flat_map(|path| format!(":(top,literal){path}\0").into_bytes())
-                        .collect();
-                    containment.recheck(&self.cancellation).await?;
-                    self.execute(
-                        &args,
-                        ExecuteOptions {
-                            stdin: Some(stdin),
-                            ..Default::default()
-                        },
-                    )
+        let mut mutated = false;
+        let restored = async {
+            if tracked {
+                let mut restore = long_paths().to_vec();
+                restore.extend([
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "restore",
+                    "--no-recurse-submodules",
+                    "--source",
+                    &commit,
+                    "--worktree",
+                    "--staged",
+                ]);
+                let mut args = restore.clone();
+                if !sparse {
+                    args.push("--ignore-skip-worktree-bits");
+                }
+                args.extend(["--", "."]);
+                self.check_restore_writes(&scope, &commit, sparse, None)
                     .await?;
+                mutated = true;
+                self.text(&args).await?;
+                if sparse {
+                    let manual = self.manual_sparse_paths().await.unwrap_or_default();
+                    if !manual.is_empty() {
+                        let mut args = restore;
+                        args.extend([
+                            "--ignore-skip-worktree-bits",
+                            "--pathspec-from-file=-",
+                            "--pathspec-file-nul",
+                        ]);
+                        let stdin = manual
+                            .iter()
+                            .flat_map(|path| format!(":(top,literal){path}\0").into_bytes())
+                            .collect();
+                        self.check_restore_writes(&scope, &commit, sparse, Some(&manual))
+                            .await?;
+                        self.execute(
+                            &args,
+                            ExecuteOptions {
+                                stdin: Some(stdin),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    }
                 }
             }
+            self.recreate_restore_scope(&scope).await?;
+            self.clean_checkpoint_workspace(&scope, &mut mutated).await
         }
-        std::fs::create_dir_all(&self.cwd)?;
-        let cleaned = self.clean_checkpoint_workspace(&containment).await;
-        // Even a failed clean must leave staged state at HEAD.
-        containment.recheck(&self.cancellation).await?;
-        std::fs::create_dir_all(&self.cwd)?;
-        let mut args = long_paths().to_vec();
-        args.extend([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "reset",
-            "--quiet",
-            "--",
-            ".",
-        ]);
-        self.text(&args).await?;
-        cleaned?;
+        .await;
+        if mutated {
+            // Reset changes only the index; a safety refusal must never prevent this finalizer.
+            let finalizer = self
+                .clone()
+                .with_cancellation(crate::CancellationToken::new());
+            let recreated = finalizer.recreate_restore_scope(&scope).await;
+            let reset = finalizer
+                .at(&scope.root)
+                .text(&[
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "reset",
+                    "--quiet",
+                    "--",
+                    &scope.pathspec,
+                ])
+                .await;
+            restored?;
+            recreated?;
+            reset?;
+        } else {
+            restored?;
+        }
         Ok(true)
     }
     async fn manual_sparse_paths(&self) -> Result<Vec<String>, GitError> {
@@ -1374,15 +1217,15 @@ impl Git {
 
     async fn clean_checkpoint_workspace(
         &self,
-        containment: &crate::safety::CheckpointScan,
+        scope: &crate::safety::RestoreScope,
+        mutated: &mut bool,
     ) -> Result<(), GitError> {
-        let excluded = containment.excluded_pathspecs();
         let mut args = long_paths().to_vec();
         args.extend(["clean", "-fd", "--", "."]);
-        args.extend(excluded.iter().map(String::as_str));
         for pass in 0..4 {
-            containment.recheck(&self.cancellation).await?;
-            std::fs::create_dir_all(&self.cwd)?;
+            self.recreate_restore_scope(scope).await?;
+            self.check_clean_paths(scope).await?;
+            *mutated = true;
             let output = self
                 .execute(
                     &args,
@@ -1427,10 +1270,9 @@ impl Git {
                 Err(error) => return Err(error.into()),
             }
             if pass == 3 {
-                std::fs::create_dir_all(&self.cwd)?;
+                self.recreate_restore_scope(scope).await?;
                 let mut args = long_paths().to_vec();
                 args.extend(["clean", "-dn", "--", "."]);
-                args.extend(excluded.iter().map(String::as_str));
                 if self
                     .execute(
                         &args,

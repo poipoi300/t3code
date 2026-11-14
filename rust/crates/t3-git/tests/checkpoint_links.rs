@@ -192,100 +192,6 @@ async fn ignored_links_use_all_git_ignore_sources_without_exposing_targets() -> 
 }
 
 #[tokio::test]
-async fn tracked_link_replacements_work_in_nested_and_sparse_scopes() -> TestResult {
-    for kind in LinkKind::all() {
-        for sparse in [false, true] {
-            for ignored in [false, true] {
-                let repo = Repository::new().await?;
-                repo.write("safe", "base\n")?;
-                repo.write("scope/keep", "before\n")?;
-                repo.write("other/keep", "outside scope\n")?;
-                let link = "scope/linked";
-                match kind {
-                    LinkKind::File => repo.write(link, "old\n")?,
-                    _ => repo.write("scope/linked/old", "old\n")?,
-                }
-                repo.commit("base").await?;
-                if sparse {
-                    repo.command(&[
-                        "sparse-checkout",
-                        "set",
-                        "--cone",
-                        "--sparse-index",
-                        "scope",
-                    ])
-                    .await?;
-                }
-                let path = repo.root().join(link);
-                match kind {
-                    LinkKind::File => std::fs::remove_file(&path)?,
-                    _ => std::fs::remove_dir_all(&path)?,
-                }
-                repo.write("scope/.gitignore", if ignored { "linked\n" } else { "" })?;
-                repo.write("scope/keep", "working\n")?;
-                let target = outside(&repo)?;
-                kind.create(&target, &path).await?;
-                let scoped = repo.git.at(repo.root().join("scope"));
-                let reference = checkpoint_ref("tracked-ignored-link", 0);
-                let result =
-                    assert_safe_capture(&repo, &scoped, &reference, link, &target, false).await;
-                kind.remove(&path)?;
-                result?;
-                assert_eq!(repo.show(&reference, "scope/keep").await?, "working\n");
-                assert_eq!(
-                    repo.show(&reference, "other/keep").await?,
-                    "outside scope\n"
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn capture_prunes_a_large_ignored_tree_beside_a_visible_unsafe_link() -> TestResult {
-    let repo = Repository::new().await?;
-    repo.write("safe", "base\n")?;
-    repo.write(".gitignore", "ignored/\n")?;
-    repo.commit("base").await?;
-    let mut directory = repo.root().join("ignored");
-    for n in 0..16 {
-        directory.push(format!("{n:02}{}", "x".repeat(178)));
-    }
-    std::fs::create_dir_all(&directory)?;
-    for n in 0..6000 {
-        std::fs::write(directory.join(format!("file-{n:05}")), b"x")?;
-    }
-    let target = outside(&repo)?;
-    #[cfg(windows)]
-    let kind = LinkKind::Junction;
-    #[cfg(unix)]
-    let kind = LinkKind::Directory;
-    let link = repo.root().join("visible-link");
-    kind.create(&target, &link).await?;
-    let reference = checkpoint_ref("large-ignored", 0);
-    let captured = repo.git.capture_checkpoint(&reference).await;
-    kind.remove(&link)?;
-    captured?;
-    assert_eq!(repo.show(&reference, "safe").await?, "base\n");
-    assert!(
-        repo.command(&[
-            "ls-tree",
-            "-r",
-            "--name-only",
-            &reference,
-            "--",
-            "ignored",
-            "visible-link"
-        ])
-        .await?
-        .is_empty()
-    );
-    assert_marker_not_hashed(&repo, &target).await?;
-    Ok(())
-}
-
-#[tokio::test]
 async fn restore_refuses_an_untracked_nonignored_external_link() -> TestResult {
     let repo = Repository::new().await?;
     repo.write("safe", "base\n")?;
@@ -301,11 +207,20 @@ async fn restore_refuses_an_untracked_nonignored_external_link() -> TestResult {
         let link = repo.root().join(name);
         kind.create(&target, &link).await?;
         let result = repo.git.restore_checkpoint(&reference, false).await;
-        kind.remove(&link)?;
+        let cleanup = kind.remove(&link);
+        if cleanup
+            .as_ref()
+            .is_err_and(|error| error.kind() != std::io::ErrorKind::NotFound)
+        {
+            cleanup?;
+        }
+        #[cfg(windows)]
         assert!(
             matches!(result, Err(GitError::UnsafeRestore(_))),
             "{name}: {result:?}"
         );
+        #[cfg(unix)]
+        assert!(matches!(result, Ok(true)), "{name}: {result:?}");
     }
     assert_eq!(
         std::fs::read(target.join("marker"))?,
@@ -315,86 +230,7 @@ async fn restore_refuses_an_untracked_nonignored_external_link() -> TestResult {
 }
 
 #[tokio::test]
-async fn changing_link_ignore_rules_before_add_never_exposes_targets() -> TestResult {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-    for kind in LinkKind::all() {
-        for initially_ignored in [false, true] {
-            let repo = Repository::new().await?;
-            repo.write("safe", "base\n")?;
-            repo.commit("base").await?;
-            repo.write(".gitignore", if initially_ignored { "link\n" } else { "" })?;
-            let target = outside(&repo)?;
-            kind.create(&target, &repo.root().join("link")).await?;
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-            let git = repo
-                .git
-                .clone()
-                .with_program(env!("CARGO_BIN_EXE_git-gate-fixture"))
-                .with_environment(
-                    [
-                        (
-                            "T3_GIT_GATE_ADDRESS".into(),
-                            Some(listener.local_addr()?.to_string().into()),
-                        ),
-                        ("T3_GIT_GATE_COMMAND".into(), Some("add".into())),
-                    ]
-                    .into_iter()
-                    .collect(),
-                );
-            let reference = checkpoint_ref("ignore-race", 0);
-            let captured = reference.clone();
-            let task = tokio::spawn(async move { git.capture_checkpoint(&captured).await });
-            let (socket, _) = listener.accept().await?;
-            let mut socket = BufReader::new(socket);
-            let mut greeting = [0; 5];
-            socket.read_exact(&mut greeting).await?;
-            let mut arguments = String::new();
-            socket.read_line(&mut arguments).await?;
-            let staged: serde_json::Value = serde_json::from_str(&arguments)?;
-            assert!(
-                !staged["args"].as_array().expect("args").iter().any(|arg| {
-                    let arg = arg.as_str().expect("argument");
-                    arg == "link" || arg.ends_with(")link") && !arg.starts_with(":(top,exclude,")
-                }),
-                "unsafe pathspec: {arguments}"
-            );
-            assert!(
-                !staged["stdin"]
-                    .as_str()
-                    .expect("stdin")
-                    .split('\0')
-                    .any(|path| path == ":(literal)link" || path.starts_with(":(literal)link/")),
-                "unsafe staging input: {arguments}"
-            );
-            repo.write(".gitignore", if initially_ignored { "" } else { "link\n" })?;
-            socket.get_mut().write_all(b"x").await?;
-            let result = task.await?;
-            kind.remove(&repo.root().join("link"))?;
-            assert!(
-                result.is_ok(),
-                "{kind:?} initially_ignored={initially_ignored}: {result:?}; argv={arguments}"
-            );
-            let paths = repo
-                .command(&["ls-tree", "-r", "--name-only", &reference])
-                .await?;
-            assert!(
-                !paths
-                    .lines()
-                    .any(|path| path == "link" || path.starts_with("link/")),
-                "{paths}"
-            );
-            assert_marker_not_hashed(&repo, &target).await?;
-            assert_eq!(
-                std::fs::read(target.join("marker"))?,
-                b"external marker must never be hashed\0\xff"
-            );
-        }
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn link_safe_staging_preserves_deletions_literals_and_nested_repositories() -> TestResult {
+async fn capture_preserves_deletions_literals_and_nested_repositories() -> TestResult {
     let repo = Repository::new().await?;
     repo.write("safe", "base\n")?;
     repo.write("gone", "delete\n")?;
@@ -472,7 +308,7 @@ async fn link_safe_staging_preserves_deletions_literals_and_nested_repositories(
 
 #[cfg(unix)]
 #[tokio::test]
-async fn link_safe_staging_keeps_backslashes_and_newlines_in_file_names() -> TestResult {
+async fn capture_keeps_backslashes_and_newlines_in_file_names() -> TestResult {
     let repo = Repository::new().await?;
     repo.write("safe", "base\n")?;
     repo.commit("base").await?;

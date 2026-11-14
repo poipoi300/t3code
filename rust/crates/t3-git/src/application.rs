@@ -39,16 +39,38 @@ impl ProgressBuffer {
 #[cfg(test)]
 mod progress_tests {
     use super::*;
-    #[test]
-    fn slow_consumers_keep_bounded_output_and_terminal_events() {
-        let queue = ProgressBuffer::default();
+    #[tokio::test]
+    async fn slow_consumers_keep_bounded_output_and_terminal_events() {
+        let queue = Arc::new(ProgressBuffer::default());
+        queue.send(Ok(serde_json::from_value(serde_json::json!({"actionId":"test","cwd":"repo","action":"commit","kind":"action_started","phases":["commit"]})).unwrap()));
         for index in 0..4096 {
             queue.send(Ok(serde_json::from_value(serde_json::json!({"actionId":"test","cwd":"repo","action":"commit","kind":"hook_output","hookName":null,"stream":"stdout","text":format!("line {index}")})).unwrap()));
         }
         queue.send(Err(GitError::Unavailable("terminal".into())));
-        let events = queue.events.lock().unwrap();
-        assert!(events.len() <= 128, "buffered {} events", events.len());
-        assert!(events.back().unwrap().is_err());
+        {
+            let events = queue.events.lock().unwrap();
+            assert!(events.len() <= 128, "buffered {} events", events.len());
+            assert!(matches!(
+                events.front(),
+                Some(Ok(GitActionProgressEvent::Started(_)))
+            ));
+            assert!(events.back().unwrap().is_err());
+        }
+        let (_done, finished) = watch::channel(true);
+        let mut stream = GitActionSubscription {
+            receiver: queue,
+            cancellation: CancellationToken::new(),
+            finished,
+        };
+        let mut terminal = false;
+        let mut count = 0;
+        while let Some(event) = stream.recv().await {
+            count += 1;
+            terminal = event.is_err();
+        }
+        assert_eq!(count, 128);
+        assert!(terminal);
+        stream.close().await;
     }
 }
 
@@ -246,6 +268,7 @@ impl GitActionSubscription {
             let ready = self.receiver.ready.notified();
             tokio::pin!(ready);
             ready.as_mut().enable();
+            let finished = *self.finished.borrow_and_update();
             if let Some(event) = self
                 .receiver
                 .events
@@ -255,7 +278,7 @@ impl GitActionSubscription {
             {
                 return Some(event);
             }
-            if *self.finished.borrow_and_update() {
+            if finished {
                 return None;
             }
             tokio::select! {

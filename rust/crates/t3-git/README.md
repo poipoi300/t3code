@@ -84,33 +84,34 @@ operation, which awaits process termination before deleting scratch files.
 runtime must remain alive until they finish. Git requests a one-second SIGTERM
 grace through `t3-process`; Windows job termination remains immediate.
 
-Checkpoint containment deliberately differs from
-`apps/server/src/vcs/GitVcsDriver.ts`: capture scans without traversing directory
-links and removes excluded paths from its private index before staging. If the
-scope contains unsafe links, staging uses a NUL-delimited list of safe files,
-filtered by Git's own ignore rules. Ignored links are never named in add
-pathspecs; changing ignore rules cannot expose a scanned unsafe link during add.
-Cached deletions, sparse entries and embedded repositories retain Git semantics.
-Windows exclusions match index paths case-insensitively, including case-only replacements.
-Directory symlinks and reparse points (including junctions), external or dangling file
-symlinks, and uninspectable paths cannot be followed outside the worktree. Safe
-internal file symlinks retain Git's symlink semantics. A scope whose ancestor is
-a link is rejected. Restore checks before invoking Git and again before writing;
-clean checks before each pass. An unsafe link returns `GitError::UnsafeRestore`
-without running the destructive command. This also protects tracked directories
-replaced by junctions after capture. Tests exercise real Windows junctions and
-directory/file symlinks; outside files remain present and byte-identical.
+### Checkpoint filesystem boundary
+
+Restore and clean never write or delete through a link: immediately before each
+command, Git supplies its candidate paths and the filesystem validates their
+ancestor directories. A destination junction/mount point is refused. Directories
+Git is about to clear or remove are checked for contained junctions/mount points;
+true symlinks may be replaced or unlinked without following them.
+Tracked symlinks are captured and restored as links; nested repositories and
+submodules remain Git leaves (`--no-recurse-submodules` overrides recursion config).
+These are preflight checks, not an atomic filesystem
+transaction: callers must serialize mutations, and an unrelated process changing
+paths after the final check remains outside that guarantee.
+
+Capture reads what `git add` reads. Known inherited behavior: Git for Windows may
+read through a junction during `add -A`, as the TypeScript driver does. Capture
+has no link scan, ignore enumeration, explicit file list or link removal.
+
 Restore ownership compares the canonical deepest existing ancestor plus missing
 suffix components, with Windows case folding; missing scopes/owners cannot evade
 overlap checks.
 
 Disposable indexes and checkpoint plumbing disable index/ref/checkout hooks.
 User commit hooks and configured clean/smudge filters remain intentional Git
-behavior, subject to cancellation and the command's deadline. Commands default
-to noninteractive askpass/credential-manager settings, `GIT_PAGER=cat`, true
-editors, and `GIT_SSH_COMMAND=ssh -oBatchMode=yes`; explicit environment patches
-can select another SSH implementation. This SSH default supersedes configured
-`core.sshCommand`. Inherited repository/namespace/pathspec selectors and Git
+behavior, subject to cancellation and the command's deadline. Only background
+status fetches and scoped fetches disable interactive credential prompts.
+User-initiated network commands inherit transport/credential settings, and only
+`LANGUAGE=C` is global; `LC_ALL=C` is scoped to the locale-sensitive reads/clean.
+Inherited repository/namespace/pathspec selectors and Git
 tracing are cleared; explicit patches still merge with command precedence,
 including case-insensitive environment-key matching on Windows. Nested unborn
 repository recovery is bounded by 64 candidates and per-command deadlines rather
@@ -185,11 +186,10 @@ Review hardening (2026-11-14): working-tree file expansion fails closed until
 Git handle with the server environment and internal paths and derive checkout
 handles with `.at()` so locks, caches and invalidation are shared. On Windows,
 scratch-index and checkpoint commands disable hooks through a private empty
-temporary directory retained by that root handle; this hardens the TypeScript
-`/dev/null` convention. User commit hooks still run. Windows containment uses
-`std::fs::read_link`'s SYMLINK/MOUNT_POINT reparse-tag decoder, propagating I/O
-failures and allowing unsupported non-link tags. Ignored directories are pruned
-before walking; restore retains exclusions for those directories even if its
-`.gitignore` changes. Action subscriptions retain at most 128 events, evicting
+temporary directory retained by that root handle, under the configured state
+directory (otherwise the process temp directory); this hardens the TypeScript
+`/dev/null` convention. User commit hooks still run. Windows containment reads
+reparse tags directly through
+`FSCTL_GET_REPARSE_POINT`. Action subscriptions retain at most 128 events, evicting
 old hook output first while preserving terminal events; this bound is stricter
 than TypeScript's currently unbounded callback stream.

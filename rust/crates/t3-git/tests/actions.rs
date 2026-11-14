@@ -602,6 +602,25 @@ async fn internal_indexes_do_not_run_post_index_change_hooks() -> TestResult {
             "disabled hooks path must be a server-owned directory: {path:?}"
         );
         assert!(std::fs::read_dir(path)?.next().is_none());
+        let state = repo.temp.path().join("server-state");
+        let configured = repo
+            .git
+            .clone()
+            .with_internal_paths(state.clone(), repo.temp.path().join("secrets"));
+        let owned = configured
+            .execute(
+                &["config", "--get", "core.hooksPath"],
+                t3_git::ExecuteOptions {
+                    capture: true,
+                    ..Default::default()
+                },
+            )
+            .await?
+            .stdout_text();
+        assert!(
+            std::path::Path::new(owned.trim()).starts_with(&state),
+            "configured hooks directory must live under state: {owned}"
+        );
     }
     repo.git.prepare_commit_context(None, true).await?;
     assert!(

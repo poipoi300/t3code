@@ -17,6 +17,7 @@ mod safety;
 mod setup_tracker;
 mod workflow;
 mod worktree;
+mod worktree_container;
 mod worktree_progress;
 pub use actions::{CheckoutRefresh, parse_commit_message};
 pub use actions::{CommitOptions, PreparedCommit, PushTarget};
@@ -240,16 +241,25 @@ impl Git {
     fn disabled_hooks_path(&self) -> Result<String, GitError> {
         #[cfg(windows)]
         {
-            if self.core.disabled_hooks.get().is_none() {
-                let directory = tempfile::Builder::new()
-                    .prefix("t3-git-no-hooks-")
-                    .tempdir()?;
-                let _ = self.core.disabled_hooks.set(directory);
-            }
-            let directory = self.core.disabled_hooks.get().ok_or_else(|| {
-                GitError::Unavailable("Disabled hooks directory is unavailable.".into())
+            let key = self.internal_paths.as_ref().map(|(state, _)| state.clone());
+            let mut directories = self.core.disabled_hooks.lock().map_err(|_| {
+                GitError::Unavailable("Disabled hooks storage is unavailable.".into())
             })?;
-            Ok(directory.path().to_string_lossy().into_owned())
+            if let Some(directory) = directories.get(&key) {
+                return Ok(directory.path().to_string_lossy().into_owned());
+            }
+            let mut builder = tempfile::Builder::new();
+            builder.prefix("t3-git-no-hooks-");
+            let directory = match &key {
+                Some(state) => {
+                    std::fs::create_dir_all(state)?;
+                    builder.tempdir_in(state)?
+                }
+                None => builder.tempdir()?,
+            };
+            let path = directory.path().to_string_lossy().into_owned();
+            directories.insert(key, directory);
+            Ok(path)
         }
         #[cfg(not(windows))]
         {
