@@ -49,6 +49,10 @@ fn repository(path: &Path) {
 
 impl Server {
     async fn start() -> Self {
+        Self::start_with(|_| Vec::new()).await
+    }
+    /// `extra` adds environment entries, given the home before the server starts.
+    async fn start_with(extra: impl FnOnce(&Path) -> Vec<(String, String)>) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
         // The terminal's shell: without PATH it resolves ComSpec (cmd.exe), so no user shell
@@ -56,6 +60,7 @@ impl Server {
         let env = ["SystemRoot", "ComSpec", "WINDIR"]
             .into_iter()
             .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_owned(), v)))
+            .chain(extra(home))
             .collect();
         let runtime = t3_server::runtime::start(ConfigInputs {
             flags: ServerFlags {
@@ -507,5 +512,66 @@ async fn host_database_storage_and_scoped_host_services() {
         let exit = s.call(tag, payload).await;
         assert_eq!(failure(exit), "EnvironmentAuthorizationError", "{tag}");
     }
+    s.runtime.shutdown().await.unwrap();
+}
+
+/// Devices: one runtime when a Node runtime is on PATH (here a stand-in file nothing runs),
+/// unsupported without one. Device support stays off, so no host or hub starts.
+#[cfg(feature = "device")]
+#[tokio::test]
+async fn devices_are_served_with_a_node_runtime_and_unsupported_without() {
+    let mut absent = Server::start().await;
+    let exit = absent
+        .call("device.list", json!({"inspectOnly": true}))
+        .await;
+    let encoded = serde_json::to_value(&exit).unwrap();
+    assert_eq!(
+        encoded["cause"][0]["defect"], "Unknown request tag: device.list",
+        "{encoded}"
+    );
+    let without_node = absent.runtime.rpc_methods_served;
+    absent.runtime.shutdown().await.unwrap();
+
+    let mut s = Server::start_with(|home| {
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let node = if cfg!(windows) { "node.exe" } else { "node" };
+        std::fs::write(bin.join(node), "").unwrap();
+        vec![("PATH".into(), bin.to_string_lossy().into_owned())]
+    })
+    .await;
+    // The eleven device methods are the only difference a Node runtime makes.
+    let with_node = s.runtime.rpc_methods_served;
+    println!("RPC methods served: {without_node} without Node, {with_node} with Node (of 220)");
+    assert_eq!(with_node, without_node + 11);
+    s.client
+        .start("subscribeDeviceState", json!({}), CallKind::Stream)
+        .unwrap();
+    let state = s.chunk().await;
+    assert!(state["hosts"].is_array(), "{state}");
+    let listed = ok(s.call("device.list", json!({"inspectOnly": true})).await);
+    assert!(listed["hosts"].is_array(), "{listed}");
+    let configured = ok(s.call("device.configure", json!({"enabled": false})).await);
+    assert!(configured["hosts"].is_array(), "{configured}");
+
+    // The hub proxy: its policy, then authentication, then readiness (nothing is running).
+    let http = reqwest::Client::new();
+    let hub = format!("{}/api/device-hub/api/devices", s.origin);
+    assert_eq!(http.get(&hub).send().await.unwrap().status(), 401);
+    let authorized = http
+        .get(&hub)
+        .header("cookie", &s.cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), 503);
+    let unknown = format!("{}/api/device-hub/not-a-route", s.origin);
+    assert_eq!(http.get(&unknown).send().await.unwrap().status(), 404);
+
+    // A read-only session may list but not configure (settings:write).
+    s.reconnect_with(&["orchestration:read"]).await;
+    ok(s.call("device.list", json!({"inspectOnly": true})).await);
+    let refused = s.call("device.configure", json!({"enabled": false})).await;
+    assert_eq!(failure(refused), "EnvironmentAuthorizationError");
     s.runtime.shutdown().await.unwrap();
 }

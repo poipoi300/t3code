@@ -36,6 +36,23 @@ fn inputs(home: &Path) -> ConfigInputs {
     }
 }
 
+/// Review H1: without `--host` the server listens on loopback only, as TypeScript's
+/// `checkServerReachability` (`input.host ?? "127.0.0.1"`) does; remote starts pass a host.
+#[tokio::test]
+async fn a_start_without_a_host_listens_on_loopback_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut no_host = inputs(temp.path());
+    no_host.flags.host = None;
+    let server = t3_server::runtime::start(no_host).await.unwrap();
+    assert_eq!(
+        server.address.ip(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        "{}",
+        server.address
+    );
+    server.shutdown().await.unwrap();
+}
+
 async fn call(socket: &mut Socket, client: &mut Client, tag: &str, kind: CallKind) -> CallEvent {
     client.start(tag, json!({}), kind).unwrap();
     next_event(socket, client).await

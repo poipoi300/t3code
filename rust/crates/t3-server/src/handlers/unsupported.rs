@@ -114,17 +114,6 @@ pub fn register(registry: &mut HandlerRegistry) -> crate::Result<()> {
     registry.unimplemented::<WsSubscribePreviewEventsRpc>()?;
     registry.unimplemented::<WsPreviewStopLocalServerRpc>()?;
     registry.unimplemented::<WsSubscribeDiscoveredLocalServersRpc>()?;
-    registry.unimplemented::<WsDeviceTestHostRpc>()?;
-    registry.unimplemented::<WsDeviceEasAccountRpc>()?;
-    registry.unimplemented::<WsDeviceSimlockIdentityRpc>()?;
-    registry.unimplemented::<WsDeviceListRpc>()?;
-    registry.unimplemented::<WsDeviceConfigureRpc>()?;
-    registry.unimplemented::<WsDeviceOpenRpc>()?;
-    registry.unimplemented::<WsDeviceCloseRpc>()?;
-    registry.unimplemented::<WsDeviceShutdownRpc>()?;
-    registry.unimplemented::<WsDeviceDetailRpc>()?;
-    registry.unimplemented::<WsDeviceActionRpc>()?;
-    registry.unimplemented::<WsSubscribeDeviceStateRpc>()?;
     registry.unimplemented::<WsGuestShareCreateRpc>()?;
     registry.unimplemented::<WsSecretsAnswerRequestRpc>()?;
     Ok(())

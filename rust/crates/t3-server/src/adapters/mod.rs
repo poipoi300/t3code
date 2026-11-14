@@ -4,6 +4,8 @@ pub mod auth;
 pub mod cli;
 #[cfg(feature = "local-services")]
 pub mod config;
+#[cfg(feature = "device")]
+pub mod device;
 #[cfg(feature = "forge")]
 pub mod forge;
 #[cfg(feature = "git")]

@@ -70,6 +70,45 @@ mod authority {
             })
         }
 
+        /// `project/threadWorkspaceRoot.ts`: the thread's worktree, else its live project's root;
+        /// a deleted thread, or a failed read, has none.
+        pub async fn thread_workspace_root(&self, thread_id: &str) -> Option<PathBuf> {
+            let thread_id = thread_id.to_owned();
+            let read = self
+                .database
+                .reader(move |connection| {
+                    use t3_persistence::rusqlite::OptionalExtension;
+                    Ok(connection
+                        .query_row(
+                            "SELECT json_extract(t.payload_json, '$.worktreePath'), p.workspace_root
+                             FROM orchestration_v2_projection_threads t
+                             LEFT JOIN projection_projects p
+                               ON p.project_id = t.project_id AND p.deleted_at IS NULL
+                             WHERE t.thread_id = ?1 AND t.deleted_at IS NULL",
+                            [thread_id],
+                            |row| {
+                                Ok((
+                                    row.get::<_, Option<String>>(0)?,
+                                    row.get::<_, Option<String>>(1)?,
+                                ))
+                            },
+                        )
+                        .optional()?)
+                })
+                .await;
+            match read {
+                Ok(Some((worktree, root))) => worktree
+                    .filter(|path| !path.is_empty())
+                    .or(root)
+                    .map(PathBuf::from),
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::warn!(%error, "cannot read the thread's workspace");
+                    None
+                }
+            }
+        }
+
         /// `managedWorktreesDirectories`: the default folder, the setting and its predecessors.
         async fn managed_directories(&self) -> Vec<PathBuf> {
             let mut directories = vec![self.default_worktrees.clone()];

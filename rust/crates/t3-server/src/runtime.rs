@@ -121,7 +121,10 @@ async fn start_configured(
             "LAN fencing, bootstrap-fd and Tailscale are not yet ported".into(),
         ));
     }
-    let host = config.host.clone().unwrap_or_else(|| "0.0.0.0".into());
+    // Before binding (TypeScript `checkServerReachability`): loopback when no host is given, and
+    // never a host the organisation's policy forbids, not even briefly.
+    let policy = crate::adapters::config::managed_policy(&inputs.env)?;
+    let host = crate::adapters::config::reachable_host(policy.as_ref(), &config)?;
     // Keep the listener used for automatic selection: probing then rebinding races other servers.
     let listener = match tokio::net::TcpListener::bind((host.as_str(), config.port)).await {
         Ok(listener) => listener,
@@ -133,7 +136,7 @@ async fn start_configured(
     };
     let address = listener.local_addr()?;
     let (account_home, environment) = (inputs.home.clone(), inputs.env.clone());
-    let local = LocalServices::open(config, address.port()).await?;
+    let local = LocalServices::open(config, address.port(), policy).await?;
     // Dev mode is `--dev-url` / `VITE_DEV_SERVER_URL`, as in TypeScript; it keeps the free
     // Replay (dev) provider (`seedDevReplayInstance` in ProviderInstanceRegistryHydration.ts).
     #[cfg(feature = "orchestration")]
@@ -350,6 +353,13 @@ async fn start_domains(
     ))?;
     #[cfg(all(feature = "git", not(feature = "workspace")))]
     domains.insert_runtime(crate::adapters::git::GitAdapter::start(&context))?;
+    // Device hosts resolve a thread's workspace through the same authority.
+    #[cfg(feature = "device")]
+    if let Some(device) =
+        crate::adapters::device::DeviceAdapter::start(&context, workspaces.clone()).await?
+    {
+        domains.insert_runtime(device)?;
+    }
     #[cfg(feature = "workspace")]
     domains.insert(crate::workspaces::workspace_adapter(&context, workspaces).await?)?;
     #[cfg(feature = "terminal")]

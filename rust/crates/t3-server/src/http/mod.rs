@@ -40,6 +40,14 @@ pub fn router(services: Arc<ServiceRegistry>) -> Router {
         let router = crate::adapters::scheduler::routes(router);
         #[cfg(feature = "orchestration")]
         let router = orchestration::routes(router);
+        // The device router owns its absolute path and its own policy-then-auth order.
+        #[cfg(feature = "device")]
+        let router = match services.domain::<crate::adapters::device::DeviceAdapter>() {
+            Some(device) => {
+                router.route_service("/api/device-hub/{*path}", device.runtime.router())
+            }
+            None => router,
+        };
         let router = router.fallback(static_files::serve);
         (router, cors)
     };
