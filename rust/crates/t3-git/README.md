@@ -133,6 +133,30 @@ the scope and top-level, or a changed `commondir` pointer refuses the operation 
 names the changed path. Descendant submodules and nested worktrees remain leaves
 of their containing scope and may have their own bindings.
 
+The identity also records the volume and file id (Windows: volume serial number and
+file index read from a handle on the entry itself; POSIX: device and inode) of the
+top-level `.git` entry, the Git directory and the common directory, and every marker
+carries its entry's id. So a `.git` replaced at the same path (moved aside and
+re-created, or overwritten by an extracted archive) refuses as a changed repository,
+in-process and after a restart. Ordinary Git use keeps these ids: `gc`, `repack`,
+fetches, commits and config writes change files inside `.git`, not the directories
+themselves, and Git rewrites a worktree's `.git`/`gitdir` pointer files in place
+(`git worktree repair`; reasoned from Git's `write_file`, not tested here).
+What also changes them, and so refuses until the repository is trusted again: a
+`.git` deleted and re-created, a restore from backup or re-clone into the folder,
+and moving the repository to another volume. In-place edits of the real repository's
+configuration, hooks or attributes are not detected; an agent that can write the
+real `.git` can still choose its filters (the conceded residual). On ReFS the
+64-bit file index may not be unique.
+
+Saved bindings are versioned (`REPOSITORY_BINDING_VERSION`, now 2). A record of any
+other version, including one saved before file ids existed, decodes but is refused
+by `with_repository_binding` with `RepositoryChanged` asking to trust the
+repository again; it is never rebound silently. `rebind_repository` is the only way
+to replace an in-process identity: it is for the user's explicit "trust this
+repository" and for a repository the server itself just created in the folder (a
+clone, a recreated worktree). `bind_repository` keeps refusing a changed repository.
+
 Until integration supplies durable identities, the first protected use records
 each scope in a process-lifetime cache, shared even across newly constructed Git
 handles. This does not survive a server restart and trusts what exists at first
@@ -145,7 +169,11 @@ Every checkpoint command disables fsmonitor and hooks; status/branch reads disab
 fsmonitor, and all produced diffs disable external diff and textconv helpers.
 Capture's `add` may run clean/process filters; restore may run smudge/process
 filters, and its worktree comparisons/index reset may run clean/process filters.
-Status and untracked totals may also run clean/process filters. These preserve
+Status and untracked totals may also run clean/process filters. Automatic status
+(`status`, detailed status and its `diff-index`/`diff-files` totals) and the
+worktree pre-removal check pass `--ignore-submodules=dirty`: a submodule's changed
+commit is still reported, but Git never runs inside a submodule, so a repository
+planted at a submodule path cannot run its configuration from a status read. These preserve
 Git/LFS behavior. The low-level `status` helper can also run `post-index-change`
 when Git refreshes its index; detailed status suppresses optional index writes
 with `GIT_OPTIONAL_LOCKS=0`. Clean itself runs no configured filter. Helpers come from
