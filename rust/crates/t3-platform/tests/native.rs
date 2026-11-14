@@ -711,10 +711,18 @@ async fn unanswerable_host_actions_are_typed_unsupported_or_go_to_the_shell_exte
     // open a real browser.
     use t3_client::persistence::external_links::{ExternalUrlSurface, safe_external_url};
     assert_eq!(platform.external_url_surface(), ExternalUrlSurface::Desktop);
-    for refused in ["file:///etc/passwd", "mailto:someone@example.com", "javascript:alert(1)", "zed://file/x"] {
+    for refused in [
+        "file:///etc/passwd",
+        "mailto:someone@example.com",
+        "javascript:alert(1)",
+        "zed://file/x",
+    ] {
         assert!(safe_external_url(refused, ExternalUrlSurface::Desktop).is_none());
         assert!(
-            matches!(platform.open_url(refused.into()).await, Err(PlatformError::InvalidData(_))),
+            matches!(
+                platform.open_url(refused.into()).await,
+                Err(PlatformError::InvalidData(_))
+            ),
             "{refused}"
         );
         assert!(
@@ -762,7 +770,9 @@ impl t3_platform::SecretKeyStore for DamagedSecrets {
     ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, t3_platform::SecretStoreError> {
         let loaded = self.inner.load(id)?;
         match (loaded, *self.damage.lock().unwrap()) {
-            (Some(secret), Some(damage)) => damage(secret.to_vec()).map(|s| Some(zeroize::Zeroizing::new(s))),
+            (Some(secret), Some(damage)) => {
+                damage(secret.to_vec()).map(|s| Some(zeroize::Zeroizing::new(s)))
+            }
             (loaded, _) => Ok(loaded),
         }
     }
@@ -782,7 +792,10 @@ async fn an_unreadable_or_wrong_length_storage_key_is_replaced_instead_of_failin
     for damage in damages {
         let (platform, dir, secrets) = platform().await;
         let secure = key("connection-credential", "c");
-        platform.write(StorageArea::Secure, vec![put(&secure, b"token")]).await.unwrap();
+        platform
+            .write(StorageArea::Secure, vec![put(&secure, b"token")])
+            .await
+            .unwrap();
         drop(platform);
         let damaged = DamagedSecrets {
             inner: secrets.clone(),
@@ -790,14 +803,29 @@ async fn an_unreadable_or_wrong_length_storage_key_is_replaced_instead_of_failin
         };
         let mut config = config(dir.path(), &secrets);
         config.secrets = Box::new(damaged);
-        let reopened = NativePlatform::open(config).await.expect("opens with a new key");
+        let reopened = NativePlatform::open(config)
+            .await
+            .expect("opens with a new key");
         let report = reopened.open_report();
         assert_eq!(report.discarded_secure_records, 1);
         assert!(report.replaced_unreadable_key);
-        assert_eq!(reopened.get(StorageArea::Secure, secure.clone()).await.unwrap(), None);
-        reopened.write(StorageArea::Secure, vec![put(&secure, b"new")]).await.unwrap();
         assert_eq!(
-            reopened.get(StorageArea::Secure, secure).await.unwrap().as_deref(),
+            reopened
+                .get(StorageArea::Secure, secure.clone())
+                .await
+                .unwrap(),
+            None
+        );
+        reopened
+            .write(StorageArea::Secure, vec![put(&secure, b"new")])
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .get(StorageArea::Secure, secure)
+                .await
+                .unwrap()
+                .as_deref(),
             Some(&b"new"[..])
         );
     }
@@ -807,7 +835,11 @@ async fn an_unreadable_or_wrong_length_storage_key_is_replaced_instead_of_failin
 async fn a_file_that_is_not_a_database_is_moved_aside_and_storage_starts_afresh() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = Arc::new(EphemeralSecretStore::default());
-    std::fs::write(dir.path().join("client-storage.sqlite"), b"this is not sqlite at all").unwrap();
+    std::fs::write(
+        dir.path().join("client-storage.sqlite"),
+        b"this is not sqlite at all",
+    )
+    .unwrap();
     let platform = NativePlatform::open(config(dir.path(), &secrets))
         .await
         .expect("opens a fresh database");
@@ -818,8 +850,94 @@ async fn a_file_that_is_not_a_database_is_moved_aside_and_storage_starts_afresh(
         .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
         .collect();
     assert_eq!(aside.len(), 1, "the damaged file is kept for diagnosis");
-    assert_eq!(std::fs::read(aside[0].path()).unwrap(), b"this is not sqlite at all");
+    assert_eq!(
+        std::fs::read(aside[0].path()).unwrap(),
+        b"this is not sqlite at all"
+    );
     let ordinary = key("thread", "t");
-    platform.write(StorageArea::Ordinary, vec![put(&ordinary, b"x")]).await.unwrap();
-    assert_eq!(platform.get(StorageArea::Ordinary, ordinary).await.unwrap().as_deref(), Some(&b"x"[..]));
+    platform
+        .write(StorageArea::Ordinary, vec![put(&ordinary, b"x")])
+        .await
+        .unwrap();
+    assert_eq!(
+        platform
+            .get(StorageArea::Ordinary, ordinary)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(&b"x"[..])
+    );
+}
+
+/// A key store that fails once with `Unavailable`, or reports its key unreadable, and records
+/// what it was asked to retire.
+struct FlakySecrets {
+    inner: Arc<EphemeralSecretStore>,
+    unavailable_once: std::sync::atomic::AtomicBool,
+    corrupt_once: std::sync::atomic::AtomicBool,
+    retired: Arc<std::sync::Mutex<Vec<String>>>,
+}
+impl t3_platform::SecretKeyStore for FlakySecrets {
+    fn load(
+        &self,
+        id: &str,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, t3_platform::SecretStoreError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.unavailable_once.swap(false, SeqCst) {
+            return Err(t3_platform::SecretStoreError::Unavailable("keystore busy".into()));
+        }
+        if self.corrupt_once.swap(false, SeqCst) {
+            return Err(t3_platform::SecretStoreError::Corrupt);
+        }
+        self.inner.load(id)
+    }
+    fn store(&self, id: &str, secret: &[u8]) -> Result<(), t3_platform::SecretStoreError> {
+        self.inner.store(id, secret)
+    }
+    fn retire(&self, id: &str) -> Result<(), t3_platform::SecretStoreError> {
+        self.retired.lock().unwrap().push(id.to_owned());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_key_store_that_is_unavailable_once_keeps_every_record_for_the_next_open() {
+    // Re-review N1: a temporary Keystore failure must not discard saved credentials.
+    let (platform, dir, secrets) = platform().await;
+    let secure = key("connection-credential", "c");
+    platform.write(StorageArea::Secure, vec![put(&secure, b"token")]).await.unwrap();
+    drop(platform);
+    let retired = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut flaky = config(dir.path(), &secrets);
+    flaky.secrets = Box::new(FlakySecrets {
+        inner: secrets.clone(),
+        unavailable_once: true.into(),
+        corrupt_once: false.into(),
+        retired: retired.clone(),
+    });
+    assert!(NativePlatform::open(flaky).await.is_err(), "a temporary failure fails this launch");
+    let reopened = NativePlatform::open(config(dir.path(), &secrets)).await.unwrap();
+    assert_eq!(reopened.open_report().discarded_secure_records, 0);
+    assert_eq!(
+        reopened.get(StorageArea::Secure, secure).await.unwrap().as_deref(),
+        Some(&b"token"[..])
+    );
+    assert!(retired.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_unreadable_key_is_set_aside_before_a_new_one_replaces_it() {
+    let (platform, dir, secrets) = platform().await;
+    drop(platform);
+    let retired = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut damaged = config(dir.path(), &secrets);
+    damaged.secrets = Box::new(FlakySecrets {
+        inner: secrets.clone(),
+        unavailable_once: false.into(),
+        corrupt_once: true.into(),
+        retired: retired.clone(),
+    });
+    let reopened = NativePlatform::open(damaged).await.unwrap();
+    assert!(reopened.open_report().replaced_unreadable_key);
+    assert_eq!(retired.lock().unwrap().len(), 1, "retired, not overwritten");
 }

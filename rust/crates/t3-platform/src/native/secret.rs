@@ -23,6 +23,77 @@ pub enum SecretStoreError {
 pub trait SecretKeyStore: Send + Sync + 'static {
     fn load(&self, id: &str) -> Result<Option<Zeroizing<Vec<u8>>>, SecretStoreError>;
     fn store(&self, id: &str, secret: &[u8]) -> Result<(), SecretStoreError>;
+    /// Sets aside a key that `load` reported `Corrupt`, before a new one is stored under the
+    /// same id, so a misread key is kept rather than overwritten.
+    fn retire(&self, _id: &str) -> Result<(), SecretStoreError> {
+        Ok(())
+    }
+}
+
+/// What a failed Android Keystore call means; `secret/android.rs` gathers the facts from the
+/// exception. Only an authentication-tag failure and a permanently invalidated key are certain:
+/// AOSP's `AndroidKeyStoreProvider` raises `UnrecoverableKeyException` for every keystore2
+/// error except not-found and invalidated, temporary ones included.
+#[cfg(any(target_os = "android", test))]
+pub(crate) mod keystore_failure {
+    #[derive(Debug, Default, Clone, Copy)]
+    pub(crate) struct Facts {
+        pub tag_mismatch: bool,
+        pub permanently_invalidated: bool,
+        pub unrecoverable: bool,
+        /// The cause is an `android.security.KeyStoreException`.
+        pub keystore_cause: bool,
+        /// Its `isTransientFailure()` (API 33+); `None` before 33.
+        pub cause_transient: Option<bool>,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Failure {
+        /// The key will never open this blob; `replace_key` when the Keystore entry itself is
+        /// gone for good and may be deleted.
+        Permanent { replace_key: bool },
+        /// Possibly temporary: fail this launch and touch nothing.
+        Transient,
+    }
+
+    pub(crate) fn classify(facts: &Facts) -> Failure {
+        if facts.permanently_invalidated {
+            Failure::Permanent { replace_key: true }
+        } else if facts.tag_mismatch
+            || facts.unrecoverable
+                && (!facts.keystore_cause || facts.cause_transient == Some(false))
+        {
+            Failure::Permanent { replace_key: false }
+        } else {
+            Failure::Transient
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn only_certain_keystore_failures_discard_saved_credentials() {
+            let unrecoverable = Facts {
+                unrecoverable: true,
+                ..Facts::default()
+            };
+            for (facts, expected) in [
+                (Facts { tag_mismatch: true, ..Facts::default() }, Failure::Permanent { replace_key: false }),
+                (Facts { permanently_invalidated: true, ..Facts::default() }, Failure::Permanent { replace_key: true }),
+                // A keystore2 error behind UnrecoverableKeyException may be temporary.
+                (Facts { keystore_cause: true, ..unrecoverable }, Failure::Transient),
+                (Facts { keystore_cause: true, cause_transient: Some(true), ..unrecoverable }, Failure::Transient),
+                (Facts { keystore_cause: true, cause_transient: Some(false), ..unrecoverable }, Failure::Permanent { replace_key: false }),
+                (unrecoverable, Failure::Permanent { replace_key: false }),
+                // Bad padding, a provider or keystore error: not certain, so temporary.
+                (Facts::default(), Failure::Transient),
+            ] {
+                assert_eq!(classify(&facts), expected, "{facts:?}");
+            }
+        }
+    }
 }
 
 #[cfg(any(

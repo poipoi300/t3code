@@ -211,6 +211,10 @@ impl Store {
                     .map_err(database_error)?;
                 let mut fresh = zeroize::Zeroizing::new([0_u8; 32]);
                 random.fill(fresh.as_mut()).map_err(|_| OpenError::Random)?;
+                if report.replaced_unreadable_key {
+                    // Keep the misread key rather than overwrite it.
+                    secrets.retire(&key_id)?;
+                }
                 secrets.store(&key_id, fresh.as_ref())?;
                 let stored = secrets.load(&key_id)?.ok_or(SecretStoreError::Corrupt)?;
                 if stored.as_slice() != fresh.as_ref() {

@@ -78,43 +78,66 @@ impl AndroidKeystoreStore {
 
 /// How a Keystore call failed.
 enum JavaFailure {
-    /// The key cannot open this blob or is gone for good (a tag mismatch, backup data
-    /// restored onto a device with its own key, an invalidated key): treat it as missing.
-    KeyUnusable,
-    /// Anything else, including a transient Keystore or provider error: fail this launch only.
+    /// The key will never open this blob (see `keystore_failure::classify`); `replace_key` when
+    /// the Keystore entry itself is permanently invalidated and may be deleted.
+    KeyUnusable { replace_key: bool },
+    /// Anything else, including a temporary Keystore or provider error: fail this launch only.
     Other(String),
 }
 
-/// Exceptions that mean the stored key will never open this blob again.
-const KEY_UNUSABLE: &[&str] = &[
-    "javax/crypto/AEADBadTagException",
-    "javax/crypto/BadPaddingException",
-    "java/security/UnrecoverableKeyException",
-    "android/security/keystore/KeyPermanentlyInvalidatedException",
-];
+fn is_instance(env: &mut JNIEnv<'_>, object: &JObject<'_>, class: &str) -> bool {
+    // A class the device lacks raises NoClassDefFoundError; clear it and answer no.
+    let matched = env.is_instance_of(object, class).unwrap_or(false);
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+    matched
+}
 
 fn classify_exception(env: &mut JNIEnv<'_>) -> JavaFailure {
+    use super::keystore_failure::{Facts, Failure, classify};
     let Ok(throwable) = env.exception_occurred() else {
         return JavaFailure::Other("an unreadable Java exception".into());
     };
     let _ = env.exception_describe();
     let _ = env.exception_clear();
-    for class in KEY_UNUSABLE {
-        // A class the device lacks raises NoClassDefFoundError; clear it and move on.
-        let matched = env.is_instance_of(&throwable, *class).unwrap_or(false);
-        if env.exception_check().unwrap_or(false) {
-            let _ = env.exception_clear();
-        }
-        if matched {
-            return JavaFailure::KeyUnusable;
+    let mut facts = Facts {
+        tag_mismatch: is_instance(env, &throwable, "javax/crypto/AEADBadTagException"),
+        permanently_invalidated: is_instance(
+            env,
+            &throwable,
+            "android/security/keystore/KeyPermanentlyInvalidatedException",
+        ),
+        unrecoverable: is_instance(env, &throwable, "java/security/UnrecoverableKeyException"),
+        ..Facts::default()
+    };
+    if facts.unrecoverable
+        && let Ok(cause) = env
+            .call_method(&throwable, "getCause", "()Ljava/lang/Throwable;", &[])
+            .and_then(|cause| cause.l())
+        && !cause.is_null()
+    {
+        facts.keystore_cause = is_instance(env, &cause, "android/security/KeyStoreException");
+        if facts.keystore_cause {
+            // API 33+; older devices raise NoSuchMethodError, cleared below.
+            facts.cause_transient = env
+                .call_method(&cause, "isTransientFailure", "()Z", &[])
+                .and_then(|value| value.z())
+                .ok();
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_clear();
+            }
         }
     }
-    JavaFailure::Other("a Keystore call failed".into())
+    match classify(&facts) {
+        Failure::Permanent { replace_key } => JavaFailure::KeyUnusable { replace_key },
+        Failure::Transient => JavaFailure::Other("a Keystore call failed".into()),
+    }
 }
 
 fn failure_to_secret_error(failure: JavaFailure) -> SecretStoreError {
     match failure {
-        JavaFailure::KeyUnusable => SecretStoreError::Corrupt,
+        JavaFailure::KeyUnusable { .. } => SecretStoreError::Corrupt,
         JavaFailure::Other(detail) => SecretStoreError::Unavailable(detail),
     }
 }
@@ -146,7 +169,11 @@ fn delete_keystore_key(env: &mut JNIEnv<'_>) -> jni::errors::Result<()> {
 }
 
 /// Writes `bytes` to `path` so that a crash leaves either the old file or the new one whole.
-fn write_durably(directory: &std::path::Path, path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+fn write_durably(
+    directory: &std::path::Path,
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> std::io::Result<()> {
     use std::io::Write;
     let partial = path.with_extension("partial");
     let mut file = std::fs::File::create(&partial)?;
@@ -316,6 +343,17 @@ fn do_final(
 }
 
 impl SecretKeyStore for AndroidKeystoreStore {
+    fn retire(&self, id: &str) -> Result<(), SecretStoreError> {
+        let path = self.path(id);
+        if !path.exists() {
+            return Ok(());
+        }
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        std::fs::rename(&path, path.with_extension(format!("retired-{seconds}")))
+            .map_err(unavailable)
+    }
     fn load(&self, id: &str) -> Result<Option<Zeroizing<Vec<u8>>>, SecretStoreError> {
         let blob = match std::fs::read(self.path(id)) {
             Ok(blob) => blob,
@@ -368,8 +406,9 @@ impl SecretKeyStore for AndroidKeystoreStore {
         };
         // A key invalidated for good cannot wrap a new secret either: replace it once.
         let (nonce, ciphertext) = match wrap() {
-            Err(JavaFailure::KeyUnusable) => {
-                self.java(delete_keystore_key).map_err(failure_to_secret_error)?;
+            Err(JavaFailure::KeyUnusable { replace_key: true }) => {
+                self.java(delete_keystore_key)
+                    .map_err(failure_to_secret_error)?;
                 wrap()
             }
             result => result,

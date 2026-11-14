@@ -47,15 +47,27 @@ hyper client would mean owning connection and TLS setup code.
 | Windows | Credential Manager (`keyring`, `windows-native`) | Electron's `safeStorage` uses DPAPI; both are bound to the user account. |
 | macOS | Keychain (`keyring`, `apple-native`) | Same facility `safeStorage` uses. Not built on this machine. |
 | Linux | Secret Service over D-Bus (`keyring`, `async-secret-service`, pure-Rust zbus) | Like `safeStorage`, it refuses to open when no secret service is running instead of falling back to `basic_text`. Not built on this machine. |
-| Android | Shell supplies a `SecretKeyStore` backed by the Android Keystore | The mobile app uses `expo-secure-store` today. |
-| iOS | Shell supplies a `SecretKeyStore` backed by the Keychain | As above. |
+| Android | `AndroidKeystoreStore` (`NativeConfig::mobile`): the storage key wrapped by an AES-GCM key in the Android Keystore, the wrapped form fsynced beside the data | The Java VM comes from `set_android_vm` or, on API 31+, the NDK's `JNI_GetCreatedJavaVMs`. Never run on a device. |
+| iOS | `KeychainStore` (`NativeConfig::mobile`): a generic password item | Defaults only; see the shell requirement below. Not built on this machine. |
 
 Only the storage key lives in the OS store (service `T3 Code client storage`, account
 `storage-<random id>` recorded in the database), not every secret, so values have no size limit
 and stay inside the cross-area transaction. If the OS store is unavailable, `open` fails with
 `OpenError::SecretStore`; nothing is written in plaintext. If the key is gone (the user cleared
-the keychain), the unreadable secure rows are deleted at open and counted in
-`NativePlatform::open_report()`. `NativeConfig::desktop(dir)` uses the OS store;
+the keychain) or unreadable (a damaged Android wrapped key, a Keystore key that no longer opens
+it, a wrong length), the unreadable secure rows are deleted at open, a new key replaces it, and
+both are counted in `NativePlatform::open_report()`. A database file SQLite reports as not a
+database or corrupt is moved aside as `client-storage.sqlite.corrupt-<seconds>` and a new one
+started (`recreated_database`). On Unix the data directory is created `0700`; deleted secure rows
+are overwritten (`secure_delete`) and the WAL is checkpointed after secure deletes.
+
+**Shell requirement (iOS keychain accessibility).** `KeychainStore` sets only class, service and
+account, so the item gets the system defaults: accessible when unlocked, migratable to a new
+device through an encrypted backup, not synchronised, in the app's first access group. The TypeScript app stores voice grants
+`WHEN_UNLOCKED_THIS_DEVICE_ONLY`. Before any secret that must not leave the device moves into the
+secure area, or if an app extension or a background launch while locked must read storage, the
+iOS shell has to choose the accessibility class and access group and pass them to the store (an
+option `KeychainStore` does not take yet). `NativeConfig::desktop(dir)` uses the OS store;
 `EphemeralSecretStore` keeps keys in memory for tests and throwaway tools.
 
 ## Web
