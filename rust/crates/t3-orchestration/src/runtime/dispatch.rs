@@ -388,36 +388,42 @@ impl CommandInputs for RuntimeCommandInputs {
                 ) {
                     let value = crate::decision::engine::stored_value(command)?;
                     let target = effective_selection(&value, Some(current))?.ok_or(Error::Stale)?;
-                    let original = current
-                        .runs
-                        .iter()
-                        .find(|run| {
-                            matches!(run.status, OrchestrationV2RunStatus::Running)
-                                && (value["dispatchMode"]["targetRunId"]
+                    let running = current.runs.iter().find(|run| {
+                        matches!(run.status, OrchestrationV2RunStatus::Running)
+                            && (value["dispatchMode"]["targetRunId"]
+                                == crate::decision::engine::stored_value(&run.id)
+                                    .unwrap_or_default()
+                                || value["targetRunId"]
                                     == crate::decision::engine::stored_value(&run.id)
-                                        .unwrap_or_default()
-                                    || value["targetRunId"]
-                                        == crate::decision::engine::stored_value(&run.id)
-                                            .unwrap_or_default())
-                        })
+                                        .unwrap_or_default())
+                    });
+                    let original = running
                         .map(|run| run.model_selection.clone())
                         .unwrap_or_else(|| current.thread.model_selection.clone());
-                    eprintln!("DEBUG {kind} original={:?} target={:?} sessions={:?}", original, target, current.provider_sessions.iter().map(|s| s.provider_instance_id.clone()).collect::<Vec<_>>());
-                    if original.instance_id == target.instance_id
+                    // The decision compares the running run's provider instance, as TS does.
+                    let instance = match running {
+                        Some(run) => {
+                            crate::ports::checkpoints_forks::checkpoint_restore_safety::expanded_id(
+                                &run.provider_instance_id,
+                            )?
+                        }
+                        None => original.instance_id.clone(),
+                    };
+                    if instance == target.instance_id
                         && !crate::ports::decisions::model_switch::model_selections_equal(
                             &original, &target,
                         )
                         && let Some(session) = current.provider_sessions.iter().find(|session| {
                             session.provider_instance_id
                                 == t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(
-                                    original.instance_id.clone(),
+                                    instance.clone(),
                                 )
                         })
                     {
                         prepared.context.inputs.selection_transition = Some(
                             self.base
                                 .providers
-                                .adapter(original.instance_id.clone())
+                                .adapter(instance.clone())
                                 .await?
                                 .plan_selection_transition(
                                     crate::provider::SelectionTransitionInput {

@@ -869,6 +869,35 @@ impl t3_orchestration::ports::checkpoints_forks::thread_launch_service::LaunchEn
     }
 }
 
+/// The project root as the launch workspace; worktrees are refused.
+struct RootWorkspace(PathBuf);
+
+#[async_trait]
+impl WorkspaceBackend for RootWorkspace {
+    async fn prepare(
+        &self,
+        _: ProjectId,
+        _: ThreadId,
+        strategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
+        _: CancellationToken,
+    ) -> Result<Workspace> {
+        match strategy {
+            OrchestrationV2ThreadLaunchWorkspaceStrategy::Root(_) => Ok(Workspace {
+                cwd: self.0.clone(),
+                branch: None,
+                worktree_path: None,
+            }),
+            _ => Err(Error::Unsupported("root workspace: worktrees")),
+        }
+    }
+    async fn remove(&self, _: Workspace, _: CancellationToken) -> Result<()> {
+        Ok(())
+    }
+    async fn current_branch(&self, _: PathBuf) -> Result<Option<String>> {
+        Ok(None)
+    }
+}
+
 /// `orchestration.launchThread` from a client: a project-root launch with a first message
 /// creates the thread as the user from `web` and runs its turn.
 #[tokio::test]
@@ -880,7 +909,10 @@ async fn a_client_launch_creates_the_thread_and_runs_its_first_turn() -> Result<
         workspace.checkpoints.clone(),
         NOW,
         |adapter| adapter,
-        |ports| ports.launch = Some(Arc::new(RootLaunch)),
+        |ports| {
+            ports.launch = Some(Arc::new(RootLaunch));
+            ports.workspaces = Arc::new(RootWorkspace(workspace.path.clone()));
+        },
     )
     .await?;
     create_project(&runtime, &workspace).await?;
@@ -906,8 +938,7 @@ async fn a_client_launch_creates_the_thread_and_runs_its_first_turn() -> Result<
         }
         assert!(
             !SETTLED.contains(&statuses[0]["status"].as_str().unwrap_or_default()),
-            "{}",
-            serde_json::to_value(&projection.turn_items)?
+            "{statuses}"
         );
         committed.recv().await.map_err(|error| Error::Service {
             operation: "launch test",
