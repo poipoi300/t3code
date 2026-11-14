@@ -7,7 +7,8 @@
 //! `Variant` names the web toast types; the web defines no toast size variant.
 //! `ToastOptions` supplies title/description, action and priority; `ThreadToastData` supplies
 //! thread scope, leading-icon/expandable slots, secondary actions and inline/stacked-end layout.
-//! Strings are English source keys and are translated when displayed. Slots build fresh elements.
+//! Text slots are `i18n::Text`: a key is translated when shown, content is shown as given.
+//! Slots build fresh elements.
 //! Optional title/description slots replace their text; keep the text fields for announcements.
 //! `ToastUpdate` preserves omitted fields; `Some(None)` clears an optional field. Passing full
 //! `ToastOptions` to `update` replaces all options, including cleared actions.
@@ -38,7 +39,7 @@ use t3_client::types::{ThreadId, ThreadKey};
 
 use super::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use super::icon::Icon;
-use crate::i18n::t;
+use crate::i18n::{Text, t};
 use crate::state::nav::Navigator;
 use crate::theme::{cn, palette, tw};
 
@@ -94,7 +95,7 @@ pub enum Priority {
 
 #[derive(Clone)]
 pub struct Action {
-    pub label: String,
+    pub label: Text,
     pub disabled: bool,
     pub on_press: Callback,
 }
@@ -112,8 +113,8 @@ pub struct ThreadToastData {
     pub secondary_action: Option<Action>,
     pub secondary_action_variant: Option<ButtonVariant>,
     pub expandable_content: Option<Slot>,
-    pub expand_label: Option<String>,
-    pub collapse_label: Option<String>,
+    pub expand_label: Option<Text>,
+    pub collapse_label: Option<Text>,
     pub expandable_description_trigger: bool,
     pub action_layout: ActionLayout,
     pub action_variant: Option<ButtonVariant>,
@@ -122,8 +123,8 @@ pub struct ThreadToastData {
 #[derive(Clone)]
 pub struct ToastOptions {
     pub variant: Variant,
-    pub title: String,
-    pub description: Option<String>,
+    pub title: Text,
+    pub description: Option<Text>,
     pub title_content: Option<Slot>,
     pub description_content: Option<Slot>,
     /// `None` is persistent (the web's `timeout: 0`).
@@ -142,7 +143,7 @@ impl Default for ToastOptions {
     fn default() -> Self {
         Self {
             variant: Variant::Default,
-            title: String::new(),
+            title: Text::content(""),
             description: None,
             title_content: None,
             description_content: None,
@@ -161,8 +162,8 @@ impl Default for ToastOptions {
 #[derive(Clone, Default)]
 pub struct ToastUpdate {
     pub variant: Option<Variant>,
-    pub title: Option<String>,
-    pub description: Option<Option<String>>,
+    pub title: Option<Text>,
+    pub description: Option<Option<Text>>,
     pub title_content: Option<Option<Slot>>,
     pub description_content: Option<Option<Slot>>,
     pub timeout: Option<Option<Duration>>,
@@ -389,7 +390,7 @@ pub fn show_anchored_copy_error_toast(anchor: Option<&ElementRef>, error: &str) 
     Some(anchored_toast_manager().add(ToastOptions {
         title: "Failed to copy".into(),
         variant: Variant::Error,
-        description: Some(error.into()),
+        description: Some(Text::content(error.to_owned())),
         anchor: Some(anchor),
         ..Default::default()
     }))
@@ -1002,7 +1003,7 @@ fn toast_root(
                 if tooltip() {
                     let title = entry.options.title.clone();
                     vec![view().app_class(tw("pointer-events-auto px-2 py-1"))
-                        .child(entry.options.title_content.as_ref().map(|slot| slot()).unwrap_or_else(|| text(move || SharedString::from(t(&title))).test_id("toast-title").into_element())).into_element()]
+                        .child(entry.options.title_content.as_ref().map(|slot| slot()).unwrap_or_else(|| text(move || title.resolve()).test_id("toast-title").into_element())).into_element()]
                 } else {
                     let id = entry.id;
                     let options = entry.options.clone();
@@ -1071,8 +1072,8 @@ fn toast_motion_class(
 
 fn announcement(options: &ToastOptions) -> String {
     match &options.description {
-        Some(description) => format!("{}: {}", t(&options.title), t(description)),
-        None => t(&options.title),
+        Some(description) => format!("{}: {}", options.title.resolve(), description.resolve()),
+        None => options.title.resolve().to_string(),
     }
 }
 
@@ -1090,7 +1091,7 @@ struct BodyState {
 }
 
 fn has_visible_toast_action(action: Option<&Action>) -> bool {
-    action.is_some_and(|action| !action.label.is_empty())
+    action.is_some_and(|action| !action.label.resolve().is_empty())
 }
 
 fn derive_toast_body_descriptor(options: &ToastOptions) -> BodyDescriptor {
@@ -1157,7 +1158,13 @@ fn toast_body_content(
             ])))
             .child(
                 body.copy_error
-                    .then(|| copy_error_button(controls.description.clone().unwrap_or_default())),
+                    .then(|| copy_error_button(
+                        controls
+                            .description
+                            .as_ref()
+                            .map(|description| description.resolve().to_string())
+                            .unwrap_or_default(),
+                    )),
             )
             .children(controls.data.additional_actions.iter().map(|(_, action)| {
                 toast_action(
@@ -1249,7 +1256,7 @@ fn toast_title(options: Rc<ToastOptions>) -> impl IntoElement {
         .child(if let Some(slot) = &options.title_content {
             slot()
         } else {
-            text(move || SharedString::from(t(&options.title))).into_element()
+            text(move || options.title.resolve()).into_element()
         })
 }
 
@@ -1261,7 +1268,7 @@ fn toast_action(
     let action = action.clone();
     let disabled = action.disabled;
     button(
-        ButtonContent::Label(t(&action.label)),
+        ButtonContent::Label(action.label.resolve().to_string()),
         variant,
         ButtonSize::Xs,
         move || disabled,
@@ -1309,12 +1316,12 @@ fn error_description_clamped(options: &ToastOptions) -> bool {
         && options
             .description
             .as_ref()
-            .is_some_and(|description| description.encode_utf16().count() >= 180)
+            .is_some_and(|description| description.resolve().encode_utf16().count() >= 180)
 }
 
 fn description(options: &ToastOptions) -> impl IntoElement {
     let clamped = error_description_clamped(options);
-    let source = options.description.clone().unwrap_or_default();
+    let source = options.description.clone();
     if let Some(slot) = &options.description_content {
         return view()
             .test_id("toast-description")
@@ -1322,10 +1329,10 @@ fn description(options: &ToastOptions) -> impl IntoElement {
             .child(slot())
             .into_element();
     }
-    if source.is_empty() {
+    let Some(source) = source.filter(|source| !source.resolve().is_empty()) else {
         return fragment(Vec::new());
-    }
-    text(move || SharedString::from(t(&source)))
+    };
+    text(move || source.resolve())
         .test_id("toast-description")
         .select_text()
         .app_class(tw("min-w-0 select-text text-muted-foreground"))
@@ -1363,19 +1370,14 @@ fn toast_description_and_expandable(
 }
 
 fn expand_label(options: &ToastOptions, open: bool) -> String {
-    t(if open {
-        options
-            .data
-            .collapse_label
-            .as_deref()
-            .unwrap_or("Hide details")
+    let (label, fallback) = if open {
+        (&options.data.collapse_label, "Hide details")
     } else {
-        options
-            .data
-            .expand_label
-            .as_deref()
-            .unwrap_or("Show details")
-    })
+        (&options.data.expand_label, "Show details")
+    };
+    label
+        .as_ref()
+        .map_or_else(|| t(fallback), |label| label.resolve().to_string())
 }
 
 fn expand_chevron(open: Signal<bool>, full_line: bool) -> impl IntoElement {
@@ -1506,7 +1508,7 @@ mod tests {
             ..Default::default()
         });
         assert!(derive_toast_body_descriptor(&options).stacked);
-        options.action.as_mut().expect("action").label.clear();
+        options.action.as_mut().expect("action").label = Text::content("");
         assert_eq!(
             derive_toast_body_descriptor(&options),
             BodyDescriptor {
@@ -1525,7 +1527,7 @@ mod tests {
             }
         );
         options.variant = Variant::Error;
-        options.description = Some("".into());
+        options.description = Some(Text::content(""));
         assert!(derive_toast_body_descriptor(&options).copy_error);
         options.data.hide_copy_button = true;
         assert!(!derive_toast_body_descriptor(&options).copy_error);
@@ -1576,10 +1578,10 @@ mod tests {
         let (initial, mut updates) = manager.subscribe();
         assert_eq!(initial.len(), 1);
         assert_eq!(initial[0].id, id);
-        assert_eq!(initial[0].options.title, "Updated before mount");
+        assert_eq!(initial[0].options.title, Text::from("Updated before mount"));
         assert_eq!(
-            initial[0].options.description.as_deref(),
-            Some("Keep these details")
+            initial[0].options.description,
+            Some(Text::from("Keep these details"))
         );
         assert_eq!(initial[0].options.timeout, None);
         assert_eq!(initial[0].options.data.thread_ref, Some(key("a", "t")));
@@ -1624,7 +1626,7 @@ mod tests {
         assert_eq!(calls.get(), 1);
         let remaining = manager.subscribe().0;
         assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].options.title, "Follow-up");
+        assert_eq!(remaining[0].options.title, Text::from("Follow-up"));
         manager.close(remaining[0].id);
         assert_eq!(calls.get(), 1);
     }
@@ -1697,11 +1699,11 @@ mod tests {
     fn long_error_clamping_uses_the_webs_utf16_length_and_only_error_descriptions() {
         let mut options = ToastOptions {
             variant: Variant::Error,
-            description: Some("x".repeat(179)),
+            description: Some(Text::content("x".repeat(179))),
             ..Default::default()
         };
         assert!(!error_description_clamped(&options));
-        options.description = Some("🦀".repeat(90));
+        options.description = Some(Text::content("🦀".repeat(90)));
         assert!(error_description_clamped(&options));
         options.variant = Variant::Info;
         assert!(!error_description_clamped(&options));

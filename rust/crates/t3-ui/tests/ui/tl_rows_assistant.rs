@@ -1,7 +1,9 @@
 //! TL-ROWS-ASSISTANT: client-derived rows through the component's production entry points.
 
 use crate::support::{DESKTOP, PHONE};
-use futures::{FutureExt, channel::oneshot};
+use futures::{
+    FutureExt, StreamExt, channel::oneshot, future::LocalBoxFuture, stream::LocalBoxStream,
+};
 use nsh_core::prelude::*;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
@@ -14,9 +16,14 @@ use t3_client::thread_views::messages_timeline::{
 };
 use t3_client::types::{EnvironmentId, ThreadId, ThreadKey};
 use t3_client::view_logic::session::TimelineEntry;
+use t3_contracts::base_schemas::RunId;
 use t3_ui::i18n::t;
 use t3_ui::runtime::Shared;
+use t3_ui::screens::thread::rewind::{
+    RewindAvailability, RewindError, RewindService, RewindState, RewindTarget, TimelineRewindClient,
+};
 use t3_ui::screens::thread::rows::assistant::{self, AssistantRowContext, AssistantRowsState};
+use t3_ui::screens::thread::timeline::TimelineServices;
 use t3_ui::ui::toast;
 
 const AT: &str = "2026-11-13T12:34:00Z";
@@ -39,6 +46,72 @@ fn control(label: &'static str, press: impl Fn() + 'static) -> impl IntoElement 
         .accessibility_label(Some(t(label).into()))
         .on_press(press)
         .child(text(t(label)))
+}
+
+fn conversation() -> ThreadKey {
+    ThreadKey {
+        environment: EnvironmentId("environment".into()),
+        thread: ThreadId("conversation".into()),
+    }
+}
+
+/// The client's fork operation: checks the source identity, waits for its release once, then
+/// succeeds or fails.
+struct Forks {
+    count: Signal<usize>,
+    fail: Signal<bool>,
+    waiting: Stored<Option<oneshot::Receiver<()>>>,
+}
+impl TimelineRewindClient for Forks {
+    fn state(&self, _: &ThreadKey) -> RewindState {
+        RewindState {
+            reverting: false,
+            can_fork: true,
+        }
+    }
+    fn availability(&self, _: &ThreadKey, _: &RewindTarget) -> RewindAvailability {
+        RewindAvailability::default()
+    }
+    fn changes(&self, _: &ThreadKey) -> LocalBoxStream<'static, ()> {
+        futures::stream::pending().boxed_local()
+    }
+    fn rewind(
+        &self,
+        _: ThreadKey,
+        _: RewindTarget,
+        _: bool,
+    ) -> LocalBoxFuture<'static, Result<String, RewindError>> {
+        futures::future::pending().boxed_local()
+    }
+    fn fork(
+        &self,
+        source: ThreadKey,
+        run: RunId,
+    ) -> LocalBoxFuture<'static, Result<ThreadKey, RewindError>> {
+        assert_eq!(source.thread.0, "source-thread");
+        assert_eq!(source.environment.0, "environment");
+        assert_eq!(run.0, "run");
+        self.count.update(|count| *count += 1);
+        let waiting = self.waiting.with(Option::take);
+        let fail = self.fail.get_untracked();
+        async move {
+            if let Some(waiting) = waiting {
+                let _ = waiting.await;
+            }
+            if fail {
+                Err(RewindError {
+                    message: "Permission denied".into(),
+                    detail: None,
+                })
+            } else {
+                Ok(ThreadKey {
+                    environment: EnvironmentId("environment".into()),
+                    thread: ThreadId("fork".into()),
+                })
+            }
+        }
+        .boxed_local()
+    }
 }
 
 #[component]
@@ -81,54 +154,28 @@ fn AssistantFixture() -> impl IntoElement {
     let row = assistant::assistant_row(projected);
     let state = AssistantRowsState::default();
     let fork_count = signal(0);
-    let reply_count = signal(0);
     let fail = signal(false);
     let visible = signal(true);
     let (release, waiting) = oneshot::channel::<()>();
     let release = stored(Some(release));
     let waiting = stored(Some(waiting));
-    let mut context = AssistantRowContext::new(state);
+    provide_context(t3_ui::runtime::Rt::new(
+        t3_client::ClientStore::default(),
+        Rc::new(t3_ui::runtime::backend::Unavailable("fixture".into())),
+        t3_ui::runtime::host::Choice::Demo,
+    ));
+    provide_context(t3_ui::state::nav::Navigator::new(
+        t3_ui::state::nav::Route::Thread(conversation()),
+    ));
+    provide_context(RewindService(Rc::new(Forks {
+        count: fork_count,
+        fail,
+        waiting,
+    })));
+    let services = TimelineServices::new(conversation());
+    let mut context = AssistantRowContext::new(state, &services);
     context.timestamp_format = computed(|| t3_contracts::settings::TimestampFormat::V24Hour);
-    context.thread_ref = Some(ThreadKey {
-        environment: EnvironmentId("environment".into()),
-        thread: ThreadId("conversation".into()),
-    });
     context.markdown_cwd = Some("C:/project".into());
-    context.on_fork_from_run = Some(Rc::new(move |request| {
-        assert_eq!(
-            serde_json::to_value(request.source_thread_id).expect("source id"),
-            json!("source-thread")
-        );
-        assert_eq!(
-            serde_json::to_value(request.run_id).expect("run id"),
-            json!("run")
-        );
-        fork_count.update(|count| *count += 1);
-        let waiting = waiting.with(Option::take);
-        let fail = fail.get();
-        async move {
-            if let Some(waiting) = waiting {
-                waiting.await.map_err(|e| e.to_string())?;
-            }
-            if fail {
-                Err("Permission denied".into())
-            } else {
-                Ok(())
-            }
-        }
-        .boxed_local()
-    }));
-    context.on_reply_to_response = Some(Rc::new(move |request| {
-        assert_eq!(request.thread_ref.thread.0, "conversation");
-        assert_eq!(request.message.text, FINAL);
-        assert_eq!(
-            serde_json::to_value(request.projected_item.source_item_id.clone())
-                .expect("source item"),
-            json!("source-item")
-        );
-        reply_count.update(|count| *count += 1);
-        Ok(())
-    }));
     let body_context = context.clone();
     let sent_context = context;
     toast::anchored_toast_provider(
@@ -172,7 +219,6 @@ fn AssistantFixture() -> impl IntoElement {
                 .child(control("Fail forks", move || fail.set(true)))
                 .child(control("Sent message", move || sent.set(true)))
                 .child(text(move || format!("Forks: {}", fork_count.get())))
-                .child(text(move || format!("Replies: {}", reply_count.get())))
                 .child(dynamic(move || {
                     visible.get().then(|| {
                         untracked(|| assistant::assistant_timeline_row(row, body_context.clone()))
@@ -310,7 +356,8 @@ fn client_suppresses_empty_fallback_for_embedded_output_and_interrupted_badge_su
 }
 
 #[test]
-fn concrete_fork_and_reply_controls_keep_source_identity_and_busy_state_through_recycling() {
+fn the_production_context_forks_through_the_rewind_service_and_keeps_busy_state_through_recycling()
+{
     let mut app = start(PHONE);
     app.wait_for("Working draft").expect("mounted");
     app.press("role:button[Finish]").expect("finish");
@@ -319,9 +366,12 @@ fn concrete_fork_and_reply_controls_keep_source_identity_and_busy_state_through_
     app.press("role:button[Fork from this response]")
         .expect("fork");
     app.wait_for("Forks: 1").expect("source operation");
-    app.press("role:button[Reply to this response]")
-        .expect("concrete reply control");
-    app.wait_for("Replies: 1").expect("source response context");
+    // The composer has no reply service yet (ui-mounts-notes.md): hidden, as without onReplyToResponse.
+    assert!(
+        app.screen()
+            .enabled("role:button[Reply to this response]")
+            .is_err()
+    );
     assert!(
         !app.screen()
             .enabled("role:button[Fork from this response]")

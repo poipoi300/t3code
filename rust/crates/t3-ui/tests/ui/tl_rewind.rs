@@ -16,6 +16,7 @@ use t3_contracts::base_schemas::RunId;
 use t3_ui::screens::thread::{
     rewind::*,
     rows::user::{UserRowContext, UserRowState, user_message_row},
+    timeline::TimelineServices,
 };
 use t3_ui::state::nav::{Navigator, Route};
 use t3_ui::ui::confirm::confirm_dialog_host;
@@ -120,6 +121,11 @@ fn RewindFixture() -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
     t3_ui::i18n::set_language("en", &[]);
     provide_context(t3_ui::theme::text_view_parts());
+    provide_context(t3_ui::runtime::Rt::new(
+        t3_client::ClientStore::default(),
+        Rc::new(t3_ui::runtime::backend::Unavailable("fixture".into())),
+        t3_ui::runtime::host::Choice::Demo,
+    ));
     let nav = Navigator::new(Route::Thread(key("parent")));
     provide_context(nav);
     let client = Client {
@@ -134,12 +140,13 @@ fn RewindFixture() -> impl IntoElement {
     let allowed = client.allowed;
     let files = client.files;
     let fail = client.fail;
-    let rewind = TimelineRewind::with_client(key("parent"), Some(Rc::new(client)));
+    provide_context(RewindService(Rc::new(client)));
+    let services = TimelineServices::new(key("parent"));
+    let rewind = services.rewind;
     let row = target_row();
     let target = RewindTarget::from_row(&row).expect("target");
     let projection = computed(move || Some(row.clone()));
-    let mut user = UserRowContext::new(UserRowState::new());
-    rewind.bind_user_row(&mut user);
+    let user = UserRowContext::new(UserRowState::new(), &services);
     on_key("ctrl+d", move |_| allowed.set(false));
     on_key("ctrl+o", move |_| nav.open(Route::Thread(key("other"))));
     view()
@@ -185,14 +192,19 @@ fn MissingServiceFixture() -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
     t3_ui::i18n::set_language("en", &[]);
     provide_context(t3_ui::theme::text_view_parts());
+    provide_context(t3_ui::runtime::Rt::new(
+        t3_client::ClientStore::default(),
+        Rc::new(t3_ui::runtime::backend::Unavailable("fixture".into())),
+        t3_ui::runtime::host::Choice::Demo,
+    ));
     let nav = Navigator::new(Route::Thread(key("parent")));
     provide_context(nav);
-    let rewind = use_timeline_rewind(key("parent"));
+    let services = TimelineServices::new(key("parent"));
+    let rewind = services.rewind;
     let row = target_row();
     let target = RewindTarget::from_row(&row).expect("target");
     let projection = computed(move || Some(row.clone()));
-    let mut user = UserRowContext::new(UserRowState::new());
-    rewind.bind_user_row(&mut user);
+    let user = UserRowContext::new(UserRowState::new(), &services);
     view()
         .w_full()
         .h_full()
@@ -272,9 +284,9 @@ fn cancel_keeps_the_thread_and_confirm_forwards_the_exact_user_target_once() {
         app.press("role:button[Confirm]").expect("confirm");
         app.wait_for("Calls: 1").expect("client called");
         app.wait_for("Busy: false").expect("completed");
-        app.wait_for("Restored prompt from client")
+        app.wait_for("Restored: Some(\"Restored prompt from client\")")
             .expect("client outcome reaches the editor binding");
-        assert!(app.screen().shows("(\"prompt\", 0, false)"));
+        assert!(app.screen().shows("Payload: [(\"prompt\", 0, false)]"));
     }
 }
 
@@ -338,7 +350,7 @@ fn isolated_files_are_explicit_and_fork_opens_only_the_clients_ready_target() {
     app.wait_for("Edit from here?").expect("confirm files");
     app.press("role:button[Confirm]").expect("answer");
     app.wait_for("Calls: 1").expect("dispatch");
-    assert!(app.screen().shows("(\"prompt\", 0, true)"));
+    assert!(app.screen().shows("Payload: [(\"prompt\", 0, true)]"));
     app.press("id:fork").expect("fork");
     app.wait_for("/environment/fork")
         .expect("client returned ready scoped thread");

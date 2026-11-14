@@ -336,7 +336,6 @@ fn thread_options() -> BlockListOptions {
     use t3_ui::runtime::{Rt, backend::Unavailable, host::Choice};
     use t3_ui::screens::thread::rows::{
         approval::{ApprovalContext, ApprovalRowsState},
-        groups::WorkGroupsState,
         plan::{PlanContext, PlanRowsState},
     };
     use t3_ui::state::nav::{Navigator, Route};
@@ -350,13 +349,34 @@ fn thread_options() -> BlockListOptions {
         environment: EnvironmentId("environment".into()),
         thread: ThreadId("blocks".into()),
     };
+    let services = t3_ui::screens::thread::timeline::TimelineServices::new(key.clone());
     BlockListOptions::for_thread(
-        key.clone(),
-        WorkGroupsState::default(),
+        &services,
         ApprovalContext::new(key.clone(), ApprovalRowsState::default()),
         PlanContext::new(key, PlanRowsState::default()),
-        computed(|| false),
     )
+}
+
+/// Options for a list outside a thread, built by the production constructor.
+fn standalone_options() -> BlockListOptions {
+    use t3_client::{
+        ClientStore,
+        types::{EnvironmentId, ThreadId, ThreadKey},
+    };
+    use t3_ui::runtime::{Rt, backend::Unavailable, host::Choice};
+    use t3_ui::state::nav::{Navigator, Route};
+    provide_context(Rt::new(
+        ClientStore::default(),
+        Rc::new(Unavailable("fixture".into())),
+        Choice::Demo,
+    ));
+    provide_context(Navigator::new(Route::Home));
+    BlockListOptions::new(&t3_ui::screens::thread::timeline::TimelineServices::new(
+        ThreadKey {
+            environment: EnvironmentId("environment".into()),
+            thread: ThreadId("standalone".into()),
+        },
+    ))
 }
 
 #[component]
@@ -592,7 +612,7 @@ fn ManyFenceBudgetFixture() -> impl IntoElement {
             empty.clone()
         }
     });
-    let options = BlockListOptions::default();
+    let options = standalone_options();
     let state = options.state;
     let samples = signal(String::new());
     spawn(async move {
@@ -838,7 +858,6 @@ fn MixedRowsFixture() -> impl IntoElement {
     use t3_ui::runtime::{Rt, backend::Unavailable, host::Choice};
     use t3_ui::screens::composer::send::PendingMessages;
     use t3_ui::screens::thread::rows::approval::{ApprovalContext, ApprovalRowsState};
-    use t3_ui::screens::thread::rows::groups::WorkGroupsState;
     use t3_ui::screens::thread::rows::plan::{PlanContext, PlanRowsState};
     use t3_ui::state::nav::{Navigator, Route};
     t3_ui::theme::install(&Default::default());
@@ -853,7 +872,8 @@ fn MixedRowsFixture() -> impl IntoElement {
         thread: ThreadId("mixed".into()),
     };
     let mode = signal("mixed");
-    let groups = WorkGroupsState::default();
+    let services = t3_ui::screens::thread::timeline::TimelineServices::new(key.clone());
+    let groups = services.groups;
     groups
         .expanded_run_ids
         .set(["run".into(), "notice-run".into()].into_iter().collect());
@@ -906,12 +926,11 @@ fn MixedRowsFixture() -> impl IntoElement {
         })
     });
     let mut options = BlockListOptions::for_thread(
-        key.clone(),
-        groups,
+        &services,
         approvals,
         PlanContext::new(key.clone(), PlanRowsState::default()),
-        computed(move || mode.get() != "mixed"),
     );
+    options.user.working = computed(move || mode.get() != "mixed");
     let client = Rc::new(ClientRuntime::new(
         FakePlatform::default(),
         ClientStore::default(),
@@ -1072,4 +1091,90 @@ fn every_client_row_kind_uses_its_owner_or_an_explicit_unrendered_arm() {
         "viewport/footer share the block list's single scroller"
     );
     eprintln!("TL-BLOCKS-3 mounted kinds: {mounted:?}; explicitly unrendered: {unrendered:?}");
+}
+
+/// The thread screen's `timeline()` mounts this list: a long reply in the store is many virtual
+/// cells (code chunks with their own cell markers), not one row.
+#[component]
+fn ProductionTimelineFixture() -> impl IntoElement {
+    use t3_client::ClientStore;
+    use t3_client::types::{EnvironmentId, ThreadId, ThreadKey};
+    use t3_contracts::orchestration_v2::OrchestrationV2ThreadStreamItem;
+    use t3_ui::runtime::{Rt, backend::Unavailable, host::Choice};
+    use t3_ui::state::nav::{Navigator, Route};
+    t3_ui::theme::install(&Default::default());
+    let store = ClientStore::default();
+    let environment = EnvironmentId("environment".into());
+    let session = store.begin_session(environment.clone());
+    let key = ThreadKey {
+        environment,
+        thread: ThreadId("long".into()),
+    };
+    let code = (0..500)
+        .map(|line| format!("const production_{line} = {line};\n"))
+        .collect::<String>();
+    let text = format!("Here it is:\n\n```ts\n{code}```\n");
+    let item = json!({"id":"answer","threadId":"long","type":"assistant_message","messageId":"answer",
+        "text":text,"streaming":false,"runId":"run","nodeId":null,"providerThreadId":null,
+        "providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":1,
+        "status":"completed","title":null,"startedAt":AT,"completedAt":AT,"updatedAt":AT});
+    let thread = json!({"id":"long","projectId":"project","title":"Long","providerInstanceId":"codex",
+        "modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"runtimeMode":"full-access",
+        "interactionMode":"default","branch":null,"worktreePath":null,"activeProviderThreadId":null,
+        "lineage":{"rootThreadId":"long","parentThreadId":null,"relationshipToParent":null},
+        "forkedFrom":null,"createdBy":"user","creationSource":"web","createdAt":AT,"updatedAt":AT,
+        "archivedAt":null,"settledOverride":null,"settledAt":null,"lastVisitedAt":null,"deletedAt":null});
+    let snapshot: OrchestrationV2ThreadStreamItem = serde_json::from_value(json!({
+        "kind":"snapshot","snapshotSequence":1,
+        "projection":{"thread":thread,"runs":[],"attempts":[],"nodes":[],"subagents":[],
+            "providerSessions":[],"providerThreads":[],"providerTurns":[],"runtimeRequests":[],
+            "messages":[],"plans":[],"turnItems":[item],"checkpointScopes":[],"checkpoints":[],
+            "contextHandoffs":[],"contextTransfers":[],
+            "visibleTurnItems":[{"position":0,"visibility":"local","sourceThreadId":"long","sourceItemId":"answer","item":item}],
+            "updatedAt":AT}
+    }))
+    .expect("canonical thread snapshot");
+    store
+        .apply_thread(key.clone(), session, vec![snapshot])
+        .expect("seeded thread");
+    provide_context(Rt::new(
+        store,
+        Rc::new(Unavailable("fixture".into())),
+        Choice::Demo,
+    ));
+    provide_context(Navigator::new(Route::Thread(key.clone())));
+    view()
+        .w_full()
+        .h_full()
+        .child(t3_ui::screens::thread::timeline::timeline(key))
+}
+
+#[test]
+fn the_thread_timeline_mounts_a_long_reply_as_block_cells() {
+    let mut sets = t3_ui::registries();
+    let mut fixtures = Registry::new();
+    fixtures.register::<ProductionTimelineFixture>();
+    sets.push(fixtures);
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: sets,
+        viewport: size(px(DESKTOP.0), px(DESKTOP.1)),
+        ..EngineConfig::new(Root::of::<ProductionTimelineFixture>())
+    })
+    .expect("fixture");
+    app.wait_for("text:/const production_/")
+        .expect("reply mounted");
+    let chunks = app
+        .screen()
+        .layout_nodes()
+        .into_iter()
+        .filter(|node| {
+            node.test_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("timeline-code-chunk-"))
+        })
+        .count();
+    assert!(
+        chunks >= 2,
+        "a 500-line fence is split into chunk cells, saw {chunks}"
+    );
 }

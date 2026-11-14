@@ -20,7 +20,7 @@ use super::dialog::{
     alert_dialog_close, alert_dialog_description, alert_dialog_footer, alert_dialog_header,
     alert_dialog_popup, alert_dialog_title,
 };
-use crate::i18n::t;
+use crate::i18n::{Text, t};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ConfirmDialogVariant {
@@ -236,8 +236,8 @@ pub fn is_confirm_dialog_active() -> bool {
 
 #[derive(Debug, PartialEq, Eq)]
 struct ConfirmationCopy {
-    title: String,
-    description: Option<String>,
+    title: Text,
+    description: Option<Text>,
 }
 
 /// Port of ConfirmDialogHost.tsx resolveConfirmDialogCopy.
@@ -252,13 +252,13 @@ fn resolve_confirm_dialog_copy(message: &str) -> ConfirmationCopy {
             .collect::<Vec<_>>()
             .join("\n");
         return ConfirmationCopy {
-            title: lines[question_line].trim().into(),
+            title: Text::content(lines[question_line].trim().to_owned()),
             description: nonempty(description.trim()),
         };
     }
     if let Some(question_mark) = normalized.find('?') {
         return ConfirmationCopy {
-            title: normalized[..=question_mark].trim().into(),
+            title: Text::content(normalized[..=question_mark].trim().to_owned()),
             description: nonempty(normalized[question_mark + 1..].trim()),
         };
     }
@@ -267,13 +267,13 @@ fn resolve_confirm_dialog_copy(message: &str) -> ConfirmationCopy {
         description: Some(if normalized.is_empty() {
             "This action requires your confirmation.".into()
         } else {
-            normalized.into()
+            Text::content(normalized.to_owned())
         }),
     }
 }
 
-fn nonempty(text: &str) -> Option<String> {
-    (!text.is_empty()).then(|| text.into())
+fn nonempty(text: &str) -> Option<Text> {
+    (!text.is_empty()).then(|| Text::content(text.to_owned()))
 }
 
 /// Port of ConfirmDialogHost.tsx ConfirmDialogHost, using the app-wide FIFO.
@@ -595,12 +595,13 @@ mod tests {
                 Some("Suite"),
             ),
         ] {
+            let copy = resolve_confirm_dialog_copy(message);
             assert_eq!(
-                resolve_confirm_dialog_copy(message),
-                ConfirmationCopy {
-                    title: title.into(),
-                    description: description.map(String::from)
-                },
+                (
+                    copy.title.resolve().to_string(),
+                    copy.description.map(|d| d.resolve().to_string())
+                ),
+                (title.to_owned(), description.map(String::from)),
                 "{message:?}"
             );
         }

@@ -19,6 +19,29 @@ pub fn text_field(
     size: InputSize,
     on_submit: impl Fn() + 'static,
 ) -> impl IntoElement {
+    field(value, placeholder, label, size, false, || false, on_submit)
+}
+
+/// `<Input type="password" disabled={..}>`: the same field with what is typed hidden.
+pub fn masked_text_field(
+    value: Signal<String>,
+    placeholder: String,
+    label: String,
+    disabled: impl Fn() -> bool + 'static,
+    on_submit: impl Fn() + 'static,
+) -> impl IntoElement {
+    field(value, placeholder, label, InputSize::Default, true, disabled, on_submit)
+}
+
+fn field(
+    value: Signal<String>,
+    placeholder: String,
+    label: String,
+    size: InputSize,
+    masked: bool,
+    disabled: impl Fn() -> bool + 'static,
+    on_submit: impl Fn() + 'static,
+) -> impl IntoElement {
     let height = move || {
         let m = metrics();
         px(match size {
@@ -27,6 +50,8 @@ pub fn text_field(
         })
     };
     nsh_base::input()
+        .masked(masked)
+        .disabled(disabled)
         .value(move || value.get())
         .on_change(move |text: &str| value.set(text.to_owned()))
         .on_submit(move |_: &str| on_submit())

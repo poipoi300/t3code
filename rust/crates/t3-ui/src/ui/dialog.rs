@@ -7,8 +7,8 @@
 //! `*_content` and `*_overlay` names are aliases, as in TSX. `Variant::{Default, Media}` and
 //! `FooterVariant::{Default, Bare}` are the source's variants; there is no popup Size in TSX.
 //! Button slots take the existing `ButtonSize` and `ButtonVariant`; `ActionVariant` excludes
-//! destructive variants, just as `DialogActionProps` does. Text slots receive English keys
-//! (closures allow dynamic text); ButtonContent carries already translated labels.
+//! destructive variants, just as `DialogActionProps` does. Text slots take `i18n::Text` (a key
+//! or content; closures allow dynamic text); ButtonContent carries already translated labels.
 //! Text slots retain their last open value while the native layer animates out.
 //! `state.on_open_change(callback)` gives the caller control of open requests; the callback
 //! updates `open` itself and can reject a dismissal while a form has unsaved data.
@@ -38,7 +38,7 @@ use nsh_core::prelude::*;
 
 use super::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use super::icon::Icon;
-use crate::i18n::t;
+use crate::i18n::{Text, t};
 use crate::state::layout::{Pointer, layout_class, pointer};
 use crate::theme::{cn, tw};
 
@@ -159,7 +159,7 @@ impl Default for PopupOptions {
     }
 }
 
-type TextSource = Rc<dyn Fn() -> String>;
+type TextSource = Rc<dyn Fn() -> Text>;
 type OpenChange = Rc<dyn Fn(bool)>;
 type Replaced = Rc<dyn Fn()>;
 
@@ -311,15 +311,15 @@ pub fn alert_dialog<E: IntoElement>(
     children(DialogState::new(open, true))
 }
 
-pub fn dialog_trigger(state: DialogState, source: &str) -> impl IntoElement {
-    let source = source.to_owned();
+pub fn dialog_trigger(state: DialogState, source: impl Into<Text>) -> impl IntoElement {
+    let source = source.into();
     let label = source.clone();
     // The source's bare Trigger has no Button styling.
     nsh_base::button()
         .test_id("dialog-trigger")
-        .accessibility_label(move || Some(SharedString::from(t(&label))))
+        .accessibility_label(move || Some(label.resolve()))
         .on_press(move || state.show())
-        .child(text(move || SharedString::from(t(&source))))
+        .child(text(move || source.resolve()))
 }
 
 pub fn dialog_close(
@@ -685,14 +685,14 @@ pub fn dialog_portal(
             SharedString::from(
                 state
                     .title
-                    .with(|source| source.as_ref().map(|f| t(&f())).unwrap_or_default()),
+                    .with(|source| source.as_ref().map(|f| f().resolve()).unwrap_or_default()),
             )
         })
         .accessibility_description(move || {
             SharedString::from(
                 state
                     .description
-                    .with(|source| source.as_ref().map(|f| t(&f())).unwrap_or_default()),
+                    .with(|source| source.as_ref().map(|f| f().resolve()).unwrap_or_default()),
             )
         })
         .app_class(tw("w-full h-full"))
@@ -912,18 +912,18 @@ fn footer<M>(
         .child(children)
 }
 
-pub fn dialog_title(state: DialogState, source: impl Fn() -> String + 'static) -> impl IntoElement {
+pub fn dialog_title(state: DialogState, source: impl Fn() -> Text + 'static) -> impl IntoElement {
     title_text(state, source).app_class(tw("font-semibold text-xl leading-snug"))
 }
 
 fn title_text(
     state: DialogState,
-    source: impl Fn() -> String + 'static,
+    source: impl Fn() -> Text + 'static,
 ) -> nsh_core::element::Text {
     let source = retained_text(state, source);
     register_text(state.title, source.clone());
     // wrap-anywhere drops: NSH wraps text at words and preserves newlines.
-    text(move || SharedString::from(t(&source())))
+    text(move || source().resolve())
         .role(AccessibilityRole::Header)
         .accessibility_level(2u32)
 }
@@ -931,29 +931,29 @@ fn title_text(
 /// Port of alert-dialog.tsx AlertDialogTitle.
 pub fn alert_dialog_title(
     state: DialogState,
-    source: impl Fn() -> String + 'static,
+    source: impl Fn() -> Text + 'static,
 ) -> impl IntoElement {
     title_text(state, source).app_class(tw("shrink-0 font-semibold text-xl leading-snug"))
 }
 
 pub fn dialog_description(
     state: DialogState,
-    source: impl Fn() -> String + 'static,
+    source: impl Fn() -> Text + 'static,
 ) -> impl IntoElement {
     description_text(state, source).app_class(tw("text-muted-foreground text-sm"))
 }
 
 fn description_text(
     state: DialogState,
-    source: impl Fn() -> String + 'static,
+    source: impl Fn() -> Text + 'static,
 ) -> nsh_core::element::Text {
     let source = retained_text(state, source);
     register_text(state.description, source.clone());
-    text(move || SharedString::from(t(&source())))
+    text(move || source().resolve())
 }
 
-fn retained_text(state: DialogState, source: impl Fn() -> String + 'static) -> TextSource {
-    let last = stored(String::new());
+fn retained_text(state: DialogState, source: impl Fn() -> Text + 'static) -> TextSource {
+    let last = stored(Text::content(""));
     let value = computed(move || {
         if state.open.get() {
             let next = source();
@@ -982,7 +982,7 @@ fn register_text(slot: Signal<Option<TextSource>>, source: TextSource) {
 /// Port of alert-dialog.tsx AlertDialogDescription.
 pub fn alert_dialog_description(
     state: DialogState,
-    source: impl Fn() -> String + 'static,
+    source: impl Fn() -> Text + 'static,
 ) -> impl IntoElement {
     // overflow-y-auto becomes scroll; wrap-anywhere and overscroll-contain drop per the port table.
     scroll()

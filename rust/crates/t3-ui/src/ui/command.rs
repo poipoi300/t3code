@@ -34,25 +34,26 @@ use nsh_core::{
     prelude::*,
 };
 
-use crate::i18n::t;
+use crate::i18n::Text;
 use crate::state::layout::{Pointer, layout_class, pointer};
 use crate::theme::{Scope, cn, metrics, palette, tw, tw_with};
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::Icon;
 
-/// Values are stable, untranslated keys. Labels/group names are English translation keys;
-/// user-authored names pass through unchanged. Keywords provide additional filter text.
+/// Values are stable, untranslated keys. Labels are `i18n::Text`: a literal is a key, client
+/// data (thread titles, project names, paths) is content. Keywords provide additional filter
+/// text. `group` names the `command_group` the item belongs to (its label's source text).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
     pub value: SharedString,
-    pub label: SharedString,
+    pub label: Text,
     pub group: Option<SharedString>,
     pub keywords: Vec<SharedString>,
     pub disabled: bool,
 }
 
 impl Item {
-    pub fn new(value: impl Into<SharedString>, label: impl Into<SharedString>) -> Self {
+    pub fn new(value: impl Into<SharedString>, label: impl Into<Text>) -> Self {
         Self {
             value: value.into(),
             label: label.into(),
@@ -254,7 +255,7 @@ impl CommandState {
 
 fn search_text(item: &Item) -> Vec<String> {
     // Exact Intl collation needs a t3-i18n contains helper; client-ranked results use filter=false.
-    std::iter::once(t(&item.label).to_lowercase())
+    std::iter::once(item.label.resolve().to_lowercase())
         .chain(item.keywords.iter().map(|k| k.to_lowercase()))
         .collect()
 }
@@ -366,7 +367,7 @@ fn dialog_transition(motion: Motion, open: bool, popup: bool) -> Animation {
 /// NSH owns the portal and focus scope; exit completion unmounts command-owned work.
 pub fn command_dialog<E: IntoElement>(
     open: Signal<bool>,
-    label: impl Into<String>,
+    label: impl Into<Text>,
     children: impl Fn() -> E + 'static,
 ) -> impl IntoElement {
     let label = label.into();
@@ -414,7 +415,7 @@ pub fn command_dialog<E: IntoElement>(
             });
             let label = label.clone();
             nsh_base::dialog()
-                .label(move || SharedString::from(t(&label)))
+                .label(move || label.resolve())
                 // Keep the native layer alive until both explicit CSS-equivalent tracks end.
                 .animation(ModalAnimation::None)
                 .close_on_escape(false)
@@ -436,12 +437,12 @@ pub fn command_dialog<E: IntoElement>(
 
 pub fn command_dialog_trigger(
     open: Signal<bool>,
-    label: impl Into<String>,
+    label: impl Into<Text>,
     children: impl IntoElement,
 ) -> impl IntoElement {
     let label = label.into();
     nsh_base::button()
-        .accessibility_label(move || Some(SharedString::from(t(&label))))
+        .accessibility_label(move || Some(label.resolve()))
         .on_press(move || open.set(true))
         .child(children)
 }
@@ -525,8 +526,8 @@ pub fn command_dialog_popup(
 
 /// Input is always lg. A start addon replaces Search (for example, a submenu Back button).
 pub struct InputOptions {
-    pub label: String,
-    pub placeholder: String,
+    pub label: Text,
+    pub placeholder: Text,
     pub auto_focus: bool,
     pub start_addon: Option<AnyElement>,
     /// None lets Escape close the enclosing CommandDialog; Some can navigate a submenu back.
@@ -536,7 +537,7 @@ pub struct InputOptions {
 }
 
 impl InputOptions {
-    pub fn new(label: impl Into<String>, placeholder: impl Into<String>) -> Self {
+    pub fn new(label: impl Into<Text>, placeholder: impl Into<Text>) -> Self {
         Self {
             label: label.into(),
             placeholder: placeholder.into(),
@@ -637,8 +638,8 @@ pub fn command_input(state: CommandState, options: InputOptions) -> impl IntoEle
                             if let Some(submit) = &submit { submit(); } else { state.accept(); }
                         })
                         .submit_behavior(SubmitBehavior::Submit)
-                        .label(move || SharedString::from(t(&label)))
-                        .placeholder(move || t(&placeholder))
+                        .label(move || label.resolve())
+                        .placeholder(move || placeholder.resolve().to_string())
                         // The inherited radius is the input control's rounded-lg.
                         .app_class(move || {
                             let inset = if layout_class().is_compact() { 36.0 } else { tokens().number("command-shell-inset").unwrap_or(8.0) + 24.0 };
@@ -699,7 +700,7 @@ pub fn command_panel_with_layout(
 
 pub fn command_list(
     state: CommandState,
-    label: impl Into<String>,
+    label: impl Into<Text>,
     children: impl IntoElement,
 ) -> impl IntoElement {
     let label = label.into();
@@ -712,7 +713,7 @@ pub fn command_list(
             busy: state.loading.get(),
             ..Default::default()
         })
-        .label(move || SharedString::from(t(&label)))
+        .label(move || label.resolve())
         .app_class(move || {
             tw(&cn([
                 Some("relative size-full min-h-0 outline-none transition-shadow focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"),
@@ -729,7 +730,7 @@ pub fn command_list(
 
 pub fn command_list_virtualized<E: IntoElement>(
     state: CommandState,
-    label: impl Into<String>,
+    label: impl Into<Text>,
     render: impl Fn(Memo<Option<Item>>) -> E + 'static,
 ) -> impl IntoElement {
     let label = label.into();
@@ -770,7 +771,7 @@ pub fn command_list_virtualized<E: IntoElement>(
             state.highlight(None);
         }
     })
-    .label(move || SharedString::from(t(&label)))
+    .label(move || label.resolve())
     .estimated_item_size(move || {
         px(if layout_class().is_compact() {
             36.0
@@ -810,25 +811,32 @@ pub fn command_collection<E: IntoElement>(
     )
 }
 
-pub fn command_list_heading(label: impl Into<String>) -> impl IntoElement {
+pub fn command_list_heading(label: impl Into<Text>) -> impl IntoElement {
     let label = label.into();
     // NSH lacks role=presentation; this label is plain, non-interactive text.
-    text(move || SharedString::from(t(&label)))
+    text(move || label.resolve())
         .app_class(tw("px-2 py-1.5 font-medium text-muted-foreground text-xs"))
 }
 
 #[derive(Clone)]
 struct GroupScope(SharedString);
 
+/// A group's identity: its label's source text, whether key or content.
+fn text_source(label: &Text) -> SharedString {
+    match label {
+        Text::Key(source) | Text::Content(source) => source.clone(),
+    }
+}
+
 pub fn command_group<E: IntoElement>(
     state: CommandState,
-    label: impl Into<String>,
+    label: impl Into<Text>,
     follows_group: impl IntoReactive<bool>,
     children: impl Fn() -> E + 'static,
 ) -> impl IntoElement {
     let label = label.into();
     let follows_group = follows_group.into_reactive();
-    let value = SharedString::from(label.clone());
+    let value = text_source(&label);
     // AutocompleteGroup's [[role=group]+&] becomes the caller's sibling condition.
     when(
         move || {
@@ -838,12 +846,12 @@ pub fn command_group<E: IntoElement>(
         },
         move || {
             untracked(|| {
-                provide_context(GroupScope(SharedString::from(label.clone())));
+                provide_context(GroupScope(text_source(&label)));
                 let label = label.clone();
                 let follows_group = follows_group.clone();
                 view()
                     .role(AccessibilityRole::Group)
-                    .label(move || SharedString::from(t(&label)))
+                    .label(move || label.resolve())
                     .app_class(move || tw(&cn([follows_group.get().then_some("mt-1.5")])))
                     .child(children())
             })
@@ -851,9 +859,9 @@ pub fn command_group<E: IntoElement>(
     )
 }
 
-pub fn command_group_label(label: impl Into<String>) -> impl IntoElement {
+pub fn command_group_label(label: impl Into<Text>) -> impl IntoElement {
     let label = label.into();
-    text(move || SharedString::from(t(&label)))
+    text(move || label.resolve())
         .app_class(tw("px-2 py-1.5 font-medium text-muted-foreground text-xs"))
 }
 
@@ -912,7 +920,7 @@ pub fn command_item(
         .element_ref(&row)
         .role(AccessibilityRole::Option)
         .focusable(false)
-        .optional_label(move || item.get().map(|i| SharedString::from(t(&i.label))))
+        .optional_label(move || item.get().map(|i| i.label.resolve()))
         .disabled(disabled)
         .accessibility_state(move || AccessibilityState {
             selected: selected(),
@@ -971,9 +979,9 @@ fn item_classes(
     ]), &attrs)
 }
 
-pub fn command_shortcut(label: impl Into<String>) -> impl IntoElement {
+pub fn command_shortcut(label: impl Into<Text>) -> impl IntoElement {
     let label = label.into();
-    text(move || SharedString::from(t(&label))).app_class(tw(
+    text(move || label.resolve()).app_class(tw(
         "ms-auto font-medium font-sans text-secondary-label text-xs tracking-widest",
     ))
 }
@@ -987,14 +995,14 @@ pub fn command_footer(children: impl IntoElement) -> impl IntoElement {
 }
 
 pub fn command_footer_action(
-    label: impl Into<String>,
+    label: impl Into<Text>,
     disabled: impl Fn() -> bool + 'static,
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
     // Frozen Button API lacks the TSX's h-auto/px-2/transparent-hover override.
     let dialog = use_context::<DialogScope>();
     button(
-        ButtonContent::Label(t(&label.into())),
+        ButtonContent::Label(label.into().resolve().to_string()),
         ButtonVariant::GhostMuted,
         ButtonSize::Xs,
         move || dialog.is_some_and(|dialog| !dialog.open.get()) || disabled(),

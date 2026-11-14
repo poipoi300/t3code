@@ -546,6 +546,7 @@ fn ProjectedWorkspace() -> impl IntoElement {
     let store = t3_client::ClientStore::default();
     let backend: Rc<dyn Backend> = Rc::new(demo::DemoBackend::new(store.clone()));
     provide_context(Rt::new(store, backend.clone(), Choice::Demo));
+    t3_ui::app::provide_without_client();
     let key = demo::demo_thread(&t3_client::types::EnvironmentId(
         "demo-demo.t3.codes".into(),
     ));

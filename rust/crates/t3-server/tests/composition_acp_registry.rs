@@ -684,6 +684,7 @@ async fn providers() {
     assert_eq!(listed["providers"].as_array().unwrap().len(), 2);
     assert_eq!(listed["providers"][0]["current"], Value::Null);
 
+    let since = server.status_count();
     let configured = server
         .call(
             "server.setAcpRegistryProvider",
@@ -700,6 +701,7 @@ async fn providers() {
         set["params"]["headers"]["Authorization"],
         format!("Bearer {HEADER_SECRET}")
     );
+    server.reprobed(since).await;
     let listed = server
         .call("server.listAcpRegistryProviders", scope(json!({})))
         .await
@@ -745,6 +747,7 @@ async fn providers() {
         reason(&required).as_deref(),
         Some("provider_configuration_failed")
     );
+    let since = server.status_count();
     let disabled = server
         .call(
             "server.disableAcpRegistryProvider",
@@ -753,6 +756,7 @@ async fn providers() {
         .await
         .unwrap();
     assert_eq!(disabled, json!({"disabled": true}));
+    server.reprobed(since).await;
     let listed = server
         .call("server.listAcpRegistryProviders", scope(json!({})))
         .await

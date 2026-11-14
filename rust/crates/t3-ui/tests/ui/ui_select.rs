@@ -42,7 +42,7 @@ fn Harness(props: HarnessProps) -> impl IntoElement {
     let mut config = SelectProps::new("Choose a number");
     config.items = items.into();
     config.disabled = disabled.into();
-    config.placeholder = "Choose".into();
+    config.placeholder = t3_ui::i18n::Text::from("Choose").into();
     config.default_value = props.initial.clone().map(SharedString::from);
     if props.controlled {
         config.value = Prop::bind(move || Value::Controlled(value.get()));
@@ -411,4 +411,41 @@ fn disabling_an_open_select_does_not_change_its_value() {
     app.press("role:button[Toggle disabled]").expect("enable");
     open(&mut app);
     assert_eq!(app.screen().selected("role:option[One]"), Ok(true));
+}
+
+/// Rule 4 of fidelity review 2: the label and placeholder take `Text`; content ("Settings", a
+/// catalogue key) is shown as given, a key translates ("Paramètres" in French). Item titles are
+/// final text the caller supplies (a native language name stays as it is).
+#[component]
+fn ContentSelect() -> impl IntoElement {
+    theme::install(&Default::default());
+    t3_ui::i18n::set_language("fr", &[]);
+    let mut content = SelectProps::new(t3_ui::i18n::Text::content("Settings"));
+    content.items = vec![SelectItem::new("fr", "Français")].into();
+    content.placeholder = t3_ui::i18n::Text::content("Settings").into();
+    let mut key = SelectProps::new("Choose a number");
+    key.placeholder = t3_ui::i18n::Text::from("Settings").into();
+    view()
+        .w_full()
+        .h_full()
+        .child(select::select(content, |_| {}))
+        .child(select::select(key, |_| {}))
+}
+
+#[test]
+fn content_slots_are_shown_verbatim_and_key_slots_translated() {
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(PHONE.0), px(PHONE.1)),
+        ..EngineConfig::new(Root::of::<ContentSelect>())
+    })
+    .expect("content select");
+    app.wait_for("Paramètres")
+        .expect("the key placeholder translates");
+    let screen = app.screen();
+    assert!(
+        screen.texts().contains(&"Settings"),
+        "the content placeholder is shown as given: {:?}",
+        screen.texts()
+    );
 }

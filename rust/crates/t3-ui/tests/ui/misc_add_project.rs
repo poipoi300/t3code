@@ -378,9 +378,15 @@ impl AddProjectClient for DeferredProject {
         .boxed_local()
     }
 }
+#[derive(Clone, PartialEq, Props)]
+struct DeferredProps {
+    content: Option<nsh_core::element::Renderer<bool>>,
+}
 #[component]
-fn DeferredHarness() -> impl IntoElement {
-    let reply = use_context::<ProjectReply>().expect("test response context");
+fn DeferredHarness(props: DeferredProps) -> impl IntoElement {
+    props.content.expect("fixture content").render("form", true)
+}
+fn deferred_form(reply: ProjectReply) -> AnyElement {
     theme::install(&Default::default());
     provide_context(Navigator::new(Route::AddProject));
     let (sender, receiver) = mpsc::unbounded();
@@ -398,13 +404,18 @@ fn DeferredHarness() -> impl IntoElement {
 #[test]
 fn pending_project_submission_survives_an_authoritative_view_update() {
     for window in [DESKTOP, PHONE] {
-        let reply = ProjectReply(Rc::default());
+        let reply = ProjectReply::default();
         let responder = reply.clone();
         let mut app = Headless::start(EngineConfig {
             ui_sets: t3_ui::registries(),
             viewport: size(px(window.0), px(window.1)),
             ..EngineConfig::new(Root::new::<DeferredHarness>(move || {
-                provide_context(reply.clone())
+                let reply = reply.clone();
+                DeferredProps {
+                    content: Some(nsh_core::element::Renderer::new(move |_: &bool| {
+                        deferred_form(reply.clone())
+                    })),
+                }
             }))
         })
         .expect("deferred project harness");

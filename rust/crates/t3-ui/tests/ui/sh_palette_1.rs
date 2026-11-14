@@ -453,7 +453,7 @@ fn CommandFocusFixture() -> impl IntoElement {
                                     text(move || {
                                         item.with(|item| {
                                             item.as_ref()
-                                                .map(|item| item.label.clone())
+                                                .map(|item| item.label.resolve())
                                                 .unwrap_or_default()
                                         })
                                     }),

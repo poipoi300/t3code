@@ -322,3 +322,5 @@ mod dsk_snapshot;
 mod dsk_ssh;
 #[path = "ui/dsk_backend.rs"]
 mod dsk_backend;
+#[path = "ui/ui_mounts_app_root.rs"]
+mod ui_mounts_app_root;

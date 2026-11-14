@@ -323,3 +323,46 @@ fn preview_cards_open_on_hover_or_touch_and_dismiss_with_escape_or_back() {
         assert!(!app.screen().shows("Thread preview"));
     }
 }
+
+/// Rule 4 of fidelity review 2: content in a popover slot ("Settings", a catalogue key) is shown
+/// and named as given; the key slot translates ("Paramètres" in French).
+#[component]
+fn ContentPopover() -> impl IntoElement {
+    t3_ui::theme::install(&Default::default());
+    t3_ui::i18n::set_language("fr", &[]);
+    let handle = p::popover_create_handle();
+    view().w_full().h_full().p(px(40.0)).child(p::popover(
+        handle,
+        p::PopoverOptions::default(),
+        p::popover_trigger(
+            handle,
+            t3_ui::i18n::Text::content("Settings"),
+            || false,
+            text("open"),
+        ),
+        move || {
+            view()
+                .child(p::popover_title(t3_ui::i18n::Text::content("Settings")))
+                .child(text(t3_ui::i18n::Text::from("Settings").resolve()))
+                .into_element()
+        },
+    ))
+}
+
+#[test]
+fn content_slots_are_shown_verbatim_and_key_slots_translated() {
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(PHONE.0), px(PHONE.1)),
+        ..EngineConfig::new(Root::of::<ContentPopover>())
+    })
+    .expect("content popover");
+    app.wait_for("role:button[Settings]")
+        .expect("the content trigger is named as given");
+    app.press("role:button[Settings]").expect("open");
+    app.wait_for("Paramètres").expect("the key text translates");
+    assert!(
+        app.screen().texts().contains(&"Settings"),
+        "the content title is shown as given"
+    );
+}

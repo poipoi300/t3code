@@ -3,7 +3,8 @@
 //! `popover_create_handle()` owns controlled open state; `popover(handle, options, trigger,
 //! content)` composes the trigger slot and a lazy popup. `popover_trigger`, `popover_close`,
 //! `popover_title`, and `popover_popup` (also `popover_content`) are the corresponding slots.
-//! Labels passed to trigger/title/close are English translation keys; arbitrary content is
+//! Labels passed to trigger/title/close are `i18n::Text` (a literal is a key, a runtime string is
+//! content); arbitrary content is
 //! translated by its caller. `Variant::{Default, Panel}`, `Size::{Auto, Sm, Md, Lg}` (the web's
 //! width prop), and `Padding::{Default, Compact, None}` keep the web names. There is no restyling API.
 //! `popover_trigger(handle, ..)` measures the panel anchor; a custom trigger can forward its
@@ -18,7 +19,7 @@
 
 use nsh_core::prelude::*;
 
-use crate::i18n::t;
+use crate::i18n::Text;
 use crate::state::layout::{Pointer, pointer};
 use crate::theme::{cn, tw};
 
@@ -86,7 +87,7 @@ pub struct PopoverHandle {
     open: Signal<bool>,
     available: Signal<nsh_core::Size<Points>>,
     anchor_width: Signal<f32>,
-    title: Signal<Option<String>>,
+    title: Signal<Option<Text>>,
 }
 
 pub fn popover_create_handle() -> PopoverHandle {
@@ -180,13 +181,13 @@ fn standard_popover(
 
 pub fn popover_trigger(
     handle: PopoverHandle,
-    label: impl Into<String>,
+    label: impl Into<Text>,
     disabled: impl Fn() -> bool + 'static,
     children: impl IntoElement,
 ) -> impl IntoElement {
     let label = label.into();
     nsh_base::button()
-        .accessibility_label(move || Some(t(&label).into()))
+        .accessibility_label(move || Some(label.resolve()))
         .disabled(disabled)
         .on_layout(move |bounds: &Bounds<Points>| handle.measure_anchor(*bounds))
         .child(children)
@@ -194,17 +195,17 @@ pub fn popover_trigger(
 
 pub fn popover_close(
     handle: PopoverHandle,
-    label: impl Into<String>,
+    label: impl Into<Text>,
     children: impl IntoElement,
 ) -> impl IntoElement {
     let label = label.into();
     nsh_base::button()
-        .accessibility_label(move || Some(t(&label).into()))
+        .accessibility_label(move || Some(label.resolve()))
         .on_press(move || handle.set_open(false))
         .child(children)
 }
 
-pub fn popover_title(source: impl Into<String>) -> impl IntoElement {
+pub fn popover_title(source: impl Into<Text>) -> impl IntoElement {
     let source = source.into();
     if let Some((handle, _)) = use_context::<(PopoverHandle, PopoverOptions)>() {
         handle.title.set(Some(source.clone()));
@@ -216,7 +217,7 @@ pub fn popover_title(source: impl Into<String>) -> impl IntoElement {
             }
         });
     }
-    text(move || SharedString::from(t(&source)))
+    text(move || source.resolve())
         .role(AccessibilityRole::Header)
         .app_class(tw("font-semibold text-sm leading-none"))
 }
@@ -258,7 +259,7 @@ pub fn popover_popup(
     };
     view()
         .role(AccessibilityRole::Dialog)
-        .optional_label(move || handle.title.get().map(|title| t(&title).into()))
+        .optional_label(move || handle.title.get().map(|title| title.resolve()))
         .app_class(tw(&cn([
             Some("relative flex rounded-lg text-popover-foreground outline-none"),
             // index.css @utility dropdown-glass; the dark numeric token is not paired by theme.
@@ -555,7 +556,7 @@ pub fn preview_card(
 
 /// Port of apps/web/src/components/ui/preview-card.tsx PreviewCardTrigger.
 pub fn preview_card_trigger(
-    label: impl Into<String>,
+    label: impl Into<Text>,
     href: Option<SharedString>,
     open_with: nsh_base::LinkOpenWith,
     on_open: impl Fn(&SharedString) + 'static,
@@ -567,7 +568,7 @@ pub fn preview_card_trigger(
         .href(href)
         .open_with(open_with)
         .on_open(on_open)
-        .accessibility_label(move || Some(t(&label).into()))
+        .accessibility_label(move || Some(label.resolve()))
         .child(children)
 }
 

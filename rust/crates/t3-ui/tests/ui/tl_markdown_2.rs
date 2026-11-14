@@ -397,7 +397,7 @@ fn AssistantFileFixture() -> impl IntoElement {
     });
     let panel = computed(move || ready.get().map(|key| host.panel(key)));
     view().w_full().h_full()
-        .child(dynamic(move || ready.get().map(|_| untracked(|| {
+        .child(dynamic(move || ready.get().map(|key| untracked(|| {
             let entry = Rc::new(serde_json::from_value(serde_json::json!({
                 "id":"row-answer", "kind":"message", "createdAt":"2026-11-13T12:34:00Z",
                 "message":{"id":"answer","role":"assistant","text":"[Open source](src/main.rs:12:3)","streaming":false,"runId":"run","createdAt":"2026-11-13T12:34:00Z","updatedAt":"2026-11-13T12:34:00Z"},
@@ -408,7 +408,7 @@ fn AssistantFileFixture() -> impl IntoElement {
             })).expect("canonical assistant entry"));
             let rows = derive_messages_timeline_rows(&MessagesTimelineRowsInput { timeline_entries: vec![entry], ..Default::default() });
             let row = rows.into_iter().find(|row| matches!(&row.content, MessagesTimelineRowContent::Message { message, .. } if message.role == "assistant")).map(Shared);
-            assistant_timeline_row(assistant_row(computed(move || row.clone())), AssistantRowContext::new(AssistantRowsState::default()))
+            assistant_timeline_row(assistant_row(computed(move || row.clone())), AssistantRowContext::new(AssistantRowsState::default(), &t3_ui::screens::thread::timeline::TimelineServices::new(key)))
         }))))
         .child(text(move || SharedString::from(panel.get().and_then(|panel| panel.with(|panel| panel.active().and_then(|surface| match &surface.content {
             t3_ui::screens::panel::SurfaceContent::File { relative_path, reveal_line, .. } => Some(format!("assistant-panel:{relative_path};line:{reveal_line:?}")),

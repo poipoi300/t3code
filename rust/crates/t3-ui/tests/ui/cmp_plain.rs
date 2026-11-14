@@ -1,18 +1,19 @@
 //! CMP-PLAIN and the composer mounts: the thread composer built by its production constructor
-//! (`screens::thread::composer::thread_composer`) over a `FakePlatform` client runtime whose store
-//! holds a seeded shell and thread. The runtime has no connected session (a UI test cannot reach
-//! the client's in-process fake server), so delivery itself is not exercised here.
+//! (`screens::thread::composer::thread_composer`) over a client runtime that is really paired
+//! with `t3_client::testing::environment::FakeEnvironment`, or over an unconnected one where the
+//! web's disconnected behaviour is the subject.
 
 use std::rc::Rc;
+use std::time::Duration;
 
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use nsh_core::prelude::*;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
 use serde_json::{Value, json};
 use t3_client::ClientStore;
 use t3_client::composition::{ClientRuntime, Spawner};
-use t3_client::testing::FakePlatform;
+use t3_client::testing::environment::{self, FakeEnvironment};
 use t3_client::types::{EnvironmentId, ThreadId, ThreadKey};
 use t3_contracts::orchestration_v2::{
     OrchestrationV2CreationSource, OrchestrationV2ShellStreamItem, OrchestrationV2ThreadStreamItem,
@@ -24,7 +25,8 @@ use t3_ui::state::nav::{Navigator, Route};
 
 use crate::support::{DESKTOP, PHONE};
 
-const AT: &str = "2026-11-13T12:00:00.000Z";
+const DISPATCH: &str = "orchestration.dispatchCommand";
+const SEARCH: &str = "projects.searchEntries";
 
 fn key() -> ThreadKey {
     ThreadKey {
@@ -33,80 +35,36 @@ fn key() -> ThreadKey {
     }
 }
 
-fn thread_json(id: &str, title: &str) -> Value {
-    json!({
-        "id": id, "projectId": "project", "title": title,
-        "providerInstanceId": "codex",
-        "modelSelection": {"instanceId": "codex", "model": "gpt-5.4"},
-        "runtimeMode": "full-access", "interactionMode": "default",
-        "branch": null, "worktreePath": null, "activeProviderThreadId": null,
-        "lineage": {"rootThreadId": id, "parentThreadId": null, "relationshipToParent": null},
-        "forkedFrom": null, "createdBy": "user", "creationSource": "web",
-        "createdAt": AT, "updatedAt": AT,
-        "archivedAt": null, "settledOverride": null, "settledAt": null,
-        "lastVisitedAt": null, "deletedAt": null
-    })
-}
-
 fn shell() -> Value {
-    let row = |id: &str, title: &str| {
-        let mut thread = thread_json(id, title);
-        // No project: without a session the client's `@` query would stop at path search
-        // (see the hand-off); a project-less thread has no workspace to search.
-        thread["projectId"] = json!("no-project");
-        thread.as_object_mut().expect("thread").extend(
-            json!({
-                "latestRunId": null, "activeRunId": null, "status": "idle",
-                "pendingRuntimeRequest": null, "latestVisibleMessage": null,
-                "latestUserMessageAt": null, "hasActionableProposedPlan": false,
-                "itemCount": 0, "visibleItemCount": 0
-            })
-            .as_object()
-            .cloned()
-            .unwrap_or_default(),
-        );
-        thread
-    };
-    json!({
-        "schemaVersion": 1, "snapshotSequence": 1,
-        "threads": [row("thread-a", "Composer thread"), row("thread-b", "Parser rewrite")],
-        "archivedThreads": [],
-        "projects": [{
-            "id": "project", "title": "Project", "workspaceRoot": "/work/project",
-            "repositoryIdentity": null, "defaultModelSelection": null, "scripts": [],
-            "createdAt": AT, "updatedAt": AT
-        }]
-    })
+    environment::shell(&[
+        ("thread-a", "Composer thread"),
+        ("thread-b", "Parser rewrite"),
+    ])
 }
 
 fn projection(question: bool) -> Value {
-    let (requests, items) = if question {
-        (
-            json!([{"id":"request","nodeId":"node","providerTurnId":null,"nativeRequestRef":null,
-                "kind":"user_input","status":"pending",
-                "responseCapability":{"type":"live","providerSessionId":"session"},
-                "createdAt":AT,"resolvedAt":null}]),
-            json!([{"type":"user_input_request","id":"input-item","threadId":"thread-a","runId":null,
-                "nodeId":"node","providerThreadId":null,"providerTurnId":null,"nativeItemRef":null,
-                "parentItemId":null,"ordinal":0,"status":"running","title":null,"startedAt":null,
-                "completedAt":null,"updatedAt":AT,"requestId":"request",
-                "questions":[{"id":"scope","header":"Scope","question":"Which scope should change?",
-                    "options":[{"label":"Parser only","description":"Touch the parser","value":"parser"},
-                               {"label":"Everything","description":"Touch every crate","value":"all"}]}]}]),
-        )
-    } else {
-        (json!([]), json!([]))
-    };
-    json!({
-        "thread": thread_json("thread-a", "Composer thread"),
-        "runs": [], "attempts": [], "nodes": [], "subagents": [], "providerSessions": [],
-        "providerThreads": [], "providerTurns": [], "runtimeRequests": requests, "messages": [],
-        "plans": [], "turnItems": items, "checkpointScopes": [], "checkpoints": [],
-        "contextHandoffs": [], "contextTransfers": [], "visibleTurnItems": [],
-        "updatedAt": AT
-    })
+    if !question {
+        return environment::projection("thread-a", "Composer thread", json!([]), json!([]));
+    }
+    let at = environment::NOW;
+    environment::projection(
+        "thread-a",
+        "Composer thread",
+        json!([{"id":"request","nodeId":"node","providerTurnId":null,"nativeRequestRef":null,
+            "kind":"user_input","status":"pending",
+            "responseCapability":{"type":"live","providerSessionId":"session"},
+            "createdAt":at,"resolvedAt":null}]),
+        json!([{"type":"user_input_request","id":"input-item","threadId":"thread-a","runId":null,
+            "nodeId":"node","providerThreadId":null,"providerTurnId":null,"nativeItemRef":null,
+            "parentItemId":null,"ordinal":0,"status":"running","title":null,"startedAt":null,
+            "completedAt":null,"updatedAt":at,"requestId":"request",
+            "questions":[{"id":"scope","header":"Scope","question":"Which scope should change?",
+                "options":[{"label":"Parser only","description":"Touch the parser","value":"parser"},
+                           {"label":"Everything","description":"Touch every crate","value":"all"}]}]}]),
+    )
 }
 
+/// The store as an unconnected client keeps it after an earlier session.
 fn seed(store: &ClientStore, question: bool) {
     let environment = key().environment;
     let session = store.begin_session(environment.clone());
@@ -134,16 +92,17 @@ fn seed(store: &ClientStore, question: bool) {
 
 #[derive(Clone, PartialEq, Props)]
 struct FixtureProps {
+    connected: bool,
     question: bool,
 }
 
-/// The production composer under a fake client runtime, with what a user and a test can observe:
-/// mount/unmount (leaving the thread), and the client's own draft and question state.
+/// The production composer under a client runtime, with what a test can observe: mounting
+/// (leaving the thread), the client's draft and question state, the server's received calls,
+/// and how often the timeline's store selector recomputes.
 #[component]
 fn ComposerFixture(props: FixtureProps) -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
     let store = ClientStore::default();
-    seed(&store, props.question);
     provide_context(Rt::new(
         store.clone(),
         Rc::new(Unavailable("fixture".into())),
@@ -158,13 +117,50 @@ fn ComposerFixture(props: FixtureProps) -> impl IntoElement {
             spawn(future);
         });
     });
+    let server = FakeEnvironment::new("env", spawner.clone());
+    server.set_shell(shell());
+    server.set_thread("thread-a", projection(props.question));
     let client = ClientRuntime::new(
-        FakePlatform::default(),
-        store,
+        server.platform(),
+        store.clone(),
         OrchestrationV2CreationSource::Web,
-        spawner,
+        spawner.clone(),
     );
-    let mounted = signal(true);
+    if props.connected {
+        let pairing = client.pair(server.pairing());
+        let opening = client.clone();
+        spawner(
+            async move {
+                if pairing.await.is_ok() {
+                    opening.open_thread(&key());
+                }
+            }
+            .boxed_local(),
+        );
+    } else {
+        seed(&store, props.question);
+    }
+    let ready = signal(false);
+    {
+        let client = client.clone();
+        let mut changes = store.subscribe();
+        spawn(async move {
+            while changes.next().await.is_some() {
+                let session = client
+                    .client(&key().environment)
+                    .and_then(|connected| connected.session())
+                    .is_some();
+                let thread = client
+                    .store()
+                    .snapshot()
+                    .environments
+                    .get(&key().environment)
+                    .and_then(|environment| environment.threads.get(&key().thread))
+                    .is_some_and(|thread| thread.projection.is_some());
+                ready.set(session && thread);
+            }
+        });
+    }
     let draft = signal(String::new());
     let selected = signal(Vec::<String>::new());
     {
@@ -188,21 +184,15 @@ fn ComposerFixture(props: FixtureProps) -> impl IntoElement {
             }
         });
     }
-    let outgoing = {
-        let client = client.clone();
-        move || {
-            let drafts = client.composer_drafts();
-            let id = drafts.editor_draft_key(&key());
-            let document = drafts.document();
-            let raw = document.borrow()["draftsByThreadKey"][&id].clone();
-            t3_client::thread_views::composer::context_records::outgoing_message_context(&raw, &[])
-                .ok()
-                .flatten()
-                .map(|context| serde_json::to_string(&context).expect("context"))
-                .unwrap_or_default()
-        }
-    };
-    let outgoing_text = signal(String::new());
+    let timeline = t3_ui::runtime::rt().store.timeline(key());
+    let timeline_runs = signal(0_u32);
+    effect(move || {
+        timeline.get();
+        untracked(|| timeline_runs.update(|runs| *runs += 1));
+    });
+    let dispatches = signal(Vec::<Value>::new());
+    let searches = signal(0_usize);
+    let mounted = signal(true);
     let content = view()
         .w_full()
         .h_full()
@@ -220,13 +210,35 @@ fn ComposerFixture(props: FixtureProps) -> impl IntoElement {
         )
         .child(
             nsh_base::button()
-                .test_id("outgoing")
-                .on_press(move || outgoing_text.set(outgoing()))
-                .child(text("Read outgoing context")),
+                .test_id("read-server")
+                .on_press(move || {
+                    dispatches.set(server.calls(DISPATCH));
+                    searches.set(server.calls(SEARCH).len());
+                })
+                .child(text("Read server")),
         )
+        .child(text(move || {
+            if ready.get() {
+                "Session ready"
+            } else {
+                "No session"
+            }
+        }))
         .child(text(move || format!("Client draft {:?}", draft.get())))
         .child(text(move || format!("Client answer {:?}", selected.get())))
-        .child(text(move || format!("Outgoing {}", outgoing_text.get())))
+        .child(text(move || {
+            format!("Dispatches {}", dispatches.with(Vec::len))
+        }))
+        .child(text(move || {
+            format!(
+                "Last dispatch {}",
+                dispatches.with(|calls| calls.last().map(Value::to_string).unwrap_or_default())
+            )
+        }))
+        .child(text(move || format!("Searches {}", searches.get())))
+        .child(text(move || {
+            format!("Timeline derivations {}", timeline_runs.get())
+        }))
         .child(dynamic(move || {
             mounted.get().then(|| {
                 let client = client.clone();
@@ -239,14 +251,19 @@ fn ComposerFixture(props: FixtureProps) -> impl IntoElement {
     )
 }
 
-fn start(window: (f32, f32), question: bool) -> Headless {
+fn start(window: (f32, f32), connected: bool, question: bool) -> Headless {
     let mut config = EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
         ..EngineConfig::new(Root::new::<ComposerFixture>(move || FixtureProps {
+            connected,
             question,
         }))
     };
+    if question {
+        // The panel's 200 ms single-select auto-advance runs on the engine clock.
+        config.clock = nsh_core::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH);
+    }
     if window == DESKTOP {
         config.environment.os = nsh_core::platform::Os::Linux;
         config.environment.idiom = nsh_core::platform::Idiom::Desktop;
@@ -254,19 +271,28 @@ fn start(window: (f32, f32), question: bool) -> Headless {
     let mut app = Headless::start(config).expect("composer fixture starts");
     app.wait_for("id:composer-editor")
         .expect("the composer mounts");
+    if connected {
+        app.wait_for("Session ready")
+            .expect("paired and the thread is open");
+    }
     app
+}
+
+fn read_server(app: &mut Headless) {
+    app.press("id:read-server")
+        .expect("read what the server received");
 }
 
 #[test]
 fn a_draft_survives_leaving_and_returning_to_the_thread() {
     for window in [DESKTOP, PHONE] {
-        let mut app = start(window, false);
+        let mut app = start(window, false, false);
         app.type_text("id:composer-editor", "keep this draft")
             .expect("type into the editor");
         app.wait_for("Client draft \"keep this draft\"")
             .expect("the client's draft store holds the text");
         app.press("id:leave").expect("leave");
-        app.wait_for_gone("id:composer-editor", std::time::Duration::from_secs(5))
+        app.wait_for_gone("id:composer-editor", Duration::from_secs(5))
             .expect("unmounted");
         app.press("id:return").expect("return");
         app.wait_for("id:composer-editor").expect("remounted");
@@ -276,36 +302,75 @@ fn a_draft_survives_leaving_and_returning_to_the_thread() {
 }
 
 #[test]
-fn at_opens_thread_suggestions_and_choosing_one_inserts_a_context_reference() {
+fn enter_sends_once_through_the_client_and_clears_the_draft() {
     for window in [DESKTOP, PHONE] {
-        let mut app = start(window, false);
+        let mut app = start(window, true, false);
+        app.type_text("id:composer-editor", "ship it")
+            .expect("type");
+        app.wait_for("Client draft \"ship it\"").expect("saved");
+        app.press_key("enter").expect("send with Enter");
+        app.wait_for("Client draft \"\"")
+            .expect("the client clears the sent draft");
+        read_server(&mut app);
+        app.wait_for("Dispatches 1")
+            .expect("one dispatch reached the server");
+        app.wait_for("text:/Last dispatch .*ship it/")
+            .expect("carrying the typed text");
+        app.press_key("enter").expect("Enter on the empty composer");
+        read_server(&mut app);
+        assert!(
+            app.screen().shows("Dispatches 1"),
+            "an empty composer sends nothing"
+        );
+    }
+}
+
+#[test]
+fn at_suggests_a_thread_and_the_chosen_chip_is_sent_as_a_context_reference() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = start(window, true, false);
         app.type_text("id:composer-editor", "see @Parser")
             .expect("type a mention trigger");
         app.wait_for("Parser rewrite")
             .expect("the client's thread suggestion is listed");
         app.press_key("enter")
             .expect("choose the active suggestion");
-        app.wait_for_gone("role:option", std::time::Duration::from_secs(5))
+        app.wait_for_gone("role:option", Duration::from_secs(5))
             .expect("the menu closes after the client accepts the selection");
-        app.press("id:outgoing").expect("read the outgoing context");
-        app.wait_for(r#"text:/"kind":"thread"/"#)
-            .expect("the draft sends the chosen thread as a context reference");
-        app.wait_for(r#"text:/"threadId":"thread-b"/"#)
-            .expect("for the chosen thread");
+        app.press_key("enter").expect("send");
+        app.wait_for("Client draft \"\"").expect("sent");
+        read_server(&mut app);
+        app.wait_for("Dispatches 1").expect("one dispatch");
+        app.wait_for(r#"text:/Last dispatch .*"kind":"thread".*"threadId":"thread-b"/"#)
+            .expect("the chosen thread travels as a context reference");
     }
 }
 
 #[test]
-fn a_pending_question_is_docked_and_digits_typed_in_the_editor_stay_in_the_answer() {
+fn a_digit_answers_the_pending_question_through_the_client() {
     for window in [DESKTOP, PHONE] {
-        let mut app = start(window, true);
+        let mut app = start(window, true, true);
         app.wait_for("Which scope should change?")
             .expect("the question panel is in the banner dock");
-        app.wait_for("Parser only").expect("its options");
-        app.wait_for("text:/Type your own answer, or leave this blank to use the selected option/")
-            .expect("the editor is the custom-answer field");
-        // Without a session the client disables the request (`!canOperate`), so the panel's
-        // digit shortcut is not installed; typed digits are the answer's text.
+        // Digits are the panel's while focus is outside an editable field.
+        read_server(&mut app);
+        app.press_key("1").expect("digit shortcut");
+        app.wait_for("Client answer [\"parser\"]")
+            .expect("the client's question session records the answer");
+        app.run_for(Duration::from_millis(300))
+            .expect("auto-advance");
+        read_server(&mut app);
+        app.wait_for(r#"text:/Last dispatch .*"scope":"parser"/"#)
+            .expect("the answer is sent to the server");
+    }
+}
+
+#[test]
+fn digits_typed_in_the_answer_editor_stay_in_the_answer() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = start(window, true, true);
+        app.wait_for("Which scope should change?")
+            .expect("question");
         app.type_text("id:composer-editor", "1")
             .expect("type a digit");
         app.wait_for("Client draft \"1\"")
@@ -320,7 +385,7 @@ fn a_pending_question_is_docked_and_digits_typed_in_the_editor_stay_in_the_answe
 #[test]
 fn sending_while_disconnected_takes_the_webs_toast_and_keeps_the_draft() {
     for window in [DESKTOP, PHONE] {
-        let mut app = start(window, false);
+        let mut app = start(window, false, false);
         app.type_text("id:composer-editor", "not yet")
             .expect("type");
         app.wait_for("Client draft \"not yet\"").expect("saved");
@@ -339,4 +404,46 @@ fn sending_while_disconnected_takes_the_webs_toast_and_keeps_the_draft() {
             "no invented failure line"
         );
     }
+}
+
+/// Typing latency: keystrokes leave the timeline's selector alone and query the server only
+/// when the suggestion's input changed.
+#[test]
+fn keystrokes_neither_recompute_the_timeline_nor_repeat_unchanged_queries() {
+    let mut app = start(DESKTOP, true, false);
+    let timeline = app
+        .screen()
+        .texts()
+        .into_iter()
+        .find(|text| text.starts_with("Timeline derivations"))
+        .map(|text| text.to_string())
+        .expect("counter shown");
+    read_server(&mut app);
+    app.wait_for("Searches 0")
+        .expect("no query before a trigger");
+    app.type_text("id:composer-editor", "@Par")
+        .expect("trigger");
+    app.wait_for("Parser rewrite").expect("results");
+    read_server(&mut app);
+    let after_trigger = app
+        .screen()
+        .texts()
+        .into_iter()
+        .find(|text| text.starts_with("Searches "))
+        .map(|text| text.to_string())
+        .expect("search count");
+    assert_ne!(after_trigger, "Searches 0", "path queries are counted");
+    app.type_text("id:composer-editor", " then plain words without a trigger")
+        .expect("type past the trigger");
+    app.wait_for("text:/Client draft .*without a trigger/")
+        .expect("typed");
+    read_server(&mut app);
+    assert!(
+        app.screen().shows(&after_trigger),
+        "no query ran once the trigger closed"
+    );
+    assert!(
+        app.screen().shows(&timeline),
+        "typing never recomputed the timeline selector"
+    );
 }

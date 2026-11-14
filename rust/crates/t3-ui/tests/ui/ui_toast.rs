@@ -480,3 +480,51 @@ fn anchored_copy_feedback_is_tooltip_shaped_and_expires() {
         .expect("copy feedback lifetime");
     assert!(!app.screen().shows("Copied!"));
 }
+
+/// Rule 4 of fidelity review 2: a slot holding content is shown as given, even when the content
+/// equals a catalogue key ("Settings" is "Paramètres" in French); a key slot is translated.
+#[component]
+fn ContentToastFixture() -> impl IntoElement {
+    t3_ui::theme::install(&Default::default());
+    t3_ui::i18n::set_language("fr", &[]);
+    let manager = ToastManager::default();
+    manager.add(ToastOptions {
+        title: t3_ui::i18n::Text::content("Settings"),
+        description: Some(t3_ui::i18n::Text::content("Settings")),
+        timeout: None,
+        action: Some(Action {
+            label: t3_ui::i18n::Text::content("Settings"),
+            disabled: false,
+            on_press: Rc::new(|| {}),
+        }),
+        ..Default::default()
+    });
+    manager.add(ToastOptions {
+        title: "Settings".into(),
+        timeout: None,
+        ..Default::default()
+    });
+    view()
+        .w_full()
+        .h_full()
+        .child(toast::toasts(manager, Position::TopRight, || None))
+}
+
+#[test]
+fn content_slots_are_shown_verbatim_and_key_slots_translated() {
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(PHONE.0), px(PHONE.1)),
+        ..EngineConfig::new(Root::of::<ContentToastFixture>())
+    })
+    .expect("content toast fixture");
+    app.wait_for("Paramètres").expect("the key title is translated");
+    app.wait_for("role:button[Settings]")
+        .expect("the content action label is shown as given");
+    let screen = app.screen();
+    let texts = screen.texts();
+    let count = |wanted: &str| texts.iter().filter(|text| **text == wanted).count();
+    // Content title, content description and content action label; only the key translates.
+    assert_eq!(count("Settings"), 3, "{texts:?}");
+    assert_eq!(count("Paramètres"), 1, "{texts:?}");
+}

@@ -1,19 +1,41 @@
-//! TL-ROWS-USER: the real row consumes the client's timeline projection.
+//! TL-ROWS-USER: the real row consumes the client's timeline projection, with the context
+//! built by its production constructor from the thread's `TimelineServices`.
 use crate::support::{DESKTOP, PHONE};
+use futures::{FutureExt, StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
 use nsh_core::prelude::*;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::{Headless, LayoutNode};
 use serde_json::json;
 use std::rc::Rc;
+use t3_client::ClientStore;
+use t3_client::services::assets::AssetUrlState;
 use t3_client::thread_views::messages_timeline::{
     MessagesTimelineRow, MessagesTimelineRowsInput, derive_messages_timeline_rows,
 };
+use t3_client::types::{EnvironmentId, ThreadId, ThreadKey};
 use t3_client::view_logic::session::{ChatMessage, TimelineContent, TimelineEntry};
+use t3_contracts::assets::{AssetCreateUrlResult, AssetResource};
+use t3_contracts::base_schemas::RunId;
 use t3_ui::i18n::{Value as Argument, t, tr};
+use t3_ui::runtime::services::assets::{AssetUrlBinding, AssetUrlClient};
+use t3_ui::runtime::{Rt, backend::Unavailable, host::Choice};
+use t3_ui::screens::thread::rewind::{
+    RewindAvailability, RewindError, RewindService, RewindState, RewindTarget, TimelineRewindClient,
+};
 use t3_ui::screens::thread::rows::user::{self, UserRowContext, UserRowState};
+use t3_ui::screens::thread::timeline::TimelineServices;
+use t3_ui::state::nav::{Navigator, Route};
+
+fn thread_key() -> ThreadKey {
+    ThreadKey {
+        environment: EnvironmentId("environment".into()),
+        thread: ThreadId("thread".into()),
+    }
+}
 
 fn projection(kind: &str) -> Option<Rc<MessagesTimelineRow>> {
-    let mut message = json!({"id":kind,"role":"user","text":"","runId":null,"streaming":false,
+    // A run and a turn-start intent: the client offers a rewind only for such messages.
+    let mut message = json!({"id":kind,"role":"user","text":"","runId":"run","inputIntent":"turn_start","streaming":false,
         "createdAt":"2026-11-13T12:00:00.000Z","updatedAt":"2026-11-13T12:00:00.000Z"});
     let extra = match kind {
         "automation" => {
@@ -30,6 +52,14 @@ fn projection(kind: &str) -> Option<Rc<MessagesTimelineRow>> {
         "guest" => {
             json!({"text":"Message from guest Sam, sent by the owner:\n\nWhy?","context":{"guest":{"guestMessageId":"guest-message:one","name":"Sam","text":"Why?"}}})
         }
+        "chip" => json!({
+            "text":"Please fix [a.ts](t3-context://v1/mention/mention-a)",
+            "context":{"records":[{"version":1,"contextId":"mention-a","kind":"mention","label":"a.ts","path":"src/a.ts"}]}
+        }),
+        "image" => json!({
+            "text":"Look at this",
+            "attachments":[{"type":"image","id":"photo","name":"photo.png","mimeType":"image/png","sizeBytes":12}]
+        }),
         _ => json!({"createdBy":"agent","creationSource":"server","text":"Server restarted."}),
     };
     message
@@ -53,24 +83,95 @@ fn projection(kind: &str) -> Option<Rc<MessagesTimelineRow>> {
     }).into_iter().find(|row| matches!(&row.content,t3_client::thread_views::messages_timeline::MessagesTimelineRowContent::Message{message,..} if message.role=="user"))
 }
 
+/// The client's rewind operation: counts confirmed rewinds.
+struct Rewind(Signal<usize>);
+impl TimelineRewindClient for Rewind {
+    fn state(&self, _: &ThreadKey) -> RewindState {
+        RewindState {
+            reverting: false,
+            can_fork: true,
+        }
+    }
+    fn availability(&self, _: &ThreadKey, _: &RewindTarget) -> RewindAvailability {
+        RewindAvailability {
+            can_rewind: true,
+            can_restore_files: false,
+            reason: None,
+        }
+    }
+    fn changes(&self, _: &ThreadKey) -> LocalBoxStream<'static, ()> {
+        futures::stream::pending().boxed_local()
+    }
+    fn rewind(
+        &self,
+        _: ThreadKey,
+        target: RewindTarget,
+        _: bool,
+    ) -> LocalBoxFuture<'static, Result<String, RewindError>> {
+        assert_eq!(target.turn_count, 0);
+        self.0.update(|count| *count += 1);
+        futures::future::ready(Ok(String::new())).boxed_local()
+    }
+    fn fork(
+        &self,
+        _: ThreadKey,
+        _: RunId,
+    ) -> LocalBoxFuture<'static, Result<ThreadKey, RewindError>> {
+        futures::future::pending().boxed_local()
+    }
+}
+
+/// Signs every attachment image and records which ids were asked for.
+struct Assets(Signal<Vec<String>>);
+impl AssetUrlClient for Assets {
+    fn watch(
+        &self,
+        _: EnvironmentId,
+        resource: AssetResource,
+    ) -> LocalBoxStream<'static, AssetUrlState> {
+        let AssetResource::Attachment { attachment_id, .. } = &resource else {
+            panic!("user images are attachments, got {resource:?}");
+        };
+        let id = attachment_id.0.clone();
+        self.0.update(|ids| ids.push(id.clone()));
+        let state = AssetUrlState::Success {
+            url: format!("https://server.test/api/assets/{id}"),
+            asset: Rc::new(
+                serde_json::from_value::<AssetCreateUrlResult>(
+                    json!({"relativeUrl":"/api/assets/x","expiresAt":1}),
+                )
+                .expect("asset"),
+            ),
+        };
+        futures::stream::once(async move { state })
+            .chain(futures::stream::pending())
+            .boxed_local()
+    }
+}
+
 #[component]
 fn UserRowFixture() -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
+    t3_ui::i18n::set_language("en", &[]);
     provide_context(t3_ui::theme::text_view_parts());
+    provide_context(Rt::new(
+        ClientStore::default(),
+        Rc::new(Unavailable("fixture".into())),
+        Choice::Demo,
+    ));
+    provide_context(Navigator::new(Route::Thread(thread_key())));
+    let edits = signal(0usize);
+    let signed = signal(Vec::<String>::new());
+    provide_context(RewindService(Rc::new(Rewind(edits))));
+    provide_context(AssetUrlBinding(Rc::new(Assets(signed))));
     let selected = signal("automation");
-    let edits = signal(0);
     let state = UserRowState::new();
-    let mut context = UserRowContext::new(state);
-    context.revert = Some(Rc::new(move |row, count| {
-        assert_eq!(count, 0);
-        assert!(!row.id.is_empty());
-        edits.update(|n| *n += 1);
-    }));
+    let services = TimelineServices::new(thread_key());
+    let mut context = UserRowContext::new(state, &services);
+    // The row's projection inputs; its actions come from the constructor.
     let working = signal(false);
-    let reverting = signal(false);
     let find_active = signal(false);
     context.working = computed(move || working.get());
-    context.reverting = computed(move || reverting.get());
     context.find_active = computed(move || find_active.get());
     let mut root = view().w_full().h_full();
     for (label, kind) in [
@@ -81,6 +182,8 @@ fn UserRowFixture() -> impl IntoElement {
         ("File example", "file"),
         ("Guest example", "guest"),
         ("Server example", "server"),
+        ("Chip example", "chip"),
+        ("Image example", "image"),
     ] {
         root = root.child(
             nsh_base::button()
@@ -98,12 +201,6 @@ fn UserRowFixture() -> impl IntoElement {
         )
         .child(
             nsh_base::button()
-                .accessibility_label(Some(SharedString::from(t("Toggle reverting"))))
-                .on_press(move || reverting.update(|value| *value = !*value))
-                .child(text(t("Toggle reverting"))),
-        )
-        .child(
-            nsh_base::button()
                 .accessibility_label(Some(SharedString::from(t("Reveal for find"))))
                 .on_press(move || {
                     find_active.set(true);
@@ -114,13 +211,17 @@ fn UserRowFixture() -> impl IntoElement {
         .child(text(move || {
             SharedString::from(tr(
                 "Edits: {count}",
-                &[("count", Argument::Int(edits.get()))],
+                &[("count", Argument::Int(edits.get() as i64))],
             ))
+        }))
+        .child(text(move || {
+            SharedString::from(format!("Signed: {}", signed.get().join(", ")))
         }))
         .child(user::user_message_row(
             computed(move || projection(selected.get())),
             context,
-        ));
+        ))
+        .child(t3_ui::ui::confirm::confirm_dialog_host());
     t3_ui::ui::toast::anchored_toast_provider(content)
 }
 fn fixture(window: (f32, f32)) -> Headless {
@@ -155,7 +256,8 @@ fn client_attribution_folds_are_independent_when_the_cell_is_reused() {
         app.wait_for("Agent summary").expect("agent summary");
         assert!(!app.screen().shows("text:/Hidden agent payload/"));
         app.press("role:button[Agent]").expect("expand agent");
-        app.wait_for("text:/Hidden agent payload/").expect("agent body");
+        app.wait_for("text:/Hidden agent payload/")
+            .expect("agent body");
         app.press("role:button[Automation example]").expect("reuse");
         app.wait_for(r"text:/Run the full daily audit\./")
             .expect("preserved fold");
@@ -188,23 +290,66 @@ fn client_projected_edit_guards_and_default_copy_work_without_renderers() {
             .enabled("role:button[Copy message]")
             .expect("copied temporarily disabled")
     );
-    for toggle in [
-        "role:button[Toggle working]",
-        "role:button[Toggle reverting]",
-    ] {
-        app.press(toggle).expect("busy");
+    app.press("role:button[Toggle working]").expect("busy");
+    assert!(
+        !app.screen()
+            .enabled("role:button[Edit from here]")
+            .expect("edit")
+    );
+    let _ = app.press("role:button[Edit from here]");
+    assert!(!app.screen().shows("Edit from here?"));
+    app.press("role:button[Toggle working]").expect("idle");
+}
+
+/// The constructor binds "Edit from here" to the thread's rewind service: it asks first, is
+/// disabled while the request is open, and rewinds once on confirm.
+#[test]
+fn the_production_context_edits_from_here_through_the_rewind_service() {
+    for window in [PHONE, DESKTOP] {
+        let mut app = fixture(window);
+        app.wait_for("Daily audit").expect("row");
+        app.press("role:button[Own example]").expect("own");
+        app.wait_for("role:button[Edit from here]")
+            .expect("edit offered");
+        app.press("role:button[Edit from here]").expect("edit");
+        app.wait_for("Edit from here?").expect("confirmation");
         assert!(
             !app.screen()
                 .enabled("role:button[Edit from here]")
                 .expect("edit")
         );
-        let _ = app.press("role:button[Edit from here]");
         assert!(app.screen().shows("Edits: 0"));
-        app.press(toggle).expect("idle");
+        app.press("role:button[Confirm]").expect("confirm");
+        app.wait_for("Edits: 1").expect("one rewind");
     }
-    app.press("role:button[Edit from here]").expect("edit");
-    app.wait_for("Edits: 1").expect("one action");
 }
+
+/// A sent context reference renders CMP-CHIPS' chip, not an empty gap.
+#[test]
+fn sent_context_references_render_their_chip() {
+    for window in [PHONE, DESKTOP] {
+        let mut app = fixture(window);
+        app.wait_for("Daily audit").expect("row");
+        app.press("role:button[Chip example]").expect("chip");
+        app.wait_for("text:/Please fix/").expect("message");
+        app.wait_for("a.ts").expect("the mention chip");
+    }
+}
+
+/// A committed image without a local preview shows through the thread's signed asset URL.
+#[test]
+fn committed_images_resolve_through_the_signed_asset_url() {
+    for window in [PHONE, DESKTOP] {
+        let mut app = fixture(window);
+        app.wait_for("Daily audit").expect("row");
+        app.press("role:button[Image example]").expect("image");
+        app.wait_for("Signed: photo")
+            .expect("one signed URL for the attachment");
+        app.wait_for("role:button[Preview photo.png]")
+            .expect("the image is drawn, not its file-name fallback");
+    }
+}
+
 #[test]
 fn client_file_guest_and_markdown_content_render_without_injected_presentations() {
     for window in [PHONE, DESKTOP] {

@@ -22,7 +22,7 @@ use std::rc::Rc;
 pub use nsh_base::{OpenChangeReason, SelectEntry, SelectGroup, SelectItem};
 use nsh_core::prelude::*;
 
-use crate::i18n::t;
+use crate::i18n::Text;
 use crate::theme::{self, Scope, cn, palette, tw, tw_with};
 use crate::ui::icon::Icon;
 
@@ -78,8 +78,8 @@ pub struct SelectProps {
     pub default_open: bool,
     pub disabled: Prop<bool>,
     pub invalid: Prop<bool>,
-    pub label: Prop<SharedString>,
-    pub placeholder: Prop<SharedString>,
+    pub label: Prop<Text>,
+    pub placeholder: Prop<Text>,
     pub variant: Variant,
     pub size: Size,
     pub popup: Popup,
@@ -92,7 +92,7 @@ pub struct SelectProps {
 }
 
 impl SelectProps {
-    pub fn new(label: impl Into<SharedString>) -> Self {
+    pub fn new(label: impl Into<Text>) -> Self {
         Self {
             items: Vec::new().into(),
             value: Value::Uncontrolled.into(),
@@ -102,7 +102,7 @@ impl SelectProps {
             disabled: false.into(),
             invalid: false.into(),
             label: label.into().into(),
-            placeholder: SharedString::default().into(),
+            placeholder: Text::content("").into(),
             variant: Variant::Default,
             size: Size::Default,
             popup: Popup::default(),
@@ -158,17 +158,6 @@ pub fn select_popup(
         Value::Controlled(value) => value,
     });
     let pressed = Prop::bind(move || open.get().unwrap_or_else(|| own_open.get()));
-    let translated = computed(move || {
-        items
-            .get()
-            .into_iter()
-            .map(|mut item| {
-                item.title = t(&item.title).into();
-                item.group = item.group.map(|group| t(&group).into());
-                item
-            })
-            .collect::<Vec<_>>()
-    });
     let trigger = trigger.map_or_else(
         || {
             select_trigger(
@@ -189,14 +178,15 @@ pub fn select_popup(
     let rendered_group = render_group;
     let empty = empty.map(|render| render());
     nsh_base::select()
-        .items(translated)
+        // Titles and group names are final: callers translate their keys, content stays as is.
+        .items(move || items.get())
         .value(move || Value::Controlled(current.get()))
         .default_value(default_value)
         .open(open)
         .default_open(default_open)
         .disabled(disabled)
-        .accessibility_label(move || Some(SharedString::from(t(&label.get()))))
-        .placeholder(move || Some(SharedString::from(t(&placeholder.get()))))
+        .accessibility_label(move || Some(label.with(Text::resolve)))
+        .placeholder(move || Some(placeholder.with(Text::resolve)))
         .trigger(trigger)
         .placement(popup.side)
         .align(popup.align)
@@ -383,7 +373,7 @@ fn trigger_height(size: Size, compact: bool) -> f32 {
 /// Standalone SelectButton. NSH's typed button replaces `useRender`'s arbitrary tag override.
 pub fn select_button(
     children: impl IntoElement,
-    label: impl Into<SharedString>,
+    label: impl Into<Text>,
     size: Size,
     disabled: Prop<bool>,
     on_press: impl Fn() + 'static,
@@ -391,7 +381,7 @@ pub fn select_button(
     let label = label.into();
     let on_press = Rc::new(on_press);
     nsh_base::button()
-        .accessibility_label(move || Some(SharedString::from(t(&label))))
+        .accessibility_label(move || Some(label.resolve()))
         .disabled(disabled)
         .inline_style(trigger_transition)
         .app_class(move || {
@@ -427,7 +417,7 @@ pub fn select_button(
 pub fn select_value(
     items: Prop<Vec<SelectItem>>,
     value: Prop<Option<SharedString>>,
-    placeholder: Prop<SharedString>,
+    placeholder: Prop<Text>,
 ) -> impl IntoElement {
     let title = computed(move || {
         value.get().filter(|value| !value.is_empty()).map(|value| {
@@ -439,7 +429,7 @@ pub fn select_value(
             })
         })
     });
-    text(move || SharedString::from(t(&title.get().unwrap_or_else(|| placeholder.get()))))
+    text(move || title.get().unwrap_or_else(|| placeholder.with(Text::resolve)))
         .app_class(move || {
             let attrs: Vec<_> = title
                 .get()
@@ -465,9 +455,9 @@ pub fn select_group(children: impl IntoElement) -> impl IntoElement {
     view().child(children)
 }
 
-pub fn select_group_label(label: impl Into<SharedString>) -> impl IntoElement {
+pub fn select_group_label(label: impl Into<Text>) -> impl IntoElement {
     let label = label.into();
-    group_label(Prop::bind(move || SharedString::from(t(&label))))
+    group_label(Prop::bind(move || label.resolve()))
 }
 
 fn group_label(label: impl Into<Prop<SharedString>>) -> impl IntoElement {

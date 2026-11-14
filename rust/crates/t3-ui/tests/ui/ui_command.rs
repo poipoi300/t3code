@@ -219,7 +219,7 @@ fn row(state: CommandState, item: Memo<Option<Item>>) -> impl IntoElement {
         state,
         item,
         || None,
-        text(move || item.get().map(|i| t(&i.label)).unwrap_or_default()),
+        text(move || item.get().map(|i| i.label.resolve()).unwrap_or_default()),
     )
 }
 
@@ -511,4 +511,65 @@ fn keyboard_reveal_keeps_the_active_row_inside_the_lists_scroll_padding() {
             "nearest reveal leaves 8px at the lower edge, got {bottom_gap}"
         );
     }
+}
+
+/// Rule 4 of fidelity review 2: an item whose label is content (a thread titled "Settings") is
+/// named and searched as given; the key item ("Settings", "Paramètres" in French) as translated.
+#[component]
+fn ContentItems() -> impl IntoElement {
+    theme::install(&ThemeChoice::default());
+    t3_ui::i18n::set_language("fr", &[]);
+    let state = CommandState::new(
+        || {
+            vec![
+                Item::new("thread", t3_ui::i18n::Text::content("Settings")),
+                Item::new("action", "Settings"),
+            ]
+        },
+        CommandOptions::default(),
+        |_| {},
+    );
+    let mut input = InputOptions::new(
+        t3_ui::i18n::Text::content("Search projects"),
+        t3_ui::i18n::Text::content("Search projects"),
+    );
+    input.auto_focus = false;
+    view().w_full().h_full().child(command(state, move |state| {
+        view()
+            .child(command_input(state, input))
+            .child(command_list(
+                state,
+                "Projects",
+                command_collection(state, move |item| row(state, item)),
+            ))
+    }))
+}
+
+fn start_content_items() -> Headless {
+    Headless::start(EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(PHONE.0), px(PHONE.1)),
+        ..EngineConfig::new(Root::of::<ContentItems>())
+    })
+    .expect("content items")
+}
+
+#[test]
+fn content_labels_are_named_and_searched_as_given() {
+    let mut app = start_content_items();
+    app.wait_for("Paramètres").expect("the key item translates");
+    app.wait_for("role:option[Settings]")
+        .expect("the content item is named as given");
+    app.type_text("label:Search projects", "settings")
+        .expect("search");
+    app.wait_for_gone("Paramètres", std::time::Duration::from_secs(1))
+        .expect("the key item is searched by its translated label");
+    assert!(app.screen().shows("Settings"));
+    let mut app = start_content_items();
+    app.wait_for("Paramètres").expect("the key item translates");
+    app.type_text("label:Search projects", "param")
+        .expect("search");
+    app.wait_for_gone("text:Settings", std::time::Duration::from_secs(1))
+        .expect("the content item is searched by its own text");
+    assert!(app.screen().shows("Paramètres"));
 }

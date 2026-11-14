@@ -77,7 +77,7 @@ pub fn wizard_header(
     children: Option<AnyElement>,
 ) -> impl IntoElement {
     let title = Rc::new(title);
-    let title_source = move || title().resolve().to_string();
+    let title_source = move || title();
     let has_identity = identity.is_some();
     let mut slots = vec![if has_identity {
         // sr-only: no visible element; the registered title still names the dialog.
@@ -90,7 +90,7 @@ pub fn wizard_header(
     }];
     slots.extend(identity);
     slots.extend(description.map(|description| {
-        dialog_description(state, move || description().resolve().to_string()).into_element()
+        dialog_description(state, move || description()).into_element()
     }));
     slots.extend(children);
     dialog_header(state, slots)

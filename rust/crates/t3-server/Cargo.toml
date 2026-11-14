@@ -126,6 +126,12 @@ name = "native_providers"
 harness = false
 required-features = ["providers"]
 
+# Its own `main`: the test binary doubles as the fake ACP registry agent it launches.
+[[test]]
+name = "composition_acp_registry"
+harness = false
+required-features = ["providers"]
+
 # Its own `main`: the test binary doubles as the fake `codex` and `claude` it launches.
 [[test]]
 name = "textgen_native"

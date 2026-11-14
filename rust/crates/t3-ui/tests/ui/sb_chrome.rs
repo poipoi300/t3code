@@ -289,8 +289,12 @@ fn utilities_navigate_and_back_returns_to_main_with_live_capability_changes() {
         app.press("role:button[Settings]").expect("settings");
         app.wait_for("text:route:/settings/general")
             .expect("general settings route");
-        app.press("role:button[Usage]").expect("usage");
-        app.wait_for("text:route:/usage").expect("usage route");
+        assert!(
+            !app.screen()
+                .matches("role:button[Usage]")
+                .expect("valid selector"),
+            "Usage stays hidden until its screen exists"
+        );
         app.press("role:button[Pull requests]")
             .expect("pull requests");
         app.wait_for("role:button[Back]")

@@ -540,8 +540,8 @@ fn RetainedText() -> impl IntoElement {
             }))
             .child(dialog_popup(state, PopupOptions::default(), move || {
                 vec![
-                    dialog_title(state, move || title.get()).into_element(),
-                    dialog_description(state, move || description.get()).into_element(),
+                    dialog_title(state, move || title.get().into()).into_element(),
+                    dialog_description(state, move || description.get().into()).into_element(),
                 ]
             }))
     })
@@ -906,4 +906,44 @@ fn reopening_during_exit_does_not_unmount_the_reopened_popup() {
     app.press("role:button[Close]").expect("close");
     gone(&mut app, "role:dialog");
     app.wait_for("dialog closed").expect("eventual exit");
+}
+
+/// Rule 4 of fidelity review 2: content slots ("Settings", a catalogue key) are shown as given;
+/// only the key title of the second dialog translates ("Paramètres" in French).
+#[component]
+fn ContentSlots() -> impl IntoElement {
+    theme::install(&ThemeChoice::default());
+    t3_ui::i18n::set_language("fr", &[]);
+    let open = signal(false);
+    dialog(open, move |state| {
+        view()
+            .w_full()
+            .h_full()
+            .child(dialog_trigger(state, t3_ui::i18n::Text::content("Settings")))
+            .child(dialog_popup(state, PopupOptions::default(), move || {
+                dialog_header(
+                    state,
+                    view()
+                        .child(dialog_title(state, || t3_ui::i18n::Text::content("Settings")))
+                        .child(dialog_description(state, || {
+                            t3_ui::i18n::Text::content("Settings")
+                        }))
+                        .child(text(t3_ui::i18n::Text::from("Settings").resolve())),
+                )
+            }))
+    })
+}
+
+#[test]
+fn content_slots_are_shown_verbatim_and_key_slots_translated() {
+    let mut app = start::<ContentSlots>(PHONE);
+    app.wait_for("role:button[Settings]")
+        .expect("the content trigger is shown as given");
+    app.press("role:button[Settings]").expect("open");
+    app.wait_for("Paramètres").expect("the key text translates");
+    let screen = app.screen();
+    let texts = screen.texts();
+    let count = |wanted: &str| texts.iter().filter(|text| **text == wanted).count();
+    // Trigger, content title and content description.
+    assert_eq!(count("Settings"), 3, "{texts:?}");
 }
