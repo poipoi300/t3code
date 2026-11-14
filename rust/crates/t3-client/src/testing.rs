@@ -2,7 +2,11 @@
 #[cfg(any(test, feature = "testing"))]
 pub mod environment;
 #[cfg(test)]
+mod relay_tests;
+#[cfg(test)]
 mod removal_tests;
+#[cfg(test)]
+mod route_policy_tests;
 use crate::{
     ClientError,
     platform::*,

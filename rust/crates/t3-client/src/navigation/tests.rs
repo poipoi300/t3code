@@ -347,8 +347,8 @@ fn each_launch_address_lands_where_the_web_router_sends_it_in_each_state() {
         (pairing, pairing, pairing, pairing),
         ("/pair#token=abc", "/pair#token=abc", "/pair#token=abc", "/"),
         // An agent approval or connect-CLI launch: hosted static app only, which this is not.
-        ("/approve-agent?code=x", "/approve-agent?code=x", "/", "/"),
-        ("/connect?state=s", "/connect?state=s", "/", "/"),
+        ("/approve-agent?code=x", "/approve-agent?code=x", "/pair", "/"),
+        ("/connect?state=s", "/connect?state=s", "/pair", "/"),
         ("/connect-agent", "/connect-agent", "/connect-agent", "/connect-agent"),
         ("/guest", "/guest", "/guest", "/guest"),
         (project, project, "/pair", "/settings/projects?project=env%3Arepo"),
@@ -359,7 +359,12 @@ fn each_launch_address_lands_where_the_web_router_sends_it_in_each_state() {
             ("unpaired", signed_out, unpaired),
             ("paired", signed_in, paired),
         ] {
-            let landed = Location::resolve(launch, policy).href();
+            // Each redirect replaces the address and is resolved again, as `UrlState` does; the
+            // web router chains the same way (`/connect` to `/`, then `_chat` to `/pair`).
+            let mut landed = launch.to_owned();
+            for _ in 0..3 {
+                landed = Location::resolve(&landed, policy).href();
+            }
             assert_eq!(landed, expected, "{launch} {state}");
             assert_eq!(
                 Location::resolve(&landed, policy).href(),

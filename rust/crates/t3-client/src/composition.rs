@@ -520,6 +520,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                     }
                 }
                 if !this.inner.restored.replace(true) {
+                    this.follow_route_policy();
                     let notice = StorageNotice {
                         storage: this.inner.platform.storage_report(),
                         reset_catalog,
@@ -554,6 +555,39 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             );
         }
         notice
+    }
+
+    /// The route policy (`RoutePolicy::for_client`) once the first restore has read the saved
+    /// environments; `None` before, when no route guard may act on a guess.
+    pub fn route_policy(&self) -> Option<crate::navigation::RoutePolicy> {
+        self.inner.restored.get().then(|| {
+            crate::navigation::RoutePolicy::for_client(!self.inner.environments.borrow().is_empty())
+        })
+    }
+
+    /// Hands the platform the route policy now and on every change while the runtime lives, so
+    /// the host's location snapshots carry it.
+    fn follow_route_policy(&self) {
+        let Some(mut last) = self.route_policy() else {
+            return;
+        };
+        self.inner.platform.set_route_policy(last);
+        let inner = Rc::downgrade(&self.inner);
+        let mut changes = self.changes();
+        (self.inner.spawn)(
+            async move {
+                while changes.next().await.is_some() {
+                    let Some(this) = inner.upgrade().map(|inner| Self { inner }) else {
+                        break;
+                    };
+                    if let Some(policy) = this.route_policy().filter(|policy| *policy != last) {
+                        this.inner.platform.set_route_policy(policy);
+                        last = policy;
+                    }
+                }
+            }
+            .boxed_local(),
+        );
     }
 
     /// Pairing requests from links the OS hands the running app (mobile deep links), for the

@@ -17,6 +17,11 @@
 //! // … drive the UI, then:
 //! assert_eq!(environment.calls("orchestration.dispatchCommand").len(), 1);
 //! ```
+//!
+//! T3 Connect: `environment.sign_in()`, then build the client with
+//! `ClientRuntime::with_relay(environment.platform(), store, source, spawner, FakeEnvironment::relay_config())`.
+//! After `restore`, the relay lists this environment as linked to [`ACCOUNT`] and
+//! `add_relay_environment` connects to it through the relay.
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::{Rc, Weak};
@@ -32,6 +37,10 @@ use crate::platform::*;
 
 pub const ORIGIN: &str = "https://server.test";
 pub const NOW: &str = "2026-06-20T00:00:00.000Z";
+/// The fake T3 Connect relay; its connect answer points at `ORIGIN`.
+pub const RELAY: &str = "https://relay.test";
+/// The account the host is signed in to after [`FakeEnvironment::sign_in`].
+pub const ACCOUNT: &str = "account";
 
 #[derive(Default)]
 struct State {
@@ -43,6 +52,9 @@ struct State {
     script: BTreeMap<String, VecDeque<Result<Value, Value>>>,
     calls: Vec<(String, Value)>,
     sequence: u64,
+    signed_in: bool,
+    relay_refuses: bool,
+    relay: Vec<String>,
 }
 
 struct Server {
@@ -135,6 +147,30 @@ impl FakeEnvironment {
             .push_back(answer);
     }
 
+    /// Signs the host in to T3 Connect as [`ACCOUNT`] (or out): the cloud identity and token it
+    /// answers. The relay lists this environment as linked to that account.
+    pub fn sign_in(&self, signed_in: bool) {
+        self.server.state.borrow_mut().signed_in = signed_in;
+    }
+
+    /// The relay refuses to connect this device (503 `environment_endpoint_unavailable`).
+    pub fn refuse_relay(&self, refuses: bool) {
+        self.server.state.borrow_mut().relay_refuses = refuses;
+    }
+
+    /// Every request the relay answered, as "METHOD /path".
+    pub fn relay_requests(&self) -> Vec<String> {
+        self.server.state.borrow().relay.clone()
+    }
+
+    /// What `ClientRuntime::with_relay` takes to reach this relay.
+    pub fn relay_config() -> crate::composition::RelayConfig {
+        crate::composition::RelayConfig {
+            relay_url: RELAY.into(),
+            client_id: t3_contracts::relay::RelayPublicClientId::T3Web,
+        }
+    }
+
     /// Every request payload the client sent to `method`, in order.
     pub fn calls(&self, method: &str) -> Vec<Value> {
         self.server
@@ -192,6 +228,68 @@ fn config(environment: &str) -> Value {
     config
 }
 
+fn relay_endpoint() -> Value {
+    json!({"httpBaseUrl": ORIGIN, "wsBaseUrl": "wss://server.test", "providerKind": "cloudflare_tunnel"})
+}
+
+/// The relay's protocol surface the client uses: token exchange, list, status, connect.
+fn relay_response(server: &Server, request: &HttpRequest, path: &str) -> HttpResponse {
+    let environment = &server.environment;
+    let mut state = server.state.borrow_mut();
+    state.relay.push(format!("{} {path}", request.method));
+    let connect = format!("/v1/environments/{environment}/connect");
+    let status = format!("/v1/environments/{environment}/status");
+    match (request.method.as_str(), path) {
+        ("POST", "/v1/client/dpop-token") => {
+            let scope = url::form_urlencoded::parse(&request.body)
+                .find(|(key, _)| key == "scope")
+                .map(|(_, value)| value.into_owned())
+                .unwrap_or_default();
+            response(
+                200,
+                json!({"access_token":"relay-access","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","token_type":"DPoP","expires_in":3600,"scope": scope}),
+            )
+        }
+        ("GET", "/v1/environments") => response(
+            200,
+            json!({"environments":[{"environmentId": environment, "label": "Fake host", "endpoint": relay_endpoint(), "linkedAt": NOW}]}),
+        ),
+        ("POST", path) if path == status => response(
+            200,
+            json!({"environmentId": environment, "endpoint": relay_endpoint(), "status": "online", "checkedAt": NOW}),
+        ),
+        ("POST", path) if path == connect && state.relay_refuses => response(
+            503,
+            json!({"_tag":"RelayEnvironmentEndpointUnavailableError","code":"environment_endpoint_unavailable","reason":"endpoint_request_failed","traceId":"relay-trace"}),
+        ),
+        ("POST", path) if path == connect => response(
+            200,
+            json!({"environmentId": environment, "endpoint": relay_endpoint(), "credential": "relay-credential", "expiresAt": "2036-01-01T00:00:00.000Z"}),
+        ),
+        _ => response(404, json!({})),
+    }
+}
+
+/// A cloud session token for `account`, as the host's account store hands it out.
+fn cloud_token(account: &str) -> String {
+    use base64::Engine;
+    let claims = json!({"sub": account, "exp": 4_102_444_800u64}).to_string();
+    format!(
+        "e30.{}.sig",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims)
+    )
+}
+
+/// The host's DPoP public key and its RFC 7638 thumbprint.
+fn dpop_key() -> (Value, String) {
+    use base64::Engine;
+    use sha2::Digest;
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let jwk = json!({"crv":"P-256","kty":"EC","x":encode(&[1; 32]),"y":encode(&[2; 32])});
+    let thumbprint = encode(&sha2::Sha256::digest(jwk.to_string()));
+    (jwk, thumbprint)
+}
+
 fn response(status: u16, body: Value) -> HttpResponse {
     HttpResponse {
         status,
@@ -246,10 +344,12 @@ impl Platform for EnvironmentPlatform {
     fn http(&self, request: HttpRequest) -> HostFuture<'_, HttpResponse> {
         let server = self.server.clone();
         async move {
-            let path = url::Url::parse(&request.url)
-                .map_err(|error| PlatformError::Network(error.to_string()))?
-                .path()
-                .to_owned();
+            let url = url::Url::parse(&request.url)
+                .map_err(|error| PlatformError::Network(error.to_string()))?;
+            let path = url.path().to_owned();
+            if url.host_str() == Some("relay.test") {
+                return Ok(relay_response(&server, &request, &path));
+            }
             let permissions = server.state.borrow().permissions.clone().unwrap_or_else(|| {
                 vec!["orchestration:read".into(), "orchestration:operate".into()]
             });
@@ -324,6 +424,26 @@ impl Platform for EnvironmentPlatform {
             HostAction::ClientPresentation => {
                 async { Ok(HostReply::Document(json!({"label":"Test client"}))) }.boxed_local()
             }
+            HostAction::CloudIdentity | HostAction::CloudToken => {
+                let token = matches!(action, HostAction::CloudToken);
+                let signed_in = self.server.state.borrow().signed_in;
+                let answer = signed_in.then(|| {
+                    if token {
+                        cloud_token(ACCOUNT)
+                    } else {
+                        ACCOUNT.to_owned()
+                    }
+                });
+                async move { Ok(HostReply::Text(answer)) }.boxed_local()
+            }
+            HostAction::RelayDeviceId => {
+                async { Ok(HostReply::Text(Some("device-1".into()))) }.boxed_local()
+            }
+            HostAction::DpopPublicJwk => async { Ok(HostReply::Document(dpop_key().0)) }.boxed_local(),
+            HostAction::DpopThumbprint => {
+                async { Ok(HostReply::Text(Some(dpop_key().1))) }.boxed_local()
+            }
+            HostAction::DpopSign { .. } => async { Ok(HostReply::Bytes(vec![3; 64])) }.boxed_local(),
             action => self.fake.host(action),
         }
     }
