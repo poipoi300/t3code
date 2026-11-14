@@ -130,7 +130,7 @@ remain unfinished as complete driver integrations.**
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `codex` | PATH/custom CLI; managed/local packages | Manifest compatibility and per-model minimums | Native app-server and managed account catalog; bundled/custom models | Reasoning, configured service tiers/cyber, defaults | Four runtime modes, explicit override precedence | ChatGPT OAuth/PKCE/JWT, transfer, renewable scoped tokens, revocation, private broker | Host refresh/lifecycle assembly; shared-instance update propagation; final scoped review |
 | `claudeAgent` | PATH/custom CLI; Windows entry resolution; prompt-free native probe | Manifest compatibility; model min/max filtering | Bundled/reported/custom models; runtime suffix/context resolution | Effort cap sources, Ultracode migration | Permission/plan/sandbox precedence and bypass availability | CLI-owned login guidance; account/usage probes and five-minute cache with one-use fallback; isolated homes | Additional synced-plugin/worktree/link cases and host lifecycle assembly; maintenance requires injected resolver |
-| `cursor` | SDK route identified; no CLI invented | Manifest compatibility normalization | Input SDK model conversion | Parameter ordering, defaults, booleans, effort/context/fast mapping | Remaining | Remaining | SDK catalog fetch, paid-plan/auth classification, login setup, interaction/runtime modes and capabilities |
+| `cursor` | Shipped SDK HTTP catalog; no CLI invented | Manifest compatibility | Cached per-key HTTP models, strict SDK schema and custom models | Parameter ordering, defaults, booleans, effort/context/fast mapping | Windows auto-review/sandbox precedence and agent/plan mapping | T3 credential store, legacy migration, scoped browser login via narrow SDK trait, configured-key precedence, verified atomic commit and logout | SDK login transport bridge supplied by host; filesystem skills/workspaces, usage tests and lifecycle wiring in progress |
 | `grok` | PATH/custom CLI; updater-disabled version probe | Manifest compatibility | Custom-model composition; metadata input | Reasoning metadata/default/order conversion | Remaining | Credential environment only | `grok models` auth/model parsing, ACP initialize catalog, login/setup, launch/runtime modes, skills, maintenance and capability integration |
 | `opencode` | PATH/custom CLI; external HTTP identity probe | Minimum 1.14.19; v1/v2 classification; manifest compatibility | Custom-model composition only | Common inheritance only | Remaining | External server password transport/secret isolation | Native v1/v2 catalogs/options/auth/modes, managed-server selection/cache, maintenance and capability integration |
 | `antigravity` | Managed ACP route identified | Release-tag compatibility; pure managed-release selection | Bundled manifest | Raw profiles/common inheritance | Permission and CLI-mode mapping | Config secret resolution only | Platform install discovery, harness/profile isolation/materialization, release downloads/verification, OAuth/callback/profile leases, live catalog and capabilities |
@@ -201,7 +201,7 @@ Native protocols and per-provider adapters remain with their assigned owners.
   browser/device OAuth and real update endpoints were not exercised on Windows.
 
 Run from `rust/` with
-`CARGO_TARGET_DIR=D:\t3code-rust-target\server-e` and the configured four Cargo jobs:
+`CARGO_TARGET_DIR=D:\t3code-rust-target\server-e` and the configured two Cargo jobs:
 
 ```text
 cargo fmt -p t3-provider
@@ -244,7 +244,7 @@ crates, start provider turns, or use live network. Never read real provider/T3
 credential directories. All filesystem tests use temporary directories.
 
 Every Cargo invocation now uses `CARGO_TARGET_DIR=D:\t3code-rust-target\server-e`
-and the configured four Cargo jobs; do not go back to the populated C: target. Run from
+and the configured two Cargo jobs; do not go back to the populated C: target. Run from
 `C:\Users\Administrator\t3code-rust\rust` with `login:false` and
 `rtk proxy cargo ... --offline -p t3-provider`. Use explicit UTF-8 for Python.
 The manual usage refresh reports GPT/Codex quota unknown; the coordinator owns
@@ -351,5 +351,41 @@ a live `Arc<ModelManifest>`; `InstallationOptions.manifest` and
 The loopback refresh regression changes a live Claude catalog without rebuilding
 the provider. Maintenance regression tests reject an entire malformed mise listing
 and keep pnpm's installed-version probe lazy. Five focused maintenance tests pass.
-Formatting completed; full crate test run is now in flight. No provider turns,
+Formatting completed; the full crate test run passed before the subsequent Cursor work. No-deps Clippy also passed before Cursor work. No provider turns,
 live HTTP, real credentials or git mutations were used.
+
+Active checkpoint after full-suite verification: the auth pre-active registration
+regression failed and was fixed by resolving the current binding domain at stop
+time. Auth (8), ChatGPT (8), credential lease (4) passed. A duplicate guard around
+export was removed and the intended guard now encloses `ChatGptAuth::finish`.
+Post-update verification now refreshes enabled instances of the driver's kind,
+invalidates their caches, checks current object identity, reports failed rows,
+and provides an after-update hook. Already-current updates report success and
+OpenCode's installed/running version split has the source restart message.
+Provider service tests (3) pass including peer refresh and client cancellation.
+
+New Cursor modules: `cursor_catalog` performs only `/v1/me` and `/v1/models`
+through `HttpTransport`, with 32-key/30-minute nonempty model cache and fixed
+error classification. `cursor_auth` preserves the T3 `cursor` credential binding,
+legacy JSON migration, key expiry/configured-key precedence, and SDK browser
+login behind `CursorLogin`. `AuthContext::commit` owns credential persistence and
+verification through cancellation; prompt logout is exposed by
+`AuthService::try_handle_prompt_command`. `cursor_provider` implements canonical
+status/models/setup/auth output; `cursor_usage` implements API-key exchange and
+dashboard usage through the same narrow transport. Catalog/auth/store/status/usage/mode tests (9) and filesystem skill tests (2)
+passed after the service restart. The host-provided SDK login bridge remains
+an explicit injection requirement.
+
+Restart checkpoint (18:42 interruption recovered): focused auth (8), Cursor (9),
+Cursor skills (2) and provider service (3) pass; no-deps Clippy passes. New
+`opencode_catalog` ports v1 connected-provider/primary-agent options and v2
+normalized models, release-family legacy filtering, skill and command inventories.
+`opencode_loader` ports bounded two-agreeing-read settlement, fresh partial
+progress, warm-cache fallback, and strict directory settlement; five OpenCode
+tests pass on paused clocks. No OpenCode server runtime has been added yet.
+`HttpTransport::raw` now exposes bounded bytes/status/content type with redacted
+bodies. A real loopback HTTP regression proved that a non-JSON Cursor 401 lost
+its auth classification. `CursorCatalog` now parses successful JSON strictly but
+classifies non-2xx by status even when its body is empty or not JSON; focused
+verification is in flight. No process or provider request remains from the
+interrupted turn; current cargo work uses the D: target and two jobs.

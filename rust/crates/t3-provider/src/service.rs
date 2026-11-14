@@ -27,7 +27,9 @@ pub trait ProviderInstanceService: Send + Sync {
     async fn invalidate_caches(&self) -> ServiceResult<()> {
         self.invalidate_models(None, true).await
     }
-    async fn after_update(&self) -> ServiceResult<()> { Ok(()) }
+    async fn after_update(&self) -> ServiceResult<()> {
+        Ok(())
+    }
     fn catalogs_per_cwd(&self) -> bool {
         false
     }
@@ -62,7 +64,9 @@ pub trait GlobalProviderSources: Send + Sync {
 #[async_trait]
 pub trait CatalogRefresh: Send + Sync {
     async fn refresh(&self) -> ServiceResult<()>;
-    async fn force_refresh(&self) -> ServiceResult<()> { self.refresh().await }
+    async fn force_refresh(&self) -> ServiceResult<()> {
+        self.refresh().await
+    }
 }
 #[async_trait]
 pub trait MaintenanceExecutor: Send + Sync {
@@ -441,13 +445,30 @@ impl ProviderService {
 
         rx.borrow().clone().ok_or(ServiceError::Maintenance)?
     }
-    async fn refresh_after_update(&self, driver: &str, selected: &ProviderInstanceId) -> ServiceResult<Vec<ServerProvider>> {
+    async fn refresh_after_update(
+        &self,
+        driver: &str,
+        selected: &ProviderInstanceId,
+    ) -> ServiceResult<Vec<ServerProvider>> {
         self.catalog.force_refresh().await?;
         let snapshots = self.snapshots.read().await.clone();
-        let instances: Vec<_> = self.instances.read().await.iter().filter(|(id, _)| {
-            *id == selected || snapshots.get(*id).is_some_and(|value| value.driver.0 == driver && value.enabled)
-        }).map(|(_, instance)| instance.clone()).collect();
-        if let Some(instance) = instances.iter().find(|instance| instance.instance_id() == selected) {
+        let instances: Vec<_> = self
+            .instances
+            .read()
+            .await
+            .iter()
+            .filter(|(id, _)| {
+                *id == selected
+                    || snapshots
+                        .get(*id)
+                        .is_some_and(|value| value.driver.0 == driver && value.enabled)
+            })
+            .map(|(_, instance)| instance.clone())
+            .collect();
+        if let Some(instance) = instances
+            .iter()
+            .find(|instance| instance.instance_id() == selected)
+        {
             let _ = instance.after_update().await;
         }
         let mut verified = vec![];
@@ -458,18 +479,29 @@ impl ProviderService {
                 instance.maintenance(true).await?;
                 instance.latest_version(true).await?;
                 instance.snapshot(None, true).await
-            }.await;
+            }
+            .await;
             let current = self.instances.read().await;
-            if current.get(id).is_none_or(|current| !Arc::ptr_eq(current, &instance)) { continue; }
+            if current
+                .get(id)
+                .is_none_or(|current| !Arc::ptr_eq(current, &instance))
+            {
+                continue;
+            }
             match refresh {
                 Ok(value) => {
-                    self.snapshots.write().await.insert(id.clone(), value.clone());
+                    self.snapshots
+                        .write()
+                        .await
+                        .insert(id.clone(), value.clone());
                     verified.push(value);
                 }
                 Err(_) => {
                     if let Some(value) = self.snapshots.write().await.get_mut(id) {
                         value.status = ServerProviderState::Error;
-                        value.message = Some(Some("Provider refresh failed after update.".to_owned().into()));
+                        value.message = Some(Some(
+                            "Provider refresh failed after update.".to_owned().into(),
+                        ));
                     }
                 }
             }
@@ -616,10 +648,18 @@ impl ProviderService {
     }
 }
 
-const OPENCODE_SERVER_RESTART_MESSAGE: &str = "OpenCode CLI updated. Restart the configured local OpenCode server to use the new version.";
+const OPENCODE_SERVER_RESTART_MESSAGE: &str =
+    "OpenCode CLI updated. Restart the configured local OpenCode server to use the new version.";
 fn needs_opencode_restart(providers: &[ServerProvider]) -> bool {
-    providers.iter().any(|provider| provider.driver.0 == "opencode"
-        && provider.installed_version.as_ref().and_then(Option::as_ref).zip(provider.version.as_ref()).is_some_and(|(installed, running)| installed != running))
+    providers.iter().any(|provider| {
+        provider.driver.0 == "opencode"
+            && provider
+                .installed_version
+                .as_ref()
+                .and_then(Option::as_ref)
+                .zip(provider.version.as_ref())
+                .is_some_and(|(installed, running)| installed != running)
+    })
 }
 
 fn machine_catalog_digest(provider: &ServerProvider) -> ServiceResult<String> {

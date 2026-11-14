@@ -543,24 +543,23 @@ impl ChatGptAuth {
         let lease = self.store.lease().await?;
         lease
             .run(async {
-                        lease.check()?;
-                        let saved = self.store.load().await?;
-                        let credentials = Self::active(&saved).ok_or(ServiceError::Unavailable)?;
-                        let registration = saved
-                            .registrations
-                            .profiles
-                            .iter()
-                            .find(|p| p.client_id == credentials.client_id)
-                            .ok_or(ServiceError::Unavailable)?;
-                        let credentials = serde_json::from_value(
-                            serde_json::to_value(credentials)
-                                .map_err(|_| ServiceError::Response)?,
-                        )
-                        .map_err(|_| ServiceError::Response)?;
-                        Ok(Sensitive::new(ChatGptTransferredProfile {
-                            registration: registration.clone(),
-                            credentials,
-                        }))
+                lease.check()?;
+                let saved = self.store.load().await?;
+                let credentials = Self::active(&saved).ok_or(ServiceError::Unavailable)?;
+                let registration = saved
+                    .registrations
+                    .profiles
+                    .iter()
+                    .find(|p| p.client_id == credentials.client_id)
+                    .ok_or(ServiceError::Unavailable)?;
+                let credentials = serde_json::from_value(
+                    serde_json::to_value(credentials).map_err(|_| ServiceError::Response)?,
+                )
+                .map_err(|_| ServiceError::Response)?;
+                Ok(Sensitive::new(ChatGptTransferredProfile {
+                    registration: registration.clone(),
+                    credentials,
+                }))
             })
             .await
     }

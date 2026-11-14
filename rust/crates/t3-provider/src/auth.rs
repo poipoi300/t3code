@@ -28,9 +28,15 @@ pub enum AuthReply {
 
 #[async_trait]
 pub trait AuthBackend: Send + Sync {
-    fn check_start(&self) -> ServiceResult<()> { Ok(()) }
-    fn check_logout(&self) -> ServiceResult<()> { Ok(()) }
-    fn is_logout_prompt(&self, _text: &str, _has_attachments: bool) -> bool { false }
+    fn check_start(&self) -> ServiceResult<()> {
+        Ok(())
+    }
+    fn check_logout(&self) -> ServiceResult<()> {
+        Ok(())
+    }
+    fn is_logout_prompt(&self, _text: &str, _has_attachments: bool) -> bool {
+        false
+    }
     async fn methods(&self) -> ServiceResult<Vec<ProviderAuthMethod>>;
     async fn authenticate(&self, method: &str, context: AuthContext) -> ServiceResult<()>;
     async fn logout(&self) -> ServiceResult<Option<String>>;
@@ -127,21 +133,40 @@ impl AuthContext {
         let flow = self.flow_id.clone();
         tokio::spawn(async move {
             let mut state = inner.state.lock().await;
-            if inner.cancel.is_cancelled() || state.active.as_ref().is_none_or(|active| active.id != flow || active.cancel.is_cancelled()) {
+            if inner.cancel.is_cancelled()
+                || state
+                    .active
+                    .as_ref()
+                    .is_none_or(|active| active.id != flow || active.cancel.is_cancelled())
+            {
                 return Err(ServiceError::Inactive);
             }
             state.published.state.phase = ProviderAuthPhase::Verifying;
             state.published.state.authorization_url = None;
             state.published.state.interaction = Some(None);
-            inner.changes.send_modify(|value| *value = value.wrapping_add(1));
+            inner
+                .changes
+                .send_modify(|value| *value = value.wrapping_add(1));
             let result = operation.await;
             state.active = None;
-            state.published.state.phase = if result.is_ok() { ProviderAuthPhase::Succeeded } else { ProviderAuthPhase::Failed };
+            state.published.state.phase = if result.is_ok() {
+                ProviderAuthPhase::Succeeded
+            } else {
+                ProviderAuthPhase::Failed
+            };
             state.published.state.expires_at = None;
-            state.published.state.message = Some(result.err().map_or_else(|| "Sign-in complete.".into(), |error| error.to_string()));
-            inner.changes.send_modify(|value| *value = value.wrapping_add(1));
+            state.published.state.message = Some(
+                result
+                    .err()
+                    .map_or_else(|| "Sign-in complete.".into(), |error| error.to_string()),
+            );
+            inner
+                .changes
+                .send_modify(|value| *value = value.wrapping_add(1));
             result
-        }).await.map_err(|_| ServiceError::Storage)?
+        })
+        .await
+        .map_err(|_| ServiceError::Storage)?
     }
     pub async fn interaction(
         &self,
@@ -259,9 +284,7 @@ impl AuthController {
         let state = self.inner.state.lock().await;
         state.stopping || state.active.is_some()
     }
-    async fn binding_guard(
-        &self,
-    ) -> ServiceResult<tokio::sync::OwnedMutexGuard<BindingState>> {
+    async fn binding_guard(&self) -> ServiceResult<tokio::sync::OwnedMutexGuard<BindingState>> {
         let domain = self.inner.domain.read().await;
         let mut guard = domain.clone().lock_owned().await;
         guard.changing.retain(|owner| owner.strong_count() > 0);
@@ -809,12 +832,23 @@ impl Default for AuthService {
     }
 }
 impl AuthService {
-    pub async fn try_handle_prompt_command(&self, id: &ProviderInstanceId, text: &str, has_attachments: bool) -> ServiceResult<bool> {
-        let Ok(controller) = self.controller(id).await else { return Ok(false); };
-        if !controller.backend.is_logout_prompt(text, has_attachments) { return Ok(false); }
+    pub async fn try_handle_prompt_command(
+        &self,
+        id: &ProviderInstanceId,
+        text: &str,
+        has_attachments: bool,
+    ) -> ServiceResult<bool> {
+        let Ok(controller) = self.controller(id).await else {
+            return Ok(false);
+        };
+        if !controller.backend.is_logout_prompt(text, has_attachments) {
+            return Ok(false);
+        }
         let _gate = self.credential_changes.lock().await;
         let current = self.controller(id).await?;
-        if !current.backend.is_logout_prompt(text, has_attachments) { return Ok(false); }
+        if !current.backend.is_logout_prompt(text, has_attachments) {
+            return Ok(false);
+        }
         self.check_binding(&current).await?;
         current.logout().await?;
         Ok(true)

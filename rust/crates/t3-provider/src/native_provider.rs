@@ -473,16 +473,16 @@ impl NativeProvider {
                         && value["usageLimits"].get("unavailable").is_none()
                         && let (Some(client), Some(version)) =
                             (self.reset_client.as_ref(), version.version.as_deref())
-                        {
-                            let config = crate::environment::claude_home(
-                                config_text("homePath"),
-                                &environment,
-                                &self.context.home,
-                                &self.context.cwd,
-                            );
-                            if let Some(credits) = client.read(&config, version).await {
-                                value["usageLimits"]["resetCredits"] = json!(credits);
-                            }
+                    {
+                        let config = crate::environment::claude_home(
+                            config_text("homePath"),
+                            &environment,
+                            &self.context.home,
+                            &self.context.cwd,
+                        );
+                        if let Some(credits) = client.read(&config, version).await {
+                            value["usageLimits"]["resetCredits"] = json!(credits);
+                        }
                     }
                     let mut commands = vec![
                         json!({"name":"compact","description":"Summarize the conversation and reduce context usage"}),

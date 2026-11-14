@@ -388,15 +388,31 @@ async fn registering_an_auth_flow_waiting_for_session_stop_joins_the_current_bin
     let (started, stopped) = tokio::sync::oneshot::channel();
     let (release, ready) = tokio::sync::oneshot::channel();
     let (deliveries, _received) = mpsc::unbounded_channel();
-    let second = AuthController::new("other".into(), first.binding.clone(), Arc::new(PendingBackend(deliveries)), Arc::new(HeldStopper { started: Mutex::new(Some(started)), release: Mutex::new(Some(ready)) }), Duration::from_secs(300)).await;
+    let second = AuthController::new(
+        "other".into(),
+        first.binding.clone(),
+        Arc::new(PendingBackend(deliveries)),
+        Arc::new(HeldStopper {
+            started: Mutex::new(Some(started)),
+            release: Mutex::new(Some(ready)),
+        }),
+        Duration::from_secs(300),
+    )
+    .await;
     let mut states = second.subscribe("owner".into());
     let flow = second.start("owner", None, None, None, 0).await.unwrap();
     stopped.await.unwrap();
     service.register("other".into(), second.clone()).await;
-    assert!(matches!(first.admit_access().await, Err(ServiceError::SharedBinding)));
+    assert!(matches!(
+        first.admit_access().await,
+        Err(ServiceError::SharedBinding)
+    ));
     assert!(!access.cancellation.is_cancelled());
     release.send(()).unwrap();
     phase(&mut states, ProviderAuthPhase::Waiting).await;
     assert!(access.cancellation.is_cancelled());
-    second.cancel("owner", &flow.expose().flow_id.as_ref().unwrap().0).await.unwrap();
+    second
+        .cancel("owner", &flow.expose().flow_id.as_ref().unwrap().0)
+        .await
+        .unwrap();
 }

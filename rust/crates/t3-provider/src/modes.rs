@@ -81,11 +81,28 @@ pub struct CursorMode {
     pub sandbox_enabled: bool,
     pub mode: &'static str,
 }
-pub fn cursor(mode: RuntimeMode, interaction: ProviderInteractionMode, approval: Option<&str>, sandbox: Option<&str>, platform: crate::environment::Platform) -> CursorMode {
-    let auto_review = approval.map_or(matches!(mode, RuntimeMode::ApprovalRequired | RuntimeMode::Auto), |approval| approval != "never");
+pub fn cursor(
+    mode: RuntimeMode,
+    interaction: ProviderInteractionMode,
+    approval: Option<&str>,
+    sandbox: Option<&str>,
+    platform: crate::environment::Platform,
+) -> CursorMode {
+    let auto_review = approval.map_or(
+        matches!(mode, RuntimeMode::ApprovalRequired | RuntimeMode::Auto),
+        |approval| approval != "never",
+    );
     CursorMode {
         auto_review,
-        sandbox_enabled: sandbox.map_or(mode != RuntimeMode::FullAccess && !(platform == crate::environment::Platform::Windows && auto_review), |sandbox| sandbox != "dangerFullAccess"),
-        mode: if interaction == ProviderInteractionMode::Plan { "plan" } else { "agent" },
+        sandbox_enabled: sandbox.map_or(
+            mode != RuntimeMode::FullAccess
+                && !(platform == crate::environment::Platform::Windows && auto_review),
+            |sandbox| sandbox != "dangerFullAccess",
+        ),
+        mode: if interaction == ProviderInteractionMode::Plan {
+            "plan"
+        } else {
+            "agent"
+        },
     }
 }

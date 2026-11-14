@@ -186,8 +186,8 @@ impl NativeMaintenance {
             && let Some((_, value)) = cache
                 .as_ref()
                 .filter(|(at, _)| now >= *at && now - *at < 3_600_000)
-            {
-                return Ok(value.clone());
+        {
+            return Ok(value.clone());
         }
         let value = self.resolve().await?;
         *cache = Some((now, value.clone()));

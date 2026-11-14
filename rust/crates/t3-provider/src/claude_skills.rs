@@ -286,11 +286,11 @@ fn plugin_roots(
         if let (Some(install), Some(real)) = (canonical(path), canonical(&directory))
             && real.starts_with(install)
         {
-                output.push(Root {
-                    directory,
-                    scope,
-                    prefix: Some(prefix.clone()),
-                });
+            output.push(Root {
+                directory,
+                scope,
+                prefix: Some(prefix.clone()),
+            });
         }
     }
     output
