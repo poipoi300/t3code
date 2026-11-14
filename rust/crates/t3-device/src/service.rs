@@ -20,6 +20,8 @@ pub struct DeviceSettings {
     pub agent_access_enabled: bool,
     pub onboarding_completed: bool,
     pub hosts: Vec<DeviceHostConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_hosts: Option<Vec<DeviceHostConfig>>,
 }
 impl std::fmt::Debug for DeviceSettings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -29,6 +31,63 @@ impl std::fmt::Debug for DeviceSettings {
             .field("onboarding_completed", &self.onboarding_completed)
             .field("hosts", &self.hosts.len())
             .finish()
+    }
+}
+impl DeviceSettings {
+    pub fn from_server(settings: &t3_contracts::settings::ServerSettings) -> Self {
+        let mut ids = BTreeSet::new();
+        let saved = settings
+            .device_hosts
+            .iter()
+            .cloned()
+            .map(DeviceHostConfig::SshDeviceHostConfig)
+            .chain(
+                settings
+                    .eas_device_hosts
+                    .iter()
+                    .cloned()
+                    .map(DeviceHostConfig::EasDeviceHostConfig),
+            )
+            .chain(
+                settings
+                    .simlock_device_hosts
+                    .iter()
+                    .cloned()
+                    .map(DeviceHostConfig::SimlockDeviceHostConfig),
+            )
+            .collect::<Vec<_>>();
+        let hosts = saved
+            .iter()
+            .filter(|host| {
+                settings.simlock_device_hosts_enabled
+                    || !matches!(host, DeviceHostConfig::SimlockDeviceHostConfig(_))
+            })
+            .filter(|host| {
+                ids.insert(match host {
+                    DeviceHostConfig::SshDeviceHostConfig(c) => c.id.clone(),
+                    DeviceHostConfig::EasDeviceHostConfig(c) => c.id.clone(),
+                    DeviceHostConfig::SimlockDeviceHostConfig(c) => c.id.clone(),
+                })
+            })
+            .cloned()
+            .collect();
+        Self {
+            enabled: settings.enable_device_support,
+            agent_access_enabled: settings.enable_agent_device_access,
+            onboarding_completed: settings.device_onboarding_completed,
+            hosts,
+            account_hosts: Some(saved),
+        }
+    }
+}
+pub fn configuration_patch(
+    input: &DeviceConfigureInput,
+) -> t3_contracts::settings::ServerSettingsPatch {
+    t3_contracts::settings::ServerSettingsPatch {
+        enable_device_support: input.enabled.flatten(),
+        enable_agent_device_access: input.agent_access_enabled.flatten(),
+        device_onboarding_completed: input.onboarding_completed.flatten(),
+        ..Default::default()
     }
 }
 #[async_trait]
@@ -1220,14 +1279,73 @@ impl DeviceService {
         }
         Ok(())
     }
+    pub(crate) async fn preflight_pools(&self, seen: &mut BTreeSet<(String, u64)>) -> Result<()> {
+        let entries = self.inner.state.lock().await.hosts.clone();
+        seen.retain(|(id, generation)| {
+            entries
+                .iter()
+                .any(|entry| entry.host.id() == id && entry.generation == *generation)
+        });
+        if !self.inner.settings.read().await?.enabled {
+            return Ok(());
+        }
+        for entry in entries {
+            if !matches!(
+                &entry.config,
+                Some(DeviceHostConfig::SimlockDeviceHostConfig(_))
+            ) || !seen.insert((entry.host.id().into(), entry.generation))
+            {
+                continue;
+            }
+            entry.host.availability(DevicePlatform::Ios).await;
+            let summary = entry.host.summary().await;
+            if self.unchanged(&entry).await {
+                self.publish(|state| {
+                    if let Some(host) = state
+                        .hosts
+                        .iter_mut()
+                        .find(|host| host.id.as_ref() == entry.host.id())
+                    {
+                        *host = summary;
+                    }
+                })
+                .await;
+            }
+        }
+        Ok(())
+    }
     pub async fn stop(&self) -> Result<()> {
-        self.configure(DeviceConfigureInput {
-            enabled: Some(Some(false)),
-            agent_access_enabled: None,
-            onboarding_completed: None,
+        let service = self.clone();
+        tokio::spawn(async move { service.stop_inner().await })
+            .await
+            .map_err(|_| Error::Cancelled("stop"))?
+    }
+    async fn stop_inner(&self) -> Result<()> {
+        let _guard = self.inner.lifecycle.lock().await;
+        let sessions = self.state().await.sessions;
+        let mut result = self.release_launchers(&sessions).await;
+        let entries = self.inner.state.lock().await.hosts.clone();
+        let stopped = stream::iter(entries)
+            .map(|entry| async move { entry.host.retire().await })
+            .buffer_unordered(4)
+            .collect::<Vec<_>>()
+            .await;
+        for stopped in stopped {
+            if result.is_ok() {
+                result = stopped;
+            }
+        }
+        self.publish(|state| {
+            state.host_status = DeviceHostStatus::Disabled;
+            state.host_status_detail = None;
+            state.host_statuses.clear();
+            state.devices.clear();
+            state.sessions.clear();
+            state.booting_devices = Some(Some(vec![]));
         })
-        .await
-        .map(|_| ())
+        .await;
+        let pruned = self.prune_launchers().await;
+        result.and(pruned)
     }
 }
 

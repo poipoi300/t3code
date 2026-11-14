@@ -52,12 +52,17 @@ impl Accounts for AccountService {
             .as_ref()
             .and_then(|v| v.as_ref())
             .and_then(|id| {
-                settings.hosts.iter().find_map(|h| match h {
-                    DeviceHostConfig::EasDeviceHostConfig(c) if c.id == *id => {
-                        Some(c.access_token.clone())
-                    }
-                    _ => None,
-                })
+                settings
+                    .account_hosts
+                    .as_ref()
+                    .unwrap_or(&settings.hosts)
+                    .iter()
+                    .find_map(|h| match h {
+                        DeviceHostConfig::EasDeviceHostConfig(c) if c.id == *id => {
+                            Some(c.access_token.clone())
+                        }
+                        _ => None,
+                    })
             })
             .unwrap_or_else(|| SettingsSecretValue::Literal(String::new()));
         let token = self
@@ -121,10 +126,15 @@ impl Accounts for AccountService {
             .as_ref()
             .and_then(|v| v.as_ref())
             .and_then(|id| {
-                settings.hosts.iter().find_map(|h| match h {
-                    DeviceHostConfig::SimlockDeviceHostConfig(c) if c.id == *id => Some(c),
-                    _ => None,
-                })
+                settings
+                    .account_hosts
+                    .as_ref()
+                    .unwrap_or(&settings.hosts)
+                    .iter()
+                    .find_map(|h| match h {
+                        DeviceHostConfig::SimlockDeviceHostConfig(c) if c.id == *id => Some(c),
+                        _ => None,
+                    })
             });
         let (token, source) =
             if let Some(token) = input.agent_token.as_ref().and_then(|v| v.as_ref()) {

@@ -26,6 +26,7 @@ use tokio::sync::{Mutex, Notify};
 struct ChildControl {
     exit: Notify,
     stops: AtomicUsize,
+    stop_gate: std::sync::Mutex<Option<Arc<Gate>>>,
 }
 struct Child(Arc<ChildControl>);
 #[async_trait]
@@ -36,6 +37,10 @@ impl ManagedChild for Child {
     }
     async fn stop(&mut self) -> Result<()> {
         self.0.stops.fetch_add(1, Ordering::SeqCst);
+        let gate = self.0.stop_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.wait().await;
+        }
         Ok(())
     }
 }
@@ -66,6 +71,7 @@ impl Spawner for FakeSpawner {
         let control = Arc::new(ChildControl {
             exit: Notify::new(),
             stops: AtomicUsize::new(0),
+            stop_gate: std::sync::Mutex::new(None),
         });
         self.children.lock().await.push(control.clone());
         Ok(Box::new(Child(control)))
@@ -206,6 +212,19 @@ async fn local_fixture(
     Arc<Health>,
     Arc<AtomicUsize>,
 ) {
+    local_fixture_with_stop_signal(startup_code, None).await
+}
+async fn local_fixture_with_stop_signal(
+    startup_code: i32,
+    daemon_stopped: Option<Arc<Notify>>,
+) -> (
+    tempfile::TempDir,
+    LocalDeviceHost,
+    Arc<FakeCommands>,
+    Arc<FakeSpawner>,
+    Arc<Health>,
+    Arc<AtomicUsize>,
+) {
     let temp = tempfile::tempdir().unwrap();
     installed(temp.path(), Tool::Hub).await;
     installed(temp.path(), Tool::Agent).await;
@@ -214,6 +233,12 @@ async fn local_fixture(
     let attempts = Arc::new(AtomicUsize::new(0));
     let count = attempts.clone();
     let commands = FakeCommands::new(move |c| {
+        if c.args.get(1).is_some_and(|a| a == "daemon")
+            && c.args.get(2).is_some_and(|a| a == "stop")
+            && let Some(stopped) = &daemon_stopped
+        {
+            stopped.notify_one();
+        }
         if c.args.get(1).is_some_and(|a| a == "devices") {
             let attempt = count.fetch_add(1, Ordering::SeqCst) + 1;
             if startup_code == 0 {
@@ -249,6 +274,26 @@ async fn local_fixture(
         machine: Arc::new(Mac),
     });
     (temp, host, commands, spawner, http, attempts)
+}
+#[tokio::test]
+async fn local_stops_daemon_before_slow_hub_shutdown_completes() {
+    let requested = Arc::new(Notify::new());
+    let (_temp, host, _commands, spawner, _http, _attempts) =
+        local_fixture_with_stop_signal(0, Some(requested.clone())).await;
+    let host = Arc::new(host);
+    host.ensure_agent_ready(Arc::new(|_, _| {})).await.unwrap();
+    let gate = Gate::new();
+    *spawner.children.lock().await[0].stop_gate.lock().unwrap() = Some(gate.clone());
+    let copy = host.clone();
+    let stopping = tokio::spawn(async move { copy.stop().await });
+    gate.entered.notified().await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), requested.notified())
+        .await
+        .expect("daemon stop must not wait for hub exit");
+    assert!(!stopping.is_finished());
+    gate.release.notify_one();
+    stopping.await.unwrap().unwrap();
+    assert!(host.current().await.is_none());
 }
 #[tokio::test]
 async fn local_revalidates_cached_daemon_and_recovers_with_registered_endpoint() {

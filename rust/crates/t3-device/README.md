@@ -5,11 +5,29 @@ values come from `t3-contracts`. There are no replacement wire types in this cra
 
 ## Service and transport bindings
 
-`DeviceService::new` takes the local host, settings, optional host factory,
-launchers, installer, and accounts. Settings changes to host definitions must
-call `reconcile`; `configure` handles enablement and agent access. Dropping a
-subscription receiver unsubscribes it. Await `stop` before ending the runtime;
-dropping a Rust value cannot perform asynchronous cloud cleanup.
+`DeviceRuntime::new(RuntimeInputs)` composes the service, proxy and settings
+consumer. Supply the local host, host factory, launchers, installer, accounts,
+settings, settings-change receiver, HTTP client, authentication and socket
+connector. Subscribe to the owning settings service before construction. The
+constructor reconciles the initial snapshot; its worker rereads current settings
+on notifications, reconciles host changes and preflights enabled Simlock pools.
+Observe `settings_status()` for errors and subsequent recovery. No tool install
+or device boot runs during construction.
+
+`DeviceSettings::from_server` maps canonical private settings, including disabled
+pool credentials for account checks. `configuration_patch` writes only supplied
+device enablement, agent-access and onboarding flags. The server supplies durable
+settings, secret resolution and authentication through these existing seams.
+
+Use `runtime.service` for RPCs, `runtime.router()` for the proxy and
+`runtime.state_stream()` for already encoded state events. With the `mcp` feature,
+`runtime.mcp(threads)` shares the same service. Close admission and join active
+connections before awaiting `runtime.shutdown()`, while settings and Tokio remain
+alive. Shutdown joins reconciliation, releases launchers and retires every host
+even after a cleanup error; it preserves saved device enablement. Dropping the
+runtime only cancels its watcher and cannot perform asynchronous cloud cleanup.
+Direct `DeviceService::new` remains available for custom composition; its owner
+must call `reconcile` on settings changes and await `stop` at process shutdown.
 
 | RPC ledger row | Service entry point |
 | --- | --- |
@@ -23,11 +41,12 @@ dropping a Rust value cannot perform asynchronous cloud cleanup.
 | `device.shutdown` | `shutdown` |
 | `device.detail` | `detail` |
 | `device.action` | `action` |
-| `subscribeDeviceState` | `state_stream` (initial snapshot and subsequent revisions) |
+| `subscribeDeviceState` | `DeviceRuntime::state_stream` (initial snapshot and subsequent revisions) |
 
 Service snapshots contain all host kinds in `hosts`, like the TypeScript decoded
 type. **Apply `service::wire_state` before serializing RPC results or stream
-events.** It implements the TypeScript schema's encoding transform: machine
+events from the raw service.** The runtime's stream already applies it. This
+implements the TypeScript schema's encoding transform: machine
 hosts in `hosts`, cloud summaries in `easHosts` and `simlockHosts`.
 
 With `features = ["mcp"]`, `mcp::DeviceAdapter` implements
@@ -39,7 +58,10 @@ lock, including after boot. Quick-start text has four exact TypeScript goldens.
 `proxy::DeviceHubProxy::router` mounts `/api/device-hub/{*path}` in Axum. Supply
 `Authenticator` that checks the requested read/operate scope, cookies, bearer
 credentials, and WebSocket tickets using the server's authorization service.
-It has no permissive default. The proxy allowlists routes, removes client
+It has no permissive default. Merge the runtime router at the root; it already
+contains the prefix. Its path/method policy runs before authentication, then
+readiness and upstream routing. Unknown or traversing paths never consume a
+ticket or contact a host. The proxy removes client
 credentials and upstream cookies, bridges binary WebSockets, streams HTTP
 bodies, and repeats a completed MJPEG still frame once after 100 ms.
 
@@ -53,7 +75,10 @@ claims, release-before-close, and state fan-out port `DeviceService.ts` and
 Android orientation/permissions, and ffmpeg/libx264 admission.
 
 `local` ports SDK discovery, camera/runtime environment, hub supervision, cached
-daemon health and legacy daemon stop from `LocalDeviceHost.ts`. `ssh` ports
+daemon health and legacy daemon stop from `LocalDeviceHost.ts`. Daemon stop runs
+concurrently with hub shutdown, including when the hub exit is delayed, matching
+upstream `f313d0a6cb`. Hub readiness is in memory; Rust creates no legacy hub.json.
+`ssh` ports
 `SshDeviceHost.ts`, `localSshDeviceHost.ts`, and `sshDeviceScript.ts`, including
 self-host detection, port-forward ownership, health failure reset, three-miss
 reconnect and bounded retries. It does not terminate local processes discovered
@@ -104,13 +129,14 @@ Windows handling; no manually assembled `cmd.exe` argument string is used.
 
 ## Integration remaining and intentional differences
 
-The owning server/config/MCP crates must construct these adapters, subscribe
-settings changes to `reconcile`, register the RPC methods, map typed errors, apply
-`wire_state`, mount the proxy, and await shutdown. Those crates were not edited.
+The owning server/config/MCP crates must supply `RuntimeInputs`, register the RPC
+methods, map typed errors, apply `wire_state` to raw RPC state results, merge the
+proxy router and await runtime shutdown. The settings receiver comes from the
+server's existing subscription. Those crates were not edited.
 No durable settings, secret-provider, thread-store or authentication implementation
-is duplicated here. There is no automatic settings watcher or executable entry
-point in this crate. These are composition requirements, not missing device
-service methods.
+is duplicated here. The runtime consumes the supplied settings subscription;
+there is no executable entry point. These are composition requirements, not
+missing device service methods.
 
 Differences from TypeScript:
 
@@ -132,6 +158,11 @@ Differences from TypeScript:
 - Open/configure/close/shutdown run in owned Tokio tasks and finish if their
   caller drops. This preserves cleanup/state consistency, but differs from
   interruption of TypeScript local operations. The runtime must remain alive.
+- The runtime rereads the latest settings on notifications rather than replaying
+  each queued snapshot, so intermediate host configurations can be coalesced.
+  Pool preflight checks run serially in its background settings worker; TypeScript
+  forks them per host. Reconciliation and shutdown wait for active bounded
+  preflight calls; construction does not. No preflight starts a device.
 - Session timestamps use nanosecond ISO strings instead of millisecond strings
   to distinguish replacements during stale-list reconciliation. Session names,
   IDs and on-disk formats otherwise retain their TypeScript forms.
@@ -163,7 +194,7 @@ Differences from TypeScript:
 
 ## Verification
 
-The default suite has 107 tests; enabling `mcp` adds seven (114 total).
+The default suite has 113 tests; enabling `mcp` adds seven (120 total).
 
 Tests use fakes and recorded TypeScript outputs for every device/tool/API seam,
 paused Tokio clocks for renewals/reconnects, and explicit events for concurrency.

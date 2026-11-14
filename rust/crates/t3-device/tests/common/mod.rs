@@ -217,6 +217,8 @@ pub struct FakeHost {
     pub stops: AtomicUsize,
     pub agent_stops: AtomicUsize,
     pub inspection_fail: AtomicBool,
+    pub availability_calls: AtomicUsize,
+    pub availability_changed: Notify,
     pub phase: StdMutex<Option<Phase>>,
 }
 impl FakeHost {
@@ -247,6 +249,8 @@ impl FakeHost {
             stops: AtomicUsize::new(0),
             agent_stops: AtomicUsize::new(0),
             inspection_fail: AtomicBool::new(false),
+            availability_calls: AtomicUsize::new(0),
+            availability_changed: Notify::new(),
             phase: StdMutex::new(None),
         })
     }
@@ -280,6 +284,8 @@ impl DeviceHost for FakeHost {
         }
     }
     async fn availability(&self, p: DevicePlatform) -> DevicePlatformAvailability {
+        self.availability_calls.fetch_add(1, Ordering::SeqCst);
+        self.availability_changed.notify_one();
         host::available(p, None)
     }
     async fn ensure_ready(&self, phase: Phase) -> Result<Ready> {

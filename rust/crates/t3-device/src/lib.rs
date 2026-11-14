@@ -13,11 +13,13 @@ pub mod mcp;
 pub mod mjpeg;
 pub mod project;
 pub mod proxy;
+pub mod runtime;
 pub mod service;
 pub mod ssh;
 pub mod tools;
 
 pub use error::{Error, Result};
+pub use runtime::{DeviceRuntime, RuntimeInputs};
 pub use service::DeviceService;
 pub use t3_contracts::device as contracts;
 
