@@ -234,18 +234,9 @@ fn cached_images_show_immediately_and_a_decode_error_or_missing_marker_uses_the_
         !app.screen().shows("RU"),
         "data images are visible in the first commit"
     );
-    // Data URIs become content-digest keys inside NSH, so target the mounted image's event.
-    let node = app
-        .screen()
-        .id("id:project-favicon-image")
-        .expect("cached image");
-    app.engine().control().dispatch_event(
-        node,
-        EventKind::Error,
-        EventPayload::Error {
-            message: "Decode failed".into(),
-        },
-    );
+    // NSH rewrites data URLs to digest keys; include a retried hidden image in the failure.
+    app.fail_images("data:image/*")
+        .expect("cached image and retry cannot decode");
     app.wait_for("RU").expect("decode failure reveals fallback");
     assert!(app.screen().shows("RU"));
     app.press("id:missing").expect("server missing sentinel");

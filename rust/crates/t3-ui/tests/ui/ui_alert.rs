@@ -156,18 +156,70 @@ fn AlertFixture() -> impl IntoElement {
         ))
 }
 
+#[component]
+fn LabelFixture() -> impl IntoElement {
+    t3_ui::theme::install(&t3_ui::theme::ThemeChoice::default());
+    t3_ui::i18n::set_language("fr", &[]);
+    banner::root(banner::Props::default(), |context| {
+        view()
+            .child(banner::row_button(
+                context,
+                banner::Layout::Inline,
+                || String::from("Settings"),
+                || false,
+                || {},
+                |_| banner::RowSlots::default(),
+            ))
+            .child(banner::row_button(
+                context,
+                banner::Layout::Inline,
+                || String::from("Settings"),
+                || false,
+                || {},
+                |_| banner::RowSlots::default(),
+            ))
+            .child(banner::row_button(
+                context,
+                banner::Layout::Inline,
+                || String::from("Settings"),
+                || false,
+                || {},
+                |_| banner::RowSlots::default(),
+            ))
+            .child(banner::dismiss(String::from("Copy"), || false, || {}))
+            .child(banner::dismiss(String::from("Copy"), || false, || {}))
+            .child(banner::dismiss(String::from("Copy"), || false, || {}))
+    })
+}
+
 // No primitive gallery route exists; this fixture mounts the owned components directly.
 fn start(window: (f32, f32)) -> Headless {
+    start_root(window, Root::of::<AlertFixture>())
+}
+
+fn start_root(window: (f32, f32), root: Root) -> Headless {
     let mut sets = t3_ui::registries();
     let mut fixtures = Registry::new();
     fixtures.register::<AlertFixture>();
+    fixtures.register::<LabelFixture>();
     sets.push(fixtures);
     Headless::start(EngineConfig {
         ui_sets: sets,
         viewport: size(px(window.0), px(window.1)),
-        ..EngineConfig::new(Root::of::<AlertFixture>())
+        ..EngineConfig::new(root)
     })
     .expect("primitive fixture starts")
+}
+
+#[test]
+fn labels_translate_keys_and_preserve_runtime_and_already_translated_content() {
+    for window in [PHONE, DESKTOP] {
+        let app = start_root(window, Root::of::<LabelFixture>());
+        assert_eq!(app.screen().count("role:button[Settings]"), Ok(2));
+        assert_eq!(app.screen().count("role:button[Paramètres]"), Ok(1));
+        assert_eq!(app.screen().count("role:button[Copy]"), Ok(2));
+        assert_eq!(app.screen().count("role:button[Copier]"), Ok(1));
+    }
 }
 
 fn node(app: &Headless, id: &str) -> LayoutNode {
