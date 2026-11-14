@@ -71,14 +71,8 @@ type SelectHandler = Rc<dyn Fn(&str, &Trigger, &ComposerSnapshot) -> bool>;
 
 /// Port of chat/ChatComposer.tsx composerMenuSearchKey (highlight identity only).
 fn same_menu_search(left: &Trigger, right: &Trigger) -> bool {
-    // ChatComposer's visual highlight key uses JS trim; the client's JsTrim trait is private.
-    let query_key = |query: &str| {
-        query.trim_matches(|ch| matches!(ch,
-        '\u{0009}'..='\u{000d}' | ' ' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}'
-        | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'
-    )).to_lowercase()
-    };
-    left.kind == right.kind && query_key(&left.query) == query_key(&right.query)
+    policy::composer_menu_search_key(left.kind, &left.query)
+        == policy::composer_menu_search_key(right.kind, &right.query)
 }
 
 /// Port of chat/useComposerTriggerState.ts and ChatComposer.tsx's controlled menu state.

@@ -4,12 +4,7 @@ use std::collections::BTreeMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
-use futures::FutureExt;
-use nsh_core::prelude::*;
-use t3_client::thread_views::messages_timeline::{MessagesTimelineRow, MessagesTimelineRowContent};
-use t3_theme::syntax::{SyntaxTheme, syntax_theme_for};
-
-use super::code::{HighlightCache, HighlightCode, IncrementalHighlightedDocument, code_chunk_row};
+use super::code::{CodeHighlightState, HighlightQueueWork, code_chunk_row, highlighted_chunk};
 use super::flatten::{Block, BlockId, BlockKind, FlattenWork, MessageFlattener, StreamBlocks};
 use crate::i18n::t;
 use crate::runtime::Shared;
@@ -17,7 +12,8 @@ use crate::screens::thread::markdown::base::{
     chat_markdown, chat_markdown_blocks, chat_markdown_leaf, starts_with_heading,
 };
 use crate::screens::thread::markdown::code_block::{
-    CodeBlockOptions, CodeBlockProps, CodeBlockState, extract_fence_title, markdown_code_block,
+    CodeBlockOptions, CodeBlockProps, CodeBlockState, extract_fence_title,
+    markdown_code_block_header, markdown_code_chunk_frame,
 };
 use crate::screens::thread::rows::assistant::{
     AssistantRowContext, AssistantRowsState, assistant_changed_files_section,
@@ -30,6 +26,9 @@ use crate::screens::thread::rows::groups::{
 use crate::screens::thread::rows::user::{UserRowContext, UserRowState, user_message_row};
 use crate::screens::thread::rows::work::working_row;
 use crate::theme::{cn, tw};
+use futures::FutureExt;
+use nsh_core::prelude::*;
+use t3_client::thread_views::messages_timeline::{MessagesTimelineRow, MessagesTimelineRowContent};
 
 pub type TimelineRows = Memo<Shared<Vec<Rc<MessagesTimelineRow>>>>;
 
@@ -40,6 +39,8 @@ pub struct ListWork {
     pub changed_blocks: usize,
     pub inspected_bytes: usize,
     pub flatten: FlattenWork,
+    pub highlight_fences: usize,
+    pub highlight_queue: Option<HighlightQueueWork>,
 }
 
 #[derive(Clone)]
@@ -61,6 +62,8 @@ struct MessageDocument {
     fences: BTreeMap<usize, usize>,
     streaming: bool,
     work: ListWork,
+    highlight_updates: Vec<Rc<BlockLeaf>>,
+    highlight_reset: bool,
 }
 
 impl MessageDocument {
@@ -72,17 +75,23 @@ impl MessageDocument {
             fences: BTreeMap::new(),
             streaming: false,
             work: ListWork::default(),
+            highlight_updates: Vec::new(),
+            highlight_reset: false,
         }
     }
 
     fn update(&mut self, id: &str, source: &str, streaming: bool, replace: bool) -> Vec<BlockId> {
-        let mut delta = if replace {
-            self.flattener.replace(id, source)
-        } else {
-            self.flattener.ingest(id, source)
+        self.highlight_updates.clear();
+        self.highlight_reset = false;
+        let mut delta = match source.get(self.document.source_len()..) {
+            Some(tail) if self.streaming && !replace => self.flattener.append(tail),
+            _ => {
+                self.highlight_reset = true;
+                self.flattener.replace(id, source)
+            }
         };
         if !streaming && let Some(finished) = self.flattener.finish() {
-            // finish may publish context without rows; it must not discard the ingest splice.
+            // finish may publish context without rows; it must not discard the append splice.
             delta.document = finished.document;
             delta.context_version = finished.context_version;
         }
@@ -119,6 +128,13 @@ impl MessageDocument {
                 }
                 _ => None,
             };
+            if let Some(old) = self.leaves.get(&index)
+                && old.fence == Some(index)
+                && fence.is_some()
+                && old.fence != fence
+            {
+                retired.push(old.block.id.clone());
+            }
             if let Some(old) = self.leaves.get_mut(&index)
                 && Rc::ptr_eq(&old.block, &block)
             {
@@ -129,6 +145,9 @@ impl MessageDocument {
                         fence,
                         ..old.as_ref().clone()
                     });
+                    if fence.is_some() {
+                        self.highlight_updates.push(old.clone());
+                    }
                 }
                 continue;
             }
@@ -173,6 +192,9 @@ impl MessageDocument {
                     lexer_exit: lexer.finish(),
                 }),
             );
+            if fence.is_some() {
+                self.highlight_updates.push(self.leaves[&index].clone());
+            }
         }
         if let Some(index) = old_last
             && let Some(leaf) = self.leaves.get_mut(&index)
@@ -183,6 +205,9 @@ impl MessageDocument {
                     streaming: live,
                     ..leaf.as_ref().clone()
                 });
+                if leaf.fence.is_some() {
+                    self.highlight_updates.push(leaf.clone());
+                }
             }
         }
         self.streaming = streaming;
@@ -232,6 +257,8 @@ pub struct BlockListModel {
     order: Vec<(usize, String)>,
     count: usize,
     work: ListWork,
+    highlight_updates: Vec<Rc<BlockLeaf>>,
+    highlight_resets: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -263,6 +290,8 @@ impl PartialEq for BlockCell {
 
 impl BlockListModel {
     pub fn update(&mut self, rows: &[Rc<MessagesTimelineRow>]) -> Vec<BlockId> {
+        self.highlight_updates.clear();
+        self.highlight_resets.clear();
         let mut removed = std::mem::take(&mut self.entries);
         let mut retired = Vec::new();
         self.order.clear();
@@ -283,16 +312,32 @@ impl BlockListModel {
                         _ => Rc::ptr_eq(&entry.row, row),
                     };
                     if entry.message.is_none() || !same_message {
-                        let replace = entry
-                            .message
-                            .as_ref()
-                            .is_some_and(|m| !m.streaming && !streaming);
+                        let replace = entry.message.as_mut().is_some_and(|document| {
+                            if !document.streaming {
+                                return true;
+                            }
+                            let end = document.document.source_len();
+                            let start = document
+                                .leaves
+                                .last_key_value()
+                                .map_or(end, |(_, leaf)| leaf.block.source.bytes.start);
+                            document.work.inspected_bytes += end - start;
+                            let previous =
+                                source(&entry.row).and_then(|(text, _)| text.get(start..end));
+                            previous.is_none() || text.get(start..end) != previous
+                        });
                         retired.extend(
                             entry
                                 .message
                                 .get_or_insert_with(|| MessageDocument::new(&row.id))
                                 .update(&row.id, text, streaming, replace),
                         );
+                        let document = entry.message.as_mut().expect("updated message");
+                        self.highlight_updates
+                            .append(&mut document.highlight_updates);
+                        if document.highlight_reset {
+                            self.highlight_resets.push(row.id.clone());
+                        }
                     }
                 } else {
                     if let Some(message) = entry.message.take() {
@@ -400,20 +445,13 @@ impl BlockListModel {
     }
 }
 
-#[derive(Clone, Default)]
-struct AppHighlightCache(Rc<std::cell::RefCell<HighlightCache>>);
-impl PartialEq for AppHighlightCache {
-    fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
-    }
-}
-
 /// Created above the list; recycling never owns parse, wrap, copy or highlight state.
 #[derive(Clone, Copy)]
 pub struct BlockListState {
     model: Stored<BlockListModel>,
-    highlights: Stored<BTreeMap<BlockId, IncrementalHighlightedDocument>>,
+    highlights: Stored<BTreeMap<BlockId, CodeHighlightState>>,
     fences: Stored<BTreeMap<BlockId, CodeBlockState>>,
+    tables: crate::screens::thread::markdown::links::MarkdownTablesState,
     owner: Owner,
 }
 
@@ -423,19 +461,32 @@ impl Default for BlockListState {
             model: stored(BlockListModel::default()),
             highlights: stored(BTreeMap::new()),
             fences: stored(BTreeMap::new()),
+            tables: Default::default(),
             owner: Owner::current(),
         }
     }
 }
 
 impl BlockListState {
+    fn highlighter(self, id: BlockId) -> CodeHighlightState {
+        self.owner.run(|| {
+            self.highlights
+                .with(|states| states.entry(id).or_default().clone())
+        })
+    }
+
     fn fence(self, id: BlockId) -> CodeBlockState {
         self.owner
             .run(|| self.fences.with(|states| *states.entry(id).or_default()))
     }
 
     pub fn work(self) -> ListWork {
-        self.model.with(|model| model.work())
+        let mut work = self.model.with(|model| model.work());
+        self.highlights.with(|states| {
+            work.highlight_fences = states.len();
+            work.highlight_queue = states.values().next().map(CodeHighlightState::queue_work);
+        });
+        work
     }
     pub fn len(self) -> usize {
         self.model.with(|model| model.len())
@@ -455,9 +506,6 @@ pub struct BlockListOptions {
     pub assistant: AssistantRowContext,
     pub user: UserRowContext,
     pub work: WorkGroupsContext,
-    pub syntax: Memo<Shared<SyntaxTheme>>,
-    pub highlighter: Option<HighlightCode>,
-    pub highlighter_revision: Rc<str>,
     pub wrapped: Memo<bool>,
     pub themed: Memo<bool>,
 }
@@ -469,20 +517,8 @@ impl Default for BlockListOptions {
             assistant: AssistantRowContext::new(AssistantRowsState::default()),
             user: UserRowContext::new(UserRowState::new()),
             work: WorkGroupsContext::new(WorkGroupsState::default()),
-            syntax: computed(|| {
-                Shared(Rc::new(
-                    syntax_theme_for(if dark() {
-                        t3_theme::palette::Appearance::Dark
-                    } else {
-                        t3_theme::palette::Appearance::Light
-                    })
-                    .clone(),
-                ))
-            }),
-            highlighter: None,
-            highlighter_revision: Rc::from(""),
             wrapped: computed(|| true),
-            themed: computed(|| false),
+            themed: computed(crate::theme::has_theme_id),
         }
     }
 }
@@ -501,6 +537,27 @@ pub fn messages_timeline(rows: TimelineRows, options: BlockListOptions) -> impl 
                 fences.remove(id);
             }
         });
+        state.model.with(|model| {
+            for message in model.highlight_resets.drain(..) {
+                state.highlights.with(|documents| {
+                    for (id, document) in documents.iter() {
+                        if id.message_id == message {
+                            document.clear();
+                        }
+                    }
+                });
+            }
+            for leaf in model.highlight_updates.drain(..) {
+                if let (Some(first), BlockKind::Code(chunk)) = (leaf.fence, &leaf.block.kind) {
+                    state
+                        .highlighter(BlockId {
+                            message_id: leaf.block.id.message_id.clone(),
+                            index: first,
+                        })
+                        .upsert(chunk, leaf.streaming);
+                }
+            }
+        });
         // Only the projection handle is copied; blocks stay in the persistent documents.
         rows.get()
     });
@@ -508,18 +565,16 @@ pub fn messages_timeline(rows: TimelineRows, options: BlockListOptions) -> impl 
         revision.with(|_| ());
         state.len()
     });
-    let cache = global::<AppHighlightCache>().get_untracked().0;
     let list = virtual_list(count, move |at| {
         let cell = computed(move || {
             revision.with(|_| ());
             state.model.with(|model| model.cell(at.index()))
         });
         let options = options.clone();
-        let cache = cache.clone();
         view().child(each(
             move || cell.get().into_iter().collect::<Vec<_>>(),
             |cell| cell.id.clone(),
-            move |cell, _| timeline_row_content(cell, options.clone(), cache.clone()),
+            move |cell, _| timeline_row_content(cell, options.clone()),
         ))
     })
     // NSH keys() re-hashes the entire reply on a new tail block; key only mounted cells above.
@@ -544,7 +599,6 @@ pub fn messages_timeline(rows: TimelineRows, options: BlockListOptions) -> impl 
 fn timeline_row_content(
     cell: ReadSignal<BlockCell>,
     options: BlockListOptions,
-    cache: Rc<std::cell::RefCell<HighlightCache>>,
 ) -> impl IntoElement {
     if matches!(
         cell.get_untracked().row.content,
@@ -567,6 +621,7 @@ fn timeline_row_content(
         })
     });
     let footer = computed(move || cell.with(|cell| matches!(cell.id, CellId::Footer(_))));
+    let fence = computed(move || leaf.with(|leaf| leaf.as_ref().and_then(|leaf| leaf.fence)));
     let spacing = computed(move || {
         leaf.with(|leaf| {
             leaf.as_ref().map(|leaf| {
@@ -580,9 +635,7 @@ fn timeline_row_content(
     view()
         // index.css .messages-timeline-scroll and .chat-content-lane; no nested scroller.
         .app_class(tw("w-full px-3 sm:px-12"))
-        .child(view().app_class(tw("mx-auto w-full min-w-0 max-w-(--chat-content-max-width)"))
-            // NSH's overflow flag clips both axes; this lane's natural height keeps vertical content intact.
-            .overflow_hidden()
+        .child(view().app_class(tw("mx-auto w-full min-w-0 max-w-(--chat-content-max-width) overflow-x-clip"))
             .child(view().app_class(move || Some(tw(&cn([
                 cell.with(|cell| cell.last).then_some(padding_of(&cell.with(|cell| cell.row.clone()))),
                 row.with(|row| row.as_ref().is_some_and(|row| matches!(&row.content,
@@ -593,17 +646,20 @@ fn timeline_row_content(
                 .child(dynamic(move || {
                     let kind = kind.get();
                     let footer = footer.get();
+                    fence.with(|_| ());
                     let spacing = spacing.get();
                     untracked(|| {
                         let body = match kind {
                         Some(0) => empty_response(row).into_element(),
-                        Some(1) => code_cell(cell, leaf, options.clone(), cache.clone()),
+                        Some(1) => code_cell(cell, leaf, options.clone()),
                         Some(2) => text(move || leaf.with(|leaf| leaf.as_ref().and_then(|leaf| leaf.block.text.as_ref()).map_or_else(String::new, |text| text.to_string())))
                             .select_text().app_class(tw("font-mono")).into_element(),
                         Some(4) => {
+                            let Some(table_leaf) = leaf.get_untracked() else { return view().into_element(); };
+                            let id = table_leaf.block.id.clone();
                             let source = computed(move || leaf.with(|leaf| leaf.as_ref()
                                 .and_then(|leaf| leaf.block.text.clone()).unwrap_or_else(|| Rc::from(""))));
-                            crate::screens::thread::markdown::rich::markdown_table_block(source).into_element()
+                            crate::screens::thread::markdown::links::markdown_table_leaf(source, id, options.state.tables).into_element()
                         }
                         Some(5) => view().into_element(),
                         Some(_) => prose_cell(leaf).into_element(),
@@ -613,9 +669,10 @@ fn timeline_row_content(
                         if !matches!(kind, Some(1..=4)) { return body; }
                         let (gap, heading) = spacing.unwrap_or_default();
                         // Virtual cells have separate parents; a zero-height sibling preserves the shared gap and first: rules.
+                        let blocks = chat_markdown_blocks();
+                        let blocks = if gap { blocks.child(view().h(px(0.0))) } else { blocks };
                         view().app_class(tw("min-w-0 px-1"))
-                            .child(chat_markdown_blocks()
-                                .child(gap.then(|| view().h(px(0.0))))
+                            .child(blocks
                                 .child(chat_markdown_leaf(heading, body)))
                             .into_element()
                     })
@@ -769,7 +826,6 @@ fn code_cell(
     cell: ReadSignal<BlockCell>,
     leaf: Memo<Option<Shared<BlockLeaf>>>,
     options: BlockListOptions,
-    cache: Rc<std::cell::RefCell<HighlightCache>>,
 ) -> AnyElement {
     let Some(initial) = leaf.get_untracked() else {
         return view().into_element();
@@ -784,6 +840,7 @@ fn code_cell(
     };
     let state = options.state;
     let fence_state = state.fence(fence_id.clone());
+    let marker = format!("timeline-code-chunk-{}", id.index);
     let wrapped = computed(move || {
         fence_state
             .wrap_override
@@ -798,50 +855,27 @@ fn code_cell(
             })
         })
     });
-    let syntax = options.syntax;
-    let provider = options.highlighter.clone();
-    let provider_revision = options.highlighter_revision.clone();
-    let highlight_id = id.clone();
-    let highlighted = computed(move || {
-        let syntax = syntax.get();
-        leaf.with(|leaf| {
-            leaf.as_ref().and_then(|leaf| {
-                let BlockKind::Code(chunk) = &leaf.block.kind else {
-                    return None;
-                };
-                // Fence identity and source offset disambiguate parser entry states and revisions.
-                let context = format!(
-                    "{}:{}:{}:{}:{}",
-                    provider_revision,
-                    highlight_id.message_id,
-                    first,
-                    chunk.value_bytes.start,
-                    leaf.lexer_context
-                );
-                let result = cache.borrow_mut().highlight(
-                    chunk,
-                    &syntax,
-                    &context,
-                    leaf.streaming,
-                    provider.as_ref(),
-                );
-                Some(Shared(state.highlights.with(|documents| {
-                    documents
-                        .entry(highlight_id.clone())
-                        .or_default()
-                        .update(result)
-                })))
-            })
-        })
-    });
+    let streaming =
+        computed(move || leaf.with(|leaf| leaf.as_ref().is_some_and(|leaf| leaf.streaming)));
+    let highlighted = highlighted_chunk(chunk, streaming, state.highlighter(fence_id.clone()));
+    let first_chunk =
+        computed(move || chunk.with(|chunk| chunk.as_ref().is_some_and(|chunk| chunk.first)));
+    let last_chunk =
+        computed(move || chunk.with(|chunk| chunk.as_ref().is_some_and(|chunk| chunk.last)));
     if first != id.index {
-        return view().direction(LayoutDirection::Ltr).writing_direction(WritingDirection::Ltr)
-            .app_class(move || Some(tw(&cn([
-                Some("min-w-0 text-start overflow-hidden border-x border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32"),
-                options.themed.get().then_some("bg-(--code-background) border-contrast-border text-code-foreground dark:border-contrast-border dark:bg-(--code-background)"),
-            ]))))
-            .child(code_chunk_row(chunk, highlighted, wrapped)).into_element();
+        return view()
+            .test_id(&marker)
+            .child(markdown_code_chunk_frame(
+                options.themed,
+                first_chunk,
+                last_chunk,
+                code_chunk_row(chunk, highlighted, wrapped),
+            ))
+            .into_element();
     }
+    let message_streaming = computed(move || {
+        cell.with(|cell| source(&cell.row).is_some_and(|(_, streaming)| streaming))
+    });
     let props = computed(move || {
         chunk.with(|chunk| {
             let Some(chunk) = chunk else {
@@ -851,8 +885,7 @@ fn code_cell(
                 code: chunk.text.clone(),
                 language: chunk.language.clone().unwrap_or_else(|| "text".into()),
                 fence_title: extract_fence_title(chunk.meta.as_deref()),
-                is_streaming: cell
-                    .with(|cell| source(&cell.row).is_some_and(|(_, streaming)| streaming)),
+                is_streaming: message_streaming.get(),
                 default_wrapped: options.wrapped.get(),
                 themed: options.themed.get(),
                 ..Default::default()
@@ -863,7 +896,9 @@ fn code_cell(
         copy: Some(Rc::new(move |_| {
             let code = state.model.with(|model| model.code_text(&fence_id));
             async move {
-                let code = code.ok_or_else(|| String::from("Code block no longer exists."))?;
+                let mut code = code.ok_or_else(|| String::from("Code block no longer exists."))?;
+                // ReactMarkdown's pre/code child includes one final LF beyond mdast Code.value.
+                code.push('\n');
                 set_clipboard(code);
                 Ok(())
             }
@@ -871,9 +906,15 @@ fn code_cell(
         })),
         ..Default::default()
     };
-    // TL-MARKDOWN-1's frame is currently monolithic; split header/frame seam requested in hand-off.
-    markdown_code_block(props, fence_state, copy, move |_| {
-        code_chunk_row(chunk, highlighted, wrapped).into_element()
-    })
-    .into_element()
+    view()
+        .test_id(&marker)
+        .child(markdown_code_chunk_frame(
+            options.themed,
+            first_chunk,
+            last_chunk,
+            view()
+                .child(markdown_code_block_header(props, fence_state, copy))
+                .child(code_chunk_row(chunk, highlighted, wrapped)),
+        ))
+        .into_element()
 }

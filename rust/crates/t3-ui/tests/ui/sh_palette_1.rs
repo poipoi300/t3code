@@ -1,5 +1,6 @@
 //! Port of CommandPalette.browser.test.tsx and commandPaletteCommands.browser.test.tsx shell cases.
 
+use nsh_core::platform::{Environment, Idiom, Os};
 use nsh_core::{keymap::When, prelude::*};
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
@@ -156,11 +157,25 @@ fn trigger(label: &'static str, detail: impl Fn() -> OpenDetail + 'static) -> im
 }
 
 fn fixture(size_: (f32, f32)) -> Headless {
+    // A viewport alone leaves NSH's headless environment on iOS, without desktop modal focus.
+    fixture_on(size_, Os::Web)
+}
+
+fn fixture_on(size_: (f32, f32), os: Os) -> Headless {
     let mut registry = Registry::new();
     registry.register::<PaletteFixture>();
     let mut app = Headless::start(EngineConfig {
         ui_sets: vec![nsh_base::registry(), registry],
         viewport: size(px(size_.0), px(size_.1)),
+        environment: Environment {
+            os,
+            idiom: if size_ == PHONE {
+                Idiom::Phone
+            } else {
+                Idiom::Desktop
+            },
+            ..Default::default()
+        },
         clock: nsh_core::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH),
         ..EngineConfig::new(Root::of::<PaletteFixture>())
     })
@@ -318,18 +333,178 @@ fn toggling_an_open_child_mode_closes_it_and_the_next_toggle_opens_cleanly() {
 
 #[test]
 fn dismissal_returns_keyboard_focus_to_the_unchanged_workspace() {
-    let mut app = fixture(DESKTOP);
-    app.type_text("label:Workspace", "draft")
-        .expect("workspace input takes focus");
-    app.press_key("f8")
-        .expect("open without changing opener focus");
-    app.press_key("p").expect("palette input takes typing");
-    assert_eq!(input_value(&app), "p");
-    app.press_key("escape").expect("close palette");
-    app.press_key("x")
-        .expect("type after returning to workspace");
-    assert_eq!(
-        app.screen().input_text("label:Workspace"),
-        Ok(Some("draftx"))
+    for os in [Os::Windows, Os::Web] {
+        let mut app = fixture_on(DESKTOP, os);
+        app.type_text("label:Workspace", "draft")
+            .expect("workspace input takes focus");
+        app.press_key("f8")
+            .expect("open without changing opener focus");
+        app.press_key("p").expect("palette input takes typing");
+        assert_eq!(input_value(&app), "p");
+        app.press_key("escape").expect("close palette");
+        app.press_key("x")
+            .expect("type after returning to workspace");
+        assert_eq!(
+            app.screen().input_text("label:Workspace"),
+            Ok(Some("draftx"))
+        );
+    }
+}
+
+#[test]
+fn outside_dismissal_restores_the_workspace_input_on_desktop_and_web() {
+    for os in [Os::Windows, Os::Web] {
+        for size_ in [PHONE, DESKTOP] {
+            let mut app = fixture_on(size_, os);
+            app.type_text("label:Workspace", "draft")
+                .expect("focus workspace");
+            app.press_key("f8").expect("open palette");
+            app.press_key("p").expect("palette owns typing");
+            assert_eq!(input_value(&app), "p");
+            let backdrop = app
+                .screen()
+                .id("id:command-dialog-backdrop")
+                .expect("backdrop");
+            app.engine().control().dispatch_event(
+                backdrop,
+                EventKind::PressDown,
+                EventPayload::None,
+            );
+            app.wait_for("text:presented: false").expect("dismissed");
+            app.press_key("x").expect("workspace owns typing again");
+            assert_eq!(
+                app.screen().input_text("label:Workspace"),
+                Ok(Some("draftx"))
+            );
+        }
+    }
+}
+
+#[component]
+fn CommandFocusFixture() -> impl IntoElement {
+    use t3_ui::screens::palette::{ContentOptions, command_palette_content};
+    use t3_ui::ui::command::{self, CommandOptions, CommandState, Item};
+    theme::install(&ThemeChoice::default());
+    let open = signal(false);
+    let workspace = signal(String::new());
+    let destination = signal(String::new());
+    let destination_ref = element_ref();
+    let executed = signal(0u32);
+    on_key_with(
+        "f8",
+        KeyOptions {
+            when: When::Always,
+            ..Default::default()
+        },
+        move |_| open.set(true),
     );
+    view()
+        .w_full()
+        .h_full()
+        .child(
+            nsh_base::input()
+                .label("Workspace")
+                .value(move || workspace.get())
+                .on_change(move |value: &str| workspace.set(value.into())),
+        )
+        .child(
+            nsh_base::input()
+                .label("Destination")
+                .element_ref(&destination_ref)
+                .value(move || destination.get())
+                .on_change(move |value: &str| destination.set(value.into())),
+        )
+        .child(text(move || format!("executed: {}", executed.get())))
+        .child(command::command_dialog(
+            open,
+            "Command palette",
+            move || {
+                let state = CommandState::new(
+                    || {
+                        vec![
+                            Item::new("stay", "Run command"),
+                            Item::new("move", "Focus destination"),
+                        ]
+                    },
+                    CommandOptions {
+                        filter: false,
+                        ..Default::default()
+                    },
+                    move |value| {
+                        executed.update(|count| *count += 1);
+                        open.set(false);
+                        if value == "move" {
+                            destination_ref.focus();
+                        }
+                    },
+                );
+                command::command_dialog_popup(
+                    command_palette_content(
+                        state,
+                        ContentOptions::default(),
+                        command::command_list(
+                            state,
+                            "Commands",
+                            command::command_collection(state, move |item| {
+                                command::command_item(
+                                    state,
+                                    item,
+                                    || None,
+                                    text(move || {
+                                        item.with(|item| {
+                                            item.as_ref()
+                                                .map(|item| item.label.clone())
+                                                .unwrap_or_default()
+                                        })
+                                    }),
+                                )
+                            }),
+                        ),
+                    ),
+                    || {},
+                )
+            },
+        ))
+}
+
+#[test]
+fn choosing_a_command_restores_the_opener_unless_the_action_moves_focus() {
+    for os in [Os::Windows, Os::Web] {
+        for moves_focus in [false, true] {
+            let mut registry = Registry::new();
+            registry.register::<CommandFocusFixture>();
+            let mut app = Headless::start(EngineConfig {
+                ui_sets: vec![nsh_base::registry(), registry],
+                environment: Environment {
+                    os,
+                    idiom: Idiom::Desktop,
+                    ..Default::default()
+                },
+                viewport: size(px(DESKTOP.0), px(DESKTOP.1)),
+                clock: nsh_core::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH),
+                ..EngineConfig::new(Root::of::<CommandFocusFixture>())
+            })
+            .expect("command fixture starts");
+            app.wait_for("label:Workspace").expect("workspace mounted");
+            app.type_text("label:Workspace", "draft")
+                .expect("focus workspace");
+            app.press_key("f8").expect("open command dialog");
+            app.wait_for("Run command").expect("real command row");
+            if moves_focus {
+                app.press_key("down").expect("select focus action");
+            }
+            app.press_key("enter").expect("execute selected command");
+            app.wait_for("text:executed: 1").expect("one action ran");
+            assert_eq!(app.screen().count("role:dialog"), Ok(0));
+            app.press_key("x").expect("type after command");
+            assert_eq!(
+                app.screen().input_text("label:Workspace"),
+                Ok(Some(if moves_focus { "draft" } else { "draftx" }))
+            );
+            assert_eq!(
+                app.screen().input_text("label:Destination"),
+                Ok(Some(if moves_focus { "x" } else { "" }))
+            );
+        }
+    }
 }

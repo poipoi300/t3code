@@ -42,6 +42,10 @@ struct TestUrls {
 }
 
 impl UrlClient for TestUrls {
+    fn stream_error(&self) -> Option<Text> {
+        self.reject
+            .then(|| Text::content("URL history permission denied"))
+    }
     fn watch(&self) -> LocalBoxStream<'static, UrlSnapshot> {
         futures::stream::once(futures::future::ready(snapshot(&self.initial, 0)))
             .chain(self.receiver.borrow_mut().take().expect("one URL lease"))
@@ -237,16 +241,20 @@ fn unavailable_history_directions_do_not_dispatch_and_native_back_returns_to_thr
 
 #[test]
 fn a_closed_url_service_disables_navigation_instead_of_claiming_success() {
-    let mut app = start(DESKTOP, "/settings/general", false);
-    app.wait_for("Page not found").expect("fallback");
-    app.press("role:button[Close URL host]")
-        .expect("capability closes");
-    app.wait_for("resource closed")
-        .expect("client closure reason");
-    let _ = app.press("role:button[Go home]");
-    app.press("role:button[Open usage]")
-        .expect("local route request");
-    assert!(app.screen().shows("Location /settings/general"));
-    assert!(app.screen().shows("Selected Settings(General)"));
-    assert!(app.screen().shows("Requests []"));
+    for (reject, reason) in [
+        (false, "resource closed"),
+        (true, "URL history permission denied"),
+    ] {
+        let mut app = start(DESKTOP, "/settings/general", reject);
+        app.wait_for("Page not found").expect("fallback");
+        app.press("role:button[Close URL host]")
+            .expect("capability closes");
+        app.wait_for(reason).expect("client closure reason");
+        let _ = app.press("role:button[Go home]");
+        app.press("role:button[Open usage]")
+            .expect("local route request");
+        assert!(app.screen().shows("Location /settings/general"));
+        assert!(app.screen().shows("Selected Settings(General)"));
+        assert!(app.screen().shows("Requests []"));
+    }
 }

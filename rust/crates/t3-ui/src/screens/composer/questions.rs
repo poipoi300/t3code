@@ -16,7 +16,7 @@ use t3_contracts::orchestration_v2::OrchestrationV2UserInputQuestion;
 
 use crate::i18n::{Text as UiText, Value, tr, ts};
 use crate::runtime::Shared;
-use crate::screens::thread::markdown::base::chat_markdown;
+use crate::screens::thread::markdown::base::chat_markdown_with_root_classes;
 use crate::theme::{cn, tw};
 use crate::ui::alert::composer_banner as banner;
 use crate::ui::badge::Child;
@@ -304,6 +304,18 @@ fn composer_pending_user_input_card(questions: ComposerQuestions) -> impl IntoEl
                 .map(|view| (Shared(view.questions.clone()), view.question_index))
         })
     });
+    let heading_directions = computed(move || {
+        body_question.with(|current| {
+            current.as_ref().and_then(|(questions, index)| {
+                questions.get(*index).map(|question| {
+                    (
+                        text_direction(&question.header.0),
+                        markdown_prose_direction(&question.question.0),
+                    )
+                })
+            })
+        })
+    });
     let enabled_question = computed(move || {
         questions.view.with(|view| {
             view.as_ref().and_then(|view| {
@@ -316,7 +328,6 @@ fn composer_pending_user_input_card(questions: ComposerQuestions) -> impl IntoEl
         enabled_question.get();
         untracked(|| card.cancel_timer());
     });
-    cleanup(move || card.cancel_timer());
     effect(move || {
         let current = questions.view.get();
         untracked(|| {
@@ -375,10 +386,12 @@ fn composer_pending_user_input_card(questions: ComposerQuestions) -> impl IntoEl
                 .app_class(tw("group/banner-row flex min-h-7 sm:min-h-6 min-w-0 flex-1 items-center gap-x-1 text-start cursor-pointer rounded-xl hover:bg-foreground/5 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring px-4 py-1.5 pe-0"))
                 .child(view().app_class(tw("flex min-w-0 flex-1 items-center gap-1 ps-2 sm:ps-1.5"))
                     .child(text(move || questions.view.with(|view| view.as_ref().and_then(|view| view.questions.get(view.question_index)).map(|question| question.header.0.clone()).unwrap_or_default()))
+                        .style_with(move |style| style.writing_direction(writing_direction(heading_directions.get().and_then(|directions| directions.0))))
                         .app_class(move || Some(tw(&cn([Some("min-w-0 truncate text-muted-foreground"), collapsed.get().then_some("max-w-1/2")])))))
                     .child(when(collapsed, move || view().app_class(tw("flex min-w-0 flex-1 items-center gap-1"))
                         .child(banner::separator(true))
                         .child(text(move || questions.view.with(|view| view.as_ref().and_then(|view| view.questions.get(view.question_index)).map(|question| question.question.0.clone()).unwrap_or_default()))
+                            .style_with(move |style| style.writing_direction(writing_direction(heading_directions.get().and_then(|directions| directions.1))))
                             .app_class(move || Some(tw(&cn([Some("min-w-0 flex-1 truncate text-secondary-label"), Some(align_class(direction.get()))]))))))))
                 .child(view().app_class(tw("flex flex-wrap items-center justify-end gap-0"))
                     .child(dynamic(move || questions.view.with(|view| view.as_ref().filter(|view| view.questions.len() > 1).map(|view| banner::count(text(tr("{index}/{count}", &[("index", Value::from(view.question_index + 1)), ("count", Value::from(view.questions.len()))])))))))
@@ -413,9 +426,9 @@ fn question_body(
     banner::scroll(view().app_class(tw("min-w-0 ps-6 pe-4 pb-1 sm:ps-5.5"))
         .child(question.map(|question| {
             let question_text = question.question.0;
-            view().child(view().app_class(move || Some(tw(&cn([Some("pt-0.5 text-foreground/85"), Some(align_class(direction.get()))]))))
+            view().child(view().app_class(move || Some(tw(align_class(direction.get()))))
                 // TextView has no soft-break-as-hard-break option; source newlines retain its Markdown semantics.
-                .child(chat_markdown(move || question_text.clone(), || false)))
+                .child(chat_markdown_with_root_classes(move || question_text.clone(), || false, "pt-0.5 text-foreground/85")))
                 .child(question.options.into_iter().enumerate().fold(view().app_class(tw("-ms-2 mt-1.5 sm:-ms-1.5")), |column, (index, option)| {
                     let label = option.label.0;
                     let description = option.description.0;
@@ -442,7 +455,7 @@ fn question_body(
                                 .child(text(SharedString::from(label.clone())).writing_direction(writing_direction(text_direction(&label))).app_class(tw("text-sm font-medium")))
                                 .child((!description.is_empty() && description != label).then(|| text(SharedString::from(description.clone())).writing_direction(writing_direction(text_direction(&description))).app_class(tw("text-secondary-label text-2xs")))))
                             .child((index < 9).then(|| view().app_class(tw("flex h-5 w-7 shrink-0 items-center justify-center sm:w-6")).child(kbd(KbdVariant::Default, vec![Child::Text(UiText::content((index + 1).to_string()))])))))
-                        .child(preview.map(|preview| view().app_class(tw("ps-9 pe-2 pb-1.5 text-xs text-foreground/70 sm:ps-8")).child(chat_markdown(move || preview.clone(), || false)))))
+                        .child(preview.map(|preview| view().app_class(tw("ps-9 pe-2 pb-1.5 sm:ps-8")).child(chat_markdown_with_root_classes(move || preview.clone(), || false, "text-xs text-foreground/70")))))
                 }))
         })))
 }

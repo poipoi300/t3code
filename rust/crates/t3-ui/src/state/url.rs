@@ -11,79 +11,20 @@ use crate::screens::{add_project, connect, new_thread, thread};
 use crate::theme::tw;
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 
-use crate::runtime::services::navigation::{client_route, ui_route};
 pub use t3_client::navigation::{
-    AppUrlRequest as UrlRequest, AppUrlSnapshot as UrlSnapshot, CloseModal, RoutePolicy, app_path,
-    is_app_modal_page, is_sidebar_utility_page,
+    AppUrlRequest as UrlRequest, AppUrlSnapshot as UrlSnapshot, CloseModal, Location,
+    MainAppLocation, RoutePolicy, app_path, is_app_modal_page, is_sidebar_utility_page, parse,
+    path_for,
 };
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Location {
-    pub route: Route,
-    pub pathname: String,
-    pub search: String,
-    pub hash: String,
-}
-impl From<t3_client::navigation::Location> for Location {
-    fn from(location: t3_client::navigation::Location) -> Self {
-        Self {
-            route: ui_route(location.route),
-            pathname: location.pathname,
-            search: location.search,
-            hash: location.hash,
-        }
-    }
-}
-impl Location {
-    fn client(&self) -> t3_client::navigation::Location {
-        t3_client::navigation::Location {
-            route: client_route(self.route.clone()),
-            pathname: self.pathname.clone(),
-            search: self.search.clone(),
-            hash: self.hash.clone(),
-        }
-    }
-    pub fn parse(path: &str) -> Self {
-        t3_client::navigation::Location::parse(path).into()
-    }
-    pub fn resolve(path: &str, policy: RoutePolicy) -> Self {
-        t3_client::navigation::Location::resolve(path, policy).into()
-    }
-    pub fn href(&self) -> String {
-        self.client().href()
-    }
-    pub fn target(&self) -> Option<t3_client::navigation::RouteTarget> {
-        self.client().target()
-    }
-}
-pub fn parse(address: &str) -> Route {
-    ui_route(t3_client::navigation::parse(address))
-}
-pub fn path_for(route: &Route) -> Option<String> {
-    t3_client::navigation::path_for(&client_route(route.clone()))
-}
-#[derive(Clone, Debug, Default)]
-pub struct MainAppLocation(t3_client::navigation::MainAppLocation);
-impl MainAppLocation {
-    pub fn record(&mut self, location: &Location, index: u64) {
-        self.0.record(&location.client(), index);
-    }
-    pub fn main_href(&self) -> &str {
-        self.0.main_href()
-    }
-    pub fn modal_return_target(&self) -> Option<&t3_client::navigation::RouteTarget> {
-        self.0.modal_return_target()
-    }
-    pub fn close_modal(&self, index: u64) -> CloseModal {
-        self.0.close_modal(index)
-    }
-}
 
 /// Adapter for the client/platform URL service requested in ui-sh-routes.md. Its current-first
 /// stream merges address changes and claimed native links; dropping it releases the listener.
 pub trait UrlClient {
     fn watch(&self) -> LocalBoxStream<'static, UrlSnapshot>;
     fn navigate(&self, request: UrlRequest) -> LocalBoxFuture<'static, Result<(), Text>>;
+    fn stream_error(&self) -> Option<Text> {
+        None
+    }
 }
 
 /// Root-owned navigation: tasks and the service lease end with App. Host history remains the
@@ -114,6 +55,7 @@ impl UrlState {
             requests: stored(requests),
         };
         let mut changes = client.watch();
+        let observer = client.clone();
         spawn(async move {
             while let Some(request) = receiver.next().await {
                 if !state.available.get_untracked() {
@@ -154,9 +96,11 @@ impl UrlState {
                 state.available.set(false);
                 state.can_go_back.set(false);
                 state.can_go_forward.set(false);
-                state.error.set(Some(Text::client_key(
-                    t3_client::platform::PlatformError::Closed.to_string(),
-                )));
+                state
+                    .error
+                    .set(Some(observer.stream_error().unwrap_or_else(|| {
+                        Text::client_key(t3_client::platform::PlatformError::Closed.to_string())
+                    })));
             });
         });
         effect(move || {

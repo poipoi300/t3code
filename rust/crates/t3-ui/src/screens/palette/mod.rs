@@ -226,8 +226,8 @@ fn command_palette_dialog(palette: Palette) -> impl IntoElement {
                 let (mode, _) = mode_session.get();
                 Some(untracked(|| match mode {
                     OverlayMode::Command => open_command_palette_dialog(palette).into_element(),
-                    // SH-PALETTE-3 mounts ProjectFilePicker and ProjectContentSearchDialog here.
-                    OverlayMode::Files | OverlayMode::Content => view().into_element(),
+                    OverlayMode::Files => files::project_file_picker().into_element(),
+                    OverlayMode::Content => files::project_content_search_dialog().into_element(),
                 }))
             })),
         move || palette.close(),
@@ -457,21 +457,10 @@ pub fn command_palette_content(
             })
             .child(command::command_input(state, input))
             .child(input_accessory);
-        // The opaque panel has no class slot; layout constraints belong to this child.
-        let panel = view().app_class(tw(match panel_size {
-            PanelSize::List => "flex min-h-0 flex-col",
-            PanelSize::TallList => "",
-            PanelSize::Fill => "flex min-h-0 flex-1 flex-col",
-        }));
-        // NSH has no max-h-[min(...)]; preserve the source's rem/vh limits in points.
-        let panel = match panel_size {
-            PanelSize::List => panel.max_h(move || {
-                px((28.0 * nsh_core::geometry::REM_SIZE.0).min(window().height.0 * 0.70))
-            }),
-            PanelSize::TallList => panel.max_h(move || {
-                px((34.0 * nsh_core::geometry::REM_SIZE.0).min(window().height.0 * 0.76))
-            }),
-            PanelSize::Fill => panel,
+        let panel_layout = match panel_size {
+            PanelSize::List => command::PanelLayout::List,
+            PanelSize::TallList => command::PanelLayout::TallList,
+            PanelSize::Fill => command::PanelLayout::Fill,
         };
         let footer = command::command_footer(
             // Footer's responsive layout needs a child because primitives expose no class slot.
@@ -487,7 +476,7 @@ pub fn command_palette_content(
                 .child(footer_trailing));
         vec![
             input.into_element(),
-            command::command_panel(true, panel.child(children)).into_element(),
+            command::command_panel_with_layout(true, panel_layout, children).into_element(),
             footer.into_element(),
         ]
     })

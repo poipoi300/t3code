@@ -26,39 +26,46 @@ pub fn sidebar_thread_context_menu(
     model: Memo<Option<ThreadActionMenu>>,
     on_action: impl Fn(String) + 'static,
 ) -> impl IntoElement {
-    let on_action: Rc<dyn Fn(String)> = Rc::new(on_action);
     menu::context_menu(
         trigger,
         // UI-MENU owns popup sizing; the web fallback's sizing preset is requested in the hand-off.
         MenuOptions::default(),
         || false,
-        menu::menu_popup_with(move || {
-            let on_action = on_action.clone();
-            dynamic(move || {
-                let current = model.get();
-                let items = current
-                    .as_ref()
-                    .map(|model| model.items.clone())
-                    .unwrap_or_else(unavailable_items);
-                let reason = current
-                    .as_ref()
-                    .and_then(|model| model.unavailable_reason.as_deref())
-                    .map(t)
-                    .or_else(|| {
-                        current
-                            .is_none()
-                            .then(|| t("Thread actions are not available on this client."))
-                    });
-                view()
-                    .child(reason.map(|reason| menu::menu_group_label(reason, false)))
-                    .children(
-                        items
-                            .into_iter()
-                            .map(|item| action_item(item, model, on_action.clone(), false)),
-                    )
-            })
-        }),
+        thread_action_menu_content(model, on_action),
     )
+}
+
+pub fn thread_action_menu_content(
+    model: Memo<Option<ThreadActionMenu>>,
+    on_action: impl Fn(String) + 'static,
+) -> impl IntoElement {
+    let on_action: Rc<dyn Fn(String)> = Rc::new(on_action);
+    menu::menu_popup_with(move || {
+        let on_action = on_action.clone();
+        dynamic(move || {
+            let current = model.get();
+            let items = current
+                .as_ref()
+                .map(|model| model.items.clone())
+                .unwrap_or_else(unavailable_items);
+            let reason = current
+                .as_ref()
+                .and_then(|model| model.unavailable_reason.as_deref())
+                .map(t)
+                .or_else(|| {
+                    current
+                        .is_none()
+                        .then(|| t("Thread actions are not available on this client."))
+                });
+            view()
+                .child(reason.map(|reason| menu::menu_group_label(reason, false)))
+                .children(
+                    items
+                        .into_iter()
+                        .map(|item| action_item(item, model, on_action.clone(), false)),
+                )
+        })
+    })
 }
 
 fn unavailable_items() -> Vec<ContextMenuItemSchema> {
@@ -106,7 +113,7 @@ fn enabled(items: &[ContextMenuItemSchema], id: &str, parent_disabled: bool) -> 
     })
 }
 
-fn action_item(
+pub(crate) fn action_item(
     item: ContextMenuItemSchema,
     model: Memo<Option<ThreadActionMenu>>,
     on_action: Rc<dyn Fn(String)>,
@@ -205,9 +212,32 @@ pub fn thread_rename_input(
     on_commit: impl Fn() + 'static,
     on_cancel: impl Fn() + 'static,
 ) -> impl IntoElement {
+    thread_rename_input_with_style(
+        title,
+        on_commit,
+        on_cancel,
+        ThreadRenameInputStyle::default(),
+        None,
+    )
+}
+
+#[derive(Clone, Copy, Default)]
+pub enum ThreadRenameInputStyle {
+    #[default]
+    Sidebar,
+    Header,
+}
+
+pub fn thread_rename_input_with_style(
+    title: Signal<String>,
+    on_commit: impl Fn() + 'static,
+    on_cancel: impl Fn() + 'static,
+    style: ThreadRenameInputStyle,
+    input_ref: Option<ElementRef>,
+) -> nsh_core::element::Input {
     let settled = signal(false);
     let composing = signal(false);
-    let node = element_ref();
+    let node = input_ref.unwrap_or_else(element_ref);
     let focused = signal(false);
     let cancel: Rc<dyn Fn()> = Rc::new(on_cancel);
     let commit: Rc<dyn Fn()> = Rc::new(on_commit);
@@ -255,7 +285,10 @@ pub fn thread_rename_input(
                 commit();
             }
         })
-        .app_class(tw("min-w-0 flex-1 rounded-sm border border-input bg-card px-1 text-sm font-medium text-card-foreground outline-none focus:border-foreground"))
+        .app_class(tw(match style {
+            ThreadRenameInputStyle::Sidebar => "min-w-0 flex-1 rounded-sm border border-input bg-card px-1 text-sm font-medium text-card-foreground outline-none focus:border-foreground",
+            ThreadRenameInputStyle::Header => "min-w-0 flex-1 rounded-sm bg-transparent text-sm font-medium text-foreground outline-none ring-1 ring-inset ring-ring/50 focus:ring-ring",
+        }))
 }
 
 /// Client-owned notice projection; no action is undoable merely because this view exists.

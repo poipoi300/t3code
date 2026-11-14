@@ -8,13 +8,16 @@
 //! message as one view per block puts the blocks in [`chat_markdown_blocks`], so the spacing
 //! between blocks is the same as inside one TextView.
 
-use nsh_base::text_view::{CodeBlock, MarkdownOptions, TextViewClasses};
+use nsh_base::text_view::{
+    Block, CodeBlock, CustomNode, Document, MarkdownOptions, MarkdownPlugin, MarkdownPlugins,
+    Parser, TextViewClasses,
+};
 use nsh_core::prelude::*;
 
 use super::code_block::{
     CodeBlockOptions, CodeBlockProps, CodeBlockState, extract_fence_title, markdown_code_block,
 };
-use crate::theme::tw;
+use crate::theme::{cn, tw};
 
 /// ChatMarkdown over `text` (the whole source; see ui-package-addendum.md "Streaming text" for
 /// how a streaming row must supply it). `streaming` keeps an unclosed fence open.
@@ -22,15 +25,75 @@ pub fn chat_markdown(
     text: impl Fn() -> String + 'static,
     streaming: impl Fn() -> bool + 'static,
 ) -> impl IntoElement {
+    chat_markdown_with_root_classes(
+        text,
+        streaming,
+        chat_markdown_classes().root.as_deref().unwrap_or_default(),
+    )
+}
+
+/// ChatMarkdown with root overrides applied after its default layout and typography classes.
+pub fn chat_markdown_with_root_classes(
+    text: impl Fn() -> String + 'static,
+    streaming: impl Fn() -> bool + 'static,
+    root_classes: &str,
+) -> AnyElement {
+    let mut classes = chat_markdown_classes();
+    if classes.root.as_deref() != Some(root_classes) {
+        classes.root = Some(tw(&cn([classes.root.as_deref(), Some(root_classes)])));
+    }
+    let context = super::links::markdown_link_context();
+    let plugins = use_context::<MarkdownPlugins>().unwrap_or_default();
+    let streaming = std::rc::Rc::new(streaming);
+    let parse_streaming = streaming.clone();
+    let parsed = computed(move || {
+        Parser::new()
+            .options(MarkdownOptions {
+                streaming: parse_streaming(),
+                ..Default::default()
+            })
+            .plugins(&plugins)
+            .markdown(&text())
+    });
+    let document = computed(move || {
+        let mut document = parsed.get();
+        super::links::MarkdownLinkPlugin {
+            context: context.get(),
+        }
+        .decorate_document(&mut document);
+        document
+    });
     nsh_base::text_view()
-        .markdown(move || Some(SharedString::from(text())))
+        .document(move || Some(document.get()))
         .options(move || MarkdownOptions {
             streaming: streaming(),
             ..Default::default()
         })
-        .classes(chat_markdown_classes())
+        .classes(classes)
+        .render_custom(move |node| {
+            super::links::MarkdownLinkPlugin {
+                context: context.get(),
+            }
+            .render(node)
+            .unwrap_or_else(|| markdown_custom_fallback(node))
+        })
         .render_code_block(|code: &CodeBlock| fenced_code_block(code))
         .selectable(true)
+        .into_element()
+}
+
+fn markdown_custom_fallback(node: &CustomNode) -> AnyElement {
+    let blocks = if !node.children.is_empty() {
+        node.children.clone()
+    } else if !node.content.is_empty() {
+        vec![Block::paragraph(node.content.clone())]
+    } else {
+        return text(SharedString::from(node.text.clone())).into_element();
+    };
+    nsh_base::text_view()
+        .document(Some(Document::new(blocks)))
+        .classes(chat_markdown_classes())
+        .into_element()
 }
 
 /// The `.chat-markdown` rules by TextView part.
@@ -91,7 +154,11 @@ pub fn starts_with_heading(source: &str) -> bool {
     let content = &first[indent..];
     let hashes = content.len() - content.trim_start_matches('#').len();
     if hashes > 0 {
-        return hashes <= 6 && content[hashes..].chars().next().is_none_or(|c| c == ' ' || c == '\t');
+        return hashes <= 6
+            && content[hashes..]
+                .chars()
+                .next()
+                .is_none_or(|c| c == ' ' || c == '\t');
     }
     let Some(underline) = lines.next() else {
         return false;

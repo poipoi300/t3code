@@ -59,11 +59,18 @@ fn root(address: Option<&str>, store: ClientStore, started: Started) -> AnyEleme
     let panels = Panels::new();
     provide_context(panels);
     clock::start();
-    crate::keys::install(panels);
+    // The client exposes no designated primary yet (request in client-seam-requests.md): unscoped.
+    let keys = crate::keys::install(panels, signal(None));
+    let command_palette = crate::screens::palette::palette_controller();
+    keys.register(crate::keys::bindings::Scope {
+        commands: command_palette.command_handlers(),
+        when: Rc::new(move |_| command_palette.is_mounted()),
+        ..Default::default()
+    });
 
     let top = computed(move || nav.top());
     let standalone = computed(move || top.get().is_standalone());
-    view()
+    let content = view()
         .flex_1()
         .w_full()
         .bg(move || palette().background)
@@ -73,10 +80,17 @@ fn root(address: Option<&str>, store: ClientStore, started: Started) -> AnyEleme
             if standalone.get() {
                 router::screen(&top.get())
             } else {
-                shell::app_shell().into_element()
+                crate::screens::palette::command_palette(shell::app_shell()).into_element()
             }
         }))
         // ConfirmDialogHost at the root, as the web mounts it: every confirm request needs one.
         .child(crate::ui::confirm::confirm_dialog_host())
-        .into_element()
+        .into_element();
+    crate::ui::toast::toast_provider(
+        crate::ui::toast::anchored_toast_provider(crate::keys::bindings::keyboard_events(
+            keys, content,
+        )),
+        crate::ui::toast::Position::TopRight,
+    )
+    .into_element()
 }

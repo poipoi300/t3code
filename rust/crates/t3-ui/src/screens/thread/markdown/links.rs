@@ -1,16 +1,19 @@
 //! Port of apps/web/src/components/chat/{MarkdownFileLink,MarkdownExternalLink,MarkdownThreadLink}.tsx.
 
-use std::{collections::{BTreeMap, BTreeSet}, rc::Rc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 
-use futures::{StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
+use futures::{StreamExt, stream::LocalBoxStream};
 
 use nsh_base::text_view::{
     Block, CustomNode, Document, Inline, MarkdownPlugin, ParseContext, Parser, TextViewClasses,
     mdast,
 };
+use nsh_core::element::Renderer;
 use nsh_core::prelude::*;
 use t3_client::types::{EnvironmentId, ThreadId, ThreadKey};
-use t3_contracts::orchestration_v2::OrchestrationV2ThreadLinkMetadata;
 use t3_client::view_logic::session::links::{
     MarkdownFileLinkMeta, is_windows_absolute, resolve_inline_code_file_link_meta,
     resolve_markdown_file_link_meta,
@@ -20,14 +23,47 @@ use t3_client::view_logic::session::markdown_link_presentation::{
     is_markdown_file_link_label, leading_external_link_text_length, markdown_file_copy_menu_items,
     parse_thread_link_href, thread_link_candidates, unknown_thread_link_label,
 };
+use t3_contracts::orchestration_v2::OrchestrationV2ThreadLinkMetadata;
+
+const MARKDOWN_FONT_SIZE: f32 = 14.0;
 
 use crate::i18n::{Text, Value, t, tr};
 use crate::runtime::{Shared, rt};
 use crate::state::nav::{Route, navigator};
 use crate::theme::{cn, tw};
 use crate::ui::icon::{Icon, icon_with_class};
-use crate::ui::menu::{ItemOptions, MenuOptions, context_menu, menu_item, menu_popup_with};
+use crate::ui::menu::{ItemOptions, MenuOptions, context_menu, menu, menu_item, menu_popup_with};
 use crate::ui::tooltip::{TooltipOptions, Variant, tooltip, tooltip_create_handle};
+
+/// Created above the list; each table's feedback and timer are keyed by the flattener's BlockId.
+#[derive(Clone, Copy)]
+pub struct MarkdownTablesState {
+    tables: Stored<
+        BTreeMap<crate::screens::thread::blocks::flatten::BlockId, super::rich::MarkdownTableState>,
+    >,
+    owner: Owner,
+}
+
+impl Default for MarkdownTablesState {
+    fn default() -> Self {
+        Self {
+            tables: stored(BTreeMap::new()),
+            owner: Owner::current(),
+        }
+    }
+}
+
+/// Port of MarkdownTable.tsx, with its feedback retained above recycled block cells.
+pub fn markdown_table_leaf(
+    source: Memo<Rc<str>>,
+    id: crate::screens::thread::blocks::flatten::BlockId,
+    state: MarkdownTablesState,
+) -> impl IntoElement {
+    let table = state
+        .owner
+        .run(|| state.tables.with(|tables| *tables.entry(id).or_default()));
+    super::rich::markdown_table_block_with_state(source, table)
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ThreadLinkLookup {
@@ -35,23 +71,81 @@ pub struct ThreadLinkLookup {
     pub metadata: BTreeMap<ThreadId, OrchestrationV2ThreadLinkMetadata>,
 }
 
-/// Bound by runtime/services/thread_ops.rs to the destination client's query/host services.
+/// Bound by runtime/services/thread_ops.rs to the destination client metadata query.
 pub trait MarkdownLinkService {
-    fn thread_link_metadata(&self, environment: EnvironmentId, threads: Vec<ThreadId>)
-        -> LocalBoxStream<'static, ThreadLinkLookup>;
-
-    fn resolve_file(&self, thread: ThreadKey, meta: MarkdownFileLinkMeta)
-        -> LocalBoxFuture<'static, Result<MarkdownFileLinkMeta, t3_client::ClientError>>;
+    fn thread_link_metadata(
+        &self,
+        environment: EnvironmentId,
+        threads: Vec<ThreadId>,
+    ) -> LocalBoxStream<'static, ThreadLinkLookup>;
 }
 
 #[derive(Clone)]
 pub struct MarkdownLinkRuntime(pub Rc<dyn MarkdownLinkService>);
 
+fn markdown_link_runtime() -> Option<MarkdownLinkRuntime> {
+    use_context::<MarkdownLinkRuntime>().or_else(|| {
+        use_context::<crate::runtime::Rt>()
+            .and_then(|runtime| runtime.backend().client())
+            .map(|client| crate::runtime::services::thread_ops::markdown_links(&client))
+    })
+}
+
+pub fn markdown_link_context() -> Memo<MarkdownLinkContext> {
+    if let Some(context) = use_context::<MarkdownLinkContext>() {
+        return computed(move || context.clone());
+    }
+    let navigation = use_context::<crate::state::nav::Navigator>();
+    let runtime = use_context::<crate::runtime::Rt>();
+    let thread = computed(move || {
+        navigation
+            .as_ref()
+            .and_then(|navigation| match navigation.top() {
+                Route::Thread(key) | Route::ThreadPanel(key, _) => Some(key),
+                _ => None,
+            })
+    });
+    let shell = computed(move || {
+        thread
+            .get()
+            .and_then(|key| runtime.map(|runtime| runtime.store.shell(key.environment)))
+    });
+    computed(move || {
+        let Some(thread) = thread.get() else {
+            return MarkdownLinkContext::default();
+        };
+        let cwd = shell.get().and_then(|shell| shell.get()).and_then(|shell| {
+            let record = shell
+                .threads
+                .iter()
+                .find(|record| record.id == thread.thread)?;
+            record
+                .worktree_path
+                .as_ref()
+                .map(|path| Rc::from(path.0.as_str()))
+                .or_else(|| {
+                    shell
+                        .projects
+                        .iter()
+                        .find(|project| project.id == record.project_id)
+                        .map(|project| Rc::from(project.workspace_root.0.as_str()))
+                })
+        });
+        MarkdownLinkContext {
+            environment: Some(thread.environment.clone()),
+            thread: Some(thread),
+            cwd,
+            ..Default::default()
+        }
+    })
+}
+
 /// Message/file context, captured once for a bounded prose block; authored values are content.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MarkdownLinkContext {
     pub environment: Option<EnvironmentId>,
     pub thread: Option<ThreadKey>,
+    pub message_id: Option<String>,
     pub cwd: Option<Rc<str>>,
     pub base_dir: Option<Rc<str>>,
 }
@@ -132,15 +226,21 @@ impl MarkdownLinkPlugin {
                 .all(|item| matches!(item, Inline::Text { .. }))
                 .then(|| content.iter().map(Inline::plain_text).collect::<String>());
             let url = if href.starts_with("//") {
-                    format!("https:{href}")
-                } else {
-                    href.into()
-                };
+                format!("https:{href}")
+            } else {
+                href.into()
+            };
             let label = content.iter().map(Inline::plain_text).collect::<String>();
-            return Some(Inline::Custom(CustomNode::new("markdown-external-link")
-                .with_attribute("href", url)
-                .with_text(label)
-                .with_content(markdown_external_link_content(&host, plain.as_deref(), content))));
+            return Some(Inline::Custom(
+                CustomNode::new("markdown-external-link")
+                    .with_attribute("href", url)
+                    .with_text(label)
+                    .with_content(markdown_external_link_content(
+                        &host,
+                        plain.as_deref(),
+                        content,
+                    )),
+            ));
         }
         None
     }
@@ -151,15 +251,33 @@ impl MarkdownLinkPlugin {
                 let content = Document::new(vec![Block::paragraph(node.content.clone())]);
                 let plugin = self.clone();
                 // TextView names a custom inline U+FFFC; the native link supplies the authored name.
-                Some(nsh_base::link()
-                    .href(Some(SharedString::from(node.attributes.get("href")?.clone())))
-                    .title(node.attributes.get("title").cloned().map(SharedString::from))
-                    .accessibility_label(Some(SharedString::from(node.text.clone())))
-                    .app_class(tw("min-w-0 max-w-full text-info-foreground no-underline"))
-                    .child(nsh_base::text_view().document(Some(content))
-                        .classes(TextViewClasses { paragraph: Some(tw("m-0")), ..Default::default() })
-                        .render_custom(move |node| plugin.render(node).unwrap_or_else(|| view().into_element())))
-                    .into_element())
+                Some(
+                    nsh_base::link()
+                        .href(Some(SharedString::from(
+                            node.attributes.get("href")?.clone(),
+                        )))
+                        .title(
+                            node.attributes
+                                .get("title")
+                                .cloned()
+                                .map(SharedString::from),
+                        )
+                        .accessibility_label(Some(SharedString::from(node.text.clone())))
+                        .app_class(tw("min-w-0 max-w-full text-info-foreground no-underline"))
+                        .child(
+                            nsh_base::text_view()
+                                .document(Some(content))
+                                .classes(TextViewClasses {
+                                    root: Some(tw("text-sm leading-relaxed text-info-foreground")),
+                                    paragraph: Some(tw("m-0")),
+                                    ..Default::default()
+                                })
+                                .render_custom(move |node| {
+                                    plugin.render(node).unwrap_or_else(|| view().into_element())
+                                }),
+                        )
+                        .into_element(),
+                )
             }
             "markdown-file-link" => {
                 let href = node.attributes.get("href")?;
@@ -169,15 +287,23 @@ impl MarkdownLinkPlugin {
                         .get("inline-code")
                         .is_some_and(|v| v == "true"),
                 )?;
-                let chip = markdown_file_link_in_context(meta, self.context.thread.clone());
+                let chip = markdown_file_link_in_context(meta, Some(self.context.clone()));
                 if node.content.is_empty() {
                     return Some(chip.into_element());
                 }
                 Some(
                     text(SharedString::default())
-                        .child(nsh_base::text_view().document(Some(Document::new(vec![
-                            Block::paragraph(node.content.clone()),
-                        ]))))
+                        .child(
+                            nsh_base::text_view()
+                                .document(Some(Document::new(vec![Block::paragraph(
+                                    node.content.clone(),
+                                )])))
+                                .classes(TextViewClasses {
+                                    root: Some(tw("text-sm leading-relaxed text-foreground/90")),
+                                    paragraph: Some(tw("m-0")),
+                                    ..Default::default()
+                                }),
+                        )
                         .child(text(SharedString::from(" ")))
                         .child(chip)
                         .into_element(),
@@ -404,7 +530,9 @@ fn markdown_link_favicon(host: String) -> impl IntoElement {
     let failed = global::<FailedFaviconHosts>();
     let url = favicon_url_for_host(&host);
     view()
-        .app_class(tw("inline-block ms-[0.25em] me-[0.2em]"))
+        .app_class(tw("inline-block"))
+        .ms(px(MARKDOWN_FONT_SIZE * 0.25))
+        .me(px(MARKDOWN_FONT_SIZE * 0.2))
         .accessible(false)
         .child(dynamic(move || {
             if let Some(mark) = source_control_host_icon(&host) {
@@ -442,23 +570,47 @@ pub fn markdown_file_link(meta: MarkdownFileLinkMeta) -> impl IntoElement {
 
 fn markdown_file_link_in_context(
     meta: MarkdownFileLinkMeta,
-    thread: Option<ThreadKey>,
+    context: Option<MarkdownLinkContext>,
+) -> impl IntoElement {
+    // Popup state belongs to the mounted chip, outside TextView's rendering computation.
+    file_link_chip().content(move |_: &bool| render_file_link_chip(meta.clone(), context.clone()))
+}
+
+#[derive(Clone, PartialEq, Props)]
+struct FileLinkChipProps {
+    content: Prop<Option<Renderer<bool>>>,
+}
+
+#[component]
+fn FileLinkChip(props: FileLinkChipProps) -> impl IntoElement {
+    dynamic(move || {
+        let content = props.content.get();
+        untracked(|| content.map(|content| content.render("file-chip", false)))
+    })
+}
+
+fn render_file_link_chip(
+    meta: MarkdownFileLinkMeta,
+    context: Option<MarkdownLinkContext>,
 ) -> impl IntoElement {
     let panel = use_context::<crate::screens::panel::PanelHost>();
-    let service = use_context::<MarkdownLinkRuntime>();
-    let owner = Owner::current();
-    let open_task = stored(None::<Spawned<()>>);
-    let panel_target = thread.zip(panel).filter(|_| meta.workspace_relative_path.is_some());
+    let thread = context.as_ref().and_then(|context| context.thread.clone());
+    let panel_target = thread
+        .zip(panel)
+        .filter(|_| meta.workspace_relative_path.is_some());
     let meta = Rc::new(meta);
     let label = file_link_label(&meta, None);
     let accessible = tr(
         "File options for {label}",
         &[("label", Value::Text(label.clone()))],
     );
-    let open = signal(false);
     let hovered = signal(false);
     let tooltip_path = meta.target_path.clone();
     let popup_meta = meta.clone();
+    let make_popup = move || {
+        let meta = popup_meta.clone();
+        menu_popup_with(move || file_copy_menu(&meta))
+    };
     let trigger = if let Some((thread, panel)) = panel_target {
         let target = meta.clone();
         nsh_base::link()
@@ -466,40 +618,22 @@ fn markdown_file_link_in_context(
             .href(Some(SharedString::from(meta.target_path.clone())))
             .open_with(nsh_base::LinkOpenWith::App)
             .accessibility_label(Some(SharedString::from(label.clone())))
-            .app_class(tw("inline-block max-w-full items-center gap-[0.2em] font-medium leading-[normal] text-(--context-chip-mention) cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-current rounded-sm disabled:cursor-default"))
+            .gap(px(MARKDOWN_FONT_SIZE * 0.2)).line_height(nsh_core::LineHeight::Normal)
+        .app_class(tw("inline-block max-w-full items-center font-medium text-(--context-chip-mention) cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-current rounded-sm disabled:cursor-default"))
             .child(file_tag_chip_content(&meta.file_path, Text::content(label), hovered))
-            .on_open(move |_: &SharedString| {
-                if let Some(task) = open_task.replace(None) { task.cancel(); }
-                let thread = thread.clone();
-                let target = target.clone();
-                if let Some(service) = service.clone() {
-                    owner.run(|| { open_task.replace(Some(spawn(async move {
-                        if let Ok(meta) = service.0.resolve_file(thread.clone(), target.as_ref().clone()).await {
-                            open_file_in_panel(panel, &thread, &meta);
-                        }
-                    }))); });
-                } else {
-                    open_file_in_panel(panel, &thread, &target);
-                }
-            })
+            .on_open(move |_: &SharedString| open_file_in_panel(panel, &thread, &target))
             .into_element()
     } else {
-        nsh_base::button()
+        // NSH programmatic ContextMenu opens redirect taps to the initial focus; Menu keeps pointer activation.
+        menu(nsh_base::button()
             .direction(LayoutDirection::Ltr)
         .accessibility_label(accessible)
         // ContextChip's ink variable is resolved directly; selector rules go on their children.
         // `.chat-markdown-file-link` overrides inline-flex to inline-block in index.css.
-        .app_class(tw("inline-block max-w-full items-center gap-[0.2em] font-medium leading-[normal] text-(--context-chip-mention) cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-current rounded-sm disabled:cursor-default select-text"))
-        .child(file_tag_chip_content(&meta.file_path, Text::content(label), hovered))
-        .on_press(move || open.set(true)).into_element()
-    };
-    let options = MenuOptions {
-        open: Some(open),
-        ..Default::default()
-    };
-    let make_popup = move || {
-        let meta = popup_meta.clone();
-        menu_popup_with(move || file_copy_menu(&meta))
+        .gap(px(MARKDOWN_FONT_SIZE * 0.2)).line_height(nsh_core::LineHeight::Normal)
+        .app_class(tw("inline-block max-w-full items-center font-medium text-(--context-chip-mention) cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-current rounded-sm disabled:cursor-default select-text"))
+        .child(file_tag_chip_content(&meta.file_path, Text::content(label), hovered)),
+            MenuOptions { align: Align::Start, ..Default::default() }, make_popup()).into_element()
     };
     view()
         .app_class(tw("inline-block max-w-full"))
@@ -513,15 +647,30 @@ fn markdown_file_link_in_context(
             },
             text(SharedString::from(tooltip_path)),
         ))
-        .child(context_menu(trigger, options, || false, make_popup()))
+        .child(context_menu(
+            trigger,
+            MenuOptions::default(),
+            || false,
+            make_popup(),
+        ))
 }
 
-fn open_file_in_panel(panel: crate::screens::panel::PanelHost, thread: &ThreadKey, meta: &MarkdownFileLinkMeta) {
-    if let Some(path) = meta.workspace_relative_path.as_ref() {
-        panel.apply(thread, crate::screens::panel::Action::OpenFile {
-            path: path.clone(), line: meta.line.map(|line| line as f64),
-        });
-    }
+fn open_file_in_panel(
+    panel: crate::screens::panel::PanelHost,
+    thread: &ThreadKey,
+    meta: &MarkdownFileLinkMeta,
+) {
+    let path = meta
+        .workspace_relative_path
+        .clone()
+        .unwrap_or_else(|| meta.file_path.clone());
+    panel.apply(
+        thread,
+        crate::screens::panel::Action::OpenFile {
+            path,
+            line: meta.line.map(|line| line as f64),
+        },
+    );
 }
 
 fn file_copy_menu(meta: &MarkdownFileLinkMeta) -> impl IntoElement + use<> {
@@ -560,11 +709,23 @@ fn file_tag_chip_content(
     // glyph already in ui/icon.rs, rather than an invented icon or another platform branch.
     text(SharedString::default())
         .writing_direction(WritingDirection::Ltr)
-        .child(icon_with_class(
-            Icon::File,
-            "inline-block size-[1em] shrink-0 self-center me-[0.2em]",
-        ))
+        .child(
+            svg(Icon::File.asset())
+                .accessible(false)
+                .app_class(tw("inline-block shrink-0 self-center"))
+                .w(px(MARKDOWN_FONT_SIZE))
+                .h(px(MARKDOWN_FONT_SIZE))
+                .me(px(MARKDOWN_FONT_SIZE * 0.2)),
+        )
         .child(context_chip_label(move || label.resolve(), hovered, true))
+}
+
+fn markdown_chip_icon(which: Icon) -> impl IntoElement {
+    svg(which.asset())
+        .accessible(false)
+        .app_class(tw("shrink-0 self-center"))
+        .w(px(MARKDOWN_FONT_SIZE))
+        .h(px(MARKDOWN_FONT_SIZE))
 }
 
 /// Port of ContextChip.tsx ContextChipLabel; native hover state replaces its parent selector.
@@ -573,8 +734,8 @@ fn context_chip_label(
     hovered: Signal<bool>,
     inline: bool,
 ) -> impl IntoElement {
-    text(label).number_of_lines(1u32).app_class(move || Some(tw(&cn([
-        Some("block min-w-0 self-baseline text-ellipsis underline decoration-transparent decoration-1 underline-offset-[0.2em] transition-colors motion-reduce:transition-none"),
+    text(label).number_of_lines(1u32).underline_offset(px(MARKDOWN_FONT_SIZE * 0.2)).app_class(move || Some(tw(&cn([
+        Some("block min-w-0 self-baseline text-ellipsis underline decoration-transparent decoration-1 transition-colors motion-reduce:transition-none"),
         inline.then_some("inline"), hovered.get().then_some("decoration-current"),
     ]))))
 }
@@ -612,7 +773,10 @@ fn thread_chip(
             .find(|(environment, _)| *environment == key.environment)
             .and_then(|(_, shell)| shell.as_ref())
             .and_then(|shell| shell.threads.iter().find(|thread| thread.id == key.thread))
-            .map(|thread| OrchestrationV2ThreadLinkMetadata { title: thread.title.clone(), project_id: Some(thread.project_id.clone()) })
+            .map(|thread| OrchestrationV2ThreadLinkMetadata {
+                title: thread.title.clone(),
+                project_id: Some(thread.project_id.clone()),
+            })
     };
     let refs: Vec<_> = if reachable && !lookup.settled {
         Vec::new()
@@ -636,7 +800,13 @@ fn thread_chip(
             lookup.settled,
             &refs,
             find,
-            |key| lookup.metadata.get(&key.thread).cloned().or_else(|| find(key)),
+            |key| {
+                lookup
+                    .metadata
+                    .get(&key.thread)
+                    .cloned()
+                    .or_else(|| find(key))
+            },
         );
     let unknown = Text::client_key(unknown_thread_link_label(link, environment));
     let title = resolution
@@ -703,14 +873,33 @@ pub fn markdown_thread_link(
             .collect::<Vec<_>>()
     });
     let lookup = signal(ThreadLinkLookup::default());
-    if let Some(service) = use_context::<MarkdownLinkRuntime>() {
+    if let Some(service) = markdown_link_runtime() {
         let candidates = thread_link_candidates(&link, &environment);
         let request = computed(move || {
             let written = &candidates[0];
             selectors.with(|selectors| {
-                selectors.iter().find(|(id, _)| *id == written.environment)
-                    .filter(|(_, shell)| !shell.with(|shell| shell.as_ref().is_some_and(|shell| shell.threads.iter().any(|thread| thread.id == written.thread))))
-                    .map(|_| (written.environment.clone(), candidates.iter().map(|key| key.thread.clone()).collect::<Vec<_>>()))
+                selectors
+                    .iter()
+                    .find(|(id, _)| *id == written.environment)
+                    .filter(|(_, shell)| {
+                        !shell.with(|shell| {
+                            shell.as_ref().is_some_and(|shell| {
+                                shell
+                                    .threads
+                                    .iter()
+                                    .any(|thread| thread.id == written.thread)
+                            })
+                        })
+                    })
+                    .map(|_| {
+                        (
+                            written.environment.clone(),
+                            candidates
+                                .iter()
+                                .map(|key| key.thread.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                    })
             })
         });
         effect(move || {
@@ -719,7 +908,9 @@ pub fn markdown_thread_link(
             if let Some((environment, threads)) = request {
                 let mut updates = service.0.thread_link_metadata(environment, threads);
                 let task = spawn(async move {
-                    while let Some(update) = updates.next().await { lookup.set(update); }
+                    while let Some(update) = updates.next().await {
+                        lookup.set(update);
+                    }
                 });
                 cleanup(move || task.cancel());
             }
@@ -745,12 +936,13 @@ pub fn markdown_thread_link(
                     Default::default(),
                     text(move || chip.with(|chip| chip.unknown.resolve())),
                 );
-                return view().app_class(tw("inline-flex max-w-full items-center gap-[0.2em] font-medium leading-[normal] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-current rounded-sm"))
+                return view().gap(px(MARKDOWN_FONT_SIZE * 0.2)).line_height(nsh_core::LineHeight::Normal)
+        .app_class(tw("inline-flex max-w-full items-center font-medium focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-current rounded-sm"))
                     .role(AccessibilityRole::Group)
                     .focusable(true)
                     .label(move || SharedString::from(tr("Unavailable context, {label}", &[("label", Value::Text(chip.with(|chip| chip.title.resolve().to_string())))])))
                     .tooltip(hint)
-                    .child(icon_with_class(Icon::CircleDashed, "size-[1em] shrink-0 self-center"))
+                    .child(markdown_chip_icon(Icon::CircleDashed))
                     .child(text(move || chip.with(|chip| chip.title.resolve())))
                     .into_element();
             }
@@ -763,19 +955,20 @@ pub fn markdown_thread_link(
                     .href(move || Some(SharedString::from(Route::Thread(chip.with(|chip| chip.key.clone())).path())))
                     .open_with(nsh_base::LinkOpenWith::App)
                     .accessibility_label(move || Some(tr("Thread, {title}", &[("title", Value::Text(chip.with(|chip| chip.title.resolve().to_string())))]).into()))
-                    .app_class(tw("inline-flex max-w-full items-center gap-[0.2em] font-medium leading-[normal] text-(--context-chip-thread) cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-current rounded-sm no-underline"))
+                    .gap(px(MARKDOWN_FONT_SIZE * 0.2)).line_height(nsh_core::LineHeight::Normal)
+        .app_class(tw("inline-flex max-w-full items-center font-medium text-(--context-chip-thread) cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-current rounded-sm no-underline"))
                     .on_open(move |_: &SharedString| {
                         if !chip.with_untracked(|chip| chip.missing) { nav.open(Route::Thread(chip.with_untracked(|chip| chip.key.clone()))); }
                     })
                     .child(dynamic(move || {
                         project.get().map_or_else(
-                            || icon_with_class(Icon::MessagesSquare, "size-[1em] shrink-0 self-center").into_element(),
-                            |project| crate::ui::avatar::project_favicon(
+                            || markdown_chip_icon(Icon::MessagesSquare).into_element(),
+                            |project| view().w(px(MARKDOWN_FONT_SIZE)).h(px(MARKDOWN_FONT_SIZE)).child(crate::ui::avatar::project_favicon(
                                 move || crate::ui::avatar::ProjectFaviconProject::from_shell(chip.with(|chip| chip.key.environment.clone()), &project),
                                 |_| None,
-                                "size-[1em] self-center",
+                                "size-full self-center",
                                 None,
-                            ).into_element(),
+                            )).into_element(),
                         )
                     }))
                     .child(context_chip_label(move || chip.with(|chip| chip.title.resolve()), hovered, false)))
@@ -874,14 +1067,20 @@ mod tests {
         let Block::Paragraph { content } = &resolved.blocks[0] else {
             panic!("paragraph");
         };
-        let Inline::Custom(external) = &content[0]
-        else {
+        let Inline::Custom(external) = &content[0] else {
             panic!("external link");
         };
         assert_eq!(external.name, "markdown-external-link");
-        assert_eq!(external.attributes.get("title").map(String::as_str), Some("Authored title"));
         assert_eq!(
-            external.content.iter().map(Inline::plain_text).collect::<String>(),
+            external.attributes.get("title").map(String::as_str),
+            Some("Authored title")
+        );
+        assert_eq!(
+            external
+                .content
+                .iter()
+                .map(Inline::plain_text)
+                .collect::<String>(),
             "Settings"
         );
         let Inline::Custom(file) = &content[2] else {

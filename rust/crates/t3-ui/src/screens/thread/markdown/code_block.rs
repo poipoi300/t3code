@@ -139,6 +139,25 @@ pub fn markdown_code_block(
     options: CodeBlockOptions,
     children: impl Fn(Memo<bool>) -> AnyElement + 'static,
 ) -> impl IntoElement {
+    markdown_code_block_inner(props, state, options, children, false)
+}
+
+/// The fence's shared toolbar without a surface or block margins.
+pub fn markdown_code_block_header(
+    props: Memo<CodeBlockProps>,
+    state: CodeBlockState,
+    options: CodeBlockOptions,
+) -> impl IntoElement {
+    markdown_code_block_inner(props, state, options, |_| view().into_element(), true)
+}
+
+fn markdown_code_block_inner(
+    props: Memo<CodeBlockProps>,
+    state: CodeBlockState,
+    options: CodeBlockOptions,
+    children: impl Fn(Memo<bool>) -> AnyElement + 'static,
+    header_only: bool,
+) -> impl IntoElement {
     let wrapped = computed(move || {
         state
             .wrap_override
@@ -199,7 +218,13 @@ pub fn markdown_code_block(
         if diagram.get() {
             Some(untracked(|| {
                 view()
-                    .app_class(tw("my-[0.65rem] border border-transparent"))
+                    .app_class(move || {
+                        Some(tw(if header_only {
+                            ""
+                        } else {
+                            "my-[0.65rem] border border-transparent"
+                        }))
+                    })
                     .child(
                         view()
                             .app_class(tw(
@@ -265,13 +290,22 @@ pub fn markdown_code_block(
                     ))
                     .child(view_toggle.map(|slot| slot()))
                     .child(copy_button());
-                markdown_code_block_frame(
-                    props,
-                    CodeBlockFrameOptions::default(),
-                    actions,
-                    children(wrapped),
-                )
-                .into_element()
+                if header_only {
+                    markdown_code_block_header_frame(
+                        props,
+                        CodeBlockFrameOptions::default(),
+                        actions,
+                    )
+                    .into_element()
+                } else {
+                    markdown_code_block_frame(
+                        props,
+                        CodeBlockFrameOptions::default(),
+                        actions,
+                        children(wrapped),
+                    )
+                    .into_element()
+                }
             }))
         }
     }))
@@ -283,6 +317,17 @@ pub fn markdown_code_block_frame(
     actions: impl IntoElement,
     children: impl IntoElement,
 ) -> impl IntoElement {
+    view().direction(LayoutDirection::Ltr).writing_direction(WritingDirection::Ltr)
+        .app_class(move || Some(tw(&crate::theme::cn([Some("my-[0.65rem] text-start overflow-hidden rounded-lg border border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32"), props.with(|p| p.themed).then_some("bg-(--code-background) border-contrast-border text-code-foreground dark:border-contrast-border dark:bg-(--code-background)")]))))
+        .child(markdown_code_block_header_frame(props, options, actions))
+        .child(children)
+}
+
+fn markdown_code_block_header_frame(
+    props: Memo<CodeBlockProps>,
+    options: CodeBlockFrameOptions,
+    actions: impl IntoElement,
+) -> impl IntoElement {
     let title = options.title.map(|render| render()).unwrap_or_else(|| {
         view()
             .app_class(tw(
@@ -291,14 +336,37 @@ pub fn markdown_code_block_frame(
             .child(markdown_code_block_title_content(props))
             .into_element()
     });
-    // NSH separates the layout direction from the text's bidi base direction.
+    view()
+        // index.css:2195 and 1537; thread-find excludes header chrome in its data model.
+        .app_class(move || {
+            Some(tw(&crate::theme::cn([
+                Some("flex items-center justify-between gap-2 pt-1.5 pr-1.5 pb-0 pl-3 select-none"),
+                Some(if props.with(|p| p.themed) {
+                    "text-code-foreground/72"
+                } else {
+                    "text-contrast-foreground/72"
+                }),
+                options.header_class.as_deref(),
+            ])))
+        })
+        .child(title)
+        .child(actions)
+}
+
+/// A fence split over virtual rows has side borders throughout, and corners only at its ends.
+pub fn markdown_code_chunk_frame(
+    themed: Memo<bool>,
+    first: Memo<bool>,
+    last: Memo<bool>,
+    children: impl IntoElement,
+) -> impl IntoElement {
     view().direction(LayoutDirection::Ltr).writing_direction(WritingDirection::Ltr)
-        .app_class(move || Some(tw(&crate::theme::cn([Some("my-[0.65rem] text-start overflow-hidden rounded-lg border border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32"), props.with(|p| p.themed).then_some("bg-(--code-background) border-contrast-border text-code-foreground dark:border-contrast-border dark:bg-(--code-background)")]))))
-        .child(view()
-            // index.css:2195 and 1537; thread-find excludes header chrome in its data model.
-            .app_class(move || Some(tw(&crate::theme::cn([Some("flex items-center justify-between gap-2 pt-1.5 pr-1.5 pb-0 pl-3 select-none"), Some(if props.with(|p| p.themed) { "text-code-foreground/72" } else { "text-contrast-foreground/72" }), options.header_class.as_deref()]))))
-            .child(title)
-            .child(actions))
+        .app_class(move || Some(tw(&crate::theme::cn([
+            Some("min-w-0 text-start overflow-hidden border-x border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32"),
+            first.get().then_some("rounded-t-lg border-t"),
+            last.get().then_some("rounded-b-lg border-b"),
+            themed.get().then_some("bg-(--code-background) border-contrast-border text-code-foreground dark:border-contrast-border dark:bg-(--code-background)"),
+        ]))))
         .child(children)
 }
 

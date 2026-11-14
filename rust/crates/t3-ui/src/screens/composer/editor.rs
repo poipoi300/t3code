@@ -12,13 +12,14 @@ use nsh_base::rich_editor::{
         EditorState, EditorStateConfig, KeyEvent, Plugin, PluginSpec, Selection, StateError,
         TextSelection, Transaction, TransactionOrigin,
     },
-    transform::ReplaceStep,
+    transform::{Mapping, ReplaceStep},
     view::{EditorSession, NodeViews, RichEditorClasses, RichEditorPastedFiles, rich_editor},
 };
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
 use t3_client::thread_views::{
     composer::{
+        block_shortcuts::ListNormalizer,
         code_pairs::CodePairs,
         editor::{self as document, BuildOptions, RichDocMap},
         input_rules,
@@ -334,6 +335,7 @@ fn remember_document(data: &mut EditorData, node: &Node, json: Value) {
 
 struct EditorData {
     source: SourceEditor,
+    lists: ListNormalizer,
     mode: EditorMode,
     resolvers: ComposerResolvers,
     pairs: Arc<Mutex<CodePairs>>,
@@ -454,6 +456,7 @@ impl ComposerEditor {
         let pos = map.flat_to_pm(map.markdown_to_flat(expanded));
         let data = Arc::new(Mutex::new(EditorData {
             source: SourceEditor::new(value, SourceSelection::caret(pos)),
+            lists: ListNormalizer::default(),
             mode,
             resolvers,
             pairs: Arc::new(Mutex::new(CodePairs::default())),
@@ -758,6 +761,7 @@ impl ComposerEditor {
         )?;
         let mut data = lock(&self.data);
         data.source = source;
+        data.lists = ListNormalizer::default();
         data.mode = mode;
         *lock(&data.pairs) = CodePairs::default();
         data.error = None;
@@ -874,6 +878,9 @@ fn apply_transaction(
 ) -> Result<(), StateError> {
     let old = session.state();
     let composing = session.composing() || tr.get_meta("composition").is_some();
+    // NSH holds preedit outside the document and inserts its commit after composing ends.
+    let composition_commit =
+        !session.composing() && matches!(tr.origin(), Some(TransactionOrigin::Input));
     let controlled = tr.get_meta("composerControlled") == Some(&Value::Bool(true));
     if let Some(error) = tr.get_meta("composerError").and_then(Value::as_str) {
         return Err(invalid(error));
@@ -939,7 +946,55 @@ fn apply_transaction(
             |instance, model| (data.resolvers.model)(instance, model),
         );
     }
-    let range = selection(&state);
+    let mut range = selection(&state);
+    if data.mode == EditorMode::Rich {
+        let mut mapping = Mapping::new();
+        for tr in &applied {
+            mapping.append_mapping(&tr.mapping);
+        }
+        data.lists.map_pending(|position| {
+            let mapped = mapping.map_result(position, 1);
+            (!mapped.deleted).then_some(mapped.pos)
+        });
+        let mut ranges = Vec::new();
+        for map in &mapping.maps {
+            for (from, to) in &mut ranges {
+                *from = map.map(*from, -1);
+                *to = map.map(*to, 1);
+            }
+            map.for_each(|_, _, from, to| ranges.push((from, to)));
+        }
+        let normalized = data.lists.apply(
+            &doc,
+            range,
+            &ranges,
+            composing && !composition_commit,
+            history || controlled,
+        );
+        let converted = normalized.document != doc;
+        doc = normalized.document;
+        range = normalized.selection;
+        if converted {
+            let normalized = tree(state.schema(), &doc)?;
+            let mut tr = replace_native_document(&state, &normalized, range)?;
+            if state.selection().json_id() != "text" {
+                tr.set_selection(state.selection().map(tr.doc(), &tr.mapping));
+            }
+            tr.set_add_to_history(false)
+                .set_stored_marks(state.stored_marks().map(<[_]>::to_vec));
+            drop(data);
+            let (next, transactions) = state.apply_transaction(tr)?;
+            data = lock(shared);
+            for tr in &transactions {
+                lock(&data.pairs).map(|position, bias| {
+                    let mapped = tr.mapping.map_result(position, bias);
+                    (!mapped.deleted).then_some(mapped.pos)
+                });
+            }
+            state = next;
+            applied.extend(transactions);
+        }
+    }
     let takes_before = caret_takes_marks_before(&state);
     let rewrite = if history {
         // Reconcile stale chips restored by undo before drawing them.
@@ -1017,6 +1072,14 @@ fn apply_transaction(
             tr.set_stored_marks(Some(marks.to_vec()));
         }
         let (next, transactions) = state.apply_transaction(tr)?;
+        let mut data = lock(shared);
+        for tr in &transactions {
+            data.lists.map_pending(|position| {
+                let mapped = tr.mapping.map_result(position, 1);
+                (!mapped.deleted).then_some(mapped.pos)
+            });
+        }
+        drop(data);
         state = next;
         applied.extend(transactions);
     }

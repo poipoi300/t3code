@@ -28,7 +28,9 @@ use t3_i18n::{DateFormat, Formats, TimeZone};
 
 use crate::i18n::{Text as I18nText, t};
 use crate::runtime::Shared;
-use crate::screens::thread::blocks::code::{CodeHighlightState, code_chunk_row, highlighted_chunk};
+use crate::screens::thread::blocks::code::{
+    CodeHighlightState, HighlightStatus, HighlightedCode, code_chunk_row, code_syntax_theme,
+};
 use crate::screens::thread::blocks::flatten::{
     Block, BlockId, BlockKind, MessageFlattener, StreamBlocks,
 };
@@ -173,12 +175,43 @@ struct MarkdownLeaf {
     fence: Option<BlockId>,
 }
 
+#[derive(Default)]
+struct CompletedCode {
+    value: Option<(Rc<Block>, String, Shared<HighlightedCode>)>,
+}
+
+impl CompletedCode {
+    fn resolve(
+        &mut self,
+        leaf: &MarkdownLeaf,
+        theme: &str,
+        read: impl FnOnce() -> Shared<HighlightedCode>,
+    ) -> Shared<HighlightedCode> {
+        if !leaf.streaming
+            && let Some((block, previous_theme, value)) = &self.value
+            && Rc::ptr_eq(block, &leaf.block)
+            && previous_theme == theme
+        {
+            return value.clone();
+        }
+        let value = read();
+        self.value = (!leaf.streaming
+            && matches!(
+                value.status,
+                HighlightStatus::Highlighted | HighlightStatus::Plain
+            ))
+        .then(|| (leaf.block.clone(), theme.to_owned(), value.clone()));
+        value
+    }
+}
+
 struct MessageRenderer {
     id: String,
     flattener: MessageFlattener,
     document: StreamBlocks,
     leaves: Vec<Rc<MarkdownLeaf>>,
     inspected_bytes: usize,
+    line_break_blocks: usize,
 }
 
 impl MessageRenderer {
@@ -189,6 +222,7 @@ impl MessageRenderer {
             document: StreamBlocks::default(),
             leaves: Vec::new(),
             inspected_bytes: 0,
+            line_break_blocks: 0,
         }
     }
 
@@ -218,14 +252,18 @@ impl MessageRenderer {
         for block in delta.rows {
             let index = block.id.index;
             let leaf = self.leaf(block, streaming && index + 1 == count);
+            self.line_break_blocks += usize::from(leaf.line_breaks);
             if index == self.leaves.len() {
                 self.leaves.push(leaf.clone());
             } else {
+                self.line_break_blocks -= usize::from(self.leaves[index].line_breaks);
                 self.leaves[index] = leaf.clone();
             }
             updates.push((index, leaf));
         }
-        self.leaves.truncate(count);
+        for leaf in self.leaves.drain(count..) {
+            self.line_break_blocks -= usize::from(leaf.line_breaks);
+        }
         if let Some(index) =
             old_last.filter(|index| *index < count && !updates.iter().any(|(at, _)| at == index))
         {
@@ -308,6 +346,7 @@ impl MessageRenderer {
 struct MessageHandle {
     keys: Signal<Vec<BlockId>>,
     slots: Stored<Vec<Signal<Shared<MarkdownLeaf>>>>,
+    line_breaks: Signal<bool>,
 }
 
 impl PartialEq for MessageHandle {
@@ -336,7 +375,7 @@ impl MessageHandle {
             |id| id.clone(),
             move |id, _| {
                 let slot = self.slots.with(|slots| slots[id.get_untracked().index]);
-                render_markdown_leaf(slot, state)
+                render_markdown_leaf(slot, self.line_breaks, state)
             },
         ))
     }
@@ -344,27 +383,40 @@ impl MessageHandle {
 
 fn render_markdown_leaf(
     leaf: Signal<Shared<MarkdownLeaf>>,
+    line_breaks: Signal<bool>,
     state: AssistantRowsState,
 ) -> impl IntoElement {
     let kind = computed(move || {
         leaf.with(|leaf| match &leaf.block.kind {
-            BlockKind::Header => 0,
+            BlockKind::Header | BlockKind::Definition { .. } => 0,
             BlockKind::Code(code) if code.first => 1,
             BlockKind::Code(_) => 2,
             BlockKind::Output { .. } => 3,
-            _ => 4,
+            BlockKind::Table => 4,
+            _ => 5,
         })
     });
     dynamic(move || {
         let kind = kind.get();
-        untracked(|| match kind {
-            0 => view().into_element(),
-            1 | 2 => render_code_leaf(leaf, state),
-            3 => text(move || SharedString::from(leaf.with(|leaf| leaf.text.to_string())))
-                .select_text()
-                .app_class(tw("font-mono"))
-                .into_element(),
-            _ => render_prose_leaf(leaf).into_element(),
+        untracked(|| {
+            (kind != 0).then(|| match kind {
+                1 | 2 => render_code_leaf(leaf, state),
+                3 => text(move || SharedString::from(leaf.with(|leaf| leaf.text.to_string())))
+                    .select_text()
+                    .app_class(tw("font-mono"))
+                    .into_element(),
+                4 => {
+                    let id = leaf.with_untracked(|leaf| leaf.block.id.clone());
+                    let source = computed(move || leaf.with(|leaf| leaf.text.clone()));
+                    crate::screens::thread::markdown::links::markdown_table_leaf(
+                        source,
+                        id,
+                        state.tables,
+                    )
+                    .into_element()
+                }
+                _ => render_prose_leaf(leaf, line_breaks).into_element(),
+            })
         })
     })
 }
@@ -390,9 +442,16 @@ impl nsh_base::text_view::MarkdownPlugin for PreserveAssistantBreaks {
     }
 }
 
-fn render_prose_leaf(leaf: Signal<Shared<MarkdownLeaf>>) -> impl IntoElement {
-    let presentation =
-        computed(move || leaf.with(|leaf| (leaf.line_breaks, leaf.starts_with_heading)));
+fn render_prose_leaf(
+    leaf: Signal<Shared<MarkdownLeaf>>,
+    line_breaks: Signal<bool>,
+) -> impl IntoElement {
+    let presentation = computed(move || {
+        (
+            line_breaks.get(),
+            leaf.with(|leaf| leaf.starts_with_heading),
+        )
+    });
     let plugins = use_context::<nsh_base::text_view::MarkdownPlugins>().unwrap_or_default();
     dynamic(move || {
         let (preserve, heading) = presentation.get();
@@ -435,8 +494,20 @@ fn render_code_leaf(leaf: Signal<Shared<MarkdownLeaf>>, state: AssistantRowsStat
             .highlights
             .with(|documents| documents.entry(fence).or_default().clone())
     });
-    let streaming = computed(move || leaf.with(|leaf| leaf.streaming));
-    let highlighted = highlighted_chunk(chunk, streaming, highlight_state);
+    let completed = stored(CompletedCode::default());
+    let highlighted = computed(move || {
+        leaf.with(|leaf| {
+            let BlockKind::Code(chunk) = &leaf.block.kind else {
+                return None;
+            };
+            // Completed chunks stop observing the fence's revision once their colors settle.
+            Some(completed.with(|cache| {
+                cache.resolve(leaf, &code_syntax_theme().name, || {
+                    highlight_state.highlighted(chunk)
+                })
+            }))
+        })
+    });
     if !code.first {
         return view().direction(LayoutDirection::Ltr).writing_direction(WritingDirection::Ltr)
             // A fence's continuation has no inter-block margin in the web's single pre.
@@ -499,6 +570,7 @@ pub struct AssistantRowsState {
     copy_resets: Stored<BTreeMap<String, Spawned<()>>>,
     messages: Stored<BTreeMap<String, MessageRenderState>>,
     code_states: Stored<BTreeMap<BlockId, CodeBlockState>>,
+    tables: crate::screens::thread::markdown::links::MarkdownTablesState,
     highlights: Stored<BTreeMap<BlockId, CodeHighlightState>>,
 }
 
@@ -510,6 +582,7 @@ impl Default for AssistantRowsState {
             copy_resets: stored(BTreeMap::new()),
             messages: stored(BTreeMap::new()),
             code_states: stored(BTreeMap::new()),
+            tables: Default::default(),
             highlights: stored(BTreeMap::new()),
         }
     }
@@ -528,6 +601,7 @@ impl AssistantRowsState {
                                 handle: MessageHandle {
                                     keys: signal(Vec::new()),
                                     slots: stored(Vec::new()),
+                                    line_breaks: signal(false),
                                 },
                                 last_message: None,
                                 last_fallback: None,
@@ -549,6 +623,10 @@ impl AssistantRowsState {
                         row.message.streaming,
                         replace,
                     );
+                    let line_breaks = message.renderer.line_break_blocks != 0;
+                    if message.handle.line_breaks.get_untracked() != line_breaks {
+                        message.handle.line_breaks.set(line_breaks);
+                    }
                     self.highlights.with(|documents| {
                         if updates.first().is_some_and(|(index, _)| *index == 0) {
                             for (id, document) in documents.iter() {
@@ -884,26 +962,19 @@ pub fn assistant_copy_button(
                 });
                 view()
                     .element_ref(&anchor)
+                    .app_class(tw("group/assistant-copy"))
                     .tooltip(assistant_tooltip("Copy message"))
-                    .child(dynamic(move || {
-                        let glyph = if copied.get() {
-                            Icon::Check
-                        } else {
-                            Icon::Copy
-                        };
-                        button(
-                            ButtonContent::Custom {
-                                child: icon_with_class(
-                                    glyph,
-                                    if copied.get() {
-                                        "size-3 text-primary"
-                                    } else {
-                                        "size-3 text-muted-foreground"
-                                    },
+                    .child(button(
+                        ButtonContent::Custom {
+                            child: dynamic(move || {
+                                let copied = copied.get();
+                                icon_with_class(
+                                    if copied { Icon::Check } else { Icon::Copy },
+                                    if copied { "size-3 text-primary" } else { "size-3 text-muted-foreground group-hover/assistant-copy:text-foreground" },
                                 )
-                                .into_element(),
-                                label: t("Copy message"),
-                            },
+                            }).into_element(),
+                            label: t("Copy message"),
+                        },
                             ButtonVariant::GhostMuted,
                             ButtonSize::Xs,
                             move || copied.get(),
@@ -927,8 +998,7 @@ pub fn assistant_copy_button(
                                     state.copied(&message_key(&row), anchor);
                                 }
                             },
-                        )
-                    }))
+                    ))
             })
         })
     })
@@ -967,9 +1037,9 @@ pub fn assistant_fork_button(
                             icon_with_class(
                                 Icon::GitFork,
                                 if busy.get() && !reduce_motion() {
-                                    "size-3 text-muted-foreground animate-pulse"
+                                    "size-3 text-contrast-muted-foreground animate-pulse"
                                 } else {
-                                    "size-3 text-muted-foreground"
+                                    "size-3 text-contrast-muted-foreground"
                                 },
                             )
                         })
@@ -1029,10 +1099,11 @@ pub fn assistant_reply_button(
         let on_reply = context.on_reply_to_response.clone()?;
         Some(
             view()
+                .app_class(tw("group/assistant-reply"))
                 .tooltip(assistant_tooltip("Reply to this response"))
                 .child(button(
                     ButtonContent::Custom {
-                        child: icon_with_class(Icon::Reply, "size-3 text-muted-foreground")
+                        child: icon_with_class(Icon::Reply, "size-3 text-muted-foreground group-hover/assistant-reply:text-foreground")
                             .into_element(),
                         label: t("Reply to this response"),
                     },
@@ -1196,6 +1267,145 @@ impl TimestampHost for UiTimestampHost {
 mod tests {
     use super::*;
 
+    #[component]
+    fn HostTimestampFixture() -> impl IntoElement {
+        crate::theme::install(&Default::default());
+        assert_eq!(
+            UiTimestampHost::zone(None),
+            TimeZone::Iana("America/New_York".into())
+        );
+        let entry = Rc::new(serde_json::from_value(serde_json::json!({
+            "id":"zone-answer", "kind":"message", "createdAt":"2026-11-13T12:34:00Z",
+            "message":{"id":"zone-answer","role":"assistant","text":"Host timezone answer","streaming":false,"runId":"run","createdAt":"2026-11-13T12:34:00Z","updatedAt":"2026-11-13T12:34:00Z"}
+        })).expect("canonical host-zone entry"));
+        let rows = t3_client::thread_views::messages_timeline::derive_messages_timeline_rows(
+            &t3_client::thread_views::messages_timeline::MessagesTimelineRowsInput {
+                timeline_entries: vec![entry],
+                latest_run: Some(
+                    t3_client::thread_views::messages_timeline::TimelineLatestRun {
+                        run_id: "run".into(),
+                        status: "completed".into(),
+                        started_at: Some("2026-11-13T12:34:00Z".into()),
+                        completed_at: Some("2026-11-13T12:34:00Z".into()),
+                        turn_ended: None,
+                    },
+                ),
+                ..Default::default()
+            },
+        );
+        let source = rows
+            .into_iter()
+            .find(|row| AssistantRow::from_row(row).is_some())
+            .expect("client assistant row");
+        let row = assistant_row(computed(move || Some(Shared(source.clone()))));
+        let mut context = AssistantRowContext::new(AssistantRowsState::default());
+        context.timestamp_format = computed(|| TimestampFormat::V24Hour);
+        view()
+            .app_class(tw("group/assistant"))
+            .child(assistant_timeline_row(row, context))
+    }
+
+    #[test]
+    fn host_timezone_is_forwarded_and_renders_its_offset_when_supported() {
+        use nsh_engine::{EngineConfig, Root};
+        use nsh_testing::Headless;
+        use std::time::SystemTime;
+        let mut config = EngineConfig {
+            ui_sets: crate::registries(),
+            viewport: size(px(390.0), px(844.0)),
+            clock: nsh_core::time::Clock::manual(
+                SystemTime::UNIX_EPOCH
+                    + Duration::from_millis(
+                        t3_client::time::epoch_ms("2026-11-13T12:34:00Z").expect("fixture time")
+                            as u64,
+                    ),
+            ),
+            ..EngineConfig::new(Root::of::<HostTimestampFixture>())
+        };
+        config.environment.locale_settings.time_zone =
+            nsh_core::platform::TimeZone::parse("America/New_York").expect("host IANA name");
+        let expected = if TimeZone::Iana("America/New_York".into()).is_known() {
+            "07:34"
+        } else {
+            "12:34"
+        };
+        eprintln!("host America/New_York: expected rendered time {expected}");
+        let mut app = Headless::start(config).expect("host timezone fixture");
+        app.wait_for("Host timezone answer")
+            .expect("actual assistant row");
+        app.wait_for(expected)
+            .expect("host zone conversion or declared UTC fallback");
+    }
+
+    #[test]
+    fn completed_colors_skip_fence_reads_but_refresh_edits_themes_and_pending_results() {
+        use std::cell::Cell;
+        fn value(
+            leaf: &MarkdownLeaf,
+            status: HighlightStatus,
+            reads: &Cell<usize>,
+        ) -> Shared<HighlightedCode> {
+            reads.set(reads.get() + 1);
+            Shared(Rc::new(HighlightedCode {
+                text: leaf.text.clone(),
+                lines: Vec::new(),
+                status,
+                foreground: None,
+            }))
+        }
+        let mut renderer = MessageRenderer::new("colors");
+        renderer.update("```rust\nlet value = 1;\n```", false, false);
+        let leaf = renderer.leaves[1].clone();
+        for status in [HighlightStatus::Highlighted, HighlightStatus::Plain] {
+            let reads = Cell::new(0);
+            let mut cache = CompletedCode::default();
+            for _ in 0..128 {
+                let colored =
+                    cache.resolve(&leaf, "light", || value(&leaf, status.clone(), &reads));
+                assert_eq!(colored.text.as_ref(), "let value = 1;");
+            }
+            assert_eq!(
+                reads.get(),
+                1,
+                "a tail's fence revisions do not revisit the completed prefix"
+            );
+            cache.resolve(&leaf, "dark", || value(&leaf, status.clone(), &reads));
+            assert_eq!(reads.get(), 2, "a theme change refreshes colors");
+            renderer.update("```rust\nlet value = 2;\n```", false, true);
+            let edited = renderer.leaves[1].clone();
+            let colored = cache.resolve(&edited, "dark", || value(&edited, status.clone(), &reads));
+            assert_eq!(colored.text.as_ref(), "let value = 2;");
+            assert_eq!(
+                reads.get(),
+                3,
+                "the same BlockId with a new source is not stale"
+            );
+            let live = MarkdownLeaf {
+                streaming: true,
+                ..edited.as_ref().clone()
+            };
+            for _ in 0..2 {
+                cache.resolve(&live, "dark", || value(&live, status.clone(), &reads));
+            }
+            assert_eq!(
+                reads.get(),
+                5,
+                "the streaming tail keeps observing its tokenizer"
+            );
+            let pending = cache.resolve(&edited, "dark", || {
+                value(&edited, HighlightStatus::Unavailable, &reads)
+            });
+            assert_eq!(pending.status, HighlightStatus::Unavailable);
+            let ready = cache.resolve(&edited, "dark", || value(&edited, status.clone(), &reads));
+            assert_eq!(ready.status, status);
+            assert_eq!(
+                reads.get(),
+                7,
+                "an unavailable result cannot freeze out arriving tokens"
+            );
+        }
+    }
+
     #[test]
     fn appends_retain_completed_leaf_identity_and_inspect_only_the_open_tail() {
         let mut source = "A completed paragraph.\n\n".repeat(1000);
@@ -1328,5 +1538,27 @@ mod tests {
                 "{text:?}"
             );
         }
+        let mut renderer = MessageRenderer::new("insight-facts");
+        let mut source = "Before\nwith breaks\n\n★ Insight ─\nBody\n\nAfter".to_owned();
+        renderer.update(&source, true, false);
+        assert_eq!(renderer.line_break_blocks, 1);
+        let before = renderer.leaves[1].clone();
+        assert!(
+            !before.line_breaks,
+            "the reply-wide flag also applies to other blocks"
+        );
+        for _ in 0..100 {
+            let prior_work = renderer.inspected_bytes;
+            source.push('x');
+            renderer.update(&source, true, false);
+            assert_eq!(renderer.line_break_blocks, 1);
+            assert!(Rc::ptr_eq(&before, &renderer.leaves[1]));
+            assert!(renderer.inspected_bytes - prior_work < 110);
+        }
+        renderer.update("Before\nwith breaks", false, true);
+        assert_eq!(
+            renderer.line_break_blocks, 0,
+            "an edit removes the document fact"
+        );
     }
 }

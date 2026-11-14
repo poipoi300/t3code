@@ -371,3 +371,219 @@ fn a_refused_send_keeps_the_draft_and_literal_answers_keep_their_markers() {
         sent(&mut app, 0, "");
     }
 }
+
+#[test]
+fn real_edit_transactions_normalize_changed_list_prefixes_and_history_together() {
+    for (marker, kind) in [
+        ("- ", "bulletList"),
+        ("* ", "bulletList"),
+        ("+ ", "bulletList"),
+        ("3) ", "orderedList"),
+        ("4. ", "orderedList"),
+        ("- [ ] ", "taskList"),
+        ("- [x] ", "taskList"),
+    ] {
+        for content in [
+            "existing text",
+            "[ordinary text]",
+            "[link](url)",
+            "[x]text",
+            "😀 @README.md",
+        ] {
+            let editor =
+                ComposerEditor::new(content, 0, EditorMode::Rich, ComposerResolvers::default())
+                    .expect("editor");
+            let mut tr = editor.session().state().tr();
+            tr.insert_text(marker, Some(1), Some(1));
+            editor
+                .dispatch(tr)
+                .expect("insert prefix in the real adapter");
+            assert_eq!(
+                editor
+                    .session()
+                    .state()
+                    .doc()
+                    .first_child()
+                    .expect("list")
+                    .ty()
+                    .name(),
+                kind,
+                "{marker}{content}"
+            );
+            assert_eq!(editor.read_snapshot().value, format!("{marker}{content}"));
+            assert_eq!(
+                editor.read_snapshot().expanded_cursor,
+                marker.encode_utf16().count()
+            );
+            assert!(editor.undo().expect("undo insertion and conversion"));
+            assert_eq!(
+                editor
+                    .session()
+                    .state()
+                    .doc()
+                    .first_child()
+                    .expect("paragraph")
+                    .ty()
+                    .name(),
+                "paragraph"
+            );
+            assert_eq!(editor.read_snapshot().value, content);
+            assert!(editor.redo().expect("redo insertion and conversion"));
+            assert_eq!(
+                editor
+                    .session()
+                    .state()
+                    .doc()
+                    .first_child()
+                    .expect("list")
+                    .ty()
+                    .name(),
+                kind
+            );
+            assert_eq!(editor.read_snapshot().value, format!("{marker}{content}"));
+            assert_eq!(
+                editor.read_snapshot().expanded_cursor,
+                marker.encode_utf16().count()
+            );
+        }
+    }
+}
+
+#[test]
+fn pending_list_prefixes_map_through_composition_and_history_clears_them() {
+    let editor = ComposerEditor::new(
+        "head\n-get md",
+        0,
+        EditorMode::Rich,
+        ComposerResolvers::default(),
+    )
+    .expect("editor");
+    let session = editor.session();
+    let mut tr = session.state().tr();
+    tr.insert_text(" ", Some(8), Some(8))
+        .set_meta("composition", serde_json::json!(1));
+    editor
+        .dispatch(tr)
+        .expect("edit a marker during composition");
+    assert_eq!(
+        session
+            .state()
+            .doc()
+            .last_child()
+            .expect("literal paragraph")
+            .ty()
+            .name(),
+        "paragraph"
+    );
+    let mut tr = session.state().tr();
+    tr.insert_text("😀", Some(1), Some(1))
+        .set_meta("composition", serde_json::json!(1));
+    editor
+        .dispatch(tr)
+        .expect("move the pending marker through a UTF-16 edit");
+    assert_eq!(
+        session
+            .state()
+            .doc()
+            .last_child()
+            .expect("still literal")
+            .ty()
+            .name(),
+        "paragraph"
+    );
+    editor
+        .dispatch(session.state().tr())
+        .expect("composition-end flush");
+    assert_eq!(
+        session
+            .state()
+            .doc()
+            .last_child()
+            .expect("normalized list")
+            .ty()
+            .name(),
+        "bulletList"
+    );
+    assert_eq!(editor.read_snapshot().value, "😀head\n- get md");
+
+    let editor =
+        ComposerEditor::new("", 0, EditorMode::Rich, ComposerResolvers::default()).expect("editor");
+    let session = editor.session();
+    let mut tr = session.state().tr();
+    tr.time = 1_000;
+    tr.insert_text("- ", None, None);
+    editor.dispatch(tr).expect("unfinished gesture");
+    assert_eq!(
+        session
+            .state()
+            .doc()
+            .first_child()
+            .expect("literal marker")
+            .ty()
+            .name(),
+        "paragraph"
+    );
+    let mut tr = session.state().tr();
+    tr.time = 3_000;
+    tr.insert_text("text", None, None);
+    editor.dispatch(tr).expect("complete gesture");
+    assert_eq!(
+        session
+            .state()
+            .doc()
+            .first_child()
+            .expect("list")
+            .ty()
+            .name(),
+        "bulletList"
+    );
+    assert!(editor.undo().expect("restore literal marker"));
+    assert_eq!(editor.read_snapshot().value, "- ");
+    editor
+        .dispatch(session.state().tr())
+        .expect("selection-only transaction");
+    assert_eq!(
+        session
+            .state()
+            .doc()
+            .first_child()
+            .expect("history stays literal")
+            .ty()
+            .name(),
+        "paragraph"
+    );
+    let mut tr = session.state().tr();
+    tr.insert_text("go", None, None);
+    editor.dispatch(tr).expect("complete the restored gesture");
+    assert_eq!(
+        session
+            .state()
+            .doc()
+            .first_child()
+            .expect("completed gesture becomes a list")
+            .ty()
+            .name(),
+        "bulletList"
+    );
+    assert_eq!(editor.read_snapshot().value, "- go");
+
+    let editor =
+        ComposerEditor::new("", 0, EditorMode::Rich, ComposerResolvers::default()).expect("editor");
+    let mut tr = editor.session().state().tr();
+    tr.insert_text("- 日本", None, None)
+        .set_origin(nsh_base::rich_editor::state::TransactionOrigin::Input)
+        .set_meta("composition", serde_json::json!(2));
+    editor.dispatch(tr).expect("native committed IME insertion");
+    assert_eq!(
+        editor
+            .session()
+            .state()
+            .doc()
+            .first_child()
+            .expect("committed list")
+            .ty()
+            .name(),
+        "bulletList"
+    );
+    assert_eq!(editor.read_snapshot().value, "- 日本");
+}

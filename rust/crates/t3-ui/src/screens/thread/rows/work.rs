@@ -6,7 +6,8 @@ use std::rc::Rc;
 use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
 use t3_client::thread_views::messages_timeline::work_entry::{
-    action as tool_group_action, has_detail, plain_output, trim as js_trim,
+    action as tool_group_action, has_detail, notification_child_thread_id, plain_output,
+    thread_read_target_id, trim as js_trim,
 };
 use t3_client::thread_views::messages_timeline::{
     MessagesTimelineRow, MessagesTimelineRowContent, live_work_entry_label,
@@ -21,8 +22,8 @@ use t3_client::view_logic::session::{
 };
 use t3_client::work_log::{
     has_question_answer, live_thought_line, question_answer_preview, question_answer_text,
-    question_text_preview, resolve_work_entry_tool_presentation,
-    turn_item_needs_detail_fetch, work_entry_viewed_image_path,
+    question_text_preview, resolve_work_entry_tool_presentation, turn_item_needs_detail_fetch,
+    work_entry_viewed_image_path,
 };
 use t3_client::workspace::project_ops::paths::format_workspace_relative_path;
 use t3_contracts::orchestration_v2::{
@@ -33,12 +34,23 @@ use t3_contracts::settings::TimestampFormat;
 use t3_i18n::{DateFormat, Formats, TimeZone};
 
 use crate::i18n::{Text as I18nText, Value, t, tr};
-use crate::runtime::Shared;
+use crate::runtime::backend::HostClient;
+use crate::runtime::{Rt, Shared};
 use crate::screens::thread::blocks::flatten::{BlockId, BlockKind, MessageFlattener};
-use crate::screens::thread::markdown::base::chat_markdown;
+use crate::screens::thread::markdown::base::{
+    chat_markdown, chat_markdown_blocks, chat_markdown_leaf, starts_with_heading,
+};
+use crate::state::nav::{Navigator, Route};
 use crate::theme::{cn, tw};
+use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
+use t3_client::thread_views::messages_timeline::{
+    thread_read_label_prefix, thread_read_target_title,
+};
+use t3_client::thread_views::threads::turn_item_presentation::workspace_preparation_retry_run_ids;
+use t3_client::thread_views::timeline_events::resolved_id;
+use t3_client::types::{ThreadId, ThreadKey};
 
 /// Construct above the virtual list; both disclosure and markdown state survive recycling.
 #[derive(Clone, Copy)]
@@ -46,6 +58,7 @@ pub struct WorkRowState {
     expanded: Signal<BTreeSet<String>>,
     reasoning: Stored<BTreeMap<String, ReasoningRender>>,
     owner: Owner,
+    threads: Stored<BTreeMap<ThreadKey, WorkThread>>,
 }
 
 impl Default for WorkRowState {
@@ -54,6 +67,7 @@ impl Default for WorkRowState {
             expanded: signal(BTreeSet::new()),
             reasoning: stored(BTreeMap::new()),
             owner: Owner::current(),
+            threads: stored(BTreeMap::new()),
         }
     }
 }
@@ -97,7 +111,6 @@ pub struct WorkEntryRow {
     pub workspace_root: Option<String>,
     pub grouped: bool,
     pub pending_approval: bool,
-    pub thread_read_label: Option<I18nText>,
     pub viewed_images: Rc<Vec<String>>,
 }
 
@@ -112,7 +125,6 @@ impl WorkEntryRow {
             workspace_root: None,
             grouped: false,
             pending_approval: false,
-            thread_read_label: None,
             viewed_images: Rc::default(),
         }
     }
@@ -192,7 +204,6 @@ impl WorkEntryRow {
             workspace_root: None,
             grouped,
             pending_approval,
-            thread_read_label: None,
             viewed_images: Rc::new({
                 let mut seen = BTreeSet::new();
                 entries
@@ -220,7 +231,6 @@ fn utf16_prefix(source: &str, limit: usize) -> &str {
 pub type RowSlot = Rc<dyn Fn(&WorkEntryRow) -> AnyElement>;
 pub type ToggleAction = Rc<dyn Fn(&str, bool)>;
 pub type ContentReady = Rc<dyn Fn(&str)>;
-pub type IconRenderer = Rc<dyn Fn(&WorkLogEntry, &str, &str) -> AnyElement>;
 pub type ViewedImageRenderer = Rc<dyn Fn(t3_client::work_log::ViewedImageAsset) -> AnyElement>;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -257,33 +267,111 @@ pub fn viewed_images_timeline_row(
 #[derive(Clone)]
 pub struct WorkRowContext {
     pub state: WorkRowState,
+    nav: Option<Navigator>,
+    thread: Option<WorkThread>,
     pub timestamp_format: Memo<TimestampFormat>,
     pub on_toggle_entry: Option<ToggleAction>,
     pub on_content_ready: ContentReady,
-    pub icon: Option<IconRenderer>,
     pub image: Option<RowSlot>,
     pub question_attachments: Option<RowSlot>,
     pub pending_approval: Option<RowSlot>,
     pub subagent_notification: Option<RowSlot>,
-    pub thread_read: Option<RowSlot>,
-    pub trailing_thread_links: Option<RowSlot>,
 }
 
 impl WorkRowContext {
     pub fn new(state: WorkRowState) -> Self {
+        let nav = use_context::<Navigator>();
+        let key = nav.and_then(|nav| nav.top().thread().cloned());
+        let thread = key.map(|key| {
+            state.owner.run(|| {
+                state.threads.with(|threads| {
+                    threads
+                        .entry(key.clone())
+                        .or_insert_with(|| WorkThread::new(key))
+                        .clone()
+                })
+            })
+        });
         Self {
+            nav,
+            thread,
             state,
             timestamp_format: computed(|| TimestampFormat::Locale),
             on_toggle_entry: None,
             on_content_ready: Rc::new(|_| {}),
-            icon: None,
             image: None,
             question_attachments: None,
             pending_approval: None,
             subagent_notification: None,
-            thread_read: None,
-            trailing_thread_links: None,
         }
+    }
+}
+
+#[derive(Clone)]
+struct WorkThread {
+    key: ThreadKey,
+    client: Option<HostClient>,
+    shell: Memo<Option<Shared<t3_client::state::sharing::SharedShellSnapshot>>>,
+    retrying: Signal<BTreeSet<String>>,
+    retry_runs: Memo<
+        Vec<t3_contracts::orchestration_v2_id_table::IdOrIndex<t3_contracts::base_schemas::RunId>>,
+    >,
+}
+
+impl WorkThread {
+    fn new(key: ThreadKey) -> Self {
+        let runtime = use_context::<Rt>();
+        let shell = runtime
+            .map(|rt| rt.store.shell(key.environment.clone()))
+            .unwrap_or_else(|| computed(|| None));
+        let retry_runs = runtime
+            .map(|rt| {
+                rt.store.thread_state(key.clone(), |thread| {
+                    thread
+                        .and_then(|thread| thread.projection.as_ref())
+                        .map(|projection| {
+                            workspace_preparation_retry_run_ids(
+                                &projection.runs,
+                                &projection.turn_items,
+                            )
+                        })
+                        .unwrap_or_default()
+                })
+            })
+            .unwrap_or_else(|| computed(Vec::new));
+        Self {
+            key,
+            shell,
+            retry_runs,
+            retrying: signal(BTreeSet::new()),
+            client: runtime.and_then(|rt| rt.backend().client()),
+        }
+    }
+
+    fn read_target(
+        &self,
+        entry: &WorkLogEntry,
+        preview: &str,
+    ) -> Option<(String, String, ThreadKey)> {
+        let id = thread_read_target_id(entry)?;
+        let prefix = thread_read_label_prefix(preview)?;
+        let title = self.shell.with(|shell| {
+            let shell = shell.as_ref()?;
+            let target = shell.threads.iter().find(|thread| thread.id.0 == id)?;
+            thread_read_target_title(
+                &target.title,
+                target.archived_at.as_ref().map(|at| at.0.as_str()),
+                target.deleted_at.as_ref().map(|at| at.0.as_str()),
+            )
+        })?;
+        Some((
+            prefix,
+            title,
+            ThreadKey {
+                environment: self.key.environment.clone(),
+                thread: ThreadId(id),
+            },
+        ))
     }
 }
 
@@ -456,11 +544,13 @@ fn work_entry_header(row: &WorkEntryRow, expanded: bool, context: &WorkRowContex
     let answer = question
         .filter(|answer| has_question_answer(answer))
         .map(question_answer_preview);
+    let thread_label = (!reasoning)
+        .then(|| context.thread.as_ref()?.read_target(entry, &preview))
+        .flatten();
     let accessible = [
-        row.thread_read_label
+        thread_label
             .as_ref()
-            .map(I18nText::resolve)
-            .map(|label| label.to_string())
+            .map(|(prefix, title, _)| format!("{prefix} “{title}”"))
             .unwrap_or(preview.clone()),
         answer.clone().unwrap_or_default(),
     ]
@@ -502,19 +592,42 @@ fn work_entry_header(row: &WorkEntryRow, expanded: bool, context: &WorkRowContex
     } else {
         work_entry_icon_name(entry)
     };
-    let glyph = context.icon.as_ref().map_or_else(
-        || fallback_icon(&icon_name, icon_class, true),
-        |render| render(entry, &icon_name, icon_class),
-    );
-    let label = if reasoning && !expanded {
-        row.compact_reasoning
-            .as_deref()
-            .unwrap_or(&preview)
-            .to_owned()
-    } else {
-        preview.clone()
-    };
-    let label = view()
+    let tool_icon = (!warning && !destructive)
+        .then(|| {
+            entry
+                .presentation
+                .get("toolIcon")
+                .filter(|icon| !icon.is_null())
+                .or_else(|| {
+                    entry
+                        .presentation
+                        .get("toolSource")?
+                        .get("icon")
+                        .filter(|icon| !icon.is_null())
+                })
+        })
+        .flatten();
+    let failure_label = t("Tool call failed");
+    untracked(|| {
+        let glyph = tool_activity_icon(tool_icon, &icon_name, icon_class);
+        let glyph = if failed {
+            view()
+                .role(AccessibilityRole::Image)
+                .optional_label(Some(SharedString::from(failure_label)))
+                .child(glyph)
+                .into_element()
+        } else {
+            glyph
+        };
+        let label = if reasoning && !expanded {
+            row.compact_reasoning
+                .as_deref()
+                .unwrap_or(&preview)
+                .to_owned()
+        } else {
+            preview.clone()
+        };
+        let label = view()
         .app_class(tw("min-w-0 flex-1 overflow-hidden"))
         .child(
             view()
@@ -522,13 +635,21 @@ fn work_entry_header(row: &WorkEntryRow, expanded: bool, context: &WorkRowContex
                     "flex min-w-0 w-full items-baseline gap-1.5 text-sm leading-relaxed",
                 ))
                 .child(
-                    text(SharedString::from(label))
-                        .number_of_lines(1u32)
-                        .app_class(tw(&cn([
-                            Some("min-w-0 truncate"),
-                            answer.is_none().then_some("flex-1"),
-                            Some(heading),
-                        ]))),
+                    match thread_label {
+                        Some((prefix, title, target)) => {
+                            let nav = context.nav;
+                            view().app_class(tw("flex min-w-0"))
+                                .child(text(SharedString::from(format!("{prefix} “"))).app_class(tw("shrink-0")))
+                                .child(nsh_base::button().role(Some(AccessibilityRole::Link)).accessibility_label(Some(SharedString::from(title.clone())))
+                                    .app_class(tw("min-w-0 truncate rounded-sm text-foreground underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-ring"))
+                                    .on_press(move || { if let Some(nav) = nav { nav.open(Route::Thread(target.clone())); } })
+                                    .child(text(SharedString::from(title)).number_of_lines(1u32)))
+                                .child(text(SharedString::from("”")).app_class(tw("shrink-0"))).into_element()
+                        }
+                        None => text(SharedString::from(label)).number_of_lines(1u32).app_class(tw(&cn([
+                            Some("min-w-0 truncate"), answer.is_none().then_some("flex-1"), Some(heading),
+                        ]))).into_element(),
+                    },
                 )
                 .child(answer.map(|answer| {
                     text(SharedString::from(answer))
@@ -543,58 +664,111 @@ fn work_entry_header(row: &WorkEntryRow, expanded: bool, context: &WorkRowContex
                         ])))
                 })),
         );
-    let trailing = view()
-        .app_class(tw("flex items-center gap-1.5"))
-        .child(can_expand.then(|| {
-            view()
-                .app_class(tw("flex size-4 shrink-0 items-center justify-center"))
-                .child(icon(
-                    if expanded {
-                        Icon::ChevronDown
-                    } else {
-                        Icon::ChevronRight
-                    },
-                    12.0,
-                    || crate::theme::palette().icon_muted.opacity(0.7),
-                ))
-        }))
-        .child(timeline_row_timestamp(
-            entry.created_at.clone(),
-            context.timestamp_format,
-            false,
-        ));
-    let line = work_log_line(glyph, label.into_element(), trailing.into_element(), false);
-    let header = if can_expand {
-        let entry_id = entry.id.clone();
-        let state = context.state;
-        let toggle = context.on_toggle_entry.clone();
-        nsh_base::button().accessibility_label(Some(SharedString::from(accessible)))
+        let trailing = view()
+            .app_class(tw("flex items-center gap-1.5"))
+            .child(thread_actions(entry, context))
+            .child((failed && !destructive && tool_icon.is_some()).then(|| {
+                view()
+                    .test_id("work-tool-failure")
+                    .app_class(tw("size-3 shrink-0"))
+                    .child(icon(Icon::X, 12.0, || {
+                        crate::theme::current_tokens()
+                            .color("tool-error-icon")
+                            .unwrap_or(crate::theme::palette().destructive)
+                            .opacity(0.4)
+                    }))
+            }))
+            .child(can_expand.then(|| {
+                view()
+                    .app_class(tw("flex size-4 shrink-0 items-center justify-center"))
+                    .child(icon(
+                        if expanded {
+                            Icon::ChevronDown
+                        } else {
+                            Icon::ChevronRight
+                        },
+                        12.0,
+                        || crate::theme::palette().icon_muted.opacity(0.7),
+                    ))
+            }))
+            .child(timeline_row_timestamp(
+                entry.created_at.clone(),
+                context.timestamp_format,
+                false,
+            ));
+        let line = work_log_line(glyph, label.into_element(), trailing.into_element(), false);
+        if can_expand {
+            let entry_id = entry.id.clone();
+            let state = context.state;
+            let toggle = context.on_toggle_entry.clone();
+            view().role(AccessibilityRole::Button).accessibility_state(nsh_core::AccessibilityState { expanded: Some(expanded), ..Default::default() }).optional_label(Some(SharedString::from(accessible)))
             .app_class(tw("w-full cursor-pointer text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"))
-            .test_id(&format!("work-entry-{}", entry.id)).on_press(move || {
+            .test_id(&format!("work-entry-{}", entry.id)).on_press(move |_: &()| {
                 let next = !state.expanded(&entry_id);
                 state.set_expanded(&entry_id, next);
                 if let Some(toggle) = &toggle { toggle(&entry_id, !next); }
             }).child(line).into_element()
-    } else {
-        line.into_element()
+        } else {
+            line.into_element()
+        }
+    })
+}
+
+fn thread_actions(entry: &WorkLogEntry, context: &WorkRowContext) -> Option<AnyElement> {
+    let (nav, thread) = context.nav.zip(context.thread.as_ref())?;
+    let target = match entry.projected_item.as_ref().map(|projected| &projected.item) {
+        Some(OrchestrationV2TurnItem::ThreadCreated(created)) => resolved_id(&created.target_thread_id).map(|id| (
+            id.to_owned(), tr("Open {title}", &[("title", Value::from(created.title.clone().unwrap_or_else(|| t("created thread"))))]), t("Open chat"),
+            "shrink-0 rounded-sm text-sm text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+        )),
+        Some(OrchestrationV2TurnItem::Notification(notification)) => notification_child_thread_id(&notification.source).map(|id| (
+            id.0.clone(), t("Open subagent thread"), t("Open subagent"),
+            "inline-flex shrink-0 cursor-pointer items-center gap-0.5 font-medium underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-ring text-foreground",
+        )),
+        _ => None,
     };
-    // Native button activation excludes selectable details and independently interactive links.
-    view()
-        .child(header)
-        .child(
-            context
-                .trailing_thread_links
-                .as_ref()
-                .map(|render| render(row)),
-        )
-        .child(
-            context
-                .thread_read
-                .as_ref()
-                .filter(|_| row.thread_read_label.is_some())
-                .map(|render| render(row)),
-        )
-        .into_element()
+    let (id, accessible, label, class) = target?;
+    let target = ThreadKey {
+        environment: thread.key.environment.clone(),
+        thread: ThreadId(id),
+    };
+    Some(
+        nsh_base::button()
+            .accessibility_label(Some(SharedString::from(accessible)))
+            .app_class(tw(class))
+            .on_press(move || nav.open(Route::Thread(target.clone())))
+            .child(text(SharedString::from(label)).number_of_lines(1u32))
+            .into_element(),
+    )
+}
+
+fn tool_activity_icon(
+    metadata: Option<&serde_json::Value>,
+    fallback: &str,
+    class: &str,
+) -> AnyElement {
+    let source = metadata.and_then(|icon| {
+        serde_json::from_value::<t3_contracts::provider_runtime::ToolActivityIcon>(icon.clone())
+            .ok()
+    });
+    let fallback = fallback.to_owned();
+    let class = class.to_owned();
+    let failed = signal(false);
+    let loaded = signal(false);
+    dynamic(move || {
+        let url = source.as_ref().and_then(|icon| t3_client::thread_views::messages_timeline::work_entry::tool_icon_url(icon, dark()));
+        let Some(url) = url.filter(|_| !failed.get()) else { return fallback_icon(&fallback, &class, true); };
+        let fallback = fallback.clone();
+        let class = class.clone();
+        untracked(|| view().app_class(tw("relative size-4"))
+            .child(when(move || !loaded.get(), move || fallback_icon(&fallback, &class, true)))
+            .child(image(url).app_class(tw("absolute inset-0 size-4 overflow-hidden rounded-xs bg-background dark:opacity-70"))
+                .opacity(move || if loaded.get() { if dark() { 0.7_f32 } else { 1.0 } } else { 0.0 })
+                .accessible(false).test_id("work-tool-icon")
+                .on_load(move |_: &Size<DevicePixels>| loaded.set(true))
+                .on_error(move |_: &str| { failed.set(true); }))
+            .into_element())
+    }).into_element()
 }
 
 fn can_expand_projected_item(row: &WorkEntryRow, preview: &str) -> bool {
@@ -636,7 +810,7 @@ fn can_expand_projected_item(row: &WorkEntryRow, preview: &str) -> bool {
 }
 
 fn expanded_tool_content(row: &WorkEntryRow) -> AnyElement {
-    // TL-OUTPUT's inspector/full output and retry wait for ClientRuntime/Backend U8.
+    // TL-OUTPUT owns the projected inspector and full-output fetch using the client detail service.
     if row.entry.projected_item.is_some() && row.plain_output.is_none() {
         return view().into_element();
     }
@@ -735,7 +909,7 @@ impl ReasoningRender {
         self.handle.slots.with(|slots| {
             for block in &delta.rows {
                 let text: Rc<str> = match &block.kind {
-                    BlockKind::Header => Rc::from(""),
+                    BlockKind::Header | BlockKind::Definition { .. } => Rc::from(""),
                     BlockKind::Document if streaming => Rc::from(""),
                     BlockKind::Code(code) => Rc::from(format!(
                         "\x60\x60\x60{}\n{}\n\x60\x60\x60",
@@ -796,17 +970,26 @@ pub fn reasoning_trace_content(
         dynamic(move || {
             handle.get().map(|handle| {
                 untracked(|| {
-                    each(
+                    chat_markdown_blocks().child(each(
                         move || handle.keys.get(),
                         |id| id.clone(),
                         move |id, _| {
                             let slot = handle.slots.with(|slots| slots[id.get_untracked().index]);
-                            chat_markdown(
-                                move || slot.with(|leaf| leaf.text.to_string()),
-                                move || slot.with(|leaf| leaf.streaming),
+                            let visible = computed(move || slot.with(|leaf| !leaf.text.is_empty()));
+                            when(
+                                move || visible.get(),
+                                move || {
+                                    chat_markdown_leaf(
+                                        slot.with_untracked(|leaf| starts_with_heading(&leaf.text)),
+                                        chat_markdown(
+                                            move || slot.with(|leaf| leaf.text.to_string()),
+                                            move || slot.with(|leaf| leaf.streaming),
+                                        ),
+                                    )
+                                },
                             )
                         },
-                    )
+                    ))
                 })
             })
         })
@@ -909,13 +1092,101 @@ fn failed_work_entry(
         text(SharedString::from(error.failure.message.0.clone()))
             .app_class(tw("ms-7 py-1 text-sm leading-relaxed text-foreground/80"))
     });
-    view().app_class(tw("group/timeline-row relative w-full min-w-0 rounded-md px-0.5 py-0.5 text-left transition-colors"))
+    let retry = workspace_preparation_retry(error, context);
+    untracked(|| {
+        view().app_class(tw("group/timeline-row relative w-full min-w-0 rounded-md px-0.5 py-0.5 text-left transition-colors"))
         .child(work_log_line(fallback_icon("circle-alert", color, false), text(SharedString::from(label)).app_class(tw(&cn([Some("text-sm font-medium"), Some(color)]))).into_element(),
             timeline_row_timestamp(row.entry.created_at.clone(), context.timestamp_format, true).into_element(), true))
-        .child(detail).into_element()
+        .child(detail).child(retry).into_element()
+    })
+}
+
+fn workspace_preparation_retry(
+    error: &TurnItemError,
+    context: &WorkRowContext,
+) -> Option<AnyElement> {
+    let thread = context.thread.as_ref()?;
+    let client = thread.client.clone()?;
+    let run = error.run_id.as_ref()?;
+    if error.failure.code.as_ref().map(|code| code.0.as_str())
+        != Some("workspace_preparation_failed")
+        || !thread.retry_runs.with(|runs| runs.contains(run))
+    {
+        return None;
+    }
+    let run = resolved_id(run)?.to_owned();
+    let key = thread.key.clone();
+    let retrying = thread.retrying;
+    let owner = context.state.owner;
+    Some(untracked(|| {
+        view()
+            .app_class(tw("ms-7 pb-1"))
+            .child(button(
+                ButtonContent::IconLabel {
+                    icon: Icon::RotateCcw,
+                    label: t("Retry"),
+                },
+                ButtonVariant::Outline,
+                ButtonSize::Xs,
+                || false,
+                move || {
+                    if retrying.with(|runs| runs.contains(&run)) {
+                        return;
+                    }
+                    retrying.update(|runs| {
+                        runs.insert(run.clone());
+                    });
+                    let client = client.clone();
+                    let key = key.clone();
+                    let run = run.clone();
+                    owner.run(|| {
+                        spawn(async move {
+                            if let Err(error) =
+                                crate::runtime::services::thread_ops::retry_workspace_preparation_run(
+                                    &client, key, t3_contracts::base_schemas::RunId(run.clone()),
+                                )
+                                .await
+                            {
+                                log::warn!("workspace preparation retry failed: {error}");
+                            }
+                            if let Some(mut runs) = retrying.try_get() {
+                                runs.remove(&run);
+                                retrying.try_set(runs);
+                            }
+                        })
+                    });
+                },
+            ))
+            .into_element()
+    }))
+}
+
+#[derive(Clone, PartialEq, Props)]
+struct WorkTimestampProps {
+    content: Prop<Option<Renderer<bool>>>,
+}
+
+#[component]
+fn WorkTimestamp(props: WorkTimestampProps) -> impl IntoElement {
+    let content = props.content.get_untracked();
+    // A popup's props must live with its native host, beyond the row builder's reactive region.
+    content.map_or_else(
+        || view().into_element(),
+        |content| content.render("work-timestamp", false).into_element(),
+    )
 }
 
 pub fn timeline_row_timestamp(
+    created_at: String,
+    format: Memo<TimestampFormat>,
+    always_visible: bool,
+) -> impl IntoElement {
+    work_timestamp().content(move |_: &bool| {
+        render_timeline_row_timestamp(created_at.clone(), format, always_visible).into_element()
+    })
+}
+
+fn render_timeline_row_timestamp(
     created_at: String,
     format: Memo<TimestampFormat>,
     always_visible: bool,
@@ -1115,7 +1386,7 @@ fn browser_app_icon() -> ImageSrc {
       stroke-width="1.9"
       stroke-linecap="round"
       stroke-linejoin="round"
-      aria-hidden
+      aria-hidden="true"
     >
       <path d="M8.5 19H7.2C4.4 19 3 17.5 3 14.6V7.4C3 4.5 4.5 3 7.4 3h8.2C18.5 3 20 4.5 20 7.4v2.4" />
       <circle cx="7.4" cy="7.2" r="0.75" fill="currentColor" stroke="none" />

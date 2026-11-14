@@ -258,11 +258,7 @@ impl AppendState {
         let header_bytes = header.len();
         let header_utf16 = header.encode_utf16().count();
         let before = self.local.work();
-        let local = if self.output {
-            self.local.update_output(&source)
-        } else {
-            self.local.update(&source)
-        };
+        let local = self.local.parse_tail(&source, self.output);
         let after = self.local.work();
         self.work.add(FlattenWork {
             indexed_bytes: after.indexed_bytes - before.indexed_bytes,
@@ -408,7 +404,7 @@ impl AppendState {
         }
     }
 
-    fn publish_definitions(&mut self, local: &MessageBlocks) {
+    fn publish_definitions(&mut self, local: &TailBlocks) {
         let header_bytes = self
             .continuation
             .as_ref()
@@ -631,29 +627,21 @@ pub struct Block {
     pub text: Option<Rc<str>>,
 }
 
-/// Whole-message data remains available when no corresponding view is mounted.
+/// Cached parser data for the open tail window.
 #[derive(Clone, Debug)]
-pub struct MessageBlocks {
+struct TailBlocks {
     pub source: Rc<str>,
     pub blocks: Rc<Vec<Rc<Block>>>,
-    pub keys: Rc<Vec<BlockId>>,
     /// Resolve links/footnotes against this context, not a row in isolation.
     pub definitions: Rc<str>,
-    pub document_wide: bool,
     pub definition_nodes: Rc<Vec<Rc<MarkdownNode>>>,
 }
 
-impl MessageBlocks {
-    pub fn source_of(&self, block: &Block) -> Option<&str> {
-        self.source.get(block.source.bytes.clone())
-    }
-}
-
-/// Keep one instance per message outside recycled cells; use update_output for plain tool output.
+/// Keep one instance per message outside recycled cells; initialize plain output with replace_output.
 pub struct MessageFlattener {
     message_id: String,
     parser: IncrementalMarkdownParser,
-    previous: Option<MessageBlocks>,
+    previous: Option<TailBlocks>,
     stable: usize,
     output: bool,
     index: SourceIndex,
@@ -675,15 +663,6 @@ impl MessageFlattener {
         }
     }
 
-    /// Full-snapshot compatibility API. Streaming parents call `ingest` instead.
-    pub fn update(&mut self, source: &str) -> MessageBlocks {
-        self.flatten(source, false)
-    }
-
-    pub fn update_output(&mut self, source: &str) -> MessageBlocks {
-        self.flatten(source, true)
-    }
-
     pub fn work(&self) -> FlattenWork {
         let mut work = self.work;
         if let Some(stream) = &self.stream {
@@ -703,12 +682,20 @@ impl MessageFlattener {
 
     /// Use this for edits to settled content; an append guard cannot inspect that prefix.
     pub fn replace(&mut self, message_id: &str, source: &str) -> BlockDelta {
+        self.replace_mode(message_id, source, false)
+    }
+
+    pub fn replace_output(&mut self, message_id: &str, source: &str) -> BlockDelta {
+        self.replace_mode(message_id, source, true)
+    }
+
+    fn replace_mode(&mut self, message_id: &str, source: &str, output: bool) -> BlockDelta {
         let old_count = self
             .stream
             .as_ref()
             .map_or(0, |state| state.document.block_count());
         self.message_id = message_id.into();
-        self.stream = Some(AppendState::new(message_id, false));
+        self.stream = Some(AppendState::new(message_id, output));
         let mut result = self.append(source);
         result.old_count = old_count;
         result.changed_from = 0;
@@ -748,11 +735,7 @@ impl MessageFlattener {
         let source = format!("{header}{}", state.pending);
         state.work.copied_bytes += source.len();
         let before = state.local.work();
-        let local = if state.output {
-            state.local.update_output(&source)
-        } else {
-            state.local.update(&source)
-        };
+        let local = state.local.parse_tail(&source, state.output);
         let after = state.local.work();
         state.work.add(FlattenWork {
             indexed_bytes: after.indexed_bytes - before.indexed_bytes,
@@ -805,7 +788,7 @@ impl MessageFlattener {
         }
     }
 
-    fn flatten(&mut self, source: &str, output: bool) -> MessageBlocks {
+    fn parse_tail(&mut self, source: &str, output: bool) -> TailBlocks {
         if self.output == output
             && let Some(previous) = &self.previous
             && previous.source.as_ref() == source
@@ -923,13 +906,6 @@ impl MessageFlattener {
             .map(|block| block.text.as_ref().map_or(0, |text| text.len()))
             .sum::<usize>();
         self.work.visited_rows += blocks.len().saturating_sub(stable);
-        self.work.visited_rows += blocks.len();
-        let keys: Vec<_> = blocks.iter().map(|b| b.id.clone()).collect();
-        let keys = self
-            .previous
-            .as_ref()
-            .filter(|p| p.keys.as_ref() == &keys)
-            .map_or_else(|| Rc::new(keys), |p| p.keys.clone());
         if let Some(previous) = &self.previous {
             self.work.visited_rows += blocks.len().min(previous.blocks.len());
             for (block, old) in blocks.iter_mut().zip(previous.blocks.iter()) {
@@ -939,12 +915,10 @@ impl MessageFlattener {
             }
         }
         self.work.copied_bytes += source.len();
-        let next = MessageBlocks {
+        let next = TailBlocks {
             source: Rc::from(source),
             blocks: Rc::new(blocks),
-            keys,
             definitions: Rc::from(definitions),
-            document_wide,
             definition_nodes: Rc::new(definition_nodes),
         };
         self.output = output;
@@ -1638,7 +1612,50 @@ mod tests {
         "\u{feff}text after a byte-order mark",
     ];
 
-    fn assert_document(message: &MessageBlocks) {
+    struct TestBlocks {
+        source: String,
+        blocks: Vec<Rc<Block>>,
+        definitions: BTreeMap<(bool, String), (Rc<str>, SourceRange)>,
+    }
+
+    impl TestBlocks {
+        fn source_of(&self, block: &Block) -> Option<&str> {
+            self.source.get(block.source.bytes.clone())
+        }
+    }
+
+    fn snapshot(document: &StreamBlocks) -> TestBlocks {
+        TestBlocks {
+            source: document
+                .source_range(0..document.source_len())
+                .expect("source"),
+            blocks: (0..document.block_count())
+                .map(|index| document.block(index).expect("block"))
+                .collect(),
+            definitions: document
+                .0
+                .borrow()
+                .definitions
+                .iter()
+                .map(|(key, fact)| {
+                    (
+                        key.clone(),
+                        (fact.source.clone(), fact.source_range.clone()),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn replacement(source: &str) -> TestBlocks {
+        snapshot(
+            &MessageFlattener::new("message")
+                .replace("message", source)
+                .document,
+        )
+    }
+
+    fn assert_document(message: &TestBlocks) {
         let mut byte = 0;
         let mut utf16 = 0;
         for (index, block) in message.blocks.iter().enumerate() {
@@ -1667,6 +1684,8 @@ mod tests {
     fn assert_stream(source: &str) {
         let mut parser = IncrementalMarkdownParser::default();
         let mut flattener = MessageFlattener::new("message");
+        let mut seen = 0;
+        flattener.replace("message", "");
         for end in source
             .char_indices()
             .map(|(at, _)| at)
@@ -1678,13 +1697,18 @@ mod tests {
                 parse_markdown(text),
                 "parse at {end}: {text:?}"
             );
-            let incremental = flattener.update(text);
-            let full = MessageFlattener::new("message").update(text);
+            let delta = flattener.append(&source[seen..end]);
+            seen = end;
+            let incremental = snapshot(&delta.document);
+            let full = replacement(text);
             assert_eq!(
                 incremental.blocks, full.blocks,
                 "flatten at {end}: {text:?}"
             );
-            assert_eq!(incremental.definitions, full.definitions);
+            assert_eq!(
+                incremental.definitions, full.definitions,
+                "definitions at {end}: {text:?}"
+            );
             assert_document(&incremental);
         }
     }
@@ -1697,48 +1721,18 @@ mod tests {
     }
 
     #[test]
-    fn appended_ranges_and_code_values_match_the_snapshot_parser() {
+    fn appended_ranges_and_code_values_match_replacements() {
         let code = format!(
             "Intro\n\n```rust title=x\n{}tail\n```\n\nAfter",
             "  😀 = 1;\n".repeat(125)
         );
-        for source in STREAM_CASES
-            .iter()
-            .map(|tail| format!("{PREFIX}{tail}"))
-            .chain([
-                code,
-                format!("    {}\n\nend", "x\n    ".repeat(85)),
-                format!("```\n{}```\n\nend", "x\n".repeat(40)),
-                format!("```\n{}```\n\nend", "x\n".repeat(80)),
-            ])
-        {
-            let mut state = AppendState::new("message", false);
-            let mut end = 0;
-            for ch in source.chars() {
-                let delta = ch.to_string();
-                state.push(&delta);
-                end += ch.len_utf8();
-                assert_eq!(
-                    state.document.source_range(0..end).as_deref(),
-                    Some(&source[..end])
-                );
-                {
-                    let full = MessageFlattener::new("message").update(&source[..end]);
-                    assert_eq!(
-                        state
-                            .document
-                            .0
-                            .borrow()
-                            .blocks
-                            .values()
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                        *full.blocks,
-                        "prefix {end}: {:?}",
-                        &source[..end]
-                    );
-                }
-            }
+        for source in [
+            code,
+            format!("    {}\n\nend", "x\n    ".repeat(85)),
+            format!("```\n{}```\n\nend", "x\n".repeat(40)),
+            format!("```\n{}```\n\nend", "x\n".repeat(80)),
+        ] {
+            assert_stream(&source);
         }
     }
 
@@ -1766,26 +1760,35 @@ mod tests {
     }
 
     #[test]
-    fn web_definitions_arriving_late_invalidate_earlier_context() {
-        let before = format!("[later] and footnote[^note]\n\n{PREFIX}");
+    fn web_definitions_arriving_late_invalidate_bindings_and_retain_blocks() {
+        let source = format!("[later] and footnote[^note]\n\n{PREFIX}text");
         let mut flattener = MessageFlattener::new("message");
-        let initial = flattener.update(&format!("{before}text"));
-        for tail in [
-            "text",
-            "[later]: /target",
-            "[later]: /target\n\n[^note]: a note",
-        ] {
-            let source = format!("{before}{tail}");
-            let next = flattener.update(&source);
-            assert_eq!(
-                next.blocks,
-                MessageFlattener::new("message").update(&source).blocks
+        let initial = flattener.replace("message", &source);
+        let reference = initial.document.block(1).expect("settled references");
+        let mut source = source;
+        for tail in ["\n\n[later]: /target", "\n\n[^note]: a note"] {
+            source.push_str(tail);
+            let next = flattener.append(tail);
+            assert_eq!(snapshot(&next.document).blocks, replacement(&source).blocks);
+            assert!(Rc::ptr_eq(
+                &reference,
+                &next.document.block(1).expect("retained references")
+            ));
+            assert!(
+                next.invalidations
+                    .iter()
+                    .any(|invalidation| invalidation.affects(&reference.id))
             );
-            if tail.contains("/target") {
-                assert!(next.definitions.contains("[later]: /target"));
-                assert!(!Rc::ptr_eq(&initial.blocks[1], &next.blocks[1]));
-            }
+            assert_eq!(
+                next.document
+                    .definition("later", false)
+                    .expect("reference definition")
+                    .node
+                    .data["url"],
+                "/target"
+            );
         }
+        assert!(initial.document.definition("note", true).is_some());
     }
 
     #[test]
@@ -1798,18 +1801,19 @@ mod tests {
             "replacement without fences".into(),
             format!("{}edited prefix", PREFIX.replace("Before", "Edited")),
             format!("{PREFIX}plain text"),
-            format!("{PREFIX}plain text"),
         ] {
-            let next = flattener.update(&source);
-            assert_eq!(
-                next.blocks,
-                MessageFlattener::new("message").update(&source).blocks
-            );
+            let next = snapshot(&flattener.replace("message", &source).document);
+            assert_eq!(next.blocks, replacement(&source).blocks);
             assert_document(&next);
         }
-        let before = flattener.update("same");
-        let after = flattener.update("same");
-        assert!(Rc::ptr_eq(&before.blocks, &after.blocks));
+        let before = flattener.replace("message", "same");
+        let retained = before.document.block(1).expect("text");
+        let after = flattener.append("");
+        assert!(after.rows.is_empty());
+        assert!(Rc::ptr_eq(
+            &retained,
+            &after.document.block(1).expect("same text")
+        ));
         let mut parser = IncrementalMarkdownParser::default();
         let mut root = parser.parse(PREFIX, parse_markdown);
         root.children.clear();
@@ -1899,7 +1903,7 @@ mod tests {
             "<details>\n\n```\ncode in HTML\n```\n\n</details>",
             "★ Insight ───\n\n```\ncode in a callout\n```\n\n───",
         ] {
-            let message = MessageFlattener::new("message").update(source);
+            let message = replacement(source);
             assert_eq!(message.blocks.len(), 2);
             assert_eq!(message.blocks[1].kind, BlockKind::Document);
             assert_eq!(message.source_of(&message.blocks[1]), Some(source));
@@ -1926,7 +1930,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let source = format!("Before\n\n```rust title=example\n{value}\n```\n\nAfter");
-        let blocks = MessageFlattener::new("message").update(&source);
+        let blocks = replacement(&source);
         assert_document(&blocks);
         let chunks: Vec<_> = blocks
             .blocks
@@ -1957,25 +1961,18 @@ mod tests {
     fn streaming_reuses_completed_code_chunks_and_only_reflattens_the_tail() {
         let prefix = format!("Intro\n\n```rs\n{}", "x\n".repeat(100));
         let mut flattener = MessageFlattener::new("message");
-        let before = flattener.update(&prefix);
-        let after = flattener.update(&format!("{prefix}tail"));
+        let before = snapshot(&flattener.replace("message", &prefix).document);
+        let after = snapshot(&flattener.append("tail").document);
         assert_document(&after);
-        assert_eq!(
-            after.blocks,
-            MessageFlattener::new("message")
-                .update(&format!("{prefix}tail"))
-                .blocks
-        );
-        assert!(Rc::ptr_eq(&before.blocks[0], &after.blocks[0]));
-        assert!(Rc::ptr_eq(&before.blocks[1], &after.blocks[1]));
-        assert!(Rc::ptr_eq(&before.blocks[2], &after.blocks[2]));
-        assert!(Rc::ptr_eq(&before.blocks[3], &after.blocks[3]));
+        assert_eq!(after.blocks, replacement(&format!("{prefix}tail")).blocks);
+        for index in 0..4 {
+            assert!(Rc::ptr_eq(&before.blocks[index], &after.blocks[index]));
+        }
         assert!(!Rc::ptr_eq(
             before.blocks.last().expect("tail"),
             after.blocks.last().expect("tail")
         ));
-        assert!(Rc::ptr_eq(&before.keys, &after.keys));
-        assert!(flattener.stable >= 3);
+        assert!(flattener.stream.as_ref().expect("stream").stable >= 3);
         assert_stream(&format!("```\n{}tail\n```\n\nend", "x\n".repeat(82)));
     }
 
@@ -1987,7 +1984,7 @@ mod tests {
                 "  😀\n".repeat(85)
             )
             .replace('\n', newline);
-            let blocks = MessageFlattener::new("unicode").update(&source);
+            let blocks = replacement(&source);
             assert_document(&blocks);
             let code: String = blocks
                 .blocks
@@ -2008,12 +2005,12 @@ mod tests {
     fn plain_output_is_lossless_bounded_and_has_no_markdown_semantics() {
         let source = format!("```\n{}", "[ref]: 😀\r\n".repeat(100));
         let mut flattener = MessageFlattener::new("work:tool");
-        let first = flattener.update_output(&source);
+        let first = snapshot(&flattener.replace_output("work:tool", &source).document);
         assert_document(&first);
         let text: String = first
             .blocks
             .iter()
-            .filter_map(|b| match &b.kind {
+            .filter_map(|block| match &block.kind {
                 BlockKind::Output { text, .. } => {
                     assert!(text.lines().count() <= 40);
                     Some(text.as_str())
@@ -2023,16 +2020,16 @@ mod tests {
             })
             .collect();
         assert_eq!(text, source);
-        let next = flattener.update_output(&format!("{source}tail"));
+        let next = snapshot(&flattener.append("tail").document);
         assert!(Rc::ptr_eq(&first.blocks[1], &next.blocks[1]));
-        assert_eq!(
-            next.blocks,
-            MessageFlattener::new("work:tool")
-                .update_output(&format!("{source}tail"))
-                .blocks
+        let full = snapshot(
+            &MessageFlattener::new("work:tool")
+                .replace_output("work:tool", &format!("{source}tail"))
+                .document,
         );
+        assert_eq!(next.blocks, full.blocks);
         assert!(matches!(
-            flattener.update("```rs\nx\n```").blocks[1].kind,
+            flattener.replace("work:tool", "```rs\nx\n```").rows[1].kind,
             BlockKind::Code(_)
         ));
     }

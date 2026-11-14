@@ -23,7 +23,7 @@ pub struct ComposerDraftView {
     pub error: Option<Text>,
 }
 
-/// Adapter for the composed client draft service; implementations must not live in the UI.
+/// Adapter for the composed client draft service; persistence and mutation policy stay in the client.
 /// Mutations merge with the current client draft, retaining attachments, context and model picks.
 pub trait ComposerDraftClient {
     fn changes(&self, key: &ThreadKey) -> LocalBoxStream<'static, ()>;

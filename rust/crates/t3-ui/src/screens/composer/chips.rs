@@ -1139,9 +1139,9 @@ fn render_context_reference(
             Some(Text::from("T3 Code environment")),
             None,
         ),
-        ComposerContextRecord::Response(record) => {
-            assistant_citation_chip(record.citation.clone(), context)
-        }
+        ComposerContextRecord::Response(_) if draft => unresolved_chip(label.to_owned(), true),
+        // TL-ROWS-USER/TL-MARKDOWN owns ResponseReplyCard; do not substitute an inline chip.
+        ComposerContextRecord::Response(_) => view().into_element(),
         ComposerContextRecord::Unknown(_) => unresolved_chip(label.to_owned(), draft),
     }
 }
@@ -1523,6 +1523,53 @@ fn attachment_chip(
     draft: bool,
     fallback_label: &str,
 ) -> AnyElement {
+    if draft {
+        return attachment_chip_contents(name, id, bytes, kind, context, true, fallback_label);
+    }
+    let (name, id, kind, fallback_label) = (
+        name.to_owned(),
+        id.to_owned(),
+        kind.to_owned(),
+        fallback_label.to_owned(),
+    );
+    chip_scope(move || {
+        let data = context.data;
+        let asset_id = id.clone();
+        let asset = computed(move || {
+            data.with(|data| {
+                (
+                    data.message_attachments.get(&asset_id).cloned(),
+                    data.previews.get(&asset_id).cloned(),
+                    data.video_attachments.contains(&asset_id),
+                )
+            })
+        });
+        dynamic(move || {
+            asset.with(|_| ());
+            let (name, id, kind, fallback_label, context) = (
+                name.clone(),
+                id.clone(),
+                kind.clone(),
+                fallback_label.clone(),
+                context.clone(),
+            );
+            chip_scope(move || {
+                attachment_chip_contents(&name, &id, bytes, &kind, context, false, &fallback_label)
+            })
+        })
+        .into_element()
+    })
+}
+
+fn attachment_chip_contents(
+    name: &str,
+    id: &str,
+    bytes: u64,
+    kind: &str,
+    context: ChipContext,
+    draft: bool,
+    fallback_label: &str,
+) -> AnyElement {
     let attachment = context
         .data
         .with(|data| data.message_attachments.get(id).cloned());
@@ -1547,10 +1594,9 @@ fn attachment_chip(
         .with(|data| data.video_attachments.contains(id));
     let kind = if video { "video" } else { kind };
     let name = match attachment.as_ref().map(|attachment| &attachment.attachment) {
-        Some(t3_contracts::chat_attachment::ChatAttachment::File(file)) => {
+        Some(t3_contracts::chat_attachment::ChatAttachment::File(file)) if !draft => {
             crate::screens::thread::rows::user::user_message_file_label(file)
         }
-        Some(t3_contracts::chat_attachment::ChatAttachment::Image(file)) => file.name.clone(),
         _ => name.to_owned(),
     };
     let size = format_attachment_size(bytes);
@@ -1565,7 +1611,14 @@ fn attachment_chip(
     } else {
         tr("File attachment, {name}, {size}", &arguments)
     });
-    let preview = context.data.with(|data| data.previews.get(id).cloned());
+    let preview = context
+        .data
+        .with(|data| data.previews.get(id).cloned())
+        .or_else(|| {
+            attachment
+                .as_ref()
+                .and_then(|attachment| attachment.preview_url.clone())
+        });
     let action = context.open_attachment.map(|open| {
         let id = id.to_owned();
         Rc::new(move || open(&id)) as Rc<dyn Fn()>
@@ -1578,11 +1631,15 @@ fn attachment_chip(
         glyph(Icon::File)
     };
     context_chip(
-        document_kind(&name).unwrap_or(kind),
+        if kind == "image" {
+            "image"
+        } else {
+            document_kind(&name).unwrap_or(kind)
+        },
         icon,
         file_chip_content(&name, &size, None).into_element(),
         accessible,
-        Some(Text::content(format!("{name}\n{size}"))),
+        (kind != "image" || draft).then(|| Text::content(format!("{name}\n{size}"))),
         action,
     )
 }
@@ -1619,9 +1676,13 @@ fn draft_attachment_chip(item: AttachmentItem, context: ChipContext) -> AnyEleme
     } else {
         tr("File attachment, {name}, {size}", &args)
     };
-    let label = suffix.as_ref().map_or(label.clone(), |suffix| {
-        format!("{label}, {}", suffix.resolve())
-    });
+    let label = if !item.image || item.needs_reattach {
+        suffix.as_ref().map_or(label.clone(), |suffix| {
+            format!("{label}, {}", suffix.resolve())
+        })
+    } else {
+        label
+    };
     let tooltip = match &item.upload {
         _ if item.needs_reattach => tr(
             "{name} was not saved with this draft. Attach it again to send it.",
@@ -1643,7 +1704,7 @@ fn draft_attachment_chip(item: AttachmentItem, context: ChipContext) -> AnyEleme
         });
     let kind = if item.needs_reattach {
         "neutral"
-    } else if matches!(item.upload, UploadState::Failed(_)) {
+    } else if !item.image && matches!(item.upload, UploadState::Failed(_)) {
         "invalid"
     } else if item.image {
         "image"

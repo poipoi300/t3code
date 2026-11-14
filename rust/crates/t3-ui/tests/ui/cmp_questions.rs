@@ -363,3 +363,84 @@ fn digit_shortcuts_share_selection_and_respect_focus_collapse_and_pending_state(
         assert!(app.screen().shows("Choices 1 Advances 1 Dismissals 0"));
     }
 }
+
+#[component]
+fn MarkdownRootOverrides() -> impl IntoElement {
+    use t3_ui::screens::thread::markdown::base::{chat_markdown, chat_markdown_with_root_classes};
+
+    let mut tokens = t3_ui::theme::tokens_for(&Default::default());
+    tokens.set_color("foreground", AdaptiveColor::rgb(0x00ff00, 0x00ff00));
+    set_tokens(tokens);
+    set_color_scheme(Appearance::Light);
+    view()
+        .w_full()
+        .child(
+            view()
+                .test_id("default-root")
+                .child(chat_markdown(|| "Default body".into(), || false)),
+        )
+        .child(
+            view()
+                .test_id("question-root")
+                .child(chat_markdown_with_root_classes(
+                    || "Question body".into(),
+                    || false,
+                    "pt-0.5 text-foreground/85",
+                )),
+        )
+        .child(chat_markdown_with_root_classes(
+            || "Option preview".into(),
+            || false,
+            "text-xs text-foreground/70",
+        ))
+        .child(chat_markdown_with_root_classes(
+            || "```ts title=\"override.ts\"\nlet value = 1;\n```".into(),
+            || false,
+            "text-xs text-foreground/70",
+        ))
+}
+
+#[test]
+fn markdown_root_overrides_apply_to_text_and_keep_default_layout_and_fence_controls() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = Headless::start(EngineConfig {
+            ui_sets: t3_ui::registries(),
+            viewport: size(px(window.0), px(window.1)),
+            ..EngineConfig::new(Root::of::<MarkdownRootOverrides>())
+        })
+        .expect("Markdown root overrides");
+        app.wait_for("Option preview").expect("Markdown rendered");
+        for (label, font_size, color) in [
+            ("Default body", 14.0, 0x00ff00e6),
+            ("Question body", 14.0, 0x00ff00d9),
+            ("Option preview", 12.0, 0x00ff00b3),
+        ] {
+            let style = app
+                .screen()
+                .span_style(&format!("text:{label}"))
+                .expect(label);
+            assert_eq!(style.font_size, px(font_size), "{label} font size");
+            assert_eq!(style.color, nsh_core::Color(color), "{label} color");
+        }
+        let layout = app.screen().layout_nodes();
+        let height = |id: &str| {
+            layout
+                .iter()
+                .find(|node| node.test_id.as_deref() == Some(id))
+                .expect("Markdown wrapper")
+                .bounds
+                .size
+                .height
+        };
+        assert_eq!(height("question-root"), height("default-root") + px(2.0));
+        app.wait_for("override.ts")
+            .expect("existing fence renderer");
+        app.press("role:button[Copy code]")
+            .expect("fence copy control");
+        assert!(
+            app.screen()
+                .clipboard()
+                .is_some_and(|text| text.contains("let value = 1;"))
+        );
+    }
+}

@@ -265,6 +265,20 @@ fn content_search_keeps_file_groups_and_opens_the_matching_line() {
         app.press_key("down").expect("navigate to the second match");
         app.wait_for("role:button[b.ts:2]")
             .expect("list reveals the selected match");
+        let active = app.screen().id("role:button[b.ts:2]").expect("match");
+        let nodes = app.screen().layout_nodes();
+        let viewport = nodes
+            .iter()
+            .find(|node| node.scroll.is_some())
+            .expect("content viewport")
+            .bounds;
+        let row = nodes
+            .iter()
+            .find(|node| node.id == active)
+            .expect("selected match bounds")
+            .bounds;
+        assert!(row.origin.y.0 >= viewport.origin.y.0);
+        assert!(row.origin.y.0 + row.size.height.0 <= viewport.origin.y.0 + viewport.size.height.0);
         app.press("role:button[b.ts:2]")
             .expect("select a concrete result");
         app.wait_for("text:opened:remote:b.ts:Some(2)")

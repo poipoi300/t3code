@@ -527,5 +527,17 @@ mod tests {
             "{:?} in {classes}",
             list.unknown()
         );
+        // Per-axis overflow and listed transitions become NSH's one-property forms.
+        for (web, nsh) in [
+            ("min-w-0 overflow-x-clip overflow-y-visible", "min-w-0 overflow-hidden"),
+            ("overflow-y-visible", ""),
+            (
+                "transition-[background-color,border-color,box-shadow] hover:bg-accent",
+                "transition hover:bg-accent",
+            ),
+            ("transition-[width]", "transition-[width]"),
+        ] {
+            assert_eq!(rewrite(web, Scope::Root, &[], &is_color, false), nsh, "{web}");
+        }
     }
 }

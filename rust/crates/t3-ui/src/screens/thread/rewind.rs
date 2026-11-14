@@ -68,7 +68,7 @@ pub struct RewindState {
     pub can_fork: bool,
 }
 
-/// Composed operation requested in briefs/client-seam-requests.md, TL-REWIND.
+/// Thin binding over the client's composed rewind and fork operations.
 /// Implementations restore draft/attachments only after persisted rollback and recheck all guards.
 pub trait TimelineRewindClient {
     fn state(&self, key: &ThreadKey) -> RewindState;
@@ -87,7 +87,7 @@ pub trait TimelineRewindClient {
     ) -> LocalBoxFuture<'static, Result<ThreadKey, RewindError>>;
 }
 
-/// The runtime integrator provides the composed service once, never a raw rollback RPC.
+/// Optional override; normal screens bind from Backend::client().
 #[derive(Clone)]
 pub struct RewindService(pub Rc<dyn TimelineRewindClient>);
 
@@ -105,7 +105,13 @@ pub struct TimelineRewind {
 }
 
 pub fn use_timeline_rewind(key: ThreadKey) -> TimelineRewind {
-    TimelineRewind::with_client(key, use_context::<RewindService>().map(|service| service.0))
+    let service = use_context::<RewindService>().or_else(|| {
+        use_context::<crate::runtime::Rt>()?
+            .backend()
+            .client()
+            .map(|client| crate::runtime::services::thread_ops::timeline_rewind(&client))
+    });
+    TimelineRewind::with_client(key, service.map(|service| service.0))
 }
 
 impl TimelineRewind {
@@ -268,39 +274,42 @@ mod tests {
     use t3_client::view_logic::session::TimelineEntry;
 
     #[test]
-    fn only_the_clients_rewindable_user_rows_produce_a_target() {
-        for (role, supported, expected) in [
-            ("user", true, true),
-            ("user", false, false),
-            ("assistant", true, false),
-        ] {
-            let entry: TimelineEntry = serde_json::from_value(serde_json::json!({
+    fn targets_preserve_client_identity_and_reject_non_user_or_unresolved_payloads() {
+        let entry: TimelineEntry = serde_json::from_value(serde_json::json!({
                 "id":"prompt", "kind":"message", "createdAt":"2026-11-13T12:00:00Z",
-                "message":{"id":"prompt", "role":role, "text":"Prompt", "runId":"run", "inputIntent":"turn_start",
+                "message":{"id":"prompt", "role":"user", "text":"Prompt", "runId":"run", "inputIntent":"turn_start",
                     "streaming":false, "createdAt":"2026-11-13T12:00:00Z", "updatedAt":"2026-11-13T12:00:00Z"}
             })).expect("canonical entry");
-            let rows = derive_messages_timeline_rows(&MessagesTimelineRowsInput {
-                timeline_entries: vec![Rc::new(entry)],
-                supports_conversation_rollback: supported,
-                thread_start_checkpoint_available: true,
-                available_revert_turn_counts: Some([0].into()),
-                ..Default::default()
-            });
-            let targets: Vec<_> = rows
-                .iter()
-                .filter_map(|row| RewindTarget::from_row(row))
-                .collect();
-            assert_eq!(
-                targets,
-                if expected {
-                    vec![RewindTarget {
-                        message_id: MessageId("prompt".into()),
-                        turn_count: 0,
-                    }]
-                } else {
-                    vec![]
-                }
-            );
+        let rows = derive_messages_timeline_rows(&MessagesTimelineRowsInput {
+            timeline_entries: vec![Rc::new(entry)],
+            supports_conversation_rollback: true,
+            thread_start_checkpoint_available: true,
+            available_revert_turn_counts: Some([0].into()),
+            ..Default::default()
+        });
+        let row = rows
+            .iter()
+            .find(|row| RewindTarget::from_row(row).is_some())
+            .expect("client target");
+        assert_eq!(
+            RewindTarget::from_row(row),
+            Some(RewindTarget {
+                message_id: MessageId("prompt".into()),
+                turn_count: 0
+            })
+        );
+        for unresolved in [false, true] {
+            let mut invalid = row.as_ref().clone();
+            let MessagesTimelineRowContent::Message { message, .. } = &mut invalid.content else {
+                panic!("user row")
+            };
+            let message = Rc::make_mut(message);
+            if unresolved {
+                message.id = t3_contracts::orchestration_v2_id_table::IdOrIndex::Index(0);
+            } else {
+                message.role = "assistant".into();
+            }
+            assert_eq!(RewindTarget::from_row(&invalid), None);
         }
     }
 }

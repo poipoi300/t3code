@@ -134,5 +134,19 @@ fn virtualized_keyboard_selection_reaches_rows_outside_the_initial_window() {
             .expect("client item 75 executed");
         app.wait_for("Result 75")
             .expect("virtual list followed selection");
+        let active = app.screen().id("role:option[Result 75]").expect("row");
+        let nodes = app.screen().layout_nodes();
+        let viewport = nodes
+            .iter()
+            .find(|node| node.scroll.is_some())
+            .expect("list viewport")
+            .bounds;
+        let row = nodes
+            .iter()
+            .find(|node| node.id == active)
+            .expect("active bounds")
+            .bounds;
+        assert!(row.origin.y.0 >= viewport.origin.y.0);
+        assert!(row.origin.y.0 + row.size.height.0 <= viewport.origin.y.0 + viewport.size.height.0);
     }
 }

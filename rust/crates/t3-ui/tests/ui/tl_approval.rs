@@ -135,9 +135,11 @@ fn ApprovalFixture() -> impl IntoElement {
     let pending = computed(move || {
         projection.with(|projection| {
             let projection = projection.as_ref()?;
-            let source = projection.source();
-            let pending = requests::derive_pending(&source.runtime_requests, &source.turn_items);
-            ApprovalRow::from_pending(pending.approvals.first()?, projection)
+            let source =
+                t3_client::thread_views::thread_ops::approvals::PendingApprovals::default()
+                    .project(projection);
+            let pending = source.values().next()?;
+            Some(ApprovalRow::from_client(pending))
         })
     });
     let list = view().child(each(
@@ -297,4 +299,97 @@ fn default_and_provider_specific_more_options_submit_the_exact_decision() {
         .expect("provider-specific option");
     app.wait_for("text:decision:\"acceptAlways\"")
         .expect("option preserved");
+}
+
+#[component]
+fn UnboundApprovalFixture() -> impl IntoElement {
+    t3_ui::theme::install(&Default::default());
+    let projection = computed(|| Some(Shared(Rc::new(source(true, false)))));
+    let context = ApprovalContext::from_projection(key(), projection, ApprovalRowsState::default());
+    let pending = context.pending;
+    let row = computed(move || {
+        pending.with(|rows| {
+            rows.values()
+                .next()
+                .map(|row| ApprovalRow::from_client(row))
+        })
+    });
+    timeline_pending_approval_row(row, context)
+}
+
+#[test]
+fn an_unbound_approval_shows_waiting_without_response_controls() {
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(PHONE.0), px(PHONE.1)),
+        ..EngineConfig::new(Root::of::<UnboundApprovalFixture>())
+    })
+    .expect("start unbound request");
+    app.first_render().expect("render");
+    assert!(app.screen().shows("Waiting for approval"));
+    assert!(app.screen().id("role:button[Approve]").is_err());
+    assert!(app.screen().id("role:button[Decline]").is_err());
+    assert!(!app.screen().shows("·"));
+}
+
+#[component]
+fn ProviderContentFixture() -> impl IntoElement {
+    t3_ui::theme::install(&Default::default());
+    t3_ui::i18n::set_language("fr", &[]);
+    provide_context(ApprovalServices {
+        can_operate: Rc::new(|_| true),
+        respond: Rc::new(|_| async { Ok(()) }.boxed_local()),
+    });
+    let projection = computed(|| {
+        let previous = source(true, false);
+        let mut projection = previous.source().as_ref().clone();
+        if let t3_contracts::orchestration_v2::OrchestrationV2TurnItem::ApprovalRequest(item) =
+            &mut projection.turn_items[1]
+        {
+            let options = item
+                .options
+                .as_mut()
+                .expect("provider options")
+                .as_mut()
+                .expect("non-null options");
+            options[1].label = "Settings".into();
+            options[1].warning = Some(Some("Delete thread".into()));
+        }
+        Some(Shared(Rc::new(SharedThreadProjection::update(
+            Rc::new(projection),
+            None,
+        ))))
+    });
+    let context = ApprovalContext::from_projection(key(), projection, ApprovalRowsState::default());
+    let pending = context.pending;
+    let row = computed(move || {
+        pending.with(|rows| {
+            rows.values()
+                .find(|row| {
+                    row.request_kind
+                        == t3_contracts::provider_policy::ProviderRequestKind::Permission
+                })
+                .map(|row| ApprovalRow::from_client(row))
+        })
+    });
+    timeline_pending_approval_row(row, context)
+}
+
+#[test]
+fn provider_option_labels_stay_literal_when_they_match_a_catalogue_key() {
+    let mut config = EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(DESKTOP.0), px(DESKTOP.1)),
+        ..EngineConfig::new(Root::of::<ProviderContentFixture>())
+    };
+    config.environment.os = nsh_core::platform::Os::Linux;
+    config.environment.idiom = nsh_core::platform::Idiom::Desktop;
+    let mut app = Headless::start(config).expect("start provider content");
+    app.first_render().expect("render");
+    assert!(app.screen().id("role:button[Settings]").is_ok());
+    assert!(app.screen().id("role:button[Paramètres]").is_err());
+    app.hover("role:button[Settings]")
+        .expect("provider warning");
+    app.wait_for("Delete thread")
+        .expect("warning remains literal");
 }

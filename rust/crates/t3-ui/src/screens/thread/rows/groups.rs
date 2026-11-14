@@ -102,7 +102,6 @@ pub struct WorkGroupsContext {
 impl WorkGroupsContext {
     pub fn new(state: WorkGroupsState) -> Self {
         let mut work = WorkRowContext::new(state.entries);
-        work.icon = Some(Rc::new(|_, name, class| activity_icon(name, class)));
         let timestamp_format = computed(|| TimestampFormat::Locale);
         work.timestamp_format = timestamp_format;
         Self {

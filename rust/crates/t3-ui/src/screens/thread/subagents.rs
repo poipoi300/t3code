@@ -339,7 +339,7 @@ fn inspector_view(
         .child(
             view()
                 .app_class(tw("flex min-w-0 items-center gap-2"))
-                .child(inspector_provider_icon(driver, visual.as_ref()))
+                .child(provider_instance_icon(driver, visual.as_ref()))
                 .child(model),
         )
         .child(
@@ -382,13 +382,17 @@ fn inspector_view(
                 .child(truncated(preview)),
         );
     }
+    thread_hover_card(title, details).into_element()
+}
+
+/// Port of apps/web/src/components/ThreadHoverCard.tsx ThreadHoverCard.
+fn thread_hover_card(title: Text, children: impl IntoElement) -> impl IntoElement {
     view()
         .app_class(tw("flex min-w-0 max-w-80 flex-col gap-2 px-1 py-2"))
         .child(text(move || title.resolve()).app_class(tw(
             "min-w-0 truncate text-xs leading-tight font-medium text-foreground",
         )))
-        .child(details)
-        .into_element()
+        .child(children)
 }
 
 /// Port of AgentElapsed.tsx: only the visible live label ticks, using the destination's clock.
@@ -431,7 +435,7 @@ fn ultrafast_icon() -> impl IntoElement {
 }
 
 /// Port of ProviderInstanceIcon.tsx, the tooltip's badgeContent="none"/12px branch.
-fn inspector_provider_icon(
+fn provider_instance_icon(
     driver: &str,
     visual: Option<&timeline_events::ProviderVisual>,
 ) -> AnyElement {

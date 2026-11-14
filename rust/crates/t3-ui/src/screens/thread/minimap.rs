@@ -372,9 +372,10 @@ fn minimap_preview(
     let assistant_text = computed(move || preview.get().and_then(|preview| preview.assistant_text));
     view().app_class(tw("pointer-events-none absolute left-8 w-80 -translate-y-1/2"))
         .top(move || Percentage(resolve_timeline_minimap_top_percent(map.active.get().unwrap_or(0) as f64, map.count.get()) as f32 / 100.0))
-        // dropdown-glass is index.css's token-derived background; no opaque replacement.
-        .child(view().app_class(tw("rounded-xl p-3 text-left text-popover-foreground shadow-xl shadow-black/25"))
+        // index.css @utility dropdown-glass: token background, contrast border and backdrop filter.
+        .child(view().app_class(tw("rounded-xl p-3 text-left text-popover-foreground shadow-xl shadow-black/25 border backdrop-blur-(--glass-blur) dark:backdrop-blur-[16px] backdrop-saturate-[1.14] dark:backdrop-saturate-[1.08]"))
             .bg(crate::ui::popover::dropdown_glass_background)
+            .border_color(move || tokens().color("contrast-foreground").unwrap_or_default().opacity(0.1))
             .child(text(move || user_text.get().map_or_else(|| ts("User message"), |s| SharedString::from(s.to_string())))
                 .app_class(tw("max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium leading-5")).number_of_lines(1u32))
             .child(when(move || assistant_text.with(|text| text.is_some()), move || text(move || assistant_text.get().map_or_else(SharedString::default, |text| text.to_string().into()))
@@ -383,6 +384,11 @@ fn minimap_preview(
 
 /// Port of TimelineMinimap.tsx TimelineMinimapNavigationButton.
 fn timeline_minimap_navigation_button(map: TimelineMinimap, previous: bool) -> impl IntoElement {
+    let label = if previous {
+        t("Previous turn")
+    } else {
+        t("Next turn")
+    };
     let hint = crate::ui::tooltip::tooltip_create_handle();
     let popup = crate::ui::tooltip::tooltip(
         hint,
@@ -394,11 +400,7 @@ fn timeline_minimap_navigation_button(map: TimelineMinimap, previous: bool) -> i
             },
             ..Default::default()
         },
-        text(t(if previous {
-            "Previous turn"
-        } else {
-            "Next turn"
-        })),
+        text(SharedString::from(label.clone())),
     );
     let target = computed(move || {
         map.current.get().and_then(|index| {
@@ -420,7 +422,7 @@ fn timeline_minimap_navigation_button(map: TimelineMinimap, previous: bool) -> i
         .style_with(move |style| if previous { style.bottom(px(map.rail_height.get() + 6.0)) } else { style.top(px(map.rail_height.get() + 6.0)) })
         .pointer_events(move || if map.interactive() { PointerEvents::Auto } else { PointerEvents::None })
         // The shared primitive has no icon-micro size; icon-xs is its smallest supported size.
-        .child(button(ButtonContent::Icon { icon: if previous { Icon::ChevronUp } else { Icon::ChevronDown }, label: t(if previous { "Previous turn" } else { "Next turn" }) },
+        .child(button(ButtonContent::Icon { icon: if previous { Icon::ChevronUp } else { Icon::ChevronDown }, label },
             ButtonVariant::GhostMuted, ButtonSize::IconXs, move || target.get().is_none() || !map.interactive(), move || { if map.interactive() && let Some(index) = target.get_untracked() { map.select(index); } }))
 }
 

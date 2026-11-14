@@ -285,14 +285,17 @@ impl ThreadFindIndex {
     fn first_in_tail(&self, order: usize, id: &str, from: usize) -> Option<ThreadFindMatch> {
         let document = self.documents.get(&(order, id.to_owned()))?;
         document.blocks.range(from..).find_map(|(_, block)| {
-            block.hits.first().map(|(segment, rendered)| ThreadFindMatch {
-                order,
-                block: block.block.id.clone(),
-                occurrence: 0,
-                segment: *segment,
-                rendered: rendered.clone(),
-                source: block.block.source.clone(),
-            })
+            block
+                .hits
+                .first()
+                .map(|(segment, rendered)| ThreadFindMatch {
+                    order,
+                    block: block.block.id.clone(),
+                    occurrence: 0,
+                    segment: *segment,
+                    rendered: rendered.clone(),
+                    source: block.block.source.clone(),
+                })
         })
     }
 
@@ -406,7 +409,7 @@ impl ThreadFind {
     }
     pub fn apply(self, order: usize, id: &str, kind: FindKind, delta: &BlockDelta) {
         let before = self.state.get_untracked();
-        self.index.with(|index| {
+        let found_first = self.index.with(|index| {
             let old_count = index.count();
             let affected = before
                 .active
@@ -416,7 +419,8 @@ impl ThreadFind {
                 affected.and_then(|active| index.tail_anchor(active, delta.changed_from));
             index.apply(order, id, kind, delta, None, &[]);
             let first = (old_count == 0 && index.count() > 0)
-                .then(|| index.first_in_tail(order, id, delta.changed_from)).flatten();
+                .then(|| index.first_in_tail(order, id, delta.changed_from))
+                .flatten();
             self.state.update(|state| {
                 state.count = index.count();
                 state.counting = index.counting();
@@ -439,9 +443,16 @@ impl ThreadFind {
                     }
                 }
                 state.active_index = state.active_index.min(state.count.saturating_sub(1));
-                if let Some(first) = first { state.active = Some(first); state.active_index = 0; }
+                if let Some(first) = first {
+                    state.active = Some(first);
+                    state.active_index = 0;
+                }
             });
+            old_count == 0 && index.count() > 0
         });
+        if found_first {
+            self.reveal_active();
+        }
     }
     pub fn finish(self, order: usize, id: &str) {
         self.index.with(|index| index.finish(order, id));
@@ -609,10 +620,12 @@ pub fn thread_find_bar(find: ThreadFind) -> impl IntoElement {
             .pointer_events(PointerEvents::BoxNone)
             .on_layout(move |bounds: &Bounds<Points>| available_width.set(bounds.size.width.0))
             .test_id("thread-find-bar")
-            .child(view().app_class(tw("relative inline-flex w-full min-w-0 items-center rounded-2xl border h-9 text-base text-foreground sm:text-sm"))
+            .child(view().app_class(tw("relative inline-flex w-full min-w-0 items-center rounded-2xl border h-9 text-base text-foreground sm:text-sm backdrop-blur-(--glass-blur) dark:backdrop-blur-[16px] backdrop-saturate-[1.14] dark:backdrop-saturate-[1.08]"))
                 .self_end()
                 .w(move || px(tokens().number("thread-details-panel-width").unwrap_or(280.0).min(available_width.get())))
                 .bg(crate::ui::popover::dropdown_glass_background)
+                // index.css @utility dropdown-glass supplies the contrast border as well as blur.
+                .border_color(move || tokens().color("contrast-foreground").unwrap_or_default().opacity(0.1))
                 .child(nsh_base::input().element_ref(&find.input)
                     .value(move || find.state.with(|state| state.query.clone()))
                     .on_change(move |query: &str| find.set_query(query))
@@ -806,12 +819,21 @@ mod tests {
     fn a_first_live_hit_can_be_selected_from_only_the_changed_tail() {
         let mut flattener = MessageFlattener::new("live");
         let mut index = ThreadFindIndex::default();
-        index.apply(0, "live", FindKind::Assistant, &flattener.replace("live", "Before\n\n```rs\nx\n```\n\nTail"), None, &[]);
+        index.apply(
+            0,
+            "live",
+            FindKind::Assistant,
+            &flattener.replace("live", "Before\n\n```rs\nx\n```\n\nTail"),
+            None,
+            &[],
+        );
         index.search("needle", None, &[]);
         assert_eq!(index.count(), 0);
         let delta = flattener.append(" needle");
         index.apply(0, "live", FindKind::Assistant, &delta, None, &[]);
-        let first = index.first_in_tail(0, "live", delta.changed_from).expect("new live match");
+        let first = index
+            .first_in_tail(0, "live", delta.changed_from)
+            .expect("new live match");
         assert_eq!(first.occurrence, 0);
         assert_eq!(index.match_at(0), Some(first));
     }

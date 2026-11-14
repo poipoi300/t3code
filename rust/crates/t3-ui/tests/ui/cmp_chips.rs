@@ -8,6 +8,7 @@ use serde_json::json;
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 use t3_client::thread_views::composer::attachment_intake::{AttachmentItem, UploadState};
 use t3_client::thread_views::user_message::context_references;
+use t3_client::view_logic::session::MessageAttachment;
 use t3_ui::screens::composer::{
     chips::{
         ChipContext, ChipData, composer_prompt_editor_with_chips,
@@ -30,9 +31,14 @@ fn data() -> ChipData {
         "path": "skills/browser/SKILL.md", "enabled": true
     }))
     .expect("provider skill");
+    let image = serde_json::from_value(json!({
+        "version": 1, "kind": "image", "contextId": "sent-image", "label": "Original caption.png",
+        "attachmentId": "server-image", "name": "Original caption.png", "mimeType": "image/png", "sizeBytes": 3
+    })).expect("canonical image context");
     ChipData {
-        records: BTreeMap::from([("term".into(), terminal)]),
+        records: BTreeMap::from([("term".into(), terminal), ("sent-image".into(), image)]),
         skills: vec![skill],
+        message_attachments: BTreeMap::from([("server-image".into(), sent_image_attachment())]),
         draft_attachments: vec![AttachmentItem {
             id: "local".into(),
             name: "notes.txt".into(),
@@ -47,6 +53,12 @@ fn data() -> ChipData {
         }],
         ..Default::default()
     }
+}
+
+fn sent_image_attachment() -> MessageAttachment {
+    serde_json::from_value(json!({
+        "type": "image", "id": "server-image", "name": "stored-blob.png", "mimeType": "image/png", "sizeBytes": 3
+    })).expect("client image attachment")
 }
 
 fn refresh_provider(data: &mut ChipData) {
@@ -92,6 +104,9 @@ fn ChipsFixture() -> impl IntoElement {
     let sent = context_references("[capture](t3-context://v1/terminal/term)").remove(0);
     let mismatched = context_references("[mismatch](t3-context://v1/file/term)").remove(0);
     let record = data().records.remove("term").expect("terminal");
+    let image_reference =
+        context_references("![Original caption.png](t3-context://v1/image/sent-image)").remove(0);
+    let image_record = data().records.remove("sent-image").expect("image");
     view()
         .w_full()
         .h_full()
@@ -146,6 +161,33 @@ fn ChipsFixture() -> impl IntoElement {
                     catalogue.update(|data| data.draft_attachments[0].needs_reattach = true)
                 })
                 .child(text("Require reattach")),
+        )
+        .child(
+            nsh_base::button()
+                .on_press(move || {
+                    catalogue.update(|data| data.message_attachments.clear());
+                    opens.set(String::new());
+                })
+                .child(text("Forget sent image")),
+        )
+        .child(
+            nsh_base::button()
+                .on_press(move || {
+                    catalogue.update(|data| {
+                        data.message_attachments
+                            .extend([("server-image".into(), sent_image_attachment())])
+                    })
+                })
+                .child(text("Restore sent image")),
+        )
+        .child(
+            view()
+                .test_id("sent-image")
+                .child(user_message_context_reference_chip(
+                    &image_reference,
+                    Some(&image_record),
+                    context.clone(),
+                )),
         )
         .child(
             view()
@@ -310,6 +352,26 @@ fn an_expired_draft_terminal_cannot_open_captured_output() {
 fn sent_context_uses_the_shared_details_and_kind_mismatch_cannot_open_terminal_data() {
     for window in [PHONE, DESKTOP] {
         let mut app = start(window);
+        let image = "id:sent-image >> role:button[Image attachment, Original caption.png, 1 KB]";
+        app.press(image)
+            .expect("canonical image name, not stored blob name");
+        app.wait_for("Opened: attachment:server-image")
+            .expect("image action");
+        app.press("text:Forget sent image")
+            .expect("asset metadata unavailable");
+        app.wait_for("id:sent-image >> label:Unavailable context, Original caption.png")
+            .expect("missing asset guard");
+        assert!(
+            !app.screen()
+                .matches(image)
+                .expect("missing asset has no image action")
+        );
+        app.press("text:Restore sent image")
+            .expect("asset metadata arrives");
+        app.press(image)
+            .expect("asset change restores the shared chip");
+        app.wait_for("Opened: attachment:server-image")
+            .expect("restored image action");
         app.press("id:sent-chip >> role:button[Terminal excerpt, capture. Show details]")
             .expect("sent terminal chip");
         app.wait_for("PowerShell").expect("terminal title");

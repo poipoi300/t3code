@@ -10,7 +10,7 @@ use nsh_core::prelude::*;
 use crate::i18n::t;
 use crate::theme::{cn, tw};
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
-use crate::ui::icon::Icon;
+use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::menu::{ItemOptions, MenuOptions, menu, menu_item, menu_popup_with};
 
 /// ChatMarkdownMedia.tsx authoredImageSizeStyle, expressed without CSS calc/min strings.
@@ -368,19 +368,50 @@ pub fn chat_markdown_video(
     }))
 }
 
+#[derive(Clone, Copy)]
+pub struct MarkdownTableState {
+    pub copied: Signal<bool>,
+    reset: Stored<Option<Spawned<()>>>,
+    owner: Owner,
+}
+
+impl Default for MarkdownTableState {
+    fn default() -> Self {
+        Self {
+            copied: signal(false),
+            reset: stored(None),
+            owner: Owner::current(),
+        }
+    }
+}
+
 /// A parsed block's table; completed blocks keep this memo outside recycled cells.
 pub fn markdown_table(table: Memo<Table>) -> impl IntoElement {
+    markdown_table_with_state(table, MarkdownTableState::default())
+}
+
+pub fn markdown_table_with_state(
+    table: Memo<Table>,
+    state: MarkdownTableState,
+) -> impl IntoElement {
     view()
         .app_class(tw("w-full max-w-full"))
         .child(dynamic(move || {
             let table = table.get();
             untracked(|| table_grid(&table))
         }))
-        .child(markdown_table_actions(table))
+        .child(markdown_table_actions_with_state(table, state))
 }
 
 /// A table row's exact block source, supplied by TL-BLOCKS-1 rather than a whole message.
 pub fn markdown_table_block(source: Memo<Rc<str>>) -> impl IntoElement {
+    markdown_table_block_with_state(source, MarkdownTableState::default())
+}
+
+pub fn markdown_table_block_with_state(
+    source: Memo<Rc<str>>,
+    state: MarkdownTableState,
+) -> impl IntoElement {
     let parsed = computed(move || {
         source.with(|source| {
             nsh_base::text_view::Parser::new()
@@ -398,7 +429,11 @@ pub fn markdown_table_block(source: Memo<Rc<str>>) -> impl IntoElement {
     });
     view().child(when(
         move || parsed.with(Option::is_some),
-        move || untracked(|| markdown_table(computed(move || parsed.get().unwrap_or_default()))),
+        move || {
+            untracked(|| {
+                markdown_table_with_state(computed(move || parsed.get().unwrap_or_default()), state)
+            })
+        },
     ))
 }
 
@@ -480,7 +515,10 @@ fn table_cell(
                 let formula = formula.clone();
                 markdown_math(computed(move || formula.clone()), false)
             })
-            .classes(TextViewClasses { paragraph: Some(tw("m-0")), ..Default::default() })
+            .classes(TextViewClasses {
+                root: Some(tw(&cn([Some("text-sm"), header.then_some("font-semibold")]))),
+                paragraph: Some(tw("m-0")), ..Default::default()
+            })
             .app_class(tw(match align {
                 ColumnAlign::Center => "w-full text-center text-foreground/90",
                 ColumnAlign::Right => "w-full text-right text-foreground/90",
@@ -506,10 +544,19 @@ fn has_math(inline: &Inline) -> bool {
 }
 
 pub fn markdown_table_actions(table: Memo<Table>) -> impl IntoElement {
-    let copied = signal(false);
+    markdown_table_actions_with_state(table, MarkdownTableState::default())
+}
+
+fn markdown_table_actions_with_state(
+    table: Memo<Table>,
+    state: MarkdownTableState,
+) -> impl IntoElement {
+    let MarkdownTableState {
+        copied,
+        reset,
+        owner,
+    } = state;
     let open = signal(false);
-    let reset = stored(None::<Spawned<()>>);
-    let owner = Owner::current();
     let copy = move |csv: bool| {
         let value = table.with(|table| {
             if csv {
@@ -549,27 +596,34 @@ pub fn markdown_table_actions(table: Memo<Table>) -> impl IntoElement {
                         }
                     }),
                 ))
-                .child(dynamic(move || {
-                    button(
-                        ButtonContent::Icon {
-                            icon: if copied.get() {
-                                Icon::Check
-                            } else {
-                                Icon::Copy
+                .child(
+                    view()
+                        .app_class(move || tw(if copied.get() { "hidden" } else { "flex" }))
+                        .child(button(
+                            ButtonContent::Custom {
+                                child: icon_with_class(Icon::Copy, "size-3").into_element(),
+                                label: t("Copy table"),
                             },
-                            label: if copied.get() {
-                                t("Copied")
-                            } else {
-                                t("Copy table")
+                            ButtonVariant::GhostMuted,
+                            ButtonSize::IconXs,
+                            || false,
+                            move || open.set(!open.get_untracked()),
+                        )),
+                )
+                .child(
+                    view()
+                        .app_class(move || tw(if copied.get() { "flex" } else { "hidden" }))
+                        .child(button(
+                            ButtonContent::Custom {
+                                child: icon_with_class(Icon::Check, "size-3").into_element(),
+                                label: t("Copied"),
                             },
-                        },
-                        ButtonVariant::GhostMuted,
-                        ButtonSize::IconXs,
-                        || false,
-                        move || open.set(!open.get_untracked()),
-                    )
-                    .into_element()
-                })),
+                            ButtonVariant::GhostMuted,
+                            ButtonSize::IconXs,
+                            || false,
+                            move || open.set(!open.get_untracked()),
+                        )),
+                ),
             MenuOptions {
                 open: Some(open),
                 align: Align::End,

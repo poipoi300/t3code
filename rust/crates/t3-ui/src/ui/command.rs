@@ -647,21 +647,52 @@ pub fn command_input(state: CommandState, options: InputOptions) -> impl IntoEle
                         }))))
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PanelLayout {
+    #[default]
+    Default,
+    List,
+    TallList,
+    Fill,
+}
+
 pub fn command_panel(
     has_footer: impl IntoReactive<bool>,
+    children: impl IntoElement,
+) -> impl IntoElement {
+    command_panel_with_layout(has_footer, PanelLayout::default(), children)
+}
+
+pub fn command_panel_with_layout(
+    has_footer: impl IntoReactive<bool>,
+    layout: PanelLayout,
     children: impl IntoElement,
 ) -> impl IntoElement {
     let has_footer = has_footer.into_reactive();
     // The footer sibling condition replaces not-has; touch-action and scrollbar selectors
     // are native scroll behavior, without a CSS scrollbar element to target.
-    view()
-        .app_class(move || {
-            tw(&cn([
-                Some("relative min-h-0 overflow-hidden rounded-t-xl bg-transparent"),
-                (!has_footer.get()).then_some("rounded-b-2xl"),
-            ]))
-        })
-        .child(children)
+    let panel = view().app_class(move || {
+        tw(&cn([
+            Some("relative min-h-0 overflow-hidden rounded-t-xl bg-transparent"),
+            (!has_footer.get()).then_some("rounded-b-2xl"),
+            Some(match layout {
+                PanelLayout::Default | PanelLayout::TallList => "",
+                PanelLayout::List => "flex min-h-0 flex-col",
+                PanelLayout::Fill => "flex min-h-0 flex-1 flex-col",
+            }),
+        ]))
+    });
+    // NSH cannot parse min(rem, vh); keep CommandPaletteContent's bounds on the panel itself.
+    let panel = match layout {
+        PanelLayout::List => panel.max_h(move || {
+            px((28.0 * nsh_core::geometry::REM_SIZE.0).min(window().height.0 * 0.70))
+        }),
+        PanelLayout::TallList => panel.max_h(move || {
+            px((34.0 * nsh_core::geometry::REM_SIZE.0).min(window().height.0 * 0.76))
+        }),
+        PanelLayout::Default | PanelLayout::Fill => panel,
+    };
+    panel.child(children)
 }
 
 pub fn command_list(

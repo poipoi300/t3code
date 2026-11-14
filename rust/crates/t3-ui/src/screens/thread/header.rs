@@ -13,7 +13,7 @@ use t3_contracts::orchestration_v2::AppThreadLineageRelationshipToParent;
 use crate::i18n::{Text as I18nText, Value, t, tr};
 use crate::runtime::{Shared, rt};
 use crate::screens::panel::{Action, PanelHost};
-use crate::screens::sidebar::actions::ThreadActionMenu;
+use crate::screens::sidebar::actions::{self, ThreadActionMenu};
 use crate::state::layout::layout_class;
 use crate::state::nav::{Route, navigator};
 use crate::theme::tw;
@@ -21,6 +21,7 @@ use crate::ui::avatar::{ProjectFaviconProject, project_favicon};
 use crate::ui::badge;
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::{Icon, icon_with_class};
+use crate::ui::menu::{self, MenuOptions};
 use crate::ui::toast::{self, ToastOptions};
 use crate::ui::toggle::{Content, Size, Variant, toggle};
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
@@ -38,7 +39,7 @@ impl Default for ThreadHeaderState {
     fn default() -> Self {
         Self {
             can_operate: false,
-            unavailable_reason: Some("Thread actions unavailable".into()),
+            unavailable_reason: Some("This connection cannot change threads.".into()),
             menu: None,
             is_scratch: None,
         }
@@ -56,6 +57,7 @@ pub enum HeaderError {
 }
 
 pub trait ThreadHeaderService {
+    /// Emits the current state first; dropping the stream releases its subscription.
     fn watch(&self, key: ThreadKey) -> LocalBoxStream<'static, Rc<ThreadHeaderState>>;
     fn rename_thread(
         &self,
@@ -75,7 +77,7 @@ pub trait ThreadHeaderService {
 pub struct ThreadHeaderRuntime(pub Rc<dyn ThreadHeaderService>);
 
 pub trait ThreadHeaderNavigationService {
-    /// Current availability first; dropping the stream releases the project demand.
+    /// Current availability first; dropping the stream releases its subscription.
     fn watch(&self, project: ProjectKey) -> LocalBoxStream<'static, Option<I18nText>>;
     fn new_thread_in_project(
         &self,
@@ -107,7 +109,6 @@ struct Breadcrumb {
     project: Option<Rc<OrchestrationProjectShell>>,
     parent: Option<(ThreadKey, String)>,
     origin: Option<String>,
-    guest: Option<GuestShare>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -118,18 +119,26 @@ struct GuestShare {
 
 #[derive(Clone, Copy)]
 struct HeaderController {
+    owner: Owner,
     key: Stored<ThreadKey>,
     service: Option<Stored<Rc<dyn ThreadHeaderService>>>,
     state: Signal<Rc<ThreadHeaderState>>,
     renaming: Signal<Option<String>>,
     draft: Signal<String>,
     menu_open: Signal<bool>,
+    context_open: Signal<bool>,
     closing_share: Signal<bool>,
 }
 
 impl HeaderController {
     fn new(key: ThreadKey) -> Self {
-        let service = use_context::<ThreadHeaderRuntime>().map(|runtime| stored(runtime.0));
+        let service = use_context::<ThreadHeaderRuntime>()
+            .or_else(|| {
+                rt().backend()
+                    .client()
+                    .map(|client| crate::runtime::services::thread_ops::thread_header(&client))
+            })
+            .map(|runtime| stored(runtime.0));
         let state = signal(Rc::new(ThreadHeaderState::default()));
         if let Some(service) = service {
             let mut changes = service.get().watch(key.clone());
@@ -141,12 +150,14 @@ impl HeaderController {
             });
         }
         let this = Self {
+            owner: Owner::current(),
             key: stored(key),
             service,
             state,
             renaming: signal(None),
             draft: signal(String::new()),
             menu_open: signal(false),
+            context_open: signal(false),
             closing_share: signal(false),
         };
         // External permission changes cancel an editor that can no longer submit.
@@ -165,6 +176,7 @@ impl HeaderController {
                 .with_untracked(|state| state.can_operate && state.unavailable_reason.is_none())
         {
             self.menu_open.set(false);
+            self.context_open.set(false);
             self.draft.set(title.clone());
             self.renaming.set(Some(title));
         }
@@ -181,7 +193,7 @@ impl HeaderController {
         {
             return;
         }
-        let title = self.draft.get_untracked().trim().to_owned();
+        let title = t3_contracts::wire::trim_js(&self.draft.get_untracked()).to_owned();
         if title.is_empty() {
             toast::toast_manager().add(ToastOptions {
                 variant: toast::Variant::Warning,
@@ -191,18 +203,23 @@ impl HeaderController {
         } else if title != original
             && let Some(service) = self.service
         {
-            spawn(async move {
-                if let Err(error) = service.get().rename_thread(self.key.get(), title).await {
-                    report_header_error(error, Some("Failed to rename thread"));
-                }
+            self.owner.run(move || {
+                spawn(async move {
+                    if let Err(error) = service.get().rename_thread(self.key.get(), title).await {
+                        report_header_error(error, Some("Failed to rename thread"));
+                    }
+                })
             });
         }
     }
 
     fn dispatch(self, action: String, title: String) {
         self.menu_open.set(false);
+        self.context_open.set(false);
         if action == "rename" {
-            self.begin_rename(title);
+            // The closing native menu restores focus before the new input takes it.
+            self.owner
+                .run(move || after_answer(move || self.begin_rename(title)));
             return;
         }
         if self
@@ -212,10 +229,12 @@ impl HeaderController {
             return;
         }
         if let Some(service) = self.service {
-            spawn(async move {
-                if let Err(error) = service.get().perform_action(self.key.get(), action).await {
-                    report_header_error(error, None);
-                }
+            self.owner.run(move || {
+                spawn(async move {
+                    if let Err(error) = service.get().perform_action(self.key.get(), action).await {
+                        report_header_error(error, None);
+                    }
+                })
             });
         }
     }
@@ -302,14 +321,6 @@ pub fn thread_header(key: ThreadKey) -> impl IntoElement {
                     .and_then(Option::as_ref)
                     .map(|origin| origin.label.clone())
                     .filter(|label| !label.is_empty()),
-                guest: row
-                    .guest_share
-                    .as_ref()
-                    .and_then(Option::as_ref)
-                    .map(|share| GuestShare {
-                        expires_at: share.expires_at.0.clone(),
-                        name: share.guest_name.as_ref().map(|name| name.0.clone()),
-                    }),
             })
         })
     });
@@ -317,6 +328,24 @@ pub fn thread_header(key: ThreadKey) -> impl IntoElement {
         computed(move || breadcrumb.with(|b| b.as_ref().is_some_and(|b| b.project.is_some())));
     let workspace_panel = use_context::<PanelHost>().map(|host| host.panel(key.clone()));
     let controller = HeaderController::new(key.clone());
+    let projection = runtime.store.thread(key.clone());
+    let guest = computed(move || {
+        projection.with(|projection| {
+            projection
+                .as_ref()
+                .and_then(|projection| {
+                    projection
+                        .thread
+                        .guest_share
+                        .as_ref()
+                        .and_then(Option::as_ref)
+                })
+                .map(|share| GuestShare {
+                    expires_at: share.expires_at.0.clone(),
+                    name: share.guest_name.as_ref().map(|name| name.0.clone()),
+                })
+        })
+    });
     view()
         // Electron drag/window reservations belong to the shell; no native overflow-clip-margin.
         .app_class(tw("relative bg-background flex h-[var(--workspace-topbar-height)] min-h-[var(--workspace-topbar-height)] shrink-0 items-center px-3 sm:px-5"))
@@ -327,7 +356,8 @@ pub fn thread_header(key: ThreadKey) -> impl IntoElement {
                 ButtonVariant::Ghost, ButtonSize::Icon, || false, move || nav.back(),
             ),
         ))
-        .child(chat_header(breadcrumb, key.environment.clone(), controller))
+        // ContextMenu adds a native wrapper; reserve the breadcrumb's share on that wrapper.
+        .child(view().app_class(tw("min-w-0 flex-1")).child(chat_header(breadcrumb, key.environment.clone(), controller, guest)))
         // The web fixes this group to window chrome; the shared header is its native anchor.
         .child(when(
             move || !(layout_class() == crate::state::layout::LayoutClass::Wide
@@ -345,14 +375,20 @@ fn chat_header(
     breadcrumb: Memo<Option<Breadcrumb>>,
     environment: EnvironmentId,
     controller: HeaderController,
+    guest: Memo<Option<GuestShare>>,
 ) -> impl IntoElement {
     let nav = navigator();
     let project = computed(move || {
         breadcrumb.with(|b| b.as_ref().and_then(|b| b.project.clone()).map(Shared))
     });
     let parent = computed(move || breadcrumb.with(|b| b.as_ref().and_then(|b| b.parent.clone())));
-    let origin = computed(move || breadcrumb.with(|b| b.as_ref().and_then(|b| b.origin.clone())));
-    let guest = computed(move || breadcrumb.with(|b| b.as_ref().and_then(|b| b.guest.clone())));
+    let origin = computed(move || {
+        if controller.renaming.with(Option::is_some) {
+            None
+        } else {
+            breadcrumb.with(|b| b.as_ref().and_then(|b| b.origin.clone()))
+        }
+    });
     let available_width = signal(0.0_f32);
     let collapse_parent = computed(move || {
         let available = available_width.get();
@@ -396,7 +432,7 @@ fn chat_header(
             + gaps * gap
             > available
     });
-    view()
+    let content = view()
         // Sibling controls reserve their actual width instead of the web's pr-10/pr-24.
         .app_class(tw("flex min-w-0 flex-1 items-center gap-2 sm:gap-3"))
         .child(view()
@@ -429,26 +465,14 @@ fn chat_header(
                                 .on_press(move || nav.open(Route::Thread(key.clone())))
                                 .app_class(tw("inline-flex min-w-0 max-w-full cursor-pointer items-center rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
                                 .child(text(SharedString::from(title)).accessible(false).app_class(move || tw(if collapse_parent.get() { "block min-w-0 truncate w-0" } else { "block min-w-0 truncate" })))
-                                .child(when(move || collapse_parent.get(), || text(SharedString::from("...")).accessible(false))))
+                                .child(when(move || collapse_parent.get(), || text(SharedString::from("...")).accessible(false).test_id("parent-breadcrumb-ellipsis"))))
                             .into_element(),
                         workspace_breadcrumb_separator().into_element(),
                     ])).unwrap_or_default()
                 }))
                 .child(view()
                     .app_class(tw("flex min-w-0 items-center font-medium text-foreground min-w-10 flex-1"))
-                    // Backend has no title-menu/rename capability yet.
-                    .child(view()
-                        .role(AccessibilityRole::Header)
-                        .accessibility_level(2u32)
-                        .app_class(tw("min-w-0 flex-1"))
-                        .direction(move || breadcrumb.with(|b| match b.as_ref().and_then(|b| text_direction(&b.title)) {
-                            Some(TextDirection::Ltr) => LayoutDirection::Ltr,
-                            Some(TextDirection::Rtl) => LayoutDirection::Rtl,
-                            None => LayoutDirection::Inherit,
-                        }))
-                        .tooltip(tooltip(tooltip_create_handle(), TooltipOptions::default(), text(move || breadcrumb.with(|b| b.as_ref().map_or_else(String::new, |b| b.title.clone())))))
-                        .child(text(move || breadcrumb.with(|b| b.as_ref().map_or_else(String::new, |b| b.title.clone())))
-                            .app_class(tw("block min-w-0 truncate"))))
+                    .child(thread_title(breadcrumb, controller))
                     .child(dynamic(move || origin.get().map(|origin| untracked(|| {
                         let description = origin.clone();
                         view().app_class(tw("flex shrink-0"))
@@ -457,7 +481,104 @@ fn chat_header(
                     }))))),
             ),
         )
-        .child(guest_share_indicator(guest, controller))
+        .child(guest_share_indicator(guest, controller));
+    menu::context_menu(
+        content.on_context_menu(move |_: &ContextMenuEvent| controller.menu_open.set(false)),
+        MenuOptions {
+            open: Some(controller.context_open),
+            ..Default::default()
+        },
+        move || {
+            controller.renaming.with(Option::is_some)
+                || controller.service.is_none()
+                || controller
+                    .state
+                    .with(|state| state.unavailable_reason.is_some() || state.menu.is_none())
+        },
+        header_menu_popup(breadcrumb, controller),
+    )
+}
+
+fn header_menu_popup(
+    breadcrumb: Memo<Option<Breadcrumb>>,
+    controller: HeaderController,
+) -> impl IntoElement {
+    let model = computed(move || controller.state.with(|state| state.menu.clone()));
+    actions::thread_action_menu_content(model, move |action| {
+        let title = breadcrumb.with(|b| b.as_ref().map_or_else(String::new, |b| b.title.clone()));
+        controller.dispatch(action, title);
+    })
+}
+
+fn thread_title(
+    breadcrumb: Memo<Option<Breadcrumb>>,
+    controller: HeaderController,
+) -> impl IntoElement {
+    let ready = computed(move || breadcrumb.with(Option::is_some));
+    let title = computed(move || {
+        breadcrumb.with(|b| b.as_ref().map_or_else(String::new, |b| b.title.clone()))
+    });
+    let unavailable = computed(move || {
+        controller.service.is_none()
+            || controller
+                .state
+                .with(|state| state.unavailable_reason.is_some() || state.menu.is_none())
+    });
+    let chevron_bounds = signal(Bounds::new(
+        nsh_core::geometry::point(px(0.0), px(0.0)),
+        size(px(0.0), px(0.0)),
+    ));
+    view().app_class(tw("min-w-0"))
+        .child(when(ready, move || {
+            dynamic(move || {
+                let editing = controller.renaming.with(Option::is_some);
+                untracked(|| {
+                    if editing {
+                        let node = element_ref();
+                        let focused = stored(false);
+                        actions::thread_rename_input_with_style(controller.draft, move || controller.commit_rename(), move || controller.renaming.set(None), actions::ThreadRenameInputStyle::Header, Some(node))
+                            // Native menu focus return can follow autofocus in the same mount batch.
+                            .on_layout(move |_: &Bounds<Points>| {
+                                if !focused.get() { focused.replace(true); node.focus(); }
+                            })
+                            .into_element()
+                    } else {
+                        // ButtonEvent::Press erases click count/modifiers; the native button-role view retains them.
+                        let trigger = view().role(AccessibilityRole::Button).focusable(true)
+                            .accessibility_state(move || nsh_core::AccessibilityState {
+                                has_popup: true,
+                                expanded: Some(controller.menu_open.get()),
+                                ..Default::default()
+                            })
+                            .test_id("thread-title-actions")
+                            .label(move || SharedString::from(tr("Thread actions for {title}", &[("title", Value::Text(title.get()))])))
+                            .disabled(move || unavailable.get())
+                            .on_press(move |event: &PressEvent| {
+                                if unavailable.get_untracked() { return; }
+                                if event.clicks > 1 {
+                                    if event.clicks == 2 && event.modifiers == Default::default() && !chevron_bounds.get_untracked().contains(&event.position) {
+                                        controller.begin_rename(title.get_untracked());
+                                    }
+                                } else {
+                                    controller.context_open.set(false);
+                                    controller.menu_open.set(true);
+                                }
+                            })
+                            .on_context_menu(move |_: &ContextMenuEvent| controller.context_open.set(false))
+                            .app_class(tw("group/thread-title inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1 rounded-sm text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
+                            .child(view().role(AccessibilityRole::Header).accessibility_level(2u32).app_class(tw("min-w-0"))
+                                .direction(move || match text_direction(&title.get()) { Some(TextDirection::Ltr) => LayoutDirection::Ltr, Some(TextDirection::Rtl) => LayoutDirection::Rtl, None => LayoutDirection::Inherit })
+                                .child(text(move || title.get()).app_class(tw("block min-w-0 truncate"))))
+                            .child(view().on_layout(move |bounds: &Bounds<Points>| chevron_bounds.set(*bounds)).app_class(tw("size-3.5 shrink-0"))
+                                .child(icon_with_class(Icon::ChevronDown, "size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/thread-title:opacity-100 group-focus-visible/thread-title:opacity-100")));
+                        view().app_class(tw("min-w-0"))
+                            .tooltip(tooltip(tooltip_create_handle(), TooltipOptions::default(), text(move || controller.state.with(|state| state.unavailable_reason.as_ref().map_or_else(|| title.get(), |reason| reason.resolve().to_string())))))
+                            .child(menu::context_menu(trigger, MenuOptions { open: Some(controller.menu_open), align: Align::Start, ..Default::default() }, move || unavailable.get(), header_menu_popup(breadcrumb, controller)))
+                            .into_element()
+                    }
+                })
+            })
+        }))
 }
 
 fn project_breadcrumb(
@@ -499,22 +620,24 @@ fn project_breadcrumb(
         .tooltip(tooltip(tooltip_create_handle(), TooltipOptions::default(), text(move || unavailable.get().map_or_else(|| tr("New thread in {project}", &[("project", Value::Text(display_name()))]), |reason| reason.resolve().to_string()))))
         .child(nsh_base::button()
             .disabled(move || unavailable.with(Option::is_some))
-            .accessibility_label(move || tr("New thread in {project}", &[("project", Value::Text(display_name()))]))
+            .accessibility_label(move || Some(tr("New thread in {project}", &[("project", Value::Text(display_name()))]).into()))
             .on_press_down(move || controller.renaming.set(None))
             .on_press(move || {
                 if unavailable.get_untracked().is_none() && let Some(navigation) = navigation {
-                    spawn(async move {
-                        match navigation.get().new_thread_in_project(project_key.get()).await {
+                    let navigation = navigation.get();
+                    let project_key = project_key.get();
+                    controller.owner.run(move || spawn(async move {
+                        match navigation.new_thread_in_project(project_key).await {
                             Ok(destination) => nav.open(destination.route()),
                             Err(error) => report_header_error(error, None),
                         }
-                    });
+                    }));
                 }
             })
             .app_class(tw("inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1.5 rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
             // The shared favicon resource reader remains the assets runtime owner's binding.
             .child(project_favicon(move || favicon.clone(), |_| None, "size-3.5", None))
-            .child(text(move || display_name()).app_class(tw("block min-w-0 truncate max-w-40"))))
+            .child(text(display_name).app_class(tw("block min-w-0 truncate max-w-40"))))
 }
 
 /// Port of chat/GuestShareControls.tsx GuestShareIndicator and GuestShareStatus.
@@ -585,15 +708,17 @@ fn guest_share_indicator(
                                     }
                                     if let Some(service) = controller.service {
                                         controller.closing_share.set(true);
-                                        spawn(async move {
-                                            let result = service
-                                                .get()
-                                                .close_guest_share(controller.key.get())
-                                                .await;
-                                            controller.closing_share.set(false);
-                                            if let Err(error) = result {
-                                                report_header_error(error, None);
-                                            }
+                                        controller.owner.run(move || {
+                                            spawn(async move {
+                                                let result = service
+                                                    .get()
+                                                    .close_guest_share(controller.key.get())
+                                                    .await;
+                                                controller.closing_share.set(false);
+                                                if let Err(error @ HeaderError::Failed { .. }) = result {
+                                                    log::warn!("[atom-command] stop guest share failed: {error:?}");
+                                                }
+                                            })
                                         });
                                     }
                                 },

@@ -5,8 +5,9 @@
 //! re-renders only the streaming row. User rows are TL-ROWS-USER's; assistant, assistant-meta and
 //! sent-message rows TL-ROWS-ASSISTANT's; work-log, thinking, toggle and fold rows TL-ROWS-WORK-2's
 //! over TL-ROWS-WORK-1's entries, whose expansions feed back into the client's row input; event
-//! rows TL-EVENTS'. TL-VIEWPORT owns following and position memory; CMP-SEND's queued and failed
-//! messages follow the rows inside the same scroller.
+//! rows TL-EVENTS'; pending approvals TL-APPROVAL's and proposed plans TL-PLAN's. TL-VIEWPORT
+//! owns following and position memory; requests whose turn item has not arrived and CMP-SEND's
+//! queued and failed messages follow the rows inside the same scroller.
 //!
 //! The block-flattened timeline (TL-BLOCKS-*) replaces the cell body with blocks so long code
 //! cannot dominate a frame; see ui-plan.md, NSH problem 2.
@@ -26,12 +27,16 @@ use t3_contracts::orchestration_v2::{OrchestrationV2ThreadShell, OrchestrationV2
 
 use crate::i18n::t;
 use crate::runtime::{Shared, rt};
+use crate::screens::thread::rows::approval::{
+    ApprovalContext, ApprovalRowsState, approval_timeline_row, unmatched_pending_approval_rows,
+};
 use crate::screens::thread::rows::assistant::{
     AssistantRowContext, AssistantRowsState, assistant_meta_timeline_row, assistant_row,
     assistant_timeline_row, sent_message_timeline_row,
 };
 use crate::screens::composer::send::{ComposerSendClient, PendingMessages, pending_messages};
 use crate::screens::thread::rows::events::{EventRowContext, v2_event_timeline_row};
+use crate::screens::thread::rows::plan::{PlanContext, PlanRowsState, proposed_plan_timeline_row};
 use crate::screens::thread::rows::groups::{
     WorkGroupsContext, WorkGroupsState, work_group_timeline_row,
 };
@@ -48,6 +53,7 @@ enum RowKind {
     AssistantMeta,
     SentMessage,
     Event,
+    Plan,
     Working,
     Work,
     Other,
@@ -61,6 +67,7 @@ fn kind_of(row: &MessagesTimelineRow) -> RowKind {
         C::AssistantMeta { .. } => RowKind::AssistantMeta,
         C::SentMessage { .. } => RowKind::SentMessage,
         C::Event { .. } => RowKind::Event,
+        C::ProposedPlan { .. } => RowKind::Plan,
         C::Working { .. } => RowKind::Working,
         C::Work { .. }
         | C::WorkLive { .. }
@@ -121,6 +128,8 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
     // The previous projection: the client reuses unchanged rows and patches a streaming one.
     let previous: Rc<RefCell<Option<MessagesTimelineRowsProjection>>> = Rc::default();
     let groups = WorkGroupsState::default();
+    let approvals = ApprovalContext::new(key.clone(), ApprovalRowsState::default());
+    let pending_approvals = approvals.pending;
     let working = computed(move || run.with(|run| run.is_working));
     let rows = computed(move || {
         let run = run.get();
@@ -134,6 +143,9 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
             ..Default::default()
         };
         groups.apply_to_input(&mut input);
+        // Pending approvals stay outside collapsed work (MessagesTimeline's pendingApprovalRequestIds).
+        input.pending_approval_request_ids =
+            pending_approvals.with(|pending| pending.0.keys().cloned().collect());
         let next = derive_messages_timeline_rows_with_state(&input, previous.borrow().as_ref());
         let rows = next.rows.clone();
         *previous.borrow_mut() = Some(next);
@@ -146,6 +158,8 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
         state: AssistantRowsState::default(),
         users: UserRowState::new(),
         events: EventRowContext::new(key.clone(), groups.entries),
+        approvals: approvals.clone(),
+        plans: PlanContext::new(key.clone(), PlanRowsState::default()),
         groups,
         working,
     };
@@ -174,13 +188,14 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
             )
         })
     }))
-    .footer(pending.map(|(messages, client)| {
+    .footer(
         view().app_class(tw("w-full px-3 sm:px-12")).child(
             view()
                 .app_class(tw("mx-auto w-full min-w-0 max-w-(--chat-content-max-width)"))
-                .child(pending_messages(client, key, messages)),
-        )
-    }).unwrap_or_else(view))
+                .child(unmatched_pending_approval_rows(rows, approvals))
+                .child(pending.map(|(messages, client)| pending_messages(client, key, messages))),
+        ),
+    )
     .estimated_item_size(px(120.0))
     .content_padding_y(px(16.0))
     .flex_1()
@@ -199,6 +214,8 @@ struct Rows {
     state: AssistantRowsState,
     users: UserRowState,
     events: EventRowContext,
+    approvals: ApprovalContext,
+    plans: PlanContext,
     groups: WorkGroupsState,
     working: Memo<bool>,
 }
@@ -210,6 +227,8 @@ fn cell(
         state,
         users,
         events,
+        approvals,
+        plans,
         groups,
         working,
     }: Rows,
@@ -237,9 +256,12 @@ fn cell(
                     .into_element()
             }
             RowKind::Event => v2_event_timeline_row(row, events.clone()).into_element(),
-            RowKind::Work => {
-                work_group_timeline_row(row, WorkGroupsContext::new(groups)).into_element()
-            }
+            RowKind::Plan => proposed_plan_timeline_row(row, plans.clone()).into_element(),
+            // A pending approval entry leaves WORK-1's slot empty; TL-APPROVAL draws the row's requests.
+            RowKind::Work => view()
+                .child(work_group_timeline_row(row, WorkGroupsContext::new(groups)))
+                .child(approval_timeline_row(row, approvals.clone()))
+                .into_element(),
             RowKind::Other => return None,
         };
         let frame = move || Some(tw(row.with(|r| r.as_ref().map_or("pb-4", |r| frame_of(&r.0)))));

@@ -11,16 +11,19 @@ use crate::theme::{cn, tw};
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::Icon;
 use crate::ui::input::{InputSize, text_field};
-use crate::ui::{badge, dialog, menu, toast};
-use futures::{FutureExt, future::LocalBoxFuture};
+use crate::ui::{badge, dialog, menu, toast, tooltip};
+use futures::{FutureExt, StreamExt, future::LocalBoxFuture};
+use nsh_base::text_view::{Block as TextBlock, Document, Inline, TextViewClasses};
 use nsh_base::text_view::{MarkdownPlugin, MarkdownPlugins, ParseContext, mdast};
 use nsh_core::prelude::*;
 use std::{collections::BTreeMap, rc::Rc, time::Duration};
 use t3_client::thread_views::messages_timeline::{MessagesTimelineRow, MessagesTimelineRowContent};
 use t3_client::types::ThreadKey;
+use t3_client::view_logic::session::plan_presentation::{
+    PlanCodeFence, PlanTextState, PreviewState, plan_code_fence, preview_chunk, preview_code_text,
+};
 use t3_client::view_logic::session::text::{
-    normalize_plan_markdown_for_export, proposed_plan_markdown_filename, proposed_plan_title,
-    strip_displayed_plan_markdown,
+    normalize_plan_markdown_for_export, proposed_plan_markdown_filename,
 };
 use t3_contracts::wire::trim_js;
 
@@ -73,14 +76,34 @@ pub struct PlanContext {
 }
 impl PlanContext {
     pub fn new(thread: ThreadKey, state: PlanRowsState) -> Self {
+        let client =
+            use_context::<crate::runtime::Rt>().and_then(|runtime| runtime.backend().client());
+        let can_write = signal(false);
+        let (write_file, download) = if let Some(client) = client {
+            let service = client.plan_services();
+            let mut changes = service.changes(&thread);
+            can_write.set(service.can_write(&thread));
+            let destination = thread.clone();
+            spawn(async move {
+                while changes.next().await.is_some() {
+                    can_write.set(service.can_write(&destination));
+                }
+            });
+            (
+                Some(crate::runtime::services::thread_ops::write_plan(&client)),
+                crate::runtime::services::thread_ops::download_plan(&client),
+            )
+        } else {
+            (None, None)
+        };
         Self {
             thread,
             state,
             workspace_root: computed(|| None),
-            can_write: computed(|| false),
+            can_write: computed(move || can_write.get()),
             find_active: computed(|| false),
-            write_file: None,
-            download: None,
+            write_file,
+            download,
         }
     }
 }
@@ -112,7 +135,7 @@ struct PlanState {
     keys: Signal<Vec<BlockId>>,
     slots: Stored<Vec<Signal<Shared<PlanLeaf>>>>,
     code_states: Stored<BTreeMap<BlockId, CodeBlockState>>,
-    title: Signal<Option<String>>,
+    title: Signal<Option<Shared<String>>>,
     collapsible: Signal<bool>,
 }
 impl PartialEq for PlanState {
@@ -146,69 +169,35 @@ impl PlanRowsState {
 }
 struct PlanRender {
     flattener: MessageFlattener,
-    seen: usize,
-    units: usize,
-    lines: usize,
-    title_probe: usize,
-    title: Option<String>,
-    header_stage: u8,
-    header_scan: usize,
-    display_start: Option<usize>,
-    tail_start: usize,
-    tail: Rc<str>,
+    presentation: PlanTextState,
     leaves: Vec<Rc<PlanLeaf>>,
 }
 struct PlanLeaf {
     block: Rc<Block>,
     preview: Rc<str>,
+    preview_code: Rc<str>,
     preview_state: PreviewState,
     code_first: Option<usize>,
+    code_fence: Option<PlanCodeFence>,
 }
 impl PlanRender {
     fn new(id: &str) -> Self {
         Self {
             flattener: MessageFlattener::new(id),
-            seen: 0,
-            units: 0,
-            lines: 1,
-            title_probe: 0,
-            title: None,
-            display_start: None,
-            header_stage: 0,
-            header_scan: 0,
-            tail_start: 0,
-            tail: Rc::from(""),
+            presentation: PlanTextState::default(),
             leaves: Vec::new(),
         }
     }
     fn update(&mut self, row: &PlanRow<'_>, state: PlanState, owner: Owner) {
         let source = row.markdown;
-        if source.len() < self.seen
-            || source.get(self.tail_start..self.seen) != Some(self.tail.as_ref())
-        {
-            *self = Self::new(row.id);
+        let update = self.presentation.update(source, row.streaming);
+        if update.reset {
+            self.flattener = MessageFlattener::new(row.id);
+            self.leaves.clear();
         }
-        let appended = &source[self.seen..];
-        if self.units <= 900 {
-            self.units += appended.encode_utf16().take(901).count();
-        }
-        if self.lines <= 20 {
-            self.lines += appended.bytes().filter(|c| *c == b'\n').take(21).count();
-        }
-        state.collapsible.set(self.units > 900 || self.lines > 20);
-        if self.title.is_none() {
-            let tail = &source[self.title_probe..];
-            state
-                .title
-                .set(proposed_plan_title(tail).map(str::to_owned));
-            if let Some(end) = tail.rfind('\n') {
-                self.title = proposed_plan_title(&tail[..end]).map(str::to_owned);
-                self.title_probe += end + 1;
-            }
-        } else {
-            state.title.set(self.title.clone());
-        }
-        let start = self.display_prefix(source, row.streaming);
+        state.collapsible.set(update.collapsible);
+        state.title.set(update.title.map(Shared));
+        let start = update.display_start;
         let mut delta = self.flattener.ingest(row.id, &source[start..]);
         if !row.streaming
             && let Some(finished) = self.flattener.finish()
@@ -239,11 +228,27 @@ impl PlanRender {
                         .and_then(|leaf| leaf.code_first),
                     _ => None,
                 };
+                let code_fence = match &block.kind {
+                    BlockKind::Code(code) if code.first => plan_code_fence(raw),
+                    BlockKind::Code(_) => at
+                        .checked_sub(1)
+                        .and_then(|at| self.leaves.get(at))
+                        .and_then(|leaf| leaf.code_fence),
+                    _ => None,
+                };
+                let preview_code = match &block.kind {
+                    BlockKind::Code(code) => Rc::from(preview_code_text(
+                        &preview, code.first, code.last, code_fence,
+                    )),
+                    _ => Rc::from(""),
+                };
                 let leaf = Rc::new(PlanLeaf {
                     block,
                     preview: Rc::from(preview),
+                    preview_code,
                     preview_state,
                     code_first,
+                    code_fence,
                 });
                 if at == self.leaves.len() {
                     self.leaves.push(leaf.clone());
@@ -269,80 +274,7 @@ impl PlanRender {
                     .collect(),
             );
         }
-        self.tail_start = source[self.seen..]
-            .rfind('\n')
-            .map_or(self.tail_start, |at| self.seen + at + 1);
-        self.tail = Rc::from(&source[self.tail_start..]);
-        self.seen = source.len();
     }
-
-    fn display_prefix(&mut self, source: &str, streaming: bool) -> usize {
-        if let Some(start) = self.display_start {
-            return start;
-        }
-        loop {
-            let remaining = &source[self.header_scan..];
-            let newline = remaining.find('\n');
-            let line = &remaining[..newline.unwrap_or(remaining.len())];
-            let blank = trim_js(line).is_empty();
-            let heading = proposed_plan_title(line);
-            let skip = match self.header_stage {
-                0 => blank || (heading.is_some() && strip_displayed_plan_markdown(line).is_empty()),
-                1 => {
-                    blank || heading.is_some_and(|heading| heading.eq_ignore_ascii_case("summary"))
-                }
-                _ => blank,
-            };
-            if !skip {
-                if newline.is_some() || !streaming {
-                    self.display_start = Some(self.header_scan);
-                }
-                return self.header_scan;
-            }
-            let Some(end) = newline else {
-                return source.len();
-            };
-            if self.header_stage == 0 {
-                self.header_stage = 1;
-            } else if self.header_stage == 1 && !blank {
-                self.header_stage = 2;
-            }
-            self.header_scan += end + 1;
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-struct PreviewState {
-    visible: usize,
-    pending_newlines: usize,
-}
-fn preview_chunk(raw: &str, mut state: PreviewState) -> (String, PreviewState) {
-    if state.visible > 10 {
-        return (String::new(), state);
-    }
-    let mut preview = String::new();
-    for raw_line in raw.split_inclusive('\n') {
-        let newline = raw_line.ends_with('\n');
-        let line =
-            raw_line.trim_end_matches(|c: char| trim_js(c.encode_utf8(&mut [0; 4])).is_empty());
-        if trim_js(line).is_empty() {
-            if newline && state.visible > 0 {
-                state.pending_newlines += 1;
-            }
-            continue;
-        }
-        state.visible += 1;
-        if state.visible > 10 {
-            preview.push_str("\n\n...");
-            state.pending_newlines = 0;
-            break;
-        }
-        preview.extend(std::iter::repeat_n('\n', state.pending_newlines));
-        preview.push_str(line);
-        state.pending_newlines = usize::from(newline);
-    }
-    (preview, state)
 }
 
 /// Port of TimelineAssistantRows.tsx ProposedPlanTimelineRow.
@@ -432,67 +364,69 @@ fn proposed_plan_card(
                     }
                 },
             ))
-            .child(menu::menu_item(
-                t("Download as markdown"),
-                menu::ItemOptions {
-                    disabled: download.is_none().into(),
-                    ..Default::default()
-                },
-                text(t("Download as markdown")),
-                {
-                    let download = download.clone();
+            .child(download.clone().map(|download| {
+                menu::menu_item(
+                    t("Download as markdown"),
+                    Default::default(),
+                    text(t("Download as markdown")),
                     move || {
-                        if let Some(download) = download.clone()
-                            && let Some((name, source)) = contents(row)
-                        {
+                        if let Some((name, source)) = contents(row) {
+                            let download = download.clone();
                             owner.run(|| {
                                 spawn(async move {
                                     if let Err(error) = download(name, source).await {
                                         plan_toast(
                                             toast::Variant::Error,
-                                            "Could not save plan",
+                                            "Could not download plan",
                                             Some(error),
                                         );
                                     }
                                 })
                             });
                         }
-                    }
-                },
-            ))
-            .child(menu::menu_item(
-                t("Save to workspace"),
-                menu::ItemOptions {
-                    disabled: Prop::bind(move || {
-                        !has_writer || !can_save.get() || root.get().is_none() || state.saving.get()
-                    }),
-                    ..Default::default()
-                },
-                text(t("Save to workspace")),
-                move || {
-                    if has_writer
-                        && can_save.get_untracked()
-                        && root.get_untracked().is_some()
-                        && !state.saving.get_untracked()
-                    {
-                        let last = state.last_path.get_untracked();
-                        state.draft_path.set(if last.is_empty() {
-                            contents(row)
-                                .map(|(filename, _)| filename)
-                                .unwrap_or_default()
-                        } else {
-                            last
-                        });
-                        state.open.set(true);
-                    }
-                },
-            ))
+                    },
+                )
+            }))
+            .child(
+                view()
+                    .tooltip(plan_write_hint(state, can_save, root, has_writer))
+                    .child(menu::menu_item(
+                        t("Save to workspace"),
+                        menu::ItemOptions {
+                            disabled: Prop::bind(move || {
+                                !has_writer
+                                    || !can_save.get()
+                                    || root.get().is_none()
+                                    || state.saving.get()
+                            }),
+                            ..Default::default()
+                        },
+                        text(t("Save to workspace")),
+                        move || {
+                            if has_writer
+                                && can_save.get_untracked()
+                                && root.get_untracked().is_some()
+                                && !state.saving.get_untracked()
+                            {
+                                let last = state.last_path.get_untracked();
+                                state.draft_path.set(if last.is_empty() {
+                                    contents(row)
+                                        .map(|(filename, _)| filename)
+                                        .unwrap_or_default()
+                                } else {
+                                    last
+                                });
+                                state.open.set(true);
+                            }
+                        },
+                    )),
+            )
     });
     view().app_class(tw("rounded-2xl border border-border/80 bg-card/70 p-4 sm:p-5"))
         .child(view().app_class(tw("flex flex-wrap items-center justify-between gap-3"))
             .child(view().app_class(tw("flex min-w-0 items-center gap-2"))
                 .child(badge::badge(badge::Props { variant: badge::Variant::Secondary, ..Default::default() }, vec![badge::Child::Text(Text::from("Plan"))]))
-                .child(text(move || state.title.get().unwrap_or_else(|| t("Proposed plan"))).role(AccessibilityRole::Header).app_class(tw("truncate text-sm font-medium text-foreground"))))
+                .child(text(move || state.title.get().map_or_else(|| t("Proposed plan"), |title| title.to_string())).role(AccessibilityRole::Header).app_class(tw("truncate text-sm font-medium text-foreground"))))
             .child(menu::menu(button(ButtonContent::Icon { icon: Icon::Ellipsis, label: t("Plan actions") }, ButtonVariant::Outline, ButtonSize::IconXs, || false, || {}), menu::MenuOptions { align: Align::End, ..Default::default() }, popup)))
         .child(view().app_class(tw("mt-4"))
             .child(view().app_class(move || tw(&cn([Some("relative"), (state.collapsible.get() && !state.expanded.get()).then_some("max-h-104 overflow-hidden")])))
@@ -528,8 +462,6 @@ fn plan_blocks(state: PlanState, preview: bool) -> impl IntoElement {
                     ) || (preview && leaf.preview.is_empty())
                     {
                         0
-                    } else if preview {
-                        1
                     } else if matches!(leaf.block.kind, BlockKind::Code(_)) {
                         2
                     } else {
@@ -541,7 +473,7 @@ fn plan_blocks(state: PlanState, preview: bool) -> impl IntoElement {
                 let shape = shape.get();
                 untracked(|| match shape {
                     0 => view().into_element(),
-                    2 => plan_code_chunk(slot, state),
+                    2 => plan_code_chunk(slot, state, preview),
                     _ => chat_markdown(
                         move || {
                             slot.with(|leaf| {
@@ -580,7 +512,7 @@ impl MarkdownPlugin for PlanHeadingOffset {
         })
     }
 }
-fn plan_code_chunk(slot: Signal<Shared<PlanLeaf>>, state: PlanState) -> AnyElement {
+fn plan_code_chunk(slot: Signal<Shared<PlanLeaf>>, state: PlanState, preview: bool) -> AnyElement {
     let initial = slot.get_untracked();
     let BlockKind::Code(code) = &initial.block.kind else {
         return view().into_element();
@@ -596,7 +528,14 @@ fn plan_code_chunk(slot: Signal<Shared<PlanLeaf>>, state: PlanState) -> AnyEleme
     let body = move || {
         text(move || {
             slot.with(|leaf| {
-                SharedString::from(leaf.block.text.as_deref().unwrap_or("").to_owned())
+                SharedString::from(
+                    if preview {
+                        leaf.preview_code.as_ref()
+                    } else {
+                        leaf.block.text.as_deref().unwrap_or("")
+                    }
+                    .to_owned(),
+                )
             })
         })
         .select_text()
@@ -616,7 +555,11 @@ fn plan_code_chunk(slot: Signal<Shared<PlanLeaf>>, state: PlanState) -> AnyEleme
                 return CodeBlockProps::default();
             };
             CodeBlockProps {
-                code: code.text.clone(),
+                code: if preview {
+                    leaf.preview_code.to_string()
+                } else {
+                    code.text.clone()
+                },
                 language: code.language.clone().unwrap_or_else(|| "text".into()),
                 fence_title: extract_fence_title(code.meta.as_deref()),
                 ..Default::default()
@@ -722,15 +665,22 @@ fn save_plan_to_workspace_form(
             dialog,
             view()
                 .child(dialog::dialog_title(dialog, || t("Save plan to workspace")))
-                .child(dialog::dialog_description(dialog, move || {
-                    tr(
-                        "Enter a path relative to {workspace}.",
-                        &[(
-                            "workspace",
-                            Value::Text(workspace.get().unwrap_or_else(|| t("the workspace"))),
-                        )],
-                    )
-                })),
+                .child(
+                    view()
+                        .app_class(tw("hidden"))
+                        .child(dialog::dialog_description(dialog, move || {
+                            tr(
+                                "Enter a path relative to {workspace}.",
+                                &[(
+                                    "workspace",
+                                    Value::Text(
+                                        workspace.get().unwrap_or_else(|| t("the workspace")),
+                                    ),
+                                )],
+                            )
+                        })),
+                )
+                .child(workspace_description(workspace)),
         ))
         .child(dialog::dialog_panel(
             dialog,
@@ -766,6 +716,7 @@ fn save_plan_to_workspace_form(
                 .child(
                     view()
                         .app_class(move || tw(if state.saving.get() { "hidden" } else { "flex" }))
+                        .tooltip(plan_write_hint(state, can_write, workspace, has_writer))
                         .child(button(
                             ButtonContent::Label(t("Save")),
                             ButtonVariant::Default,
@@ -788,58 +739,52 @@ fn save_plan_to_workspace_form(
         ))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use t3_client::view_logic::session::text::collapsed_proposed_plan_preview;
-
-    #[test]
-    fn incremental_header_skips_match_the_client_across_every_append_boundary() {
-        for source in [
-            "# Title\n\n## Summary\n\nBody\n\nLater\n",
-            "\n\n# A body heading\n\nText",
-            "# Title\n\n\n\n\n\n\n\n## Summary\n\nBody",
-            "Plain first line\n\n## Summary\nBody",
-            "# Title\r\n\r\n## Summary\r\n\r\n😀 body",
-        ] {
-            let mut render = PlanRender::new("plan");
-            for end in source
-                .char_indices()
-                .map(|(at, _)| at)
-                .chain([source.len()])
-            {
-                let source = &source[..end];
-                let at = render.display_prefix(source, true);
-                assert_eq!(
-                    source[at..].replace("\r\n", "\n").trim_end(),
-                    strip_displayed_plan_markdown(source).as_str(),
-                    "prefix {source:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn block_previews_match_client_nonempty_line_limits_and_keep_one_ellipsis() {
-        for body in [
-            "First\n\nSecond",
-            "a\n\nb\n\nc\n\nd\n\ne\n\nf\n\ng\n\nh\n\ni\n\nj\n\nk\n\nl\n",
-            "```rust\nlet x = 1;\n```\n\nNext",
-            "a  \r\n\r\nb  \r\n",
-        ] {
-            let mut state = PreviewState::default();
-            let preview = body
-                .split_inclusive("\n\n")
-                .map(|block| {
-                    let (preview, after) = preview_chunk(block, state);
-                    state = after;
-                    preview
-                })
-                .collect::<String>();
-            assert_eq!(
-                preview.trim_end(),
-                collapsed_proposed_plan_preview(body, 10)
+fn workspace_description(workspace: Memo<Option<String>>) -> impl IntoElement {
+    nsh_base::text_view()
+        .document(move || {
+            let message = tr(
+                "Enter a path relative to {workspace}.",
+                &[("workspace", Value::Text("\u{fffc}".into()))],
             );
-        }
-    }
+            let (before, after) = message.split_once('\u{fffc}').unwrap_or((&message, ""));
+            Some(Document::new(vec![TextBlock::paragraph(vec![
+                Inline::text(before),
+                Inline::Code {
+                    code: workspace.get().unwrap_or_else(|| t("the workspace")).into(),
+                },
+                Inline::text(after),
+            ])]))
+        })
+        .classes(TextViewClasses {
+            code: Some(tw("font-mono")),
+            ..Default::default()
+        })
+        .app_class(tw("text-muted-foreground text-sm"))
+}
+
+fn plan_write_hint(
+    state: PlanState,
+    can_write: Memo<bool>,
+    workspace: Memo<Option<String>>,
+    has_writer: bool,
+) -> impl IntoElement + nsh_core::element::IntoTooltip {
+    let hint = tooltip::tooltip_create_handle();
+    effect(move || {
+        hint.set_disabled(
+            has_writer && can_write.get() && workspace.get().is_some() && !state.saving.get(),
+        );
+    });
+    tooltip::tooltip(
+        hint,
+        Default::default(),
+        text(move || {
+            if state.saving.get() {
+                t("Saving...")
+            } else if workspace.get().is_none() {
+                t("Workspace path is unavailable")
+            } else {
+                t("This connection cannot save files.")
+            }
+        }),
+    )
 }

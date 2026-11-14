@@ -75,20 +75,18 @@ fn empty_project_file_picker() -> impl IntoElement {
         |_| {},
     );
     state.disabled.set(true);
-    view()
-        .test_id("project-file-picker")
-        .child(command_palette_content(
-            state,
-            ContentOptions {
-                input: input("File picker", "Search files…"),
-                escape_label: "Back".into(),
-                footer_action_label: Some("Open file".into()),
-                ..Default::default()
-            },
-            view()
-                .app_class(tw("py-10 text-center text-sm text-muted-foreground"))
-                .child(text(move || t("Open a project to search its files."))),
-        ))
+    command_palette_content(
+        state,
+        ContentOptions {
+            input: input("File picker", "Search files…"),
+            escape_label: "Back".into(),
+            footer_action_label: Some("Open file".into()),
+            ..Default::default()
+        },
+        view()
+            .app_class(tw("py-10 text-center text-sm text-muted-foreground"))
+            .child(text(move || t("Open a project to search its files."))),
+    )
 }
 
 fn empty_content_search_dialog() -> impl IntoElement {
@@ -101,20 +99,18 @@ fn empty_content_search_dialog() -> impl IntoElement {
         |_| {},
     );
     state.disabled.set(true);
-    view()
-        .test_id("project-content-search")
-        .child(command_palette_content(
-            state,
-            ContentOptions {
-                input: input("Search project contents", "Search project contents…"),
-                escape_label: "Back".into(),
-                footer_action_label: Some("Open file".into()),
-                panel_size: PanelSize::Fill,
-                ..Default::default()
-            },
-            text(move || t("Open a project to search its files."))
-                .app_class(tw("m-auto px-6 text-center text-muted-foreground text-sm")),
-        ))
+    command_palette_content(
+        state,
+        ContentOptions {
+            input: input("Search project contents", "Search project contents…"),
+            escape_label: "Back".into(),
+            footer_action_label: Some("Open file".into()),
+            panel_size: PanelSize::Fill,
+            ..Default::default()
+        },
+        text(move || t("Open a project to search its files."))
+            .app_class(tw("m-auto px-6 text-center text-muted-foreground text-sm")),
+    )
 }
 
 fn open_project_file_picker(host: PaletteSearchRuntime, target: SearchTarget) -> impl IntoElement {
@@ -190,62 +186,59 @@ fn open_project_file_picker(host: PaletteSearchRuntime, target: SearchTarget) ->
     });
     let empty = computed(move || matches.with(|items| items.is_empty()));
     let active = computed(move || current.with(|view| client::has_query(&view.matched_query)));
-    view()
-        .test_id("project-file-picker")
-        .child(command_palette_content(
-            state,
-            ContentOptions {
-                input: input("File picker", "Search files…"),
-                escape_label: "Back".into(),
-                footer_action_label: Some("Open file".into()),
-                panel_size: PanelSize::TallList,
-                ..Default::default()
-            },
-            dynamic(move || {
-                if empty.get() {
-                    return view()
-                        .app_class(tw("py-10 text-center text-sm text-muted-foreground"))
-                        .child(text(move || {
-                            current
-                                .with(|view| file_empty_state(&state.query.get(), view).resolve())
-                        }))
-                        .into_element();
-                }
-                untracked(|| {
-                    command::command_list(
-                        state,
-                        "File picker",
-                        view()
-                            // Project names are literal content, unlike CommandGroupLabel's key-only slot.
-                            .child(
-                                text(move || target.with(|target| target.project_name.clone()))
-                                    .app_class(tw(
-                                        "px-2 py-1.5 font-medium text-muted-foreground text-xs",
-                                    )),
-                            )
-                            .child(command::command_collection(state, move |item| {
-                                let matched = computed(move || {
-                                    item.with(|item| {
-                                        item.as_ref().and_then(|item| {
-                                            matches.with(|matches| {
-                                                matches
-                                                    .iter()
-                                                    .find(|matched| {
-                                                        format!("file:{}", matched.path)
-                                                            == item.value.as_ref()
-                                                    })
-                                                    .cloned()
-                                            })
+    command_palette_content(
+        state,
+        ContentOptions {
+            input: input("File picker", "Search files…"),
+            escape_label: "Back".into(),
+            footer_action_label: Some("Open file".into()),
+            panel_size: PanelSize::TallList,
+            ..Default::default()
+        },
+        dynamic(move || {
+            if empty.get() {
+                return view()
+                    .app_class(tw("py-10 text-center text-sm text-muted-foreground"))
+                    .child(text(move || {
+                        current.with(|view| file_empty_state(&state.query.get(), view).resolve())
+                    }))
+                    .into_element();
+            }
+            untracked(|| {
+                command::command_list(
+                    state,
+                    "File picker",
+                    view()
+                        // Project names are literal content, unlike CommandGroupLabel's key-only slot.
+                        .child(
+                            text(move || target.with(|target| target.project_name.clone()))
+                                .app_class(tw(
+                                    "px-2 py-1.5 font-medium text-muted-foreground text-xs",
+                                )),
+                        )
+                        .child(command::command_collection(state, move |item| {
+                            let matched = computed(move || {
+                                item.with(|item| {
+                                    item.as_ref().and_then(|item| {
+                                        matches.with(|matches| {
+                                            matches
+                                                .iter()
+                                                .find(|matched| {
+                                                    format!("file:{}", matched.path)
+                                                        == item.value.as_ref()
+                                                })
+                                                .cloned()
                                         })
                                     })
-                                });
-                                file_result_row(state, item, matched, active)
-                            })),
-                    )
-                    .into_element()
-                })
-            }),
-        ))
+                                })
+                            });
+                            file_result_row(state, item, matched, active)
+                        })),
+                )
+                .into_element()
+            })
+        }),
+    )
 }
 
 fn file_result_row(
@@ -424,7 +417,7 @@ fn open_content_search_dialog(
         .child(search_option_button("Match case".into(), "Aa", options, current, 0))
         .child(search_option_button("Match whole word".into(), "ab", options, current, 1))
         .child(search_option_button("Use regular expression".into(), ".*", options, current, 2));
-    view().test_id("project-content-search").child(command_palette_content(state, ContentOptions {
+    command_palette_content(state, ContentOptions {
         // Interpolated input labels await UI-COMMAND's Text slots; no content is used as a key.
         input: input("Search project contents", "Search project contents…"), escape_label: "Back".into(),
         footer_action_label: Some("Open file".into()), panel_size: PanelSize::Fill,
@@ -440,7 +433,7 @@ fn open_content_search_dialog(
                     .child(text(move || current.with(content_empty_state).resolve())).into_element();
             }
             untracked(|| content_results(state, current).into_element())
-        }))))
+        })))
 }
 
 fn search_option_button(

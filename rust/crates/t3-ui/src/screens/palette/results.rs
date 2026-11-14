@@ -188,6 +188,16 @@ pub fn command_palette_virtualized_results(
         }
         let options = options.clone();
         untracked(|| {
+            let content_height = signal(px(0.0));
+            // NSH's own-viewport list has no intrinsic height; LegendList sizes from its content.
+            watch_scroll(
+                move || list.node(),
+                move |event| {
+                    if content_height.get_untracked() != event.content_size.height {
+                        content_height.set(event.content_size.height);
+                    }
+                },
+            );
             // NSH's virtual list owns scrolling; overscroll/scrollbar-track hints have no native meaning.
             virtual_list(
                 move || results.with(|results| results.rows.len()),
@@ -211,8 +221,9 @@ pub fn command_palette_virtualized_results(
             .estimated_item_size(px(40.0))
             // CommandListVirtualized's size-full wrapper is inherited by the native scroll surface.
             .app_class(tw(
-                "size-full min-w-0 flex min-h-0 flex-col flex-1 overflow-x-hidden px-2 py-2",
+                "size-full min-w-0 flex min-h-0 flex-col overflow-x-hidden px-2 py-2",
             ))
+            .h(move || content_height.get())
             .into_element()
         })
     })
