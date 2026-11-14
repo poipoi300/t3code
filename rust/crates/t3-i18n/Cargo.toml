@@ -14,18 +14,24 @@ unicode-general-category = "1"
 icu = { version = "2", features = ["experimental"] }
 fixed_decimal = { version = "0.7", features = ["ryu"] }
 tinystr = "0.8"
-jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"], optional = true }
+jiff = { version = "0.2", default-features = false, features = ["std"], optional = true }
 
 [features]
-default = ["icu-fallback", "iana"]
+default = ["icu-fallback", "iana-bundled"]
 # Format dates and compact numbers through ICU4X for host locales that have no generated Intl
 # table (every locale except the shipped UI languages, en-GB, and their default regions).
 # Without it those locales use the en-US patterns with their own number symbols, and ICU4X's
 # date and compact-number data stays out of the binary.
 icu-fallback = []
-# Resolve IANA time zone names (`America/New_York`) with a bundled tz database. Without it an
-# IANA zone formats as UTC and callers pass `TimeZone::Fixed` offsets instead.
-iana = ["dep:jiff"]
+# Resolve IANA time zone names (`America/New_York`). Without it an IANA zone formats as UTC and
+# callers pass `TimeZone::Fixed` offsets instead. The zone data comes from the platform:
+# `/usr/share/zoneinfo` (Linux, macOS, iOS), Android's single `tzdata` file, and a bundled copy
+# only where the system has none (Windows, wasm). The UI uses this, so its binaries do not
+# carry the whole database on every target.
+iana = ["dep:jiff", "jiff/tzdb-zoneinfo", "jiff/tzdb-concatenated", "jiff/tzdb-bundle-platform"]
+# The server's default: the database is always bundled, as Node bundles its own, so a host
+# without system zone data still resolves every zone.
+iana-bundled = ["iana", "jiff/tzdb-bundle-always"]
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
