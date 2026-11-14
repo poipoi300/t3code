@@ -374,9 +374,12 @@ pub fn kiro_auth_from_whoami(
             }
         }
         (Some(0), Some(output)) => {
-            let account = serde_json::from_str::<Value>(
-                output.trim_start().lines().next().unwrap_or("").trim(),
-            )
+            let account = serde_json::from_str::<Value>(t3_contracts::wire::trim_js(
+                t3_contracts::wire::trim_js(output)
+                    .lines()
+                    .next()
+                    .unwrap_or(""),
+            ))
             .ok()
             .filter(|account| {
                 account.is_object()
@@ -393,7 +396,7 @@ pub fn kiro_auth_from_whoami(
                 == Some("ApiKey")
                 || env
                     .get("KIRO_API_KEY")
-                    .is_some_and(|s| !s.trim().is_empty())
+                    .is_some_and(|s| !t3_contracts::wire::trim_js(s).is_empty())
             {
                 serde_json::json!({"status":"authenticated","type":"api_key","label":"Kiro API key"})
             } else {
@@ -455,7 +458,7 @@ pub fn kiro_models_from_list(code: i32, stdout: &str) -> Result<Option<Vec<Serve
     if code != 0 {
         return Ok(None);
     }
-    let Ok(list) = serde_json::from_str::<Listed>(stdout.trim()) else {
+    let Ok(list) = serde_json::from_str::<Listed>(t3_contracts::wire::trim_js(stdout)) else {
         return Ok(None);
     };
     if list.models.is_empty() {

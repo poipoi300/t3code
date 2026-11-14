@@ -339,6 +339,36 @@ impl NativeMaintenance {
         {
             return self.manual(Some(real));
         }
+        if context.driver != "grok" && context.platform != Platform::Windows {
+            let sibling = Path::new(&resolved).with_file_name("port");
+            let port = if sibling.exists() {
+                Some(sibling.to_string_lossy().into_owned())
+            } else {
+                self.probe.resolve("port", &context.environment)
+            };
+            if let Some(port) = port
+                && let Some(prefix) = Path::new(&port).parent().and_then(Path::parent)
+                && normalize(&real).starts_with(&format!(
+                    "{}/",
+                    normalize(&prefix.to_string_lossy()).trim_end_matches('/')
+                ))
+                && let Some(output) = self.run(&port, &["provides", &real]).await
+                && let Some(name) = regex::Regex::new(r"\bis provided by: (\S+)")
+                    .expect("MacPorts ownership")
+                    .captures(&output)
+                    .and_then(|capture| capture.get(1))
+                    .map(|name| name.as_str().to_owned())
+            {
+                let mut value = self.manual(Some(real))?;
+                if regex::Regex::new(r"^[A-Za-z0-9_.+-]+$")
+                    .expect("MacPorts package name")
+                    .is_match(&name)
+                {
+                    value.capabilities.manual_command = Some(format!("sudo port upgrade {name}"));
+                }
+                return Ok(value);
+            }
+        }
         if context.driver == "grok"
             && !maintenance::homebrew_ownership(&real).is_some_and(|ownership| ownership.cask)
         {

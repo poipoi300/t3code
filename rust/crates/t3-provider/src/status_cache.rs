@@ -124,7 +124,7 @@ impl ProviderStatusCache {
         cached.update_state = None;
         cached.workspace_snapshots = None;
         let bytes = serde_json::to_vec_pretty(&cached).map_err(|_| ServiceError::Response)?;
-        if bytes.len() as u64 > MAX_BYTES {
+        if bytes.len() as u64 >= MAX_BYTES {
             return Err(ServiceError::Response);
         }
         tokio::task::spawn_blocking(move || -> ServiceResult<()> {

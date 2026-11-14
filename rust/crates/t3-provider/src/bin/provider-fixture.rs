@@ -238,6 +238,13 @@ fn acp_protocol(config: &Value) -> Result<(), Box<dyn std::error::Error>> {
                     if reply["result"]["action"]["action"]!="accept"{error=Some(json!({"code":-32000,"message":"authentication declined"}));}
                 }json!({})
             },
+            "session/set_config_option"=>{
+                let model = message["params"]["value"].as_str().unwrap_or_default();
+                if let Some(options) = config["modelConfigs"].get(model) {
+                    writeln!(output,"{}",json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"config_option_update","configOptions":options}}}))?;
+                    json!({"configOptions":options})
+                } else {error=Some(json!({"code":-32602,"message":"unknown catalog model"}));json!({})}
+            },
             "session/delete"|"logout"|"auth/logout"|"providers/set"|"providers/disable"=>json!({}),
             "session/list"=>config.get("sessions").cloned().unwrap_or_else(||json!({"sessions":[{"sessionId":"one","cwd":"/fixture","title":"One"}],"nextCursor":null})),
             "providers/list"=>config.get("providers").cloned().unwrap_or_else(||json!({"providers":[{"providerId":"openai","supported":["openai"],"required":false,"current":null}]})),

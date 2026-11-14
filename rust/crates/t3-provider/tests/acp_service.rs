@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 use t3_contracts::{
@@ -19,7 +19,8 @@ use t3_provider::{
     acp_coordinator::AcpRuntimeCoordinator, acp_service::*, auth::AuthService,
     sensitive::Sensitive, transport::SystemClock,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc, oneshot};
+type LookupGate = mpsc::UnboundedSender<(ThreadId, oneshot::Sender<()>)>;
 fn failure() -> AcpError {
     AcpError::new(
         AcpRegistryOperationErrorReason::SessionImportFailed,
@@ -34,6 +35,8 @@ struct Host {
     stop_fails: AtomicBool,
     launch_fails: AtomicBool,
     history_fails: AtomicBool,
+    listed_count: AtomicUsize,
+    lookup: Mutex<Option<LookupGate>>,
 }
 #[derive(Clone)]
 struct Shared(Arc<Host>);
@@ -50,7 +53,9 @@ impl AcpSessionManager for Shared {
         _: &Path,
         _: Option<&str>,
     ) -> AcpResult<AcpRegistryListSessionsResult> {
-        Ok(serde_json::from_value(json!({"sessions":[{"sessionId":"native:id","cwd":"/workspace","additionalDirectories":[],"title":null,"updatedAt":null,"importedThreadId":null}],"nextCursor":null,"canLoad":true,"canResume":true,"canDelete":true})).unwrap())
+        let count = self.listed_count.load(Ordering::SeqCst);
+        let sessions=(0..count).map(|index|json!({"sessionId":if count==1{"native:id".into()}else{format!("native:{index}")},"cwd":"/workspace","additionalDirectories":[],"title":null,"updatedAt":null,"importedThreadId":null})).collect::<Vec<_>>();
+        Ok(serde_json::from_value(json!({"sessions":sessions,"nextCursor":null,"canLoad":true,"canResume":true,"canDelete":true})).unwrap())
     }
     async fn delete_session(&self, _: &Path, _: &str) -> AcpResult<()> {
         self.calls.lock().await.push("delete".into());
@@ -92,6 +97,12 @@ impl AcpSessionHost for Shared {
         })
     }
     async fn thread(&self, id: &ThreadId) -> AcpResult<Option<ImportedThread>> {
+        let gate = self.lookup.lock().await.clone();
+        if let Some(gate) = gate {
+            let (answer, wait) = oneshot::channel();
+            gate.send((id.clone(), answer)).unwrap();
+            wait.await.unwrap();
+        }
         Ok(self.threads.lock().await.get(id).cloned())
     }
     async fn launch_import(&self, launch: ImportLaunch) -> AcpResult<()> {
@@ -167,6 +178,8 @@ fn setup() -> (AcpRegistryService, Arc<Host>) {
         stop_fails: AtomicBool::new(false),
         launch_fails: AtomicBool::new(false),
         history_fails: AtomicBool::new(false),
+        listed_count: AtomicUsize::new(1),
+        lookup: Mutex::new(None),
     });
     let service = AcpRegistryService::new(
         Arc::new(Catalog),
@@ -254,6 +267,10 @@ async fn session_import_repairs_pending_history_and_native_delete_refuses_an_exi
     assert_eq!(launch.len(), 1);
     assert_eq!(launch[0].launch.model_selection.model, "default-model");
     assert_eq!(
+        launch[0].created_by,
+        t3_contracts::orchestration_v2::OrchestrationV2Actor::User
+    );
+    assert_eq!(
         serde_json::to_value(&launch[0].native).unwrap()["metadata"]["itemIdentityVersion"],
         2
     );
@@ -298,5 +315,50 @@ async fn session_import_repairs_pending_history_and_native_delete_refuses_an_exi
     assert_eq!(
         imported_thread_id(&"acpRegistry".into(), &"one:two".into(), "é/a!").0,
         "thread:provider:acpRegistry:provider-instance:one%3Atwo:native-thread:%C3%A9%2Fa!"
+    );
+}
+
+#[tokio::test]
+async fn native_session_mapping_uses_at_most_sixteen_reads_and_preserves_list_order() {
+    let (service, host) = setup();
+    host.listed_count.store(20, Ordering::SeqCst);
+    let (gate, mut entered) = mpsc::unbounded_channel();
+    *host.lookup.lock().await = Some(gate);
+    let listing = tokio::spawn(async move {
+        service
+            .list_sessions(AcpRegistryListSessionsInput {
+                instance_id: "acp".into(),
+                project_id: "project".into(),
+                cursor: None,
+            })
+            .await
+            .unwrap()
+    });
+    let mut first = vec![];
+    for _ in 0..16 {
+        first.push(entered.recv().await.unwrap());
+    }
+    assert!(entered.try_recv().is_err());
+    let (_, release) = first.pop().unwrap();
+    release.send(()).unwrap();
+    let replacement = entered.recv().await.unwrap();
+    assert!(entered.try_recv().is_err());
+    for (_, release) in first.into_iter().rev() {
+        release.send(()).unwrap();
+    }
+    replacement.1.send(()).unwrap();
+    for _ in 0..3 {
+        entered.recv().await.unwrap().1.send(()).unwrap();
+    }
+    let listed = listing.await.unwrap();
+    assert_eq!(
+        listed
+            .sessions
+            .iter()
+            .map(|session| session.session_id.0.clone())
+            .collect::<Vec<_>>(),
+        (0..20)
+            .map(|index| format!("native:{index}"))
+            .collect::<Vec<_>>()
     );
 }

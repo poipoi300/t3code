@@ -21,7 +21,7 @@ tokio = { version = "1", features = ["sync", "time", "rt", "macros", "fs", "net"
 regex = "1"
 sha2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "gzip"] }
 url = "2"
 tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
@@ -30,7 +30,9 @@ base64 = "0.22"
 getrandom = "0.3"
 ring = "0.17"
 file-id = "0.2"
+fs4 = { version = "1.1.0", default-features = false }
 serde_yaml_ng = "0.10"
+zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
 unicode-normalization = "0.1"
 
 [dev-dependencies]

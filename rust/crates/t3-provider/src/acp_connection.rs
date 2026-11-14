@@ -118,6 +118,7 @@ pub struct AcpConnection {
     events: Task,
     child: Option<Child>,
     commands: watch::Receiver<Option<Arc<AvailableCommands>>>,
+    raw_commands: watch::Receiver<Vec<Value>>,
 }
 impl std::fmt::Debug for AcpConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -132,6 +133,7 @@ impl AcpConnection {
     ) -> Self {
         let (client, mut events) = Client::connect(reader, writer, handler, Default::default());
         let (send, commands) = watch::channel(None);
+        let (raw_send, raw_commands) = watch::channel(vec![]);
         let events = Task(tokio::spawn(async move {
             while let Some(Ok(event)) = events.next().await {
                 if let t3_acp::Event::SessionUpdate(update) = event
@@ -142,6 +144,7 @@ impl AcpConnection {
                         .cloned()
                         .unwrap_or_default();
                     send.send_replace(Some(Arc::new(acp_catalog::commands(&commands))));
+                    raw_send.send_replace(commands);
                 }
                 events.acknowledge();
             }
@@ -151,6 +154,7 @@ impl AcpConnection {
             events,
             child: None,
             commands,
+            raw_commands,
         }
     }
     pub async fn spawn(
@@ -219,9 +223,20 @@ impl AcpConnection {
             .map_err(|error| protocol_error(&error, Reason::ProbeFailed))
     }
     pub async fn new_session(&self, cwd: &std::path::Path) -> AcpResult<Sensitive<Value>> {
+        self.new_session_with_meta(cwd, None).await
+    }
+    pub async fn new_session_with_meta(
+        &self,
+        cwd: &std::path::Path,
+        meta: Option<Value>,
+    ) -> AcpResult<Sensitive<Value>> {
+        let mut input = json!({"cwd":cwd,"mcpServers":[]});
+        if let Some(meta) = meta {
+            input["_meta"] = meta;
+        }
         let mut setup = self
             .client
-            .new_session(json!({"cwd":cwd,"mcpServers":[]}))
+            .new_session(input)
             .await
             .map_err(|error| protocol_error(&error, Reason::ProbeFailed))?;
         let id = setup["sessionId"].as_str().ok_or_else(|| {
@@ -279,6 +294,31 @@ impl AcpConnection {
                     protocol_error(&error, failure)
                 }
             })
+    }
+    pub(crate) fn catalog_commands(&self) -> Vec<Value> {
+        self.raw_commands.borrow().clone()
+    }
+    pub(crate) async fn select_catalog_model(
+        &self,
+        session: &str,
+        config_id: &str,
+        model: &str,
+    ) -> AcpResult<Sensitive<Vec<Value>>> {
+        let response = self
+            .client
+            .set_config_option(json!({"sessionId":session,"configId":config_id,"value":model}))
+            .await
+            .map_err(|error| protocol_error(&error, Reason::ProbeFailed))?;
+        let options = self
+            .client
+            .session_state(session)
+            .config_options
+            .or_else(|| response.get("configOptions").cloned());
+        Ok(Sensitive::new(
+            options
+                .and_then(|value| value.as_array().cloned())
+                .unwrap_or_default(),
+        ))
     }
     pub async fn authenticate(&self, method: &str) -> AcpResult<()> {
         self.client

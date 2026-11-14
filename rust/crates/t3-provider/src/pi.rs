@@ -28,7 +28,7 @@ pub struct PiProvider {
     clock: Arc<dyn ProviderClock>,
     manifest: ManifestSource,
     maintenance: Option<Arc<NativeMaintenance>>,
-    update_checks: bool,
+    update_checks: std::sync::atomic::AtomicBool,
     machine: Mutex<Option<ServerProvider>>,
 }
 impl PiProvider {
@@ -48,7 +48,7 @@ impl PiProvider {
             clock,
             manifest,
             maintenance: None,
-            update_checks: false,
+            update_checks: std::sync::atomic::AtomicBool::new(false),
             machine: Mutex::new(None),
         }
     }
@@ -58,7 +58,8 @@ impl PiProvider {
         update_checks: bool,
     ) -> Self {
         self.maintenance = Some(maintenance);
-        self.update_checks = update_checks;
+        self.update_checks
+            .store(update_checks, std::sync::atomic::Ordering::Relaxed);
         self
     }
     fn environment(&self) -> Environment {
@@ -373,6 +374,12 @@ impl PiProvider {
 }
 #[async_trait]
 impl ProviderInstanceService for PiProvider {
+    async fn configure_update_checks(&self, enabled: bool) -> ServiceResult<bool> {
+        Ok(self
+            .update_checks
+            .swap(enabled, std::sync::atomic::Ordering::Relaxed)
+            != enabled)
+    }
     fn instance_id(&self) -> &ProviderInstanceId {
         &self.spec.instance_id
     }
@@ -439,7 +446,9 @@ impl ProviderInstanceService for PiProvider {
     }
     async fn enrich_snapshot(&self, mut snapshot: ServerProvider) -> ServiceResult<ServerProvider> {
         let capabilities = self.maintenance(false).await?;
-        let latest = if self.update_checks
+        let latest = if self
+            .update_checks
+            .load(std::sync::atomic::Ordering::Relaxed)
             && snapshot.enabled
             && snapshot.installed
             && snapshot.version.is_some()

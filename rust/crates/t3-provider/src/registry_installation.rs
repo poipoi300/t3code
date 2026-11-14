@@ -355,11 +355,13 @@ impl RegistryBinaryInstaller {
                 .map_err(|_| install_error())?;
             fs::rename(&archive, command).map_err(|_| install_error())?;
         } else {
+            let tar = crate::environment::archive_tar(self.platform, &self.environment);
+            let tar = tar.to_str().ok_or_else(archive_error)?;
             let (tool, args) = if kind == "zip" && self.platform != Platform::Windows {
                 ("unzip", vec!["-Z1".into(), archive_path.clone()])
             } else {
                 (
-                    "tar",
+                    tar,
                     vec![
                         match kind {
                             "gz" => "-tzf",
@@ -391,7 +393,7 @@ impl RegistryBinaryInstaller {
                 )
             } else {
                 (
-                    "tar",
+                    tar,
                     vec![
                         match kind {
                             "gz" => "-xzf",

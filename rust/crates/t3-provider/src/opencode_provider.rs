@@ -29,6 +29,7 @@ pub struct OpenCodeProvider {
     unsupported_usage: Mutex<Option<String>>,
     maintenance: Option<[Arc<crate::maintenance_resolution::NativeMaintenance>; 2]>,
     service_replacement: Option<Arc<crate::opencode_service::OpenCodeServiceReplacement>>,
+    update_checks: std::sync::atomic::AtomicBool,
 }
 impl OpenCodeProvider {
     pub fn initial_snapshot(&self) -> ServiceResult<ServerProvider> {
@@ -78,6 +79,7 @@ impl OpenCodeProvider {
             unsupported_usage: Mutex::new(None),
             maintenance: None,
             service_replacement: None,
+            update_checks: std::sync::atomic::AtomicBool::new(false),
         }
     }
     pub fn with_service_replacement(
@@ -491,6 +493,36 @@ impl OpenCodeProvider {
 }
 #[async_trait]
 impl ProviderInstanceService for OpenCodeProvider {
+    async fn configure_update_checks(&self, enabled: bool) -> ServiceResult<bool> {
+        Ok(self
+            .update_checks
+            .swap(enabled, std::sync::atomic::Ordering::Relaxed)
+            != enabled)
+    }
+    fn has_enrichment(&self) -> bool {
+        self.maintenance.is_some()
+    }
+    async fn enrich_snapshot(&self, mut snapshot: ServerProvider) -> ServiceResult<ServerProvider> {
+        let capabilities = self.maintenance(false).await?;
+        let latest = if self
+            .update_checks
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && snapshot.enabled
+            && snapshot.installed
+            && snapshot.version.is_some()
+        {
+            self.latest_version(false).await?
+        } else {
+            None
+        };
+        snapshot.version_advisory = Some(crate::maintenance::version_advisory(
+            &capabilities,
+            snapshot.version.as_ref().map(|version| version.0.as_str()),
+            latest.as_deref(),
+            Some(&snapshot.checked_at.0),
+        ));
+        Ok(snapshot)
+    }
     fn instance_id(&self) -> &ProviderInstanceId {
         &self.spec.instance_id
     }

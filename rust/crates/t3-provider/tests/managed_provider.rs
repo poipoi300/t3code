@@ -4,7 +4,7 @@ use serde_json::json;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -24,6 +24,7 @@ struct Source {
     requests: mpsc::UnboundedSender<Request>,
     policy: watch::Receiver<BackgroundPolicy>,
     enrichment: Option<mpsc::UnboundedSender<Enrichment>>,
+    update_checks: AtomicBool,
 }
 struct Enrichment {
     snapshot: ServerProvider,
@@ -31,6 +32,9 @@ struct Enrichment {
 }
 #[async_trait]
 impl ProviderInstanceService for Source {
+    async fn configure_update_checks(&self, enabled: bool) -> ServiceResult<bool> {
+        Ok(self.update_checks.swap(enabled, Ordering::SeqCst) != enabled)
+    }
     fn has_enrichment(&self) -> bool {
         self.enrichment.is_some()
     }
@@ -97,6 +101,7 @@ fn setup_all(
         requests,
         policy: background.clone(),
         enrichment,
+        update_checks: AtomicBool::new(false),
     });
     let mut options = ManagedOptions::new(background);
     options.usage = usage;
@@ -382,4 +387,40 @@ async fn enrichment_runs_after_the_base_check_and_is_cancelled_on_refresh_and_te
     let mut pending = callbacks.recv().await.unwrap();
     drop(provider);
     pending.answer.closed().await;
+}
+
+#[tokio::test]
+async fn update_policy_changes_cancel_enrichment_without_probing_or_starting_before_readiness() {
+    let (tx, mut callbacks) = mpsc::unbounded_channel();
+    let (provider, _policy, mut requests) = setup_all(snapshot("warning"), None, Some(tx));
+    assert!(provider.configure_update_checks(true).await.unwrap());
+    assert!(requests.try_recv().is_err());
+    assert!(callbacks.try_recv().is_err());
+    let check = tokio::spawn({
+        let provider = provider.clone();
+        async move { provider.snapshot(None, false).await.unwrap() }
+    });
+    requests
+        .recv()
+        .await
+        .unwrap()
+        .answer
+        .send(Ok(snapshot("ready")))
+        .unwrap();
+    check.await.unwrap();
+    let mut old = callbacks.recv().await.unwrap();
+    assert!(provider.configure_update_checks(false).await.unwrap());
+    old.answer.closed().await;
+    let mut next = callbacks.recv().await.unwrap();
+    next.snapshot.version = Some("2.0.0".into());
+    next.answer.send(Ok(next.snapshot)).unwrap();
+    let mut updates = provider.subscribe_snapshots().unwrap();
+    observed(&mut updates, |snapshot| {
+        snapshot
+            .version
+            .as_ref()
+            .is_some_and(|version| version.0 == "2.0.0")
+    })
+    .await;
+    assert!(requests.try_recv().is_err());
 }

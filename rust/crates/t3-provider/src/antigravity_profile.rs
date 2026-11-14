@@ -11,6 +11,36 @@ use std::{
 pub const AUTH_PREFIX: &str = "Open the following link to authenticate the ACP server: ";
 pub const BROWSER_MARKER: &str = "__T3_ANTIGRAVITY_AUTH_URL__";
 pub const SIGN_IN_REQUIRED: &str = "Sign in to Antigravity in Settings before you continue.";
+pub fn text_generation_available(profile: &Path) -> bool {
+    for (file, key) in [("hooks.json", "hooks"), ("mcp_config.json", "mcpServers")] {
+        let path = profile.join("config").join(file);
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return false,
+        };
+        if !metadata.is_file() || metadata.len() > 64000 {
+            return false;
+        }
+        let Some(value) = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        else {
+            return false;
+        };
+        if !value.is_object() {
+            return false;
+        }
+        let nested = value
+            .get(key)
+            .filter(|value| !value.is_null())
+            .unwrap_or(&value);
+        if !nested.as_object().is_some_and(|object| object.is_empty()) {
+            return false;
+        }
+    }
+    true
+}
 const REMOVED: &[&str] = &[
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
@@ -95,7 +125,7 @@ impl AuthConfig {
 pub fn instance_directories(state: &Path, instance: &str) -> (PathBuf, PathBuf) {
     let key = format!("{:x}", Sha256::digest(instance.as_bytes()));
     (
-        state.join("providers/antigravity").join(&key),
+        state.join("providers").join("antigravity").join(&key),
         state.join("antigravity-tmp").join(&key[..12]),
     )
 }
@@ -337,6 +367,11 @@ pub async fn prepare(input: PrepareProfile<'_>) -> ServiceResult<Profile> {
         let link = directory.join(relative);
         let target = input.user_home.join(".gemini").join(relative);
         if !target.exists() {
+            if std::fs::symlink_metadata(&link)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                let _ = std::fs::remove_dir(&link).or_else(|_| std::fs::remove_file(&link));
+            }
             continue;
         }
         if let Ok(metadata) = std::fs::symlink_metadata(&link) {

@@ -70,7 +70,7 @@ pub struct NativeProvider {
     reset_client: Option<Arc<crate::reset_credits::ClaudeResetClient>>,
     reset_coordinator: Arc<crate::reset_credits::ResetCreditCoordinator>,
     maintenance: Option<Arc<crate::maintenance_resolution::NativeMaintenance>>,
-    update_checks: bool,
+    update_checks: std::sync::atomic::AtomicBool,
 }
 impl NativeProvider {
     pub fn new(
@@ -111,7 +111,7 @@ impl NativeProvider {
             reset_client: None,
             reset_coordinator: crate::reset_credits::ResetCreditCoordinator::shared(),
             maintenance: None,
-            update_checks: false,
+            update_checks: std::sync::atomic::AtomicBool::new(false),
         }
     }
     pub fn with_reset_client(
@@ -134,7 +134,8 @@ impl NativeProvider {
         update_checks: bool,
     ) -> Self {
         self.maintenance = Some(maintenance);
-        self.update_checks = update_checks;
+        self.update_checks
+            .store(update_checks, std::sync::atomic::Ordering::Relaxed);
         self
     }
     pub fn initial_snapshot(&self) -> ServiceResult<ServerProvider> {
@@ -606,13 +607,22 @@ impl NativeProvider {
 }
 #[async_trait]
 impl ProviderInstanceService for NativeProvider {
+    async fn configure_update_checks(&self, enabled: bool) -> ServiceResult<bool> {
+        Ok(self
+            .update_checks
+            .swap(enabled, std::sync::atomic::Ordering::Relaxed)
+            != enabled)
+    }
     fn has_enrichment(&self) -> bool {
         self.maintenance.is_some()
     }
     async fn enrich_snapshot(&self, mut snapshot: ServerProvider) -> ServiceResult<ServerProvider> {
         if let Some(maintenance) = &self.maintenance {
             let capabilities = maintenance.capabilities(false).await?;
-            let latest = if self.update_checks {
+            let latest = if self
+                .update_checks
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
                 maintenance.latest(false).await?
             } else {
                 None

@@ -8,7 +8,10 @@ use std::{
 use t3_contracts::{
     acp_registry::*,
     base_schemas::{ProjectId, ThreadId},
-    orchestration_v2::{CommandThreadCreateImportedNativeThread, OrchestrationV2ThreadLaunchInput},
+    orchestration_v2::{
+        CommandThreadCreateImportedNativeThread, OrchestrationV2Actor,
+        OrchestrationV2ThreadLaunchInput,
+    },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
     server::ServerProvider,
     speech::True,
@@ -80,6 +83,7 @@ pub struct ImportedThread {
 pub struct ImportLaunch {
     pub launch: OrchestrationV2ThreadLaunchInput,
     pub native: CommandThreadCreateImportedNativeThread,
+    pub created_by: OrchestrationV2Actor,
 }
 #[async_trait]
 pub trait AcpSessionHost: Send + Sync {
@@ -174,21 +178,45 @@ impl AcpRegistryService {
             .manager
             .list_sessions(&cwd, input.cursor.as_deref())
             .await?;
-        for session in &mut listed.sessions {
-            let id =
-                imported_thread_id(&instance.driver, &input.instance_id, &session.session_id.0);
-            let thread = self.host.thread(&id).await.map_err(|_| {
-                AcpError::new(
-                    AcpRegistryOperationErrorReason::SessionImportFailed,
-                    "Could not inspect existing imported ACP sessions.",
-                )
-            })?;
-            session.native_history_pending = thread
-                .as_ref()
-                .filter(|thread| thread.native_history_pending)
-                .map(|_| true);
-            session.imported_thread_id = thread.map(|_| id);
+        let mut sessions = std::mem::take(&mut listed.sessions).into_iter().enumerate();
+        let mut jobs = tokio::task::JoinSet::new();
+        let mut finished = vec![];
+        let error = || {
+            AcpError::new(
+                AcpRegistryOperationErrorReason::SessionImportFailed,
+                "Could not inspect existing imported ACP sessions.",
+            )
+        };
+        loop {
+            while jobs.len() < 16 {
+                let Some((index, mut session)) = sessions.next() else {
+                    break;
+                };
+                let id =
+                    imported_thread_id(&instance.driver, &input.instance_id, &session.session_id.0);
+                let host = self.host.clone();
+                jobs.spawn(async move {
+                    let thread = host.thread(&id).await.map_err(|_| {
+                        AcpError::new(
+                            AcpRegistryOperationErrorReason::SessionImportFailed,
+                            "Could not inspect existing imported ACP sessions.",
+                        )
+                    })?;
+                    session.native_history_pending = thread
+                        .as_ref()
+                        .filter(|thread| thread.native_history_pending)
+                        .map(|_| true);
+                    session.imported_thread_id = thread.map(|_| id);
+                    Ok::<_, AcpError>((index, session))
+                });
+            }
+            match jobs.join_next().await {
+                Some(result) => finished.push(result.map_err(|_| error())??),
+                None => break,
+            }
         }
+        finished.sort_by_key(|(index, _)| *index);
+        listed.sessions = finished.into_iter().map(|(_, session)| session).collect();
         Ok(listed)
     }
     pub async fn delete_session(
@@ -211,7 +239,18 @@ impl AcpRegistryService {
             ));
         }
         let thread = imported_thread_id(&instance.driver, &input.instance_id, &input.session_id.0);
-        if self.host.thread(&thread).await?.is_some() {
+        if self
+            .host
+            .thread(&thread)
+            .await
+            .map_err(|_| {
+                AcpError::new(
+                    AcpRegistryOperationErrorReason::SessionDeleteFailed,
+                    "Could not inspect the imported ACP session mapping.",
+                )
+            })?
+            .is_some()
+        {
             return Err(AcpError::new(
                 AcpRegistryOperationErrorReason::SessionDeleteFailed,
                 "Delete the imported T3 thread before deleting its native ACP session.",
@@ -371,8 +410,18 @@ impl AcpRegistryService {
             ));
         }
         let thread = imported_thread_id(&instance.driver, &input.instance_id, &input.session_id.0);
-        if let Some(existing) = self.host.thread(&thread).await? {
-            self.host.import_history(&thread, &cwd).await?;
+        if let Some(existing) = self.host.thread(&thread).await.map_err(|_| {
+            AcpError::new(
+                AcpRegistryOperationErrorReason::SessionImportFailed,
+                "Could not inspect the imported ACP session mapping.",
+            )
+        })? {
+            self.host.import_history(&thread, &cwd).await.map_err(|_| {
+                AcpError::new(
+                    AcpRegistryOperationErrorReason::SessionImportFailed,
+                    "Could not import the ACP session history.",
+                )
+            })?;
             return Ok(AcpRegistryImportSessionResult {
                 thread_id: thread,
                 imported: existing.native_history_pending,
@@ -402,11 +451,26 @@ impl AcpRegistryService {
         let native=serde_json::from_value(json!({"ref":{"driver":instance.driver,"nativeId":input.session_id,"strength":"strong"},"metadata":metadata})).map_err(|_|error())?;
         if self
             .host
-            .launch_import(ImportLaunch { launch, native })
+            .launch_import(ImportLaunch {
+                launch,
+                native,
+                created_by: OrchestrationV2Actor::User,
+            })
             .await
             .is_err()
         {
-            if self.host.thread(&thread).await?.is_some() {
+            if self
+                .host
+                .thread(&thread)
+                .await
+                .map_err(|_| {
+                    AcpError::new(
+                        AcpRegistryOperationErrorReason::SessionImportFailed,
+                        "Could not inspect the imported ACP session after launch failed.",
+                    )
+                })?
+                .is_some()
+            {
                 return Ok(AcpRegistryImportSessionResult {
                     thread_id: thread,
                     imported: false,

@@ -32,6 +32,7 @@ impl ProviderClock for Clock {
 struct Effects {
     events: mpsc::UnboundedSender<String>,
     reject_retirement: AtomicBool,
+    update_checks: Arc<AtomicBool>,
 }
 #[async_trait]
 impl ProviderSessions for Effects {
@@ -59,6 +60,7 @@ struct Source {
     spec: Arc<InstanceSpec>,
     value: ServerProvider,
     events: mpsc::UnboundedSender<String>,
+    update_checks: Arc<AtomicBool>,
 }
 impl Drop for Source {
     fn drop(&mut self) {
@@ -69,6 +71,9 @@ impl Drop for Source {
 }
 #[async_trait]
 impl ProviderInstanceService for Source {
+    async fn configure_update_checks(&self, enabled: bool) -> ServiceResult<bool> {
+        Ok(self.update_checks.swap(enabled, Ordering::SeqCst) != enabled)
+    }
     fn instance_id(&self) -> &ProviderInstanceId {
         &self.spec.instance_id
     }
@@ -92,6 +97,7 @@ impl ProviderFactory for Effects {
                 spec,
                 value: value.clone(),
                 events: self.events.clone(),
+                update_checks: self.update_checks.clone(),
             }),
             initial: value,
             auth: None,
@@ -106,6 +112,7 @@ async fn replacement_waits_for_retirement_retries_failures_and_parks_unavailable
     let effects = Arc::new(Effects {
         events,
         reject_retirement: AtomicBool::new(false),
+        update_checks: Arc::new(AtomicBool::new(false)),
     });
     let service = ProviderService::new(
         Arc::new(AuthService::default()),
@@ -189,6 +196,15 @@ async fn replacement_waits_for_retirement_retries_failures_and_parks_unavailable
         events.push(event);
     }
     assert_eq!(events, ["retire:work", "drop:work", "create:work:two"]);
+    assert!(effects.update_checks.load(Ordering::SeqCst));
+    settings.enable_provider_update_checks = false;
+    let policy = host
+        .reconcile(&settings, &BTreeSet::new(), false, &BTreeMap::new())
+        .await
+        .unwrap();
+    assert!(policy.activated.is_empty() && policy.retired.is_empty());
+    assert!(!effects.update_checks.load(Ordering::SeqCst));
+    assert!(received.try_recv().is_err());
     host.close().await.unwrap();
     assert!(service.get_providers().await.0.is_empty());
     assert!(fixture.calls().is_empty());

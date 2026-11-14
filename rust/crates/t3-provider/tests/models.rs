@@ -78,6 +78,7 @@ fn grok_effort_order_defaults_and_unfamiliar_tokens_follow_advertised_metadata()
 #[test]
 fn kiro_whoami_reads_first_line_and_never_infers_auth_from_a_failed_command() {
     let env = Environment::new();
+    assert_eq!(kiro_auth_from_whoami(Some(0),Some("\u{feff}{\"email\":\"ada@example.com\",\"accountType\":\"IdentityCenter\"}\nProfile: work"),&env).unwrap().email.unwrap().unwrap().0,"ada@example.com");
     assert!(
         kiro_auth_from_whoami(
             Some(0),

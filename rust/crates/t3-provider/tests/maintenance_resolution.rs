@@ -517,3 +517,37 @@ async fn claude_native_channel_uses_the_updaters_host_settings_and_sorted_manage
         Some("2.1.302".into())
     );
 }
+
+#[tokio::test]
+async fn macports_ownership_disables_native_updates_and_never_reflects_an_unusable_package_name() {
+    for (driver, name, manual) in [
+        (
+            "claudeAgent",
+            "claude-code",
+            Some("sudo port upgrade claude-code"),
+        ),
+        ("codex", "codex;secret-never-format", None),
+    ] {
+        let path = format!("/opt/local/bin/{driver}");
+        let probe = Arc::new(Probe {
+            resolved: BTreeMap::from([
+                ("provider".into(), path.clone()),
+                ("port".into(), "/opt/local/bin/port".into()),
+            ]),
+            replies: BTreeMap::from([(
+                format!("/opt/local/bin/port|provides|{path}"),
+                format!("{path} is provided by: {name}"),
+            )]),
+            ..Default::default()
+        });
+        let mut context = context(driver, &path);
+        context.platform = Platform::Macos;
+        let capabilities = build_resolver(context, probe, Arc::new(Http::default()))
+            .capabilities(false)
+            .await
+            .unwrap();
+        assert!(capabilities.update.is_none());
+        assert_eq!(capabilities.manual_command.as_deref(), manual);
+        assert!(!format!("{capabilities:?}").contains("secret-never-format"));
+    }
+}

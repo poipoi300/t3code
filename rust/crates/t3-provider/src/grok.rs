@@ -261,7 +261,7 @@ pub struct GrokProvider {
     manifest: ManifestSource,
     machine: Mutex<Option<ServerProvider>>,
     maintenance: Option<Arc<crate::maintenance_resolution::NativeMaintenance>>,
-    update_checks: bool,
+    update_checks: std::sync::atomic::AtomicBool,
     system_config: PathBuf,
 }
 impl GrokProvider {
@@ -284,7 +284,7 @@ impl GrokProvider {
             manifest,
             machine: Mutex::new(None),
             maintenance: None,
-            update_checks: false,
+            update_checks: std::sync::atomic::AtomicBool::new(false),
             system_config: "/etc/grok".into(),
         }
     }
@@ -298,7 +298,8 @@ impl GrokProvider {
         update_checks: bool,
     ) -> Self {
         self.maintenance = Some(maintenance);
-        self.update_checks = update_checks;
+        self.update_checks
+            .store(update_checks, std::sync::atomic::Ordering::Relaxed);
         self
     }
     fn environment(&self) -> Environment {
@@ -331,7 +332,7 @@ impl GrokProvider {
     pub fn initial_snapshot(&self) -> ServiceResult<ServerProvider> {
         let fallback = catalog::capabilities(vec![]);
         let builtin = catalog::model(DEFAULT_MODEL, "Grok Build", Some(fallback.clone()));
-        let mut value = json!({"instanceId":self.spec.instance_id,"driver":"grok","displayName":self.spec.display_name.as_deref().unwrap_or("Grok"),"enabled":self.spec.enabled,"installed":self.spec.enabled,"version":null,"status":if self.spec.enabled{"warning"}else{"disabled"},"auth":{"status":"unknown"},"checkedAt":self.checked()?,"models":catalog::custom_models(&[builtin],&self.custom(),Some(&fallback)),"skills":[],"slashCommands":[],"message":if self.spec.enabled{"Checking Grok CLI availability..."}else{"Grok is disabled in T3 Code settings."},"supportsConversationRollback":false,"showInteractionModeToggle":false,"supportedRuntimeModes":["approval-required","auto","full-access"],"continuation":{"groupKey":self.spec.default_continuation_key()}});
+        let mut value = json!({"instanceId":self.spec.instance_id,"driver":"grok","displayName":self.spec.display_name.as_deref().unwrap_or("Grok"),"enabled":self.spec.enabled,"installed":self.spec.enabled,"version":null,"status":if self.spec.enabled{"warning"}else{"disabled"},"auth":{"status":"unknown"},"setup":{"canAuthenticate":false,"canInstall":false},"checkedAt":self.checked()?,"models":catalog::custom_models(&[builtin],&self.custom(),Some(&fallback)),"skills":[],"slashCommands":[],"message":if self.spec.enabled{"Checking Grok CLI availability..."}else{"Grok is disabled in T3 Code settings."},"supportsConversationRollback":false,"showInteractionModeToggle":false,"supportedRuntimeModes":["approval-required","auto","full-access"],"continuation":{"groupKey":self.spec.default_continuation_key()}});
         if let Some(color) = &self.spec.accent_color {
             value["accentColor"] = json!(color);
         }
@@ -560,6 +561,12 @@ impl GrokProvider {
 }
 #[async_trait]
 impl ProviderInstanceService for GrokProvider {
+    async fn configure_update_checks(&self, enabled: bool) -> ServiceResult<bool> {
+        Ok(self
+            .update_checks
+            .swap(enabled, std::sync::atomic::Ordering::Relaxed)
+            != enabled)
+    }
     fn instance_id(&self) -> &ProviderInstanceId {
         &self.spec.instance_id
     }
@@ -572,7 +579,10 @@ impl ProviderInstanceService for GrokProvider {
     async fn enrich_snapshot(&self, mut snapshot: ServerProvider) -> ServiceResult<ServerProvider> {
         if let Some(maintenance) = &self.maintenance {
             let capabilities = maintenance.capabilities(false).await?;
-            let latest = if self.update_checks {
+            let latest = if self
+                .update_checks
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
                 maintenance.latest(false).await?
             } else {
                 None

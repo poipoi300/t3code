@@ -203,3 +203,63 @@ async fn registry_archives_are_listed_and_extracted_with_real_tar_before_atomic_
         .unwrap();
     assert_eq!(std::fs::read(executable).unwrap(), b"fixture executable");
 }
+
+struct WindowsZip;
+#[async_trait]
+impl RegistryCommands for WindowsZip {
+    fn resolve(&self, _: &str, _: &Environment) -> Option<PathBuf> {
+        None
+    }
+    async fn run(
+        &self,
+        command: &Path,
+        args: &[String],
+        _: &Environment,
+        _: Duration,
+        _: usize,
+    ) -> AcpResult<Sensitive<String>> {
+        if command != Path::new("D:/Windows").join("System32").join("tar.exe") {
+            return Err(t3_provider::acp_service::AcpError::new(
+                t3_contracts::acp_registry::AcpRegistryOperationErrorReason::InstallFailed,
+                "The PATH tar does not support zip archives.",
+            ));
+        }
+        if args[0] == "-tf" {
+            return Ok(Sensitive::new("bin/agent.exe\n".into()));
+        }
+        let root = Path::new(&args[3]);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin/agent.exe"), b"fixture executable").unwrap();
+        Ok(Sensitive::new(String::new()))
+    }
+}
+#[tokio::test]
+async fn windows_arm_zip_fallback_uses_system_bsdtar_even_when_path_tar_cannot_read_zip() {
+    let root = tempfile::tempdir().unwrap();
+    let mut agent = agent();
+    let target = agent
+        .distribution
+        .binary
+        .as_mut()
+        .unwrap()
+        .get_mut("windows-x86_64")
+        .unwrap();
+    target.archive = "https://archive.invalid/recorded.zip".into();
+    let target = target.clone();
+    let installer = RegistryBinaryInstaller {
+        tools: root.path().join("tools"),
+        platform: Platform::Windows,
+        target: "windows-aarch64".into(),
+        environment: Environment::from([("SYSTEMROOT".into(), "D:/Windows".into())]),
+        commands: Arc::new(WindowsZip),
+        downloads: Arc::new(Download {
+            bytes: b"fixture bytes".to_vec(),
+            calls: AtomicUsize::new(0),
+        }),
+        clock: Arc::new(SystemClock),
+    };
+    assert_eq!(
+        std::fs::read(installer.install(&agent, &target).await.unwrap()).unwrap(),
+        b"fixture executable"
+    );
+}

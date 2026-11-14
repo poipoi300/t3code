@@ -14,6 +14,12 @@ use tokio::sync::{Mutex, RwLock, watch};
 #[async_trait]
 pub trait ProviderInstanceService: Send + Sync {
     fn instance_id(&self) -> &ProviderInstanceId;
+    fn owns_usage_state(&self) -> bool {
+        false
+    }
+    async fn configure_update_checks(&self, _enabled: bool) -> ServiceResult<bool> {
+        Ok(false)
+    }
     async fn snapshot(&self, cwd: Option<&str>, fresh: bool) -> ServiceResult<ServerProvider>;
     fn subscribe_snapshots(&self) -> Option<watch::Receiver<Option<ServerProvider>>> {
         None
@@ -142,6 +148,20 @@ impl Drop for SnapshotWatcher {
     }
 }
 impl ProviderService {
+    pub async fn configure_update_checks(&self, enabled: bool) -> ServiceResult<()> {
+        let instances = self
+            .instances
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for instance in instances {
+            instance.configure_update_checks(enabled).await?;
+        }
+        Ok(())
+    }
+
     pub fn new(
         auth: Arc<AuthService>,
         executor: Arc<dyn MaintenanceExecutor>,

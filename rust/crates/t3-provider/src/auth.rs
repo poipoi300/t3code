@@ -211,6 +211,22 @@ impl AuthContext {
             inner.changes.send_modify(|v| *v = v.wrapping_add(1));
         }
     }
+    pub async fn message(&self, message: &'static str) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        let mut state = inner.state.lock().await;
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.id == self.flow_id)
+        {
+            state.published.state.message = Some(message.into());
+            inner
+                .changes
+                .send_modify(|version| *version = version.wrapping_add(1));
+        }
+    }
     pub async fn receive(&mut self) -> ServiceResult<AuthDelivery> {
         tokio::select! {
             _ = self.cancellation.cancelled() => Err(ServiceError::Cancelled),

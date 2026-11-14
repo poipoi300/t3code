@@ -165,7 +165,10 @@ impl ManagedProvider {
                             break;
                         };
                         let generation = provider.generation().await;
-                        let _ = provider.publish_enrichment(generation, value).await;
+                        let preserve_usage = !provider.source.owns_usage_state();
+                        let _ = provider
+                            .publish_snapshot(generation, value, preserve_usage)
+                            .await;
                     }
                     if changes.changed().await.is_err() {
                         break;
@@ -318,14 +321,28 @@ impl Core {
     fn publish(&self, state: &State) {
         self.changes.send_replace(Some(state.snapshot.clone()));
     }
-    pub async fn publish_enrichment(&self, generation: u64, mut next: ServerProvider) -> bool {
+    pub async fn publish_enrichment(&self, generation: u64, next: ServerProvider) -> bool {
+        self.publish_snapshot(generation, next, true).await
+    }
+    async fn publish_snapshot(
+        &self,
+        generation: u64,
+        mut next: ServerProvider,
+        preserve_usage: bool,
+    ) -> bool {
         let mut state = self.state.lock().await;
         if generation != state.generation || next.instance_id != state.snapshot.instance_id {
             return false;
         }
-        next.usage_limits = state.snapshot.usage_limits.clone();
-        if let Some(label) = &state.usage_label {
+        if preserve_usage {
+            next.usage_limits = state.snapshot.usage_limits.clone();
+        }
+        if preserve_usage && let Some(label) = &state.usage_label {
             next.auth.label = label.clone().map(Some);
+        }
+        if !preserve_usage {
+            state.usage_revision = state.usage_revision.wrapping_add(1);
+            state.usage_label = None;
         }
         if state.snapshot == next {
             return false;
@@ -391,7 +408,7 @@ impl Core {
             .and_then(Option::as_ref)
             .cloned()
             .map(Arc::new);
-        let limits = if switched {
+        let limits = if self.source.owns_usage_state() || switched {
             probed.clone()
         } else if next.usage_limits.is_none() && state.usage_revision != usage_before {
             previous.clone()
@@ -587,6 +604,19 @@ impl Core {
 }
 #[async_trait]
 impl ProviderInstanceService for ManagedProvider {
+    async fn configure_update_checks(&self, enabled: bool) -> ServiceResult<bool> {
+        let changed = self.core.source.configure_update_checks(enabled).await?;
+        if changed {
+            let state = self.core.state.lock().await;
+            let snapshot = state.checked.then(|| state.snapshot.clone());
+            let generation = state.generation;
+            drop(state);
+            if let Some(snapshot) = snapshot {
+                self.core.restart_enrichment(snapshot, generation);
+            }
+        }
+        Ok(changed)
+    }
     async fn hydrate_cached_snapshot(&self, cached: ServerProvider) -> Option<ServerProvider> {
         let mut state = self.core.state.lock().await;
         if !state.checked {

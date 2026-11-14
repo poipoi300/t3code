@@ -47,6 +47,104 @@ pub struct NativeProviderFactory {
     pub background: watch::Receiver<BackgroundPolicy>,
     pub managed_codex: Option<Arc<dyn ProviderFactory>>,
 }
+pub struct AntigravityProviderFactory {
+    pub context: NativeProviderContext,
+    pub state_directory: std::path::PathBuf,
+    pub browser_helper: std::path::PathBuf,
+    pub architecture: String,
+    pub installation: Arc<crate::antigravity_installation::AntigravityInstallation>,
+    pub http: Arc<dyn crate::transport::HttpTransport>,
+    pub stopper: Arc<dyn crate::auth::SessionStopper>,
+    pub clock: Arc<dyn ProviderClock>,
+    pub manifest: crate::catalog::ManifestSource,
+    pub background: watch::Receiver<BackgroundPolicy>,
+}
+#[async_trait]
+impl ProviderFactory for AntigravityProviderFactory {
+    async fn create(&self, spec: Arc<InstanceSpec>) -> ServiceResult<ProviderRuntime> {
+        if spec.driver.0 != "antigravity" {
+            return Err(ServiceError::Unsupported);
+        }
+        let (profile, temp) = crate::antigravity_profile::instance_directories(
+            &self.state_directory,
+            &spec.instance_id.0,
+        );
+        let environment = spec.environment(
+            &self.context.environment,
+            &self.context.home,
+            self.context.platform,
+        );
+        let auth = crate::antigravity_profile::AuthConfig::from_settings(&spec.config);
+        let home = crate::antigravity_profile::user_home(
+            self.context.platform,
+            &environment,
+            &self.context.home,
+        );
+        let factory = Arc::new(crate::antigravity_runtime::DeferredAntigravityFactory::new(
+            self.installation.clone(),
+            spec.config["binaryPath"]
+                .as_str()
+                .filter(|binary| !binary.trim().is_empty())
+                .map(|binary| crate::environment::expand_home_path(binary, &self.context.home)),
+            crate::antigravity_runtime::DeferredProfileOptions {
+                profile_directory: profile.clone(),
+                temp_directory: temp,
+                user_home: home,
+                browser_helper: self.browser_helper.clone(),
+                auth: auth.clone(),
+                environment,
+                platform: self.context.platform,
+            },
+        ));
+        let usage = Arc::new(crate::antigravity_usage::AntigravityUsage::new(
+            profile.join("antigravity-acp/acp_token.json"),
+            auth.method.clone(),
+            match self.context.platform {
+                crate::environment::Platform::Windows => "win32",
+                crate::environment::Platform::Macos => "darwin",
+                crate::environment::Platform::Linux => "linux",
+            }
+            .into(),
+            self.architecture.clone(),
+            self.http.clone(),
+            self.clock.clone(),
+        ));
+        let provider = crate::antigravity_provider::AntigravityProvider::new(
+            spec.clone(),
+            self.context.clone(),
+            factory.clone(),
+            self.clock.clone(),
+            self.manifest.clone(),
+            Some(usage),
+        )?;
+        let controller = AuthController::new(
+            spec.instance_id.clone(),
+            crate::auth::CredentialBinding {
+                key: profile.to_string_lossy().into_owned(),
+                owner: t3_contracts::provider_setup::ProviderCredentialOwner::Provider,
+            },
+            Arc::new(crate::antigravity_auth::AntigravityAuth {
+                factory,
+                provider: provider.clone(),
+                config: auth,
+                forwarder: Arc::new(crate::antigravity_auth::LoopbackForwarder),
+            }),
+            self.stopper.clone(),
+            std::time::Duration::from_secs(300),
+        )
+        .await;
+        provider.bind_auth(&controller).await;
+        let initial = provider.current().await;
+        let source = provider
+            .into_managed(ManagedOptions::new(self.background.clone()))
+            .await?;
+        Ok(ProviderRuntime {
+            source,
+            initial,
+            auth: Some(controller),
+        })
+    }
+}
 #[async_trait]
 impl ProviderFactory for NativeProviderFactory {
     async fn create(&self, spec: Arc<InstanceSpec>) -> ServiceResult<ProviderRuntime> {
@@ -189,7 +287,11 @@ impl ProviderHost {
         self.registry
             .reconcile(settings, &self.secrets, rebuild, defer_secrets, blocked)
             .await;
-        self.apply_desired(&mut state).await
+        let changes = self.apply_desired(&mut state).await?;
+        self.service
+            .configure_update_checks(settings.enable_provider_update_checks)
+            .await?;
+        Ok(changes)
     }
     async fn apply_desired(&self, state: &mut State) -> ServiceResult<HostReconcile> {
         if let Some(cache) = &self.cache {
@@ -285,7 +387,11 @@ impl ProviderHost {
         self.registry
             .reload_secrets(settings, &self.secrets, instance, blocked)
             .await;
-        self.apply_desired(&mut state).await
+        let changes = self.apply_desired(&mut state).await?;
+        self.service
+            .configure_update_checks(settings.enable_provider_update_checks)
+            .await?;
+        Ok(changes)
     }
     pub async fn apply_secret(
         &self,
@@ -298,7 +404,11 @@ impl ProviderHost {
         self.registry
             .apply_secret(settings, &self.secrets, reference, value, blocked)
             .await;
-        self.apply_desired(&mut state).await
+        let changes = self.apply_desired(&mut state).await?;
+        self.service
+            .configure_update_checks(settings.enable_provider_update_checks)
+            .await?;
+        Ok(changes)
     }
     pub async fn close(&self) -> ServiceResult<()> {
         let mut state = self.state.lock().await;
