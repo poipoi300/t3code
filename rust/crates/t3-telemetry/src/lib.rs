@@ -1,6 +1,7 @@
 //! Native telemetry services; not a wasm dependency.
 
 pub mod analytics;
+pub mod desktop;
 pub mod diagnostics;
 pub mod history;
 pub mod host;

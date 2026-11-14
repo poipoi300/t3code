@@ -1773,40 +1773,46 @@
         "line": 258
       }
     ],
+    "DesktopTelemetryReceiver.announceServerReady": [
+      {
+        "path": "apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts",
+        "line": 723
+      }
+    ],
     "DesktopTelemetryReceiver.cancelDesktopUpdate": [
+      {
+        "path": "apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts",
+        "line": 740
+      },
+      {
+        "path": "apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts",
+        "line": 802
+      }
+    ],
+    "DesktopTelemetryReceiver.commitDesktopUpdate": [
       {
         "path": "apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts",
         "line": 735
       },
       {
         "path": "apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts",
-        "line": 796
-      }
-    ],
-    "DesktopTelemetryReceiver.commitDesktopUpdate": [
-      {
-        "path": "apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts",
-        "line": 730
-      },
-      {
-        "path": "apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts",
-        "line": 793
+        "line": 799
       }
     ],
     "DesktopTelemetryReceiver.requestDesktopUpdate": [
       {
         "path": "apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts",
-        "line": 720
+        "line": 725
       },
       {
         "path": "apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts",
-        "line": 790
+        "line": 796
       }
     ],
     "DesktopTelemetryReceiver.setDiagnosticsDemand": [
       {
         "path": "apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts",
-        "line": 787
+        "line": 792
       }
     ],
     "DesktopUpdateMarker.remainingWait": [
@@ -7707,12 +7713,12 @@
     ],
     "ThreadTitleRegenerationService.execute": [
       {
-        "path": "apps/server/src/orchestration-v2/testkit/ProviderReplayHarness.ts",
-        "line": 494
-      },
-      {
         "path": "apps/server/src/orchestration-v2/ThreadTitleRegenerationService.ts",
         "line": 144
+      },
+      {
+        "path": "apps/server/src/orchestration-v2/testkit/ProviderReplayHarness.ts",
+        "line": 494
       }
     ],
     "ThreadTitleRegenerationService.forkSource": [
@@ -11970,25 +11976,25 @@
     "resourceTelemetry.desktopTelemetryReceiver.applyShellEnvironment": [
       {
         "path": "apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts",
-        "line": 225
+        "line": 227
       }
     ],
     "resourceTelemetry.desktopTelemetryReceiver.make": [
       {
         "path": "apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts",
-        "line": 399
+        "line": 401
       }
     ],
     "resourceTelemetry.desktopTelemetryReceiver.recordSampleHealth": [
       {
         "path": "apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts",
-        "line": 311
+        "line": 313
       }
     ],
     "resourceTelemetry.desktopTelemetryReceiver.writeAllToFileDescriptor": [
       {
         "path": "apps/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts",
-        "line": 339
+        "line": 341
       }
     ],
     "resourceTelemetry.nativeTelemetryClient.changeLiveSubscriberCount": [

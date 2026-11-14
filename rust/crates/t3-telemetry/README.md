@@ -123,7 +123,7 @@ the file tracer is initialized and which configured signals are exporting.
   cooldown, recent-span selection and stable spike/stall span names. Defect
   reporting accepts structural error tags, never arbitrary exception payloads.
 
-`fixtures/typescript-span-names.json` records 2,129 literal Effect.fn/withSpan
+`fixtures/typescript-span-names.json` records 2,130 literal Effect.fn/withSpan
 names, paths and line numbers from server/shared TypeScript, excluding tests and
 dynamic names. Other fixtures contain the metric names, RPC feature mappings
 and reviewed vendor catalog labels. They are local fixtures, not edits to the
@@ -202,6 +202,14 @@ Pass a customized idle interval to `update_desktop_health` when needed. No raw
 descriptor adoption, desktop updater, shell environment mutation or native
 library FFI is introduced here.
 
+For outgoing control, construct `desktop::DesktopTelemetryControl` from the
+host's existing async writer. `announce_server_ready` sends canonical version-1
+`serverReady` NDJSON when command admission becomes ready; it does not wait for
+provider checks or resource samples. `send` serializes complete control frames
+on that writer and propagates I/O failures. Default is a no-op for web/test hosts.
+The composition root schedules the announcement after command readiness and keeps
+HTTP readiness fallback; desktop/provider startup ordering remains with their owners.
+
 Rust has neither a V8 heap nor Node's single event loop. It does not fabricate
 `t3_server_heap_used_bytes`, Node event-loop utilization or V8 heap snapshots.
 The portable `HeapAttribution` and `StallMonitor` accept readings from a runtime
@@ -234,6 +242,7 @@ usage, resource model/history, host, stall and heap attribution tests. It includ
 real Windows native collection and standard SDK JSON/protobuf decoding. POSIX
 collection and signal delivery require execution on those platforms.
 
-Windows runtime example: `traceRecords=1`, `parseErrors=0`,
+Windows runtime example: `desktopControl={version:1,type:serverReady}`,
+`traceRecords=2`, `parseErrors=0`,
 `nativeStatus=healthy`, `processes=1`, `hostCpuCount=32`,
 `hostMemorySampled=true`, `externalExports=false`.
