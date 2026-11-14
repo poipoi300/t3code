@@ -1103,7 +1103,7 @@ mod tests {
         assert!(!meta_line_empty(
             Some(&model.source),
             &RowExtras {
-                scratch_machine_label: Some("Tommy-PC".into()),
+                scratch_machine_label: Some("Example-PC".into()),
                 ..Default::default()
             }
         ));
