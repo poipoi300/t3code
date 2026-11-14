@@ -108,7 +108,11 @@ const URI_COMPONENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHAN
 
 impl ThreadReadAdapter {
     fn require_capability(context: &CallContext) -> Result<()> {
-        if context.scope.capabilities.contains(&Capability::Orchestration) {
+        if context
+            .scope
+            .capabilities
+            .contains(&Capability::Orchestration)
+        {
             Ok(())
         } else {
             Err(failure(
@@ -126,7 +130,11 @@ impl ThreadReadAdapter {
         };
         let records = self
             .threads
-            .records(caller.thread_id.clone(), Vec::new(), RecordFilter::default())
+            .records(
+                caller.thread_id.clone(),
+                Vec::new(),
+                RecordFilter::default(),
+            )
             .await
             .map_err(|error| {
                 failure(
@@ -322,7 +330,8 @@ fn background_work(shell: &Value, out: &mut Map<String, Value>) {
 /// `backgroundWorkHoldsCompletion`.
 fn holds_completion(tasks: &Value) -> bool {
     tasks.as_array().into_iter().flatten().any(|task| {
-        task["awaited"] == true || matches!(task["kind"].as_str(), Some("subagent" | "background_task"))
+        task["awaited"] == true
+            || matches!(task["kind"].as_str(), Some("subagent" | "background_task"))
     })
 }
 
@@ -394,7 +403,12 @@ fn json_text(value: &Value) -> String {
 }
 
 fn join(parts: &[Option<String>]) -> String {
-    parts.iter().flatten().cloned().collect::<Vec<_>>().join("\n")
+    parts
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn text_of(item: &Value, key: &str) -> Option<String> {
@@ -462,7 +476,9 @@ fn turn_item_text(item: &Value) -> Option<String> {
         "thread_created" => format!(
             "Created thread {} with {} ({}).",
             item["targetThreadId"].as_str().unwrap_or_default(),
-            item["targetProviderInstanceId"].as_str().unwrap_or_default(),
+            item["targetProviderInstanceId"]
+                .as_str()
+                .unwrap_or_default(),
             item["targetModel"].as_str().unwrap_or_default()
         ),
         "secret_request" => format!(
@@ -487,7 +503,9 @@ fn turn_item_text(item: &Value) -> Option<String> {
                 )
             }
         }
-        "subagent" => s("result").or_else(|| s("progress")).or_else(|| s("prompt"))?,
+        "subagent" => s("result")
+            .or_else(|| s("progress"))
+            .or_else(|| s("prompt"))?,
         "dynamic_tool" => json_text(&json!({
             "toolName": item.get("toolName"),
             "input": item.get("input"),
@@ -674,7 +692,10 @@ fn items_within_budget(
     }
 }
 
-fn thread_run(projection: &t3_contracts::orchestration_v2::OrchestrationV2ThreadProjection, run: &Value) -> Value {
+fn thread_run(
+    projection: &t3_contracts::orchestration_v2::OrchestrationV2ThreadProjection,
+    run: &Value,
+) -> Value {
     let attempt = &run["activeAttemptId"];
     let executed = projection
         .provider_turns
@@ -720,8 +741,12 @@ impl OrchestratorService for ThreadReadAdapter {
         if !all_projects && let Some(project) = input["projectId"].as_str() {
             self.require_project(project).await?;
         }
-        let list_failure =
-            |error: t3_orchestration::error::Error| failure("orchestration_error", format!("Unable to list threads: {error}"));
+        let list_failure = |error: t3_orchestration::error::Error| {
+            failure(
+                "orchestration_error",
+                format!("Unable to list threads: {error}"),
+            )
+        };
         let entries = self
             .threads
             .list_project_threads(
@@ -802,7 +827,10 @@ impl OrchestratorService for ThreadReadAdapter {
                 filtered.push(shell);
             }
             let total = filtered.len();
-            (filtered.into_iter().skip(cursor).take(limit).collect(), total)
+            (
+                filtered.into_iter().skip(cursor).take(limit).collect(),
+                total,
+            )
         };
         let threads = page
             .iter()
@@ -849,7 +877,12 @@ impl OrchestratorService for ThreadReadAdapter {
         }
         let target = self
             .threads
-            .project_records(&shell.project_id, thread_id.clone(), fields, RecordFilter::default())
+            .project_records(
+                &shell.project_id,
+                thread_id.clone(),
+                fields,
+                RecordFilter::default(),
+            )
             .await
             .map_err(management_failure)?;
         let view = match input["view"].as_str() {
@@ -862,7 +895,9 @@ impl OrchestratorService for ThreadReadAdapter {
             .map_or(DEFAULT_THREAD_ITEM_MAX_CHARS, |n| n as usize);
         let after = input["afterPosition"].as_i64();
         let before = input["beforePosition"].as_u64();
-        let item_id = input["itemId"].as_str().map(|id| t3_contracts::base_schemas::TurnItemId(id.into()));
+        let item_id = input["itemId"]
+            .as_str()
+            .map(|id| t3_contracts::base_schemas::TurnItemId(id.into()));
         // Client callers (the CLI, older linked environments) page forward from a cursorless read.
         let newest_first = before.is_some() || (after.is_none() && context.scope.thread.is_some());
         let timeline = self
@@ -931,8 +966,18 @@ impl OrchestratorService for ThreadReadAdapter {
             );
         }
         let first_page = after.is_none() && before.is_none() && item_id.is_none();
-        let thread = self.detail(&context.scope, &target, timeline.total_items, &shell, first_page)?;
-        let mut runs = target.runs.iter().map(encoded).collect::<Result<Vec<_>>>()?;
+        let thread = self.detail(
+            &context.scope,
+            &target,
+            timeline.total_items,
+            &shell,
+            first_page,
+        )?;
+        let mut runs = target
+            .runs
+            .iter()
+            .map(encoded)
+            .collect::<Result<Vec<_>>>()?;
         runs.sort_by(|l, r| r["ordinal"].as_u64().cmp(&l["ordinal"].as_u64()));
         let run_limit = input["runLimit"]
             .as_u64()
@@ -979,7 +1024,9 @@ impl ThreadReadAdapter {
         let thread = encoded(&projection.thread)?;
         let shell_value = encoded(shell)?;
         let latest = latest_run(&projection.runs).map(encoded).transpose()?;
-        let active = latest_active_run(&projection.runs).map(encoded).transpose()?;
+        let active = latest_active_run(&projection.runs)
+            .map(encoded)
+            .transpose()?;
         let mut out = Map::new();
         out.insert("threadId".into(), thread["id"].clone());
         out.insert("projectId".into(), thread["projectId"].clone());
