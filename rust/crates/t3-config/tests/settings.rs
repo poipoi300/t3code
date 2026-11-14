@@ -360,6 +360,122 @@ async fn snapshot_excludes_provider_mutations() {
     );
 }
 #[tokio::test]
+async fn conditional_sign_in_mutation_removes_marker_and_secret() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = HomeLayout::derive(temp.path(), false, true);
+    let service = SettingsService::new(home.settings());
+    let session = r#"{"accessToken":"before"}"#;
+    service
+        .update(&patch(
+            json!({"sourceControlHosts":{"github":{"signIns":{"github.com":session}}}}),
+        ))
+        .await
+        .unwrap();
+    let slot = "source-control-Z2l0aHVi-c2lnbklucw-Z2l0aHViLmNvbQ";
+    let secrets = SecretStore::new(home.secrets());
+    assert_eq!(secrets.get(slot).unwrap().unwrap(), session.as_bytes());
+    let mut events = service.subscribe_changes();
+    let before = std::fs::read(home.settings()).unwrap();
+    let skipped = service
+        .update_with(async |snapshot| {
+            let session: Value = serde_json::from_str(
+                snapshot.source_control_hosts["github"]["signIns"]["github.com"]
+                    .as_str()
+                    .unwrap(),
+            )?;
+            if session["accessToken"] != "stale" {
+                return Ok(None);
+            }
+            panic!("stale token matched")
+        })
+        .await
+        .unwrap();
+    assert!(skipped.is_none());
+    assert_eq!(std::fs::read(home.settings()).unwrap(), before);
+    assert!(events.try_recv().is_err());
+    assert!(
+        service
+            .update_with(async |_| Err(t3_config::Error::Invalid {
+                context: "callback".into(),
+                detail: "failed".into()
+            }))
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read(home.settings()).unwrap(), before);
+    let changed = service
+        .update_with(async |snapshot| {
+            let mut sign_ins = snapshot.source_control_hosts["github"]["signIns"]
+                .as_object()
+                .unwrap()
+                .clone();
+            assert_eq!(sign_ins.remove("github.com").unwrap(), session);
+            Ok(Some(patch(
+                json!({"sourceControlHosts":{"github":{"signIns":sign_ins}}}),
+            )))
+        })
+        .await
+        .unwrap();
+    assert!(changed.is_some());
+    assert!(secrets.get(slot).unwrap().is_none());
+    let saved: Value = serde_json::from_slice(&std::fs::read(home.settings()).unwrap()).unwrap();
+    assert!(
+        saved["sourceControlHosts"]["github"]["signIns"]
+            .get("github.com")
+            .is_none()
+    );
+    assert!(
+        value(events.recv().await.unwrap())["sourceControlHosts"]["github"]["signIns"]
+            .get("github.com")
+            .is_none()
+    );
+    assert!(
+        value(service.reload().await.unwrap().settings)["sourceControlHosts"]["github"]["signIns"]
+            .get("github.com")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn settings_mutation_serializes_read_modify_write_with_rpc_updates() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = HomeLayout::derive(temp.path(), false, true);
+    let service = SettingsService::new(home.settings());
+    service.snapshot().await.unwrap();
+    write(
+        &home.settings(),
+        r#"{"threadTitleInstructions":"external"}"#,
+    );
+    let rpc_patch = patch(json!({"threadTitleInstructions":"rpc update"}));
+    let mut rpc = std::pin::pin!(service.update(&rpc_patch));
+    let mut other_host = std::pin::pin!(service.update_with(async |snapshot| {
+        let mut sign_ins = snapshot.source_control_hosts["github"]["signIns"]
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(sign_ins["github.com"], "first");
+        sign_ins.insert("enterprise.example".into(), json!("second"));
+        Ok(Some(patch(
+            json!({"sourceControlHosts":{"github":{"signIns":sign_ins}}}),
+        )))
+    }));
+    service.update_with(async |snapshot| {
+        assert_eq!(value(snapshot)["threadTitleInstructions"], "external");
+        tokio::select! { biased; result = &mut rpc => panic!("RPC escaped mutation lock: {result:?}"), _ = async {} => () }
+        tokio::select! { biased; result = &mut other_host => panic!("mutation escaped mutation lock: {result:?}"), _ = async {} => () }
+        Ok(Some(patch(json!({"sourceControlHosts":{"github":{"signIns":{"github.com":"first"}}}}))))
+    }).await.unwrap();
+    let (rpc, other_host) = tokio::join!(rpc, other_host);
+    rpc.unwrap();
+    other_host.unwrap();
+    let reloaded = value(service.reload().await.unwrap().settings);
+    assert_eq!(reloaded["threadTitleInstructions"], "rpc update");
+    assert_eq!(
+        reloaded["sourceControlHosts"]["github"]["signIns"],
+        json!({"github.com":"first", "enterprise.example":"second"})
+    );
+}
+#[tokio::test]
 async fn duplicate_secret_rows_keep_explicit_replacements() {
     let temp = tempfile::tempdir().unwrap();
     let home = HomeLayout::derive(temp.path(), false, true);
@@ -478,7 +594,7 @@ async fn failed_settings_commit_rolls_back_secret() {
     let home = HomeLayout::derive(temp.path(), false, true);
     let service = SettingsService::new(home.settings());
     let initial = patch(
-        json!({"textGenerators":{"local":{"kind":"openaiCompatible","baseUrl":"https://example.com","apiKey":"before","enabled":true}}}),
+        json!({"textGenerators":{"local":{"kind":"openaiCompatible","baseUrl":"https://example.com","apiKey":"before","enabled":true}},"sourceControlHosts":{"github":{"signIns":{"github.com":"session"}}}}),
     );
     service.update(&initial).await.unwrap();
     let _locked = std::fs::OpenOptions::new()
@@ -496,5 +612,29 @@ async fn failed_settings_commit_rolls_back_secret() {
             .unwrap()
             .unwrap(),
         b"before"
+    );
+    assert!(
+        service
+            .update_with(async |_| Ok(Some(patch(
+                json!({"sourceControlHosts":{"github":{"signIns":{}}}})
+            ))))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        SecretStore::new(home.secrets())
+            .get("source-control-Z2l0aHVi-c2lnbklucw-Z2l0aHViLmNvbQ")
+            .unwrap()
+            .unwrap(),
+        b"session"
+    );
+    let saved: Value = serde_json::from_slice(&std::fs::read(home.settings()).unwrap()).unwrap();
+    assert_eq!(
+        saved["sourceControlHosts"]["github"]["signIns"]["github.com"],
+        REDACTED
+    );
+    assert_eq!(
+        value(service.snapshot().await.unwrap())["sourceControlHosts"]["github"]["signIns"]["github.com"],
+        "session"
     );
 }

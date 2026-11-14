@@ -22,7 +22,7 @@ access and ownership. It does not start a server or discover the user's home.
   cwd first. `resolve_worktrees_directory` expands the setting
   and refuses relative paths and filesystem roots.
 - `SettingsService::{new,with_database}` returns an `Arc` service.
-  `reload`, `update`, `update_provider_instance`, and `with_snapshot` share one
+  `reload`, `update`, `update_with`, `update_provider_instance`, and `with_snapshot` share one
   write lock. `snapshot` reads a separate cache, including inside a `with_snapshot`
   callback or during a save. First use initializes that cache through a shared
   async cell; a failed initialization can be retried. Pass the already-open
@@ -30,6 +30,15 @@ access and ownership. It does not start a server or discover the user's home.
   the constructor never opens a
   second database. Mutations reread the file before applying their patch; a failed
   reload/save leaves the previous cache available.
+  `update_with(async |snapshot| -> Result<Option<ServerSettingsPatch>>)` reads
+  fresh resolved secrets and holds that lock through callback, secret transaction,
+  settings commit and notification. Return `None` for a failed conditional match;
+  `Some(patch)` returns `Some(updated_settings)`. Return secret changes in the
+  patch and do not call locking settings methods from the callback. To remove a
+  sign-in, remove its host from the snapshot's `signIns` map and patch that map.
+  An interrupted secret-first write can leave an orphan marker or secret on disk;
+  readers must require both and a non-empty resolved session before treating a
+  host as signed in. The existing TypeScript settings and `.bin` formats are retained.
 - `KeybindingsService` exposes `snapshot`, `reload`, `sync_defaults`, `upsert`,
   and `remove`. `default_bindings`, `parse_shortcut`, `parse_when`, `compile_rule`
   and the encoders are also available. The 88 defaults retain source order;

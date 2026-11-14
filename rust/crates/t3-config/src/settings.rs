@@ -659,6 +659,20 @@ impl SettingsService {
     pub async fn update(&self, patch: &ServerSettingsPatch) -> Result<ServerSettings> {
         self.update_inner(patch, None).await
     }
+    /// Builds a conditional patch from fresh, resolved settings under the write lock.
+    /// `None` skips the write and notification. The callback must not call locking
+    /// settings methods or mutate the secret store; return secret changes in the patch.
+    pub async fn update_with(
+        &self,
+        make_patch: impl AsyncFnOnce(&ServerSettings) -> Result<Option<ServerSettingsPatch>>,
+    ) -> Result<Option<ServerSettings>> {
+        let _write = self.write_lock.lock().await;
+        let current = self.load_for_update().await?;
+        let Some(patch) = make_patch(&current.settings).await? else {
+            return Ok(None);
+        };
+        self.update_locked(current, &patch, None).await.map(Some)
+    }
     pub async fn update_provider_instance(
         &self,
         mutation: &ProviderInstanceMutation,
@@ -672,11 +686,24 @@ impl SettingsService {
         mutation: Option<&ProviderInstanceMutation>,
     ) -> Result<ServerSettings> {
         let _write = self.write_lock.lock().await;
-        let cache = self.cache().await?;
+        let current = self.load_for_update().await?;
+        self.update_locked(current, patch, mutation).await
+    }
+    async fn load_for_update(&self) -> Result<SettingsState> {
+        self.cache().await?;
         let current = self.load().await?;
-        if let Some(error) = current.parse_failure {
+        if let Some(error) = &current.parse_failure {
             return Err(invalid("read-file", error));
         }
+        Ok(current)
+    }
+    async fn update_locked(
+        &self,
+        current: SettingsState,
+        patch: &ServerSettingsPatch,
+        mutation: Option<&ProviderInstanceMutation>,
+    ) -> Result<ServerSettings> {
+        let cache = self.cache().await?;
         let patch_value = serde_json::to_value(patch)?;
         for (id, entry) in patch_value["secretProviders"]
             .as_object()

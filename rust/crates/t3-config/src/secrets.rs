@@ -509,3 +509,54 @@ impl Drop for SecretTransaction {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{home::HomeLayout, settings::SettingsService};
+
+    #[tokio::test]
+    async fn interrupted_sign_in_transaction_requires_both_marker_and_secret() {
+        for removing in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let home = HomeLayout::derive(temp.path(), false, true);
+            let service = SettingsService::new(home.settings());
+            let session = r#"{"accessToken":"token"}"#;
+            let signed_in =
+                json!({"sourceControlHosts":{"github":{"signIns":{"github.com":session}}}});
+            let signed_out = json!({"sourceControlHosts":{"github":{"signIns":{}}}});
+            let initial = if removing { &signed_in } else { &signed_out };
+            service
+                .update(&serde_json::from_value(initial.clone()).unwrap())
+                .await
+                .unwrap();
+            let before: Value =
+                serde_json::from_slice(&fs::read(home.settings()).unwrap()).unwrap();
+            let store = SecretStore::new(home.secrets());
+            let mut next = if removing { signed_out } else { signed_in };
+            let transaction = SecretTransaction::apply(&store, &before, &mut next)
+                .await
+                .unwrap();
+            // Process termination skips rollback before settings.json is published.
+            std::mem::forget(transaction);
+            drop(service);
+            let disk: Value = serde_json::from_slice(&fs::read(home.settings()).unwrap()).unwrap();
+            let slot = "source-control-Z2l0aHVi-c2lnbklucw-Z2l0aHViLmNvbQ";
+            assert_eq!(
+                disk["sourceControlHosts"]["github"]["signIns"]
+                    .get("github.com")
+                    .is_some(),
+                removing
+            );
+            assert_eq!(store.get(slot).unwrap().is_some(), !removing);
+            let restarted = SettingsService::new(home.settings());
+            let snapshot = restarted.snapshot().await.unwrap();
+            assert!(
+                snapshot.source_control_hosts["github"]["signIns"]
+                    .get("github.com")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+            );
+        }
+    }
+}
