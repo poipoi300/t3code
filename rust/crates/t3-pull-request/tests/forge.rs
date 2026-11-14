@@ -268,14 +268,14 @@ async fn unavailable_errors_keep_the_provider_and_its_actionable_requirement() {
 }
 
 #[tokio::test]
-async fn public_host_fallback_does_not_treat_recognized_private_hosts_as_public() {
+async fn same_host_cross_repository_reads_use_that_hosts_binding_and_unbound_private_hosts_are_refused() {
     let (service, forge, _) = setup_forge();
     let mut reference = reference();
     reference.repository = "owner/another".into();
     service
         .summary(reference.clone(), Default::default())
         .await
-        .expect("public cross-repository read");
+        .expect("same-host cross-repository read");
     reference.host = Some(Some("github.attacker.invalid".into()));
     assert!(
         service

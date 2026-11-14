@@ -52,14 +52,38 @@ impl Context {
         ])
         .to_string()
     }
-    pub fn key(&self) -> ThreadPullRequestKey {
+    pub fn key(&self) -> Result<ThreadPullRequestKey> {
         let (host, repository) = self
             .project
             .canonical_repository_key
             .as_deref()
             .and_then(|key| key.split_once('/'))
             .unwrap_or((&self.project.host, &self.project.repository));
-        crate::convert(serde_json::json!({"host":host.to_lowercase(),"repository":repository.to_lowercase(),"number":self.reference.number})).expect("resolved project has a valid key")
+        crate::convert(serde_json::json!({"host":host.to_lowercase(),"repository":repository.to_lowercase(),"number":self.reference.number})).map_err(|_| {
+            Error::invalid(
+                "resolveRepository",
+                "The change request's repository could not be identified.",
+            )
+        })
+    }
+}
+
+/// A project from the authoritative list, whether or not its checkout has a forge binding.
+#[derive(Debug, Clone)]
+pub struct SelectedProject {
+    pub id: ProjectId,
+    pub title: TrimmedNonEmptyString,
+    pub workspace_root: String,
+    pub remove_agent_credits_on_merge: bool,
+}
+impl SelectedProject {
+    pub fn of(project: &Project) -> Self {
+        Self {
+            id: project.id.clone(),
+            title: project.title.clone(),
+            workspace_root: project.workspace_root.clone(),
+            remove_agent_credits_on_merge: project.remove_agent_credits_on_merge,
+        }
     }
 }
 
@@ -67,6 +91,21 @@ impl Context {
 #[async_trait]
 pub trait ProjectSource: Send + Sync {
     async fn projects(&self) -> Result<Vec<Binding>>;
+    /// The selected project from the same authoritative list, including one with no recognised
+    /// remote (TypeScript's `getShell` in `findByPublicHost`).
+    async fn selected_project(&self, id: &ProjectId) -> Result<Option<SelectedProject>> {
+        Ok(self
+            .projects()
+            .await?
+            .iter()
+            .find(|b| b.project.id == *id)
+            .map(|b| SelectedProject::of(&b.project)))
+    }
+    /// One shared host for public reads that is not tied to a project (the registry's GitHub
+    /// driver); used only for hosts its `reads_public_host` accepts.
+    fn public_host(&self) -> Option<Arc<dyn Host>> {
+        None
+    }
     fn canonical_repository_key(&self, key: &str) -> String {
         key.to_lowercase()
     }
@@ -125,21 +164,16 @@ pub async fn resolve(source: &dyn ProjectSource, reference: &PullRequestRef) -> 
     let binding = match route {
         Some(p) => p.clone(),
         None => {
-            let selected = own.ok_or_else(|| Error::unsupported("resolveRepository"))?;
-            let target = host.as_ref().ok_or_else(|| {
-                Error::invalid(
-                    "resolveRepository",
-                    "The change request does not belong to the selected project.",
-                )
-            })?;
-            if !selected.host.reads_public_host(target) {
-                return Err(Error::unsupported("resolveRepository"));
-            }
-            let mut binding = selected.clone();
-            binding.project.host = target.clone();
-            binding.project.repository = repository.into();
-            binding.project.canonical_repository_key = None;
-            binding
+            let Some(target) = host.as_ref() else {
+                return Err(match own {
+                    Some(_) => Error::invalid(
+                        "resolveRepository",
+                        "The change request does not belong to the selected project.",
+                    ),
+                    None => Error::unsupported("resolveRepository"),
+                });
+            };
+            public_binding(source, own, &reference.project_id, target, repository).await?
         }
     };
     let mut project = binding.project;
@@ -187,4 +221,48 @@ pub async fn resolve(source: &dyn ProjectSource, reference: &PullRequestRef) -> 
         viewer,
         activity: None,
     })
+}
+
+/// `findByPublicHost`: a public host read goes through the shared public host for any project in
+/// the authoritative list, even one with no remote; failing that, through the selected project's
+/// own binding when it reads that host publicly. Every other unrouted host is refused.
+async fn public_binding(
+    source: &dyn ProjectSource,
+    own: Option<&Binding>,
+    project_id: &ProjectId,
+    target: &str,
+    repository: &str,
+) -> Result<Binding> {
+    let bind = |selected: SelectedProject, host: Arc<dyn Host>| Binding {
+        project: Project {
+            id: selected.id,
+            title: selected.title,
+            workspace_root: selected.workspace_root,
+            host: target.into(),
+            repository: repository.into(),
+            canonical_repository_key: None,
+            remove_agent_credits_on_merge: selected.remove_agent_credits_on_merge,
+        },
+        host,
+    };
+    if let Some(public) = source
+        .public_host()
+        .filter(|public| public.reads_public_host(target))
+    {
+        let selected = source
+            .selected_project(project_id)
+            .await
+            .map_err(|_| {
+                Error::invalid(
+                    "resolveRepository",
+                    "The selected project could not be read.",
+                )
+            })?
+            .ok_or_else(|| Error::unsupported("resolveRepository"))?;
+        return Ok(bind(selected, public));
+    }
+    match own.filter(|own| own.host.reads_public_host(target)) {
+        Some(own) => Ok(bind(SelectedProject::of(&own.project), own.host.clone())),
+        None => Err(Error::unsupported("resolveRepository")),
+    }
 }

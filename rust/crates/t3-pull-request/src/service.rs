@@ -59,7 +59,13 @@ struct ReadPolicy {
     allow_stale: bool,
     persist: bool,
 }
-type ReportedStates = HashMap<String, (u64, PullRequestState, Option<bool>)>;
+const REPORTED_STATE_CAPACITY: usize = 2_048;
+/// Report time, state, draft flag and insertion order, keyed by pull request scope.
+#[derive(Default)]
+struct ReportedStates {
+    entries: HashMap<String, (u64, PullRequestState, Option<bool>, u64)>,
+    order: u64,
+}
 struct Inner {
     projects: Arc<dyn ProjectSource>,
     clock: Arc<dyn Clock>,
@@ -142,7 +148,7 @@ impl PullRequestService {
             linked: watch::channel(0).0,
             merges: broadcast::channel(64).0,
             states: broadcast::channel(64).0,
-            reports: Mutex::new(HashMap::new()),
+            reports: Mutex::new(ReportedStates::default()),
             closed: AtomicBool::new(false),
             cancel: CancellationToken::new(),
             tasks,
@@ -864,21 +870,33 @@ impl PullRequestService {
     }
     pub async fn report_state(&self, input: PullRequestReportStateInput) -> Result<()> {
         let ctx = self.context(&input.reference).await?;
+        let changed = ctx.key()?;
         let now = self.0.clock.now_ms();
         let key = ctx.scope();
         let draft = input.is_draft.flatten();
         {
-            let mut reports = self.0.reports.lock().unwrap_or_else(|e| e.into_inner());
-            reports.retain(|_, (at, _, _)| now.saturating_sub(*at) < 300_000);
-            if reports
-                .get(&key)
-                .is_some_and(|(_, state, previous)| *state == input.state && *previous == draft)
-            {
+            let mut held = self.0.reports.lock().unwrap_or_else(|e| e.into_inner());
+            let ReportedStates { entries, order } = &mut *held;
+            entries.retain(|_, (at, ..)| now.saturating_sub(*at) < 300_000);
+            if entries.get(&key).is_some_and(|(_, state, previous, _)| {
+                *state == input.state && *previous == draft
+            }) {
                 return Ok(());
             }
-            reports.insert(key, (now, input.state, draft));
+            // TypeScript's `REF_EPOCH_CAPACITY`: the oldest report makes room for a new one.
+            if entries.len() >= REPORTED_STATE_CAPACITY
+                && !entries.contains_key(&key)
+                && let Some(oldest) = entries
+                    .iter()
+                    .min_by_key(|(_, (.., inserted))| *inserted)
+                    .map(|(scope, _)| scope.clone())
+            {
+                entries.remove(&oldest);
+            }
+            *order += 1;
+            entries.insert(key, (now, input.state, draft, *order));
         }
-        let _ = self.0.states.send(ctx.key());
+        let _ = self.0.states.send(changed);
         Ok(())
     }
 }

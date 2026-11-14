@@ -255,7 +255,11 @@ pub struct PreparedGuide {
 #[async_trait::async_trait]
 pub trait GuideGenerator: Send + Sync {
     async fn check_enabled(&self, context: &Context) -> Result<()>;
-    /// Must use an isolated checkout, validated refs, a pinned head, and remove it in cleanup.
+    /// TypeScript's checkout rules (`PullRequestReviewGuideService.ts`), all required:
+    /// host-provided branch names pass `git check-ref-format --branch` and contain no leading
+    /// `+` and no `:`; fetches land in per-run refs under `refs/t3/review-guide/<runId>/`;
+    /// the detached worktree at the pinned head is added with `-c core.hooksPath=<null device>`
+    /// so no repository hook runs; `cleanup` force-removes that worktree and deletes the refs.
     async fn prepare(
         &self,
         context: &Context,
@@ -327,14 +331,14 @@ impl PullRequestReviewGuideService {
             ));
         }
         let ctx = self.0.pull_requests.context(&input).await?;
-        let guide = self.0.records.guide(&ctx.key()).await?;
+        let guide = self.0.records.guide(&ctx.key()?).await?;
         let detail = self.0.pull_requests.detail(input).await?;
         let run = self
             .0
             .runs
             .lock()
             .await
-            .get(&crate::linked::key_string(&ctx.key()))
+            .get(&crate::linked::key_string(&ctx.key()?))
             .map(|r| r.state.clone());
         Ok(PullRequestReviewGuideResult {
             guide,
@@ -363,7 +367,7 @@ impl PullRequestReviewGuideService {
         self.0.generator.check_enabled(&ctx).await?;
         let project = self.0.pull_requests.project(&input.project_id).await?;
         let own=self.0.pull_requests.context(&crate::convert(serde_json::json!({"projectId":project.project.id,"repository":project.project.repository,"host":project.project.host,"number":input.number}))?).await?;
-        if own.key() != ctx.key() {
+        if own.key()? != ctx.key()? {
             return Err(Error::invalid(
                 "generateReviewGuide",
                 "Guides are written from this project's checkout; select a checkout of this pull request's repository.",
@@ -394,7 +398,7 @@ impl PullRequestReviewGuideService {
                 "The host reported a head that is not a commit hash.",
             ));
         }
-        let key = crate::linked::key_string(&ctx.key());
+        let key = crate::linked::key_string(&ctx.key()?);
         let mut runs = self.0.runs.lock().await;
         let latest = self.0.pull_requests.detail(input.clone()).await?;
         if latest
@@ -479,7 +483,7 @@ impl PullRequestReviewGuideService {
             let runs=self.0.runs.lock().await;
             if runs.get(key).is_some_and(|r|r.id==id)&&!self.0.cancel.is_cancelled(){
                 let guide=crate::convert(serde_json::json!({"headSha":head,"generatedAt":iso_time(self.0.clock.now_ms()),"modelSelection":model_selection,"stops":stops}))?;
-                self.0.records.set_guide(&ctx.key(),guide).await?;
+                self.0.records.set_guide(&ctx.key()?,guide).await?;
             }
             Ok(())
         }.await;

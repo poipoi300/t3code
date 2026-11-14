@@ -80,6 +80,11 @@ impl OrchestrationPullRequestBackend {
         let _activity = self.admit()?;
         tokio::select! {_ = self.0.cancel.cancelled()=>Err(OrchestrationError::Cancelled),result=operation=>result.map_err(map_error)}
     }
+    async fn shared_feed(&self, key: &str) -> Option<watch::Receiver<u64>> {
+        let mut feeds = self.0.changes.lock().await;
+        feeds.retain(|_, feed| feed.receiver_count() > 0);
+        feeds.get(key).map(watch::Sender::subscribe)
+    }
     pub async fn shutdown(&self) {
         self.0.cancel.cancel();
         self.0.tasks.wait().await;
@@ -182,15 +187,21 @@ impl PullRequestBackend for OrchestrationPullRequestBackend {
     async fn changes(&self, input: PullRequestRef) -> OrchestrationResult<watch::Receiver<u64>> {
         let _activity = self.admit()?;
         let context = self.run(self.0.service.context(&input)).await?;
+        let key = context.cache_key();
+        if let Some(receiver) = self.shared_feed(&key).await {
+            return Ok(receiver);
+        }
+        // Opened without the registry lock: one slow host must not hold up unrelated feeds.
+        let mut stream = self.run(self.0.service.changes(&input)).await?;
         let mut feeds = self.0.changes.lock().await;
         feeds.retain(|_, feed| feed.receiver_count() > 0);
-        let key = context.cache_key();
         if let Some(feed) = feeds.get(&key) {
+            // Another subscriber opened this feed meanwhile; this stream is dropped unused.
             return Ok(feed.subscribe());
         }
-        let mut stream = self.run(self.0.service.changes(&input)).await?;
         let (output, receiver) = watch::channel(0u64);
         feeds.insert(key, output.clone());
+        drop(feeds);
         let cancel = self.0.cancel.clone();
         self.0.tasks.spawn(async move{loop{tokio::select!{
             _ = cancel.cancelled()=>break,

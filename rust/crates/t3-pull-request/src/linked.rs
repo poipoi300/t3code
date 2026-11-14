@@ -122,6 +122,6 @@ impl crate::PullRequestService {
         input: t3_contracts::pull_request::PullRequestRef,
     ) -> Result<PullRequestLinkedThreadsResult> {
         let context = self.context(&input).await?;
-        self.records().linked_threads(&context.key()).await
+        self.records().linked_threads(&context.key()?).await
     }
 }

@@ -305,3 +305,73 @@ async fn shutdown_cancels_admitted_checkout_work_and_closes_merge_receivers() {
     ));
     service.shutdown().await;
 }
+
+/// Opens #1's change feed only when released; every other feed opens at once.
+struct GatedHost {
+    fake: Arc<FakeHost>,
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Arc<tokio::sync::Notify>,
+}
+#[async_trait]
+impl Host for GatedHost {
+    fn kind(&self) -> &str {
+        "github"
+    }
+    fn capabilities(&self) -> &PullRequestCapabilities {
+        &self.fake.caps
+    }
+    async fn changes(&self, ctx: &Context) -> Result<Changes> {
+        if ctx.reference.number == 1 {
+            if let Some(entered) = self.entered.lock().expect("entered").take() {
+                let _ = entered.send(());
+            }
+            self.release.notified().await;
+        }
+        Ok(Box::pin(stream::pending()))
+    }
+}
+
+#[tokio::test]
+async fn a_slow_change_feed_does_not_block_feeds_for_other_pull_requests() {
+    use futures_util::FutureExt;
+    let (entered, entered_rx) = tokio::sync::oneshot::channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let host = Arc::new(GatedHost {
+        fake: Arc::new(FakeHost::default()),
+        entered: Mutex::new(Some(entered)),
+        release: release.clone(),
+    });
+    let source = Arc::new(Source(Mutex::new(vec![Binding {
+        project: project(),
+        host,
+    }])));
+    let clock = Arc::new(TestClock::default());
+    let service = PullRequestService::new(
+        source,
+        clock.clone(),
+        Arc::new(PullRequestReadCache::new(
+            Arc::new(MemoryStore::default()),
+            clock,
+        )),
+    );
+    let backend = OrchestrationPullRequestBackend::new(service, Arc::new(Checkouts));
+    let numbered = |number: u64| {
+        let mut input = reference();
+        input.number = number;
+        input
+    };
+    let slow = tokio::spawn({
+        let backend = backend.clone();
+        let input = numbered(1);
+        async move { backend.changes(input).await.map(|_| ()) }
+    });
+    entered_rx.await.expect("the slow feed is opening");
+    let other = backend.changes(numbered(2)).now_or_never();
+    assert!(
+        matches!(other, Some(Ok(_))),
+        "a feed for another pull request waited on the slow one"
+    );
+    release.notify_one();
+    slow.await.expect("joined").expect("slow feed opened");
+    backend.shutdown().await;
+}
