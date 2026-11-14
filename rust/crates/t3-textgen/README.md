@@ -29,8 +29,18 @@ in `packages/provider-core/src/server/textGeneration*.ts` and
 - `ApiTextRunner` implements the configured OpenAI-compatible and Anthropic HTTP
   generators. `GeneratorSecrets` resolves saved credentials. `ModelCache` caches
   by the complete configuration, bypasses on refresh/unsaved/test requests, and
-  sends the tiny explicit connection-test prompt. Hosts resolve a redacted
-  unsaved key against its saved configuration before constructing the runner.
+  sends the tiny explicit connection-test prompt. Before constructing the runner
+  for a listing or test, hosts call `api::listing_config(supplied, saved,
+  t3_config::secrets::REDACTED)`: with no supplied config it is the saved one; a
+  supplied key equal to the redaction sentinel becomes the saved key **only** when
+  `t3_shared::text_generators::saved_api_key_applies` holds (same `kind`, same
+  scheme, host and port), and otherwise fails with `GenerationError::KeyRequired`,
+  so a settings writer cannot send a saved key to an address of its choosing.
+  `t3-provider` applies the same function.
+- API replies are checked as TypeScript's schemas check them: a reply that fails
+  (missing `finish_reason`, `message.content` or `stop_reason`, wrong field types,
+  non-JSON, over 8 MiB) is `UnreadableReply` ("couldn't read"); a well-formed reply
+  without text, including an empty `choices`, is `EmptyOutput` ("no text").
 - `prompts`, `text` and `title_context` expose the pure builders, sanitizers,
   bounded role-labelled context selection and two-link source-control lookup.
   Supply `TitleLinkResolver` from the authoritative forge registry.
@@ -149,13 +159,26 @@ own account-specific model aliases/fallbacks, options, CLI protocol, sandboxing,
 tool restrictions and actual process execution from the TypeScript Codex/Claude/
 Antigravity runners. They are intentionally not duplicated here.
 
+Outbound HTTP (API generators, cloud speech, model downloads) behaves like Node's
+fetch: ambient `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` are ignored (`no_proxy`), and
+the bundled Mozilla roots are trusted plus every certificate in the PEM file named by
+`NODE_EXTRA_CA_CERTS`, read when a client is built; as in Node, an unreadable file
+adds nothing. An existing deployment behind a TLS-inspecting proxy keeps working
+with the same variable.
+
 Output decoding extracts the first balanced JSON object, including fenced or
 prefaced replies, validates fields and applies the TypeScript sanitizers. Blank
 subjects/titles retain the existing fallback strings; literal `title` is
 rejected. Refusals that do not satisfy the schema fail, rather than becoming
 titles. There is no newly invented refusal-text classifier. Commit limits
 preserve grapheme clusters, branch normalization uses NFKD, and title truncation
-does not split surrogate pairs. Provider request/reply bodies, filesystem
+does not split surrogate pairs. Trimming and whitespace collapsing use JavaScript's
+`trim`/`\s` (U+FEFF is whitespace, U+0085 is not); the sanitizers are compared with
+the executed TypeScript functions on a generated corpus (`sanitizerCases`). A
+custom-mode branch name is the model's trimmed reply, as in TypeScript; git's ref
+check behind the rename's `--` refuses option-like names, `..`, control characters,
+`@{` and `.lock`, but has no length limit, so names over 255 UTF-8 bytes are refused
+here. Provider request/reply bodies, filesystem
 contents and credentials are absent from errors and logs. This implementation
 also suppresses upstream API error bodies, which TypeScript may display.
 
@@ -235,6 +258,9 @@ cache for ten minutes, failures do not. API keys remain the host vault's concern
   discovery and worker error IPC are exercised with no model. GPU SDK packaging
   and acoustic parity remain unverified, not replaced with a fake production
   implementation. Paid model evals were not run; prompt bytes were preserved.
+- A redacted unsaved key is substituted only for its saved kind and origin
+  (`listing_config`); TypeScript substitutes it for any base URL. Custom branch
+  names over 255 bytes are refused rather than handed to git.
 - Verification markers use a Rust file-identity fingerprint, not Node's textual
   stat tuple. Each implementation safely rehashes the other's marker once.
 - API JSON replies have an 8 MiB bound; TypeScript does not impose that bound.
@@ -295,3 +321,9 @@ composed runtime with migrated temporary SQLite. The runtime proof dispatches a
 title request through the real effect worker, persists the generated title with
 project settings, and verifies shutdown cancels a hung runner without completing
 the pending title marker. Its model runner is a fake; no paid turn is started.
+
+Review fixes, 2026-11-14: formatting and strict Clippy pass; 36 default tests pass,
+including the executed TypeScript sanitizer corpus (33 inputs, 10 functions), reply
+shapes, a redirect to a second listener, cancellation in flight, the saved-key origin
+rule, the custom-branch length refusal, and a child-process run with an ambient proxy
+and `NODE_EXTRA_CA_CERTS` against a local TLS listener.

@@ -634,6 +634,7 @@ fn link_setup() -> LinkHarness {
         ("git.preparePullRequestThread", t3_rpc::CallKind::Unary),
         ("pullRequests.linkedThreads", t3_rpc::CallKind::Unary),
         ("projects.createNew", t3_rpc::CallKind::Unary),
+        ("projects.listIgnoredFiles", t3_rpc::CallKind::Unary),
     ]);
     server.state.borrow_mut().extra_rpc = Some(Rc::new(move |request| {
         let reply = |value| {
@@ -646,6 +647,8 @@ fn link_setup() -> LinkHarness {
             cfg["newProjectsRoot"] = json!("/new-projects");
             cfg["scratchWorkspaceRoot"] = json!("/scratch");
             cfg["settings"]["ghqCloneLayout"] = json!(false);
+            cfg["environment"]["capabilities"]["ignoredFileListing"] = json!(true);
+            cfg["environment"]["capabilities"]["ignoredFileSearch"] = json!(true);
             return Some(t3_rpc::HandlerOutput::Stream(
                 futures::stream::iter([Ok(vec![
                     json!({"version":1,"type":"snapshot","config":cfg}),
@@ -668,6 +671,11 @@ fn link_setup() -> LinkHarness {
         }
         if request.tag == "pullRequests.linkedThreads" {
             return reply(json!({"threads":[]}));
+        }
+        if request.tag == "projects.listIgnoredFiles" {
+            calls.borrow_mut().push((request.tag.clone(),request.payload.clone()));
+            let searched=request.payload["query"].as_str().is_some_and(|s|!s.is_empty());
+            return reply(json!({"files": if searched {json!([{"path":"hidden.env","byteLength":33}])} else {json!([{"path":".env","byteLength":11},{"path":"cache.bin","byteLength":1048577}])},"truncated":!searched}));
         }
         if matches!(
             request.tag.as_str(),
@@ -1067,4 +1075,62 @@ fn clone_step_stays_open_then_accepted_start_completes_and_retains_background_wo
     assert_eq!(effects.borrow().iter().filter(|(tag,_)|tag=="projectClone.start").count(),1);
     let id=effects.borrow().iter().find(|(tag,_)|tag=="projectClone.start").unwrap().1["projectId"].clone();
     assert!(c.composer_drafts().document().borrow()["draftThreadsByThreadKey"].as_object().unwrap().values().any(|d|d["projectId"]==id));
+}
+
+#[test]
+fn ignored_file_search_preserves_offscreen_selection_and_denied_reads_are_visible() {
+    for denied in [false,true] {
+        let (mut h,c,_,_,effects)=link_setup();
+        if denied {
+            c.client(&environment("env")).unwrap().session().unwrap().update_grants(t3_client::permissions::SessionGrants {valid:true,scopes:["orchestration:read".into()].into()});
+        }
+        let session=c.ignored_files(project("env","project"));
+        let mut views=session.watch();
+        assert!(h.run(async move { let view=views.next().await.unwrap(); (view,views) }).0.loading);
+        let mut views=session.watch();
+        let (view,mut views)=h.run(async move {
+            loop {
+                let view=views.next().await.unwrap();
+                if !view.loading {break (view,views);}
+            }
+        });
+        if denied {
+            assert!(view.error.is_some());
+            assert!(effects.borrow().iter().all(|(tag,_)|tag!="projects.listIgnoredFiles"));
+            continue;
+        }
+        assert_eq!(view.selected_count,1);
+        assert_eq!(view.selected_bytes,11);
+        assert!(view.files[1].disabled);
+        assert!(session.toggle_file("cache.bin",true).is_err());
+        session.set_query("hidden".into()).unwrap();
+        let (done,ready)=futures::channel::oneshot::channel();
+        h.spawn(async move {
+            while let Some(view)=views.next().await {
+                if view.files.iter().any(|file|file.file.path.0=="hidden.env") {
+                    done.send(view).unwrap();break;
+                }
+            }
+        });
+        h.settle();h.advance(250);
+        let found=h.run(async move {ready.await.unwrap()});
+        assert_eq!(found.selected_count,1);
+        session.toggle_file("hidden.env",true).unwrap();
+        assert_eq!(session.selected().iter().map(|f|f.byte_length).sum::<u64>(),44);
+        session.set_query(String::new()).unwrap();
+        let restored=session.snapshot();
+        assert_eq!(restored.selected_count,2);
+        assert_eq!(restored.selected_bytes,44);
+        assert!(restored.files[0].selected);
+        assert_eq!(effects.borrow().iter().filter(|(tag,_)|tag=="projects.listIgnoredFiles").count(),2);
+    }
+}
+
+#[test]
+fn new_project_folder_names_match_the_typescript_path_cases() {
+    use t3_client::navigation::project_flow::new_project_folder_name;
+    for (name,expected) in [("Pinball Stats","pinball-stats"),("  Café & Crème!  ","cafe-creme"),("../../etc","etc"),("🎱🎱","project"),("Con","con-project"),("LPT1","lpt1-project"),("console","console")] {
+        assert_eq!(new_project_folder_name(name),expected);
+    }
+    assert_eq!(new_project_folder_name(&format!("{} b","a".repeat(63))),"a".repeat(63));
 }

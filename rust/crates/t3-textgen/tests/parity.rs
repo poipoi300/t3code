@@ -65,6 +65,67 @@ fn prompts_and_speech_corrections_match_executed_typescript() {
     }
 }
 
+#[test]
+fn reply_sanitizers_match_executed_typescript() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../fixtures/parity.json")).expect("fixture");
+    let static_naming = BranchNaming::Static {
+        prefix: " Team/\u{fc} ser//x\u{feff}".into(),
+    };
+    let custom = BranchNaming::Custom {
+        instructions: String::new(),
+    };
+    for case in fixture["sanitizerCases"].as_array().expect("sanitizers") {
+        let raw = case["raw"].as_str().expect("raw");
+        let actual = serde_json::json!({
+            "raw": raw,
+            "commit": sanitize_commit_subject(raw),
+            "pr": sanitize_pr_title(raw),
+            "title": sanitize_thread_title(raw),
+            "fragment": sanitize_branch(raw),
+            "feature": sanitize_feature_branch(raw),
+            "semantic": format_generated_branch(raw, None).expect("semantic"),
+            "static": format_generated_branch(raw, Some(&static_naming)).expect("static"),
+            "custom": format_generated_branch(raw, Some(&custom)).expect("custom"),
+            "trimmed": t3_contracts::wire::trim_js(raw),
+            "json": extract_json_object(raw),
+        });
+        assert_eq!(&actual, case, "sanitizers of {raw:?}");
+    }
+}
+
+#[test]
+fn custom_branch_names_git_cannot_store_are_refused_before_leaving_the_crate() {
+    let custom = BranchNaming::Custom {
+        instructions: String::new(),
+    };
+    let input = GenerationInput::Branch(BranchInput {
+        naming: Some(custom),
+        ..Default::default()
+    });
+    let decode = |branch: &str| match decode_output(
+        &input,
+        &serde_json::json!({ "branch": branch }).to_string(),
+    )? {
+        Generated::Branch { branch } => Ok(branch),
+        _ => Err(GenerationError::InvalidOutput),
+    };
+    assert_eq!(
+        decode(" team/ticket-12-fix-login\u{feff}"),
+        Ok("team/ticket-12-fix-login".into())
+    );
+    assert_eq!(decode(&"a".repeat(255)), Ok("a".repeat(255)));
+    // Behind the rename's `--`, git's ref check refuses dashes, `..`, control characters, `@{`
+    // and `.lock`; it has no length limit, so loose-ref storage would decide.
+    for refused in ["a".repeat(256), format!("team/{}", "\u{e9}".repeat(126))] {
+        assert_eq!(
+            decode(&refused),
+            Err(GenerationError::InvalidOutput),
+            "{refused}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn prompt_extractor_verifies_the_current_specification() {
     let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));

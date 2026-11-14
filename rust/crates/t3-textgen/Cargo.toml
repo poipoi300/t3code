@@ -10,9 +10,10 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "test-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
 tokio-util = "0.7"
 t3-contracts = { path = "../t3-contracts" }
+t3-shared = { path = "../t3-shared" }
 t3-process = { path = "../t3-process" }
 t3-orchestration = { path = "../t3-orchestration", optional = true }
 unicode-segmentation = "1"
@@ -29,6 +30,11 @@ uuid = { version = "1", features = ["v4"] }
 transcribe-cpp = { version = "=0.4.1", default-features = false, optional = true }
 
 transcribe-cpp-sys = { version = "=0.4.1", default-features = false, optional = true }
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util", "net", "process"] }
+rcgen = "0.14"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+
 [features]
 native-speech = ["dep:transcribe-cpp", "dep:transcribe-cpp-sys"]
 orchestration-host = ["dep:t3-orchestration"]

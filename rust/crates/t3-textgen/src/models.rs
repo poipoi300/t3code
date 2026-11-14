@@ -128,7 +128,7 @@ impl ModelStore {
             }
         }
         // Model downloads follow Hugging Face's CDN redirects; no credentials are attached.
-        let client = reqwest::Client::builder()
+        let client = crate::api::client_builder()
             .build()
             .map_err(|_| SpeechError::Download)?;
         Ok(Self {

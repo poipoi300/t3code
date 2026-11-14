@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc, time::Duration};
+use t3_contracts::wire::trim_js;
 use t3_contracts::{
     base_schemas::ProjectId, chat_attachment::ChatAttachment, model_selection::ModelSelection,
     pull_request_review_guide::PullRequestReviewGuideStop,
@@ -47,6 +48,10 @@ pub enum GenerationError {
     RateLimit,
     #[error("The model or endpoint is unavailable.")]
     Unavailable,
+    #[error("The model API returned a reply T3 Code couldn't read.")]
+    UnreadableReply,
+    #[error("Enter the API key again: a saved key is only sent to its saved API and address.")]
+    KeyRequired,
 }
 
 #[derive(Clone)]
@@ -344,58 +349,22 @@ pub fn decode_output(input: &GenerationInput, raw: &str) -> Result<Generated, Ge
     Ok(match input {
         GenerationInput::Commit(input) => {
             let branch = if input.include_branch {
-                let branch = sanitize_branch(string("branch")?);
-                Some(if branch.contains('/') {
-                    branch
-                } else {
-                    format!("feature/{branch}")
-                })
+                Some(sanitize_feature_branch(string("branch")?))
             } else {
                 None
             };
             Generated::Commit {
                 subject: sanitize_commit_subject(string("subject")?),
-                body: string("body")?.trim().to_owned(),
+                body: trim_js(string("body")?).to_owned(),
                 branch,
             }
         }
         GenerationInput::Pr(_) => Generated::Pr {
             title: sanitize_pr_title(string("title")?),
-            body: string("body")?.trim().to_owned(),
+            body: trim_js(string("body")?).to_owned(),
         },
         GenerationInput::Branch(input) => {
-            let raw = string("branch")?;
-            let branch = match &input.naming {
-                Some(BranchNaming::Custom { .. }) => raw.trim().to_owned(),
-                Some(BranchNaming::Static { prefix }) => {
-                    let prefix = prefix
-                        .split('/')
-                        .map(|part| {
-                            let mut out = String::new();
-                            for ch in part.chars() {
-                                let ch = if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-') {
-                                    ch
-                                } else {
-                                    '-'
-                                };
-                                if ch != '-' || !out.ends_with('-') {
-                                    out.push(ch);
-                                }
-                            }
-                            out.trim_matches('-').to_owned()
-                        })
-                        .filter(|s| !s.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("/");
-                    let branch = sanitize_branch(raw);
-                    if prefix.is_empty() {
-                        branch
-                    } else {
-                        format!("{prefix}/{branch}")
-                    }
-                }
-                _ => sanitize_branch(raw),
-            };
+            let branch = format_generated_branch(string("branch")?, input.naming.as_ref())?;
             Generated::Branch { branch }
         }
         GenerationInput::ThreadTitle(_) => {

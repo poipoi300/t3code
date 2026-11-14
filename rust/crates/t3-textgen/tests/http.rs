@@ -167,6 +167,226 @@ async fn model_cache_reaches_the_api_for_explicit_tests_and_does_not_expose_erro
     task.await.expect("server");
 }
 
+/// A listener that answers every request with `body` and records what it received.
+async fn recorder(body: &'static [u8]) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let origin = format!("http://{}", listener.local_addr().expect("address"));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut request = vec![0; 64 * 1024];
+            let read = stream.read(&mut request).await.unwrap_or(0);
+            log.lock()
+                .expect("log")
+                .push(String::from_utf8_lossy(&request[..read]).into_owned());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.write_all(body).await;
+        }
+    });
+    (origin, seen)
+}
+
+#[tokio::test]
+async fn a_redirect_to_another_listener_never_receives_the_key() {
+    let (elsewhere, seen) = recorder(
+        br#"{"choices":[{"finish_reason":"stop","message":{"content":"stolen"}}],"data":[]}"#,
+    )
+    .await;
+    for path in ["/chat/completions", "/models"] {
+        let (url, task) = server(vec![(
+            307,
+            vec![("Location".into(), format!("{elsewhere}{path}"))],
+            Vec::new(),
+        )])
+        .await;
+        let runner = runner(&url, "openaiCompatible");
+        let result = if path == "/models" {
+            runner.list_models().await.map(|_| String::new())
+        } else {
+            runner.generate_text("mini", "private prompt").await
+        };
+        assert_eq!(result, Err(GenerationError::Provider), "{path}");
+        assert!(task.await.expect("server")[0].contains("test-key"));
+    }
+    assert!(seen.lock().expect("log").is_empty());
+}
+
+#[tokio::test]
+async fn cancellation_stops_a_request_in_flight() {
+    use t3_textgen::generation::{GenerationRequest, Operation, TextRunner};
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("address"));
+    let (received, arrived) = tokio::sync::oneshot::channel();
+    let held = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut buffer = vec![0; 64 * 1024];
+        let _ = stream.read(&mut buffer).await;
+        let _ = received.send(());
+        // Never answers: the read ends only when the client drops the connection.
+        while matches!(stream.read(&mut buffer).await, Ok(n) if n > 0) {}
+    });
+    let runner = runner(&url, "openaiCompatible");
+    let request = GenerationRequest {
+        operation: Operation::GenerateThreadTitle,
+        cwd: std::path::PathBuf::from("checkout"),
+        model_selection: serde_json::from_value(
+            serde_json::json!({"instanceId":"api","model":"mini"}),
+        )
+        .expect("selection"),
+        prompt: "private prompt".into(),
+        output_schema: serde_json::Value::Null,
+        attachments: Vec::new(),
+        investigation_timeout: None,
+    };
+    let token = CancellationToken::new();
+    let cancel = token.clone();
+    let (result, ()) = tokio::join!(runner.run(&request, token), async move {
+        arrived.await.expect("request reached the API");
+        cancel.cancel();
+    });
+    assert_eq!(result, Err(GenerationError::Cancelled));
+    held.await.expect("connection closed by the client");
+}
+
+#[tokio::test]
+async fn reply_shapes_map_to_the_typescript_messages() {
+    let cases: [(&str, &[u8], GenerationError); 6] = [
+        (
+            "openaiCompatible",
+            br#"{"choices":[]}"#,
+            GenerationError::EmptyOutput,
+        ),
+        (
+            "openaiCompatible",
+            br#"{"choices":[{"finish_reason":"stop","message":{"content":null}}]}"#,
+            GenerationError::EmptyOutput,
+        ),
+        (
+            "openaiCompatible",
+            br#"{"choices":[{"finish_reason":"stop","message":{}}]}"#,
+            GenerationError::UnreadableReply,
+        ),
+        (
+            "openaiCompatible",
+            br#"{"choices":[{"message":{"content":"text"}}]}"#,
+            GenerationError::UnreadableReply,
+        ),
+        (
+            "anthropic",
+            br#"{"content":[{"type":"text","text":"x"}]}"#,
+            GenerationError::UnreadableReply,
+        ),
+        ("anthropic", b"not json", GenerationError::UnreadableReply),
+    ];
+    for (kind, body, expected) in cases {
+        let (url, task) = server(vec![(200, vec![], body.to_vec())]).await;
+        let result = runner(&url, kind).generate_text("mini", "prompt").await;
+        assert_eq!(
+            result,
+            Err(expected),
+            "{kind} {}",
+            String::from_utf8_lossy(body)
+        );
+        task.await.expect("server");
+    }
+    assert_eq!(
+        GenerationError::UnreadableReply.to_string(),
+        "The model API returned a reply T3 Code couldn't read."
+    );
+    // JavaScript's trim removes a byte-order mark and keeps U+0085.
+    let (url, task) = server(vec![(
+        200,
+        vec![],
+        "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"\u{feff}\u{85}OK\u{feff}\"}}]}"
+            .as_bytes()
+            .to_vec(),
+    )])
+    .await;
+    assert_eq!(
+        runner(&url, "openaiCompatible")
+            .generate_text("mini", "prompt")
+            .await,
+        Ok("\u{85}OK".into())
+    );
+    task.await.expect("server");
+}
+
+#[test]
+fn a_redacted_key_is_substituted_only_for_the_saved_kind_and_origin() {
+    use t3_contracts::settings::TextGeneratorConfig;
+    use t3_contracts::settings_secret_value::SettingsSecretValue;
+    use t3_textgen::api::listing_config;
+    const SENTINEL: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
+    let config = |kind: &str, url: &str, key: &str| -> TextGeneratorConfig {
+        serde_json::from_value(
+            serde_json::json!({"kind":kind,"baseUrl":url,"apiKey":key,"enabled":true}),
+        )
+        .expect("config")
+    };
+    let saved = config(
+        "openaiCompatible",
+        "https://api.example.com/v1",
+        "saved-key",
+    );
+    let key = |supplied: &TextGeneratorConfig| {
+        listing_config(Some(supplied), Some(&saved), SENTINEL).map(|c| c.api_key)
+    };
+    let saved_key = Ok(SettingsSecretValue::Literal("saved-key".into()));
+    assert_eq!(
+        key(&config(
+            "openaiCompatible",
+            "https://API.example.com:443/v2",
+            SENTINEL
+        )),
+        saved_key
+    );
+    for elsewhere in [
+        config("openaiCompatible", "https://attacker.example/v1", SENTINEL),
+        config("openaiCompatible", "http://api.example.com/v1", SENTINEL),
+        config(
+            "openaiCompatible",
+            "https://api.example.com:8443/v1",
+            SENTINEL,
+        ),
+        config("anthropic", "https://api.example.com/v1", SENTINEL),
+        config("openaiCompatible", "not a url", SENTINEL),
+    ] {
+        assert_eq!(
+            key(&elsewhere),
+            Err(GenerationError::KeyRequired),
+            "{}",
+            elsewhere.base_url.0
+        );
+    }
+    let fresh = config(
+        "openaiCompatible",
+        "https://attacker.example/v1",
+        "typed-key",
+    );
+    assert_eq!(
+        key(&fresh),
+        Ok(SettingsSecretValue::Literal("typed-key".into()))
+    );
+    assert_eq!(
+        listing_config(None, Some(&saved), SENTINEL),
+        Ok(saved.clone())
+    );
+    assert_eq!(
+        listing_config(None, None, SENTINEL),
+        Err(GenerationError::Unavailable)
+    );
+    let unsaved = config("openaiCompatible", "https://api.example.com/v1", SENTINEL);
+    assert_eq!(
+        listing_config(Some(&unsaved), None, SENTINEL),
+        Err(GenerationError::KeyRequired)
+    );
+}
+
 fn model(bytes: &[u8]) -> SpeechModel {
     SpeechModel {
         id: "test/model".into(),

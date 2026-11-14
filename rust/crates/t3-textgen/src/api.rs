@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use t3_contracts::wire::trim_js;
 use t3_contracts::{
     base_schemas::TrimmedNonEmptyString,
     settings::{TextGeneratorConfig, TextGeneratorKind, TextGeneratorModel},
@@ -13,8 +14,23 @@ use t3_contracts::{
 };
 use tokio::sync::Mutex;
 
+/// Outbound HTTP the way Node's fetch does it, so deployments keep working unchanged: ambient
+/// `HTTP(S)_PROXY`/`ALL_PROXY` variables are ignored, and the bundled Mozilla roots are trusted
+/// plus every certificate in the PEM file `NODE_EXTRA_CA_CERTS` names. As in Node, an unreadable
+/// file adds nothing rather than failing.
+pub(crate) fn client_builder() -> reqwest::ClientBuilder {
+    let extra = std::env::var_os("NODE_EXTRA_CA_CERTS")
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|pem| reqwest::Certificate::from_pem_bundle(&pem).ok())
+        .unwrap_or_default();
+    extra
+        .into_iter()
+        .fold(reqwest::Client::builder().no_proxy(), |builder, root| {
+            builder.add_root_certificate(root)
+        })
+}
 pub(crate) fn http_client() -> Result<reqwest::Client, GenerationError> {
-    reqwest::Client::builder()
+    client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| GenerationError::Provider)
@@ -70,7 +86,10 @@ impl ApiTextRunner {
         if !response.status().is_success() {
             return Err(status_error(response.status()));
         }
-        response_json(response).await
+        response_json(response).await.map_err(|error| match error {
+            GenerationError::InvalidOutput => GenerationError::UnreadableReply,
+            other => other,
+        })
     }
     fn endpoint(&self, path: &str) -> String {
         format!("{}{path}", self.config.base_url.0.trim_end_matches('/'))
@@ -109,41 +128,9 @@ impl ApiTextRunner {
             let reply = self
                 .send(self.authenticate(self.client.post(self.endpoint(path)).json(&body), &key))
                 .await?;
-            let text = match self.config.kind {
-                TextGeneratorKind::OpenaiCompatible => {
-                    let choice = reply
-                        .get("choices")
-                        .and_then(Value::as_array)
-                        .and_then(|c| c.first())
-                        .ok_or(GenerationError::InvalidOutput)?;
-                    if choice.get("finish_reason").and_then(Value::as_str) == Some("length") {
-                        return Err(GenerationError::OutputLimit);
-                    }
-                    choice
-                        .pointer("/message/content")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_owned()
-                }
-                TextGeneratorKind::Anthropic => {
-                    if reply.get("stop_reason").and_then(Value::as_str) == Some("max_tokens") {
-                        return Err(GenerationError::OutputLimit);
-                    }
-                    let content = reply
-                        .get("content")
-                        .and_then(Value::as_array)
-                        .ok_or(GenerationError::InvalidOutput)?;
-                    content
-                        .iter()
-                        .filter(|c| c.get("type").and_then(Value::as_str) == Some("text"))
-                        .filter_map(|c| c.get("text").and_then(Value::as_str))
-                        .collect::<String>()
-                }
-            };
-            if text.trim().is_empty() {
-                Err(GenerationError::EmptyOutput)
-            } else {
-                Ok(text.trim().to_owned())
+            match self.config.kind {
+                TextGeneratorKind::OpenaiCompatible => chat_completion_text(&reply),
+                TextGeneratorKind::Anthropic => anthropic_message_text(&reply),
             }
         };
         tokio::time::timeout(Duration::from_secs(120), work)
@@ -165,29 +152,19 @@ impl ApiTextRunner {
                     }
                 }
                 let reply = self.send(self.authenticate(request, &key)).await?;
-                for entry in reply
-                    .get("data")
-                    .and_then(Value::as_array)
-                    .ok_or(GenerationError::InvalidOutput)?
-                {
-                    let id = entry
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .ok_or(GenerationError::InvalidOutput)?
-                        .trim();
+                let anthropic = matches!(self.config.kind, TextGeneratorKind::Anthropic);
+                let name_key = if anthropic { "display_name" } else { "name" };
+                for entry in model_page(&reply, name_key, anthropic)? {
+                    let Some(id) = entry.get("id").and_then(Value::as_str).map(trim_js) else {
+                        continue;
+                    };
                     if id.is_empty() {
                         continue;
                     }
                     let name = entry
-                        .get(
-                            if matches!(self.config.kind, TextGeneratorKind::Anthropic) {
-                                "display_name"
-                            } else {
-                                "name"
-                            },
-                        )
+                        .get(name_key)
                         .and_then(Value::as_str)
-                        .map(str::trim)
+                        .map(trim_js)
                         .filter(|s| !s.is_empty())
                         .unwrap_or(id);
                     let model = TextGeneratorModel {
@@ -230,6 +207,124 @@ impl ApiTextRunner {
             .map_err(|_| GenerationError::Timeout)?
     }
 }
+/// Checks a reply as TypeScript's schema decode does; a failure is "couldn't read".
+fn shape(valid: bool) -> Result<(), GenerationError> {
+    if valid {
+        Ok(())
+    } else {
+        Err(GenerationError::UnreadableReply)
+    }
+}
+fn null_or_string(value: Option<&Value>) -> bool {
+    value.is_some_and(|value| value.is_null() || value.is_string())
+}
+/// An optional field is absent or of its type; JSON `null` is neither.
+fn optional(value: Option<&Value>, of_type: fn(&Value) -> bool) -> bool {
+    value.is_none_or(of_type)
+}
+/// `ChatCompletion`: every choice carries `finish_reason` and `message.content`, each nullable.
+fn chat_completion_text(reply: &Value) -> Result<String, GenerationError> {
+    let choices = reply.get("choices").and_then(Value::as_array);
+    shape(choices.is_some_and(|choices| {
+        choices.iter().all(|choice| {
+            null_or_string(choice.get("finish_reason"))
+                && null_or_string(
+                    choice
+                        .get("message")
+                        .and_then(Value::as_object)
+                        .and_then(|message| message.get("content")),
+                )
+        })
+    }))?;
+    let choice = choices.and_then(|choices| choices.first());
+    if choice
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(Value::as_str)
+        == Some("length")
+    {
+        return Err(GenerationError::OutputLimit);
+    }
+    let text = choice
+        .and_then(|choice| choice.pointer("/message/content"))
+        .and_then(Value::as_str)
+        .map(trim_js)
+        .unwrap_or_default();
+    if text.is_empty() {
+        Err(GenerationError::EmptyOutput)
+    } else {
+        Ok(text.to_owned())
+    }
+}
+/// `AnthropicMessage`: a nullable `stop_reason` and content blocks with a string `type`.
+fn anthropic_message_text(reply: &Value) -> Result<String, GenerationError> {
+    let content = reply.get("content").and_then(Value::as_array);
+    shape(
+        null_or_string(reply.get("stop_reason"))
+            && content.is_some_and(|blocks| {
+                blocks.iter().all(|block| {
+                    block.get("type").is_some_and(Value::is_string)
+                        && optional(block.get("text"), Value::is_string)
+                })
+            }),
+    )?;
+    if reply.get("stop_reason").and_then(Value::as_str) == Some("max_tokens") {
+        return Err(GenerationError::OutputLimit);
+    }
+    let text = content
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect::<String>();
+    let text = trim_js(&text);
+    if text.is_empty() {
+        Err(GenerationError::EmptyOutput)
+    } else {
+        Ok(text.to_owned())
+    }
+}
+/// `OpenAIModelList` and `AnthropicModelPage`: entries with a string `id` and optional string name.
+fn model_page<'a>(
+    reply: &'a Value,
+    name_key: &str,
+    paged: bool,
+) -> Result<&'a Vec<Value>, GenerationError> {
+    let data = reply.get("data").and_then(Value::as_array);
+    shape(
+        data.is_some_and(|entries| {
+            entries.iter().all(|entry| {
+                entry.get("id").is_some_and(Value::is_string)
+                    && optional(entry.get(name_key), Value::is_string)
+            })
+        }) && (!paged
+            || optional(reply.get("has_more"), Value::is_boolean)
+                && optional(reply.get("last_id"), |id| id.is_null() || id.is_string())),
+    )?;
+    data.ok_or(GenerationError::UnreadableReply)
+}
+
+/// The configuration a model listing or connection test uses: the saved one, or the supplied
+/// unsaved one. A supplied key equal to the host's redaction `sentinel` stands for the saved key,
+/// which is used only when [`t3_shared::text_generators::saved_api_key_applies`] holds (same kind
+/// and origin); otherwise the key must be entered again, so it never reaches another address.
+pub fn listing_config(
+    supplied: Option<&TextGeneratorConfig>,
+    saved: Option<&TextGeneratorConfig>,
+    sentinel: &str,
+) -> Result<TextGeneratorConfig, GenerationError> {
+    let Some(supplied) = supplied else {
+        return saved.cloned().ok_or(GenerationError::Unavailable);
+    };
+    let mut config = supplied.clone();
+    if matches!(&supplied.api_key, SettingsSecretValue::Literal(key) if key == sentinel) {
+        config.api_key = saved
+            .filter(|saved| t3_shared::text_generators::saved_api_key_applies(supplied, saved))
+            .map(|saved| saved.api_key.clone())
+            .ok_or(GenerationError::KeyRequired)?;
+    }
+    Ok(config)
+}
+
 #[async_trait]
 impl TextRunner for ApiTextRunner {
     async fn run(

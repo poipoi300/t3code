@@ -2,7 +2,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoArg = process.argv.indexOf("--repo");
@@ -93,7 +93,14 @@ const entries=[{term:"Bob",aliases:["Robert"]},{term:"T3 Code",aliases:["T three
 const dictionaryCases=["git hub and Robert","Git hub and type script","Robert's ROBERT and bobcat","T three code, not T three coders","Kubernettes and kubernetes","O reilly and O'Reilly's book","AT and T C sharp C","type\nscript git. hub","TypeScript—GitHub","T3 Codes","Robert_Robert (Robert)"].map(text=>({words,entries,text,expected:dictionary.makeSpeechTextCorrector(words,entries)(text)}));
 const fillerCases=[];
 for(const language of [undefined,"en","de","fr"])for(const cue of [undefined,"um","uh no"]){for(const text of ["Uh, Make it red, um, blue.","Uh, Make it red, UH  NO, blue. Uh nope.","First um\r\n\r\nuh Second.","euh, ähm, hmm, human words"]){fillerCases.push({text,language,cue,expected:fillers.removeSpeechFillerWords(text,language,cue)});}}
-const outputs={cases,dictionaryCases,fillerCases};
+// The reply sanitizers run as written: JavaScript trim, `\s` and segmentation are part of what they mean.
+const moduleAt=(path)=>import(pathToFileURL(resolve(repo,path)).href);
+const textUtils=await moduleAt("packages/provider-core/src/server/textGenerationUtils.ts");
+const git=await moduleAt("packages/shared/src/git.ts");
+const schemaJson=await moduleAt("packages/shared/src/schemaJson.ts");
+const raws=["﻿Fix login","Fix login﻿","\u0085Fix login\u0085"," \t Fix login. \r\n second line"," Title　","\"Quoted title\"","`Fix`  the   bug","Fix\u0085the bug","Fix​the bug","Fix﻿the bug","Fix the bug","{\"title\":\"JSON title\"}","﻿{\"title\":\"x\"}","prefix {\"title\":\"a } b\"} suffix﻿","a".repeat(80)+" more","Commit... . .","é".repeat(40),"Feature/Add Search!!"," ./_-feature--x_/ ","UPPER Case Ü branch","\u{1F680} rocket","","  ","\u0085","title","Title\n\nbody","line1\r\nline2","x".repeat(130),"a/b//c","İstanbul ǅ","ﬃ ligature","team/ticket-12﻿","\u0085team/x\u0085"];
+const sanitizerCases=raws.map(raw=>({raw,commit:textUtils.sanitizeCommitSubject(raw),pr:textUtils.sanitizePrTitle(raw),title:textUtils.sanitizeThreadTitle(raw),fragment:git.sanitizeBranchFragment(raw),feature:git.sanitizeFeatureBranchName(raw),semantic:git.formatGeneratedBranchName(raw),static:git.formatGeneratedBranchName(raw,{mode:"static",prefix:" Team/ü ser//x﻿"}),custom:git.formatGeneratedBranchName(raw,{mode:"custom"}),trimmed:raw.trim(),json:schemaJson.extractJsonObject(raw)}));
+const outputs={cases,dictionaryCases,fillerCases,sanitizerCases};
 const parityPath=resolve(here,"../fixtures/parity.json");const parity=JSON.stringify(outputs,null,2)+"\n";
 if(process.argv.includes("--check")){if(readFileSync(parityPath,"utf8")!==parity)throw new Error("TypeScript parity corpus changed.");}else writeFileSync(parityPath,parity);
 
