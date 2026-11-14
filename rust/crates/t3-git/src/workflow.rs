@@ -81,10 +81,121 @@ pub trait ReviewHost: Send + Sync {
     }
 }
 
+async fn cancellable<T>(
+    token: &crate::CancellationToken,
+    operation: impl std::future::Future<Output = Result<T, GitError>>,
+) -> Result<T, GitError> {
+    tokio::select! { biased; _ = token.cancelled() => Err(t3_process::ProcessError::Cancelled.into()), result = operation => result }
+}
+struct ReviewSession<'a> {
+    host: &'a dyn ReviewHost,
+    token: &'a crate::CancellationToken,
+}
+#[async_trait]
+impl ReviewHost for ReviewSession<'_> {
+    async fn list(
+        &self,
+        cwd: &Path,
+        head: &str,
+        state: Option<ChangeRequestState>,
+        limit: usize,
+    ) -> Result<Vec<ChangeRequest>, GitError> {
+        cancellable(self.token, self.host.list(cwd, head, state, limit)).await
+    }
+    async fn get(&self, cwd: &Path, reference: &str) -> Result<ChangeRequest, GitError> {
+        cancellable(self.token, self.host.get(cwd, reference)).await
+    }
+    async fn checkout(&self, cwd: &Path, reference: &str) -> Result<(), GitError> {
+        cancellable(self.token, self.host.checkout(cwd, reference)).await
+    }
+    async fn create(
+        &self,
+        cwd: &Path,
+        base: &str,
+        head: &str,
+        title: &str,
+        body_file: &Path,
+    ) -> Result<(), GitError> {
+        cancellable(
+            self.token,
+            self.host.create(cwd, base, head, title, body_file),
+        )
+        .await
+    }
+    async fn clone_urls(
+        &self,
+        cwd: &Path,
+        repository: &str,
+        request_url: &str,
+    ) -> Result<SourceControlRepositoryCloneUrls, GitError> {
+        cancellable(
+            self.token,
+            self.host.clone_urls(cwd, repository, request_url),
+        )
+        .await
+    }
+    async fn default_branch(&self, cwd: &Path) -> Result<Option<String>, GitError> {
+        cancellable(self.token, self.host.default_branch(cwd)).await
+    }
+    async fn targets_remote(
+        &self,
+        cwd: &Path,
+        remote: &str,
+        repository: Option<&str>,
+    ) -> Result<bool, GitError> {
+        cancellable(
+            self.token,
+            self.host.targets_remote(cwd, remote, repository),
+        )
+        .await
+    }
+    async fn setup(&self, cwd: &Path, thread: &str, worktree: &Path) -> Result<(), GitError> {
+        cancellable(self.token, self.host.setup(cwd, thread, worktree)).await
+    }
+    fn head_ref(&self, number: u64) -> Option<String> {
+        self.host.head_ref(number)
+    }
+    fn short_label(&self) -> &str {
+        self.host.short_label()
+    }
+    fn head_branch_probe(
+        &self,
+        selectors: &[String],
+        state: Option<ChangeRequestState>,
+        default: Option<&str>,
+    ) -> (Vec<String>, usize) {
+        self.host.head_branch_probe(selectors, state, default)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequestContent {
     pub title: String,
     pub body: String,
+}
+#[async_trait]
+pub trait WorkflowTextGenerator: Send + Sync {
+    async fn commit_message(
+        &self,
+        git: &Git,
+        context: &crate::PreparedCommit,
+    ) -> Result<String, GitError>;
+    async fn pull_request(
+        &self,
+        git: &Git,
+        base: &str,
+        head: &str,
+    ) -> Result<PullRequestContent, GitError>;
+}
+#[derive(Clone, Default)]
+pub struct WorktreeCreationSettings {
+    pub directory: Option<PathBuf>,
+    pub submodules: Option<crate::WorktreeSubmodules>,
+}
+#[async_trait]
+pub trait WorktreeHost: Send + Sync {
+    async fn creation_settings(&self, cwd: &Path) -> WorktreeCreationSettings;
+    async fn setup(&self, cwd: &Path, thread_id: &str, worktree: &Path) -> Result<(), GitError>;
 }
 #[derive(Debug, Clone)]
 pub struct BranchHeadContext {
@@ -232,12 +343,17 @@ fn repository_name(url: &str) -> Option<String> {
     (repository.split('/').count() >= 2 && !key.contains(['\\', ':'])).then(|| repository.into())
 }
 
+type RequestCache = BTreeMap<String, (tokio::time::Instant, Option<ChangeRequest>)>;
+
+#[derive(Clone)]
 pub struct GitWorkflowService {
     git: Git,
     host: Option<Arc<dyn ReviewHost>>,
     worktrees_dir: Option<PathBuf>,
-    remote_status: Cache<Option<VcsStatusRemoteResult>>,
-    requests: Mutex<BTreeMap<String, (tokio::time::Instant, Option<ChangeRequest>)>>,
+    text_generator: Option<Arc<dyn WorkflowTextGenerator>>,
+    worktree_host: Option<Arc<dyn WorktreeHost>>,
+    remote_status: Arc<Cache<Option<VcsStatusRemoteResult>>>,
+    requests: Arc<Mutex<RequestCache>>,
 }
 pub type GitManager = GitWorkflowService;
 impl GitWorkflowService {
@@ -246,8 +362,10 @@ impl GitWorkflowService {
             git,
             host: None,
             worktrees_dir: None,
-            remote_status: Cache::new(2048),
-            requests: Mutex::new(BTreeMap::new()),
+            text_generator: None,
+            worktree_host: None,
+            remote_status: Arc::new(Cache::new(2048)),
+            requests: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
     pub fn with_review_host(mut self, host: Arc<dyn ReviewHost>) -> Self {
@@ -258,16 +376,166 @@ impl GitWorkflowService {
         self.worktrees_dir = Some(directory);
         self
     }
+    pub fn with_text_generator(mut self, generator: Arc<dyn WorkflowTextGenerator>) -> Self {
+        self.text_generator = Some(generator);
+        self
+    }
+    pub fn with_worktree_host(mut self, host: Arc<dyn WorktreeHost>) -> Self {
+        self.worktree_host = Some(host);
+        self
+    }
+    async fn setup_worktree(&self, thread: &str, path: &Path) -> Result<(), GitError> {
+        if let Some(host) = &self.worktree_host {
+            cancellable(
+                &self.git.cancellation,
+                host.setup(self.git.cwd(), thread, path),
+            )
+            .await
+        } else {
+            self.host()?.setup(self.git.cwd(), thread, path).await
+        }
+    }
+    pub async fn create_worktree(
+        &self,
+        input: &VcsCreateWorktreeInput,
+    ) -> Result<VcsCreateWorktreeResult, GitError> {
+        let mut workflow = self.clone();
+        let input = input.clone();
+        self.git
+            .owned_operation(move |git| async move {
+                workflow.git = git;
+                workflow.create_worktree_inner(&input).await
+            })
+            .await
+    }
+    async fn create_worktree_inner(
+        &self,
+        input: &VcsCreateWorktreeInput,
+    ) -> Result<VcsCreateWorktreeResult, GitError> {
+        let git = self.git.at(&input.cwd.0);
+        let settings = match &self.worktree_host {
+            Some(host) => {
+                cancellable(&git.cancellation, async {
+                    Ok(host.creation_settings(git.cwd()).await)
+                })
+                .await?
+            }
+            None => WorktreeCreationSettings::default(),
+        };
+        let branch = input.new_ref_name.as_ref().and_then(Option::as_ref);
+        let base = if branch.is_some() {
+            if let Some(base) = input.base_ref_name.as_ref().and_then(Option::as_ref) {
+                let resolved = git
+                    .core_text(
+                        "GitManager.createWorktree.base",
+                        &[
+                            "rev-parse",
+                            "--symbolic-full-name",
+                            "--verify",
+                            "--end-of-options",
+                            &base.0,
+                        ],
+                        true,
+                    )
+                    .await?;
+                let resolved = resolved.trim();
+                if let Some(name) = resolved.strip_prefix("refs/heads/") {
+                    Some((name.to_owned(), resolved.to_owned()))
+                } else if let Some(remote_ref) = resolved.strip_prefix("refs/remotes/") {
+                    crate::parse_remote_ref(remote_ref, &git.list_remote_names().await?)
+                        .filter(|(_, name)| name != "HEAD")
+                        .map(|(_, name)| (name, resolved.to_owned()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let path = git
+            .add_worktree(WorktreeOptions {
+                reference: input.ref_name.0.clone(),
+                new_branch: branch.map(|name| name.0.clone()),
+                path: input.path.as_ref().map(|path| PathBuf::from(&path.0)),
+                directory: settings.directory.or_else(|| self.worktrees_dir.clone()),
+                submodules: settings
+                    .submodules
+                    .unwrap_or(crate::WorktreeSubmodules::Auto),
+            })
+            .await?;
+        if let (Some(branch), Some((name, reference))) = (branch, base) {
+            let _ = git
+                .write_config_value(&format!("branch.{}.t3-merge-base", branch.0), &name)
+                .await;
+            if reference.starts_with("refs/remotes/") {
+                let _ = git
+                    .write_config_value(
+                        &format!("branch.{}.t3-merge-base-ref", branch.0),
+                        &reference,
+                    )
+                    .await;
+            }
+        }
+        // Refresh before returning: an index refresh in the background races setup and agent Git commands.
+        let _ = git
+            .at(&path)
+            .execute(
+                &["update-index", "--refresh"],
+                ExecuteOptions {
+                    allow_nonzero: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+        self.invalidate_status().await;
+        Ok(VcsCreateWorktreeResult {
+            worktree: VcsWorktree {
+                path: Text(path.to_string_lossy().into()),
+                ref_name: branch.cloned().unwrap_or_else(|| input.ref_name.clone()),
+            },
+        })
+    }
     pub fn git(&self) -> &Git {
         &self.git
     }
-    fn host(&self) -> Result<&dyn ReviewHost, GitError> {
-        self.host.as_deref().ok_or_else(|| {
-            self.git.command_error(
-                "GitManager.sourceControlProvider",
-                "No source control provider is configured for this workflow.",
-            )
-        })
+    pub fn at(&self, cwd: impl Into<PathBuf>) -> Self {
+        Self {
+            git: self.git.at(cwd),
+            ..self.clone()
+        }
+    }
+    pub fn with_cancellation(mut self, cancellation: crate::CancellationToken) -> Self {
+        self.git.status_fetch_scope = Some(cancellation.clone());
+        self.git = self.git.with_cancellation(cancellation);
+        self
+    }
+    pub async fn invalidate_local_status(&self) {
+        self.git
+            .core
+            .local_status
+            .invalidate(&physical_path(self.git.cwd()).to_string_lossy())
+            .await;
+    }
+    pub async fn invalidate_remote_status(&self) {
+        self.remote_status
+            .invalidate(&self.git.cwd().to_string_lossy())
+            .await;
+    }
+    fn host(&self) -> Result<ReviewSession<'_>, GitError> {
+        self.host
+            .as_deref()
+            .map(|host| ReviewSession {
+                host,
+                token: &self.git.cancellation,
+            })
+            .ok_or_else(|| {
+                self.git.command_error(
+                    "GitManager.sourceControlProvider",
+                    "No source control provider is configured for this workflow.",
+                )
+            })
     }
     pub async fn repository_root(&self) -> Result<Option<PathBuf>, GitError> {
         Ok(self
@@ -365,10 +633,13 @@ impl GitWorkflowService {
             && self.git.list_remote_names().await?.len() == 1
             && match self.host.as_deref() {
                 Some(host) => {
-                    host.targets_remote(
-                        self.git.cwd(),
-                        remote.unwrap_or(""),
-                        head_repository.as_deref(),
+                    cancellable(
+                        &self.git.cancellation,
+                        host.targets_remote(
+                            self.git.cwd(),
+                            remote.unwrap_or(""),
+                            head_repository.as_deref(),
+                        ),
                     )
                     .await?
                 }
@@ -376,8 +647,11 @@ impl GitWorkflowService {
             };
         let foreign_remote = remote.is_some_and(|remote| remote != "origin") && !only_remote;
         let targets = if let (Some(host), Some(remote)) = (self.host.as_deref(), remote) {
-            host.targets_remote(self.git.cwd(), remote, head_repository.as_deref())
-                .await?
+            cancellable(
+                &self.git.cancellation,
+                host.targets_remote(self.git.cwd(), remote, head_repository.as_deref()),
+            )
+            .await?
         } else {
             true
         };
@@ -590,7 +864,11 @@ impl GitWorkflowService {
                 true,
             ));
         }
-        if context.head_branch != branch && !context.cross_repository {
+        let explicit_pr = regex::Regex::new(r"^t3code[/-]pr-\d+[/-]")
+            .is_ok_and(|pattern| pattern.is_match(branch));
+        let tracks_fork_head = context.cross_repository
+            && (context.remote_name.as_deref() != Some("origin") || explicit_pr);
+        if context.head_branch != branch && !tracks_fork_head {
             let base = Some(context.head_branch.as_str()) == default_branch
                 || default_branch.is_none()
                     && ["main", "master"].contains(&context.head_branch.as_str())
@@ -672,7 +950,8 @@ impl GitWorkflowService {
                     )
                     .await?;
                 let key = format!(
-                    "{branch}\0{}\0{}",
+                    "{}\0{branch}\0{}\0{}",
+                    self.git.cwd().display(),
                     details.upstream_ref.as_deref().unwrap_or(""),
                     context.remote_name.as_deref().unwrap_or("")
                 );
@@ -910,10 +1189,21 @@ impl GitWorkflowService {
         let (base, _) = self
             .pr_base(branch, details.upstream_ref.as_deref(), &context)
             .await?;
-        let content = content.ok_or_else(|| {
-            self.git
-                .command_error("runPrStep", "Pull request title and body are required.")
-        })?;
+        let generated;
+        let content = if let Some(content) = content {
+            content
+        } else {
+            let generator = self.text_generator.as_ref().ok_or_else(|| {
+                self.git
+                    .command_error("runPrStep", "Pull request title and body are required.")
+            })?;
+            generated = cancellable(
+                &self.git.cancellation,
+                generator.pull_request(&self.git, &base, &context.head_branch),
+            )
+            .await?;
+            &generated
+        };
         let directory = tempfile::Builder::new()
             .prefix("t3code-pr-body-")
             .tempdir()?;
@@ -967,8 +1257,15 @@ impl GitWorkflowService {
             emit(json!({"kind":"action_started","phases":phases}));
             if !feature && push_action && details.branch.is_none() { return Err(self.git.command_error("runStackedAction", "Cannot push from detached HEAD.")); }
             if !feature && pr_action && details.branch.is_none() { return Err(self.git.command_error("runStackedAction", "Cannot create a pull request from detached HEAD.")); }
-            let message = input.commit_message.as_ref().and_then(Option::as_ref).map(|value| value.0.as_str());
             let paths = input.file_paths.as_ref().and_then(Option::as_ref).map(Vec::as_slice);
+            let supplied = input.commit_message.as_ref().and_then(Option::as_ref).map(|value| value.0.as_str());
+            let generated = if commit_action && supplied.is_none() {
+                match self.git.prepare_commit_context(paths, false).await? {
+                    Some(context) => Some(cancellable(&self.git.cancellation, self.text_generator.as_ref().ok_or_else(|| self.git.command_error("runCommitStep", "A commit message or text generator is required."))?.commit_message(&self.git, &context)).await?),
+                    None => None,
+                }
+            } else { None };
+            let message = supplied.or(generated.as_deref());
             let mut branch_step = json!({"status":"skipped_not_requested"}); let mut branch = details.branch;
             let mut prepared = false;
             if feature {
@@ -989,8 +1286,8 @@ impl GitWorkflowService {
             }
             let commit = if commit_action {
                 phase = Some("commit");
-                let (subject, body) = message.and_then(parse_commit_message).ok_or_else(|| self.git.command_error("runCommitStep", "A commit message is required."))?;
                 if !prepared && self.git.prepare_commit_context(paths, false).await?.is_none() { json!({"status":"skipped_no_changes"}) } else {
+                    let (subject, body) = message.and_then(parse_commit_message).ok_or_else(|| self.git.command_error("runCommitStep", "A commit message is required."))?;
                     emit(json!({"kind":"phase_started","phase":"commit","label":"Committing..."}));
                     let commit_progress = progress.as_ref().map(|reporter| {
                         let reporter = reporter.clone();
@@ -1267,7 +1564,7 @@ impl GitWorkflowService {
             if refreshed.as_ref().is_some_and(|result| result.moved)
                 && let Some(thread) = thread_id
             {
-                let _ = host.setup(self.git.cwd(), thread, &existing.path).await;
+                let _ = self.setup_worktree(thread, &existing.path).await;
             }
             return Ok(GitPreparePullRequestThreadResult {
                 pull_request: resolved,
@@ -1280,14 +1577,17 @@ impl GitWorkflowService {
         if !existed {
             self.materialize_pr(&request, &local).await?;
         }
-        let options = WorktreeOptions {
-            reference: local.clone(),
-            new_branch: None,
-            path: None,
-            directory: self.worktrees_dir.clone(),
-            submodules: Default::default(),
-        };
-        let path = self.git.add_worktree(options).await?;
+        let tree = self
+            .create_worktree(&VcsCreateWorktreeInput {
+                cwd: Text(self.git.cwd().to_string_lossy().into()),
+                ref_name: Text(local.clone()),
+                new_ref_name: None,
+                base_ref_name: None,
+                path: None,
+            })
+            .await?
+            .worktree;
+        let path = PathBuf::from(tree.path.0);
         let on_target = if existed {
             self.refresh_pr_worktree(&self.git.at(&path), &request, &local)
                 .await
@@ -1299,7 +1599,7 @@ impl GitWorkflowService {
             true
         };
         if let Some(thread) = thread_id {
-            let _ = host.setup(self.git.cwd(), thread, &path).await;
+            let _ = self.setup_worktree(thread, &path).await;
         }
         Ok(GitPreparePullRequestThreadResult {
             pull_request: resolved,

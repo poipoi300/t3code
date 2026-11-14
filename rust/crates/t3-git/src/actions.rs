@@ -72,7 +72,7 @@ impl Drop for CancelOnDrop {
         self.0.cancel();
     }
 }
-struct OperationGuard(Arc<crate::core::CoreState>);
+pub(crate) struct OperationGuard(pub(crate) Arc<crate::core::CoreState>);
 impl Drop for OperationGuard {
     fn drop(&mut self) {
         self.0

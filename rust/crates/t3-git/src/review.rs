@@ -273,27 +273,41 @@ impl Git {
             .split('\0')
             .filter(|path| !path.is_empty())
             .collect();
-        let paths: Vec<_> = paths
+        let mut paths: Vec<_> = paths
             .into_iter()
             .filter(|path| !removed.contains(path.as_str()))
             .collect();
         if paths.is_empty() {
             return Ok(ReviewIndex::empty());
         }
-        if let Some(max) = max_bytes {
-            let mut size = 0u64;
+        let omitted;
+        {
+            let mut sizes = Vec::new();
             for path in &paths {
-                if let Ok(info) = tokio::fs::symlink_metadata(self.cwd().join(path)).await
-                    && info.is_file()
-                {
-                    size = size.saturating_add(info.len());
-                }
+                let size = tokio::fs::symlink_metadata(self.cwd().join(path))
+                    .await
+                    .ok()
+                    .filter(|info| info.is_file())
+                    .map_or(0, |info| info.len());
+                sizes.push((path.clone(), size));
             }
-            if size > max {
+            sizes.sort_by_key(|(_, size)| *size);
+            let mut bytes = 0u64;
+            let selected: Vec<_> = sizes
+                .into_iter()
+                .take_while(|(_, size)| {
+                    bytes = bytes.saturating_add(*size);
+                    bytes <= max_bytes.unwrap_or(256 * 1024 * 1024)
+                })
+                .map(|(path, _)| path)
+                .collect();
+            omitted = selected.len() < paths.len();
+            if omitted && (selected.is_empty() || max_bytes.is_some()) {
                 return Ok(ReviewIndex::unavailable(
                     "Untracked files are too large to count.",
                 ));
             }
+            paths = selected;
         }
         let index = self
             .core_text(
@@ -370,7 +384,7 @@ impl Git {
         Ok(ReviewIndex {
             env: environment,
             _directory: Some(directory),
-            unavailable: None,
+            unavailable: omitted.then(|| "Untracked files are too large to count.".into()),
         })
     }
     pub(crate) async fn branch_change_totals(

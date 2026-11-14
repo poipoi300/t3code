@@ -190,3 +190,53 @@ async fn turn_queries_use_stopped_predecessor_completed_destinations_and_scope_c
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn filtered_path_batches_share_the_byte_budget_and_preserve_utf8_at_exact_fit() -> TestResult
+{
+    let repo = Repository::new().await?;
+    repo.write("base", "base\n")?;
+    repo.commit("base").await?;
+    let from = checkpoint_ref("batch-budget", 0);
+    let to = checkpoint_ref("batch-budget", 1);
+    repo.git.capture_checkpoint(&from).await?;
+    repo.write("upstream.txt", "upstream import\n")?;
+    repo.command(&["add", "upstream.txt"]).await?;
+    let mut options = t3_git::ExecuteOptions::default();
+    for key in ["GIT_COMMITTER_DATE", "GIT_AUTHOR_DATE"] {
+        options
+            .env
+            .insert(key.into(), Some("2000-01-01T00:00:00Z".into()));
+    }
+    repo.git
+        .execute(&["commit", "-m", "old import"], options)
+        .await?;
+    for n in 0..1600 {
+        repo.write(
+            &format!("authored/file-{n:04}-long-path-for-batching.txt"),
+            format!("{n}:{}\n", "é".repeat(6000)),
+        )?;
+    }
+    repo.git.capture_checkpoint(&to).await?;
+    let full = repo
+        .git
+        .filtered_checkpoint_diff(&from, &to, false, 30_000_000)
+        .await?;
+    assert!(full.len() > t3_git::DIFF_MAX_BYTES);
+    assert!(!full.contains("upstream.txt"));
+    assert!(full.contains("file-1599"));
+    let truncated = repo
+        .git
+        .filtered_checkpoint_diff(&from, &to, false, t3_git::DIFF_MAX_BYTES)
+        .await?;
+    assert_eq!(truncated, truncate_patch(&full, t3_git::DIFF_MAX_BYTES));
+    assert!(!truncated.contains('\u{fffd}'));
+    assert!(truncated.ends_with(t3_git::TRUNCATED_MARKER));
+    let exact = repo
+        .git
+        .filtered_checkpoint_diff(&from, &to, false, full.len())
+        .await?;
+    assert_eq!(exact, full);
+    assert!(!exact.ends_with(t3_git::TRUNCATED_MARKER));
+    Ok(())
+}

@@ -1,0 +1,241 @@
+mod common;
+use async_trait::async_trait;
+use common::{Repository, TestResult};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
+use t3_contracts::source_control::*;
+use t3_git::{Git, GitError, GitWorkflowService, ReviewHost};
+
+struct Host {
+    git: Git,
+    requests: Vec<ChangeRequest>,
+    probes: Mutex<Vec<String>>,
+    gate: Option<Arc<Gate>>,
+}
+struct Gate {
+    started: tokio::sync::mpsc::UnboundedSender<()>,
+    release: tokio::sync::Semaphore,
+}
+#[async_trait]
+impl ReviewHost for Host {
+    async fn list(
+        &self,
+        _: &Path,
+        head: &str,
+        _: Option<ChangeRequestState>,
+        _: usize,
+    ) -> Result<Vec<ChangeRequest>, GitError> {
+        self.probes.lock().expect("probes").push(head.into());
+        if let Some(gate) = &self.gate {
+            let _ = gate.started.send(());
+            gate.release.acquire().await.expect("release").forget();
+        }
+        Ok(self.requests.clone())
+    }
+    async fn get(&self, _: &Path, _: &str) -> Result<ChangeRequest, GitError> {
+        Ok(self.requests[0].clone())
+    }
+    async fn checkout(&self, cwd: &Path, _: &str) -> Result<(), GitError> {
+        self.git
+            .at(cwd)
+            .execute(
+                &["switch", &self.requests[0].head_ref_name.0],
+                Default::default(),
+            )
+            .await
+            .map(|_| ())
+    }
+    async fn create(&self, _: &Path, _: &str, _: &str, _: &str, _: &Path) -> Result<(), GitError> {
+        Ok(())
+    }
+    async fn clone_urls(
+        &self,
+        _: &Path,
+        _: &str,
+        _: &str,
+    ) -> Result<SourceControlRepositoryCloneUrls, GitError> {
+        Err(GitError::Unsupported("unused clone".into()))
+    }
+    async fn default_branch(&self, _: &Path) -> Result<Option<String>, GitError> {
+        Ok(Some("main".into()))
+    }
+    fn head_ref(&self, number: u64) -> Option<String> {
+        Some(format!("refs/pull/{number}/head"))
+    }
+    async fn targets_remote(&self, _: &Path, _: &str, _: Option<&str>) -> Result<bool, GitError> {
+        Ok(false)
+    }
+}
+fn request(head: &str, number: u64) -> ChangeRequest {
+    serde_json::from_value(serde_json::json!({"provider":"github","number":number,"title":format!("PR {number}"),"url":format!("https://github.com/upstream/repo/pull/{number}"),"baseRefName":"main","headRefName":head,"state":"open","updatedAt":{"_tag":"None"},"isCrossRepository":true,"headRepositoryNameWithOwner":"fork/repo","headRepositoryOwnerLogin":"fork"})).expect("request")
+}
+#[tokio::test]
+async fn fork_lookup_follows_own_published_ref_and_preserves_explicit_pr_worktrees() -> TestResult {
+    let repo = Repository::new().await?;
+    repo.commit("initial").await?;
+    repo.command(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/fork/repo.git",
+    ])
+    .await?;
+    repo.command(&["update-ref", "refs/remotes/origin/main", "HEAD"])
+        .await?;
+    repo.command(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+    ])
+    .await?;
+    repo.command(&["switch", "-c", "feature", "--track", "origin/main"])
+        .await?;
+    let host = Arc::new(Host {
+        git: repo.git.clone(),
+        requests: vec![request("main", 1), request("feature", 2)],
+        probes: Mutex::new(vec![]),
+        gate: None,
+    });
+    let service = GitWorkflowService::new(repo.git.clone()).with_review_host(host.clone());
+    assert!(
+        service
+            .remote_status(false)
+            .await?
+            .expect("remote")
+            .pr
+            .is_none()
+    );
+    assert!(host.probes.lock().expect("probes").is_empty());
+    repo.command(&["update-ref", "refs/remotes/origin/feature", "HEAD"])
+        .await?;
+    service.invalidate_status().await;
+    assert_eq!(
+        service
+            .remote_status(false)
+            .await?
+            .expect("remote")
+            .pr
+            .expect("own PR")
+            .number,
+        2
+    );
+    repo.command(&["switch", "-c", "t3code/pr-1/main", "--track", "origin/main"])
+        .await?;
+    service.invalidate_status().await;
+    assert_eq!(
+        service
+            .remote_status(false)
+            .await?
+            .expect("remote")
+            .pr
+            .expect("explicit PR")
+            .number,
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolves_and_prepares_pr_locally_with_dirty_checkout_protection() -> TestResult {
+    let repo = Repository::new().await?;
+    repo.write("file", "before\n")?;
+    let sha = repo.commit("initial").await?;
+    repo.command(&["branch", "feature"]).await?;
+    let mut pr = request("feature", 2);
+    pr.is_cross_repository = Some(Some(false));
+    pr.head_sha = Some(Some(t3_contracts::base_schemas::TrimmedNonEmptyString(sha)));
+    let service = GitWorkflowService::new(repo.git.clone()).with_review_host(Arc::new(Host {
+        git: repo.git.clone(),
+        requests: vec![pr],
+        probes: Mutex::new(vec![]),
+        gate: None,
+    }));
+    assert_eq!(
+        service
+            .resolve_pull_request("#2")
+            .await?
+            .pull_request
+            .number,
+        2
+    );
+    let input = serde_json::from_value(
+        serde_json::json!({"cwd":repo.root(),"reference":"#2","mode":"local"}),
+    )?;
+    repo.write("file", "dirty\n")?;
+    assert!(service.prepare_pull_request_thread(&input).await.is_err());
+    assert_eq!(service.current_branch().await?.as_deref(), Some("main"));
+    repo.command(&["restore", "file"]).await?;
+    let result = service.prepare_pull_request_thread(&input).await?;
+    assert_eq!(result.branch.0, "feature");
+    assert!(result.is_on_pull_request_head);
+    assert!(result.worktree_path.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn late_pr_lookup_cannot_publish_the_previous_branch_and_unsubscribe_cancels_lookup()
+-> TestResult {
+    let repo = Repository::new().await?;
+    repo.commit("initial").await?;
+    repo.command(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/fork/repo.git",
+    ])
+    .await?;
+    repo.command(&["update-ref", "refs/remotes/origin/main", "HEAD"])
+        .await?;
+    repo.command(&["branch", "--set-upstream-to=origin/main", "main"])
+        .await?;
+    repo.command(&["branch", "feature"]).await?;
+    let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+    let gate = Arc::new(Gate {
+        started,
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let host = Arc::new(Host {
+        git: repo.git.clone(),
+        requests: vec![request("main", 1)],
+        probes: Mutex::new(vec![]),
+        gate: Some(gate.clone()),
+    });
+    let workflow = GitWorkflowService::new(repo.git.clone()).with_review_host(host);
+    let service = t3_git::VcsStatusBroadcaster::new(workflow)
+        .with_policy(Arc::new(t3_git::DisabledVcsPolling));
+    let mut stream = service.stream_status(repo.root(), true).await?;
+    stream.recv().await.expect("snapshot");
+    starts.recv().await.expect("lookup started");
+    repo.command(&["switch", "feature"]).await?;
+    service.refresh_status(repo.root(), true).await?;
+    gate.release.add_permits(100);
+    let status = service.get_status(repo.root()).await?;
+    assert_eq!(status.ref_name.expect("branch").0, "feature");
+    assert!(status.pr.is_none());
+    stream.close().await;
+    service.shutdown().await;
+    repo.command(&["switch", "main"]).await?;
+    let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+    let gate = Arc::new(Gate {
+        started,
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let host = Arc::new(Host {
+        git: repo.git.clone(),
+        requests: vec![request("main", 1)],
+        probes: Mutex::new(vec![]),
+        gate: Some(gate),
+    });
+    let workflow = GitWorkflowService::new(repo.git.clone()).with_review_host(host);
+    let service = t3_git::VcsStatusBroadcaster::new(workflow)
+        .with_policy(Arc::new(t3_git::DisabledVcsPolling));
+    let mut stream = service.stream_status(repo.root(), true).await?;
+    stream.recv().await.expect("snapshot");
+    starts.recv().await.expect("new lookup started");
+    stream.close().await;
+    assert_eq!(service.active_workers(), (0, 0));
+    service.shutdown().await;
+    Ok(())
+}

@@ -68,11 +68,18 @@ impl Drop for ScratchIndex {
         self.cleanup();
     }
 }
+struct HeadMove {
+    to: String,
+    at: String,
+    reason: String,
+}
+
 struct CaptureRepository {
     common: PathBuf,
     index: Option<PathBuf>,
     prefix: String,
     head: bool,
+    head_oid: Option<String>,
 }
 
 #[derive(Default)]
@@ -83,6 +90,7 @@ struct IndexScan {
     flagged_bytes: usize,
     fallback: bool,
     sparse: bool,
+    restore: bool,
     keep: bool,
     start: bool,
 }
@@ -91,8 +99,12 @@ impl IndexScan {
         while !chunk.is_empty() && !self.fallback {
             if self.start {
                 let tag = chunk[0];
-                self.keep = tag.is_ascii_lowercase() || tag == b'S';
-                if self.sparse && tag == b's' {
+                self.keep = if self.restore {
+                    matches!(tag, b'S' | b's')
+                } else {
+                    tag.is_ascii_lowercase() || tag == b'S'
+                };
+                if self.sparse && tag == b's' && !self.restore {
                     self.fallback = true;
                     return;
                 }
@@ -113,7 +125,8 @@ impl IndexScan {
                         self.fallback = true;
                         return;
                     }
-                    let skipped = self.sparse && self.pending[0] == b'S';
+                    let skipped = self.sparse
+                        && (self.pending[0] == b'S' || self.restore && self.pending[0] == b's');
                     if !skipped || self.pending.last() != Some(&b'/') {
                         match std::str::from_utf8(&self.pending[2..]) {
                             Ok(entry) => {
@@ -210,19 +223,22 @@ impl Git {
                 index: Some(lines[1].trim().into()),
                 prefix: lines[2].into(),
                 head,
+                head_oid: head.then(|| lines[3].to_owned()),
             });
         }
         let common = self.text(&["rev-parse", "--git-common-dir"]).await?;
         let prefix = self.text(&["rev-parse", "--show-prefix"]).await?;
+        let head_exists = if checked {
+            head
+        } else {
+            self.head_commit().await?.is_some()
+        };
         Ok(CaptureRepository {
             common: self.absolute_git_path(common.trim_end_matches('\n'))?,
             index: None,
             prefix: prefix.trim_end_matches('\n').into(),
-            head: if checked {
-                head
-            } else {
-                self.head_commit().await?.is_some()
-            },
+            head: head_exists,
+            head_oid: None,
         })
     }
 
@@ -421,17 +437,50 @@ impl Git {
     }
 
     pub async fn capture_checkpoint(&self, checkpoint_ref: &str) -> Result<(), GitError> {
+        self.capture_checkpoint_with_previous(checkpoint_ref, None)
+            .await
+    }
+
+    pub async fn capture_checkpoint_with_previous(
+        &self,
+        checkpoint_ref: &str,
+        previous: Option<&str>,
+    ) -> Result<(), GitError> {
         let checkpoint_ref = checkpoint_ref.to_owned();
+        let previous = previous.map(str::to_owned);
         self.owned_operation(move |git| async move {
-            git.capture_checkpoint_owned(&checkpoint_ref).await
+            git.capture_checkpoint_owned(&checkpoint_ref, previous.as_deref())
+                .await
         })
         .await
     }
 
-    async fn capture_checkpoint_owned(&self, checkpoint_ref: &str) -> Result<(), GitError> {
+    async fn capture_checkpoint_owned(
+        &self,
+        checkpoint_ref: &str,
+        previous: Option<&str>,
+    ) -> Result<(), GitError> {
         validate_checkpoint_ref(checkpoint_ref)?;
         let exclusions = crate::safety::checkpoint_exclusions(&self.cwd)?;
         let repository = self.capture_repository().await?;
+        let head_moves = if repository.head_oid.is_some() {
+            self.read_head_moves().await
+        } else {
+            Vec::new()
+        };
+        let head_mark = head_moves
+            .first()
+            .filter(|last| Some(&last.to) == repository.head_oid.as_ref())
+            .map(|last| {
+                format!(
+                    "{} {}",
+                    last.at,
+                    head_moves
+                        .iter()
+                        .filter(|entry| entry.at == last.at)
+                        .count()
+                )
+            });
         let scratch = ScratchIndex(
             repository
                 .common
@@ -784,12 +833,32 @@ impl Git {
                 "git write-tree returned an empty tree oid".into(),
             ));
         }
+        let turn_start = if head_mark.is_some() {
+            match previous {
+                Some(previous) => self
+                    .capture_turn_start(checkpoint_ref, previous, &head_moves, &commit_env)
+                    .await
+                    .ok()
+                    .flatten(),
+                None => None,
+            }
+        } else {
+            None
+        };
         let mut args = durable_write();
         args.extend(["commit-tree", tree]);
         if repository.head {
-            args.extend(["-p", "HEAD"]);
+            args.extend(["-p", repository.head_oid.as_deref().unwrap_or("HEAD")]);
         }
-        let message = format!("t3 checkpoint ref={checkpoint_ref}");
+        if let Some(start) = &turn_start {
+            args.extend(["-p", start]);
+        }
+        let message = format!(
+            "t3 checkpoint ref={checkpoint_ref}{}",
+            head_mark
+                .map(|mark| format!("\n\nT3-Head-Moved-At: {mark}"))
+                .unwrap_or_default()
+        );
         args.extend(["-m", &message]);
         let commit = self
             .capture_execute(&args, &commit_env, None)
@@ -806,6 +875,207 @@ impl Git {
         self.capture_execute(&args, &Environment::new(), None)
             .await?;
         Ok(())
+    }
+
+    async fn read_head_moves(&self) -> Vec<HeadMove> {
+        let result = self
+            .execute(
+                &[
+                    "-c",
+                    "log.showSignature=false",
+                    "log",
+                    "--walk-reflogs",
+                    "-n",
+                    "512",
+                    "--date=unix",
+                    "--format=%H %gd %gs",
+                    "HEAD",
+                    "--",
+                ],
+                ExecuteOptions {
+                    allow_nonzero: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+        let Ok(result) = result else {
+            return Vec::new();
+        };
+        if result.code != Some(0) {
+            return Vec::new();
+        }
+        let pattern =
+            regex::Regex::new(r"^([0-9a-f]+) HEAD@\{(\d+)\} (.*)$").expect("HEAD reflog pattern");
+        result
+            .stdout_text()
+            .lines()
+            .filter_map(|line| {
+                pattern.captures(line).map(|parts| HeadMove {
+                    to: parts[1].into(),
+                    at: parts[2].into(),
+                    reason: parts[3].into(),
+                })
+            })
+            .collect()
+    }
+
+    async fn capture_turn_start(
+        &self,
+        reference: &str,
+        previous: &str,
+        moves: &[HeadMove],
+        commit_env: &Environment,
+    ) -> Result<Option<String>, GitError> {
+        validate_revision(previous)?;
+        let output = self
+            .execute(
+                &[
+                    "-c",
+                    "log.showSignature=false",
+                    "log",
+                    "--no-walk",
+                    "--format=%H %T %ct %P%n%B",
+                    &format!("{previous}^{{commit}}"),
+                ],
+                ExecuteOptions {
+                    allow_nonzero: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        if output.code != Some(0) {
+            return Ok(None);
+        }
+        let text = output.stdout_text();
+        let fields: Vec<_> = text
+            .lines()
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
+        let [commit, tree, captured_at, previous_head, ..] = fields.as_slice() else {
+            return Ok(None);
+        };
+        let pattern = regex::Regex::new(r"(?m)^T3-Head-Moved-At: (\d+) (\d+)$")
+            .expect("checkpoint trailer pattern");
+        let Some(mark) = pattern.captures(&text) else {
+            return Ok(None);
+        };
+        let Some(oldest) = moves.iter().rposition(|entry| entry.at == mark[1]) else {
+            return Ok(None);
+        };
+        if oldest == 511 {
+            return Ok(None);
+        }
+        let Some(since) = mark[2]
+            .parse::<usize>()
+            .ok()
+            .and_then(|count| oldest.checked_add(1)?.checked_sub(count))
+        else {
+            return Ok(None);
+        };
+        if moves
+            .get(since)
+            .is_none_or(|entry| entry.to != *previous_head)
+        {
+            return Ok(None);
+        }
+        let switches: Vec<_> = moves[..since]
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let from = &moves[index + 1].to;
+                (entry.reason.starts_with("checkout: moving from ") && from != &entry.to)
+                    .then_some((from, &entry.to))
+            })
+            .rev()
+            .collect();
+        let Some((_, landed_on)) = switches.last() else {
+            return Ok(None);
+        };
+        let mut args = INDEX_CONFIG.to_vec();
+        args.extend(["-c", "index.sparse=false", "read-tree", tree]);
+        self.capture_execute(&args, commit_env, None).await?;
+        for (from, to) in switches.iter() {
+            let changes = self
+                .execute(
+                    &[
+                        "-c",
+                        "core.quotePath=true",
+                        "diff-tree",
+                        "-r",
+                        "--no-renames",
+                        from,
+                        to,
+                    ],
+                    ExecuteOptions {
+                        max_output_bytes: crate::DIFF_MAX_BYTES,
+                        output_mode: OutputMode::Error,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            let mut entries = String::new();
+            for line in changes
+                .stdout_text()
+                .lines()
+                .filter(|line| !line.is_empty())
+            {
+                let (metadata, path) = line
+                    .split_once('\t')
+                    .ok_or_else(|| GitError::InvalidOutput("branch switch tree entry".into()))?;
+                let fields: Vec<_> = metadata.split_whitespace().collect();
+                if fields.len() != 5 {
+                    return Err(GitError::InvalidOutput(
+                        "branch switch tree metadata".into(),
+                    ));
+                }
+                if fields[0] == ":160000" || fields[1] == "160000" {
+                    continue;
+                }
+                entries.push_str(&format!("{} {}\t{path}\n", fields[1], fields[3]));
+            }
+            if entries.is_empty() {
+                continue;
+            }
+            let mut args = INDEX_CONFIG.to_vec();
+            args.extend(["-c", "index.sparse=false", "update-index", "--index-info"]);
+            self.capture_execute(&args, commit_env, Some(entries.into_bytes()))
+                .await?;
+        }
+        let mut args = INDEX_CONFIG.to_vec();
+        args.extend(durable_write());
+        args.push("write-tree");
+        let start_tree = self
+            .capture_execute(&args, commit_env, None)
+            .await?
+            .stdout_text();
+        let start_tree = start_tree.trim();
+        if start_tree.is_empty() || start_tree == *tree {
+            return Ok(None);
+        }
+        let mut args = durable_write();
+        let message = format!("t3 checkpoint turn start ref={reference}");
+        args.extend([
+            "commit-tree",
+            start_tree,
+            "-p",
+            landed_on,
+            "-p",
+            commit,
+            "-m",
+            &message,
+        ]);
+        let mut environment = commit_env.clone();
+        environment.insert(
+            "GIT_COMMITTER_DATE".into(),
+            Some(format!("{captured_at} +0000").into()),
+        );
+        let start = self
+            .capture_execute(&args, &environment, None)
+            .await?
+            .stdout_text();
+        Ok((!start.trim().is_empty()).then(|| start.trim().to_owned()))
     }
 
     pub async fn resolve_checkpoint(
@@ -916,8 +1186,20 @@ impl Git {
             .text(&["ls-files", "--cached", &with_tree, "-z", "--", "."])
             .await?;
         if !tracked.is_empty() {
-            let mut args = long_paths().to_vec();
-            args.extend([
+            let sparse = self
+                .execute(
+                    &["config", "--bool", "core.sparseCheckout"],
+                    ExecuteOptions {
+                        allow_nonzero: true,
+                        ..Default::default()
+                    },
+                )
+                .await?
+                .stdout_text()
+                .trim()
+                == "true";
+            let mut restore = long_paths().to_vec();
+            restore.extend([
                 "-c",
                 "core.hooksPath=/dev/null",
                 "restore",
@@ -925,11 +1207,38 @@ impl Git {
                 &commit,
                 "--worktree",
                 "--staged",
-                "--",
-                ".",
             ]);
+            let mut args = restore.clone();
+            if !sparse {
+                args.push("--ignore-skip-worktree-bits");
+            }
+            args.extend(["--", "."]);
             crate::safety::ensure_checkpoint_contained(&self.cwd)?;
             self.text(&args).await?;
+            if sparse {
+                let manual = self.manual_sparse_paths().await.unwrap_or_default();
+                if !manual.is_empty() {
+                    let mut args = restore;
+                    args.extend([
+                        "--ignore-skip-worktree-bits",
+                        "--pathspec-from-file=-",
+                        "--pathspec-file-nul",
+                    ]);
+                    let stdin = manual
+                        .iter()
+                        .flat_map(|path| format!(":(top,literal){path}\0").into_bytes())
+                        .collect();
+                    crate::safety::ensure_checkpoint_contained(&self.cwd)?;
+                    self.execute(
+                        &args,
+                        ExecuteOptions {
+                            stdin: Some(stdin),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                }
+            }
         }
         std::fs::create_dir_all(&self.cwd)?;
         let cleaned = self.clean_checkpoint_workspace().await;
@@ -949,6 +1258,59 @@ impl Git {
         cleaned?;
         Ok(true)
     }
+    async fn manual_sparse_paths(&self) -> Result<Vec<String>, GitError> {
+        let scan = Arc::new(Mutex::new(IndexScan {
+            sparse: true,
+            restore: true,
+            start: true,
+            ..Default::default()
+        }));
+        let callback = scan.clone();
+        self.execute(
+            &["ls-files", "--full-name", "--sparse", "-v", "-z", "--", "."],
+            ExecuteOptions {
+                max_output_bytes: 4096,
+                on_stdout_chunk: Some(Arc::new(move |chunk| {
+                    if let Ok(mut scan) = callback.lock() {
+                        scan.feed(chunk);
+                    }
+                })),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let paths = {
+            let mut scan = scan
+                .lock()
+                .map_err(|_| GitError::InvalidOutput("sparse path scan poisoned".into()))?;
+            if scan.fallback || !scan.start {
+                return Err(GitError::InvalidOutput("sparse path scan".into()));
+            }
+            std::mem::take(&mut scan.skipped)
+        };
+        if paths.is_empty() {
+            return Ok(paths);
+        }
+        let stdin = format!("{}\0", paths.join("\0")).into_bytes();
+        let rules = self
+            .execute(
+                &["sparse-checkout", "check-rules", "-z"],
+                ExecuteOptions {
+                    max_output_bytes: stdin.len(),
+                    stdin: Some(stdin),
+                    output_mode: OutputMode::Error,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(rules
+            .stdout_text()
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
     async fn clean_checkpoint_workspace(&self) -> Result<(), GitError> {
         let mut args = long_paths().to_vec();
         args.extend(["clean", "-fd", "--", "."]);

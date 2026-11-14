@@ -646,11 +646,14 @@ impl Git {
                 true,
             )
             .await?;
-        Ok(output
-            .trim()
+        let reference = output.trim();
+        let Some(name) = reference
             .strip_prefix(&format!("refs/remotes/{remote}/"))
-            .filter(|name| !name.is_empty())
-            .map(str::to_owned))
+            .filter(|name| !name.is_empty() && *name != "HEAD")
+        else {
+            return Ok(None);
+        };
+        Ok(self.has_commit(reference).await?.then(|| name.to_owned()))
     }
     async fn primary_default_branch(&self) -> Result<Option<String>, GitError> {
         if let Some(branch) = self.default_branch_name("origin").await? {
@@ -1173,15 +1176,28 @@ impl Git {
             } else {
                 &paths.repository.common_dir
             };
-            let mut git = self
-                .at(fetch_cwd)
-                .with_cancellation(self.core.background_shutdown.child_token());
+            let mut git = self.at(fetch_cwd).with_cancellation(
+                self.status_fetch_scope
+                    .as_ref()
+                    .unwrap_or(&self.core.background_shutdown)
+                    .child_token(),
+            );
             // The fetch must not keep its owning service alive after the last handle is dropped.
             git.core = Arc::new(CoreState::default());
             let remote = remote.to_owned();
             let permits = self.core.fetch_permits.clone();
+            let operation = self.status_fetch_scope.as_ref().map(|_| {
+                self.core
+                    .operations
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                crate::actions::OperationGuard(self.core.clone())
+            });
             tokio::spawn(async move {
-                let _permit = permits.acquire().await;
+                let _operation = operation;
+                let _permit = tokio::select! {
+                    _ = git.cancellation.cancelled() => None,
+                    permit = permits.acquire() => permit.ok(),
+                };
                 let result = git
                     .execute_command(
                         "GitVcsDriver.fetchRemoteForStatus",
@@ -1223,11 +1239,10 @@ impl Git {
             receiver
         };
         drop(locked);
-        let _ = tokio::time::timeout(
-            Duration::from_secs(5),
-            receiver.wait_for(|value| value.is_some()),
-        )
-        .await;
+        tokio::select! {
+            _ = self.cancellation.cancelled() => {},
+            _ = tokio::time::timeout(Duration::from_secs(5), receiver.wait_for(|value| value.is_some())) => {},
+        }
         let mut locked = state.lock().await;
         if locked.pending.is_some() {
             locked.retry_at = Some(Instant::now() + Duration::from_secs(15));
@@ -1266,19 +1281,8 @@ impl Git {
                 },
             )
             .await?;
-        let default = git
-            .core_text(
-                "GitVcsDriver.listRefs.defaultRef",
-                &[
-                    "--git-dir",
-                    &common,
-                    "symbolic-ref",
-                    "refs/remotes/origin/HEAD",
-                ],
-                true,
-            )
-            .await?;
-        let default = default.trim().strip_prefix("refs/remotes/origin/");
+        let default_name = git.default_branch_name("origin").await?;
+        let default = default_name.as_deref();
         let names = git.list_remote_names().await.unwrap_or_default();
         let worktrees = git.list_worktrees().await.unwrap_or_default();
         let mut local = Vec::new();
@@ -1313,6 +1317,9 @@ impl Git {
                 ));
             } else if let Some(name) = fields[0].strip_prefix("refs/remotes/") {
                 let parsed = parse_remote_ref(name, &names);
+                if parsed.as_ref().is_some_and(|(_, branch)| branch == "HEAD") {
+                    continue;
+                }
                 remote.push((
                     time,
                     VcsRef {
@@ -1390,24 +1397,24 @@ impl Git {
         };
         let mut local = snapshot.local;
         let root = path_key(&paths.repository.root);
-        let has_current = local.iter().any(|reference| {
-            reference
+        let branch = git
+            .core_text(
+                "GitVcsDriver.listRefs.currentBranch",
+                &["symbolic-ref", "--quiet", "HEAD"],
+                true,
+            )
+            .await?;
+        let current_branch = branch_from_ref(&branch);
+        for reference in &mut local {
+            reference.current = Some(&reference.name.0) == current_branch.as_ref();
+            if reference
                 .worktree_path
                 .as_ref()
                 .is_some_and(|path| path.0 == root)
-        });
-        for reference in &mut local {
-            reference.current = if has_current {
-                reference
-                    .worktree_path
-                    .as_ref()
-                    .is_some_and(|path| path.0 == root)
-            } else {
-                Some(&reference.name.0) == paths.current_branch.as_ref()
-            };
-            if reference.worktree_path.is_none()
-                && Some(&reference.name.0) == paths.current_branch.as_ref()
             {
+                reference.worktree_path = None;
+            }
+            if reference.current {
                 reference.worktree_path = Some(Text(root.clone()));
             }
         }

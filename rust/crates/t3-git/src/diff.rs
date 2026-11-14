@@ -148,9 +148,10 @@ impl Git {
         }
         validate_revision(options.from)?;
         validate_revision(options.to)?;
+        let turn_start = self.resolve_turn_start(options.from, options.to).await;
         let from = if options.fallback_from_to_head {
             match self.resolve_checkpoint(options.from).await? {
-                Some(commit) => commit,
+                Some(_) => turn_start,
                 None => self.head_commit().await?.ok_or_else(|| {
                     GitError::Unavailable(
                         "Checkpoint ref is unavailable for diff operation.".into(),
@@ -158,7 +159,7 @@ impl Git {
                 })?,
             }
         } else {
-            options.from.into()
+            turn_start
         };
         let from = format!("{from}^{{commit}}");
         let to = format!("{}^{{commit}}", options.to);
@@ -213,6 +214,138 @@ impl Git {
             .stdout_text())
     }
 
+    async fn resolve_turn_start(&self, from: &str, to: &str) -> String {
+        let result = self
+            .execute(
+                &[
+                    "-c",
+                    "log.showSignature=false",
+                    "log",
+                    "--no-walk=unsorted",
+                    "--format=%H %P",
+                    &format!("{from}^{{commit}}"),
+                    &format!("{to}^2"),
+                ],
+                ExecuteOptions {
+                    allow_nonzero: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+        if let Ok(result) = result
+            && result.code == Some(0)
+        {
+            let text = result.stdout_text();
+            let mut lines = text.lines();
+            let from_commit = lines.next().unwrap_or("").split_whitespace().next();
+            let start: Vec<_> = lines.next().unwrap_or("").split_whitespace().collect();
+            if let [commit, _, started_from, ..] = start.as_slice()
+                && Some(*started_from) == from_commit
+            {
+                return (*commit).into();
+            }
+        }
+        from.into()
+    }
+
+    async fn checkpoint_lines(
+        &self,
+        args: &[&str],
+        stdin: Option<Vec<u8>>,
+    ) -> Result<Vec<String>, GitError> {
+        let mut command = vec!["-c", "log.showSignature=false"];
+        command.extend_from_slice(args);
+        let output = self
+            .execute(
+                &command,
+                ExecuteOptions {
+                    stdin,
+                    max_output_bytes: DIFF_MAX_BYTES,
+                    output_mode: OutputMode::Error,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(output
+            .stdout_text()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+    async fn checkpoint_paths(
+        &self,
+        args: &[&str],
+        stdin: Option<Vec<u8>>,
+    ) -> Result<Vec<String>, GitError> {
+        let mut command = vec!["-c", "diff.relative=false", "-c", "log.showSignature=false"];
+        command.extend_from_slice(args);
+        command.extend(["--name-only", "-z", "--no-renames", "--no-ext-diff"]);
+        let output = self
+            .execute(
+                &command,
+                ExecuteOptions {
+                    stdin,
+                    max_output_bytes: DIFF_MAX_BYTES,
+                    output_mode: OutputMode::Error,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(output
+            .stdout_text()
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+    async fn imported_checkpoint_commits(
+        &self,
+        captured_at: &str,
+        start_head: &str,
+    ) -> Result<HashSet<String>, GitError> {
+        let since = format!("--since=@{captured_at}");
+        let entries = self
+            .checkpoint_lines(
+                &[
+                    "log",
+                    "--walk-reflogs",
+                    "--all",
+                    &since,
+                    "--format=%H %gD %gs",
+                ],
+                None,
+            )
+            .await?;
+        let ref_move=regex::Regex::new(r"(?i)^(?:$|(?:checkout|reset|branch|clone|fetch)\b|[^:]*\((?:start|finish|abort|reset)\): |(?:merge|pull|rebase|cherry-pick)\b[^()]*: fast-forward$)").expect("ref move reflog pattern");
+        let mut fetched_tips = HashSet::new();
+        let mut created_here = HashSet::new();
+        for entry in &entries {
+            let mut fields = entry.splitn(3, ' ');
+            let commit = fields.next().unwrap_or("");
+            let selector = fields.next().unwrap_or("");
+            let subject = fields.next().unwrap_or("");
+            if selector.starts_with("refs/remotes/") {
+                if subject != "update by push" {
+                    fetched_tips.insert(commit);
+                }
+            } else if !ref_move.is_match(subject) {
+                created_here.insert(commit);
+            }
+        }
+        if fetched_tips.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let mut input = fetched_tips.into_iter().collect::<Vec<_>>().join("\n");
+        input.push_str(&format!("\n^{start_head}\n"));
+        Ok(self
+            .checkpoint_lines(&["rev-list", &since, "--stdin"], Some(input.into_bytes()))
+            .await?
+            .into_iter()
+            .filter(|commit| !created_here.contains(commit.as_str()))
+            .collect())
+    }
+
     pub async fn list_authored_paths(
         &self,
         from: &str,
@@ -220,58 +353,76 @@ impl Git {
     ) -> Result<Option<HashSet<String>>, GitError> {
         validate_revision(from)?;
         validate_revision(to)?;
-        let from = format!("{from}^{{commit}}");
+        let turn_start = self.resolve_turn_start(from, to).await;
+        let from = format!("{turn_start}^{{commit}}");
         let to = format!("{to}^{{commit}}");
         let heads = self
-            .text(&["log", "--no-walk=unsorted", "--format=%P %ct", &from, &to])
+            .text(&[
+                "-c",
+                "log.showSignature=false",
+                "log",
+                "--no-walk=unsorted",
+                "--format=%ct %P",
+                &from,
+                &to,
+            ])
             .await?;
         let mut lines = heads.trim_end_matches('\n').split('\n');
         let mut first = lines.next().unwrap_or("").split(' ');
-        let start = first.next().unwrap_or("");
         let captured_at = first.next().unwrap_or("");
-        let end = lines.next().unwrap_or("").split(' ').next().unwrap_or("");
+        let start = first.next().unwrap_or("");
+        let end = lines.next().unwrap_or("").split(' ').nth(1).unwrap_or("");
         if start.is_empty() || end.is_empty() || start == end {
             return Ok(None);
         }
         let before = format!("{end}..{start}");
         let after = format!("{start}..{end}");
         let since = format!("--since=@{captured_at}");
-        let list = async |args: Vec<&str>| {
-            let mut command = vec!["-c", "diff.relative=false", "-c", "log.showSignature=false"];
-            command.extend(args);
-            command.extend(["--name-only", "-z", "--no-renames", "--no-ext-diff"]);
-            let output = self
-                .execute(
-                    &command,
-                    ExecuteOptions {
-                        max_output_bytes: DIFF_MAX_BYTES,
-                        output_mode: OutputMode::Error,
-                        ..Default::default()
-                    },
+        let (recent, a, b, c) = tokio::try_join!(
+            async {
+                self.checkpoint_lines(&["rev-list", &since, &after], None)
+                    .await
+            },
+            async { self.checkpoint_paths(&["diff", start, &from], None).await },
+            async { self.checkpoint_paths(&["diff", end, &to], None).await },
+            async {
+                self.checkpoint_paths(
+                    &["log", "--format=", "--diff-merges=remerge", &before],
+                    None,
                 )
-                .await?;
-            Ok::<_, GitError>(
-                output
-                    .stdout_text()
-                    .split('\0')
-                    .filter(|path| !path.is_empty())
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>(),
-            )
-        };
-        let (a, b, c, d) = tokio::try_join!(
-            list(vec!["diff", start, &from]),
-            list(vec!["diff", end, &to]),
-            list(vec!["log", "--format=", "--diff-merges=remerge", &before]),
-            list(vec![
-                "log",
-                "--format=",
-                "--diff-merges=remerge",
-                &since,
-                &after
-            ])
+                .await
+            }
         )?;
-        Ok(Some(a.into_iter().chain(b).chain(c).chain(d).collect()))
+        let imported = if recent.is_empty() {
+            HashSet::new()
+        } else {
+            self.imported_checkpoint_commits(captured_at, start)
+                .await
+                .unwrap_or_default()
+        };
+        let own: Vec<_> = recent
+            .iter()
+            .filter(|commit| !imported.contains(*commit))
+            .map(String::as_str)
+            .collect();
+        let own_paths = if own.is_empty() {
+            Vec::new()
+        } else {
+            self.checkpoint_paths(
+                &[
+                    "log",
+                    "--no-walk=unsorted",
+                    "--stdin",
+                    "--format=",
+                    "--diff-merges=remerge",
+                ],
+                Some(format!("{}\n", own.join("\n")).into_bytes()),
+            )
+            .await?
+        };
+        Ok(Some(
+            a.into_iter().chain(b).chain(c).chain(own_paths).collect(),
+        ))
     }
 
     /// Query-level authored-path filtering and a single byte budget across path batches.
