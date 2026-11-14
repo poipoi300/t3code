@@ -16,6 +16,13 @@ git-backend = ["dep:t3-git"]
 codex-adapter = ["dep:t3-codex-app-server", "dep:t3-process"]
 claude-adapter = ["dep:t3-claude-cli", "dep:t3-process"]
 acp-adapter = ["dep:t3-acp", "dep:t3-process"]
+# Codex and Claude replay testkits. They embed fixtures generated from the TypeScript into
+# the gitignored rust/fixtures/samples, so the product library must not compile them.
+testkit = []
+
+# This crate's own tests use the testkits.
+[dev-dependencies]
+t3-orchestration = { path = ".", features = ["testkit"] }
 
 # The composed-runtime milestone runs on package 12's Replay provider.
 [[test]]
