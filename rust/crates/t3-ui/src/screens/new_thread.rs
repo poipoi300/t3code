@@ -14,8 +14,8 @@ use crate::screens::composer::attachments::{
     ComposerAttachments, composer_attach_button, composer_attachment_strip,
 };
 use crate::screens::composer::editor::{
-    ComposerEditor, ComposerPromptEditorProps, ComposerResolvers, EditorMode,
-    composer_prompt_editor_tiptap,
+    ComposerEditor, ComposerPromptEditorProps, ComposerResolvers, ComposerSubmitCallback,
+    EditorMode, composer_prompt_editor_tiptap,
 };
 use crate::screens::composer::model_picker::{PickerProps, provider_model_picker};
 use crate::screens::composer::send::{
@@ -353,7 +353,7 @@ fn draft_chat_view(
                 t("Ask anything. @ files, $ skills, / commands").into()
             }),
             aria_label: Prop::bind(move || t("Message").into()),
-            on_submit: Prop::new(Some(Rc::new(move |_| {
+            on_submit: Prop::new(Some(ComposerSubmitCallback::new(move |_| {
                 key_submit(ComposerDispatchMode::Auto);
                 true
             }))),
@@ -414,6 +414,16 @@ fn draft_chat_view(
     if let Some(attachments) = attachments {
         main = main.child(composer_attachment_strip(attachments));
     }
+    let headline_mode = computed(move || {
+        draft(current).map(|value| {
+            (
+                value.is_scratch,
+                value.project_title.is_some(),
+                value.projects.is_empty(),
+                value.can_start_scratch,
+            )
+        })
+    });
     let surface = view().app_class(tw("relative mx-auto w-full max-w-(--chat-content-max-width)"))
         .child(view().app_class(tw("pointer-events-none absolute inset-0 z-0 rounded-2xl bg-card/80 dark:bg-surface-raised/80")))
         .child(view().app_class(tw("relative z-10 w-full rounded-2xl shadow-[0_1px_2px_rgb(0_0_0/5%)] dark:shadow-none border border-black/8 dark:border-white/5"))
@@ -443,7 +453,12 @@ fn draft_chat_view(
                                 .child(
                                     view()
                                         .app_class(tw("absolute inset-x-0 bottom-full pb-4"))
-                                        .child(draft_hero_headline(current, client, error)),
+                                        .child(dynamic(move || {
+                                            headline_mode.get();
+                                            untracked(|| {
+                                                draft_hero_headline(current, client, error)
+                                            })
+                                        })),
                                 )
                                 .child(surface)
                                 .child(dynamic(move || {
@@ -454,7 +469,6 @@ fn draft_chat_view(
                                         });
                                     message.map(|message| {
                                         text(message.resolve())
-                                            .role(AccessibilityRole::Status)
                                             .app_class(tw("pt-4 text-sm text-muted-foreground"))
                                     })
                                 })),
@@ -477,7 +491,7 @@ fn draft_hero_headline(
         .on_press(move || {
             if draft(current).is_some_and(|value| !value.projects.is_empty()) { query.set(String::new()); picker.set_open(!picker.is_open()); }
             else { nav.open(Route::AddProject); }
-        }).on_layout(move |bounds| picker.measure_anchor(bounds))
+        }).on_layout(move |bounds: &Bounds<Points>| picker.measure_anchor(*bounds))
         .app_class(tw("pointer-events-auto min-w-0 max-w-full cursor-pointer border-muted-foreground/35 border-b border-dotted text-muted-foreground/60 transition-colors hover:border-muted-foreground/60 hover:text-muted-foreground/80 focus-visible:rounded-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
         .child(text(move || draft(current).map_or_else(|| t("Add a project"), |value| {
             if value.is_scratch { t("No project") } else { value.project_title.clone().unwrap_or_else(|| t("Choose a project")) }
@@ -589,10 +603,10 @@ fn draft_hero_project_heading(
     let inline_width = signal(f32::INFINITY);
     let inline = move || window().width.0 >= 1024.0 && inline_width.get() <= available.get();
     view().app_class(tw("relative w-full"))
-        .on_layout(move |bounds| available.set(bounds.size.width.0))
+        .on_layout(move |bounds: &Bounds<Points>| available.set(bounds.size.width.0))
         .child(view().accessible(false).app_class(tw("pointer-events-none invisible absolute inset-x-0 top-0 h-0 overflow-hidden"))
             .child(view().app_class(tw("flex w-max items-baseline gap-2 font-normal text-3xl tracking-tight"))
-                .on_layout(move |bounds| inline_width.set(bounds.size.width.0))
+                .on_layout(move |bounds: &Bounds<Points>| inline_width.set(bounds.size.width.0))
                 .child(text(t("What should we build in")))
                 .child(text(move || draft(current).and_then(|value| value.project_title.clone()).unwrap_or_default())
                     .app_class(tw("font-medium")))

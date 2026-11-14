@@ -1,5 +1,5 @@
+use crate::sequence::{Utf8SequenceState, terminal_sequence_end, terminal_sequence_state_after};
 use crate::{DEFAULT_TERMINAL_ID, TerminalError};
-use crate::sequence::{terminal_sequence_end, terminal_sequence_state_after, Utf8SequenceState};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 use std::{
@@ -92,17 +92,23 @@ impl BoundedTerminalHistory {
             self.drop_prefix(drop);
         }
         while self.sequence_state != 0 {
-            let Some(front) = self.chunks.front() else { break; };
+            let Some(front) = self.chunks.front() else {
+                break;
+            };
             self.drop_prefix(terminal_sequence_end(self.sequence_state, front));
         }
     }
     fn drop_prefix(&mut self, count: usize) {
-        let Some(front) = self.chunks.front_mut() else { return; };
+        let Some(front) = self.chunks.front_mut() else {
+            return;
+        };
         self.sequence_state = terminal_sequence_state_after(self.sequence_state, &front[..count]);
         self.breaks -= front[..count].bytes().filter(|&b| b == b'\n').count();
         self.bytes -= count;
         front.drain(..count);
-        if front.is_empty() { self.chunks.pop_front(); }
+        if front.is_empty() {
+            self.chunks.pop_front();
+        }
     }
     pub fn clear(&mut self) {
         self.chunks.clear();
@@ -229,7 +235,9 @@ impl HistoryStore {
                 while remaining > 0 {
                     let count = remaining.min(skipped.len() as u64) as usize;
                     let read = file.read(&mut skipped[..count])?;
-                    if read == 0 { break; }
+                    if read == 0 {
+                        break;
+                    }
                     decoder.feed(&skipped[..read], false);
                     remaining -= read as u64;
                 }
@@ -245,10 +253,7 @@ impl HistoryStore {
                 decoder.feed(&data[..start], true);
                 let raw = String::from_utf8_lossy(&data[start..]);
                 let end = terminal_sequence_end(decoder.state, &raw);
-                Ok::<_, std::io::Error>((
-                    raw[end..].to_owned(),
-                    offset > 0,
-                ))
+                Ok::<_, std::io::Error>((raw[end..].to_owned(), offset > 0))
             })();
             let (raw, truncated) =
                 result.map_err(|source| error("read", thread, terminal, source))?;

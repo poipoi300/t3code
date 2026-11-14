@@ -55,6 +55,11 @@ fn history_sanitizer_ports_csi_dcs_osc_and_split_query_cases() {
         ("A\x1b[?2026\0$pB", "A\0B"),
         ("AB\x1b[5\rnC", "AB\rC"),
         ("AB\x1b[5\x10nC", "ABC"),
+        ("A\x1b[0écB", "AB"),
+        ("A\x1b[嚠B", "A\u{fffd}B"),
+        ("A\x1b[\u{90}\u{9b}6nB", "A\x1bP\u{9c}B"),
+        ("A\x1b[5\x1b[6nB", "AB"),
+        ("A\x1b[界nB", "A\x1b[界nB"),
         (
             "before \x1b[?2026$pafter \x1bP$q m\x1b\\after \x1b[?31uafter \x1bP+q544e\x1b\\after\n",
             "before after after after after\n",
@@ -84,6 +89,53 @@ fn history_sanitizer_ports_csi_dcs_osc_and_split_query_cases() {
             assert_eq!(output, expected, "input={input:?},split={split}");
         }
     }
+}
+
+#[test]
+fn cuts_drop_control_sequence_tails_and_remember_state_across_appends() {
+    for (text, bytes, expected) in [
+        ("prefix\x1b[31mOK", 6, "OK"),
+        ("prefix\x1b]0;HIDDEN\x07OK", 10, "OK"),
+        ("prefix\x1b]0;🙂HIDDEN\x07OK", 9, "OK"),
+        ("prefix\x1bP🙂HELLO\x1b\\OK", 9, "HELLO\x1b\\OK"),
+    ] {
+        for split in text.char_indices().map(|(at, _)| at).chain([text.len()]) {
+            let mut history = BoundedTerminalHistory::new(5000, bytes);
+            history.append(&text[..split]);
+            history.append(&text[split..]);
+            assert_eq!(history.value(), expected, "{text:?} split={split}");
+        }
+        assert_eq!(retained_terminal_history(text, bytes), expected);
+    }
+    let mut history = BoundedTerminalHistory::new(1, 8);
+    history.append("prefix\x1b]0;this is still hidden");
+    assert_eq!(history.value(), "");
+    history.append("more hidden\x07OK");
+    assert_eq!(history.value(), "OK");
+    history.clear();
+    history.append("VISIBLE");
+    assert_eq!(history.value(), "VISIBLE");
+}
+
+#[test]
+fn persisted_log_tails_scan_the_prefix_before_restoring_and_compacting() {
+    let temp = tempfile::tempdir().expect("temp");
+    let store = HistoryStore::new(temp.path(), 5, 8);
+    for persisted in [
+        "\x1b]0;x\x07ABCD",
+        "名\x1b]0;名\x07ABCD",
+        "\x1b]0;x\x07\x1b[31mABCD",
+    ] {
+        store.persist("t", "term-1", persisted).expect("persist");
+        assert_eq!(store.read("t", "term-1").expect("read"), "ABCD");
+        assert_eq!(
+            std::fs::read_to_string(store.path("t", "term-1")).expect("compacted"),
+            "ABCD"
+        );
+    }
+    let persisted = "\x1b]0;".to_owned() + &"x".repeat(65_530) + "名\x07ABCD";
+    store.persist("t", "term-1", &persisted).expect("persist");
+    assert_eq!(store.read("t", "term-1").expect("read"), "ABCD");
 }
 
 #[test]

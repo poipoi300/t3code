@@ -224,9 +224,10 @@ reach a stand-in that fails with `Error::Unsupported("<Trait>.<method>")`.
 | `cleanup` | Unsupported | Terminal, preview, scheduled-task and attachment cleanup effects fail and retry; thread deletion leaves those resources |
 | `workspaces` | Unsupported | Worktree launches fail; settlement branch and PR confirmation is unavailable |
 | `credentials` | `None` | Provider sessions start without T3 MCP credentials (05's `SessionCredentials`, `prepare_reserved` for managed leases) |
+| `worktree_restore` | `NoWorktreeRestore` | A send to a thread whose worktree was deleted is not repaired first; turn start then fails (TS test behaviour). Production: the host's `restoreMissingWorktree` port |
 | `agent_scope` | `None` | Force-stop cannot kill thread-owned agent processes; OOM detection is off |
 | `telemetry` | `None` | No usage refresh or completed-turn analytics |
-| `titles` | `None` | Title-generation effects fail and retry; threads keep their given title |
+| `titles` | `None` | Title-generation effects fail and retry; threads keep their given title. Production: a `TitleGenerator` implementing `generate_with_input(TitleGenerationInput, CancellationToken) -> Result<String>` (the `t3-textgen` bridge); 03's routing is complete |
 | `message_context` | `None` | `message.dispatch` is decided without composer context (04's `MessageContextPreparer`) |
 | `thread_find_text` | `None` | In-thread find (`ProjectionReader::search`) fails Unsupported; one store, and one find cache, serves the runtime when given |
 | `terminal_output` | `None` | `runtime.command_output` is absent: no command-output subscription |
@@ -518,6 +519,8 @@ These are additive contracts. Existing struct literals and required trait signat
 | `ThreadWorktreeRestore::restore(OrchestrationV2AppThread) -> Result<()>` (new trait); `testing::FakeThreadWorktreeRestore` (seventh batch, 22:45, upstream drift) | Upstream `runtimeLayer.ts` | 08 adds `worktree_restore` to `ThreadManagementServices`; host supplies the restore; composition binds it once 08's field exists |
 | `TurnInput::inline_context_length: Option<usize>` (upstream `inlineContextLength`) | Upstream `ProviderAdapter.ts` | 06 fills it in turn start; 11 uses it for skill-mention dispatch. Mechanical `None` added to the five literals (05, 06, 10, 11, 12) |
 | `OrchestrationRuntime::{thread_lanes(), clock(), ids()}`; `checkpoint_diffs: Arc<CheckpointDiffQuery>` | Server integrator (kept); 07 | Composition |
+| `ProviderError::EventStream { provider_session_id, detached_thread_id: Option<ThreadId>, detail }` (eighth batch, 00:30, upstream drift) | 05 + 06 (upstream `detachedThreadId`) | 05's manager raises it with `detached_thread_id` when T3 closes a session because a thread detached; 06 consumes it and retires its `ProviderStreamContext` shim |
+| `RuntimePorts::worktree_restore: Option<Arc<dyn ThreadWorktreeRestore>>` (stand-in `NoWorktreeRestore`); run execution `with_baseline_checkpoints` | 08, 07 | Composition |
 | `testing::Script<I,O>::push(Result<O>)`, `next_call().await -> Option<I>`; `Fake*` implementations for every new service, policy methods on existing fake adapter/runtime, `FakeEventCommitter::new(StoreDatabase)` | Integrator requirement | Implemented in `testing.rs`. Unscripted calls fail with typed Unsupported; prepared fake commits run callbacks on real migrated SQLite and roll back on callback/script errors |
 
 Transaction implementation contract for 03: perform receipt dedupe and guards before invoking preparation; run normalization, callback mutations, marker/position writes, events, projections, receipt and outbox on the **same** writer transaction. Preparation must not replace the receipt identity or weaken the supplied guard; validate any newly prepared guard before append. A guard rejection after callback mutation must roll those mutations back. Publish and signal only after durable commit, retaining the publication lane when the caller drops. The callback is synchronous and must not perform external I/O. The fake demonstrates rollback, not production dedupe, guard enforcement, event append or publication.
