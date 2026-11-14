@@ -32,8 +32,7 @@ const CONFIG_NAMES: [&str; 7] = [
     REVOKED,
 ];
 
-/// The auth crate must issue a single-use, 2-minute, standard-client pairing grant
-/// with subject `cloud-connect`, label `T3 Connect connect`, bound to this key.
+/// Issues a proof-bound Connect credential through the host's shared auth service.
 #[async_trait]
 pub trait CredentialIssuer: Send + Sync {
     async fn issue_cloud_pairing(&self, proof_key_thumbprint: &str) -> Result<IssuedCredential>;
@@ -45,24 +44,35 @@ pub struct IssuedCredential {
 }
 
 #[cfg(feature = "auth")]
+pub struct AuthCredentialIssuer {
+    auth: t3_auth::EnvironmentAuth,
+    settings: Arc<t3_config::settings::SettingsService>,
+}
+#[cfg(feature = "auth")]
+impl AuthCredentialIssuer {
+    pub fn new(
+        auth: t3_auth::EnvironmentAuth,
+        settings: Arc<t3_config::settings::SettingsService>,
+    ) -> Self {
+        Self { auth, settings }
+    }
+}
+#[cfg(feature = "auth")]
 #[async_trait]
-impl CredentialIssuer for t3_auth::EnvironmentAuth {
+impl CredentialIssuer for AuthCredentialIssuer {
     async fn issue_cloud_pairing(&self, proof_key_thumbprint: &str) -> Result<IssuedCredential> {
-        let scopes = t3_auth::authorization::STANDARD_SCOPES;
-        let issued = self
-            .create_pairing_link(
-                scopes,
-                t3_auth::pairing::IssuePairing {
-                    ttl_ms: Some(120_000),
-                    scopes: scopes.to_vec(),
-                    subject: Some("cloud-connect".into()),
-                    label: Some("T3 Connect connect".into()),
-                    proof_key_thumbprint: Some(proof_key_thumbprint.into()),
-                    ..Default::default()
-                },
-            )
+        let require_approval = self
+            .settings
+            .snapshot()
             .await
-            .map_err(|_| Error::Proof)?;
+            .map_err(|_| Error::Storage)?
+            .require_connect_device_approval;
+        // Auth owns the shared mint/exchange/revoke lock and cancellation-safe mutation.
+        let issued = self
+            .auth
+            .issue_connect_credential(proof_key_thumbprint, require_approval)
+            .await
+            .map_err(|_| Error::Storage)?;
         let expires = chrono::DateTime::parse_from_rfc3339(&issued.expires_at.0)
             .map_err(|_| Error::Protocol)?
             .timestamp_millis();
@@ -675,7 +685,7 @@ impl CloudLink {
         let issued = issuer
             .issue_cloud_pairing(payload.client_proof_key_thumbprint.0.as_str())
             .await?;
-        if issued.expires_at_ms <= now || issued.expires_at_ms > now.saturating_add(120_000) {
+        if issued.expires_at_ms <= now || issued.expires_at_ms > now.saturating_add(600_000) {
             return Err(Error::Protocol);
         }
         let mut response = self.claims(&config.issuer, 120);

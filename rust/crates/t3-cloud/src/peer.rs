@@ -4,6 +4,7 @@ use crate::{
     iso,
     store::{SecretStore, read_text},
 };
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use reqwest::Method;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -359,30 +360,44 @@ impl PeerLinks {
             })
             .await
             .map_err(|_| Error::Storage)?;
-        let mut summaries = Vec::new();
-        for row in rows {
+        let now = self.clock.now_ms();
+        futures_util::future::try_join_all(rows.into_iter().map(|row| async move {
             let mut link = row.link;
-            let status = if expired(&link, self.clock.now_ms())? {
+            let status = if expired(&link, now)? {
                 PeerLinkStatus::Expired
             } else {
-                let mut reachable = false;
-                for url in &link.urls {
-                    if let Ok(origin) = direct::peer_origin(url.0.as_str())
-                        && let Ok(found) = self.probe(origin).await
-                        && found.environment_id == link.environment_id
-                    {
-                        link.label = found.label.0.clone();
-                        reachable = true;
-                        break;
+                let answered = async {
+                    let mut probes: FuturesUnordered<_> = link.urls.iter().map(|url| async move {
+                        let origin = direct::peer_origin(url.0.as_str()).ok()?;
+                        self.client(origin).call::<ExecutionEnvironmentDescriptor>(
+                            Method::GET, &[".well-known", "t3", "environment"], None,
+                            None::<&serde_json::Value>, Duration::from_secs(3)
+                        ).await.ok()
+                    }).collect();
+                    while let Some(found) = probes.next().await {
+                        if let Some(found) = found && found.environment_id == link.environment_id {
+                            return Some(found.label.0);
+                        }
                     }
-                }
-                if reachable {
+                    None
+                };
+                let label = tokio::time::timeout(Duration::from_secs(3), answered).await.ok().flatten();
+                if let Some(label) = label {
+                    if link.label != label {
+                        let id = link.environment_id.0.clone();
+                        let saved = label.clone();
+                        let _ = self.db.writer(move |db| {
+                            db.execute("UPDATE peer_environment_links SET label=?1 WHERE environment_id=?2", params![saved,id])?;
+                            Ok(())
+                        }).await;
+                        link.label = label;
+                    }
                     PeerLinkStatus::Reachable
                 } else {
                     PeerLinkStatus::Unreachable
                 }
             };
-            summaries.push(PeerLinkSummary {
+            Ok(PeerLinkSummary {
                 environment_id: link.environment_id,
                 label: link.label,
                 urls: link.urls,
@@ -392,9 +407,8 @@ impl PeerLinks {
                 last_reached_at: link.last_reached_at,
                 last_error: link.last_error,
                 status,
-            });
-        }
-        Ok(summaries)
+            })
+        })).await
     }
     pub async fn unlink(&self, id: &str) -> Result<bool> {
         let _lock = self.mutation.lock().await;

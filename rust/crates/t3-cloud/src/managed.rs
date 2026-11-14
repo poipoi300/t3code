@@ -62,8 +62,12 @@ impl Drop for Active {
     }
 }
 
+enum Executable {
+    Path(PathBuf),
+    Managed(Arc<crate::relay_client::RelayClient>),
+}
 pub struct NativeManagedEndpoint {
-    executable: PathBuf,
+    executable: Executable,
     http: Http,
     secrets: SecretStore,
     clock: SharedClock,
@@ -78,7 +82,22 @@ impl NativeManagedEndpoint {
         clock: SharedClock,
     ) -> Arc<Self> {
         Arc::new(Self {
-            executable,
+            executable: Executable::Path(executable),
+            http,
+            secrets,
+            clock,
+            active: Mutex::new(None),
+            notices: broadcast::channel(64).0,
+        })
+    }
+    pub fn with_relay_client(
+        relay_client: Arc<crate::relay_client::RelayClient>,
+        http: Http,
+        secrets: SecretStore,
+        clock: SharedClock,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            executable: Executable::Managed(relay_client),
             http,
             secrets,
             clock,
@@ -97,12 +116,11 @@ impl ManagedEndpoint for NativeManagedEndpoint {
             validate_runtime(config.expose())?;
         }
         let mut active = self.active.lock().await;
-        if let (Some(current), Some(next)) = (active.as_ref(), config.as_ref()) {
-            if current.config.expose() == next.expose() {
-                if let Some(pid) = current.handle.facts.borrow().pid {
-                    return Ok(running(next.expose(), pid));
-                }
-            }
+        if let (Some(current), Some(next)) = (active.as_ref(), config.as_ref())
+            && current.config.expose() == next.expose()
+            && let Some(pid) = current.handle.facts.borrow().pid
+        {
+            return Ok(running(next.expose(), pid));
         }
         if let Some(mut old) = active.take() {
             old.monitor.abort();
@@ -112,8 +130,24 @@ impl ManagedEndpoint for NativeManagedEndpoint {
         let Some(config) = config else {
             return Ok(EndpointStatus::Disabled);
         };
+        let executable = match &self.executable {
+            Executable::Managed(client) => match client.resolve().await {
+                t3_contracts::relay_client::RelayClientStatus::Available {
+                    executable_path,
+                    ..
+                } => PathBuf::from(executable_path),
+                _ => {
+                    return Ok(EndpointStatus::Failed {
+                        provider_kind: RelayManagedEndpointProviderKind::CloudflareTunnel,
+                        failure: "missing-client".into(),
+                        reason: "A compatible tunnel client is required.".into(),
+                    });
+                }
+            },
+            Executable::Path(path) => path.clone(),
+        };
         let mut handle = start_connector(
-            self.executable.clone(),
+            executable,
             Sensitive::new(config.expose().clone()),
             self.clock.clone(),
             ConnectorServices {

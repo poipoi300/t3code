@@ -41,6 +41,48 @@ impl RequestContext {
     }
 }
 
+pub struct PeerService {
+    links: Arc<crate::peer::PeerLinks>,
+    requests: Arc<crate::link_requests::PeerLinkRequests>,
+}
+impl PeerService {
+    pub fn new(
+        links: Arc<crate::peer::PeerLinks>,
+        requests: Arc<crate::link_requests::PeerLinkRequests>,
+    ) -> Self {
+        Self { links, requests }
+    }
+    pub async fn list(&self, context: &RequestContext) -> Result<serde_json::Value> {
+        context.require(Scope::AccessRead)?;
+        Ok(serde_json::json!({"links":self.links.list().await?}))
+    }
+    pub async fn link(
+        &self,
+        context: &RequestContext,
+        input: Sensitive<t3_contracts::peer_link::PeerLinkCreateInput>,
+    ) -> Result<t3_contracts::peer_link::PeerLink> {
+        context.require(Scope::AccessWrite)?;
+        self.links.link(input).await
+    }
+    pub async fn unlink(
+        &self,
+        context: &RequestContext,
+        input: t3_contracts::peer_link::PeerLinkRemoveInput,
+    ) -> Result<t3_contracts::peer_link::PeerLinkRemoveResult> {
+        context.require(Scope::AccessWrite)?;
+        Ok(t3_contracts::peer_link::PeerLinkRemoveResult {
+            removed: self.links.unlink(&input.environment_id.0).await?,
+        })
+    }
+    pub async fn answer_request(
+        &self,
+        context: &RequestContext,
+        input: Sensitive<t3_contracts::peer_link::PeerLinkRequestAnswerInput>,
+    ) -> Result<()> {
+        self.requests.answer(context, input).await
+    }
+}
+
 pub struct CloudServices {
     pub link: Arc<CloudLink>,
     pub secrets: SecretStore,

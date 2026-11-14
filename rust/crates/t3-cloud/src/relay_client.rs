@@ -1,4 +1,4 @@
-use crate::{api::RequestContext, http::secure_origin};
+use crate::api::RequestContext;
 use async_trait::async_trait;
 use futures_util::{Stream, StreamExt};
 use sha2::{Digest, Sha256};
@@ -53,14 +53,20 @@ type InstallResult<T> = std::result::Result<T, InstallError>;
 type Report = Arc<dyn Fn(RelayClientInstallProgressStage) + Send + Sync>;
 #[async_trait]
 pub trait BinaryDownload: Send + Sync {
-    /// No redirects/auth logging; cap bytes and clean partial writes on cancellation.
+    /// Cap bytes and clean partial writes on cancellation; never log download URLs.
     async fn fetch(&self, url: &str, destination: &Path) -> InstallResult<()>;
 }
 pub struct NativeDownload(reqwest::Client);
 impl NativeDownload {
     pub fn new() -> InstallResult<Self> {
         reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() < 5 && attempt.url().scheme() == "https" {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
             .build()
             .map(Self)
             .map_err(|_| InstallError::new(RelayClientInstallFailureReason::DownloadFailed))
@@ -70,16 +76,17 @@ impl NativeDownload {
 impl BinaryDownload for NativeDownload {
     async fn fetch(&self, url: &str, destination: &Path) -> InstallResult<()> {
         let fail = || InstallError::new(RelayClientInstallFailureReason::DownloadFailed);
-        let mut response = self
+        let response = self
             .0
             .get(url)
             .timeout(Duration::from_secs(600))
             .send()
             .await
-            .map_err(|_| fail())?
-            .error_for_status()
-            .map_err(|_| fail())?
-            .bytes_stream();
+            .map_err(|_| fail())?;
+        if !response.status().is_success() {
+            return Err(fail());
+        }
+        let mut response = response.bytes_stream();
         let mut file = tokio::fs::File::create(destination)
             .await
             .map_err(|_| fail())?;

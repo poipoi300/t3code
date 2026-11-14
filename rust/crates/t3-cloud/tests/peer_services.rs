@@ -86,7 +86,7 @@ struct Store {
     requests: Mutex<Vec<TaskRequest>>,
     task: Mutex<Option<RemoteTask>>,
     completions: Mutex<Vec<Completion>>,
-    events: broadcast::Sender<TaskKey>,
+    events: broadcast::Sender<RemoteChange>,
 }
 impl Store {
     fn new() -> Arc<Self> {
@@ -135,7 +135,7 @@ impl RemoteTaskStore for Store {
             .map(|task| vec![task.key.clone()])
             .unwrap_or_default())
     }
-    fn subscribe(&self) -> broadcast::Receiver<TaskKey> {
+    fn subscribe(&self) -> broadcast::Receiver<RemoteChange> {
         self.events.subscribe()
     }
     async fn request(&self, request: TaskRequest) -> Result<NodeId> {
@@ -176,7 +176,7 @@ impl RemoteTaskStore for Store {
             task.remote.stopped_there = Some(Some(true));
         }
         self.completions.lock().await.push(command);
-        let _ = self.events.send(task.key.clone());
+        let _ = self.events.send(RemoteChange::Task(task.key.clone()));
         Ok(())
     }
     async fn shared_result_run(&self, _: &TaskKey) -> Result<bool> {
@@ -367,7 +367,172 @@ async fn restart_scans_outstanding_remote_tasks_and_joins_followers_on_shutdown(
         .await;
     let mut events = store.events.subscribe();
     let runner = service.start();
-    assert_eq!(events.recv().await.unwrap(), key);
+    assert_eq!(events.recv().await.unwrap(), RemoteChange::Task(key));
     runner.shutdown().await.unwrap();
     assert_eq!(store.task.lock().await.as_ref().unwrap().status, "failed");
+}
+
+#[tokio::test(start_paused = true)]
+async fn three_consecutive_follower_defects_fail_without_exposing_the_payload() {
+    let (peers, _directory) = peers().await;
+    let store = Store::new();
+    let calls = Calls::new();
+    let (service, _) = delegate(store.clone(), calls.clone(), peers).await;
+    for _ in 0..3 {
+        calls
+            .add(|_| std::panic::panic_any(Secret::new("marker-defect-secret")))
+            .await;
+    }
+    let mut events = store.events.subscribe();
+    let runner = service.start();
+    events.recv().await.unwrap();
+    runner.shutdown().await.unwrap();
+    let task = store.task.lock().await;
+    let task = task.as_ref().unwrap();
+    assert_eq!(task.status, "failed");
+    assert_eq!(
+        task.result.as_deref(),
+        Some(
+            "Following the thread remote-thread in Box failed repeatedly, so it may still run there (task_cancel stops it)."
+        )
+    );
+    assert_ne!(task.remote.stopped_there, Some(Some(true)));
+    assert!(
+        !task
+            .result
+            .as_ref()
+            .unwrap()
+            .contains("marker-defect-secret")
+    );
+    assert!(calls.0.lock().await.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn transport_errors_and_successful_waits_reset_the_follower_defect_streak() {
+    for successful_wait in [false, true] {
+        let (peers, _directory) = peers().await;
+        let store = Store::new();
+        let calls = Calls::new();
+        let (service, _) = delegate(store.clone(), calls.clone(), peers).await;
+        for _ in 0..2 {
+            calls.add(|_| std::panic::panic_any(0_u8)).await;
+        }
+        calls.add(move |_| if successful_wait {
+            Ok(json!({"threadId":"remote-thread","runId":"remote-run","status":"running","timedOut":true}))
+        } else { Err(t3_cloud::http::unavailable()) }).await;
+        for _ in 0..2 {
+            calls.add(|_| std::panic::panic_any(0_u8)).await;
+        }
+        calls.add(|_|Err(Error::PeerFailure {code:t3_contracts::orchestrator_mcp::OrchestratorMcpFailureCode::CapabilityDenied})).await;
+        let mut events = store.events.subscribe();
+        let runner = service.start();
+        events.recv().await.unwrap();
+        runner.shutdown().await.unwrap();
+        assert!(calls.0.lock().await.is_empty());
+        let task = store.task.lock().await;
+        assert!(
+            !task
+                .as_ref()
+                .unwrap()
+                .result
+                .as_ref()
+                .unwrap()
+                .contains("failed repeatedly")
+        );
+        assert_eq!(
+            task.as_ref().unwrap().remote.stopped_there,
+            Some(Some(true))
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn follower_defects_preserve_a_published_result_and_its_outstanding_stop() {
+    let (peers, _directory) = peers().await;
+    let store = Store::new();
+    let calls = Calls::new();
+    let (service, _) = delegate(store.clone(), calls.clone(), peers).await;
+    {
+        let mut task = store.task.lock().await;
+        let task = task.as_mut().unwrap();
+        task.status = "completed".into();
+        task.result = Some("Published answer".into());
+        task.remote.stopped_there = Some(Some(false));
+    }
+    let (attempted, attempt) = tokio::sync::oneshot::channel();
+    for _ in 0..2 {
+        calls
+            .add(|call| {
+                assert_eq!(call.tool, "t3_thread_interrupt");
+                std::panic::panic_any(0_u8)
+            })
+            .await;
+    }
+    calls
+        .add(move |call| {
+            assert_eq!(call.tool, "t3_thread_interrupt");
+            let _ = attempted.send(());
+            std::panic::panic_any(0_u8)
+        })
+        .await;
+    let runner = service.start();
+    attempt.await.unwrap();
+    runner.shutdown().await.unwrap();
+    let task = store.task.lock().await;
+    let task = task.as_ref().unwrap();
+    assert_eq!(task.status, "completed");
+    assert_eq!(task.result.as_deref(), Some("Published answer"));
+    assert_eq!(task.remote.stopped_there, Some(Some(false)));
+    assert!(store.completions.lock().await.is_empty());
+    assert!(calls.0.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn peer_rpc_services_refuse_missing_scopes_before_mutating_links_or_cards() {
+    let (peers, _directory) = peers().await;
+    let store = Store::new();
+    let requests = PeerLinkRequests::new(peers.clone(), store.clone(), Arc::new(Time::default()));
+    let service = t3_cloud::api::PeerService::new(peers.clone(), requests);
+    let mut denied = context();
+    denied.scopes.clear();
+    assert!(service.list(&denied).await.is_err());
+    assert!(
+        service
+            .unlink(
+                &denied,
+                serde_json::from_value(json!({"environmentId":"remote"})).unwrap()
+            )
+            .await
+            .is_err()
+    );
+    assert!(service.link(&denied,Sensitive::new(serde_json::from_value(json!({"environmentId":"remote","url":"https://peer.test","access":"read-only","pairingCode":"marker-code"})).unwrap())).await.is_err());
+    assert!(
+        service
+            .answer_request(
+                &denied,
+                Sensitive::new(
+                    serde_json::from_value(
+                        json!({"threadId":"parent","turnItemId":"card","answer":{"type":"decline"}})
+                    )
+                    .unwrap()
+                )
+            )
+            .await
+            .is_err()
+    );
+    assert!(peers.get("remote").await.unwrap().is_some());
+    assert!(store.cards.lock().await.is_empty());
+    assert!(
+        service
+            .unlink(
+                &context(),
+                serde_json::from_value(json!({"environmentId":"remote"})).unwrap()
+            )
+            .await
+            .unwrap()
+            .removed
+    );
+    let mut read = context();
+    read.scopes = vec![t3_contracts::auth::AuthEnvironmentScope::AccessRead];
+    assert_eq!(service.list(&read).await.unwrap(), json!({"links":[]}));
 }

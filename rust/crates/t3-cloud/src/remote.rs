@@ -5,6 +5,7 @@ use crate::{
     peer::{CallLimits, PeerCall, PeerLinks, PeerMcpClient},
 };
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc, time::Duration};
 use t3_contracts::{
@@ -24,6 +25,11 @@ use t3_contracts::{
 };
 use tokio::sync::broadcast;
 pub type TaskKey = (ThreadId, NodeId);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RemoteChange {
+    Task(TaskKey),
+    Rescan,
+}
 pub struct RemoteParent {
     pub thread_id: ThreadId,
     pub project_id: ProjectId,
@@ -50,7 +56,7 @@ pub trait RemoteTaskStore: Send + Sync {
     async fn task(&self, key: &TaskKey) -> Result<Option<RemoteTask>>;
     async fn outstanding(&self) -> Result<Vec<TaskKey>>;
     /// Subscribe before scanning/querying so a Stop cannot slip between the two.
-    fn subscribe(&self) -> broadcast::Receiver<TaskKey>;
+    fn subscribe(&self) -> broadcast::Receiver<RemoteChange>;
     async fn request(&self, command: InternalCommandDelegatedTaskRemoteRequest) -> Result<NodeId>;
     /// Apply the normal decider: a concurrent Stop/result wins and stopCount fences old acks.
     async fn complete(&self, command: InternalCommandDelegatedTaskRemoteComplete) -> Result<()>;
@@ -141,6 +147,9 @@ impl RemoteDelegation {
         caller: &LinkCaller,
         input: OrchestratorMcpDelegateTaskInput,
     ) -> Result<NodeId> {
+        if !self.links.enabled.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Error::Disabled);
+        }
         if caller.linked_origin {
             return Err(Error::Identity);
         }
@@ -434,7 +443,8 @@ impl RemoteDelegation {
         let changed = async {
             loop {
                 match changes.recv().await {
-                    Ok(changed) if &changed == key => return,
+                    Ok(RemoteChange::Task(changed)) if &changed == key => return,
+                    Ok(RemoteChange::Rescan) => return,
                     Err(broadcast::error::RecvError::Lagged(_)) => return,
                     Err(broadcast::error::RecvError::Closed) => std::future::pending::<()>().await,
                     _ => {}
@@ -691,6 +701,49 @@ impl RemoteDelegation {
         sent.task_id = Some(Some(id));
         Ok(sent)
     }
+    async fn follow_worker(&self, key: &TaskKey, cancel: &t3_process::CancellationToken) {
+        let mut delay = 2_u64;
+        let mut defects = 0_u8;
+        loop {
+            let result = tokio::select! {
+                _ = cancel.cancelled() => return,
+                result = std::panic::AssertUnwindSafe(self.follow_once(key)).catch_unwind() => result,
+            };
+            match result {
+                Ok(Ok(true)) => return,
+                Ok(Ok(false)) => {
+                    defects = 0;
+                    delay = 2;
+                    continue;
+                }
+                Ok(Err(_)) => defects = 0,
+                Err(_) => defects += 1,
+            }
+            if defects >= 3 {
+                loop {
+                    let complete = async {
+                        if let Some(task) = self.store.task(key).await?
+                            && task.result.is_none()
+                        {
+                            self.complete(&task, "failed", format!("Following the thread {} in {} failed repeatedly, so it may still run there (task_cancel stops it).", task.remote.thread_id.0, task.remote.label), None).await?;
+                        }
+                        Ok::<_, Error>(())
+                    };
+                    let result = tokio::select! {
+                        _ = cancel.cancelled() => return,
+                        result = std::panic::AssertUnwindSafe(complete).catch_unwind() => result,
+                    };
+                    if matches!(result, Ok(Ok(()))) {
+                        return;
+                    }
+                    tokio::select! { _ = cancel.cancelled() => return, _ = tokio::time::sleep(Duration::from_secs(delay)) => {} }
+                    delay = (delay * 2).min(300);
+                }
+            }
+            tokio::select! { _ = cancel.cancelled() => return, _ = tokio::time::sleep(Duration::from_secs(delay)) => {} }
+            delay = (delay * 2).min(300);
+        }
+    }
     pub fn start(self: &Arc<Self>) -> RemoteRunner {
         let service = self.clone();
         let cancel = t3_process::CancellationToken::new();
@@ -707,14 +760,24 @@ impl RemoteDelegation {
                     if active.insert(key.clone()) {
                         let service = service.clone();
                         let cancel = cancelled.clone();
-                        tasks.spawn(async move {let mut delay=2_u64;loop {let result=tokio::select! {_=cancel.cancelled()=>break,result=service.follow_once(&key)=>result};match result {Ok(true)=>break,Ok(false)=>{delay=2;},Err(_)=>{tokio::select!{_=cancel.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(delay))=>{}}delay=(delay*2).min(300);}}}key});
+                        tasks.spawn(async move {
+                            service.follow_worker(&key, &cancel).await;
+                            key
+                        });
                     } else {
                         again.insert(key);
                     }
                 }
                 tokio::select! {
                     _=cancelled.cancelled()=>{while tasks.join_next().await.is_some(){}return Ok(());},
-                    event=events.recv()=>match event {Ok(key)=>pending.push(key),Err(broadcast::error::RecvError::Lagged(_))=>pending.extend(service.store.outstanding().await?),Err(broadcast::error::RecvError::Closed)=>return Err(Error::Storage)},
+                    event=events.recv()=>match event {
+                        Ok(RemoteChange::Task(key))=>pending.push(key),
+                        Ok(RemoteChange::Rescan)|Err(broadcast::error::RecvError::Lagged(_))=>match service.store.outstanding().await {
+                            Ok(keys)=>pending.extend(keys),
+                            Err(error)=>{cancelled.cancel();while tasks.join_next().await.is_some(){}return Err(error);}
+                        },
+                        Err(broadcast::error::RecvError::Closed)=>{cancelled.cancel();while tasks.join_next().await.is_some(){}return Err(Error::Storage);}
+                    },
                     event=own.recv()=>if let Ok(key)=event{pending.push(key)},
                     result=tasks.join_next(),if !tasks.is_empty()=>if let Some(Ok(key))=result{active.remove(&key);if again.remove(&key){pending.push(key);}},
                 }

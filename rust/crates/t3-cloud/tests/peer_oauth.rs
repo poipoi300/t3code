@@ -153,6 +153,24 @@ async fn peer_link_persists_only_a_secret_reference_and_resolves_only_matching_f
         peers.resolve("remote").await,
         Err(Error::Identity)
     ));
+    relay
+        .add(|r| {
+            assert_eq!(r.timeout, std::time::Duration::from_secs(3));
+            let mut found = descriptor("remote");
+            found.label = "Renamed machine".to_owned().into();
+            Ok(response(200, serde_json::to_value(found).unwrap()))
+        })
+        .await;
+    let summaries = peers.list().await.unwrap();
+    assert_eq!(
+        summaries[0].status,
+        t3_contracts::peer_link::PeerLinkStatus::Reachable
+    );
+    assert_eq!(summaries[0].label, "Renamed machine");
+    assert_eq!(
+        peers.get("remote").await.unwrap().unwrap().label,
+        "Renamed machine"
+    );
     db.writer(|c| {
         c.execute("UPDATE peer_environment_links SET fenced=0", [])?;
         Ok(())

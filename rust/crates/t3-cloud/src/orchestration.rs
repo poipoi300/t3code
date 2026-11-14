@@ -3,7 +3,7 @@ use crate::{
     Error, Result,
     link_requests::{ActiveParent, LinkRequestStore},
     peer::CallLimits,
-    remote::{RemoteParent, RemoteTask, RemoteTaskStore, TaskKey},
+    remote::{RemoteChange, RemoteParent, RemoteTask, RemoteTaskStore, TaskKey},
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -28,7 +28,7 @@ pub struct OrchestrationStore {
     projections: Arc<ProjectionStore>,
     sink: Arc<dyn EventCommitter>,
     repository: Arc<dyn ProjectRepository>,
-    events: broadcast::Sender<TaskKey>,
+    events: broadcast::Sender<RemoteChange>,
 }
 impl OrchestrationStore {
     pub fn new(
@@ -47,9 +47,9 @@ impl OrchestrationStore {
                 tokio::select! {
                     _=cancelled.cancelled()=>return Ok(()),
                     event=source.recv()=>match event {
-                        Ok(t3_contracts::application_event::ApplicationStoredEvent::Orchestration(stored))=>if let OrchestrationV2DomainEvent::SubagentUpdated(event)=stored.event {if let t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(id)=event.payload.id {let _=forwarded.send((event.thread_id,id));}},
+                        Ok(t3_contracts::application_event::ApplicationStoredEvent::Orchestration(stored))=>if let OrchestrationV2DomainEvent::SubagentUpdated(event)=stored.event && let t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(id)=event.payload.id {let _=forwarded.send(RemoteChange::Task((event.thread_id,id)));},
                         Ok(_)=>{},Err(broadcast::error::RecvError::Closed)=>return Err(Error::Storage),
-                        Err(broadcast::error::RecvError::Lagged(_))=>{let _=forwarded.send((ThreadId(String::new()),NodeId(String::new())));},
+                        Err(broadcast::error::RecvError::Lagged(_))=>{let _=forwarded.send(RemoteChange::Rescan);},
                     }
                 }
             }
@@ -244,7 +244,7 @@ impl RemoteTaskStore for OrchestrationStore {
             })
             .map_err(|_| Error::Storage)
     }
-    fn subscribe(&self) -> broadcast::Receiver<TaskKey> {
+    fn subscribe(&self) -> broadcast::Receiver<RemoteChange> {
         self.events.subscribe()
     }
     async fn request(&self, command: InternalCommandDelegatedTaskRemoteRequest) -> Result<NodeId> {

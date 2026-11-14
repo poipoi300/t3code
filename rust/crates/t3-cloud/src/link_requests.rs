@@ -224,7 +224,7 @@ impl PeerLinkRequests {
         let (text, outcome, summary) = match card.link_status {
             Status::Linked => {
                 let label = card.linked_label.clone().flatten().unwrap_or(target);
-                let access = crate::encode(&card.linked_access.clone().flatten())?;
+                let access = crate::encode(&card.linked_access.flatten())?;
                 (
                     format!(
                         "The user linked {label} with {} access. Pass environmentId {} to act there.",
