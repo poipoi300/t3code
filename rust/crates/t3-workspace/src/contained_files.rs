@@ -60,10 +60,30 @@ impl ContainedFiles {
         Self { root: root.into() }
     }
 
-    /// The real path, refusing remote drives, links to network targets and device names
-    /// (`paths::canonicalize`), so resolution never authenticates to another host.
+    /// The real path of a path lexically inside the root, refusing remote drives, links to
+    /// network targets and device names (`paths::canonicalize`). A path outside the root is
+    /// refused from its text, before any filesystem call, with one error whether it exists,
+    /// is missing or is not a file: resolution reveals nothing about the rest of the disk.
     pub fn realpath(&self, path: &Path) -> io::Result<PathBuf> {
+        if !self.lexically_contains(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "not found under the contained root",
+            ));
+        }
         paths::canonicalize(path)
+    }
+
+    fn lexically_contains(&self, path: &Path) -> bool {
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return false;
+        }
+        paths::within(path, &self.root)
+            || paths::canonicalize(&self.root).is_ok_and(|root| paths::within(path, &root))
     }
 
     /// Opens a resolved path under the root for reading, without following a link in the leaf
@@ -81,9 +101,15 @@ impl ContainedFiles {
         let file = parent
             .open_with(name, &crate::scoped::options(true))?
             .into_std();
-        let named = crate::scoped::final_path(&file, path).map_err(workspace_error)?;
-        if !paths::within(&named, &scope.root) {
-            return Err(denied(path));
+        if file.metadata()?.is_file() {
+            // Final path inside the root and a single link: a hard link is the same file as an
+            // outside target, so no identity comparison could tell.
+            scope.check_file(&file, relative).map_err(workspace_error)?;
+        } else {
+            let named = crate::scoped::final_path(&file, path).map_err(workspace_error)?;
+            if !paths::within(&named, &scope.root) {
+                return Err(denied(path));
+            }
         }
         Ok(ContainedFile { file })
     }

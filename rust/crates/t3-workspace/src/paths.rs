@@ -9,7 +9,9 @@ pub fn canonicalize(path: impl AsRef<Path>) -> io::Result<PathBuf> {
     validate_host_path(path)
         .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "unsafe path"))?;
     reject_network_links(path)?;
-    let real = dunce::canonicalize(path)?;
+    // Dunce keeps the verbatim prefix when the plain spelling would exceed `MAX_PATH`; a
+    // verbatim disk path is local and is returned in the plain spelling callers compare with.
+    let real = without_verbatim_disk_prefix(dunce::canonicalize(path)?);
     if is_network_path(&real.to_string_lossy()) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -19,11 +21,34 @@ pub fn canonicalize(path: impl AsRef<Path>) -> io::Result<PathBuf> {
     Ok(real)
 }
 
+/// Two leading separators: UNC (`\\host\share`), verbatim UNC (`\\?\UNC\…`), volume GUID and
+/// device (`\\.\…`) paths. A verbatim disk path (`\\?\C:\…`) is local.
 pub fn is_network_path(value: &str) -> bool {
     value
         .as_bytes()
         .get(..2)
         .is_some_and(|p| p.iter().all(|b| *b == b'/' || *b == b'\\'))
+        && verbatim_disk_rest(value).is_none()
+}
+
+/// `C:\…` from `\\?\C:\…` (either separator), else `None`.
+fn verbatim_disk_rest(value: &str) -> Option<&str> {
+    let rest = value
+        .strip_prefix(r"\\?\")
+        .or_else(|| value.strip_prefix("//?/"))?;
+    let bytes = rest.as_bytes();
+    let disk = bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes.get(2).is_none_or(|b| matches!(b, b'\\' | b'/'));
+    disk.then_some(rest)
+}
+
+fn without_verbatim_disk_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(verbatim_disk_rest) {
+        Some(rest) => PathBuf::from(rest),
+        None => path,
+    }
 }
 
 pub fn expand_home(value: &str, home: &Path) -> PathBuf {
@@ -43,7 +68,8 @@ pub fn validate_host_path(path: &Path) -> Result<()> {
     let text = path
         .to_str()
         .ok_or_else(|| Error::Invalid("path must be valid Unicode".into()))?;
-    if text.contains('\0') || is_network_path(text) {
+    // A client never needs a verbatim spelling; it bypasses the checks below.
+    if text.contains('\0') || is_network_path(text) || verbatim_disk_rest(text).is_some() {
         return Err(Error::OutsideRoot(text.into()));
     }
     #[cfg(windows)]
