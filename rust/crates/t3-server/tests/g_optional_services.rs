@@ -122,9 +122,8 @@ impl Fixture {
             connections: Default::default(),
             lifecycle: Default::default(),
         });
-        let hooks = t3_server::adapters::scheduler::routes(axum::Router::new())
-            .with_state(services.clone());
-        let app = t3_server::http::router(services.clone()).merge(hooks);
+        // The production router mounts the webhook routes for the scheduler domain.
+        let app = t3_server::http::router(services.clone());
         let stop = services.shutdown.clone();
         let task = tokio::spawn(async move {
             axum::serve(
@@ -530,12 +529,15 @@ async fn webhook_http_authentication_bounds_replay_delivery_queries_and_rotation
         .await
         .unwrap();
     raw.write_all(format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
-    for _ in 0..17 {
+    // Exactly one byte over the cap and nothing after it: the server reads every byte sent
+    // before it answers and closes. Bytes it never read would make Windows reset the
+    // connection and drop the response, which made this test flaky.
+    for _ in 0..16 {
         raw.write_all(b"10000\r\n").await.unwrap();
         raw.write_all(&vec![b'x'; 65536]).await.unwrap();
         raw.write_all(b"\r\n").await.unwrap();
     }
-    let _ = raw.write_all(b"0\r\n\r\n").await;
+    raw.write_all(b"1\r\nx").await.unwrap();
     let mut response = String::new();
     raw.read_to_string(&mut response).await.unwrap();
     assert!(response.starts_with("HTTP/1.1 413"), "{response}");

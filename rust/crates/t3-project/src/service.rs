@@ -1,4 +1,5 @@
 use crate::{Error, Result, enrichment::ProjectEnrichmentService};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use serde_json::json;
 use std::{
     path::PathBuf,
@@ -157,10 +158,11 @@ impl ProjectService {
             .database()
             .read(|db| projects::list(db, None, false))
             .await?;
-        let mut projects = Vec::with_capacity(rows.len());
-        for row in rows {
-            projects.push(self.hydrate(row).await?);
-        }
+        let projects = stream::iter(rows)
+            .map(|row| self.hydrate(row))
+            .buffered(8)
+            .try_collect()
+            .await?;
         Ok(ProjectSnapshot {
             projects,
             updated_at: self.0.services.clock.now(),
@@ -177,23 +179,26 @@ impl ProjectService {
             .await?;
         let end = cursor.saturating_add(limit);
         let next = (end < rows.len()).then_some(end);
-        let mut result = Vec::new();
-        for row in rows.into_iter().skip(cursor).take(limit) {
-            let mut project = self.hydrate(row).await?;
-            if project
-                .repository_identity
-                .as_ref()
-                .and_then(|i| i.as_ref())
-                .is_none()
-            {
-                project.repository_identity = Some(
-                    self.enrichment()
-                        .read_repository_identity(&project.workspace_root.0)
-                        .await,
-                );
-            }
-            result.push(project);
-        }
+        let result = stream::iter(rows.into_iter().skip(cursor).take(limit))
+            .map(|row| async move {
+                let mut project = self.hydrate(row).await?;
+                if project
+                    .repository_identity
+                    .as_ref()
+                    .and_then(|i| i.as_ref())
+                    .is_none()
+                {
+                    project.repository_identity = Some(
+                        self.enrichment()
+                            .read_repository_identity(&project.workspace_root.0)
+                            .await,
+                    );
+                }
+                Ok::<_, Error>(project)
+            })
+            .buffered(8)
+            .try_collect()
+            .await?;
         Ok((result, next))
     }
     pub async fn get_shell(&self, id: &ProjectId) -> Result<Option<OrchestrationProjectShell>> {
@@ -215,10 +220,11 @@ impl ProjectService {
             .database()
             .read(move |db| projects::list_shells(db, ids.as_deref()))
             .await?;
-        let mut result = Vec::with_capacity(shells.len());
-        for shell in shells {
-            result.push(self.enrich_shell(shell).await);
-        }
+        let result = stream::iter(shells)
+            .map(|shell| self.enrich_shell(shell))
+            .buffered(16)
+            .collect()
+            .await;
         Ok(result)
     }
     async fn enrich_shell(

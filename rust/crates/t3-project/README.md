@@ -50,13 +50,13 @@ uses those APIs; the initially necessary local progress parser was removed.
 | ManagedProjectFolders.ts | t3-project::managed | Service implemented; native ManagedFolderIo missing |
 | ProjectCloneTracker.ts | t3-project::clones | Tracker + concrete ForgeCloneRepository adapter implemented; full parity unverified |
 | gitCloneProgress.ts | t3-forge::clone_progress; t3-project forwarding adapter | Existing sibling port reused |
-| ProjectEnrichmentService.ts | t3-project::enrichment | Partial: independent bounded lanes/cache/invalidation/publication |
+| ProjectEnrichmentService.ts | t3-project::enrichment | Separate bounded lanes/caches, options, remembered identities, single-flight lookups and publication; latest tests partly blocked |
 | ProjectFaviconResolver.ts | t3-workspace::project::FaviconResolver | Partial sibling port reused; differences below |
 | ProjectSetupScriptRunner.ts | t3-workspace::scripts/project; t3-project::scripts | Execution reused; settings/projection/trust composition added |
 | WorktreeSetupTracker.ts | t3-project::setup | Implemented: sliding subscriptions/cancel acknowledgement/retention |
-| RepositoryIdentityResolver.ts | t3-project::identity; t3-git keys/execution; t3-forge remote recognition | Partial: ordinary/bare repos/fetch remotes/gh marks/cache |
+| RepositoryIdentityResolver.ts | t3-project::identity; t3-git keys/execution; t3-forge remote recognition | Cwd/root LRU caches, coalescing and optional refiner added; post-fix verification blocked; host normalization gaps remain |
 | T3ProjectFileLoader.ts | t3-workspace::project::{load_project_file,parse_project_file}, t3-contracts | Partial sibling port reused; bounds/parser differences below |
-| ScratchThreadPromotion.ts | t3-project::promotion; t3-scheduler task-movement adapter | Service implemented; managed folders still required |
+| ScratchThreadPromotion.ts | t3-project::promotion; t3-scheduler task-movement adapter | Service with joined shutdown implemented; managed folders required; lifecycle regression awaits dependency build |
 | AgentSessionScanner.ts | t3-project::sessions::AgentSessionScanner and transcript | Partial: merge/exclusions/import flags and interpretation; discovery/streaming missing |
 | AgentSessionJson.ts | t3-project::session_json | Streaming bounded projection; accounting/scalar differences below |
 | AgentSessionImporter.ts | t3-project::sessions::AgentSessionImporter | Recent history import; runtime adapter/native history missing |
@@ -84,6 +84,14 @@ receivers deliver the current borrowed value first, then changed/newest values.
 Cancel/retry return the inner boolean for the handler envelope. All wire payloads
 use t3-contracts; no local type needs moving there.
 
+EnrichmentOptions supplies cache_capacity/max_pending/concurrency (512/512/4;
+each clamped to at least one). with_backend accepts a required ProjectMetadata
+adapter; NativeProjectMetadata delegates to the existing identity/favicon
+services. Tests gate those real services rather than fabricate repository data.
+RepositoryIdentityResolver also exposes with_cache_capacity and with_refiner;
+failed optional refinement preserves the unrefined identity. Construct promotion
+with ScratchThreadPromotion::new and join its shutdown before closing SQLite.
+
 ForgeCloneRepository uses the forge registry/Git/cwd/home, prepared private URL,
 no clone deadline, progress and an owned cancellation token. Git/SSH fallback/
 discard behavior stays in t3-forge. Project deletion is soft deletion: children
@@ -96,6 +104,17 @@ ProjectService shutdown joins admitted mutate calls; hosts must stop invoking
 low-level create/update/delete after closing admission.
 
 ## Remaining sibling dependencies (blocking completion)
+
+| Blocked work | Named owner / requested home |
+| --- | --- |
+| Native managed-directory operations, descriptor-bound streaming/listing outside registered workspaces | t3-workspace security-fixes owner; t3-workspace public API |
+| ProviderSessionRuntime domain repository | Coordinator/persistence owner must supply or assign this missing home; it is explicitly outside orchestration package 01's store seams |
+| Native-history import session mutation locks, registry/runtime policy composition | Orchestration 05 sessions/recovery, with t3-provider and orchestration 04 policy owners |
+| Canonical provider identity/refinement and post-clone authoritative status notification | t3-forge owner and server D/F composition owners; t3-git owner for remote-key normalization |
+| Dependency compilation and final crate verification | Orchestration 04 decisions/dispatch owner: latest exact clippy fails in runtime/dispatch.rs; t3-forge owner: last full-test diagnostics listed under Checks |
+
+Scanner discovery and budget enforcement remain t3-project work blocked on the
+workspace reader primitives; this table does not reassign that business logic.
 
 - ManagedFolderIo: t3-workspace needs atomic nonrecursive mkdir/claim, recursive
   mkdir, managed-root writes and no-follow removal. Known-workspace preview/write
@@ -136,7 +155,8 @@ of the pure transcript helper.
 | ProjectCloneTracker.test.ts | trackers.rs | Real clones/project-first/private URLs/cancel/retry/late success/failure/duplicate/order/concrete adapter/stall/retention; full takeover matrix remains |
 | WorktreeSetupTracker.test.ts | trackers.rs and setup unit test | Stages/tails/deadline retention/null/restart subscription/cancel acknowledgement/uncancellable/abandoned subscription reclamation |
 | RepositoryIdentityResolver.test.ts | managed_identity.rs | Real upstream/origin/marks/cache/bare/local URLs; full host/mark matrix remains |
-| ProjectEnrichmentService.test.ts | ProjectService integration | Dedicated saturation/in-flight invalidation matrix remains |
+| ProjectEnrichmentService.test.ts | enrichment.rs and ProjectService integration | Real Git eviction, independent saturated lanes, pending bound/dedupe, invalidation and disconnected caller passed; null/failure/expiry cases added awaiting build |
+| ScratchThreadPromotion.ts lifecycle | promotion.rs | Real SQLite/project creation with gated task-store failure; asserts shutdown remains pending until admitted work finishes; awaiting build |
 | ProjectFaviconResolver.test.ts | Existing t3-workspace tests/project.rs | Sibling tests, not rerun here |
 | ProjectSetupScriptRunner.test.ts | Existing t3-workspace tests/scripts.rs and project.rs | Execution reused; composition wrapper lacks PTY integration test |
 | T3ProjectFileLoader.test.ts | Existing t3-workspace tests/project.rs | Sibling JSONC/schema/trimming/bounds/malformed tests |
@@ -151,25 +171,24 @@ of the pure transcript helper.
   or all source user-facing explanations.
 - Mutate shields all mutations after caller drop; TS explicitly shields deletion.
   Clone start shields preparation too; TS begins after preparation/claim. Direct
-  project methods lack this wrapper. Hydration is sequential, not 8/16-wide.
-- Enrichment uses fixed defaults (512 entries/four workers per independent lane),
-  not configurable options. Last identity lives in its cache entry, so eviction
-  loses it. The shared entry limit also couples admission when either lane fills
-  all entries, unlike the source's separate caches/queues. Resolver failures
-  become cached null. Source-equivalent optional metadata logging and dedicated
-  race/saturation acceptance tests remain.
-- Identity probes before caching instead of separate cwd/root caching; concurrent
-  misses are not coalesced. t3-git normalization lacks some host rewrites and
+  project methods lack this wrapper. Ordered hydration now uses 8/16 concurrency.
+- Enrichment now has separate caches/pending limits, configurable options,
+  remembered identities independent of eviction, five-second failure caching,
+  single-flight lookups and cancellation-safe owned resolution. Source-equivalent
+  warning logs remain absent. Background requests use bounded tracked tasks
+  waiting on permits instead of Effect queues. Three new behavioral tests pass;
+  the remaining new cases await dependency compilation.
+- Identity now caches cwd/root separately, coalesces misses and preserves origin
+  display case when the sibling parser recovers it. t3-git normalization lacks some host rewrites and
   distinct HTTP ports. Registry refinement is missing. Remote/path tie sorting
-  is ordinal, not localeCompare. Origin display paths are lowercase; primary
-  display case is preserved when the sibling parser recovers it. Clone hooks
+  is ordinal, not localeCompare. Clone hooks
   update project/enrichment but do not notify authoritative Git-status readers.
 - Managed cleanup additionally refuses paths resolving outside their immediate
   managed parent; removal must reject junctions/links. Canceled scaffolding
   cleans unowned claims; project creation may finish once started. No
   ancestor-swap identity guarantee is claimed. Promotion preserves move order/
-  unfinished-work checks but lacks an exposed joined post-validation task
-  lifecycle and full acceptance matrix.
+  unfinished-work checks and now exposes joined shutdown for admitted validation
+  and shielded post-validation mutations. Its full acceptance matrix remains.
 - Setup uses cancellation token/completion acknowledgement rather than an Effect
   fiber. Subscribed channels survive retention. Empty unsubscribed entries are
   reclaimed on later access/retention, not a separate sweeper.
@@ -209,23 +228,37 @@ of the pure transcript helper.
 ## Checks
 
 From rust, use CARGO_TARGET_DIR=D:\t3code-rust-target\server-j and retain the
-configured Cargo job limit (currently four):
+configured Cargo job limit (currently two):
 
     cargo fmt -p t3-project
     cargo clippy -p t3-project --all-targets -- -D warnings
     cargo test -p t3-project
 
-Latest Windows verification: format passes; cargo test passes 38 tests (one unit,
-37 integration, zero ignored; zero doc tests). Integration counts: managed/identity
-8, parsing 9, project service 8, session import 3, trackers 9. This includes real
+Earlier full Windows verification passed 38 tests (one unit, 37 integration,
+zero ignored; zero doc tests), before the latest enrichment/identity/hydration/
+promotion changes. Integration counts then: managed/identity 8, parsing 9,
+project service 8, session import 3, trackers 9. This includes real
 Git/SQLite/processes, an outside-pointing Windows junction, ownership-query
 failure refusal and actual scratch recreation. The retention regression was
 observed failing before the captured-deadline fix and passing afterwards; the
 absent-inode versus literal-string regression was also observed red then green.
 
-The exact required clippy command is blocked by seven sibling dead-code errors
-in t3-forge/src/support.rs:4-10 (decode, encode, text, rows, nodes, sha,
-quote_patch_path). No sibling files were changed. A --no-deps check can diagnose
-owned lints but does not replace this required gate: that command passed for all
-t3-project targets with -D warnings after the final source/test edits.
+Latest format passes. Three focused enrichment regressions passed after the
+rewrite. The cwd-cache regression was observed red before its fix. Four newly
+added cases still need execution/post-fix green: null/failure, expiry, cwd cache,
+promotion shutdown (45 total tests expected). Do not treat the older 38-test
+suite or older passing --no-deps clippy as verification of the current source.
+
+Last full cargo test was blocked before reaching this crate by t3-forge:
+bitbucket/checkout.rs:3-4 calls absent remote::parse_change_request_url;
+bitbucket/checkout.rs:6 names absent ExecuteOptions::check_exit;
+bitbucket/read.rs:6 borrows a temporary; http.rs:45 calls private
+github::transport::is_interactive (E0603). The same dependency build blocks
+clippy in that snapshot. These are t3-forge-owner files and were not changed here.
+The subsequent exact clippy attempt instead failed in orchestration 04's
+runtime/dispatch.rs:1669 (extra .0 on Arc<Inner>), with cascading type/lint
+errors at 1701-1707. Forge emitted no errors in that later attempt; do not assume
+its older diagnostics still apply. Earlier transient GitLab and orchestration
+06 compilation failures were repaired by their owners. Re-run all three required
+checks once dependencies compile. No verification command remains running.
 No actual provider home or live T3 database was read, copied or modified.

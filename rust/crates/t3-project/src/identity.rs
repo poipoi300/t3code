@@ -5,12 +5,87 @@ use t3_git::{ExecuteOptions, Git};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
-type IdentityCache = BTreeMap<(String, bool), (Option<RepositoryIdentity>, Instant)>;
+use t3_orchestration::ports::decisions::thread_command_executor::KeyedLanes;
 
-#[derive(Clone, Default)]
+struct Cached<V> {
+    value: V,
+    until: Instant,
+    touched: u64,
+}
+struct TimedCache<K, V> {
+    entries: BTreeMap<K, Cached<V>>,
+    serial: u64,
+    capacity: usize,
+}
+impl<K, V> Default for TimedCache<K, V> {
+    fn default() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            serial: 0,
+            capacity: 512,
+        }
+    }
+}
+impl<K: Ord + Clone, V: Clone> TimedCache<K, V> {
+    fn get(&mut self, key: &K) -> Option<V> {
+        self.serial += 1;
+        let entry = self.entries.get_mut(key)?;
+        if entry.until <= Instant::now() {
+            return None;
+        }
+        entry.touched = self.serial;
+        Some(entry.value.clone())
+    }
+    fn put(&mut self, key: K, value: V, ttl: u64) {
+        if !self.entries.contains_key(&key)
+            && self.entries.len() >= self.capacity
+            && let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.touched)
+                .map(|(k, _)| k.clone())
+        {
+            self.entries.remove(&oldest);
+        }
+        self.serial += 1;
+        self.entries.insert(
+            key,
+            Cached {
+                value,
+                until: Instant::now() + Duration::from_secs(ttl),
+                touched: self.serial,
+            },
+        );
+    }
+}
+type IdentityCache = TimedCache<(String, bool), Option<RepositoryIdentity>>;
+type RootCache = TimedCache<String, Option<(String, bool)>>;
+
+#[async_trait::async_trait]
+pub trait IdentityRefiner: Send + Sync {
+    async fn refine(&self, identity: &RepositoryIdentity) -> Result<RepositoryIdentity>;
+}
+
+#[derive(Clone)]
 pub struct RepositoryIdentityResolver {
     cache: Arc<Mutex<IdentityCache>>,
+    roots: Arc<Mutex<RootCache>>,
+    lanes: Arc<KeyedLanes>,
+    refiner: Option<Arc<dyn IdentityRefiner>>,
     environment: t3_process::Environment,
+    capacity: usize,
+}
+impl Default for RepositoryIdentityResolver {
+    fn default() -> Self {
+        Self {
+            cache: Default::default(),
+            roots: Default::default(),
+            lanes: Default::default(),
+            refiner: None,
+            environment: Default::default(),
+            capacity: 512,
+        }
+    }
 }
 
 pub fn is_local_remote(url: &str) -> bool {
@@ -94,14 +169,40 @@ pub fn pick_primary_remote(
 impl RepositoryIdentityResolver {
     pub fn with_environment(mut self, environment: t3_process::Environment) -> Self {
         self.environment = environment;
-        self.cache = Arc::new(Mutex::new(BTreeMap::new()));
+        let capacity = self.capacity;
+        self.with_cache_capacity(capacity)
+    }
+    pub fn with_cache_capacity(mut self, capacity: usize) -> Self {
+        self.capacity = capacity.max(1);
+        self.cache = Arc::new(Mutex::new(TimedCache {
+            capacity: capacity.max(1),
+            ..Default::default()
+        }));
+        self.roots = Arc::new(Mutex::new(TimedCache {
+            capacity: capacity.max(1),
+            ..Default::default()
+        }));
+        self
+    }
+    pub fn with_refiner(mut self, refiner: Arc<dyn IdentityRefiner>) -> Self {
+        self.refiner = Some(refiner);
+        self.cache = Arc::new(Mutex::new(TimedCache {
+            capacity: self.capacity,
+            ..Default::default()
+        }));
         self
     }
     pub async fn resolve(&self, cwd: &str, refresh: bool) -> Option<RepositoryIdentity> {
         self.try_resolve(cwd, refresh).await.ok().flatten()
     }
 
-    async fn try_resolve(&self, cwd: &str, refresh: bool) -> Result<Option<RepositoryIdentity>> {
+    async fn probe_root(&self, cwd: &str) -> Result<Option<(String, bool)>> {
+        if t3_workspace::paths::normalize_root(cwd, Path::new(cwd), false)
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
         let git = Git::new(cwd).with_environment(self.environment.clone());
         let options = || ExecuteOptions {
             allow_nonzero: true,
@@ -110,7 +211,7 @@ impl RepositoryIdentityResolver {
         let top = git
             .execute(&["rev-parse", "--show-toplevel"], options())
             .await?;
-        let (root, bare) = if top.code == Some(0) {
+        let found = if top.code == Some(0) {
             (
                 top.stdout_text().trim_end_matches(['\r', '\n']).to_owned(),
                 false,
@@ -142,21 +243,48 @@ impl RepositoryIdentityResolver {
             let Some(found) = found else { return Ok(None) };
             found
         };
-        if root.is_empty() {
-            return Ok(None);
+        Ok((!found.0.is_empty()).then_some(found))
+    }
+    async fn try_resolve(&self, cwd: &str, refresh: bool) -> Result<Option<RepositoryIdentity>> {
+        let _cwd_guard = self.lanes.acquire([format!("cwd:{cwd}")]).await;
+        let cwd_key = cwd.to_owned();
+        if refresh {
+            self.roots.lock().await.entries.remove(&cwd_key);
         }
+        let cached = self.roots.lock().await.get(&cwd_key);
+        let found = match cached {
+            Some(value) => value,
+            None => {
+                let value = self.probe_root(cwd).await?;
+                self.roots.lock().await.put(
+                    cwd_key,
+                    value.clone(),
+                    if value.is_some() { 900 } else { 60 },
+                );
+                value
+            }
+        };
+        let Some((root, bare)) = found else {
+            return Ok(None);
+        };
+        let _root_guard = self
+            .lanes
+            .acquire([format!("repository:{root}:{bare}")])
+            .await;
         let key = (root.clone(), bare);
         let mut cache = self.cache.lock().await;
         if refresh {
-            cache.remove(&key);
+            cache.entries.remove(&key);
         }
-        if let Some((value, until)) = cache.get(&key)
-            && *until > Instant::now()
-        {
-            return Ok(value.clone());
+        if let Some(value) = cache.get(&key) {
+            return Ok(value);
         }
         drop(cache);
         let git = Git::new(Path::new(&root)).with_environment(self.environment.clone());
+        let options = || ExecuteOptions {
+            allow_nonzero: true,
+            ..Default::default()
+        };
         let mut remote_args = vec!["remote", "-v"];
         let mut marks_args = vec!["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"];
         if bare {
@@ -181,7 +309,9 @@ impl RepositoryIdentityResolver {
             let repository_path=display.filter(|p|p.to_lowercase()==canonical_path).unwrap_or(canonical_path);
             let origin = remotes.get("origin").filter(|url| t3_git::remote_repository_key(url) != key).map(|url| {
                 let key = t3_git::remote_repository_key(url);
-                let display = key.split_once('/').map(|(_,p)|p.to_owned());
+                let canonical = key.split_once('/').map(|(_,p)|p).unwrap_or("");
+                let display = t3_forge::remote::parse_remote(url).and_then(|r|r.repository)
+                    .filter(|path|path.to_lowercase()==canonical).unwrap_or_else(||canonical.into());
                 serde_json::json!({"canonicalKey":key,"remoteUrl":url,"displayName":display})
             });
             let mut value = serde_json::json!({"canonicalKey":key,"locator":{"source":"git-remote","remoteName":name,"remoteUrl":url},"rootPath":root});
@@ -194,20 +324,19 @@ impl RepositoryIdentityResolver {
             if let Some(origin) = origin { value["origin"] = origin; }
             Ok(serde_json::from_value(value)?)
         }).transpose()?;
+        let identity =
+            if let (Some(identity), Some(refiner)) = (identity.as_ref(), self.refiner.as_ref()) {
+                Some(
+                    refiner
+                        .refine(identity)
+                        .await
+                        .unwrap_or_else(|_| identity.clone()),
+                )
+            } else {
+                identity
+            };
         let ttl = if identity.is_some() { 900 } else { 60 };
-        let mut cache = self.cache.lock().await;
-        if cache.len() >= 512
-            && let Some(old) = cache
-                .iter()
-                .min_by_key(|(_, (_, until))| *until)
-                .map(|(k, _)| k.clone())
-        {
-            cache.remove(&old);
-        }
-        cache.insert(
-            key,
-            (identity.clone(), Instant::now() + Duration::from_secs(ttl)),
-        );
+        self.cache.lock().await.put(key, identity.clone(), ttl);
         Ok(identity)
     }
 }

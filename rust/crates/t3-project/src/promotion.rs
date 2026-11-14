@@ -1,6 +1,10 @@
 use crate::{Error, ProjectService, Result, managed::ManagedProjectFolders};
 use async_trait::async_trait;
-use std::{collections::BTreeSet, path::Path, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 use t3_contracts::{
     base_schemas::{ProjectId, ThreadId},
     project::{ProjectCreateFromThreadInput, ProjectCreateFromThreadResult},
@@ -9,6 +13,7 @@ use t3_orchestration::{
     api::{CommandDispatcher, ProjectionReader, ShellQuery},
     ports::decisions::orchestrator::thread_has_unfinished_work,
 };
+use tokio_util::task::TaskTracker;
 
 #[async_trait]
 pub trait MoveThreadTasks: Send + Sync {
@@ -32,12 +37,47 @@ pub struct ScratchThreadPromotion {
     pub threads: Arc<dyn ProjectionReader>,
     pub commands: Arc<dyn CommandDispatcher>,
     pub scheduled_tasks: Arc<dyn MoveThreadTasks>,
+    scope: Arc<PromotionScope>,
+}
+struct PromotionScope {
+    admission: Mutex<bool>,
+    tasks: TaskTracker,
 }
 impl ScratchThreadPromotion {
+    pub fn new(
+        projects: ProjectService,
+        folders: ManagedProjectFolders,
+        threads: Arc<dyn ProjectionReader>,
+        commands: Arc<dyn CommandDispatcher>,
+        scheduled_tasks: Arc<dyn MoveThreadTasks>,
+    ) -> Self {
+        Self {
+            projects,
+            folders,
+            threads,
+            commands,
+            scheduled_tasks,
+            scope: Arc::new(PromotionScope {
+                admission: Mutex::new(true),
+                tasks: TaskTracker::new(),
+            }),
+        }
+    }
     pub async fn create_from_thread(
         &self,
         input: ProjectCreateFromThreadInput,
     ) -> Result<ProjectCreateFromThreadResult> {
+        let _foreground = {
+            let admission = self
+                .scope
+                .admission
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !*admission {
+                return Err(Error::Unavailable("ScratchThreadPromotion is shut down"));
+            }
+            self.scope.tasks.token()
+        };
         let thread = self
             .threads
             .shell(input.thread_id)
@@ -109,7 +149,16 @@ impl ScratchThreadPromotion {
             }
         }
         let this = self.clone();
-        tokio::spawn(async move {
+        let task = {
+            let admission = self
+                .scope
+                .admission
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !*admission {
+                return Err(Error::Unavailable("ScratchThreadPromotion is shut down"));
+            }
+            self.scope.tasks.spawn(async move {
             let id=uuid::Uuid::new_v4().to_string();
             let create=serde_json::from_value(serde_json::json!({"type":"project.create","commandId":format!("scratch-promotion-project:{id}"),"projectId":id,"title":thread.title,"workspaceRoot":folder}))?;
             let project_id=match this.projects.bootstrap(create).await {Ok((p,_))=>p.id,Err(Error::Conflict{conflicting_project_id,..})=>ProjectId(conflicting_project_id),Err(e)=>return Err(e)};
@@ -118,7 +167,18 @@ impl ScratchThreadPromotion {
                 this.commands.dispatch(serde_json::from_value(serde_json::json!({"type":"thread.project.adopt-folder","commandId":format!("scratch-promotion:{}",uuid::Uuid::new_v4()),"threadId":id,"projectId":project_id}))?).await?;
             }
             Ok(ProjectCreateFromThreadResult {project_id})
-        }).await?
+            })
+        };
+        task.await?
+    }
+    pub async fn shutdown(&self) {
+        *self
+            .scope
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = false;
+        self.scope.tasks.close();
+        self.scope.tasks.wait().await;
     }
 }
 

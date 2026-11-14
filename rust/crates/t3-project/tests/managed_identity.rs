@@ -377,3 +377,55 @@ fn remote_parsing_preserves_spaces_and_ignores_push_local_and_malformed_urls() {
         assert!(!is_local_remote(remote));
     }
 }
+
+#[tokio::test]
+async fn identity_caches_cwd_and_explicit_refresh_rechecks_its_location() {
+    let f = Fixture::new();
+    let root = f.root("cached-root");
+    let git = Git::new(&root).with_environment(git_environment(f.temp.path()));
+    git.execute(&["init"], ExecuteOptions::default())
+        .await
+        .unwrap();
+    git.execute(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/Fixture/Cached.git",
+        ],
+        ExecuteOptions::default(),
+    )
+    .await
+    .unwrap();
+    let resolver =
+        RepositoryIdentityResolver::default().with_environment(git_environment(f.temp.path()));
+    let initial = resolver
+        .resolve(&root.to_string_lossy(), false)
+        .await
+        .unwrap();
+    let moved = f.temp.path().join("moved-root");
+    assert!(root.starts_with(f.temp.path()) && moved.starts_with(f.temp.path()));
+    std::fs::rename(&root, &moved).unwrap();
+    assert_eq!(
+        resolver
+            .resolve(&root.to_string_lossy(), false)
+            .await
+            .unwrap()
+            .canonical_key,
+        initial.canonical_key
+    );
+    assert!(
+        resolver
+            .resolve(&root.to_string_lossy(), true)
+            .await
+            .is_none()
+    );
+    std::fs::rename(&moved, &root).unwrap();
+    assert!(
+        resolver
+            .resolve(&root.to_string_lossy(), true)
+            .await
+            .is_some()
+    );
+    f.shutdown().await;
+}

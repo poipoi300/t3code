@@ -1,82 +1,103 @@
-# t3-project hand-off
+# t3-project hand-off — latest resumed wave
 
-The usage pause was lifted. The crate is implemented but completion is blocked
-on the sibling APIs listed below. No subagents, commits, pushes, sibling edits,
-dev servers, live T3 reads or real provider-home reads were performed.
+Status: incomplete; further verification and native adapter integration are
+blocked on the named owners below. No subagents, commits, pushes, sibling edits,
+real provider-home reads or live T3 reads were performed.
 
-## Authoritative location and build rules
+## Location and rules
 
-- Installed crate: C:\Users\Administrator\t3code-rust\rust\crates\t3-project.
-  It built in external staging before installation with Cargo.toml and src/lib.rs.
-- D:\t3code-rust-target\server-j\staging-t3-project is a STALE pre-install
-  snapshot. Never copy it over the installed crate.
-- Run scoped Cargo commands from C:\Users\Administrator\t3code-rust\rust with
-  CARGO_TARGET_DIR=D:\t3code-rust-target\server-j. Retain .cargo/config.toml's
-  configured limit (currently four jobs); never override it.
-- Only t3-project is owned. Shared brief: t3code-rust-notes\briefs\server-port.md.
-  The orchestration-08-takeover report confirms ownership of project-directory
-  services here and orchestration-v2 project planning in orchestration.
+Authoritative crate: C:\Users\Administrator\t3code-rust\rust\crates\t3-project.
+It was built in external staging before installation. Cargo.toml and src/lib.rs
+are present. D:\t3code-rust-target\server-j\staging-t3-project is a STALE
+snapshot; never restore it over the installed crate.
 
-## Implemented
+Run Cargo from C:\Users\Administrator\t3code-rust\rust, scoped -p t3-project,
+with CARGO_TARGET_DIR=D:\t3code-rust-target\server-j. Retain the configured TWO
+jobs; do not override them. Only t3-project is owned.
 
-README.md contains the initial file-by-file audit, current coverage, ledger
-mapping, public constructors, test-source mapping and all known parity gaps.
-ProjectService snapshot/mutate, receipt-aware CRUD and guarded child deletion;
-managed project orchestration; clone/setup trackers; a concrete forge clone
-adapter; identity/enrichment; settings/projection script composition; scratch
-promotion with scheduler adapter; bounded JSON projection/transcript parsing;
-recent-history scanner/import service composition are present.
+## Work since the previous 38-test report
 
-## Latest verification
+- Rechecked all blockers and corrected the earlier overly broad claim that
+  enrichment could not progress. Its cache/admission gaps were owned work.
+- Rewrote enrichment with separate bounded identity/favicon caches and pending
+  admission, configurable 512/512/4 defaults, bounded remembered identities,
+  coalesced owned lookups, stale-generation protection, cached failures, and
+  joined shutdown. Foreground identity reads bypass queue saturation and do not
+  launch favicon work. Optional resolver defects are caught as failures.
+- Added ProjectMetadata/NativeProjectMetadata constructors. Tests gate the real
+  Git/favicon backends; they do not fabricate repository result data.
+- Three focused enrichment tests PASSED: remembered identity survives eviction;
+  independent saturated lanes/pending bounds/dedupe/foreground reads; invalidated
+  lookup cannot replace newer identity and caller disconnect leaves lookup safe.
+- Added two more enrichment cases (successful null versus failure/cold; expiry).
+  They have not executed because sibling compilation failed afterwards.
+- Added a real-repository cwd-cache regression; observed it FAIL before fixing
+  RepositoryIdentityResolver. Added separate cwd/root LRU caches, coalesced
+  misses, configurable capacity and optional refinement (failure preserves the
+  original identity). Preserved origin display casing. Post-fix green awaits
+  dependency compilation.
+- ProjectService snapshot/page hydration now preserves order with concurrency 8;
+  shell hydration uses 16, matching TypeScript.
+- ScratchThreadPromotion now has a constructor and shared admission/join scope;
+  shutdown waits for admitted foreground validation and shielded mutation tasks.
+  Added a real SQLite/project-creation regression with a gated failing task store
+  proving a disconnected promotion must be joined. This test has not executed.
+- futures-util 0.3 was added to this crate only (already used in the workspace).
 
-- cargo fmt -p t3-project passes.
-- Earlier resumed full execution passed 38 tests (1 unit, 37 integration).
-- Inode absent versus literal "null" regression was observed red, fixed and
-  then passed in that full execution. Empty setup subscriptions are reclaimed;
-  their private regression also passed.
-- Tightened the existing setup retention test: the old version could pass after
-  a delayed timer. Observed red for that exact defect, captured the deadline
-  before task spawn, then observed green. Clone retention uses the same correction.
-- Extended real-directory refusal coverage: an unavailable ownership query must
-  preserve the directory; this passed. The actual outside-pointing Windows
-  junction and its sentinel also passed.
-- Extended the scratch test to actually delete/recreate scratch. First execution
-  failed because optional metadata probes pinned it on Windows. That fixture
-  now shuts enrichment down before creating projects, avoiding background pins.
-- Final full test execution after these edits PASSED all 38 tests: 1 unit;
-  managed/identity 8, parsing 9, project service 8, session import 3, trackers 9.
-  Zero failed/ignored; zero doc tests. Scratch recreation now passes as well.
-- Required clippy reached owned diagnostics; all owned errors found were fixed.
-  Latest exact command is blocked by seven foreign dead-code errors at
-  t3-forge/src/support.rs:4-10 (decode, encode, text, rows, nodes, sha,
-  quote_patch_path). Do not edit sibling files or claim exact clippy passed.
-- cargo clippy -p t3-project --all-targets --no-deps -- -D warnings PASSED
-  after the final source/test edits. This only proves owned lints are clean.
-- No verification command remains running.
+## Verification truth
 
-## Blocking sibling APIs
+Latest format passes. Earlier complete suite passed 38 tests, BEFORE this wave.
+Do not claim those 38 or the older passing --no-deps clippy verify current code.
+Current source has 45 expected tests: unit 1; managed/identity 9; parsing 9;
+project service 8; session import 3; trackers 9; enrichment 5; promotion 1.
+Only three of the seven new cases have passed; cwd cache was observed red before
+its fix, and the four remaining new/post-fix cases await a compiling dependency.
 
-1. ManagedFolderIo: t3-workspace exports no unmanaged atomic mkdir/claim,
-   recursive mkdir, managed-root writes and no-follow directory removal API.
-   Its ScopedDir helper remains private. Constructor requires a backend;
-   tests implement one only over temporary fixtures.
-2. SessionInventory: no native provider-home discovery and descriptor-bound
-   bounded streaming/restat API outside registered workspaces. It must supply
-   all README scanner budgets, Codex index/state roots, worktree folding,
-   inherited prefixes, POSIX deadlines/backoff and global read serialization.
-3. SessionImportStore: no public provider-runtime repository for completed and
-   per-thread transcript identities, insert-ignore stopped runtimes preserving
-   importedTranscripts, atomic recording and runtime-policy resolution.
-4. Registry canonical identity/refinement and authoritative post-clone Git-status
-   notification remain integration gaps. Forge cloning/progress and scheduler
-   task movement now have concrete adapters and are no longer blockers.
+Latest full cargo test failed before reaching this crate, in t3-forge:
+- bitbucket/checkout.rs:3-4 references absent remote::parse_change_request_url.
+- bitbucket/checkout.rs:6 references absent ExecuteOptions::check_exit.
+- bitbucket/read.rs:6 borrows a temporary (E0716).
+- http.rs:45 calls private github::transport::is_interactive (E0603).
+Earlier GitLab and orchestration 06 type errors were repaired by their owners.
+No sibling source was changed. Exact clippy must be re-run once dependencies
+compile. Do not suppress foreign diagnostics or claim this port complete.
 
-Native/pending-native-history import and the remaining acceptance matrices are
-incomplete; README documents this explicitly. Do not substitute empty success,
-copy sibling filesystem/runtime services, or inspect real provider homes.
+SUBSEQUENT exact clippy attempt failed instead in orchestration 04's
+runtime/dispatch.rs:1669: an extra .0 on Arc<Inner>, causing type/lint cascades
+at 1701-1707. t3-forge emitted no errors in this later clippy execution; its
+older test diagnostics above may already be repaired. The current first gate
+is the orchestration 04 decisions/dispatch owner. No commands remain running.
 
-## Next
+## Named owners / concrete requests
 
-When sibling APIs exist, implement their production adapters, native-history import and remaining parity
-matrices. No need to recreate the crate, re-audit its original homes, or restore
-staging. Stop service producers/join tasks before closing temporary databases.
+- t3-forge owner: repair the current dependency diagnostics; supply canonical
+  registry identity/refinement integration. t3-git owner: remote-key host/port
+  normalization gaps. Server D/F owners: authoritative post-clone status wiring.
+- t3-workspace security-fixes owner: public unmanaged atomic directory claims,
+  writes and no-follow removal; native listing and descriptor-bound bounded
+  streaming/restat outside registered workspaces. Scanner business logic remains
+  t3-project's work after those primitives exist, not reassigned wholesale.
+- Coordinator/persistence owner: supply or explicitly assign the missing
+  ProviderSessionRuntime domain repository (completed/per-thread transcript
+  identities, insert-ignore stopped runtime preserving importedTranscripts,
+  atomic transcript recording). Package 01's report explicitly excludes this
+  repository from its store seams; do not invent an accepted package-01 owner.
+- Orchestration 05 sessions/recovery, t3-provider and orchestration 04 policy
+  owners: native-history session-mutation locking, native history access and
+  registry/runtime-policy composition for importing a new thread.
+- t3-workspace owns the already-ported t3.json loader/favicon/script executor;
+  inherited differences remain listed in README, never patched here.
+
+## First on resume
+
+Run cargo test -p t3-project once orchestration 04 dispatch and forge compile.
+Fix OWN diagnostics only.
+First observe cwd-cache post-fix green and execute all five enrichment tests and
+promotion regression. Then exact cargo fmt, cargo clippy --all-targets --
+-D warnings and full cargo test. Preserve real dependencies and temp-only homes.
+
+README contains the initial ownership audit, current file coverage, each RPC/HTTP
+mapping, constructors, exact blockers and every recorded TypeScript difference.
+Only add production adapters using sibling public APIs; no empty-success backend
+or copied native filesystem/runtime repository. Join promotion/metadata/managed
+work before closing SQLite. No need to recreate the crate or restore staging.

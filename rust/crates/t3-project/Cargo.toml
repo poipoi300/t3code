@@ -18,6 +18,7 @@ t3-forge = { path = "../t3-forge" }
 t3-scheduler = { path = "../t3-scheduler" }
 t3-config = { path = "../t3-config" }
 async-trait = "0.1"
+futures-util = "0.3"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
