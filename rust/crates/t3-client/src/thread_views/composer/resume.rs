@@ -9,7 +9,7 @@ use t3_contracts::rpc::WsOrchestrationV2DispatchCommandRpc;
 
 use crate::operations::{self, CommandOutcome, ComposerDispatchMode, OperationQueue};
 use crate::optimistic::{ProjectionKey, ViewChange};
-use crate::rpc::{RpcEndpoint, SessionEndpoint};
+use crate::rpc::SessionEndpoint;
 use crate::thread_views::threads::execution;
 use crate::{ClientError, composition::ClientRuntime, platform::Platform, types::ThreadKey};
 

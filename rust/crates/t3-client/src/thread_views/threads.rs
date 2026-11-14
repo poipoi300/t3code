@@ -74,6 +74,7 @@ macro_rules! item_field {
     };
 }
 pub mod activity_announcement;
+pub mod turn_detail_announcement;
 pub mod archived;
 pub mod checkpoints;
 pub mod context_window;

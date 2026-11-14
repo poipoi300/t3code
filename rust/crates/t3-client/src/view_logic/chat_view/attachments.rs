@@ -13,7 +13,8 @@ use t3_contracts::{
     chat_attachment::{ChatAttachment, ChatFileAttachment, PROVIDER_SEND_TURN_MAX_FILE_BYTES},
 };
 
-fn video_mime_type(name: &str, mime: &str) -> Option<String> {
+/// The video MIME type a file plays as (`videoMimeType`), from its type or, when that is generic, its extension.
+pub fn video_mime_type(name: &str, mime: &str) -> Option<String> {
     let mime = mime
         .split(';')
         .next()

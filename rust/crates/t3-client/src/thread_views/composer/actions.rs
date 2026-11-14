@@ -36,38 +36,6 @@ pub struct PrimaryActionState {
     pub is_preparing_worktree: bool,
     pub has_sendable_content: bool,
     pub can_resume: bool,
-    /// ChatView's `resumeCompactionTokens`: the context the next send compacts first.
-    pub compact_tokens: Option<u64>,
-    pub keep_full_history: bool,
-    /// `freshSessionCommandAvailable`: messages exist, the server supports fresh context, and no
-    /// question or approval owns the composer.
-    pub fresh_session_available: bool,
-    pub fresh_session_armed: bool,
-    pub is_resuming: bool,
-}
-
-/// What `planComposerTurn` reads for one send, taken when the send starts.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct TurnOptions {
-    pub fresh_arm: Option<u64>,
-    pub compact_before_send: bool,
-}
-
-/// `formatContextWindowTokens` (apps/web/src/lib/contextWindow.ts).
-pub fn format_context_window_tokens(value: u64) -> String {
-    let fixed = |scaled: f64| {
-        let text = format!("{scaled:.1}");
-        text.strip_suffix(".0").map(str::to_owned).unwrap_or(text)
-    };
-    if value < 1_000 {
-        value.to_string()
-    } else if value < 10_000 {
-        format!("{}k", fixed(value as f64 / 1_000.0))
-    } else if value < 999_500 {
-        format!("{}k", (value as f64 / 1_000.0).round())
-    } else {
-        format!("{}m", fixed(value as f64 / 1_000_000.0))
-    }
 }
 
 type CachedThreadFacts = (Rc<OrchestrationV2ThreadProjection>, Rc<ThreadFacts>);
@@ -79,19 +47,6 @@ pub struct ComposerActionsSession<P: Platform + Clone + 'static> {
     view: Rc<RefCell<Option<Rc<PrimaryActionState>>>>,
     facts: Rc<RefCell<Option<CachedThreadFacts>>>,
     derivations: Rc<std::cell::Cell<u64>>,
-    compaction: Rc<RefCell<Option<(CompactionKey, Option<u64>)>>>,
-    compaction_derivations: Rc<std::cell::Cell<u64>>,
-}
-
-/// Inputs of `compact_before_send_tokens` other than the draft (whose typed `/compact` the send
-/// plan checks): identities, the selection, idleness and the current minute.
-#[derive(PartialEq)]
-struct CompactionKey {
-    projection: *const OrchestrationV2ThreadProjection,
-    config: *const t3_contracts::server::ServerConfig,
-    selection: t3_contracts::model_selection::ModelSelection,
-    idle: bool,
-    minute: u64,
 }
 
 impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
@@ -102,84 +57,6 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
             view: Rc::default(),
             facts: Rc::default(),
             derivations: Rc::default(),
-            compaction: Rc::default(),
-            compaction_derivations: Rc::default(),
-        }
-    }
-
-    fn compact_tokens(
-        &self,
-        projection: Option<&Rc<OrchestrationV2ThreadProjection>>,
-        config: Option<&Rc<t3_contracts::server::ServerConfig>>,
-        selection: &t3_contracts::model_selection::ModelSelection,
-        idle: bool,
-    ) -> Option<u64> {
-        let (projection, config) = (projection?, config?);
-        let key = CompactionKey {
-            projection: Rc::as_ptr(projection),
-            config: Rc::as_ptr(config),
-            selection: selection.clone(),
-            idle,
-            minute: self.runtime.now_epoch_ms() / 60_000,
-        };
-        let mut cached = self.compaction.borrow_mut();
-        if let Some((prior, tokens)) = cached.as_ref()
-            && *prior == key
-        {
-            return *tokens;
-        }
-        self.compaction_derivations
-            .set(self.compaction_derivations.get() + 1);
-        let now = crate::time::iso_from_epoch_ms(key.minute * 60_000);
-        let tokens = crate::thread_views::threads::context_window::compact_before_send_tokens(
-            crate::thread_views::threads::context_window::CompactBeforeSendInput {
-                projection,
-                selection,
-                providers: &config.providers,
-                settings: &config.settings,
-                text: "",
-                thread_idle: idle,
-                now: &now,
-            },
-            crate::time::epoch_ms,
-        );
-        *cached = Some((key, tokens));
-        tokens
-    }
-
-    /// The fresh-session arm and compaction for a send of `text`, read when it starts.
-    pub fn turn_options(&self, text: &str) -> TurnOptions {
-        let state = self.snapshot();
-        let fresh_arm = state
-            .fresh_session_available
-            .then(|| {
-                self.runtime
-                    .composer_thread_flags()
-                    .fresh_session_arm(&self.key)
-            })
-            .flatten();
-        let typed_compact = text
-            .get(..8)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("/compact"))
-            && text[8..]
-                .chars()
-                .next()
-                .is_none_or(crate::view_logic::is_js_whitespace);
-        TurnOptions {
-            fresh_arm,
-            compact_before_send: fresh_arm.is_none()
-                && state.compact_tokens.is_some()
-                && !state.keep_full_history
-                && !typed_compact,
-        }
-    }
-
-    /// After an accepted send: the arm it read is spent and full history is no longer kept.
-    pub fn sent(&self, options: TurnOptions) {
-        let flags = self.runtime.composer_thread_flags();
-        flags.set_keep_full_history(&self.key, false);
-        if let Some(arm) = options.fresh_arm {
-            flags.disarm_fresh_session(&self.key, Some(arm));
         }
     }
 
@@ -228,7 +105,6 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
             self.runtime.message_changes(),
             self.runtime.composer_preferences().changes(),
             self.runtime.pending_user_input(&self.key).changes(),
-            self.runtime.composer_thread_flags().changes(),
         ])
         .boxed_local()
     }
@@ -273,18 +149,6 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
             .is_some_and(|s| s.available::<WsOrchestrationV2DispatchCommandRpc>(&command));
         let unavailable = session.is_none();
         let facts = self.thread_facts(thread.and_then(|t| t.projection.as_ref()));
-        let flags = self.runtime.composer_thread_flags();
-        let config = environment.and_then(|e| e.config.as_ref());
-        let fresh_session_available = facts.has_messages
-            && !facts.pending_approval
-            && question.is_none()
-            && config.is_some_and(|c| c.environment.capabilities.fresh_context == Some(true));
-        let compact_tokens = self.compact_tokens(
-            thread.and_then(|t| t.projection.as_ref()),
-            config,
-            &models.selection,
-            !facts.running,
-        );
         let pending = self.runtime.pending_messages(&self.key);
         let busy = pending.iter().any(|p| {
             matches!(
@@ -407,12 +271,6 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
             is_preparing_worktree: facts.preparing,
             has_sendable_content: content.has_sendable_content,
             can_resume: facts.can_resume,
-            compact_tokens,
-            keep_full_history: flags.keep_full_history(&self.key),
-            fresh_session_available,
-            fresh_session_armed: fresh_session_available
-                && flags.fresh_session_arm(&self.key).is_some(),
-            is_resuming: flags.is_resuming(&self.key),
         };
         let mut cached = self.view.borrow_mut();
         if let Some(prior) = cached.as_ref().filter(|prior| ***prior == next) {
@@ -430,7 +288,6 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
 struct ThreadFacts {
     running: bool,
     preparing: bool,
-    has_messages: bool,
     pending_approval: bool,
     compact_message_active: bool,
     compaction_settled: bool,
@@ -532,7 +389,6 @@ fn derive_thread_facts(projection: Option<&OrchestrationV2ThreadProjection>) -> 
     ThreadFacts {
         running,
         preparing,
-        has_messages: projection.is_some_and(|p| !p.messages.is_empty()),
         pending_approval,
         compact_message_active,
         compaction_settled,

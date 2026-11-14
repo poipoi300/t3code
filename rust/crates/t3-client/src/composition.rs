@@ -158,7 +158,6 @@ struct Inner<P: Platform + Clone + 'static> {
     composer_update_dismissals: crate::thread_views::composer::banners::UpdateDismissals,
     composer_stash: Rc<crate::thread_views::composer::stash_service::PromptStashState>,
     composer_questions: Rc<crate::thread_views::composer::questions_service::PendingUserInputState>,
-    composer_thread_flags: Rc<crate::thread_views::composer::thread_flags::ComposerThreadFlags>,
     composer_attachments:
         RefCell<BTreeMap<(EnvironmentId, String), composer_attachments::AttachmentDriver>>,
     composer_task: AbortHandle,
@@ -293,7 +292,6 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 composer_update_dismissals: Rc::default(),
                 composer_stash: Rc::default(),
                 composer_questions: Rc::default(),
-                composer_thread_flags: Rc::default(),
                 composer_attachments: RefCell::default(),
                 platform,
                 store,
