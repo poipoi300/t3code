@@ -7,6 +7,8 @@
 //! Rows take `ItemOptions`: `Variant::{Default, Destructive, Ghost}`, `Density::{Default, Touch}`,
 //! inset, reactive disabled state and close-on-select. There is no web `Size` prop: density is
 //! independent of the window's `sm` breakpoint. Checkbox rows use `CheckboxVariant` instead.
+//! `menu_radio_group(label, value, children, on_value_change)` controls one string value;
+//! `menu_radio_item(label, value, options, children, on_select)` reads that group's selection.
 //! `menu_sub(trigger, disabled, popup)` owns a submenu; `menu_sub_trigger` and `menu_sub_popup`
 //! are its slots. Group, label, shortcut, detail, radio indicator and search functions mirror
 //! the named TSX components. Labels and content passed by callers are already translated.
@@ -14,6 +16,7 @@
 //! NSH owns portals, available-height scrolling, keyboard navigation, focus return, outside
 //! dismissal, long-press cancellation and the adaptive sheet with submenu Back on touch devices.
 //! Popup appearance belongs on NSH's surface (not on the inner content); submenus inherit it.
+//! The web's `DropdownMenu*` aliases are exported in snake case too.
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -27,6 +30,16 @@ use crate::i18n::t;
 use crate::state::layout::{Pointer, layout_class, pointer};
 use crate::theme::{Scope as ThemeScope, cn, palette, tw, tw_with};
 use crate::ui::icon::Icon;
+
+pub use self::{
+    menu as dropdown_menu, menu_checkbox_item as dropdown_menu_checkbox_item,
+    menu_group as dropdown_menu_group, menu_group_label as dropdown_menu_label,
+    menu_item as dropdown_menu_item, menu_popup as dropdown_menu_content,
+    menu_radio_group as dropdown_menu_radio_group, menu_radio_item as dropdown_menu_radio_item,
+    menu_separator as dropdown_menu_separator, menu_shortcut as dropdown_menu_shortcut,
+    menu_sub as dropdown_menu_sub, menu_sub_popup as dropdown_menu_sub_content,
+    menu_sub_trigger as dropdown_menu_sub_trigger, menu_trigger as dropdown_menu_trigger,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PropEnum)]
 pub enum Variant {
@@ -213,7 +226,11 @@ fn popup_style(style: StyleRefinement, width: Width) -> StyleRefinement {
         } else {
             tokens.number("glass-blur").unwrap_or(12.0)
         }))
-        .backdrop_saturate(tokens.number("glass-saturation").unwrap_or(if dark() { 1.08 } else { 1.14 }))
+        .backdrop_saturate(tokens.number("glass-saturation").unwrap_or(if dark() {
+            1.08
+        } else {
+            1.14
+        }))
         .border_1()
         .border_color(
             tokens
@@ -223,6 +240,12 @@ fn popup_style(style: StyleRefinement, width: Width) -> StyleRefinement {
         )
         // The viewport min()/calc() is measured here, including narrow-window clamping.
         .max_w(px(room))
+        // NSH sheets pin both edges; keep the web popup's 1rem viewport inset on coarse pointers.
+        .mx(px(if pointer() == Pointer::Coarse {
+            16.0
+        } else {
+            0.0
+        }))
         .min_w(px(if width == Width::Default {
             160.0_f32.min(room)
         } else {
@@ -392,16 +415,24 @@ fn MenuContent(props: MenuContentProps, cx: Scope<MenuContentEvent>) -> impl Int
         .flatten()
         .unwrap_or_else(|| CloseMenu(Rc::new(move || cx.emit(MenuContentEvent::Close))));
     provide_context(close.clone());
-    // NSH owns arrows/Escape, but does not dismiss menus on Tab. Do not capture it: the
-    // platform continues its normal focus traversal after the menu closes.
+    // Bind while mounted so Tab from the pointer-opened trigger dismisses too; pass it on
+    // for native traversal, as NSH's Select does. Arrows and Escape remain NSH's.
+    // NSH's programmatic menu close restores the trigger; preserving a moved Tab destination
+    // and dismissing on programmatic focus leave require its Focus close path upstream.
+    for key in ["tab", "shift+tab"] {
+        let close = close.clone();
+        on_key_with(
+            key,
+            KeyOptions {
+                when: When::Always,
+                pass_through: true,
+                ..Default::default()
+            },
+            move |_| (close.0)(),
+        );
+    }
     view()
-        .on_key_down(move |event: &KeyEvent| {
-            if event.key.as_ref() == "Tab" {
-                (close.0)();
-            } else {
-                rows.typeahead(event);
-            }
-        })
+        .on_key_down(move |event: &KeyEvent| rows.typeahead(event))
         .child(props.children)
 }
 
@@ -507,6 +538,7 @@ struct ItemRowProps {
     #[prop(default)]
     kind: Prop<RowKind>,
     checked: Prop<Option<bool>>,
+    radio_value: Prop<SharedString>,
     #[prop(default)]
     checkbox_variant: Prop<CheckboxVariant>,
     children: Prop<Children>,
@@ -528,7 +560,25 @@ enum RowKind {
 #[component]
 fn ItemRow(props: ItemRowProps, cx: Scope<ItemRowEvent>) -> impl IntoElement {
     let node = element_ref();
-    let disabled = props.disabled;
+    let radio = use_context::<RadioSelection>();
+    let has_group = radio.is_some();
+    let is_radio = props.kind.get_untracked() == RowKind::Radio;
+    let disabled = Prop::bind(move || props.disabled.get() || (is_radio && !has_group));
+    let group = radio.clone();
+    let checked = Prop::bind(move || {
+        if is_radio {
+            Some(
+                group
+                    .as_ref()
+                    .is_some_and(|group| group.value.get() == props.radio_value.get()),
+            )
+        } else {
+            props.checked.get()
+        }
+    });
+    if is_radio {
+        provide_context(RadioChecked(checked));
+    }
     if let Some(rows) = use_context::<SearchRows>() {
         rows.add(node, disabled, props.label);
     }
@@ -536,7 +586,7 @@ fn ItemRow(props: ItemRowProps, cx: Scope<ItemRowEvent>) -> impl IntoElement {
         .element_ref(&node)
         .accessibility_label(move || Some(props.label.get()))
         .disabled(disabled)
-        .checked(props.checked)
+        .checked(checked)
         .role(move || match props.kind.get() {
             RowKind::Radio => Some(AccessibilityRole::MenuItemRadio),
             _ => None,
@@ -544,6 +594,12 @@ fn ItemRow(props: ItemRowProps, cx: Scope<ItemRowEvent>) -> impl IntoElement {
         .close_on_select(props.close_on_select)
         .on_select(move || {
             if !disabled.get_untracked() {
+                if is_radio && let Some(group) = &radio {
+                    let value = props.radio_value.get_untracked();
+                    if group.value.get_untracked() != value {
+                        (group.choose)(value);
+                    }
+                }
                 cx.emit(ItemRowEvent::Select);
             }
         })
@@ -581,17 +637,20 @@ fn ItemRow(props: ItemRowProps, cx: Scope<ItemRowEvent>) -> impl IntoElement {
                 s
             }
         })
+        .child(when(
+            move || props.variant.get() == Variant::Ghost,
+            || {
+                // buttonVariants' compact before layer; NSH has no CSS pseudo-elements.
+                view()
+                    .accessible(false)
+                    .app_class(tw("pointer-events-none absolute inset-0"))
+                    .rounded(move || px(tokens().number("radius-md").unwrap_or(6.0) - 1.0))
+            },
+        ))
         .child(
             when(
                 move || props.kind.get() == RowKind::Checkbox,
-                move || {
-                    checkbox_content(
-                        props.checkbox_variant,
-                        props.checked,
-                        disabled,
-                        props.children,
-                    )
-                },
+                move || checkbox_content(props.checkbox_variant, checked, disabled, props.children),
             )
             .otherwise(move || {
                 if props.kind.get_untracked() == RowKind::Radio {
@@ -605,7 +664,7 @@ fn ItemRow(props: ItemRowProps, cx: Scope<ItemRowEvent>) -> impl IntoElement {
             }),
         );
     hit_target()
-        .insets(move || row_hit_slop(props.density.get()))
+        .insets(move || row_hit_slop(props.density.get(), props.variant.get()))
         .target(item)
 }
 
@@ -661,17 +720,21 @@ fn row_class(options: ItemOptions, kind: RowKind, checkbox: CheckboxVariant) -> 
             CheckboxVariant::Icon => "grid-cols-[0.625rem_minmax(0,1fr)] pe-4",
             CheckboxVariant::Default => "grid-cols-[1rem_minmax(0,1fr)] pe-4",
         }),
-        // Ghost copies buttonVariants(ghost, compact); selectors and the coarse pseudo-element
-        // become child icon styles and row_hit_slop, and --spacing(2)-1px is 7px.
-        (options.variant == Variant::Ghost).then_some("relative inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-[var(--control-radius)] border font-medium text-base outline-none transition-[box-shadow,scale] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 sm:text-sm h-7 gap-1 rounded-md px-[7px] text-xs border-transparent text-foreground h-auto min-h-7 w-full sm:text-xs active:scale-[0.97] active:bg-accent"),
+        // button.tsx's buttonVariants(ghost, compact): selectors become child icon styles,
+        // the coarse after hit area becomes row_hit_slop, and --spacing(2)-1px is 7px.
+        // Drop its will-change hint; native press feedback owns repaint scheduling. NSH's
+        // arbitrary transition-property replaces the unsupported transition-[...] utility.
+        (options.variant == Variant::Ghost).then_some("relative inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-[var(--control-radius)] border font-medium text-base outline-none [transition-property:box-shadow,scale] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 sm:text-sm h-7 gap-1 rounded-md px-[7px] text-xs border-transparent text-foreground h-auto min-h-7 w-full sm:text-xs active:scale-[0.97] active:bg-accent"),
         (options.density == Density::Touch).then_some("min-h-10 sm:min-h-10"),
     ]);
     tw_with(ThemeScope::Root, &classes, &attrs)
 }
 
-fn row_hit_slop(density: Density) -> EdgeInsets {
+fn row_hit_slop(density: Density, variant: Variant) -> EdgeInsets {
     let height = if density == Density::Touch {
         40.0
+    } else if variant == Variant::Ghost {
+        28.0
     } else if layout_class().is_compact() {
         32.0
     } else {
@@ -701,6 +764,7 @@ pub fn menu_item_icon(which: Icon, variant: Variant) -> impl IntoElement {
         .accessible(false)
 }
 
+/// `options` supplies disabled/close-on-select; its row styling belongs to `menu_item`.
 pub fn menu_checkbox_item(
     label: String,
     checked: impl Fn() -> bool + 'static,
@@ -710,13 +774,18 @@ pub fn menu_checkbox_item(
     on_checked_change: impl Fn(bool) + 'static,
 ) -> impl IntoElement {
     let checked = Prop::bind(checked);
-    row_options(options)
-        .label(label)
-        .kind(RowKind::Checkbox)
-        .checked(move || Some(checked.get()))
-        .checkbox_variant(variant)
-        .on_select(move || on_checked_change(!checked.get_untracked()))
-        .child(children)
+    row_options(ItemOptions {
+        variant: Variant::Default,
+        density: Density::Default,
+        inset: false,
+        ..options
+    })
+    .label(label)
+    .kind(RowKind::Checkbox)
+    .checked(move || Some(checked.get()))
+    .checkbox_variant(variant)
+    .on_select(move || on_checked_change(!checked.get_untracked()))
+    .child(children)
 }
 
 fn checkbox_content(
@@ -787,58 +856,127 @@ fn checkbox_switch(checked: Prop<Option<bool>>, disabled: Prop<bool>) -> impl In
     view().accessible(false)
         .app_class(move || Some(tw(&cn([
             Some("inset-shadow-[0_1px_rgb(0_0_0/4%)] inline-flex shrink-0 items-center rounded-full p-px outline-none"),
-            (!reduce_motion()).then_some("transition-[background-color,box-shadow] duration-200"),
+            (!reduce_motion()).then_some("[transition-property:background-color,box-shadow] duration-200"),
             disabled.get().then_some("opacity-64"),
         ]))))
         .h(move || px(thumb() + 2.0)).w(move || px(thumb() * 2.0 - 2.0))
         .bg(move || if checked.get() == Some(true) { palette().primary } else { palette().input })
-        // NSH has uniform corner radii: retain the round thumb during the TSX's active stretch.
+        // NSH groups transform/shape timings: use the TSX's 150ms translation timing for both,
+        // without its delayed 100ms scale or origin tween; corner radii remain uniform.
         .child(view().app_class(move || Some(tw(&cn([
             Some("pointer-events-none block aspect-square h-full origin-left bg-background shadow-sm/5 group-active:scale-x-110"),
             (checked.get() == Some(true)).then_some("origin-[16px_50%] sm:origin-[12px_50%]"),
-            (!reduce_motion()).then_some("[transition:translate_.15s,border-radius_.15s,scale_.1s_.1s,transform-origin_.15s]"),
+            (!reduce_motion()).then_some("[transition-property:translate,border-radius,scale] duration-150"),
         ]))))
             .rounded(move || px(thumb()))
             .translate_x(move || px(if checked.get() == Some(true) { thumb() - 4.0 } else { 0.0 })))
 }
 
-pub fn menu_radio_group(label: String, children: impl IntoElement) -> impl IntoElement {
-    menu_group(label, children)
+pub fn menu_radio_group(
+    label: String,
+    value: impl Fn() -> String + 'static,
+    children: impl IntoElement,
+    on_value_change: impl Fn(String) + 'static,
+) -> impl IntoElement {
+    radio_group()
+        .label(label)
+        .value(move || SharedString::from(value()))
+        .on_change(move |value: &SharedString| on_value_change(value.to_string()))
+        .child(children)
 }
 
-/// The caller supplies the group's controlled selection; reselecting still emits, as Base UI does.
+#[derive(Clone)]
+struct RadioSelection {
+    value: Prop<SharedString>,
+    choose: Rc<dyn Fn(SharedString)>,
+}
+
+#[derive(Clone, Copy)]
+struct RadioChecked(Prop<Option<bool>>);
+
+#[derive(Clone, PartialEq, Props)]
+struct RadioGroupProps {
+    label: Prop<SharedString>,
+    value: Prop<SharedString>,
+    children: Prop<Children>,
+}
+
+#[derive(Clone, Debug, PartialEq, Event)]
+enum RadioGroupEvent {
+    Change(SharedString),
+}
+
+#[component]
+fn RadioGroup(props: RadioGroupProps, cx: Scope<RadioGroupEvent>) -> impl IntoElement {
+    provide_context(RadioSelection {
+        value: props.value,
+        choose: Rc::new(move |value| cx.emit(RadioGroupEvent::Change(value))),
+    });
+    view()
+        .role(AccessibilityRole::Group)
+        .label(props.label)
+        .child(props.children)
+}
+
+/// Reselecting emits `on_select`, but does not report a changed group value.
+/// `options` supplies disabled/close-on-select; its row styling belongs to `menu_item`.
 pub fn menu_radio_item(
     label: String,
-    checked: impl Fn() -> bool + 'static,
+    value: String,
     options: ItemOptions,
     children: impl IntoElement,
     on_select: impl Fn() + 'static,
 ) -> impl IntoElement {
-    row_options(options)
-        .label(label)
-        .kind(RowKind::Radio)
-        .checked(move || Some(checked()))
-        .on_select(on_select)
-        .child(children)
+    row_options(ItemOptions {
+        variant: Variant::Default,
+        density: Density::Default,
+        inset: false,
+        ..options
+    })
+    .label(label)
+    .kind(RowKind::Radio)
+    .radio_value(value)
+    .on_select(on_select)
+    .child(children)
 }
 
-pub fn menu_radio_item_indicator(checked: impl Fn() -> bool + 'static) -> impl IntoElement {
+pub fn menu_radio_item_indicator() -> impl IntoElement {
+    menu_radio_item_indicator_with(
+        svg(Icon::Check.asset())
+            .app_class(tw("size-3.5"))
+            .accessible(false),
+    )
+}
+
+/// The TSX indicator's optional children slot, replacing its default Check icon.
+pub fn menu_radio_item_indicator_with(children: impl IntoElement) -> impl IntoElement {
+    radio_indicator().child(children)
+}
+
+#[derive(Clone, PartialEq, Props)]
+struct RadioIndicatorProps {
+    children: Prop<Children>,
+}
+
+#[component]
+fn RadioIndicator(props: RadioIndicatorProps) -> impl IntoElement {
+    let checked = use_context::<RadioChecked>();
     // hideIndicator is ignored in the TSX too; callers place this separate indicator explicitly.
     view()
         .accessible(false)
         .app_class(tw("flex shrink-0"))
-        .child(when(checked, || {
-            svg(Icon::Check.asset())
-                .app_class(tw("size-3.5"))
-                .accessible(false)
-        }))
+        .child(when(
+            move || checked.is_some_and(|checked| checked.0.get() == Some(true)),
+            move || props.children,
+        ))
 }
 
 pub fn menu_group_label(label: String, inset: bool) -> impl IntoElement {
+    let attrs: &[(&str, &str)] = if inset { &[("data-inset", "")] } else { &[] };
     text(SharedString::from(label)).app_class(tw_with(
         ThemeScope::Root,
         "px-2 py-1.5 font-medium text-muted-foreground text-xs data-inset:ps-9 sm:data-inset:ps-8",
-        if inset { &[("data-inset", "")] } else { &[] },
+        attrs,
     ))
 }
 
@@ -867,8 +1005,17 @@ pub fn menu_sub(
         .disabled(disabled)
         .offset(px(0.0))
         .trigger(trigger)
-        .back(menu_trigger(t("Back"), || false, text(t("Back"))))
+        .back(submenu_back())
         .child(popup)
+}
+
+fn submenu_back() -> impl IntoElement {
+    // NSH sheets replace cascading popups with a Back row, using the TSX's touch row density.
+    nsh_base::button().accessibility_label(t("Back"))
+        .app_class(tw("flex min-h-10 items-center gap-2 rounded-sm px-2 py-1 text-base text-foreground outline-none sm:text-sm hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
+        .hit_slop(move || row_hit_slop(Density::Touch, Variant::Default))
+        .child(svg(Icon::ArrowLeft.asset()).accessible(false).app_class(tw("size-4.5 sm:size-4 shrink-0 text-muted-foreground")))
+        .child(menu_item_label(t("Back")))
 }
 
 pub fn menu_sub_trigger(
@@ -901,21 +1048,24 @@ fn SubTrigger(props: SubTriggerProps) -> impl IntoElement {
     }
     // NSH's submenu adds press/focus to this slot; no nested button or menu item is created.
     view().element_ref(&node).label(props.label).disabled(props.disabled)
-        .app_class(move || Some(tw_with(ThemeScope::Root,
-            &cn([
-                Some("flex min-h-8 cursor-pointer items-center gap-2 rounded-sm px-2 py-1 text-base text-foreground outline-none data-disabled:cursor-not-allowed data-disabled:pointer-events-none data-inset:ps-8 data-disabled:opacity-64 sm:min-h-7 sm:text-sm"),
-                (props.density.get() == Density::Touch).then_some("min-h-10 sm:min-h-10"),
-            ]),
-            &[
+        .app_class(move || {
+            let attrs = [
                 props.inset.get().then_some(("data-inset", "")),
                 props.disabled.get().then_some(("data-disabled", "")),
-            ].into_iter().flatten().collect::<Vec<_>>())))
+            ].into_iter().flatten().collect::<Vec<_>>();
+            Some(tw_with(ThemeScope::Root,
+                &cn([
+                    Some("flex min-h-8 cursor-pointer items-center gap-2 rounded-sm px-2 py-1 text-base text-foreground outline-none data-disabled:cursor-not-allowed data-disabled:pointer-events-none data-inset:ps-8 data-disabled:opacity-64 sm:min-h-7 sm:text-sm"),
+                    (props.density.get() == Density::Touch).then_some("min-h-10 sm:min-h-10"),
+                ]),
+                &attrs))
+        })
         .hover(|s| s.bg(move || palette().accent).text_color(move || palette().accent_foreground))
         .focus(|s| s.bg(move || palette().accent).text_color(move || palette().accent_foreground))
         // NSH exposes Base UI's data-popup-open state as accessibilityState.expanded.
         .expanded(|s| s.bg(move || palette().accent).text_color(move || palette().accent_foreground))
         .focus_visible(|s| s.ring(px(2.0)).ring_inset().ring_color(move || palette().ring))
-        .hit_slop(move || row_hit_slop(props.density.get()))
+        .hit_slop(move || row_hit_slop(props.density.get(), Variant::Default))
         .child(props.children)
         .child(svg(Icon::ChevronRight.asset()).app_class(tw("-me-0.5 ms-auto opacity-80 size-4.5 sm:size-4 pointer-events-none shrink-0 text-muted-foreground")).accessible(false))
 }

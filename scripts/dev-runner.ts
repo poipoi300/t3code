@@ -689,6 +689,7 @@ interface DevRunnerCliInput {
   readonly share: boolean;
   readonly seed?: boolean | undefined;
   readonly built: boolean;
+  readonly serverWatch?: boolean | undefined;
   readonly memoryLimitGb?: number | undefined;
   readonly runArgs: ReadonlyArray<string>;
 }
@@ -870,7 +871,11 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
     env,
   });
 
-  const args = [...(built ? BUILT_DEV_ARGS : MODE_ARGS[input.mode]), ...input.runArgs];
+  const modeArgs =
+    input.mode === "dev:server" && input.serverWatch === false
+      ? ["exec", "node", "apps/server/src/bin.ts"]
+      : MODE_ARGS[input.mode];
+  const args = [...(built ? BUILT_DEV_ARGS : modeArgs), ...input.runArgs];
   const spawnCommand = yield* resolveSpawnCommand("vp", args, { env });
   const processContext = {
     mode: input.mode,
@@ -995,6 +1000,10 @@ const devRunnerCli = Command.make("dev-runner", {
       "With --share: serve a production web build from the backend instead of the Vite dev server. Rebuilds on change, no HMR, much smaller remote loads.",
     ),
     Flag.withDefault(false),
+  ),
+  serverWatch: Flag.Boolean("server-watch").pipe(
+    Flag.withDescription("Restart the backend on file changes in dev:server mode."),
+    Flag.withDefault(true),
   ),
   memoryLimitGb: Flag.Int("memory-limit-gb").pipe(
     Flag.withSchema(NonNegativeInt),

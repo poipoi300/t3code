@@ -14,6 +14,7 @@
 //! Coarse-pointer opens focus the popup to avoid the software keyboard. Automatic action focus
 //! needs the frozen button primitive to accept an ElementRef; until then NSH chooses the first
 //! enabled control. Custom rendered actions can use `state.register_action(ref, disabled)`.
+//! Custom rendered controls use `state.register_control(ref, disabled)` for fallback focus.
 //! Modal focus trapping and restoration belong to NSH. Custom alert content
 //! uses `nsh_base::dialog().role(AlertDialog)`: NSH's `alert_dialog()` is a system alert with no
 //! element slots and cannot transcribe the web tree. Portals are NSH modal layers; arbitrary DOM
@@ -21,8 +22,8 @@
 
 use std::rc::Rc;
 
-use nsh_core::animation::{Easing, KeyframeTiming, MotionChannel, MotionSpec};
-use nsh_core::element::{IntoChild, desktop::title_bar};
+use nsh_core::animation::{Easing, MotionChannel};
+use nsh_core::element::{IntoChild, Timing, desktop::title_bar};
 use nsh_core::prelude::*;
 
 use super::button::{ButtonContent, ButtonSize, ButtonVariant, button};
@@ -134,6 +135,7 @@ pub struct DialogState {
     nested: Signal<usize>,
     ancestors: Stored<Ancestors>,
     actions: Stored<Vec<FocusAction>>,
+    controls: Stored<Vec<FocusAction>>,
 }
 
 impl DialogState {
@@ -150,6 +152,7 @@ impl DialogState {
             nested: signal(0),
             ancestors: stored(use_context::<Ancestors>().unwrap_or_default()),
             actions: stored(Vec::new()),
+            controls: stored(Vec::new()),
         }
     }
 
@@ -167,6 +170,16 @@ impl DialogState {
     pub fn register_action(self, target: ElementRef, disabled: impl Fn() -> bool + 'static) {
         self.actions.with(|actions| {
             actions.push(FocusAction {
+                target,
+                disabled: Rc::new(disabled),
+            })
+        });
+    }
+
+    /// Registers a custom control in tree order for Base UI's first-control fallback.
+    pub fn register_control(self, target: ElementRef, disabled: impl Fn() -> bool + 'static) {
+        self.controls.with(|controls| {
+            controls.push(FocusAction {
                 target,
                 disabled: Rc::new(disabled),
             })
@@ -242,27 +255,31 @@ pub fn dialog_action(
 pub use dialog_action as alert_dialog_action;
 pub use dialog_close as alert_dialog_close;
 
-fn transition(open: bool, offset: f32, backdrop: bool) -> MotionSpec {
-    let (from, to) = if open { (0.0, 1.0) } else { (1.0, 0.0) };
-    let spec = MotionSpec::new(KeyframeTiming::new(200.0).easing(Easing::EaseInOut))
-        .values(MotionChannel::Opacity, [from, to]);
-    if backdrop {
-        spec
-    } else {
-        let spec = spec.values(MotionChannel::Scale, [0.98 + 0.02 * from, 0.98 + 0.02 * to]);
-        if offset != 0.0 {
-            spec.values(
-                MotionChannel::TranslateY,
-                [offset * (1.0 - from), offset * (1.0 - to)],
-            )
-        } else {
-            spec
-        }
+fn transition(motion: Motion, open: bool, offset: f32, backdrop: bool) -> Animation {
+    let timing = Timing::new(if reduce_motion() { 0.0 } else { 200.0 }, Easing::EaseInOut);
+    let mut tracks = vec![Animation::timing(
+        &motion.value(MotionChannel::Opacity),
+        if open { 1.0 } else { 0.0 },
+        timing,
+    )];
+    if !backdrop {
+        tracks.push(Animation::timing(
+            &motion.value(MotionChannel::Scale),
+            if open { 1.0 } else { 0.98 },
+            timing,
+        ));
+        tracks.push(Animation::timing(
+            &motion.value(MotionChannel::TranslateY),
+            if open { 0.0 } else { offset },
+            timing,
+        ));
     }
+    // CSS transitions reverse from their current value when an exit is interrupted.
+    Animation::parallel(tracks)
 }
 
-/// Retains the mounted tree through the exit animation, as RetainedWhileClosed does in TSX.
-fn render_retained_popup<M: 'static, E: IntoChild<M> + 'static>(
+/// RetainedWhileClosed: NSH must retain the modal layer itself through its exit animation.
+fn retained_while_closed<M: 'static, E: IntoChild<M> + 'static>(
     state: DialogState,
     options: PopupOptions,
     children: impl Fn() -> E + 'static,
@@ -275,11 +292,16 @@ fn render_retained_popup<M: 'static, E: IntoChild<M> + 'static>(
     effect(move || {
         let nested = state.nested.get();
         let sheet = options.bottom_stick_on_mobile && layout_class().is_compact();
-        nested_opacity.set(if sheet {
+        let target = if sheet {
             if nested == 0 { 1.0 } else { 0.0 }
         } else {
             1.0 - 0.1 * nested as f32
-        });
+        };
+        drop(nested_opacity.timing(
+            target,
+            if reduce_motion() { 0.0 } else { 200.0 },
+            Easing::EaseInOut,
+        ));
     });
     effect(move || {
         let open = state.open.get();
@@ -297,14 +319,15 @@ fn render_retained_popup<M: 'static, E: IntoChild<M> + 'static>(
             if !mounted.get_untracked() {
                 popup_motion.value(MotionChannel::Opacity).set(0.0);
                 popup_motion.value(MotionChannel::Scale).set(0.98);
+                popup_motion.value(MotionChannel::TranslateY).set(offset);
                 backdrop_motion.value(MotionChannel::Opacity).set(0.0);
                 mounted.set(true);
             }
-            let _ = popup_motion.play(transition(true, offset, false));
-            let _ = backdrop_motion.play(transition(true, offset, true));
+            drop(transition(popup_motion, true, offset, false).start());
+            drop(transition(backdrop_motion, true, offset, true).start());
         } else if mounted.get_untracked() {
-            let ended = popup_motion.play(transition(false, offset, false));
-            let _ = backdrop_motion.play(transition(false, offset, true));
+            let ended = transition(popup_motion, false, offset, false).start();
+            drop(transition(backdrop_motion, false, offset, true).start());
             spawn(async move {
                 let _ = ended.await;
                 if generation.get() == current && !state.open.get_untracked() {
@@ -321,6 +344,7 @@ fn render_retained_popup<M: 'static, E: IntoChild<M> + 'static>(
             state.title.set(None);
             state.description.set(None);
             state.actions.with(Vec::clear);
+            state.controls.with(Vec::clear);
             let mut ancestors = state.ancestors.get();
             for count in &ancestors.0 {
                 count.update(|n| *n += 1);
@@ -378,7 +402,7 @@ pub fn dialog_popup<M: 'static, E: IntoChild<M> + 'static>(
     options: PopupOptions,
     children: impl Fn() -> E + 'static,
 ) -> impl IntoElement {
-    render_retained_popup(state, options, children)
+    retained_while_closed(state, options, children)
 }
 
 /// Port of alert-dialog.tsx AlertDialogPopup.
@@ -432,6 +456,13 @@ pub fn dialog_portal(
                     .iter()
                     .find(|action| action.target.node().is_some() && !(action.disabled)())
                     .map(|action| action.target)
+            }) {
+                target.focus();
+            } else if let Some(target) = state.controls.with(|controls| {
+                controls
+                    .iter()
+                    .find(|control| control.target.node().is_some() && !(control.disabled)())
+                    .map(|control| control.target)
             }) {
                 target.focus();
             }
@@ -520,22 +551,37 @@ fn popup_surface(
     view()
         .test_id(if state.alert { "alert-dialog-popup" } else { "dialog-popup" })
         .element_ref(&popup_ref)
-        .focusable(true)
+        .focusable(move || state.touch.get() || pointer() == Pointer::Coarse)
         .disabled(move || !state.open.get())
         .pointer_events(move || if state.open.get() { nsh_core::PointerEvents::Auto } else { nsh_core::PointerEvents::None })
         .app_class(move || {
             let sheet = options.bottom_stick_on_mobile && layout_class().is_compact();
             let classes = cn([
-                Some("relative flex min-h-0 w-full min-w-0 flex-col outline-none transition-[scale,opacity,translate] duration-200 ease-in-out row-start-2 text-popover-foreground"),
+                Some("relative flex min-h-0 w-full min-w-0 flex-col outline-none duration-200 ease-in-out row-start-2 text-popover-foreground"),
                 (options.variant == Variant::Default).then_some("rounded-2xl border max-h-full max-w-lg"),
                 // index.css @utility dialog-glass; NSH has no backdrop-filter support query.
                 (options.variant == Variant::Default).then_some("bg-background/80 backdrop-blur-[12px] dark:backdrop-blur-[16px] backdrop-saturate-[1.14] dark:backdrop-saturate-[1.08] border-contrast-foreground/10 dark:border-white/8 shadow-[0_24px_64px_-24px_rgb(0_0_0/65%)] dark:shadow-[inset_0_1px_rgb(255_255_255/4%),0_24px_72px_-20px_rgb(0_0_0/90%)]"),
-                (options.variant == Variant::Media).then_some("max-h-[92vh] w-auto max-w-[92vw] overflow-visible rounded-none border border-transparent bg-transparent p-0 shadow-none"),
+                (options.variant == Variant::Media).then_some("w-auto overflow-visible rounded-none border border-transparent bg-transparent p-0 shadow-none"),
                 sheet.then_some("max-w-none rounded-none border-x-0 border-t border-b-0"),
                 (state.nested.get() > 0).then_some("origin-top"),
             ]);
             Some(tw(&classes))
         })
+        // NSH cannot parse transition-[scale,opacity,translate]; its transform flag covers both.
+        .inline_style(nsh_core::element::Style::default().with(
+            nsh_core::StyleKey::TransitionProperty,
+            nsh_core::PropertyValue::TransitionProps(nsh_core::TransitionProps(
+                nsh_core::TransitionProps::TRANSFORM | nsh_core::TransitionProps::OPACITY,
+            )),
+        ))
+        // max-h-[92vh] / max-w-[92vw] use the same reactive viewport lengths on every target.
+        .when(options.variant == Variant::Media, |v| v
+            .max_h(move || px(window().height.0 * 0.92))
+            .max_w(move || if options.bottom_stick_on_mobile && layout_class().is_compact() {
+                auto()
+            } else {
+                px(window().width.0 * 0.92).into()
+            }))
         .translate_y(move || px(-20.0 * state.nested.get() as f32))
         .scale(move || 1.0 - 0.1 * state.nested.get() as f32)
 }
@@ -598,13 +644,26 @@ fn footer<M>(
     cleanup(move || {
         let _ = state.bare_footer.try_set(false);
     });
-    view().test_id(if alert { "alert-dialog-footer" } else { "dialog-footer" })
+    view()
+        .test_id(if alert {
+            "alert-dialog-footer"
+        } else {
+            "dialog-footer"
+        })
         .app_class(tw(&cn([
-            Some("flex flex-col-reverse gap-2 px-6 sm:flex-row sm:justify-end sm:rounded-b-[calc(var(--radius-2xl)-1px)]"),
+            Some("flex flex-col-reverse gap-2 px-6 sm:flex-row sm:justify-end"),
             (variant == FooterVariant::Default).then_some("border-t bg-muted/72 py-4"),
             (variant == FooterVariant::Bare && alert).then_some("pb-6"),
             (variant == FooterVariant::Bare && !alert).then_some("py-4"),
         ])))
+        // sm:rounded-b-[calc(var(--radius-2xl)-1px)] is a token length minus one point.
+        .rounded_b(move || {
+            px(if layout_class().is_compact() {
+                0.0
+            } else {
+                (tokens().number("radius-2xl").unwrap_or(16.0) - 1.0).max(0.0)
+            })
+        })
         .child(children)
 }
 
@@ -669,7 +728,11 @@ pub fn alert_dialog_description(
     // overflow-y-auto becomes scroll; wrap-anywhere and overscroll-contain drop per the port table.
     scroll()
         .test_id("alert-dialog-description")
-        .app_class(tw("max-h-[min(24rem,60dvh)] min-h-0"))
+        .app_class(tw("min-h-0"))
+        // max-h-[min(24rem,60dvh)] is the lesser of 24 rem and 60% of the viewport.
+        .max_h(move || {
+            px((24.0 * tokens().number("text-base").unwrap_or(16.0)).min(window().height.0 * 0.6))
+        })
         .child(
             description_text(state, source)
                 .select_text()

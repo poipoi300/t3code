@@ -9,6 +9,8 @@
 //! thread scope, leading-icon/expandable slots, secondary actions and inline/stacked-end layout.
 //! Strings are English source keys and are translated when displayed. Slots build fresh elements.
 //! Optional title/description slots replace their text; keep the text fields for announcements.
+//! `ToastUpdate` preserves omitted fields; `Some(None)` clears an optional field. Passing full
+//! `ToastOptions` to `update` replaces all options, including cleared actions.
 //! `toasts`/`anchored_toasts` also accept an active-thread selector, for resolved draft routes.
 //! An anchored toast needs a live `ElementRef`; copy helpers silently ignore a missing anchor.
 
@@ -129,6 +131,8 @@ pub struct ToastOptions {
     pub action: Option<Action>,
     pub data: ThreadToastData,
     pub anchor: Option<ElementRef>,
+    pub side: Placement,
+    pub align: Align,
     pub side_offset: f32,
 }
 
@@ -145,8 +149,70 @@ impl Default for ToastOptions {
             action: None,
             data: ThreadToastData::default(),
             anchor: None,
+            side: Placement::Bottom,
+            align: Align::Center,
             side_offset: 4.0,
         }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct ToastUpdate {
+    pub variant: Option<Variant>,
+    pub title: Option<String>,
+    pub description: Option<Option<String>>,
+    pub title_content: Option<Option<Slot>>,
+    pub description_content: Option<Option<Slot>>,
+    pub timeout: Option<Option<Duration>>,
+    pub priority: Option<Priority>,
+    pub action: Option<Option<Action>>,
+    pub data: Option<ThreadToastData>,
+    pub anchor: Option<Option<ElementRef>>,
+    pub side: Option<Placement>,
+    pub align: Option<Align>,
+    pub side_offset: Option<f32>,
+}
+
+impl From<ToastOptions> for ToastUpdate {
+    fn from(options: ToastOptions) -> Self {
+        Self {
+            variant: Some(options.variant),
+            title: Some(options.title),
+            description: Some(options.description),
+            title_content: Some(options.title_content),
+            description_content: Some(options.description_content),
+            timeout: Some(options.timeout),
+            priority: Some(options.priority),
+            action: Some(options.action),
+            data: Some(options.data),
+            anchor: Some(options.anchor),
+            side: Some(options.side),
+            align: Some(options.align),
+            side_offset: Some(options.side_offset),
+        }
+    }
+}
+
+impl ToastUpdate {
+    fn apply(self, previous: &ToastOptions) -> ToastOptions {
+        let mut next = previous.clone();
+        macro_rules! apply { ($($field:ident),*) => { $(if let Some(value) = self.$field { next.$field = value; })* }; }
+        apply!(
+            variant,
+            title,
+            description,
+            title_content,
+            description_content,
+            timeout,
+            priority,
+            action,
+            data,
+            anchor,
+            side,
+            align,
+            side_offset
+        );
+        next
     }
 }
 
@@ -197,13 +263,22 @@ impl ToastManager {
         id
     }
 
-    /// Replaces all options, including cleared actions, without changing the toast's order.
-    pub fn update(&self, id: ToastId, options: ToastOptions) -> bool {
+    /// Updates without changing the toast's identity or order; explicit timeouts restart the budget.
+    pub fn update(&self, id: ToastId, update: impl Into<ToastUpdate>) -> bool {
         let mut state = self.0.borrow_mut();
         let Some(current) = state.entries.iter_mut().find(|entry| entry.id == id) else {
             return false;
         };
-        *current = entry(id, options);
+        let update = update.into();
+        let restart_timeout = update.timeout.is_some()
+            || update.data.as_ref().is_some_and(|data| {
+                data.dismiss_after_visible != current.options.data.dismiss_after_visible
+            });
+        let mut next = entry(id, update.apply(&current.options));
+        if !restart_timeout {
+            next.remaining = current.remaining.clone();
+        }
+        *current = next;
         state.notify();
         true
     }
@@ -422,6 +497,8 @@ fn fragment(children: Vec<AnyElement>) -> AnyElement {
 fn subscribe(manager: &ToastManager) -> Signal<Vec<Entry>> {
     let (initial, mut updates) = manager.subscribe();
     let entries = signal(initial);
+    // Timers started by the subscription task still belong to the host's reactive lifetime.
+    let owner = Owner::current();
     spawn(async move {
         while let Some(mut next) = updates.next().await {
             for (index, old) in entries.get_untracked().into_iter().enumerate() {
@@ -434,12 +511,14 @@ fn subscribe(manager: &ToastManager) -> Signal<Vec<Entry>> {
                 if !old.ending {
                     let delay = if reduce_motion() {
                         Duration::ZERO
+                    } else if old.options.anchor.is_some() {
+                        Duration::from_millis(150)
                     } else {
                         Duration::from_millis(500)
                     };
-                    set_timeout(delay, move || {
+                    owner.run(|| set_timeout(delay, move || {
                         entries.update(|shown| shown.retain(|entry| entry.id != old.id))
-                    });
+                    }));
                 }
             }
             entries.set(next);
@@ -464,6 +543,7 @@ pub fn toasts(
             .collect::<Vec<_>>()
     });
     let stack = ToastStackState::new();
+    // NSH exposes pointer/touch expansion only; focus pauses timers but cannot drive its stack geometry.
     let focused = signal(false);
     let focus = element_ref();
     focus.on_focus_in(move || focused.set(true));
@@ -494,7 +574,9 @@ pub fn toasts(
                     if is_top(position) {
                         Length::from(px(inset()
                             + safe_area().top.0
-                            + tokens().number("workspace-topbar-height").unwrap_or(32.0)))
+                            + tokens()
+                                .number("workspace-topbar-height")
+                                .unwrap_or(crate::theme::metrics().topbar)))
                     } else {
                         auto()
                     }
@@ -583,13 +665,19 @@ pub fn anchored_toasts(
             let hovered = signal(false);
             let focused = signal(false);
             let focus = element_ref();
+            let available_width = signal(window().width.0);
             focus.on_focus_in(move || focused.set(true));
             focus.on_focus_out(move || focused.set(false));
             overlay()
                 .anchor(&anchor)
-                .placement(Placement::Bottom)
+                .placement(move || item.get().options.side)
+                .align(move || item.get().options.align)
                 .offset(move || px(item.get().options.side_offset))
                 .app_class(tw("z-100 max-w-64"))
+                .max_w(move || px(available_width.get().clamp(0.0, 256.0)))
+                .on_position(move |position: &OverlayPosition| {
+                    available_width.set(position.available.width.0)
+                })
                 .element_ref(&focus)
                 .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
                 .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
@@ -609,6 +697,7 @@ fn thread_toast_visible_auto_dismiss(
     manager: ToastManager,
     paused: impl Fn() -> bool + 'static,
 ) {
+    // The package contract pauses the web's page-visible override on toast hover and control focus too.
     effect(move || {
         let entry = item.get();
         let paused = paused() || lifecycle() != Lifecycle::Active || entry.ending;
@@ -644,6 +733,8 @@ fn toast_root(
     let dismiss = manager.clone();
     let tooltip = move || item.get().options.data.tooltip_style && position.is_none();
     let hidden = Rc::new(hidden);
+    let swiped = signal(false);
+    let measured = signal(size(px(0.0), px(0.0)));
     let body_state = BodyState {
         description_open: signal(false),
         section_open: signal(false),
@@ -661,21 +752,23 @@ fn toast_root(
     nsh_base::toast()
         .pointer_events(move || if item.get().ending { nsh_core::PointerEvents::None } else { nsh_core::PointerEvents::Auto })
         .transition_status(move || if item.get().ending { nsh_base::ToastTransitionStatus::Ending } else { nsh_base::ToastTransitionStatus::Starting })
-        .starting_class(move || Some(tw(if reduce_motion() { "opacity-0" } else { "opacity-0 scale-98" })))
-        .ending_class(move || Some(tw(if reduce_motion() { "opacity-0" } else { "opacity-0 scale-98" })))
+        .starting_class(move || toast_motion_class(position, false, measured.get()))
+        // NSH owns the released swipe's translation; only fade that path instead of replacing its movement.
+        .ending_class(move || if swiped.get() { Some(tw("opacity-0")) } else { toast_motion_class(position, true, measured.get()) })
+        .on_layout(move |frame: &Bounds<Points>| measured.set(frame.size))
         .swipe_direction(position.map(Position::swipe))
         .accessibility_label(move || Some(SharedString::from(announcement(&item.get().options))))
-        .on_dismiss_request(move || { dismiss.close(item.get_untracked().id); })
+        .on_dismiss_request(move || { swiped.set(true); dismiss.close(item.get_untracked().id); })
         // index.css @utility dropdown-glass: color-mix with transparent reduces to alpha.
         .app_class(move || tw(&cn([
             Some("relative overflow-visible text-popover-foreground shadow-xl shadow-black/25 border border-contrast-foreground/10"),
-            (!reduce_motion()).then_some("transition-[scale,opacity] duration-500"),
+            (!reduce_motion()).then_some(if position.is_some() { "transition-[transform,opacity,height] duration-500" } else { "transition-[scale,opacity] duration-150" }),
             Some(if tooltip() { "rounded-md text-xs" } else { "rounded-lg" }),
         ])))
         // The frozen theme seam omits numeric/percentage tokens; stock index.css values until it exports them.
         .bg(move || palette().popover.opacity(0.18 + 0.82 * tokens().number("glass-opacity").unwrap_or(80.0) / 100.0))
         .style_with(move |style| style
-            .backdrop_blur(px(tokens().number("glass-blur").unwrap_or(12.0)))
+            .backdrop_blur(px(if dark() { 16.0 } else { tokens().number("glass-blur").unwrap_or(12.0) }))
             .backdrop_saturate(tokens().number("glass-saturation").unwrap_or(if dark() { 1.08 } else { 1.14 })))
         .child(dynamic(move || {
             let entry = item.get();
@@ -685,30 +778,31 @@ fn toast_root(
             untracked(|| {
                 if tooltip() {
                     let title = entry.options.title.clone();
-                    view().app_class(tw("pointer-events-auto px-2 py-1"))
-                        .child(entry.options.title_content.as_ref().map(|slot| slot()).unwrap_or_else(|| text(move || SharedString::from(t(&title))).test_id("toast-title").into_element())).into_element()
+                    vec![view().app_class(tw("pointer-events-auto px-2 py-1"))
+                        .child(entry.options.title_content.as_ref().map(|slot| slot()).unwrap_or_else(|| text(move || SharedString::from(t(&title))).test_id("toast-title").into_element())).into_element()]
                 } else {
                     let id = entry.id;
                     let options = entry.options.clone();
                     let descriptor = derive_toast_body_descriptor(&options);
                     let close = manager.clone();
-                    view().child(
-                        view().app_class(tw("absolute z-20 -top-1.5 -right-1.5")).child(
+                    let dismiss_control = view().app_class(tw("absolute z-20 -top-1.5 -right-1.5")).child(
                             nsh_base::button().accessibility_label(Some(SharedString::from(t("Dismiss notification"))))
                                 .test_id("toast-close")
                                 .app_class(tw("inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-full border border-border/60 bg-popover/92 text-muted-foreground shadow-sm outline-none backdrop-blur-sm transition-[color,background-color,box-shadow] hover:bg-popover hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"))
                                 .on_press(move || close.dismiss(id))
-                                .child(icon(Icon::X, 12.0, || palette().muted_foreground))
-                        )
-                    ).child(view().app_class(tw(&cn([
+                                // The shared icon API has no stroke-width prop; the source's close glyph is 2.25.
+                                .child(svg(nsh_core::element::ImageSrc::svg_markup(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>"#))
+                                    .w(px(12.0)).h(px(12.0)).accessible(false).text_color(|| palette().muted_foreground))
+                        );
+                    let content = view().app_class(tw(&cn([
                         // [overflow-x:clip] has no NSH equivalent; preserve visible detail panels.
                         Some("pointer-events-auto min-h-0 overflow-y-visible pl-3.5 text-sm"),
                         Some(if descriptor.stacked { "flex flex-col gap-2 py-2.5 pr-3.5" } else if descriptor.trailing { "py-3 flex items-center justify-between gap-1.5 pr-6" } else { "py-3 flex items-center justify-between gap-1.5 pr-3.5" }),
                     ])))
                         .opacity(move || if hidden() { 0.0_f32 } else { 1.0 })
                         .pointer_events(move || if inert() { nsh_core::PointerEvents::None } else { nsh_core::PointerEvents::Auto })
-                        .child(toast_body_content(options, descriptor, manager, id, body_state)))
-                    .into_element()
+                        .child(toast_body_content(options, descriptor, manager, id, body_state));
+                    vec![dismiss_control.into_element(), content.into_element()]
                 }
             })
         }))
@@ -716,6 +810,37 @@ fn toast_root(
         .child(position.map(|position| view().app_class(tw(if is_top(position) {
             "absolute left-0 h-[13px] w-full top-full"
         } else { "absolute left-0 h-[13px] w-full bottom-full" }))))
+}
+
+fn toast_motion_class(
+    position: Option<Position>,
+    ending: bool,
+    measured: Size<Points>,
+) -> Option<SharedString> {
+    if reduce_motion() {
+        return ending.then(|| tw("opacity-0"));
+    }
+    let Some(position) = position else {
+        return Some(tw("scale-98 opacity-0"));
+    };
+    let horizontal = position == Position::TopRight;
+    // NSH's translation length is points or percent, so resolve the web's percent-plus-inset at the measured size.
+    let distance = if horizontal {
+        measured.width.0
+    } else {
+        measured.height.0
+    } + inset();
+    let distance = if !horizontal && is_top(position) && !ending {
+        -distance
+    } else {
+        distance
+    };
+    let axis = if horizontal { "x" } else { "y" };
+    let classes = format!(
+        "translate-{axis}-[{distance}px]{}",
+        if ending { " opacity-0" } else { "" }
+    );
+    Some(tw(&classes))
 }
 
 fn announcement(options: &ToastOptions) -> String {
@@ -929,13 +1054,27 @@ fn toast_action(
 fn copy_error_button(source: String) -> impl IntoElement {
     // ButtonSize lacks icon-micro; the source's fixed equivalent is a 20px target and 12px glyph.
     // NSH's clipboard write is fire-and-forget: do not claim success without an acknowledgement.
-    nsh_base::button().accessibility_label(Some(SharedString::from(t("Copy error"))))
+    let control = nsh_base::button().accessibility_label(Some(SharedString::from(t("Copy error"))))
         .app_class(tw("inline-flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground/80 hover:bg-transparent hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
         .hit_slop(move || EdgeInsets::all(px(((crate::theme::metrics().hit_target - 20.0) / 2.0).max(0.0))))
         .on_press(move || {
             if !source.is_empty() { set_clipboard(source.clone()); }
         })
-        .child(icon(Icon::Copy, 12.0, || palette().muted_foreground))
+        .child(icon(Icon::Copy, 12.0, || palette().muted_foreground));
+    toast_tooltip(control, || t("Copy error"))
+}
+
+fn toast_tooltip(
+    control: impl IntoElement,
+    label: impl Fn() -> String + 'static,
+) -> impl IntoElement {
+    let popup = super::tooltip::tooltip(
+        super::tooltip::tooltip_create_handle(),
+        Default::default(),
+        text(move || SharedString::from(label())),
+    );
+    // NSH attaches a tooltip to a view; its button component does not expose that attachment.
+    view().tooltip(popup).child(control)
 }
 
 fn error_description_clamped(options: &ToastOptions) -> bool {
@@ -983,14 +1122,15 @@ fn toast_description_and_expandable(
     }
     let open = state.description_open;
     let labels = options.clone();
+    let tooltip_labels = options.clone();
     let content = options.data.expandable_content.clone();
     fragment(vec![
-        nsh_base::button()
+        toast_tooltip(nsh_base::button()
             .accessibility_label(move || Some(SharedString::from(expand_label(&labels, open.get()))))
             .app_class(tw("group flex min-w-0 w-full cursor-pointer select-none items-start gap-1.5 rounded-sm text-left outline-none ring-offset-background transition-colors hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"))
             .on_press(move || open.update(|value| *value = !*value))
             .child(view().app_class(tw("min-w-0 flex-1")).child(description(&options)))
-            .child(expand_chevron(open)).into_element(),
+            .child(expand_chevron(open, true)), move || expand_label(&tooltip_labels, open.get())).into_element(),
         dynamic(move || open.get().then(|| expandable_panel(content.as_ref()).into_element()))
     ])
 }
@@ -1011,10 +1151,11 @@ fn expand_label(options: &ToastOptions, open: bool) -> String {
     })
 }
 
-fn expand_chevron(open: Signal<bool>) -> impl IntoElement {
+fn expand_chevron(open: Signal<bool>, full_line: bool) -> impl IntoElement {
     // ChevronUp is absent from UI-ICONS; rotate the matching down chevron.
     view()
-        .app_class(tw("size-3.5 shrink-0 opacity-80"))
+        // h-lh on the description trigger is the content's 20px text-sm line height.
+        .app_class(tw(&cn([Some("w-3.5 shrink-0 opacity-80"), Some(if full_line { "h-5" } else { "h-3.5" })])))
         .rotate(move || {
             radians(if open.get() {
                 std::f32::consts::PI
@@ -1022,7 +1163,8 @@ fn expand_chevron(open: Signal<bool>) -> impl IntoElement {
                 0.0
             })
         })
-        .child(icon(Icon::ChevronDown, 14.0, || palette().muted_foreground))
+        .child(svg(nsh_core::element::ImageSrc::svg_markup(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#))
+            .w(px(14.0)).h(px(if full_line { 20.0 } else { 14.0 })).accessible(false).text_color(|| palette().muted_foreground))
 }
 
 fn toast_expandable_section(options: Rc<ToastOptions>, open: Signal<bool>) -> impl IntoElement {
@@ -1033,7 +1175,7 @@ fn toast_expandable_section(options: Rc<ToastOptions>, open: Signal<bool>) -> im
             .accessibility_label(move || Some(SharedString::from(expand_label(&labels, open.get()))))
             .app_class(tw("inline-flex cursor-pointer items-center gap-1 rounded-md py-0.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
             .on_press(move || open.update(|value| *value = !*value))
-            .child(expand_chevron(open))
+            .child(expand_chevron(open, false))
             .child(text(move || SharedString::from(expand_label(&options, open.get())))))
         .child(dynamic(move || open.get().then(|| expandable_panel(content.as_ref()).into_element())))
 }
@@ -1175,6 +1317,31 @@ mod tests {
             id,
             ToastOptions {
                 title: "Updated before mount".into(),
+                description: Some("Keep these details".into()),
+                timeout: None,
+                data: ThreadToastData {
+                    thread_ref: Some(key("a", "t")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        ));
+        assert!(manager.update(
+            id,
+            ToastUpdate {
+                action: Some(Some(Action {
+                    label: "Retry".into(),
+                    disabled: false,
+                    on_press: Rc::new(|| {})
+                })),
+                ..Default::default()
+            }
+        ));
+        assert!(manager.subscribe().0[0].options.action.is_some());
+        assert!(manager.update(
+            id,
+            ToastUpdate {
+                action: Some(None),
                 ..Default::default()
             }
         ));
@@ -1182,6 +1349,13 @@ mod tests {
         assert_eq!(initial.len(), 1);
         assert_eq!(initial[0].id, id);
         assert_eq!(initial[0].options.title, "Updated before mount");
+        assert_eq!(
+            initial[0].options.description.as_deref(),
+            Some("Keep these details")
+        );
+        assert_eq!(initial[0].options.timeout, None);
+        assert_eq!(initial[0].options.data.thread_ref, Some(key("a", "t")));
+        assert!(initial[0].options.action.is_none());
         let second = manager.add(ToastOptions::default());
         assert_eq!(
             futures::executor::block_on(updates.next())

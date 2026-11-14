@@ -33,10 +33,14 @@ const resolved = await Effect.gen(function* () {
     startApp: path.join(scripts, "scenarios/start-app.ts"),
     // e2e gives the app only PATH, HOME and the temp directory. A scenario that needs more names
     // it here: exact names or prefixes ending in `*`, separated by commas.
-    inheritEnv: (env.T3_SCENARIO_INHERIT_ENV ?? "")
-      .split(",")
-      .map((name) => name.trim())
-      .filter((name) => name !== ""),
+    inheritEnv: [
+      // vp needs PATHEXT to resolve bare executable names on Windows.
+      ...((yield* HostProcess.Platform) === "win32" ? ["PATHEXT"] : []),
+      ...(env.T3_SCENARIO_INHERIT_ENV ?? "")
+        .split(",")
+        .map((name) => name.trim())
+        .filter((name) => name !== ""),
+    ],
     mobile: {
       host: host || "127.0.0.1",
       // A mobile target has no `app.url`, so e2e cannot pick these ports.

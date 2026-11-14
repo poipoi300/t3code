@@ -31,6 +31,23 @@ fn raw() -> Value {
     json!({"id":7,"title":"Add page","description":"Body","state":"MERGED","source":{"branch":{"name":"feature"},"commit":{"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"repository":{"full_name":"fork/web"}},"destination":{"branch":{"name":"main"},"repository":{"full_name":"acme/web"}},"author":{"nickname":"author","display_name":"Author"},"created_on":"2026-07-01T00:00:00+00:00","updated_on":"2026-07-02T00:00:00.123456+00:00","closed_on":"2026-07-02T00:00:00+00:00","reviewers":[{"uuid":"{hidden}"},{"uuid":"{shown}","nickname":"reviewer"}],"links":{"html":{"href":"https://bitbucket.org/acme/web/pull-requests/7"}}})
 }
 #[tokio::test]
+async fn checkout_without_state_includes_merged_and_closed_requests() {
+    let (base, task) = server(1, |r| {
+        let url = url::Url::parse(&format!("http://fixture{}", r.path)).unwrap();
+        let states = url
+            .query_pairs()
+            .filter(|(k, _)| k == "state")
+            .map(|(_, v)| v.into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(states, ["OPEN", "MERGED", "DECLINED", "SUPERSEDED"]);
+        answer(json!({"values":[raw()]}))
+    })
+    .await;
+    let rows=forge(base).checkout_list_change_requests(CheckoutListInput{checkout:CheckoutInput{cwd:"fixture".into(),context:Some(CheckoutContext{provider:serde_json::from_value(json!({"kind":"bitbucket","name":"Bitbucket","baseUrl":"https://bitbucket.org"})).unwrap(),remote_name:"origin".into(),remote_url:"https://bitbucket.org/acme/web.git".into(),requested_host:None})},source:None,head_selector:"feature".into(),state:None,limit:None}).await.unwrap();
+    assert_eq!(rows[0].state, ChangeRequestState::Merged);
+    task.await.unwrap();
+}
+#[tokio::test]
 async fn list_escapes_filters_and_continues_across_malformed_pages() {
     let (base, task) = server(2, |request| {
         if request.path.ends_with("second") {
@@ -82,7 +99,7 @@ async fn detail_preserves_counts_closed_time_permissions_and_check_identity() {
     assert_eq!(detail["deletions"], 3);
     assert_eq!(detail["changedFiles"], 2);
     assert_eq!(detail["mergeability"], "conflicting");
-    assert_eq!(detail["mergedAt"], "2026-07-02T00:00:00+00:00");
+    assert_eq!(detail["mergedAt"], "2026-07-02T00:00:00.000Z");
     assert_eq!(detail["closedAt"], Value::Null);
     assert_eq!(detail["viewerPermissions"]["actions"], json!(["close"]));
     assert_eq!(detail["checks"][0]["name"], "integration / test");

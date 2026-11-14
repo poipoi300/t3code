@@ -125,10 +125,11 @@ const startApp = Effect.fn("startApp")(function* (input: {
   const node = yield* HostProcess.ExecutablePath;
   const checkout = yield* HostProcess.WorkingDirectory;
   const hostEnvironment = yield* HostProcess.Environment;
+  const platform = yield* HostProcess.Platform;
   yield* prepareHome(input.home);
   const env = {
     ...hostEnvironment,
-    PATH: `${path.join(input.home, "bin")}:${hostEnvironment.PATH ?? ""}`,
+    PATH: `${path.join(input.home, "bin")}${platform === "win32" ? ";" : ":"}${hostEnvironment.PATH ?? ""}`,
     T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD: "0",
   };
   const devRunner = (mode: string, args: ReadonlyArray<string>) => [
@@ -137,6 +138,8 @@ const startApp = Effect.fn("startApp")(function* (input: {
     "--home-dir",
     input.home,
     "--no-seed",
+    // Windows watcher notifications can restart the backend while a scenario seeds it.
+    ...(mode === "dev:server" && platform === "win32" ? ["--no-server-watch"] : []),
     ...args,
   ];
 
