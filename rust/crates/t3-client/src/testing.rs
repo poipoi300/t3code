@@ -1,6 +1,8 @@
 //! Deterministic host and server scripts; no wall-clock sleeps or network.
 #[cfg(any(test, feature = "testing"))]
 pub mod environment;
+#[cfg(test)]
+mod removal_tests;
 use crate::{
     ClientError,
     platform::*,
