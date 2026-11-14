@@ -1243,6 +1243,53 @@ fn thread_http_misses_retry_until_present_without_retaining_a_false_deletion()
 }
 
 #[test]
+fn a_stream_that_fails_after_each_value_still_backs_off() -> Result<(), ClientError> {
+    // WP5: a value before every chunk failure reset the count, so retries never slowed down.
+    // TypeScript keeps one count per session that a value never resets.
+    let mut sync = thread_sync();
+    sync.accepts_bounded = false;
+    install(&sync, detail(7)?)?;
+    let input = |after: u64| json!({"threadId":"thread-v2","afterSequence":after,"requestCompletionMarker":true,"acceptDedupedBodies":true});
+    let value = |sequence: u64| -> Result<Value, ClientError> {
+        Ok(serde_json::to_value(stream_event(
+            sequence,
+            event(
+                "turn-item.updated",
+                serde_json::to_value(row(sequence)?.item)?,
+            )?,
+        ))?)
+    };
+    for (after, replies) in [
+        (7, vec![Ok(value(8)?), Err(ClientError::Disconnected)]),
+        (8, vec![Ok(value(9)?), Err(ClientError::Disconnected)]),
+        (9, vec![Ok(json!({"kind":"synchronized"}))]),
+    ] {
+        sync.rpc.scripts.borrow_mut().push_back(RpcScript {
+            method: "orchestration.subscribeThread".into(),
+            input: input(after),
+            replies,
+        });
+    }
+    let mut follow = Box::pin(sync.follow());
+    assert!(follow.as_mut().now_or_never().is_none());
+    assert_eq!(sync.rpc.scripts.borrow().len(), 2);
+    sync.cache.platform().advance(250);
+    assert!(follow.as_mut().now_or_never().is_none());
+    assert_eq!(sync.rpc.scripts.borrow().len(), 1);
+    sync.cache.platform().advance(250);
+    assert!(follow.as_mut().now_or_never().is_none());
+    assert_eq!(
+        sync.rpc.scripts.borrow().len(),
+        1,
+        "the second retry waits 500 ms"
+    );
+    sync.cache.platform().advance(250);
+    block_on(follow)?;
+    assert!(sync.rpc.scripts.borrow().is_empty());
+    Ok(())
+}
+
+#[test]
 fn targeted_history_exposes_conversation_before_activity_without_advancing_early()
 -> Result<(), ClientError> {
     let sync = thread_sync();

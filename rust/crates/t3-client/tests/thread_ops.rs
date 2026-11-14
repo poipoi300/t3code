@@ -383,6 +383,15 @@ fn source_notice_groups_contiguous_actions_claims_shortcut_and_expires() {
     h.platform.fake.advance(5_000);
     assert!(service.thread_undo_notice().is_none());
     assert!(!service.thread_undo_claims_shortcut());
+    script(
+        &h,
+        "orchestration.dispatchCommand",
+        Ok(json!({"sequence":7})),
+    );
+    h.run(service.settle_thread(key())).unwrap();
+    assert!(service.thread_undo_notice().is_some());
+    h.run(c.remove(&environment("env"))).unwrap();
+    assert!(service.thread_undo_notice().is_none());
 }
 
 #[test]
@@ -790,6 +799,7 @@ fn accepted_rewind_survives_observer_disposal_and_restores_duplicates_beside_new
     abort.abort();
     c.close_thread(&key());
     h.settle();
+    assert_eq!(h.server().open_threads_of("t1"), 1);
     c.composer_drafts()
         .update(|document| {
             t3_client::thread_views::composer::web_models::set_prompt(
@@ -821,6 +831,7 @@ fn accepted_rewind_survives_observer_disposal_and_restores_duplicates_beside_new
         2
     );
     assert!(!service.rewind_state(&key()).reverting);
+    assert_eq!(h.server().open_threads_of("t1"), 0);
     let drafts = Rc::new(
         t3_client::thread_views::composer::draft_service::ComposerDraftService::new(Rc::new(
             h.platform.clone(),

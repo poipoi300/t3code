@@ -1333,15 +1333,27 @@ fn an_import_drops_older_raw_backups_and_removal_purges_copies_of_a_token() {
                         "unrelated",
                         &json!({"environmentId": "other"}),
                     ),
+                    // Re-review N6: a credential conflict names only its connection, and an
+                    // unreadable credential gives no token to look for.
+                    copy(
+                        "import-conflict",
+                        "credential",
+                        &json!({"destination": {"namespace": "connection-credential", "record": "ssh:devbox"}}),
+                    ),
                 ],
             )
             .await
             .unwrap();
-        let purged =
-            t3_client::persistence::purge_environment_copies(&storage, &env(), &[token.clone()])
-                .await
-                .unwrap();
-        assert_eq!(purged, 1);
+        let purged = t3_client::persistence::purge_environment_copies(
+            &storage,
+            &env(),
+            &["ssh:devbox".to_owned()],
+            &[token.clone()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(purged, 2);
+        assert!(!storage.has(StorageArea::Secure, "import-conflict"));
         let quarantined = storage
             .list(StorageArea::Secure, "quarantine".into())
             .await
