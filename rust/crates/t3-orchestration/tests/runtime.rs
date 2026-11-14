@@ -479,21 +479,54 @@ async fn a_thread_above_a_new_ceiling_is_refused_after_a_restart_until_its_mode_
     Ok(())
 }
 
-/// The Replay adapter declaring a mode list; records the mode each session opens with.
+/// A session open that waits until released, so it holds the worker's only slot.
+struct Hold {
+    thread: ThreadId,
+    entered: tokio::sync::mpsc::UnboundedSender<()>,
+    release: tokio::sync::watch::Receiver<bool>,
+}
+
+/// The Replay adapter declaring a mode list; records the runtime mode and the ceiling each
+/// session opens with.
 struct Probe {
     inner: Arc<dyn ProviderAdapter>,
     modes: Vec<RuntimeMode>,
-    opened: std::sync::Mutex<Vec<RuntimeMode>>,
+    opened: std::sync::Mutex<Vec<(RuntimeMode, Option<RuntimeMode>)>>,
+    hold: Option<Hold>,
 }
 
 impl Probe {
-    fn record(&self, input: &OpenSession) {
-        self.opened
-            .lock()
-            .expect("modes lock")
-            .push(input.runtime_policy.runtime_mode);
+    fn new(inner: Arc<dyn ProviderAdapter>, modes: Vec<RuntimeMode>) -> Self {
+        Self {
+            inner,
+            modes,
+            opened: Default::default(),
+            hold: None,
+        }
+    }
+    async fn record(&self, input: &OpenSession) {
+        if let Some(hold) = self
+            .hold
+            .as_ref()
+            .filter(|hold| hold.thread == input.thread_id)
+        {
+            let _ = hold.entered.send(());
+            let mut release = hold.release.clone();
+            let _ = release.wait_for(|released| *released).await;
+        }
+        self.opened.lock().expect("modes lock").push((
+            input.runtime_policy.runtime_mode,
+            input.runtime_policy.max_runtime_mode,
+        ));
     }
 }
+
+const ALL_MODES: [RuntimeMode; 4] = [
+    RuntimeMode::ApprovalRequired,
+    RuntimeMode::AutoAcceptEdits,
+    RuntimeMode::Auto,
+    RuntimeMode::FullAccess,
+];
 
 #[async_trait]
 impl ProviderAdapter for Probe {
@@ -517,7 +550,7 @@ impl ProviderAdapter for Probe {
         input: OpenSession,
         cancellation: CancellationToken,
     ) -> ProviderResult<Arc<dyn SessionRuntime>> {
-        self.record(&input);
+        self.record(&input).await;
         self.inner.open_session(input, cancellation).await
     }
     async fn open_session_with_policy(
@@ -526,7 +559,7 @@ impl ProviderAdapter for Probe {
         options: RuntimePolicyOptions,
         cancellation: CancellationToken,
     ) -> ProviderResult<Arc<dyn SessionRuntime>> {
-        self.record(&input);
+        self.record(&input).await;
         self.inner
             .open_session_with_policy(input, options, cancellation)
             .await
@@ -549,11 +582,10 @@ async fn a_mode_the_provider_does_not_offer_runs_as_approval_required() -> Resul
         NOW,
         |inner| {
             // Muse's offered modes (`provider-muse/src/server/status.ts`).
-            let adapter = Arc::new(Probe {
+            let adapter = Arc::new(Probe::new(
                 inner,
-                modes: vec![RuntimeMode::ApprovalRequired, RuntimeMode::FullAccess],
-                opened: Default::default(),
-            });
+                vec![RuntimeMode::ApprovalRequired, RuntimeMode::FullAccess],
+            ));
             *wrapped.lock().expect("adapter lock") = Some(adapter.clone());
             adapter
         },
@@ -582,7 +614,427 @@ async fn a_mode_the_provider_does_not_offer_runs_as_approval_required() -> Resul
     runtime.shutdown().await?;
     assert_eq!(
         *adapter.opened.lock().expect("modes lock"),
-        vec![RuntimeMode::ApprovalRequired]
+        vec![(RuntimeMode::ApprovalRequired, None)]
     );
+    Ok(())
+}
+
+/// The managed ceiling reaches the adapter as `max_runtime_mode` (the Claude adapter filters
+/// `setMode` suggestions on it), with the thread's own mode below it.
+#[tokio::test]
+async fn the_managed_ceiling_reaches_the_session_the_provider_opens() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let workspace = Workspace::plain(directory.path())?;
+    let policy = managed_ceiling()?;
+    let wrapped = std::sync::Mutex::new(None::<Arc<Probe>>);
+    let runtime = start_with(
+        &directory.path().join("statev2.sqlite"),
+        workspace.checkpoints.clone(),
+        NOW,
+        |inner| {
+            let adapter = Arc::new(Probe::new(inner, ALL_MODES.to_vec()));
+            *wrapped.lock().expect("adapter lock") = Some(adapter.clone());
+            adapter
+        },
+        |ports| ports.managed_policy = Some(policy),
+    )
+    .await?;
+    let adapter = wrapped
+        .lock()
+        .expect("adapter lock")
+        .clone()
+        .expect("adapter wrapped");
+    create_project(&runtime, &workspace).await?;
+    runtime
+        .dispatch_command(create_thread(THREAD, "approval-required", MODEL)?)
+        .await?;
+    let mut subscription = runtime
+        .transport
+        .subscribe_thread(
+            serde_json::from_value(json!({"threadId":THREAD}))?,
+            LiveStreamLimits::default(),
+        )
+        .await?;
+    runtime.dispatch_command(send(THREAD, "capped")?).await?;
+    await_completed_turn(&mut subscription).await?;
+    subscription.close().await?;
+    runtime.shutdown().await?;
+    assert_eq!(
+        *adapter.opened.lock().expect("modes lock"),
+        vec![(
+            RuntimeMode::ApprovalRequired,
+            Some(RuntimeMode::AutoAcceptEdits)
+        )]
+    );
+    Ok(())
+}
+
+/// The turn-start backstop through the composed runtime: a run was admitted while its thread
+/// was within the ceiling, then the stored mode rose above it without dispatch (as data written
+/// before the policy or by another writer). The turn start refuses it and settles it failed
+/// with TypeScript's error item, before any session opens.
+#[tokio::test]
+async fn a_turn_start_above_the_ceiling_settles_failed_through_composition() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let workspace = Workspace::plain(directory.path())?;
+    let policy = managed_ceiling()?;
+    let held = ThreadId("thread:held".into());
+    let late = ThreadId("thread:late".into());
+    let (entered, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (release, release_rx) = tokio::sync::watch::channel(false);
+    let wrapped = std::sync::Mutex::new(None::<Arc<Probe>>);
+    let runtime = start_with(
+        &directory.path().join("statev2.sqlite"),
+        workspace.checkpoints.clone(),
+        NOW,
+        |inner| {
+            let mut adapter = Probe::new(inner, ALL_MODES.to_vec());
+            adapter.hold = Some(Hold {
+                thread: held.clone(),
+                entered,
+                release: release_rx,
+            });
+            let adapter = Arc::new(adapter);
+            *wrapped.lock().expect("adapter lock") = Some(adapter.clone());
+            adapter
+        },
+        |ports| {
+            ports.managed_policy = Some(policy);
+            ports.worker.concurrency = 1;
+        },
+    )
+    .await?;
+    let adapter = wrapped
+        .lock()
+        .expect("adapter lock")
+        .clone()
+        .expect("adapter wrapped");
+    create_project(&runtime, &workspace).await?;
+    for thread in [&held, &late] {
+        runtime
+            .dispatch_command(create_thread(&thread.0, "approval-required", MODEL)?)
+            .await?;
+    }
+    runtime.dispatch_command(send(&held.0, "held")?).await?;
+    entered_rx.recv().await.expect("the held session opens");
+    runtime.dispatch_command(send(&late.0, "late")?).await?;
+    let mut thread = runtime
+        .projections
+        .thread(late.clone())
+        .await?
+        .expect("late thread");
+    thread.runtime_mode = RuntimeMode::FullAccess;
+    let event = json!({"id":"event:raised","threadId":late,"type":"thread.runtime-mode-updated","occurredAt":NOW,"payload":thread});
+    runtime
+        .events
+        .commit(CommitRequest {
+            receipt: None,
+            guard: CommitGuard::None,
+            decision: Decision {
+                events: vec![serde_json::from_value(event)?],
+                ..Default::default()
+            },
+        })
+        .await?;
+    let mut subscription = runtime
+        .transport
+        .subscribe_thread(
+            serde_json::from_value(json!({"threadId":late}))?,
+            LiveStreamLimits::default(),
+        )
+        .await?;
+    release.send_replace(true);
+    let mut settled = None;
+    while settled.is_none() {
+        let batch = subscription.pull().await?.expect("thread stream ended");
+        for item in batch {
+            let item = serde_json::to_value(&item.value)?;
+            let event = &item["event"];
+            if event["type"] == "run.updated"
+                && SETTLED.contains(&event["payload"]["status"].as_str().unwrap_or_default())
+            {
+                settled = Some(event["payload"]["status"].clone());
+            }
+        }
+    }
+    subscription.close().await?;
+    assert_eq!(settled, Some(json!("failed")));
+    let projection = runtime
+        .projections
+        .projection(late.clone())
+        .await?
+        .expect("late thread");
+    let errors: Vec<_> = projection
+        .turn_items
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|item| item["type"] == "error")
+        .collect();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0]["title"], "Thread mode is above the policy limit");
+    assert_eq!(
+        errors[0]["failure"]["message"],
+        format!("{CEILING_REFUSAL} Switch this thread's mode to continue.")
+    );
+    runtime.shutdown().await?;
+    assert_eq!(
+        *adapter.opened.lock().expect("modes lock"),
+        vec![(
+            RuntimeMode::ApprovalRequired,
+            Some(RuntimeMode::AutoAcceptEdits)
+        )],
+        "only the held thread opened a session"
+    );
+    Ok(())
+}
+
+/// A project-root launch touches only the project checks: every Git, branch and setup call
+/// fails, so a launch that reached one would fail the test.
+struct RootLaunch;
+
+#[async_trait]
+impl t3_orchestration::ports::checkpoints_forks::thread_launch_service::LaunchEnvironment
+    for RootLaunch
+{
+    async fn is_scratch(&self, _: &ProjectId) -> Result<bool> {
+        Ok(false)
+    }
+    async fn reject_during_clone(&self, _: &ProjectId) -> Result<()> {
+        Ok(())
+    }
+    async fn assert_provider_enabled(
+        &self,
+        _: &ProjectId,
+        _: &CommandId,
+        _: &ProviderInstanceId,
+    ) -> Result<()> {
+        Ok(())
+    }
+    async fn folder_for_thread(
+        &self,
+        _: &ProjectId,
+        _: &ThreadId,
+        _: &str,
+    ) -> Result<Option<PathBuf>> {
+        Ok(None)
+    }
+    async fn repository_root(&self, _: PathBuf) -> Result<Option<PathBuf>> {
+        Err(Error::Unsupported("root launch: repository_root"))
+    }
+    async fn has_commit(&self, _: PathBuf, _: &str) -> Result<bool> {
+        Err(Error::Unsupported("root launch: has_commit"))
+    }
+    async fn has_ref(&self, _: PathBuf, _: &str) -> Result<bool> {
+        Err(Error::Unsupported("root launch: has_ref"))
+    }
+    async fn remote_for_base(&self, _: PathBuf, _: &str) -> Result<Option<String>> {
+        Err(Error::Unsupported("root launch: remote_for_base"))
+    }
+    async fn local_branches(&self, _: PathBuf) -> Result<Vec<String>> {
+        Err(Error::Unsupported("root launch: local_branches"))
+    }
+    async fn temporary_branch(&self, _: &ProjectId) -> Result<String> {
+        Err(Error::Unsupported("root launch: temporary_branch"))
+    }
+    async fn generate_branch(
+        &self,
+        _: &ProjectId,
+        _: PathBuf,
+        _: &t3_orchestration::ports::checkpoints_forks::thread_launch_service::InitialMessage,
+        _: CancellationToken,
+    ) -> Result<t3_orchestration::ports::checkpoints_forks::thread_launch_service::GeneratedBranch>
+    {
+        Err(Error::Unsupported("root launch: generate_branch"))
+    }
+    async fn rename_branch(
+        &self,
+        _: PathBuf,
+        _: &str,
+        _: t3_orchestration::ports::checkpoints_forks::thread_launch_service::GeneratedBranch,
+        _: CancellationToken,
+    ) -> Result<String> {
+        Err(Error::Unsupported("root launch: rename_branch"))
+    }
+    async fn setup(
+        &self,
+        _: t3_orchestration::ports::checkpoints_forks::thread_launch_service::SetupInput,
+        _: CancellationToken,
+    ) -> Result<t3_orchestration::ports::checkpoints_forks::thread_launch_service::SetupRun> {
+        Err(Error::Unsupported("root launch: setup"))
+    }
+    async fn close_terminal(&self, _: &ThreadId, _: &str) -> Result<()> {
+        Err(Error::Unsupported("root launch: close_terminal"))
+    }
+}
+
+/// `orchestration.launchThread` from a client: a project-root launch with a first message
+/// creates the thread as the user from `web` and runs its turn.
+#[tokio::test]
+async fn a_client_launch_creates_the_thread_and_runs_its_first_turn() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let workspace = Workspace::plain(directory.path())?;
+    let runtime = start_with(
+        &directory.path().join("statev2.sqlite"),
+        workspace.checkpoints.clone(),
+        NOW,
+        |adapter| adapter,
+        |ports| ports.launch = Some(Arc::new(RootLaunch)),
+    )
+    .await?;
+    create_project(&runtime, &workspace).await?;
+    let input = serde_json::from_value(
+        json!({"commandId":"command:launch","threadId":THREAD,"projectId":"project:runtime","title":"Launched","modelSelection":{"instanceId":DEV_REPLAY_INSTANCE_ID,"model":MODEL},"runtimeMode":"approval-required","interactionMode":"default","workspaceStrategy":{"type":"root"},"initialMessage":{"text":"Hello","attachments":[]}}),
+    )?;
+    let mut committed = runtime.events.subscribe();
+    let launched = runtime.launch_client_thread(input).await?;
+    assert_eq!(launched.thread_id, ThreadId(THREAD.into()));
+    assert!(!launched.resumed);
+    let thread = serde_json::to_value(&launched.projection.thread)?;
+    assert_eq!(thread["createdBy"], "user");
+    assert_eq!(thread["creationSource"], "web");
+    loop {
+        let projection = runtime
+            .projections
+            .projection(ThreadId(THREAD.into()))
+            .await?
+            .expect("launched thread");
+        let statuses = serde_json::to_value(&projection.runs)?;
+        if statuses[0]["status"] == "completed" {
+            break;
+        }
+        assert!(
+            !SETTLED.contains(&statuses[0]["status"].as_str().unwrap_or_default()),
+            "{statuses}"
+        );
+        committed.recv().await.map_err(|error| Error::Service {
+            operation: "launch test",
+            detail: error.to_string(),
+        })?;
+    }
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+/// A plain-file workflow reader for the test: identity is the file's length.
+struct PlainWorkflowFiles;
+struct PlainOpenFile(PathBuf);
+#[async_trait]
+impl t3_orchestration::ports::runs_ingestion::workflow_file_read::WorkflowOpenFile
+    for PlainOpenFile
+{
+    async fn stat(
+        &self,
+    ) -> std::io::Result<
+        t3_orchestration::ports::runs_ingestion::workflow_file_read::WorkflowFileStat,
+    > {
+        let metadata = std::fs::metadata(&self.0)?;
+        Ok(
+            t3_orchestration::ports::runs_ingestion::workflow_file_read::WorkflowFileStat {
+                size: metadata.len(),
+                identity:
+                    t3_orchestration::ports::runs_ingestion::workflow_file_read::WorkflowFileIdentity {
+                        device: 1,
+                        inode: metadata.len(),
+                    },
+                regular: metadata.is_file(),
+            },
+        )
+    }
+    async fn read_at(&self, offset: u64, length: usize) -> std::io::Result<Vec<u8>> {
+        let bytes = std::fs::read(&self.0)?;
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
+        Ok(bytes[start..(start + length).min(bytes.len())].to_vec())
+    }
+}
+#[async_trait]
+impl t3_orchestration::ports::runs_ingestion::workflow_file_read::WorkflowFileBackend
+    for PlainWorkflowFiles
+{
+    async fn realpath(&self, path: &Path) -> std::io::Result<PathBuf> {
+        std::fs::canonicalize(path)
+    }
+    async fn open_nonblocking(
+        &self,
+        path: &Path,
+    ) -> std::io::Result<
+        Arc<dyn t3_orchestration::ports::runs_ingestion::workflow_file_read::WorkflowOpenFile>,
+    > {
+        Ok(Arc::new(PlainOpenFile(path.to_path_buf())))
+    }
+    async fn lstat_identity(
+        &self,
+        path: &Path,
+    ) -> std::io::Result<
+        t3_orchestration::ports::runs_ingestion::workflow_file_read::WorkflowFileIdentity,
+    > {
+        Ok(
+            t3_orchestration::ports::runs_ingestion::workflow_file_read::WorkflowFileIdentity {
+                device: 1,
+                inode: std::fs::symlink_metadata(path)?.len(),
+            },
+        )
+    }
+}
+
+/// `orchestration.getWorkflowScript` reads a `.js` script under the projects root and refuses
+/// one outside it; without a host reader the method is unsupported.
+#[tokio::test]
+async fn workflow_scripts_are_read_only_under_the_projects_root() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let workspace = Workspace::plain(directory.path())?;
+    let projects = directory.path().join("projects");
+    std::fs::create_dir_all(projects.join("one"))?;
+    let script = projects.join("one").join("flow.js");
+    std::fs::write(&script, "export default 1;\n")?;
+    let outside = directory.path().join("outside.js");
+    std::fs::write(&outside, "export default 2;\n")?;
+    let unbound = start(
+        &directory.path().join("unbound.sqlite"),
+        workspace.checkpoints.clone(),
+    )
+    .await?;
+    let request = |path: &Path| -> Result<OrchestrationV2GetWorkflowScriptInput> {
+        Ok(serde_json::from_value(
+            json!({"threadId":THREAD,"scriptPath":path.to_string_lossy()}),
+        )?)
+    };
+    assert!(matches!(
+        unbound.workflow_script(request(&script)?).await,
+        Err(Error::Unsupported(_))
+    ));
+    unbound.shutdown().await?;
+    let root = projects.clone();
+    let runtime = start_with(
+        &directory.path().join("statev2.sqlite"),
+        workspace.checkpoints.clone(),
+        NOW,
+        |adapter| adapter,
+        |ports| {
+            ports.workflow_files = Some(t3_orchestration::composition::WorkflowFiles {
+                backend: Arc::new(PlainWorkflowFiles),
+                projects_root: root,
+            })
+        },
+    )
+    .await?;
+    let read = runtime
+        .workflow_script(request(&script)?)
+        .await?
+        .expect("a script under the root");
+    assert_eq!(read.contents, "export default 1;\n");
+    assert!(!read.truncated);
+    let refused = runtime
+        .workflow_script(request(&outside)?)
+        .await?
+        .expect_err("a script outside the root");
+    assert_eq!(
+        serde_json::to_value(&refused.reason)?,
+        json!("outside-root")
+    );
+    runtime.shutdown().await?;
     Ok(())
 }

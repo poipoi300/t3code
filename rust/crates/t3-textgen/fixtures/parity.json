@@ -2169,5 +2169,436 @@
       "cue": "uh no",
       "expected": "ähm, human words"
     }
+  ],
+  "sanitizerCases": [
+    {
+      "raw": "﻿Fix login",
+      "commit": "Fix login",
+      "pr": "Fix login",
+      "title": "Fix login",
+      "fragment": "fix-login",
+      "feature": "feature/fix-login",
+      "semantic": "fix-login",
+      "static": "Team/ser/x/fix-login",
+      "custom": "Fix login",
+      "trimmed": "Fix login",
+      "json": "Fix login"
+    },
+    {
+      "raw": "Fix login﻿",
+      "commit": "Fix login",
+      "pr": "Fix login",
+      "title": "Fix login",
+      "fragment": "fix-login",
+      "feature": "feature/fix-login",
+      "semantic": "fix-login",
+      "static": "Team/ser/x/fix-login",
+      "custom": "Fix login",
+      "trimmed": "Fix login",
+      "json": "Fix login"
+    },
+    {
+      "raw": "Fix login",
+      "commit": "Fix login",
+      "pr": "Fix login",
+      "title": "Fix login",
+      "fragment": "fix-login",
+      "feature": "feature/fix-login",
+      "semantic": "fix-login",
+      "static": "Team/ser/x/fix-login",
+      "custom": "Fix login",
+      "trimmed": "Fix login",
+      "json": "Fix login"
+    },
+    {
+      "raw": " \t Fix login. \r\n second line",
+      "commit": "Fix login",
+      "pr": "Fix login.",
+      "title": "Fix login.",
+      "fragment": "fix-login-second-line",
+      "feature": "feature/fix-login-second-line",
+      "semantic": "fix-login-second-line",
+      "static": "Team/ser/x/fix-login-second-line",
+      "custom": "Fix login. \r\n second line",
+      "trimmed": "Fix login. \r\n second line",
+      "json": "Fix login. \r\n second line"
+    },
+    {
+      "raw": " Title　",
+      "commit": "Title",
+      "pr": "Title",
+      "title": "Title",
+      "fragment": "title",
+      "feature": "feature/title",
+      "semantic": "title",
+      "static": "Team/ser/x/title",
+      "custom": "Title",
+      "trimmed": "Title",
+      "json": "Title"
+    },
+    {
+      "raw": "\"Quoted title\"",
+      "commit": "\"Quoted title\"",
+      "pr": "\"Quoted title\"",
+      "title": "Quoted title",
+      "fragment": "quoted-title",
+      "feature": "feature/quoted-title",
+      "semantic": "quoted-title",
+      "static": "Team/ser/x/quoted-title",
+      "custom": "\"Quoted title\"",
+      "trimmed": "\"Quoted title\"",
+      "json": "\"Quoted title\""
+    },
+    {
+      "raw": "`Fix`  the   bug",
+      "commit": "`Fix`  the   bug",
+      "pr": "`Fix`  the   bug",
+      "title": "Fix` the bug",
+      "fragment": "fix-the-bug",
+      "feature": "feature/fix-the-bug",
+      "semantic": "fix-the-bug",
+      "static": "Team/ser/x/fix-the-bug",
+      "custom": "`Fix`  the   bug",
+      "trimmed": "`Fix`  the   bug",
+      "json": "`Fix`  the   bug"
+    },
+    {
+      "raw": "Fixthe bug",
+      "commit": "Fixthe bug",
+      "pr": "Fixthe bug",
+      "title": "Fixthe bug",
+      "fragment": "fix-the-bug",
+      "feature": "feature/fix-the-bug",
+      "semantic": "fix-the-bug",
+      "static": "Team/ser/x/fix-the-bug",
+      "custom": "Fixthe bug",
+      "trimmed": "Fixthe bug",
+      "json": "Fixthe bug"
+    },
+    {
+      "raw": "Fix​the bug",
+      "commit": "Fix​the bug",
+      "pr": "Fix​the bug",
+      "title": "Fix​the bug",
+      "fragment": "fix-the-bug",
+      "feature": "feature/fix-the-bug",
+      "semantic": "fix-the-bug",
+      "static": "Team/ser/x/fix-the-bug",
+      "custom": "Fix​the bug",
+      "trimmed": "Fix​the bug",
+      "json": "Fix​the bug"
+    },
+    {
+      "raw": "Fix﻿the bug",
+      "commit": "Fix﻿the bug",
+      "pr": "Fix﻿the bug",
+      "title": "Fix the bug",
+      "fragment": "fix-the-bug",
+      "feature": "feature/fix-the-bug",
+      "semantic": "fix-the-bug",
+      "static": "Team/ser/x/fix-the-bug",
+      "custom": "Fix﻿the bug",
+      "trimmed": "Fix﻿the bug",
+      "json": "Fix﻿the bug"
+    },
+    {
+      "raw": "Fix the bug",
+      "commit": "Fix the bug",
+      "pr": "Fix the bug",
+      "title": "Fix the bug",
+      "fragment": "fix-the-bug",
+      "feature": "feature/fix-the-bug",
+      "semantic": "fix-the-bug",
+      "static": "Team/ser/x/fix-the-bug",
+      "custom": "Fix the bug",
+      "trimmed": "Fix the bug",
+      "json": "Fix the bug"
+    },
+    {
+      "raw": "{\"title\":\"JSON title\"}",
+      "commit": "{\"title\":\"JSON title\"}",
+      "pr": "{\"title\":\"JSON title\"}",
+      "title": "JSON title",
+      "fragment": "title-json-title",
+      "feature": "feature/title-json-title",
+      "semantic": "title-json-title",
+      "static": "Team/ser/x/title-json-title",
+      "custom": "{\"title\":\"JSON title\"}",
+      "trimmed": "{\"title\":\"JSON title\"}",
+      "json": "{\"title\":\"JSON title\"}"
+    },
+    {
+      "raw": "﻿{\"title\":\"x\"}",
+      "commit": "{\"title\":\"x\"}",
+      "pr": "{\"title\":\"x\"}",
+      "title": "{\"title\":\"x\"}",
+      "fragment": "title-x",
+      "feature": "feature/title-x",
+      "semantic": "title-x",
+      "static": "Team/ser/x/title-x",
+      "custom": "{\"title\":\"x\"}",
+      "trimmed": "{\"title\":\"x\"}",
+      "json": "{\"title\":\"x\"}"
+    },
+    {
+      "raw": "prefix {\"title\":\"a } b\"} suffix﻿",
+      "commit": "prefix {\"title\":\"a } b\"} suffix",
+      "pr": "prefix {\"title\":\"a } b\"} suffix",
+      "title": "prefix {\"title\":\"a } b\"} suffix",
+      "fragment": "prefix-title-a-b-suffix",
+      "feature": "feature/prefix-title-a-b-suffix",
+      "semantic": "prefix-title-a-b-suffix",
+      "static": "Team/ser/x/prefix-title-a-b-suffix",
+      "custom": "prefix {\"title\":\"a } b\"} suffix",
+      "trimmed": "prefix {\"title\":\"a } b\"} suffix",
+      "json": "{\"title\":\"a } b\"}"
+    },
+    {
+      "raw": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa more",
+      "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pr": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa more",
+      "title": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa more",
+      "fragment": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "feature": "feature/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "semantic": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "static": "Team/ser/x/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "custom": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa more",
+      "trimmed": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa more",
+      "json": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa more"
+    },
+    {
+      "raw": "Commit... . .",
+      "commit": "Commit... .",
+      "pr": "Commit... . .",
+      "title": "Commit... . .",
+      "fragment": "commit",
+      "feature": "feature/commit",
+      "semantic": "commit",
+      "static": "Team/ser/x/commit",
+      "custom": "Commit... . .",
+      "trimmed": "Commit... . .",
+      "json": "Commit... . ."
+    },
+    {
+      "raw": "éééééééééééééééééééééééééééééééééééééééé",
+      "commit": "éééééééééééééééééééééééééééééééééééé",
+      "pr": "éééééééééééééééééééééééééééééééééééééééé",
+      "title": "éééééééééééééééééééééééééééééééééééééééé",
+      "fragment": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "feature": "feature/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "semantic": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "static": "Team/ser/x/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "custom": "éééééééééééééééééééééééééééééééééééééééé",
+      "trimmed": "éééééééééééééééééééééééééééééééééééééééé",
+      "json": "éééééééééééééééééééééééééééééééééééééééé"
+    },
+    {
+      "raw": "Feature/Add Search!!",
+      "commit": "Feature/Add Search!!",
+      "pr": "Feature/Add Search!!",
+      "title": "Feature/Add Search!!",
+      "fragment": "feature/add-search",
+      "feature": "feature/add-search",
+      "semantic": "feature/add-search",
+      "static": "Team/ser/x/feature/add-search",
+      "custom": "Feature/Add Search!!",
+      "trimmed": "Feature/Add Search!!",
+      "json": "Feature/Add Search!!"
+    },
+    {
+      "raw": " ./_-feature--x_/ ",
+      "commit": "./_-feature--x_/",
+      "pr": "./_-feature--x_/",
+      "title": "./_-feature--x_/",
+      "fragment": "feature-x",
+      "feature": "feature/feature-x",
+      "semantic": "feature-x",
+      "static": "Team/ser/x/feature-x",
+      "custom": "./_-feature--x_/",
+      "trimmed": "./_-feature--x_/",
+      "json": "./_-feature--x_/"
+    },
+    {
+      "raw": "UPPER Case Ü branch",
+      "commit": "UPPER Case Ü branch",
+      "pr": "UPPER Case Ü branch",
+      "title": "UPPER Case Ü branch",
+      "fragment": "upper-case-u-branch",
+      "feature": "feature/upper-case-u-branch",
+      "semantic": "upper-case-u-branch",
+      "static": "Team/ser/x/upper-case-u-branch",
+      "custom": "UPPER Case Ü branch",
+      "trimmed": "UPPER Case Ü branch",
+      "json": "UPPER Case Ü branch"
+    },
+    {
+      "raw": "🚀 rocket",
+      "commit": "🚀 rocket",
+      "pr": "🚀 rocket",
+      "title": "🚀 rocket",
+      "fragment": "rocket",
+      "feature": "feature/rocket",
+      "semantic": "rocket",
+      "static": "Team/ser/x/rocket",
+      "custom": "🚀 rocket",
+      "trimmed": "🚀 rocket",
+      "json": "🚀 rocket"
+    },
+    {
+      "raw": "",
+      "commit": "Update project files",
+      "pr": "Update project changes",
+      "title": "New thread",
+      "fragment": "update",
+      "feature": "feature/update",
+      "semantic": "update",
+      "static": "Team/ser/x/update",
+      "custom": "",
+      "trimmed": "",
+      "json": ""
+    },
+    {
+      "raw": "  ",
+      "commit": "Update project files",
+      "pr": "Update project changes",
+      "title": "New thread",
+      "fragment": "update",
+      "feature": "feature/update",
+      "semantic": "update",
+      "static": "Team/ser/x/update",
+      "custom": "",
+      "trimmed": "",
+      "json": ""
+    },
+    {
+      "raw": "",
+      "commit": "",
+      "pr": "",
+      "title": "",
+      "fragment": "update",
+      "feature": "feature/update",
+      "semantic": "update",
+      "static": "Team/ser/x/update",
+      "custom": "",
+      "trimmed": "",
+      "json": ""
+    },
+    {
+      "raw": "title",
+      "commit": "title",
+      "pr": "title",
+      "title": "title",
+      "fragment": "title",
+      "feature": "feature/title",
+      "semantic": "title",
+      "static": "Team/ser/x/title",
+      "custom": "title",
+      "trimmed": "title",
+      "json": "title"
+    },
+    {
+      "raw": "Title\n\nbody",
+      "commit": "Title",
+      "pr": "Title",
+      "title": "Title",
+      "fragment": "title-body",
+      "feature": "feature/title-body",
+      "semantic": "title-body",
+      "static": "Team/ser/x/title-body",
+      "custom": "Title\n\nbody",
+      "trimmed": "Title\n\nbody",
+      "json": "Title\n\nbody"
+    },
+    {
+      "raw": "line1\r\nline2",
+      "commit": "line1",
+      "pr": "line1",
+      "title": "line1",
+      "fragment": "line1-line2",
+      "feature": "feature/line1-line2",
+      "semantic": "line1-line2",
+      "static": "Team/ser/x/line1-line2",
+      "custom": "line1\r\nline2",
+      "trimmed": "line1\r\nline2",
+      "json": "line1\r\nline2"
+    },
+    {
+      "raw": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "commit": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "pr": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "title": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...",
+      "fragment": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "feature": "feature/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "semantic": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "static": "Team/ser/x/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "custom": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "trimmed": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "json": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "raw": "a/b//c",
+      "commit": "a/b//c",
+      "pr": "a/b//c",
+      "title": "a/b//c",
+      "fragment": "a/b/c",
+      "feature": "a/b/c",
+      "semantic": "a/b/c",
+      "static": "Team/ser/x/a/b/c",
+      "custom": "a/b//c",
+      "trimmed": "a/b//c",
+      "json": "a/b//c"
+    },
+    {
+      "raw": "İstanbul ǅ",
+      "commit": "İstanbul ǅ",
+      "pr": "İstanbul ǅ",
+      "title": "İstanbul ǅ",
+      "fragment": "istanbul-dz",
+      "feature": "feature/istanbul-dz",
+      "semantic": "istanbul-dz",
+      "static": "Team/ser/x/istanbul-dz",
+      "custom": "İstanbul ǅ",
+      "trimmed": "İstanbul ǅ",
+      "json": "İstanbul ǅ"
+    },
+    {
+      "raw": "ﬃ ligature",
+      "commit": "ﬃ ligature",
+      "pr": "ﬃ ligature",
+      "title": "ﬃ ligature",
+      "fragment": "ffi-ligature",
+      "feature": "feature/ffi-ligature",
+      "semantic": "ffi-ligature",
+      "static": "Team/ser/x/ffi-ligature",
+      "custom": "ﬃ ligature",
+      "trimmed": "ﬃ ligature",
+      "json": "ﬃ ligature"
+    },
+    {
+      "raw": "team/ticket-12﻿",
+      "commit": "team/ticket-12",
+      "pr": "team/ticket-12",
+      "title": "team/ticket-12",
+      "fragment": "team/ticket-12",
+      "feature": "team/ticket-12",
+      "semantic": "team/ticket-12",
+      "static": "Team/ser/x/team/ticket-12",
+      "custom": "team/ticket-12",
+      "trimmed": "team/ticket-12",
+      "json": "team/ticket-12"
+    },
+    {
+      "raw": "team/x",
+      "commit": "team/x",
+      "pr": "team/x",
+      "title": "team/x",
+      "fragment": "team/x",
+      "feature": "team/x",
+      "semantic": "team/x",
+      "static": "Team/ser/x/team/x",
+      "custom": "team/x",
+      "trimmed": "team/x",
+      "json": "team/x"
+    }
   ]
 }

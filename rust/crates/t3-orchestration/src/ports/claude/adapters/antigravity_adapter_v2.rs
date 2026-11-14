@@ -156,6 +156,12 @@ pub fn antigravity_capabilities() -> ProviderResult<OrchestrationV2ProviderCapab
     Ok(capabilities)
 }
 
+pub const ANTIGRAVITY_SUPPORTED_RUNTIME_MODES: [RuntimeMode; 3] = [
+    RuntimeMode::ApprovalRequired,
+    RuntimeMode::AutoAcceptEdits,
+    RuntimeMode::FullAccess,
+];
+
 pub fn antigravity_permission_mode(mode: RuntimeMode) -> &'static str {
     match mode {
         RuntimeMode::FullAccess => "yolo",

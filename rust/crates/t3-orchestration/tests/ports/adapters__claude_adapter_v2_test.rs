@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 use std::sync::Arc;
-use t3_claude_cli::control::{PermissionDecision, PermissionMode, ToolPermission};
+use t3_claude_cli::control::{PermissionMode, ToolPermission};
 use t3_contracts::provider_policy::{
     ProviderApprovalDecision, ProviderInteractionMode, RuntimeMode,
 };
@@ -747,13 +747,10 @@ fn decisions_never_upgrade_refusals_and_session_grants_are_session_scoped() {
     .unwrap();
     assert!(answer.get("updatedPermissions").is_none());
     assert_eq!(answer["decisionClassification"], "user_temporary");
-    assert!(matches!(
-        permission_result_from_decision(&request, ProviderApprovalDecision::Accept, None, false),
-        PermissionDecision::Allow {
-            updated_permissions: None,
-            ..
-        }
-    ));
+    let answer =
+        permission_result_from_decision(&request, ProviderApprovalDecision::Accept, None, false);
+    assert_eq!(answer["behavior"], "allow");
+    assert!(answer.get("updatedPermissions").is_none());
 }
 #[test]
 fn structured_questions_use_question_text_as_answer_keys() {

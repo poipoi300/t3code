@@ -503,30 +503,13 @@ impl CoordinatedTurnStart {
         }
     }
 
-    pub async fn start(
+    /// Provider startup under the workspace reservation; the policy is resolved, and a ceiling
+    /// refusal settled, by the turn start itself.
+    pub async fn start_resolving(
         &self,
         thread_id: crate::api::ThreadId,
         run_id: crate::api::RunId,
-        policy: crate::provider::RuntimePolicy,
-        will_retry: bool,
-        cancellation: tokio_util::sync::CancellationToken,
-    ) -> Result<Option<crate::ports::runs_ingestion::run_execution_service::RunExecutionHandle>>
-    {
-        self.start_configured(
-            thread_id,
-            run_id,
-            policy.with_reasoning_effort(None),
-            will_retry,
-            cancellation,
-        )
-        .await
-    }
-
-    pub async fn start_configured(
-        &self,
-        thread_id: crate::api::ThreadId,
-        run_id: crate::api::RunId,
-        policy: crate::provider::ConfiguredRuntimePolicy,
+        policy: &dyn crate::api::RuntimePolicyResolver,
         will_retry: bool,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<Option<crate::ports::runs_ingestion::run_execution_service::RunExecutionHandle>>
@@ -552,7 +535,7 @@ impl CoordinatedTurnStart {
                 cwd.as_deref(),
                 worktree.as_deref(),
                 &cancellation,
-                self.inner.start_configured(
+                self.inner.start_resolving(
                     thread_id,
                     run_id,
                     policy,

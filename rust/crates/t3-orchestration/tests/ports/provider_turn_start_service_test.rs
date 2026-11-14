@@ -174,10 +174,10 @@ async fn composer_projection_reaches_the_provider_without_rewriting_the_saved_me
     let adapter = Arc::new(adapter);
     let start = service(&h, sessions(adapter.clone()));
     let handle = start
-        .start_configured_with_projector(
+        .start_resolving_with_projector(
             ThreadId("thread:test".into()),
             RunId("run:test".into()),
-            policy().with_reasoning_effort(None),
+            &FixedRuntimePolicy(policy().with_reasoning_effort(None)),
             false,
             CancellationToken::new(),
             Some(Arc::new(ProjectComposer)),
@@ -338,10 +338,10 @@ async fn native_fork_selects_the_source_attempt_excludes_rolled_back_turns_and_c
     let adapter = Arc::new(adapter);
     let start = service(&h, sessions(adapter.clone()));
     let handle = start
-        .start(
+        .start_resolving(
             ThreadId("thread:test".into()),
             RunId("run:test".into()),
-            policy(),
+            &FixedRuntimePolicy::new(policy()),
             false,
             CancellationToken::new(),
         )
@@ -407,10 +407,10 @@ async fn completed_runs_are_read_from_the_turn_start_snapshot_without_using_lega
     service.projections = reader.clone();
     assert!(
         service
-            .start(
+            .start_resolving(
                 ThreadId("thread:test".into()),
                 RunId("run:test".into()),
-                policy(),
+                &FixedRuntimePolicy::new(policy()),
                 false,
                 CancellationToken::new()
             )
@@ -477,10 +477,10 @@ async fn busy_and_exhausted_native_forks_deliver_portable_history_but_retryable_
             )),
         );
         let result = start
-            .start_configured(
+            .start_resolving(
                 ThreadId("thread:test".into()),
                 RunId("run:test".into()),
-                policy().with_reasoning_effort(Some("high".into())),
+                &FixedRuntimePolicy(policy().with_reasoning_effort(Some("high".into()))),
                 mode == "retry",
                 CancellationToken::new(),
             )
@@ -633,10 +633,10 @@ async fn ready_handoff_is_delivered_with_the_prompt_and_recorded_after_acceptanc
         .await?;
     let start = service(&h, sessions(adapter.clone()));
     let handle = start
-        .start(
+        .start_resolving(
             ThreadId("thread:test".into()),
             RunId("run:test".into()),
-            policy(),
+            &FixedRuntimePolicy::new(policy()),
             false,
             CancellationToken::new(),
         )
@@ -693,10 +693,10 @@ async fn native_goal_defers_history_until_the_next_prompt_even_after_the_goal_ru
         .await?;
     let start = service(&h, sessions(adapter.clone()));
     let handle = start
-        .start(
+        .start_resolving(
             ThreadId("thread:test".into()),
             RunId("run:test".into()),
-            policy(),
+            &FixedRuntimePolicy::new(policy()),
             false,
             CancellationToken::new(),
         )
@@ -798,10 +798,10 @@ async fn native_goal_defers_history_until_the_next_prompt_even_after_the_goal_ru
             .is_none()
     );
     let handle = start
-        .start(
+        .start_resolving(
             ThreadId("thread:test".into()),
             RunId("run:next".into()),
-            policy(),
+            &FixedRuntimePolicy::new(policy()),
             false,
             CancellationToken::new(),
         )
@@ -984,10 +984,10 @@ async fn resume_recovers_lost_or_uncertain_native_context_and_budget_exhaustion_
             )),
         );
         let result = start
-            .start_configured(
+            .start_resolving(
                 ThreadId("thread:test".into()),
                 RunId("run:test".into()),
-                policy().with_reasoning_effort(Some("high".into())),
+                &FixedRuntimePolicy(policy().with_reasoning_effort(Some("high".into()))),
                 true,
                 CancellationToken::new(),
             )
@@ -1136,10 +1136,10 @@ async fn compacting_an_empty_conversation_fails_before_opening_a_provider() -> R
     let service = service(&h, sessions(Arc::new(adapter)));
     assert!(
         service
-            .start(
+            .start_resolving(
                 ThreadId("thread:test".into()),
                 RunId("run:test".into()),
-                policy(),
+                &FixedRuntimePolicy::new(policy()),
                 false,
                 CancellationToken::new()
             )
@@ -1196,10 +1196,10 @@ async fn starts_adopting_the_persisted_provider_identity_and_awaits_acceptance()
         .unwrap()
         .telemetry = Some(telemetry.clone());
     let handle = service
-        .start(
+        .start_resolving(
             ThreadId("thread:test".into()),
             RunId("run:test".into()),
-            policy(),
+            &FixedRuntimePolicy::new(policy()),
             false,
             CancellationToken::new(),
         )
@@ -1276,10 +1276,10 @@ async fn open_failure_retries_without_settlement_but_exhaustion_and_sign_in_fail
             }),
         );
         let result = service
-            .start(
+            .start_resolving(
                 ThreadId("thread:test".into()),
                 RunId("run:test".into()),
-                policy(),
+                &FixedRuntimePolicy::new(policy()),
                 retry,
                 CancellationToken::new(),
             )
@@ -1341,10 +1341,11 @@ async fn stop_committed_during_open_prevents_provider_start_and_preserves_the_st
             resume_open: Some(resume.clone()),
         }),
     );
-    let start = service.start(
+    let fixed = FixedRuntimePolicy::new(policy());
+    let start = service.start_resolving(
         ThreadId("thread:test".into()),
         RunId("run:test".into()),
-        policy(),
+        &fixed,
         false,
         CancellationToken::new(),
     );
@@ -1384,10 +1385,11 @@ async fn cancellation_during_open_leaves_starting_state_for_recovery() -> Result
         }),
     );
     let cancellation = CancellationToken::new();
-    let start = service.start(
+    let fixed = FixedRuntimePolicy::new(policy());
+    let start = service.start_resolving(
         ThreadId("thread:test".into()),
         RunId("run:test".into()),
-        policy(),
+        &fixed,
         false,
         cancellation.clone(),
     );
@@ -1436,10 +1438,10 @@ async fn recovers_an_abandoned_turn_before_opening_and_preserves_its_original_ru
     let adapter = Arc::new(adapter);
     let service = service(&h, sessions(adapter.clone()));
     let handle = service
-        .start(
+        .start_resolving(
             ThreadId("thread:test".into()),
             RunId("run:test".into()),
-            policy(),
+            &FixedRuntimePolicy::new(policy()),
             false,
             CancellationToken::new(),
         )

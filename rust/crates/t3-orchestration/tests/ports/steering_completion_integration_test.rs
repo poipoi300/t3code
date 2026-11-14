@@ -399,15 +399,9 @@ async fn check_scheduled_goal_case(edit: bool) -> Result<()> {
             failure.failure.code.as_ref().map(|code| code.0.as_str()),
             Some("queued_start_failed")
         );
-        assert!(
-            failure
-                .failure
-                .message
-                .0
-                .contains("Claude goals cannot be paused or resumed"),
-            "{:?}",
-            failure.failure
-        );
+        // TS gives a plain-text refusal provider-core's default message
+        // (`SteeringCompletion.integration.test.ts` checks the code only).
+        assert_eq!(failure.failure.message.0, "Provider turn failed.");
         let id = t3_contracts::stored::to_value(&queued.id)?
             .as_str()
             .expect("test value")

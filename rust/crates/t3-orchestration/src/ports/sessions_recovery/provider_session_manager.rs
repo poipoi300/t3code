@@ -1,7 +1,8 @@
 use crate::{
     api::{
-        Clock, CommitGuard, CommitRequest, Decision, EventCommitter, EventIngestor, IdGenerator,
-        IdKind, ProjectionReader, ProviderRegistry, RecordFilter, RecordKind, SessionDirectory,
+        Clock, CommandOutputSink, CommitGuard, CommitRequest, Decision, EventCommitter,
+        EventIngestor, IdGenerator, IdKind, ProjectionReader, ProviderRegistry, RecordFilter,
+        RecordKind, SessionDirectory,
     },
     error::{Error, Result},
     provider::*,
@@ -9,7 +10,7 @@ use crate::{
 use async_trait::async_trait;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex, OnceLock, Weak},
     time::Duration,
 };
 use t3_contracts::orchestration_v2::*;
@@ -221,6 +222,7 @@ struct Inner {
     maintenance: TaskTracker,
     options: SessionManagerOptions,
     services: SessionServices,
+    command_output: OnceLock<Arc<dyn CommandOutputSink>>,
 }
 
 #[derive(Clone)]
@@ -298,7 +300,26 @@ impl ProviderSessionManager {
                 maintenance: TaskTracker::new(),
                 options,
                 services: services.unwrap_or_default(),
+                command_output: OnceLock::new(),
             }),
+        }
+    }
+
+    /// Where live command chunks go (TS `startEventPump`); set once, before sessions open.
+    pub fn set_command_output(&self, sink: Arc<dyn CommandOutputSink>) -> Result<()> {
+        self.inner
+            .command_output
+            .set(sink)
+            .map_err(|_| Error::Service {
+                operation: "ProviderSessionManager.set_command_output",
+                detail: "Command output is already set.".into(),
+            })
+    }
+
+    async fn release_live_output(&self, settled: Option<(ThreadId, TurnItemId)>) -> Result<()> {
+        match (settled, self.inner.command_output.get()) {
+            (Some((thread_id, item_id)), Some(sink)) => sink.finish(thread_id, item_id).await,
+            _ => Ok(()),
         }
     }
 
@@ -608,6 +629,12 @@ impl ProviderSessionManager {
                             };
                         };
                         let mut event = event?;
+                        // Live output bypasses persistence and subscribers so floods cannot delay domain events.
+                        if let ProviderEventKind::CommandOutput { thread_id, item_id, chunk } = event.kind {
+                            if let Some(sink) = manager.inner.command_output.get() { sink.append(thread_id, item_id, chunk).await?; }
+                            continue;
+                        }
+                        let settled_output = settled_command(&event)?;
                         if matches!(&event.kind, ProviderEventKind::Session(session) if session.status == ProviderSessionStatus::Stopped) { stopped_by_provider = true; }
                         manager.observe(&session_id, &runtime, &mut event).await?;
                         if !matches!(event.kind, ProviderEventKind::PromptSuggestion { .. }) {
@@ -619,10 +646,14 @@ impl ProviderSessionManager {
                                     let state = manager.inner.state.lock().unwrap_or_else(|e| e.into_inner());
                                     state.sessions.get(&session_id).filter(|entry| Arc::ptr_eq(&entry.runtime, &runtime)).is_some_and(|entry| !requires_attachment || entry.threads.contains(&target))
                                 };
-                                if current { ingestor.ingest(session_id.clone(), instance.clone(), target, event).await?; }
+                                if current {
+                                    ingestor.ingest(session_id.clone(), instance.clone(), target, event).await?;
+                                    manager.release_live_output(settled_output).await?;
+                                }
                                 continue;
                             }
                             manager.publish(&session_id, &runtime, event).await;
+                            manager.release_live_output(settled_output).await?;
                         }
                     }
                 }.await;
@@ -2533,6 +2564,25 @@ fn expanded<T: Clone>(
             detail: "session manager requires expanded IDs".into(),
         }),
     }
+}
+
+/// A command item that stopped working: its live tail is released after the item is handed on.
+fn settled_command(event: &ProviderEvent) -> ProviderResult<Option<(ThreadId, TurnItemId)>> {
+    let ProviderEventKind::TurnItem { item, .. } = &event.kind else {
+        return Ok(None);
+    };
+    let OrchestrationV2TurnItem::CommandExecution(item) = item.as_ref() else {
+        return Ok(None);
+    };
+    if matches!(
+        item.status,
+        OrchestrationV2TurnItemStatus::Pending
+            | OrchestrationV2TurnItemStatus::Running
+            | OrchestrationV2TurnItemStatus::Waiting
+    ) {
+        return Ok(None);
+    }
+    Ok(Some((expanded(&item.thread_id)?, expanded(&item.id)?)))
 }
 
 fn event_thread(event: &ProviderEvent) -> Option<ThreadId> {

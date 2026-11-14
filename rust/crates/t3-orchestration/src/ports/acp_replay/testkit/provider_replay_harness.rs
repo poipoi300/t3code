@@ -211,6 +211,11 @@ pub mod event_tap {
         fn instance_id(&self) -> &ProviderInstanceId {
             self.inner.instance_id()
         }
+        fn supported_runtime_modes(
+            &self,
+        ) -> Option<Vec<t3_contracts::provider_policy::RuntimeMode>> {
+            self.inner.supported_runtime_modes()
+        }
         fn driver(&self) -> ProviderDriverKind {
             self.inner.driver()
         }

@@ -3,9 +3,7 @@
 use crate::provider::{ProviderError, ProviderOperation, ProviderResult, RuntimePolicy};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use t3_claude_cli::control::{
-    PermissionDecision, PermissionMode, PermissionUpdate, ToolPermission,
-};
+use t3_claude_cli::control::{PermissionDecision, PermissionMode, ToolPermission};
 use t3_contracts::{
     orchestration_v2::*,
     provider_policy::{
@@ -179,44 +177,43 @@ pub fn permission_result_from_decision(
     decision: ProviderApprovalDecision,
     feedback: Option<&str>,
     managed_ceiling: bool,
-) -> PermissionDecision {
+) -> Value {
     use ProviderApprovalDecision::*;
     if matches!(decision, Accept | AcceptForSession) {
-        let updated_permissions = if decision == AcceptForSession {
-            let updates = request
+        let updates = if decision == AcceptForSession {
+            request
                 .permission_suggestions
                 .as_deref()
                 .unwrap_or_default()
                 .iter()
-                .filter(|v| !(managed_ceiling && v["type"] == "setMode"))
-                .map(|v| {
-                    let mut value = v.clone();
-                    if value.is_object() {
-                        value["destination"] = json!("session");
-                    }
-                    serde_json::from_value::<PermissionUpdate>(value)
+                .filter(|value| !(managed_ceiling && value["type"] == "setMode"))
+                .filter_map(|value| {
+                    let mut value = value.as_object()?.clone();
+                    value.insert("destination".into(), json!("session"));
+                    Some(Value::Object(value))
                 })
-                .collect::<Result<Vec<_>, _>>()
-                .ok();
-            updates.filter(|updates| !updates.is_empty())
+                .collect::<Vec<_>>()
         } else {
-            None
+            Vec::new()
         };
-        let standing_grant = updated_permissions.is_some();
-        PermissionDecision::Allow {
+        let mut response = json!(PermissionDecision::Allow {
             updated_input: request.input.clone(),
-            updated_permissions,
+            updated_permissions: None,
             decision_classification: Some(
-                if standing_grant {
-                    "user_permanent"
-                } else {
+                if updates.is_empty() {
                     "user_temporary"
+                } else {
+                    "user_permanent"
                 }
-                .into(),
+                .into()
             ),
+        });
+        if !updates.is_empty() {
+            response["updatedPermissions"] = Value::Array(updates);
         }
+        response
     } else {
-        PermissionDecision::Deny {
+        json!(PermissionDecision::Deny {
             message: feedback
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -228,7 +225,7 @@ pub fn permission_result_from_decision(
                 .into(),
             interrupt: (decision == Cancel).then_some(true),
             decision_classification: Some("user_reject".into()),
-        }
+        })
     }
 }
 

@@ -381,11 +381,10 @@ pub trait ProviderAdapter: Send + Sync {
         self.open_session(input, cancellation).await
     }
 
-    /// The runtime modes this provider offers when it has a fixed list (TS provider snapshot
-    /// `supportedRuntimeModes`); `None` offers every mode. The host's provider snapshot wins.
-    fn supported_runtime_modes(&self) -> Option<Vec<t3_contracts::provider_policy::RuntimeMode>> {
-        None
-    }
+    /// The runtime modes this provider offers (TS provider snapshot `supportedRuntimeModes`);
+    /// a thread mode outside the list runs as approval-required, and the host's snapshot wins.
+    /// Required so no adapter offers every mode by omission: `None` states "every mode".
+    fn supported_runtime_modes(&self) -> Option<Vec<t3_contracts::provider_policy::RuntimeMode>>;
 }
 #[async_trait]
 pub trait SessionRuntime: Send + Sync {

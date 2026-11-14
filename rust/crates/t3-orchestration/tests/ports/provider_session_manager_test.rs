@@ -670,6 +670,9 @@ struct HandshakeAdapter {
 
 #[async_trait]
 impl ProviderAdapter for HandshakeAdapter {
+    fn supported_runtime_modes(&self) -> Option<Vec<t3_contracts::provider_policy::RuntimeMode>> {
+        None
+    }
     fn instance_id(&self) -> &ProviderInstanceId {
         self.native.instance_id()
     }
@@ -2278,6 +2281,9 @@ struct RoutedAdapter {
 
 #[async_trait]
 impl ProviderAdapter for RoutedAdapter {
+    fn supported_runtime_modes(&self) -> Option<Vec<t3_contracts::provider_policy::RuntimeMode>> {
+        None
+    }
     fn instance_id(&self) -> &ProviderInstanceId {
         self.first.instance_id()
     }

@@ -5348,3 +5348,128 @@ async fn composed_codex_turn_interrupt_mid_tool_scenario() -> t3_orchestration::
 async fn composed_codex_web_search_scenario() -> t3_orchestration::error::Result<()> {
     composed_codex_scenario("web_search").await
 }
+
+/// Live command output through the composed runtime: the recorded command streams its chunks to
+/// a `runtime.command_output` subscriber while it runs, and the stream ends with the settled
+/// output. The replay pauses just before the command's `item/completed`.
+#[tokio::test]
+async fn command_output_reaches_a_subscriber_while_running_and_ends_when_settled()
+-> t3_orchestration::error::Result<()> {
+    use t3_orchestration::{
+        api::*,
+        composition::{OrchestrationRuntime, RuntimePorts, StaticSettings},
+        ports::sessions_recovery::provider_adapter_registry::AdapterRegistry,
+    };
+    const SETTLE: &str = "item/completed:command";
+    let mut entries = Vec::new();
+    let mut prompt = String::new();
+    let mut sandbox = Value::Null;
+    for line in kit::fixture("command_output_streaming")?.lines() {
+        let mut entry: Value = serde_json::from_str(line)?;
+        if entry["type"] == "expect_outbound" && entry["frame"]["method"] == "turn/start" {
+            prompt = entry["frame"]["params"]["input"][0]["text"].as_str().unwrap_or_default().into();
+            sandbox = entry["frame"]["params"]["sandboxPolicy"].clone();
+        }
+        if entry["frame"]["method"] == "item/completed"
+            && entry["frame"]["params"]["item"]["type"] == "commandExecution"
+        {
+            entry["label"] = SETTLE.into();
+        }
+        entries.push(entry.to_string());
+    }
+    let transcript = t3_orchestration::testing::replay::decode_ndjson(&entries.join("\n"))
+        .map_err(|error| t3_orchestration::error::Error::Service {
+            operation: "Codex recording",
+            detail: error.to_string(),
+        })?;
+    let gate = t3_orchestration::testing::replay::ReplayGate::new([SETTLE.to_owned()])
+        .map_err(|error| t3_orchestration::error::Error::Service {
+            operation: "Codex recording",
+            detail: error.to_string(),
+        })?;
+    let adapter = Arc::new(kit::CodexReplayAdapter::new(
+        kit::options(),
+        transcript,
+        gate.clone(),
+    )?);
+    let database = t3_orchestration::testing::TestDatabase::temporary()?;
+    let workspace = tempfile::tempdir()?;
+    let mut ports = RuntimePorts::new(
+        database.stores.clone(),
+        Arc::new(AdapterRegistry::from_adapters(vec![adapter.clone()])),
+        Arc::new(CodexFixturePlainWorkspace),
+        Arc::new(t3_orchestration::testing::ManualClock::new(
+            "2026-11-13T00:00:00.000Z",
+        )),
+    );
+    // The recording's access: approval `never` with a workspace-write sandbox.
+    ports.policy = Arc::new(CodexScenarioPolicy {
+        workspace: workspace.path().into(),
+        overrides: json!({"approvalPolicy":"never","sandboxPolicy":sandbox}),
+    });
+    let mut settings = serde_json::to_value(t3_contracts::settings::ServerSettings::default())?;
+    settings["providerInstances"]["codex"] = json!({"driver":"codex","enabled":true});
+    ports.settings = Arc::new(StaticSettings::new(serde_json::from_value(settings)?));
+    let runtime = OrchestrationRuntime::start(ports).await?;
+    let thread_id = ThreadId("codex-thread".into());
+    let result = async {
+        runtime.project_command(serde_json::from_value(json!({"type":"project.create","commandId":"codex-project","projectId":"codex-project","title":"Codex fixture","workspaceRoot":workspace.path()}))?).await?;
+        runtime.dispatch_command(serde_json::from_value(json!({"type":"thread.create","commandId":"codex-thread","threadId":"codex-thread","projectId":"codex-project","title":"Replay fixture: command output","modelSelection":{"instanceId":"codex","model":"gpt-6-luna"},"runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"}))?).await?;
+        let mut committed = runtime.events.subscribe();
+        runtime.dispatch_command(serde_json::from_value(json!({"type":"message.dispatch","commandId":"codex-message","threadId":"codex-thread","messageId":"codex-message","text":prompt,"attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"}))?).await?;
+        let item_id = loop {
+            let command = runtime
+                .projections
+                .projection(thread_id.clone())
+                .await?
+                .and_then(|projection| {
+                    projection.turn_items.into_iter().find_map(|item| match item {
+                        OrchestrationV2TurnItem::CommandExecution(item) => Some(item.id),
+                        _ => None,
+                    })
+                });
+            if let Some(t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(id)) = command {
+                break id;
+            }
+            committed.recv().await.map_err(|error| t3_orchestration::error::Error::Service {
+                operation: "command output",
+                detail: error.to_string(),
+            })?;
+        };
+        assert!(gate.wait_for_reached(SETTLE).await);
+        let hub = runtime.command_output.as_ref().expect("command output hub");
+        let mut subscription = hub
+            .subscribe(OrchestrationV2SubscribeCommandOutputInput {
+                thread_id: thread_id.clone(),
+                item_id,
+            })
+            .await?;
+        let mut live = String::new();
+        while !live.contains("progress 100%") {
+            let frame = subscription.pull().await?.expect("a frame while running");
+            assert!(frame.running, "{frame:?}");
+            if frame.kind == CommandOutputFrameKind::Replace {
+                live.clear();
+            }
+            live.push_str(&frame.text);
+        }
+        assert!(live.contains("\u{1b}[0;32mstream line 2\u{1b}[0m"), "{live:?}");
+        gate.release(SETTLE);
+        let settled = loop {
+            let frame = subscription.pull().await?.expect("the settled frame");
+            if !frame.running {
+                break frame;
+            }
+        };
+        assert_eq!(settled.kind, CommandOutputFrameKind::Replace);
+        assert!(settled.text.contains("progress 100%"), "{settled:?}");
+        assert!(subscription.pull().await?.is_none(), "the stream ends once settled");
+        subscription.close().await
+    }
+    .await;
+    gate.release_all();
+    let shutdown = runtime.shutdown().await;
+    adapter.shutdown().await;
+    result?;
+    shutdown
+}

@@ -137,6 +137,14 @@ pub struct RuntimePorts {
     pub thread_find_text: Option<Arc<dyn crate::ports::transport::thread_find::ThreadFindText>>,
     /// Without it `launch_thread` is unsupported.
     pub launch: Option<Arc<dyn LaunchEnvironment>>,
+    /// `orchestration.getWorkflowScript`: the host's contained file reader and the projects
+    /// root workflow scripts live under. Without it the method is unsupported.
+    pub workflow_files: Option<WorkflowFiles>,
+    /// `orchestration.getNativeChildWork`: the provider's native child-work reader (t3-provider's
+    /// Antigravity reader). Without it the method is unsupported.
+    pub native_child_work: Option<
+        Arc<dyn crate::ports::runs_ingestion::native_child_work_query::NativeChildWorkBackend>,
+    >,
     /// Forge URL and repository rules for projected PR identities; without it projections
     /// keep identities as persisted (no host alias or authority normalisation).
     pub pull_request_identities: Option<Arc<dyn PullRequestIdentityRegistry>>,
@@ -193,6 +201,8 @@ impl RuntimePorts {
                 t3_shared::search_policy::NativeThreadSearchPolicy::default(),
             )),
             launch: None,
+            workflow_files: None,
+            native_child_work: None,
             pull_requests: None,
             pull_request_identities: None,
             rollback_workspaces: None,
@@ -204,6 +214,12 @@ impl RuntimePorts {
             worker: WorkerOptions::default(),
         }
     }
+}
+
+/// Where workflow scripts are read: the host's contained reader under `projects_root`.
+pub struct WorkflowFiles {
+    pub backend: Arc<dyn crate::ports::runs_ingestion::workflow_file_read::WorkflowFileBackend>,
+    pub projects_root: std::path::PathBuf,
 }
 
 /// A started runtime. Reads go through `transport`; commands through [`Self::dispatch_command`],
@@ -232,6 +248,9 @@ pub struct OrchestrationRuntime {
     operations: Arc<ComposedThreads>,
     ingestor: Arc<ProviderEventIngestor>,
     launches: Option<ThreadLaunchService>,
+    workflow_files: Option<WorkflowFiles>,
+    native_child_work:
+        Option<crate::ports::runs_ingestion::native_child_work_query::NativeChildWorkQuery>,
     project_lane: tokio::sync::Mutex<()>,
     continuation_service: Arc<
         crate::ports::sessions_recovery::provider_continuation_service::ProviderContinuationService,
@@ -278,6 +297,8 @@ impl OrchestrationRuntime {
             terminal_output,
             search_policy,
             launch,
+            workflow_files,
+            native_child_work,
             pull_requests,
             pull_request_identities,
             rollback_workspaces,
@@ -339,6 +360,16 @@ impl OrchestrationRuntime {
             }),
         );
         let session_directory: Arc<dyn SessionDirectory> = Arc::new(sessions.clone());
+        let command_output = terminal_output.map(|terminal| {
+            crate::ports::transport::command_output_hub::CommandOutputHub::new(
+                reader.clone(),
+                events_for_services.clone(),
+                terminal,
+            )
+        });
+        if let Some(hub) = &command_output {
+            sessions.set_command_output(Arc::new(hub.clone()))?;
+        }
         let recovery = Arc::new(
             ProviderRuntimeRecoveryService::new(
                 database.clone(),
@@ -543,18 +574,17 @@ impl OrchestrationRuntime {
             attachments,
             projections: reader.clone(),
         };
-        let command_output = terminal_output.map(|terminal| {
-            crate::ports::transport::command_output_hub::CommandOutputHub::new(
-                reader.clone(),
-                events_for_services.clone(),
-                terminal,
-            )
-        });
         let thread_search = search_policy.map(|policy| {
             Arc::new(crate::ports::transport::thread_search::ThreadSearch::new(
                 database.clone(),
                 policy,
             ))
+        });
+        let native_child_work = native_child_work.map(|backend| {
+            crate::ports::runs_ingestion::native_child_work_query::NativeChildWorkQuery {
+                projections: reader.clone(),
+                backend,
+            }
         });
         let transport = Arc::new(TransportService::new(reader, events, database.clone()));
 
@@ -623,6 +653,8 @@ impl OrchestrationRuntime {
             operations,
             ingestor,
             launches,
+            workflow_files,
+            native_child_work,
             project_lane: tokio::sync::Mutex::new(()),
             continuation_service,
             continuation_task: Mutex::new(Some(continuation_task)),
@@ -691,6 +723,103 @@ impl OrchestrationRuntime {
     /// `orchestration.launchThread` (TS `ThreadMessageIntake.launchThread`).
     pub async fn launch_thread(&self, input: LaunchInput) -> Result<LaunchResult> {
         self.intake.launch_thread(input).await
+    }
+
+    /// `orchestration.launchThread` (TS `ws.ts`): checks the worktree base, then launches through
+    /// message intake as the user, from `web` unless the client names its source.
+    pub async fn launch_client_thread(
+        &self,
+        input: OrchestrationV2ThreadLaunchInput,
+    ) -> Result<OrchestrationV2ThreadLaunchResult> {
+        let launches = self
+            .launches
+            .as_ref()
+            .ok_or(Error::Unsupported("ThreadMessageIntake.launch_thread"))?;
+        launches
+            .check_worktree_base(
+                input.project_id.clone(),
+                &input.workspace_strategy,
+                Some(input.command_id.clone()),
+            )
+            .await?;
+        let initial_message = input.initial_message.flatten().map(|message| {
+            crate::ports::checkpoints_forks::thread_launch_service::InitialMessage {
+                message_id: message.message_id.flatten(),
+                scheduled_task_id: None,
+                sender_thread_id: None,
+                text: message.text,
+                attachments: message.attachments,
+                context: message.context.flatten(),
+            }
+        });
+        let launched = self
+            .launch_thread(LaunchInput {
+                command_id: input.command_id,
+                thread_id: input.thread_id.flatten(),
+                reuse_existing_thread: input.reuse_existing_thread.flatten() == Some(true),
+                project_id: input.project_id,
+                title: input.title.0,
+                generate_title: input.generate_title.flatten() == Some(true),
+                model_selection: input.model_selection,
+                runtime_mode: input.runtime_mode,
+                interaction_mode: input.interaction_mode,
+                workspace_strategy: input.workspace_strategy,
+                initial_message,
+                imported_native_thread: None,
+                created_by: OrchestrationV2Actor::User,
+                creation_source: input
+                    .creation_source
+                    .flatten()
+                    .unwrap_or(OrchestrationV2CreationSource::Web),
+                link_origin: None,
+                delegated_from: None,
+            })
+            .await?;
+        Ok(OrchestrationV2ThreadLaunchResult {
+            thread_id: launched.thread_id,
+            projection: launched.projection,
+            resumed: launched.resumed,
+            sequence: launched.sequence,
+        })
+    }
+
+    /// `orchestration.getWorkflowScript` (TS `readWorkflowScript`): the outer error means no
+    /// host reader was supplied; the inner one is the typed RPC failure.
+    pub async fn workflow_script(
+        &self,
+        input: OrchestrationV2GetWorkflowScriptInput,
+    ) -> Result<
+        std::result::Result<
+            OrchestrationV2GetWorkflowScriptResult,
+            OrchestrationGetWorkflowScriptError,
+        >,
+    > {
+        let files = self
+            .workflow_files
+            .as_ref()
+            .ok_or(Error::Unsupported("orchestration.getWorkflowScript"))?;
+        Ok(
+            crate::ports::runs_ingestion::workflow_script_query::read_workflow_script(
+                files.backend.as_ref(),
+                &files.projects_root,
+                std::path::Path::new(&input.script_path.0),
+            )
+            .await,
+        )
+    }
+
+    /// `orchestration.getNativeChildWork` (TS `nativeChildWork.getNativeChildWork`).
+    pub async fn native_child_work(
+        &self,
+        input: OrchestrationV2GetNativeChildWorkInput,
+    ) -> Result<OrchestrationV2GetNativeChildWorkResult> {
+        let query = self
+            .native_child_work
+            .as_ref()
+            .ok_or(Error::Unsupported("orchestration.getNativeChildWork"))?;
+        Ok(OrchestrationV2GetNativeChildWorkResult {
+            children: query.get(input.thread_id).await?,
+        })
     }
 
     /// `orchestration.stopWorkflow`. Failures the RPC types are `Error::StopWorkflow`; anything
@@ -1168,6 +1297,36 @@ impl ProviderRuntimeModeSource for RegistryRuntimeModes {
     }
 }
 
+#[async_trait]
+impl crate::api::CommandOutputSink
+    for crate::ports::transport::command_output_hub::CommandOutputHub
+{
+    async fn append(
+        &self,
+        thread_id: ThreadId,
+        item_id: t3_contracts::base_schemas::TurnItemId,
+        chunk: String,
+    ) -> Result<()> {
+        let target = t3_contracts::orchestration_v2::OrchestrationV2SubscribeCommandOutputInput {
+            thread_id,
+            item_id,
+        };
+        crate::ports::transport::command_output_hub::CommandOutputHub::append(self, target, chunk)
+            .await
+    }
+    async fn finish(
+        &self,
+        thread_id: ThreadId,
+        item_id: t3_contracts::base_schemas::TurnItemId,
+    ) -> Result<()> {
+        let target = t3_contracts::orchestration_v2::OrchestrationV2SubscribeCommandOutputInput {
+            thread_id,
+            item_id,
+        };
+        crate::ports::transport::command_output_hub::CommandOutputHub::finish(self, target).await
+    }
+}
+
 /// The thread's own runtime and interaction modes (`runtime_policy::resolve_base`), without the
 /// project or managed-ceiling resolution package 04 owns. No reasoning-effort override.
 pub struct BaseRuntimePolicy;
@@ -1311,6 +1470,39 @@ mod tests {
             operation,
             detail: "detail".into(),
         }
+    }
+
+    #[test]
+    fn the_transitional_ceiling_must_agree_with_the_managed_document() {
+        use t3_contracts::provider_policy::RuntimeMode;
+        let document: t3_contracts::managed_policy::ManagedPolicyDocument =
+            serde_json::from_value(serde_json::json!({
+                "schemaVersion": 1,
+                "organization": "Acme",
+                "limits": {"maxRuntimeMode": "auto-accept-edits"},
+            }))
+            .expect("managed policy document");
+        let same = RuntimeModeCeiling {
+            organization: "Acme".into(),
+            max_runtime_mode: RuntimeMode::AutoAcceptEdits,
+        };
+        let derived = single_ceiling(Some(&document), None).expect("derived ceiling");
+        assert_eq!(derived, Some(same.clone()));
+        let agreed = single_ceiling(Some(&document), Some(same.clone())).expect("agreed ceiling");
+        assert_eq!(agreed, Some(same.clone()));
+        let legacy = single_ceiling(None, Some(same.clone())).expect("legacy ceiling");
+        assert_eq!(legacy, Some(same.clone()));
+        let other = RuntimeModeCeiling {
+            max_runtime_mode: RuntimeMode::Auto,
+            ..same
+        };
+        assert!(matches!(
+            single_ceiling(Some(&document), Some(other)),
+            Err(Error::Service {
+                operation: "OrchestrationRuntime.start",
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -435,6 +435,10 @@ impl CodexAdapterV2 {
 
 #[async_trait]
 impl ProviderAdapter for CodexAdapterV2 {
+    // TS's status declares no `supportedRuntimeModes`: every mode.
+    fn supported_runtime_modes(&self) -> Option<Vec<t3_contracts::provider_policy::RuntimeMode>> {
+        None
+    }
     async fn open_session_with_policy(
         &self,
         mut input: OpenSession,

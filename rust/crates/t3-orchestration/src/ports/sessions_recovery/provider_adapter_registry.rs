@@ -252,6 +252,9 @@ impl ProviderAdapter for GuardedAdapter {
     fn instance_id(&self) -> &ProviderInstanceId {
         self.adapter.instance_id()
     }
+    fn supported_runtime_modes(&self) -> Option<Vec<t3_contracts::provider_policy::RuntimeMode>> {
+        self.adapter.supported_runtime_modes()
+    }
     fn driver(&self) -> ProviderDriverKind {
         self.adapter.driver()
     }

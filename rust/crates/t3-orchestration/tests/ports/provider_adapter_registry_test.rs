@@ -120,9 +120,13 @@ struct BlockingAdapter {
     id: ProviderInstanceId,
     capabilities: OrchestrationV2ProviderCapabilities,
     milestones: mpsc::UnboundedSender<&'static str>,
+    modes: Option<Vec<t3_contracts::provider_policy::RuntimeMode>>,
 }
 #[async_trait]
 impl ProviderAdapter for BlockingAdapter {
+    fn supported_runtime_modes(&self) -> Option<Vec<t3_contracts::provider_policy::RuntimeMode>> {
+        self.modes.clone()
+    }
     fn instance_id(&self) -> &ProviderInstanceId {
         &self.id
     }
@@ -158,11 +162,13 @@ async fn routes_same_driver_instances_independently_and_preserves_list_order() -
         id: ProviderInstanceId("personal".into()),
         capabilities: fake.runtime.session().capabilities.clone(),
         milestones: send.clone(),
+        modes: None,
     });
     let b: Arc<dyn ProviderAdapter> = Arc::new(BlockingAdapter {
         id: ProviderInstanceId("work".into()),
         capabilities: fake.runtime.session().capabilities.clone(),
         milestones: send,
+        modes: None,
     });
     let registry = AdapterRegistry::from_adapters(vec![a.clone(), b.clone()]);
     assert!(Arc::ptr_eq(
@@ -192,10 +198,16 @@ async fn shared_credential_changes_block_new_startup_and_cancel_admitted_startup
     let (send, mut milestones) = mpsc::unbounded_channel();
     let peer = Arc::new(CredentialAccess::default());
     let own = Arc::new(CredentialAccess::default());
+    // Muse's offered modes: the credential guard must not drop them (review R2).
+    let muse = vec![
+        t3_contracts::provider_policy::RuntimeMode::ApprovalRequired,
+        t3_contracts::provider_policy::RuntimeMode::FullAccess,
+    ];
     let adapter: Arc<dyn ProviderAdapter> = Arc::new(BlockingAdapter {
         id: input.model_selection.instance_id.clone(),
         capabilities: fake.runtime.session().capabilities.clone(),
         milestones: send,
+        modes: Some(muse.clone()),
     });
     let registry = AdapterRegistry::new(vec![AdapterRegistration {
         adapter,
@@ -206,6 +218,7 @@ async fn shared_credential_changes_block_new_startup_and_cancel_admitted_startup
     let guarded = registry
         .adapter(input.model_selection.instance_id.clone())
         .await?;
+    assert_eq!(guarded.supported_runtime_modes(), Some(muse));
     peer.begin_change();
     assert!(
         guarded
@@ -235,6 +248,7 @@ async fn dropping_attach_cancels_and_awaited_shutdown_collects_its_handshake() -
         id: input.model_selection.instance_id.clone(),
         capabilities: fake.runtime.session().capabilities.clone(),
         milestones: send,
+        modes: None,
     });
     let manager = ProviderSessionManager::new(
         Arc::new(AdapterRegistry::from_adapters(vec![adapter])),
@@ -262,6 +276,9 @@ struct HandshakeChangingAdapter {
 }
 #[async_trait]
 impl ProviderAdapter for HandshakeChangingAdapter {
+    fn supported_runtime_modes(&self) -> Option<Vec<t3_contracts::provider_policy::RuntimeMode>> {
+        None
+    }
     fn instance_id(&self) -> &ProviderInstanceId {
         self.inner.instance_id()
     }

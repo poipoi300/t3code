@@ -19,6 +19,19 @@ pub trait QueueStartFailureFormatter: Send + Sync {
     fn failure(&self, cause: &Error) -> Result<OrchestrationV2ProviderFailure>;
 }
 
+/// TS `failQueuedStart`'s `makeProviderFailure({cause, code: "queued_start_failed", class:
+/// "unknown"})` for the causes a queued start meets (dispatch refusals carry plain text, which
+/// provider-core does not curate): its default message. Rust's capability refusal is plain
+/// text too, so TS's `context_handoff_unsupported` code is not distinguished here.
+fn default_queue_start_failure() -> Result<OrchestrationV2ProviderFailure> {
+    Ok(serde_json::from_value(serde_json::json!({
+        "class": "unknown",
+        "message": "Provider turn failed.",
+        "code": "queued_start_failed",
+        "retryable": null,
+    }))?)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Success,
@@ -417,6 +430,16 @@ impl CommandInputs for RuntimeCommandInputs {
                     }
                 }
             }
+            prepared.context.inputs.selection_sessions = sessions
+                .iter()
+                .filter(|(_, runtime)| {
+                    runtime
+                        .as_ref()
+                        .and_then(|runtime| runtime.extensions())
+                        .is_some_and(|extensions| extensions.capabilities().apply_selection)
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
             prepared.context.inputs.live_sessions = sessions
                 .into_iter()
                 .map(|(id, runtime)| (id, runtime.is_some()))
@@ -2331,13 +2354,10 @@ impl Inner {
         if matches!(cause, Error::Unsupported(_)) {
             return Err(cause);
         }
-        let formatter = self
-            .queue_failure_formatter
-            .get()
-            .ok_or(Error::Unsupported(
-                "queued start failure requires the host provider failure formatter",
-            ))?;
-        let failure = formatter.failure(&cause)?;
+        let failure = match self.queue_failure_formatter.get() {
+            Some(formatter) => formatter.failure(&cause)?,
+            None => default_queue_start_failure()?,
+        };
         let mut prepared = self.prepare_delegated_recovery(thread.clone()).await?;
         let reader = self
             .services

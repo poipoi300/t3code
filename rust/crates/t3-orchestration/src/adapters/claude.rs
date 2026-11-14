@@ -1341,6 +1341,10 @@ impl ClaudeAdapterV2 {
 
 #[async_trait]
 impl ProviderAdapter for ClaudeAdapterV2 {
+    // TS's status declares no `supportedRuntimeModes`: every mode.
+    fn supported_runtime_modes(&self) -> Option<Vec<t3_contracts::provider_policy::RuntimeMode>> {
+        None
+    }
     fn instance_id(&self) -> &ProviderInstanceId {
         &self.options.instance_id
     }
@@ -2962,11 +2966,11 @@ impl SessionRuntime for ClaudeSessionRuntime {
                             input.answers.as_ref().ok_or(ProviderError::Cancelled)?,
                         ),
                     );
-                    PermissionDecision::Allow {
+                    json!(PermissionDecision::Allow {
                         updated_input: updated,
                         updated_permissions: None,
                         decision_classification: Some("user_temporary".into()),
-                    }
+                    })
                 } else {
                     permission_result_from_decision(
                         &request,
@@ -2975,7 +2979,7 @@ impl SessionRuntime for ClaudeSessionRuntime {
                         managed,
                     )
                 };
-                responder.respond(decision).await
+                responder.respond_raw(decision).await
             }
             Callback::Elicitation(responder) => {
                 responder

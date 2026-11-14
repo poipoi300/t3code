@@ -9,7 +9,7 @@ use t3_orchestration::{
     api::*,
     error::{Error, Result},
     provider::*,
-    testing::FakeProviderAdapter,
+    testing::{FakeProviderAdapter, FixedRuntimePolicy},
 };
 use tokio_util::sync::CancellationToken;
 pub(crate) struct PolicySessions(pub(crate) Arc<FakeProviderAdapter>);
@@ -78,15 +78,15 @@ async fn configured_reasoning_effort_survives_session_open_thread_ensure_or_resu
         let mut runtime_policy = policy();
         runtime_policy.cwd = Some(std::path::PathBuf::from("C:/isolated/policy-worktree"));
         let handle = start
-            .start_configured(
+            .start_resolving(
                 ThreadId("thread:test".into()),
                 RunId("run:test".into()),
-                ConfiguredRuntimePolicy {
+                &FixedRuntimePolicy(ConfiguredRuntimePolicy {
                     policy: runtime_policy.clone(),
                     options: RuntimePolicyOptions {
                         reasoning_effort: Some("high".into()),
                     },
-                },
+                }),
                 false,
                 CancellationToken::new(),
             )

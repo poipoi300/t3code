@@ -232,7 +232,9 @@ reach a stand-in that fails with `Error::Unsupported("<Trait>.<method>")`.
 | `thread_find_text` | `t3-shared` `NativeThreadFindText` | Production-ready; one store, and one find cache, serves the runtime. `None` makes in-thread find fail Unsupported |
 | `terminal_output` | `t3-shared` `NativeTerminalOutputFold` | Production-ready: `runtime.command_output` is present. `None` removes it |
 | `search_policy` | `t3-shared` `NativeThreadSearchPolicy::default()` | Production-ready: `runtime.thread_search` is present. `None` removes it |
-| `launch` | `None` | `launch_thread` fails Unsupported |
+| `launch` | `None` | `launch_thread` and `launch_client_thread` fail Unsupported. Production: `GitLaunchEnvironment::new(backend, host)` over the host's `LaunchHost` |
+| `workflow_files` | `None` | `workflow_script` (`orchestration.getWorkflowScript`) fails Unsupported. Production: `WorkflowFiles { backend, projects_root }` with t3-workspace's contained reader |
+| `native_child_work` | `None` | `native_child_work` (`orchestration.getNativeChildWork`) fails Unsupported. Production: t3-provider's Antigravity child-work reader |
 | `pull_request_identities` | `None` | Projected PR links keep their persisted identity; no host alias or authority normalisation |
 | `pull_requests` | `None` | No PR watch reactor runs |
 | `rollback_workspaces` | `None` | Provider-thread rollback effects fail Unsupported |
@@ -569,7 +571,11 @@ Construct `WorkspaceCoordination::global()` once and pass it to
 `CoordinatedTurnStart::new(turn_start, projections, database, coordination.clone())`.
 Use that wrapper for every provider start (including retries); it reserves the project
 root or worktree through startup and returns the execution handle before settlement.
-Composition calls `start_resolving` with the policy resolver, which keeps reasoning effort and settles a ceiling refusal as a failed run (TS `runtime-mode-above-ceiling`); a caller that resolved the policy itself uses `start_configured`.
+(Composition does not use the wrapper yet: its turn starts take no workspace reservation.)
+Turn start always resolves the policy itself: `start_resolving` (or `CoordinatedTurnStart::start_resolving`)
+takes the policy resolver, keeps reasoning effort and settles a ceiling refusal as a failed run
+(TS `runtime-mode-above-ceiling`). There is no entry that takes a caller-resolved policy, so a host
+cannot skip the ceiling and offered-modes wrap; tests use `testing::FixedRuntimePolicy`.
 Wrap the host `WorkspaceBackend` in `CoordinatedWorkspaces::new(backend, coordination)`
 for launch cleanup and storage cleanup; direct host removals must instead call
 `coordination.cleanup(path, token, removal)`. Rollback uses these same global
@@ -616,7 +622,7 @@ For native background wakes, inject `ClaudeHostOptions::continuation_requests` w
 Known Claude differences:
 
 - Outside a managed ceiling, explicitly accepting a native `setMode` suggestion for the session can raise Claude's permission mode above the thread's displayed mode. This behavior is inherited from TypeScript (review L4); the thread mode is not changed by that native session grant. With `max_runtime_mode` present, every `setMode` suggestion is filtered.
-- Empty, filtered-away or currently undecodable session suggestions grant only the current call. TypeScript creates a whole-tool rule when no suggestions remain; this stricter behavior is intentional. Forwarding unknown native suggestions losslessly still needs the native client's raw permission-response seam.
+- Empty or entirely ceiling-filtered session suggestions grant only the current call. TypeScript creates a whole-tool rule when no suggestions remain; this stricter behavior is intentional. Other native suggestion objects retain every field, with destination set to session.
 
 ## Package 09 transport — server contract (2026-11-13)
 
@@ -664,5 +670,7 @@ Known differences and remaining integration limits:
 - Numeric cursors contain no environment identity. Ahead/pruned/unsafe cursors reset; an in-range cursor from another environment is indistinguishable under the existing TypeScript contract too.
 - `ShellSnapshotAnswer` remains a local untagged type pending its requested move to `t3-contracts::orchestration_v2::OrchestrationV2ShellSnapshotAnswer`.
 - Contracts now expose `ThreadVisitRecorded`; package 09 only extracts its thread ID for the generic reference path. Read-state fan-out/awareness drift is not ported before the requested upstream merge.
+- Inherited from TypeScript, kept on purpose (to raise upstream): a pull-request watch wake carries forge text (comment snippets, check names, merge-queue removal reasons) followed by "Look into each item and act on it as your task requires", with nothing marking that text as written by other people. Check names and the removal reason are not bounded like comment snippets (`ports/thread_project/pull_request_watch.rs:410, 481-575`; TS `pullRequestWatch.ts:256-345`). Review `t3-orchestration-ceiling-rereview.md` W1.
+- Inherited from TypeScript, kept on purpose (to raise upstream): a watch whose wake is refused for a reason that persists (the thread is above the managed ceiling, its provider instance is disabled) never commits its advance, so every two-minute sweep re-reads the forge for it, without end and without a visible notice (`pull_request_watch_reactor.rs:1049-1053`, `:187-194`; TS `PullRequestWatchReactor.ts:551-559`). Review W2.
 
 The investigated image-preview bound is a TypeScript test bug: executing the source with 10,000 image blocks yields **314,913 UTF-16 units / 314,915 UTF-8 bytes**, including eight retained image markers. Its 262,144-byte raw preview expands under JSON escaping, so `<270,000` is incorrect. `wire_projection_test.rs` pins the executed source result; Rust preserves that behavior.

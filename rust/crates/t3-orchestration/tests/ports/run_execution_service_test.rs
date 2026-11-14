@@ -83,10 +83,10 @@ async fn snapshot_batches_normalize_inside_the_writer_and_flush_before_root_comp
     let mut start = service(&h, sessions(adapter.clone()));
     start.execution = Arc::new((*start.execution).clone().with_batches(batches.clone()));
     let handle = start
-        .start(
+        .start_resolving(
             ThreadId("thread:test".into()),
             RunId("run:test".into()),
-            policy(),
+            &t3_orchestration::testing::FixedRuntimePolicy::new(policy()),
             false,
             CancellationToken::new(),
         )
@@ -223,10 +223,10 @@ async fn held_streaming_text_flushes_after_idle_and_keeps_its_reserved_position_
             StaticSettings::new(serde_json::from_value(settings)?),
         )));
         let handle = start
-            .start(
+            .start_resolving(
                 ThreadId("thread:test".into()),
                 RunId("run:test".into()),
-                policy(),
+                &t3_orchestration::testing::FixedRuntimePolicy::new(policy()),
                 false,
                 CancellationToken::new(),
             )
@@ -388,10 +388,10 @@ async fn context_and_liveness_failures_do_not_block_a_restart_and_preview_ends_o
             },
         )));
         let handle = service
-            .start(
+            .start_resolving(
                 ThreadId("thread:test".into()),
                 RunId("run:test".into()),
-                policy(),
+                &t3_orchestration::testing::FixedRuntimePolicy::new(policy()),
                 false,
                 CancellationToken::new(),
             )
@@ -529,10 +529,10 @@ async fn a_provider_turn_persists_items_drains_finalization_and_recovers_after_r
             })),
     );
     let handle = start
-        .start(
+        .start_resolving(
             ThreadId("thread:test".into()),
             RunId("run:test".into()),
-            policy(),
+            &t3_orchestration::testing::FixedRuntimePolicy::new(policy()),
             false,
             CancellationToken::new(),
         )
@@ -1230,10 +1230,10 @@ async fn root_terminal_keeps_ingesting_background_items_until_their_completion()
     let adapter = Arc::new(adapter);
     let service = service(&h, sessions(adapter.clone()));
     let handle = service
-        .start(
+        .start_resolving(
             ThreadId("thread:test".into()),
             RunId("run:test".into()),
-            policy(),
+            &t3_orchestration::testing::FixedRuntimePolicy::new(policy()),
             false,
             CancellationToken::new(),
         )
@@ -1359,11 +1359,12 @@ async fn background_completion_between_initial_read_and_subscription_does_not_pi
         resume.notify_one();
         Ok::<_, t3_orchestration::error::Error>(())
     };
+    let fixed = t3_orchestration::testing::FixedRuntimePolicy::new(policy());
     let (handle, completed) = tokio::join!(
-        start.start(
+        start.start_resolving(
             ThreadId("thread:test".into()),
             RunId("run:test".into()),
-            policy(),
+            &fixed,
             false,
             CancellationToken::new()
         ),
@@ -1455,10 +1456,10 @@ async fn ingestion_failure_stops_the_native_turn_and_repairs_its_last_observed_s
         let intercepted = InterceptCommitter::new(ingestor.committer.clone());
         ingestor.committer = intercepted.clone();
         let handle = start
-            .start(
+            .start_resolving(
                 ThreadId("thread:test".into()),
                 RunId("run:test".into()),
-                policy(),
+                &t3_orchestration::testing::FixedRuntimePolicy::new(policy()),
                 false,
                 CancellationToken::new(),
             )
@@ -1597,10 +1598,10 @@ async fn a_clean_provider_stream_without_a_root_terminal_fails_the_run_and_close
     let adapter = Arc::new(adapter);
     let service = service(&h, sessions(adapter.clone()));
     let handle = service
-        .start(
+        .start_resolving(
             ThreadId("thread:test".into()),
             RunId("run:test".into()),
-            policy(),
+            &t3_orchestration::testing::FixedRuntimePolicy::new(policy()),
             false,
             CancellationToken::new(),
         )
@@ -1670,10 +1671,10 @@ async fn unsupported_compaction_fails_durably_without_starting_a_regular_turn() 
     let (adapter, mut calls) = h.fake();
     let service = service(&h, sessions(Arc::new(adapter)));
     let handle = service
-        .start(
+        .start_resolving(
             ThreadId("thread:test".into()),
             RunId("run:test".into()),
-            policy(),
+            &t3_orchestration::testing::FixedRuntimePolicy::new(policy()),
             false,
             CancellationToken::new(),
         )
@@ -1711,10 +1712,10 @@ async fn workspace_handoff_completes_the_run_unless_a_persisted_stop_request_tak
         let adapter = Arc::new(adapter);
         let service = service(&h, sessions(adapter.clone()));
         let handle = service
-            .start(
+            .start_resolving(
                 ThreadId("thread:test".into()),
                 RunId("run:test".into()),
-                policy(),
+                &t3_orchestration::testing::FixedRuntimePolicy::new(policy()),
                 false,
                 CancellationToken::new(),
             )
@@ -1897,10 +1898,10 @@ async fn forked_baseline_overlaps_session_open_but_provider_prompt_waits_for_cap
         let start = start.clone();
         tokio::spawn(async move {
             start
-                .start(
+                .start_resolving(
                     ThreadId("thread:test".into()),
                     RunId("run:test".into()),
-                    policy(),
+                    &t3_orchestration::testing::FixedRuntimePolicy::new(policy()),
                     false,
                     CancellationToken::new(),
                 )
@@ -2080,10 +2081,10 @@ async fn detached_workspace_handoff_settles_without_interrupt_but_unmarked_strea
             );
         }
         let handle = start
-            .start(
+            .start_resolving(
                 ThreadId("thread:test".into()),
                 RunId("run:test".into()),
-                policy(),
+                &t3_orchestration::testing::FixedRuntimePolicy::new(policy()),
                 false,
                 CancellationToken::new(),
             )
@@ -2243,10 +2244,10 @@ async fn forked_baselines_skip_side_chats_continue_after_capture_failure_and_pro
         let mut start = service(&h, sessions(adapter.clone()));
         Arc::get_mut(&mut start.execution).unwrap().checkpoints = Some(checkpoint.clone());
         let result = start
-            .start(
+            .start_resolving(
                 ThreadId("thread:test".into()),
                 RunId("run:test".into()),
-                policy(),
+                &t3_orchestration::testing::FixedRuntimePolicy::new(policy()),
                 false,
                 CancellationToken::new(),
             )

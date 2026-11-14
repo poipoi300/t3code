@@ -94,6 +94,9 @@ pub struct DecisionInputs {
     /// Observed presence of a live native session. An unobserved session is absent from the
     /// list, which differs from an observed missing session (`false`).
     pub live_sessions: Vec<(ProviderSessionId, bool)>,
+    /// Live sessions whose runtime applies a model selection mid-turn (TS
+    /// `session.applyModelSelection !== undefined`).
+    pub selection_sessions: Vec<ProviderSessionId>,
     /// Project-scoped enablement (`provider_instance_enabled`) for the instances involved.
     pub provider_enabled: Vec<(ProviderInstanceId, bool)>,
     pub supported_runtime_modes: Vec<(
@@ -866,6 +869,15 @@ pub trait SessionDirectory: Send + Sync {
     async fn detach(&self, session_id: ProviderSessionId, revoke_credential: bool) -> Result<()>;
     async fn shutdown(&self) -> Result<()>;
 }
+/// Live command output (TS `CommandOutputHub.append`/`finish`). Chunks bypass persistence and
+/// run subscribers so a flood cannot delay domain events.
+#[async_trait]
+pub trait CommandOutputSink: Send + Sync {
+    async fn append(&self, thread_id: ThreadId, item_id: TurnItemId, chunk: String) -> Result<()>;
+    /// The command settled; its tail stays readable for late subscribers.
+    async fn finish(&self, thread_id: ThreadId, item_id: TurnItemId) -> Result<()>;
+}
+
 #[async_trait]
 pub trait EventIngestor: Send + Sync {
     async fn ingest_with_context(

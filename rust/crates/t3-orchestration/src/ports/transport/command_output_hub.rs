@@ -5,7 +5,10 @@ use crate::{
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use t3_contracts::{base_schemas::*, orchestration_v2::*};
@@ -18,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use t3_shared::terminal_output;
 pub use terminal_output::NativeTerminalOutputFold;
+use terminal_output::{TerminalOutput, terminal_output_resume_text};
 
 pub const TERMINAL_OUTPUT_TAIL_CHARS: usize = 64 * 1024;
 const MAX_APPEND_CHARS: usize = 16 * 1024;
@@ -34,8 +38,11 @@ pub trait TerminalOutputFold: Send + Sync {
     fn settled(&self, state: &Value) -> Result<TerminalText>;
 }
 type Key = (ThreadId, TurnItemId);
+/// One live fold per command. Its own lock serialises chunks and frames for that command, so a
+/// costly chunk never holds the hub's lock, which covers only the maps.
+type Output = Arc<Mutex<TerminalOutput>>;
 struct Tail {
-    state: Value,
+    output: Output,
     written: u64,
 }
 #[derive(Default)]
@@ -60,6 +67,8 @@ struct HubState {
 }
 struct HubInner {
     state: Mutex<HubState>,
+    /// Snapshots rendered for frames: appending never renders the retained output.
+    snapshots: AtomicU64,
     terminal: Arc<dyn TerminalOutputFold>,
     projections: Arc<dyn ProjectionReader>,
     events: Arc<dyn EventCommitter>,
@@ -74,6 +83,7 @@ impl CommandOutputHub {
     ) -> Self {
         Self(Arc::new(HubInner {
             state: Mutex::new(HubState::default()),
+            snapshots: AtomicU64::new(0),
             projections,
             events,
             terminal,
@@ -88,30 +98,53 @@ impl CommandOutputHub {
             return Ok(());
         }
         let key = (target.thread_id, target.item_id);
-        let mut hub = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        let empty = self.0.terminal.empty();
-        let state = self.0.terminal.append(
-            hub.tails.get(&key).map_or(&empty, |tail| &tail.state),
-            &chunk,
-        )?;
-        hub.serial += 1;
-        let written = hub.serial;
-        hub.tails.insert(key.clone(), Tail { state, written });
-        if hub.tails.len() > 64
-            && let Some(oldest) = hub
-                .tails
-                .iter()
-                .min_by_key(|(_, tail)| tail.written)
-                .map(|(key, _)| key.clone())
-        {
-            hub.tails.remove(&oldest);
-            for subscriber in subscribers(&mut hub, &oldest) {
-                let mut pending = subscriber.pending.lock().unwrap_or_else(|e| e.into_inner());
-                pending.replace = true;
-                pending.append.clear();
+        let output = {
+            let mut hub = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+            hub.serial += 1;
+            let written = hub.serial;
+            let output = match hub.tails.get_mut(&key) {
+                Some(tail) => {
+                    tail.written = written;
+                    tail.output.clone()
+                }
+                None => {
+                    let output: Output =
+                        Arc::new(Mutex::new(TerminalOutput::new(TERMINAL_OUTPUT_TAIL_CHARS)));
+                    hub.tails.insert(
+                        key.clone(),
+                        Tail {
+                            output: output.clone(),
+                            written,
+                        },
+                    );
+                    output
+                }
+            };
+            if hub.tails.len() > 64
+                && let Some(oldest) = hub
+                    .tails
+                    .iter()
+                    .min_by_key(|(_, tail)| tail.written)
+                    .map(|(key, _)| key.clone())
+            {
+                hub.tails.remove(&oldest);
+                for subscriber in subscribers(&mut hub, &oldest) {
+                    let mut pending = subscriber.pending.lock().unwrap_or_else(|e| e.into_inner());
+                    pending.replace = true;
+                    pending.append.clear();
+                }
             }
-        }
-        for subscriber in subscribers(&mut hub, &key) {
+            output
+        };
+        // Subscribers are read under the fold's lock, so a frame either includes this chunk or
+        // receives it as an append.
+        let mut output = output.lock().unwrap_or_else(|e| e.into_inner());
+        output.push(&chunk);
+        let subscribers = {
+            let mut hub = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+            subscribers(&mut hub, &key)
+        };
+        for subscriber in subscribers {
             let mut pending = subscriber.pending.lock().unwrap_or_else(|e| e.into_inner());
             if !pending.replace {
                 if pending.append.encode_utf16().count() + chunk.encode_utf16().count()
@@ -126,7 +159,12 @@ impl CommandOutputHub {
             }
             subscriber.wake.notify_one();
         }
+        drop(output);
         Ok(())
+    }
+    fn render(&self, output: &TerminalOutput) -> terminal_output::TerminalOutputState {
+        self.0.snapshots.fetch_add(1, Ordering::Relaxed);
+        output.snapshot()
     }
     pub async fn finish(&self, target: OrchestrationV2SubscribeCommandOutputInput) -> Result<()> {
         let key = (target.thread_id, target.item_id);
@@ -299,7 +337,16 @@ impl CommandOutputSubscription {
             }
             self.last_frame = Some(Instant::now());
             self.throttle = Duration::from_millis(100);
-            let hub = self.hub.0.state.lock().unwrap_or_else(|e| e.into_inner());
+            let output = {
+                let hub = self.hub.0.state.lock().unwrap_or_else(|e| e.into_inner());
+                hub.tails
+                    .get(&self.key)
+                    .or_else(|| hub.finished.get(&self.key))
+                    .map(|tail| tail.output.clone())
+            };
+            let output = output
+                .as_ref()
+                .map(|output| output.lock().unwrap_or_else(|e| e.into_inner()));
             let mut pending = self
                 .subscriber
                 .pending
@@ -310,16 +357,13 @@ impl CommandOutputSubscription {
                 self.cancellation.cancel();
                 return Err(output_error("Lost the thread's event stream."));
             }
-            let tail = hub
-                .tails
-                .get(&self.key)
-                .or_else(|| hub.finished.get(&self.key));
             let frame = if let Some(item) = &pending.settled {
-                let text = if item.output.is_none() && tail.is_some() {
-                    self.hub
-                        .0
-                        .terminal
-                        .settled(&tail.ok_or_else(|| output_error("Missing tail"))?.state)?
+                let text = if let (None, Some(output)) = (&item.output, &output) {
+                    let state = self.hub.render(output);
+                    TerminalText {
+                        text: state.text,
+                        truncated: state.truncated,
+                    }
                 } else {
                     persisted_output(
                         self.hub.0.terminal.as_ref(),
@@ -333,15 +377,19 @@ impl CommandOutputSubscription {
                 self.ended = true;
                 self.cancellation.cancel();
                 frame(CommandOutputFrameKind::Replace, text, false)
-            } else if pending.replace || tail.is_none() {
+            } else if pending.replace || output.is_none() {
                 if pending.overflowed {
                     self.throttle = Duration::from_millis(500);
                 }
                 pending.replace = false;
                 pending.overflowed = false;
                 pending.append.clear();
-                let text = if let Some(tail) = tail {
-                    self.hub.0.terminal.resume(&tail.state)?
+                let text = if let Some(output) = &output {
+                    let state = self.hub.render(output);
+                    TerminalText {
+                        text: terminal_output_resume_text(&state),
+                        truncated: state.truncated,
+                    }
                 } else {
                     persisted_output(
                         self.hub.0.terminal.as_ref(),
@@ -350,10 +398,7 @@ impl CommandOutputSubscription {
                 };
                 frame(CommandOutputFrameKind::Replace, text, true)
             } else {
-                let truncated = tail
-                    .map(|tail| self.hub.0.terminal.settled(&tail.state))
-                    .transpose()?
-                    .is_some_and(|text| text.truncated);
+                let truncated = output.as_ref().is_some_and(|output| output.truncated());
                 frame(
                     CommandOutputFrameKind::Append,
                     TerminalText {
@@ -495,6 +540,65 @@ mod tests {
         let invalid = r#"{"stdout":"out","stderr":"err"}"#;
         assert_eq!(legacy_claude_output(invalid), invalid);
     }
+    fn hub() -> (CommandOutputHub, crate::testing::TestDatabase) {
+        let database = crate::testing::TestDatabase::temporary().expect("test database");
+        let hub = CommandOutputHub::new(
+            Arc::new(crate::testing::FakeProjectionReader::default()),
+            Arc::new(crate::testing::FakeEventCommitter::new(
+                database.stores.clone(),
+            )),
+            Arc::new(NativeTerminalOutputFold),
+        );
+        (hub, database)
+    }
+    fn target(thread: &str) -> OrchestrationV2SubscribeCommandOutputInput {
+        OrchestrationV2SubscribeCommandOutputInput {
+            thread_id: thread.to_owned().into(),
+            item_id: "item".to_owned().into(),
+        }
+    }
+
+    /// Review S-L1: a chunk folds into the live output; nothing renders or serialises the
+    /// retained output until a frame asks for it, however many chunks arrive.
+    #[tokio::test]
+    async fn appending_renders_nothing_until_a_frame_needs_it() {
+        let (hub, _database) = hub();
+        let line = format!("{}\n", "x".repeat(1_000));
+        for _ in 0..10_000 {
+            hub.append(target("thread"), line.clone())
+                .await
+                .expect("append");
+        }
+        assert_eq!(hub.0.snapshots.load(Ordering::Relaxed), 0);
+        let key = (ThreadId("thread".into()), TurnItemId("item".into()));
+        let output = hub.0.state.lock().expect("hub").tails[&key].output.clone();
+        let state = hub.render(&output.lock().expect("output"));
+        assert_eq!(hub.0.snapshots.load(Ordering::Relaxed), 1);
+        assert!(state.truncated);
+        assert!(state.text.encode_utf16().count() <= TERMINAL_OUTPUT_TAIL_CHARS);
+    }
+
+    /// A command whose fold is busy holds only its own output: another thread's chunk still
+    /// lands, because the hub's lock is never held across a fold.
+    #[tokio::test]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "the held lock stands for a fold in progress on another command"
+    )]
+    async fn one_commands_fold_does_not_block_another_threads_output() {
+        let (hub, _database) = hub();
+        hub.append(target("busy"), "start\n".into())
+            .await
+            .expect("append");
+        let key = (ThreadId("busy".into()), TurnItemId("item".into()));
+        let busy = hub.0.state.lock().expect("hub").tails[&key].output.clone();
+        let _folding = busy.lock().expect("busy output");
+        hub.append(target("other"), "other\n".into())
+            .await
+            .expect("another thread's chunk lands while the first is folding");
+        assert_eq!(hub.0.state.lock().expect("hub").tails.len(), 2);
+    }
+
     #[tokio::test]
     async fn lost_event_receiver_wakes_output_waiters_with_a_failure_state() {
         let (sender, receiver) = broadcast::channel(1);

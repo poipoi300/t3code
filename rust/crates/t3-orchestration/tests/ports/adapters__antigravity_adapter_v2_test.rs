@@ -98,6 +98,14 @@ fn served_reads_repair_step_errors_in_order_and_reset_between_turns() {
 
 #[test]
 fn managed_modes_keep_the_cli_asking_and_approval_warnings_reach_clients() {
+    assert_eq!(
+        ANTIGRAVITY_SUPPORTED_RUNTIME_MODES,
+        [
+            RuntimeMode::ApprovalRequired,
+            RuntimeMode::AutoAcceptEdits,
+            RuntimeMode::FullAccess
+        ],
+    );
     for (mode, native) in [
         (RuntimeMode::FullAccess, "yolo"),
         (RuntimeMode::AutoAcceptEdits, "auto_edit"),

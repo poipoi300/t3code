@@ -804,6 +804,37 @@ async fn permission_callback_keeps_forwarded_ask_rules_and_native_downgrades_pen
 }
 
 #[tokio::test]
+async fn permission_callback_forwards_unknown_session_suggestions_through_native_response() {
+    let (runtime, mut subscription, mut peer) = running().await;
+    let mut frame = control("future", "Bash", json!({"command":"pwd"}));
+    frame["request"]["permission_suggestions"] = json!([
+        {"type":"futureScopedRule","scope":{"command":"pwd"},"opaque":17,"destination":"userSettings"},
+        {"type":"setMode","mode":"futureRestrictedMode","destination":"projectSettings"}
+    ]);
+    peer.send(frame).await;
+    let id = request(&mut subscription).await;
+    runtime
+        .respond(RuntimeResponse {
+            request_id: id,
+            decision: Some(ProviderApprovalDecision::AcceptForSession),
+            feedback: None,
+            answers: None,
+        })
+        .await
+        .unwrap();
+    let reply = peer.read().await;
+    runtime.close().await.unwrap();
+    assert_eq!(
+        reply["response"]["response"]["updatedPermissions"],
+        json!([
+            {"type":"futureScopedRule","scope":{"command":"pwd"},"opaque":17,"destination":"session"},
+            {"type":"setMode","mode":"futureRestrictedMode","destination":"session"}
+        ])
+    );
+    assert_eq!(reply["response"]["response"]["toolUseID"], "tool-future");
+}
+
+#[tokio::test]
 async fn permission_callback_max_runtime_mode_filters_native_set_mode_suggestions() {
     use t3_contracts::provider_policy::RuntimeMode;
     let mut input = fixture_turn_input().unwrap();

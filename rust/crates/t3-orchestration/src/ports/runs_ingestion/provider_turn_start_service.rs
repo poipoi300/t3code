@@ -220,13 +220,6 @@ struct ResumeOutcome {
     recovered: bool,
 }
 
-/// A policy resolved by the caller, or one turn start resolves itself (TS order: after the
-/// recovery read, so a refusal can settle the run).
-enum PolicySource<'a> {
-    Configured(ConfiguredRuntimePolicy),
-    Resolve(&'a dyn RuntimePolicyResolver),
-}
-
 struct PreviewHandoffWriter;
 #[async_trait]
 impl HandoffPersistence for PreviewHandoffWriter {
@@ -236,66 +229,6 @@ impl HandoffPersistence for PreviewHandoffWriter {
 }
 
 impl ProviderTurnStartService {
-    pub async fn start(
-        &self,
-        thread_id: ThreadId,
-        run_id: RunId,
-        runtime_policy: RuntimePolicy,
-        will_retry: bool,
-        cancellation: CancellationToken,
-    ) -> Result<Option<RunExecutionHandle>> {
-        self.start_configured(
-            thread_id,
-            run_id,
-            ConfiguredRuntimePolicy {
-                policy: runtime_policy,
-                options: RuntimePolicyOptions::default(),
-            },
-            will_retry,
-            cancellation,
-        )
-        .await
-    }
-
-    pub async fn start_configured(
-        &self,
-        thread_id: ThreadId,
-        run_id: RunId,
-        configured: ConfiguredRuntimePolicy,
-        will_retry: bool,
-        cancellation: CancellationToken,
-    ) -> Result<Option<RunExecutionHandle>> {
-        self.start_configured_with_projector(
-            thread_id,
-            run_id,
-            configured,
-            will_retry,
-            cancellation,
-            None,
-        )
-        .await
-    }
-
-    pub async fn start_configured_with_projector(
-        &self,
-        thread_id: ThreadId,
-        run_id: RunId,
-        configured: ConfiguredRuntimePolicy,
-        will_retry: bool,
-        cancellation: CancellationToken,
-        projector: Option<Arc<dyn ComposerContextProjector>>,
-    ) -> Result<Option<RunExecutionHandle>> {
-        self.start_from(
-            thread_id,
-            run_id,
-            PolicySource::Configured(configured),
-            will_retry,
-            cancellation,
-            projector,
-        )
-        .await
-    }
-
     /// TS `ProviderTurnStartService.start`: resolves the run's policy itself. A turn above the
     /// managed ceiling settles the run as failed instead of returning an error to retry.
     pub async fn start_resolving(
@@ -306,13 +239,34 @@ impl ProviderTurnStartService {
         will_retry: bool,
         cancellation: CancellationToken,
     ) -> Result<Option<RunExecutionHandle>> {
-        self.start_from(
+        self.start_resolving_with_projector(
             thread_id,
             run_id,
-            PolicySource::Resolve(policy),
+            policy,
             will_retry,
             cancellation,
             None,
+        )
+        .await
+    }
+
+    /// `start_resolving` with the host's composer projection of the message.
+    pub async fn start_resolving_with_projector(
+        &self,
+        thread_id: ThreadId,
+        run_id: RunId,
+        policy: &dyn RuntimePolicyResolver,
+        will_retry: bool,
+        cancellation: CancellationToken,
+        projector: Option<Arc<dyn ComposerContextProjector>>,
+    ) -> Result<Option<RunExecutionHandle>> {
+        self.start_from(
+            thread_id,
+            run_id,
+            policy,
+            will_retry,
+            cancellation,
+            projector,
         )
         .await
     }
@@ -321,7 +275,7 @@ impl ProviderTurnStartService {
         &self,
         thread_id: ThreadId,
         run_id: RunId,
-        source: PolicySource<'_>,
+        policy: &dyn RuntimePolicyResolver,
         will_retry: bool,
         cancellation: CancellationToken,
         projector: Option<Arc<dyn ComposerContextProjector>>,
@@ -416,26 +370,24 @@ impl ProviderTurnStartService {
                     .await;
             }
         };
-        let configured = match source {
-            PolicySource::Configured(configured) => configured,
-            PolicySource::Resolve(policy) => match policy
-                .resolve(projection.thread.clone(), state.run.model_selection.clone())
-                .await
-            {
-                Ok(configured) => configured,
-                Err(error) if is_above_ceiling(&error) => {
-                    return self
-                        .failed(
-                            &state,
-                            "runtime-mode-above-ceiling",
-                            "Thread mode is above the policy limit",
-                            error,
-                            false,
-                        )
-                        .await;
-                }
-                Err(error) => return Err(error),
-            },
+        // TS order: after the recovery read, so a refusal can settle the run.
+        let configured = match policy
+            .resolve(projection.thread.clone(), state.run.model_selection.clone())
+            .await
+        {
+            Ok(configured) => configured,
+            Err(error) if is_above_ceiling(&error) => {
+                return self
+                    .failed(
+                        &state,
+                        "runtime-mode-above-ceiling",
+                        "Thread mode is above the policy limit",
+                        error,
+                        false,
+                    )
+                    .await;
+            }
+            Err(error) => return Err(error),
         };
         let ConfiguredRuntimePolicy {
             policy: runtime_policy,

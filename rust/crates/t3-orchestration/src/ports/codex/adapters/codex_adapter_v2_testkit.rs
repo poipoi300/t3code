@@ -1699,6 +1699,10 @@ impl ProviderAdapter for CodexReplayAdapter {
         self.adapter.instance_id()
     }
 
+    fn supported_runtime_modes(&self) -> Option<Vec<t3_contracts::provider_policy::RuntimeMode>> {
+        self.adapter.supported_runtime_modes()
+    }
+
     fn driver(&self) -> t3_contracts::provider_instance::ProviderDriverKind {
         self.adapter.driver()
     }

@@ -179,6 +179,9 @@ impl FakeSessionRuntime {
 }
 #[async_trait]
 impl ProviderAdapter for FakeProviderAdapter {
+    fn supported_runtime_modes(&self) -> Option<Vec<t3_contracts::provider_policy::RuntimeMode>> {
+        None
+    }
     async fn open_session_with_policy(
         &self,
         input: OpenSession,
@@ -834,6 +837,28 @@ impl EventCommitter for FakeEventCommitter {
     }
     async fn latest_sequence(&self, thread_id: Option<ThreadId>) -> Result<u64> {
         self.latest_sequence.call(thread_id)
+    }
+}
+
+/// A resolver that always returns one configured policy: turn-start tests that do not exercise
+/// policy resolution call `start_resolving` with it.
+pub struct FixedRuntimePolicy(pub ConfiguredRuntimePolicy);
+impl FixedRuntimePolicy {
+    pub fn new(policy: RuntimePolicy) -> Self {
+        Self(ConfiguredRuntimePolicy {
+            policy,
+            options: RuntimePolicyOptions::default(),
+        })
+    }
+}
+#[async_trait]
+impl crate::api::RuntimePolicyResolver for FixedRuntimePolicy {
+    async fn resolve(
+        &self,
+        _thread: OrchestrationV2AppThread,
+        _selection: t3_contracts::model_selection::ModelSelection,
+    ) -> Result<ConfiguredRuntimePolicy> {
+        Ok(self.0.clone())
     }
 }
 

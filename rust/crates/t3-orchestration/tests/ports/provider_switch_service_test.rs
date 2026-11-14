@@ -15,6 +15,9 @@ struct SelectionAdapter {
 }
 #[async_trait]
 impl ProviderAdapter for SelectionAdapter {
+    fn supported_runtime_modes(&self) -> Option<Vec<t3_contracts::provider_policy::RuntimeMode>> {
+        None
+    }
     fn instance_id(&self) -> &ProviderInstanceId {
         &self.id
     }
