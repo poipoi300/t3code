@@ -118,9 +118,11 @@ pub fn register_workspace(
     );
     unary!(WsFilesystemBrowseRpc, browse, "FilesystemBrowseError");
     let service = adapter.clone();
-    registry.register::<WsProjectsWriteFileRpc, _, _>(move |_, input| {
+    registry.register::<WsProjectsWriteFileRpc, _, _>(move |ctx, input| {
         let service = service.clone();
         async move {
+            let _admitted =
+                crate::writers::admit(&ctx.services, "a file write", &input.cwd.0).await;
             let context =
                 serde_json::json!({"cwd": input.cwd, "relativePath": input.relative_path});
             service

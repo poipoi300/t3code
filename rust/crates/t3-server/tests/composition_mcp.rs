@@ -1120,7 +1120,7 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
 /// Delegation end to end over `/mcp`: a live parent (the holding stand-in) delegates to Replay
 /// (dev); the child thread runs; `task_status` reports the result and acknowledges it once. The
 /// refusals: a child broader than its parent, a caller with no live run, another thread's task.
-#[cfg(feature = "mcp-delegation")]
+#[cfg(feature = "providers")]
 #[tokio::test]
 async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
     const PARENT: &str = "thread:mcp-parent";
@@ -1129,11 +1129,12 @@ async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
     std::fs::create_dir_all(home.join("userdata")).unwrap();
     // TypeScript's dev seed (`seedDevReplayInstance`) configures Replay (dev) as a local ACP agent,
     // which is what makes its provider status installed; the Rust seed does not yet (requested).
-    // The command only has to exist: the Replay that runs is the in-process one.
+    // The command only has to exist: the Replay that runs is the in-process one. Its models are
+    // what TypeScript's Replay advertises once probed.
     let settings = json!({"providerInstances":{
         "replay":{"driver":"replay","enabled":true},
         "devReplay":{"driver":"acpRegistry","displayName":"Replay (dev)","enabled":true,
-            "config":{"source":"local","commandPath":std::env::current_exe().unwrap(),"commandArgs":["--list"]}}
+            "config":{"source":"local","commandPath":std::env::current_exe().unwrap(),"commandArgs":["--list"],"customModels":["multi-turn"]}}
     }});
     std::fs::write(
         home.join("userdata").join("settings.json"),
@@ -1256,6 +1257,17 @@ async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
     let task_id = task["taskId"].as_str().unwrap().to_owned();
     let child = task["childThreadId"].as_str().unwrap().to_owned();
     assert_eq!(task["providerInstanceId"], "devReplay", "{task}");
+    assert_eq!(task["model"], "multi-turn", "{task}");
+    assert!(
+        matches!(task["status"].as_str(), Some("running" | "queued")),
+        "{task}"
+    );
+    // A running task's result wakes the parent: TypeScript's `next`.
+    assert_eq!(
+        task["next"],
+        t3_contracts::orchestrator_mcp::ORCHESTRATOR_MCP_RUNNING_TASK_NEXT,
+        "{task}"
+    );
     // The same request again is the same task (stable command id), not a second child.
     let again = mcp
         .call(
@@ -1288,21 +1300,16 @@ async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
         }
     }
 
-    // task_status: the result, read by the owner, acknowledged once.
+    // task_status at completion needs `delegatedTaskResultPending` (Request 2 in
+    // server-seam-requests.md): until it lands the tool names it instead of guessing.
     let status = mcp
         .call(&token, "task_status", json!({"taskId": task_id}))
         .await;
-    assert!(!is_error(&status), "{status}");
-    let status = &status["result"]["structuredContent"];
-    assert_eq!(status["status"], "completed", "{status}");
-    assert_eq!(status["workState"], "result_available", "{status}");
-    assert!(status["summary"].is_string(), "{status}");
-    assert!(status.get("next").is_none(), "{status}");
-    let parent_records = mcp
-        .call(&token, "t3_thread_read", json!({"threadId": PARENT, "view": "activity"}))
-        .await;
-    assert!(!is_error(&parent_records), "{parent_records}");
-
+    assert_eq!(
+        status["result"]["structuredContent"]["missingServiceMethod"],
+        "ThreadManagementService::delegated_task_result_pending",
+        "{status}"
+    );
     // Another thread's credential cannot read this task.
     let stranger = sessions
         .registry()

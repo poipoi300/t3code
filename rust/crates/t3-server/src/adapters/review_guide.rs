@@ -149,13 +149,23 @@ impl ReviewGuideGenerator {
     /// The project's repository identity (`requireOwnRepository`'s locator), resolved when it
     /// is not cached yet.
     async fn locator(&self, workspace_root: &str) -> Result<(String, String)> {
-        let identity = self
+        let cached = self
             .projects
             .enrichment()
             .read_repository_identity(workspace_root)
-            .await
+            .await;
+        let fresh = match &cached {
+            Some(_) => None,
+            None => {
+                t3_project::identity::RepositoryIdentityResolver::default()
+                    .resolve(workspace_root, true)
+                    .await
+            }
+        };
+        let identity = cached
+            .or(fresh)
             .map(|identity| serde_json::to_value(identity).unwrap_or_default())
-            .ok_or_else(|| failed("Guides are written from this project's checkout, and this pull request is in another repository. Write it from a project that is a checkout of that repository."))?;
+            .ok_or_else(|| failed(&format!("Guides are written from this project's checkout, and this pull request is in another repository. Write it from a project that is a checkout of that repository. [diagnostic root={workspace_root}]")))?;
         let locator = &identity["locator"];
         Ok((
             locator["remoteName"]

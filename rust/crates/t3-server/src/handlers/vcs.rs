@@ -122,6 +122,9 @@ mod live {
         registry.register::<WsVcsCreateWorktreeRpc, _, _>(move |ctx, input| {
             let a = a.clone();
             async move {
+                let _admitted =
+                    crate::writers::admit(&ctx.services, "Git worktree creation", &input.cwd.0)
+                        .await;
                 a.create_worktree(&ctx.session_id, input)
                     .await
                     .map_err(worktree_error)

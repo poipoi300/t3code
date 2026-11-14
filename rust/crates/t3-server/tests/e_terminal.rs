@@ -183,30 +183,34 @@ async fn explicit_shutdown_is_silent_and_persists_final_output_for_resume() {
     resumed.manager.shutdown().await.unwrap();
 }
 
-/// t3-git H-2: a restore's hold and a terminal start never interleave. A start during the hold
-/// waits for it to drop; a hold taken while a start is in flight waits for the start and names
-/// the terminal, so the restore refuses. Ordered by polling, not by time.
+/// t3-git H-2: a restore holds its folder, not only its thread. A terminal of another thread
+/// opened in an overlapping folder waits for the hold to drop; a writer already admitted when
+/// the hold is taken is named, so the restore refuses. Ordered by the gate's own notification.
 #[cfg(feature = "orchestration")]
 #[tokio::test]
-async fn a_restore_hold_and_a_terminal_start_never_interleave() {
+async fn a_restore_hold_keeps_writers_out_of_its_folder() {
     use t3_contracts::base_schemas::ThreadId;
     use t3_orchestration::api::ThreadWriters;
     let temp = tempfile::tempdir().unwrap();
     let folder = temp.path().join("work");
-    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::create_dir_all(folder.join("sub")).unwrap();
     let adapter = terminal(temp.path());
     let writers = t3_server::adapters::terminal::TerminalWriters(adapter.clone());
-    let open = |thread: &str, terminal: &str| {
-        decode::<TerminalOpenInput>(json!({"threadId":thread,"terminalId":terminal,"cwd":folder}))
-    };
 
     let hold = writers
-        .hold(ThreadId("thread-h".into()), folder.clone())
+        .hold(ThreadId("thread-restoring".into()), folder.clone())
         .await
         .unwrap();
     assert!(hold.running.is_empty(), "{:?}", hold.running);
-    let mut late = Box::pin(adapter.open(open("thread-h", "late")));
-    assert!(matches!(poll!(&mut late), Poll::Pending));
+    let opening = tokio::spawn({
+        let adapter = adapter.clone();
+        let input = decode::<TerminalOpenInput>(
+            json!({"threadId":"thread-other","terminalId":"late","cwd":folder.join("sub")}),
+        );
+        async move { adapter.open(input).await }
+    });
+    let mut waiting = adapter.gate.waiting();
+    waiting.wait_for(|count| *count == 1).await.unwrap();
     let mut metadata = adapter.manager.subscribe_metadata();
     let Some(TerminalMetadataStreamEvent::TerminalMetadataSnapshotEvent(snapshot)) =
         metadata.recv().await
@@ -215,28 +219,28 @@ async fn a_restore_hold_and_a_terminal_start_never_interleave() {
     };
     assert!(snapshot.terminals.is_empty(), "{:?}", snapshot.terminals);
     drop(hold);
-    ok(late.await);
+    ok(opening.await.unwrap());
 
-    let mut early = Box::pin(adapter.open(open("thread-i", "early")));
-    let admitted = poll!(&mut early);
-    let mut hold = Box::pin(writers.hold(ThreadId("thread-i".into()), folder.clone()));
-    match admitted {
-        Poll::Ready(result) => {
-            ok(result);
-        }
-        Poll::Pending => {
-            assert!(matches!(poll!(&mut hold), Poll::Pending));
-            ok(early.await);
-        }
-    }
-    let hold = hold.await.unwrap();
-    // `early` for its thread and `late` for the folder.
+    let write = adapter
+        .gate
+        .enter("a file write", None, Some(folder.as_path()))
+        .await;
+    let hold = writers
+        .hold(ThreadId("thread-restoring".into()), folder.clone())
+        .await
+        .unwrap();
+    // The other thread's live terminal in the folder, and the write in flight.
     assert_eq!(hold.running.len(), 2, "{:?}", hold.running);
     assert!(
-        hold.running.iter().any(|name| name.contains("early")),
+        hold.running.iter().any(|name| name.contains("late")),
         "{:?}",
         hold.running
     );
-    drop(hold);
+    assert!(
+        hold.running.contains(&"a file write".to_owned()),
+        "{:?}",
+        hold.running
+    );
+    drop((hold, write));
     adapter.manager.shutdown().await.unwrap();
 }

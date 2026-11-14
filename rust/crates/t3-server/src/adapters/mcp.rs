@@ -704,7 +704,7 @@ struct Orchestrator {
 
 /// Delegated tasks over the caller's commands, with provider snapshots from the provider domain;
 /// without the provider domain they answer their missing piece.
-#[cfg(feature = "mcp-delegation")]
+#[cfg(feature = "providers")]
 fn delegation(
     orchestration: Arc<t3_mcp::adapters::orchestration::OrchestrationAdapter>,
     domains: &Domains,
@@ -728,7 +728,7 @@ fn delegation(
         }),
     })
 }
-#[cfg(not(feature = "mcp-delegation"))]
+#[cfg(not(feature = "providers"))]
 fn delegation(
     _: Arc<t3_mcp::adapters::orchestration::OrchestrationAdapter>,
     _: &Domains,
@@ -738,14 +738,14 @@ fn delegation(
     fallback
 }
 
-#[cfg(feature = "mcp-delegation")]
+#[cfg(feature = "providers")]
 struct DelegationHost {
     providers: Arc<t3_provider::domain::ProviderDomain>,
     source: Arc<crate::adapters::native_providers::ProviderSource>,
     settings: Arc<t3_config::settings::SettingsService>,
 }
 
-#[cfg(feature = "mcp-delegation")]
+#[cfg(feature = "providers")]
 #[async_trait::async_trait]
 impl t3_mcp::adapters::delegation::DelegationHost for DelegationHost {
     async fn providers(&self) -> t3_mcp::Result<Vec<serde_json::Value>> {

@@ -143,6 +143,17 @@ impl FolderGate {
     }
 }
 
+/// Admits a Git action or file write in `folder` through the environment's gate (`domains`),
+/// for the call's duration.
+pub async fn admit(
+    services: &crate::services::ServiceRegistry,
+    name: &str,
+    folder: &str,
+) -> Option<Admission> {
+    let gate = services.domain::<FolderGate>()?;
+    Some(gate.enter(name, None, Some(Path::new(folder))).await)
+}
+
 /// One folder contains the other: a writer in a parent folder can write into the child.
 pub fn overlaps(a: &Path, b: &Path) -> bool {
     let (a, b) = (plain(a), plain(b));

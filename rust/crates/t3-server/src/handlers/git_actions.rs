@@ -86,11 +86,15 @@ mod live {
         registry.register_stream::<WsGitRunStackedActionRpc, _, _, _>(move |ctx, input| {
             let a = a.clone();
             async move {
+                // Held while the action's stream runs.
+                let admitted =
+                    crate::writers::admit(&ctx.services, "a Git action", &input.cwd.0).await;
                 let mut events = a
                     .run_stacked_action(&ctx.session_id, input)
                     .await
                     .map_err(refusal)?;
                 Ok(async_stream::stream! {
+                    let _admitted = admitted;
                     use futures::StreamExt;
                     while let Some(event) = events.next().await {
                         yield event.map_err(|e| {
@@ -104,6 +108,8 @@ mod live {
         registry.register::<WsGitPreparePullRequestThreadRpc, _, _>(move |ctx, input| {
             let a = a.clone();
             async move {
+                let _admitted =
+                    crate::writers::admit(&ctx.services, "a Git action", &input.cwd.0).await;
                 a.prepare_pull_request_thread(&ctx.session_id, input)
                     .await
                     .map_err(refusal)

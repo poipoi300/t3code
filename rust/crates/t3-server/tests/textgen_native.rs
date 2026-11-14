@@ -71,9 +71,14 @@ fn main() -> ExitCode {
         .unwrap();
     let mut failed = 0;
     for (name, case) in &selected {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            runtime.block_on(case());
-        }));
+        // The server's start-up futures are deep; Windows' 1 MiB main stack is not enough.
+        let case = *case;
+        let handle = runtime.handle().clone();
+        let result = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || handle.block_on(case()))
+            .unwrap()
+            .join();
         match result {
             Ok(()) => println!("test {name} ... ok"),
             Err(_) => {
@@ -1180,6 +1185,54 @@ async fn diagnose_identity() {
     println!("key: {}", t3_git::remote_repository_key(&remote));
     let resolver = t3_project::identity::RepositoryIdentityResolver::default();
     let identity = resolver.resolve(&repo.to_string_lossy(), true).await;
-    println!("identity: {}", serde_json::to_string(&identity).unwrap());
+    println!("identity before server: {}", identity.is_some());
+    let marker = temp.path().join("hook-ran");
+    let hook = repo.join(".git").join("hooks").join("post-checkout");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\necho ran > '{}'\n",
+            marker.to_string_lossy().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+    let probe = |label: &str| {
+        let repo = repo.clone();
+        let label = label.to_owned();
+        async move {
+            let identity = t3_project::identity::RepositoryIdentityResolver::default()
+                .resolve(&repo.to_string_lossy(), true)
+                .await;
+            println!("identity after {label}: {}", identity.is_some());
+        }
+    };
+    probe("hook").await;
+    let control = temp.path().join("control");
+    git(&repo, &["worktree", "add", "-q", "--detach", &control.to_string_lossy(), "HEAD"]);
+    probe("control add").await;
+    git(&repo, &["worktree", "remove", "--force", &control.to_string_lossy()]);
+    probe("control remove").await;
+    println!("marker: {}", marker.exists());
+    println!("repo string: {}", repo.to_string_lossy());
+    let short = repo
+        .to_string_lossy()
+        .replace(r"C:\Users\Administrator\", r"C:\Users\ADMINI~1\");
+    let identity = t3_project::identity::RepositoryIdentityResolver::default()
+        .resolve(&short, true)
+        .await;
+    println!("identity short form ({short}): {}", identity.is_some());
+    println!("normalize short: {:?}", t3_workspace::paths::normalize_root(&short, std::path::Path::new(&short), false).await.map(|p| p.display().to_string()).map_err(|e| e.to_string()));
+    let settings = json!({});
+    let mut server = Server::start(temp, settings, None).await;
+    let resolver = t3_project::identity::RepositoryIdentityResolver::default();
+    let identity = resolver.resolve(&repo.to_string_lossy(), true).await;
+    println!("identity with server: {}", identity.is_some());
+    let top = std::process::Command::new("git").args(["rev-parse", "--show-toplevel"]).current_dir(&repo).output().unwrap();
+    println!("toplevel: {:?} {:?}", String::from_utf8_lossy(&top.stdout), String::from_utf8_lossy(&top.stderr));
+    println!("cwd: {:?}", std::env::current_dir());
+    for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_CEILING_DIRECTORIES", "GIT_CONFIG_GLOBAL", "PATH"] {
+        println!("env {key}: {:?}", std::env::var(key).map(|v| v.len()));
+    }
+    server.shutdown().await;
     drop(daemon);
 }
