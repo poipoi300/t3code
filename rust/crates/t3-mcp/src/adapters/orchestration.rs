@@ -228,13 +228,19 @@ fn caller_refused(refusal: &t3_orchestration::error::CallerRefusal) -> McpError 
 /// `t3_workflow_stop` (orchestrator handlers.ts): the stop error's reason picks the code and its
 /// TypeScript message is the text.
 fn workflow_stop_failure(error: t3_orchestration::error::Error) -> McpError {
-    let t3_orchestration::error::Error::StopWorkflow(stop) = error else {
-        return failure(error);
+    // The stop service reports `StopWorkflow.<reason>`; the RPC layer types it the same way.
+    let reason = match &error {
+        t3_orchestration::error::Error::StopWorkflow(stop) => encoded(&stop.reason)
+            .ok()
+            .and_then(|reason| reason.as_str().map(str::to_owned))
+            .unwrap_or_default(),
+        t3_orchestration::error::Error::Service { operation, .. }
+            if operation.starts_with("StopWorkflow.") =>
+        {
+            operation.trim_start_matches("StopWorkflow.").to_owned()
+        }
+        _ => return failure(error),
     };
-    let reason = encoded(&stop.reason)
-        .ok()
-        .and_then(|reason| reason.as_str().map(str::to_owned))
-        .unwrap_or_default();
     let message = match reason.as_str() {
         "not-running" => "This workflow is no longer running.",
         "unsupported" => "This provider cannot stop a workflow.",
