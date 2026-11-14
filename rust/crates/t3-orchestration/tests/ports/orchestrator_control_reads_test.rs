@@ -2801,10 +2801,17 @@ async fn startup_recovers_good_children_and_contains_a_bad_child_before_offering
         .await
         .unwrap()
         .unwrap();
-    assert!(delivered.messages.iter().any(|message| message.id
-        == t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(
-            offer.delegated_completion.unwrap().message_id
-        )));
+    assert!(delivered.messages.iter().any(|message| {
+        message.id
+            == t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(
+                offer
+                    .delegated_completion
+                    .as_ref()
+                    .unwrap()
+                    .message_id
+                    .clone(),
+            )
+    }));
     continuations.service.shutdown().await;
 }
 

@@ -15,13 +15,7 @@ pub fn assert_subagent_v2_output(
     transcript: &crate::testing::replay::ReplayTranscript,
 ) -> crate::error::Result<()> {
     use crate::ports::acp_replay::testkit::fixtures::shared;
-    shared::assert_base_projection(
-        result,
-        transcript,
-        1,
-        None,
-        Some(&["completed"]),
-    )?;
+    shared::assert_base_projection(result, transcript, 1, None, Some(&["completed"]))?;
     let projection = shared::projection_value_for(result, &transcript.scenario.0)?;
     shared::assert_semantic_projection_integrity(&projection)?;
     shared::assert_turn_item_types(

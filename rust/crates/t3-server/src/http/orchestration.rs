@@ -60,18 +60,16 @@ async fn guard(
         Vec<AuthEnvironmentScope>,
         HashMap<String, String>,
     ),
-    Response,
+    Box<Response>,
 > {
     let protocol = request
         .headers()
         .get(orchestration::PROTOCOL_HEADER)
         .and_then(|value| value.to_str().ok());
+    // TypeScript declares the header as a schema literal; Effect's HttpApi answers a failed
+    // header decode with an empty 400 before the handler (and so before authentication) runs.
     if !orchestration::protocol_header_accepted(protocol) {
-        return Err((
-            StatusCode::UPGRADE_REQUIRED,
-            Json(orchestration::protocol_mismatch_body()),
-        )
-            .into_response());
+        return Err(Box::new(StatusCode::BAD_REQUEST.into_response()));
     }
     let query = query(&request);
     let (req, _, _) = split(remote, request);
@@ -80,16 +78,19 @@ async fn guard(
         .auth
         .require(&req, AuthEnvironmentScope::OrchestrationRead)
         .await
-        .map_err(|error| ApiError::from_auth(error, internal).into_response())?;
+        .map_err(|error| Box::new(ApiError::from_auth(error, internal).into_response()))?;
     let adapter = services
         .orchestration()
-        .ok_or_else(|| ApiError::internal(internal).into_response())?;
+        .ok_or_else(|| Box::new(ApiError::internal(internal).into_response()))?;
     Ok((adapter, session.scopes, query))
 }
 
-fn thread_id(value: String) -> Result<ThreadId, Response> {
-    serde_json::from_value(serde_json::Value::String(value))
-        .map_err(|_| not_found(h::EnvironmentResourceNotFoundReason::ThreadNotFound))
+fn thread_id(value: String) -> Result<ThreadId, Box<Response>> {
+    serde_json::from_value(serde_json::Value::String(value)).map_err(|_| {
+        Box::new(not_found(
+            h::EnvironmentResourceNotFoundReason::ThreadNotFound,
+        ))
+    })
 }
 
 fn not_found(reason: h::EnvironmentResourceNotFoundReason) -> Response {
@@ -127,7 +128,7 @@ async fn shell(
     let internal = Internal::OrchestrationSnapshotFailed;
     let (adapter, scopes, query) = match guard(&s, remote, request, internal).await {
         Ok(guarded) => guarded,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let read = adapter.http_read();
     let result = read
@@ -152,11 +153,11 @@ async fn thread(
     let internal = Internal::OrchestrationThreadSnapshotFailed;
     let (adapter, scopes, _) = match guard(&s, remote, request, internal).await {
         Ok(guarded) => guarded,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let id = match thread_id(id) {
         Ok(id) => id,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     answer(
         adapter.http_read().thread_snapshot(&scopes, id).await,
@@ -173,11 +174,11 @@ async fn bounded(
     let internal = Internal::OrchestrationThreadHistoryFailed;
     let (adapter, scopes, query) = match guard(&s, remote, request, internal).await {
         Ok(guarded) => guarded,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let id = match thread_id(id) {
         Ok(id) => id,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let flag = |name: &str| query.get(name).map(String::as_str);
     let result = adapter
@@ -205,11 +206,11 @@ async fn history(
     let internal = Internal::OrchestrationThreadHistoryFailed;
     let (adapter, scopes, query) = match guard(&s, remote, request, internal).await {
         Ok(guarded) => guarded,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let id = match thread_id(id) {
         Ok(id) => id,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(cursor) = query.get("cursor") else {
         return ApiError::invalid_request(h::EnvironmentRequestInvalidReason::InvalidHistoryCursor)

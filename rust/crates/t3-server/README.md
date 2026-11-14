@@ -32,14 +32,33 @@ home only when invoked. Tests exclusively use temporary homes and port zero.
   separately), `Domains` and local config/auth services.
 - Domain services: an adapter builds its service from a `DomainContext` (local services,
   the shared `Database`, the shutdown token, the captured account home and environment).
-  `runtime::start_domains` starts, behind each feature, git, terminal, usage,
-  orchestration, then scheduler, and inserts each into `Domains`. Services with a shutdown
-  or activation step implement `DomainRuntime`. `handlers::registry_with(&domains)` hands
-  each service to its handler module; handlers and routes read it with
-  `ServiceRegistry::domain::<T>()` (`orchestration()` for the orchestration adapter).
-  Scheduler sources stay parked: with no command intake, its dispatch fails with an
-  explicit error. Terminals open where asked, without worktree recovery. Usage has no
-  provider sources yet.
+  `runtime::start_domains` starts, behind each feature, git (with the workspace authority),
+  the workspace services, terminal (with its socket transport), usage, orchestration, then
+  the scheduler, and inserts each into `Domains`. Services with a shutdown or activation
+  step implement `DomainRuntime`. `handlers::registry_with(&domains)` hands each service to
+  its handler module; handlers and routes read it with `ServiceRegistry::domain::<T>()`
+  (`orchestration()` for the orchestration adapter). `runtime::start_with(inputs,
+  StartOptions)` injects provider adapters and the Replay (dev) provider; `start` passes none.
+- Workspace authority (`workspaces.rs`, port of `workspace/KnownWorkspaces.ts`): a path is a
+  workspace only when it resolves inside a managed worktree folder (the default
+  `<base>/worktrees`, the setting and its predecessors), a live project's root, or a live
+  thread's worktree that is under a managed folder or listed by `git worktree list` for its
+  project. It is re-read for every check, so deleting a project revokes at once. It is
+  environment-wide, as in TypeScript; which session may call a method is its scopes. File,
+  entry, asset, attachment and source-control handlers all use it. Asset contexts come from
+  the project (favicon) or the thread's worktree, falling back to its project root.
+- Terminal attach, observe and resize run for one socket: `registry::CallScope` gives each
+  call its socket id (unique for the server's lifetime) and routes the client's real ACKs
+  for that call to the terminal's output window (8 chunks or 64 KiB).
+- Orchestration (feature `orchestration`): the composed runtime from
+  `t3_orchestration::composition` with the provider registry, Git checkpoints, the system
+  clock and live settings; every other host port keeps its typed `Unsupported` default
+  (launch environment, titles, pull requests, workspaces, cleanup, agent scope). Served:
+  `dispatchCommand` (command gate, then intake with user provenance), `stopWorkflow`,
+  `forceStopThread`, `subscribeShell`, `subscribeThread` and the thread reads, plus HTTP
+  `/api/orchestration/shell` and `/threads/{id}`, `/bounded`, `/history` (protocol header,
+  then `orchestration:read`). A missing or wrong protocol header gets an empty 400 before
+  authentication, as Effect's HttpApi answers a failed header decode in TypeScript.
 - `http/` contains auth/static routing; `ws.rs` drives `t3_rpc::Server`, preserving
   cancellation, EOF, application ping/pong, stream ACK windows, header context and
   negotiated frame splitting. Input and assembled messages are capped at 100 MiB.
@@ -48,11 +67,10 @@ home only when invoked. Tests exclusively use temporary homes and port zero.
   orchestration, workspace/terminal, source-control and optional-service ownership
   modules.
 
-`local-services` is a default optional feature enabling config/auth/persistence.
-`--no-default-features` compiles the transport/registry foundation independently.
-Optional orchestration/workspace/git/forge/terminal/scheduler/usage/providers
-features reserve dependencies and adapter ownership; they **do not** assemble
-those services. Provider protocol clients are not complete provider services.
+Default features are `local-services` plus every assembled domain the `t3` binary serves:
+`workspace`, `terminal`, `git`, `scheduler`, `usage`, `orchestration`. `--no-default-features`
+compiles the transport/registry foundation independently. `RunningServer::rpc_methods_served`
+and the start-up log report how many of the contract's 220 methods are served.
 
 ## Implemented first slice
 
@@ -104,6 +122,16 @@ published when `LocalServices::open` returns, because only configuration and aut
 there; a root that adds domain barriers should publish `ready` again after them.
 
 Compatibility decisions, with evidence:
+
+`handlers/telemetry.rs` serves trace/process/host diagnostics, both resource-history
+reads, resource retry, process signaling, endpoint checks and the resource stream
+through `t3-telemetry`. The subscription owns its sampling lease until the call
+ends. `adapters/telemetry.rs` starts first and shuts down last; the standalone
+binary calls `runtime::start_with_global_tracing` after acquiring home ownership.
+It installs the configured redacting file/console/OTLP subscriber instead of the
+binary's fallback console logger. Embedded `start` and `start_with` leave the
+global subscriber to their host. RPC spans use TypeScript's `ws.rpc.<method>`
+names and aggregate labels; diagnostic self-inspection remains untraced.
 
 - **Unsupported methods** answer on Effect's `Die` channel with
   `{"_tag":"NotImplemented","method":...}`, since no `Fail` union has a shared member for it.
@@ -162,14 +190,15 @@ with a live connection. Tests await network/file events and use no sleeps.
 
 The external plan at
 `C:/Users/Administrator/t3code-rust-notes/briefs/server-plan.md` contains eight
-ownership packages, every source HTTP registration, all 220 RPC call mappings,
-CLI declarations and the ordered Replay milestone. That milestone is **not met**:
-projects, shell/thread reads and Replay turn dispatch await orchestration wiring.
+ownership packages, every source HTTP registration, all 220 RPC call mappings and CLI
+declarations. A client turn over the socket works with the scripted provider; the same turn
+with Replay (dev) fails inside the composed runtime ("ACP provider thread has no native
+session ID") and its test is ignored until that is fixed.
 
 Unported sources include server.ts/serverRuntimeStartup.ts domain startup,
 ws.ts's remaining registrations, orchestration-v2/http.ts, project/http.ts,
 auth/mcpOAuthHttp.ts, mcp/McpHttpServer.ts, scheduledTasks/webhookRoute.ts,
-assets/upload HTTP transport, guest/cloud/device/speech routes, diagnostics,
+assets/upload HTTP transport, guest/cloud/device/speech routes,
 provider discovery/auth/install and the CLI command families in cli/. Managed
 policy loading/enforcement and desktop bootstrap transport are not assembled.
 Private-network fencing, dev proxy and Tailscale options are explicitly rejected;
@@ -180,6 +209,26 @@ retains it through shutdown but cannot await the watcher's task finalizer. Domai
 shutdown (provider/worker/scheduler/terminal/git) is specified in the plan, not
 simulated here. SQLite schema compatibility is inherited from persistence
 (head >=69). POSIX runtime/signals are unexecuted on this Windows host.
+
+Differences recorded this round:
+
+- MCP access tokens issued by the TypeScript server carry no audience (the TypeScript never
+  checks one); the Rust MCP endpoint verifies one, so an agent must re-authorise once after
+  switching servers. Pending a decision by the project owner.
+- `projects.mutate`, `launchThread`, the HTTP transcript export, command output, prompt
+  suggestions and thread search remain unsupported: they need the unported `ProjectService`,
+  a launch-environment port, and the shared fold/text/ranking shims named in the
+  orchestration README. Stop and force-stop failures surface as defects: the runtime has no
+  typed stop errors yet.
+- Replay (dev) registers only through `StartOptions::dev_replay`; TypeScript seeds it on a
+  dev server run from source and writes its settings entry, and the Rust binary has no dev
+  mode.
+- Without command intake the scheduler serves reads, deletes and webhook-token operations
+  only; `upsert`, `setEnabled`, `runNow` and every webhook delivery fail closed (webhooks
+  answer 500 `error` before the hook is looked up).
+- Terminal launch does not restore missing worktrees or prepare provider environments.
+  Asset tool images, native icons and source-control media resolve to nothing, and
+  attachments are stored without document text extraction.
 
 Other incomplete parity: WebSocket permessage-deflate is absent; HTTP compression
 is gzip only; dev/asar static behavior is absent; JSON extractor errors use axum's

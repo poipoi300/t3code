@@ -1,0 +1,42 @@
+[package]
+name = "t3-preview"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+
+
+[dependencies]
+t3-contracts = { path = "../t3-contracts" }
+t3-process = { path = "../t3-process" }
+t3-mcp = { path = "../t3-mcp", default-features = false }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "sync", "time", "rt", "macros", "net"] }
+tokio-util = "0.7"
+futures-util = "0.3"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+base64 = "0.22"
+regex = "1"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
+tempfile = "3"
+same-file = "1"
+tracing = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", features = ["signal", "process", "user", "fs"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[lints]
+workspace = true

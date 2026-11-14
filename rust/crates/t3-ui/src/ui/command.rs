@@ -373,12 +373,12 @@ pub fn command_dialog_popup(
     children: impl IntoElement,
     on_backdrop_pointer_down: impl Fn() + 'static,
 ) -> impl IntoElement {
-    // index.css `.dialog-glass`; NSH lacks nested-dialog counts and inset shadows.
+    // index.css `.dialog-glass`; NSH exposes no shared nested-dialog count.
     // Glass opacity/saturation use the stock values: theme only exports length/colour tokens.
-    // Static surfaces omit transition/will-change and Electron app-region hints.
+    // Native modal fade replaces CSS start/end transitions; app-region/will-change are omitted.
     view().w_full().h_full().child(command_dialog_backdrop(on_backdrop_pointer_down))
         .child(command_dialog_viewport(view()
-            .app_class(tw("relative flex min-h-0 w-full min-w-0 flex-col outline-none rounded-2xl border border-contrast-foreground/10 dark:border-white/8 bg-background/80 backdrop-blur-[12px] dark:backdrop-blur-[16px] backdrop-saturate-[1.14] dark:backdrop-saturate-[1.08] shadow-[0_24px_64px_-24px_rgb(0_0_0/65%)] dark:shadow-[0_24px_72px_-20px_rgb(0_0_0/90%)] pointer-events-auto max-h-105 max-w-xl text-foreground"))
+            .app_class(tw("relative flex min-h-0 w-full min-w-0 flex-col outline-none rounded-2xl border border-contrast-foreground/10 dark:border-white/8 bg-background/80 backdrop-blur-[12px] dark:backdrop-blur-[16px] backdrop-saturate-[1.14] dark:backdrop-saturate-[1.08] shadow-[0_24px_64px_-24px_rgb(0_0_0/65%)] dark:inset-shadow-[0_1px_rgb(255_255_255/4%)] dark:shadow-[0_24px_72px_-20px_rgb(0_0_0/90%)] pointer-events-auto max-h-105 max-w-xl text-foreground"))
             .child(children)))
 }
 

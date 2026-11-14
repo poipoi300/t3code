@@ -8,8 +8,8 @@ publish.workspace = true
 [lints]
 workspace = true
 [features]
-# The assembled domain services the `t3` binary serves; orchestration joins once it is stable.
-default = ["local-services", "workspace", "terminal", "git", "scheduler", "usage"]
+# The assembled domain services the `t3` binary serves.
+default = ["local-services", "workspace", "terminal", "git", "scheduler", "usage", "orchestration"]
 local-services = [
     "dep:t3-auth",
     "dep:t3-config",
