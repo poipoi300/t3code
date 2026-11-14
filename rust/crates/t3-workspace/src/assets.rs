@@ -256,7 +256,7 @@ impl AssetAccess {
                 disposition,
                 render_intent,
             } => {
-                let path = attachments::resolve_by_id(&self.attachments_dir, &attachment_id.0)
+                let path = attachment_file(&self.attachments_dir, &attachment_id.0, &self.internal)
                     .ok_or(Error::AssetDenied)?;
                 let extension = attachments::parse_id(&attachment_id.0).and_then(|p| p.extension);
                 let supplied_mime = mime_type.map(|m| m.0);
@@ -277,7 +277,12 @@ impl AssetAccess {
                     None
                 };
                 let download = extension.is_some() && video.is_none() && inline.is_none();
-                let mime = inline.clone().or(video).or(supplied_mime);
+                // The type comes from the stored extension; a client's type is kept only for
+                // video playback and for downloads, which never render.
+                let mime = inline
+                    .clone()
+                    .or(video)
+                    .or(supplied_mime.filter(|_| download));
                 let render = (render_intent == Some(AssetRenderIntent::McpApp)
                     && inline.as_deref() == Some("text/html"))
                 .then(|| "mcp-app".into());
@@ -504,8 +509,7 @@ impl AssetAccess {
                 if attachments::parse_id(attachment_id)
                     .is_some_and(|id| id.extension.is_none()) =>
             {
-                attachments::resolve_by_id(&self.attachments_dir, attachment_id)
-                    .and_then(|p| canonical_file(&p, &self.internal))
+                attachment_file(&self.attachments_dir, attachment_id, &self.internal)
             }
             _ => None,
         };
@@ -661,9 +665,8 @@ impl AssetAccess {
                 file_name,
                 mime_type,
                 render_intent,
-            } => attachments::resolve_by_id(&self.attachments_dir, &attachment_id)
-                .and_then(|p| canonical_file(&p, &self.internal))
-                .and_then(|path| {
+            } => attachment_file(&self.attachments_dir, &attachment_id, &self.internal).and_then(
+                |path| {
                     let file = OpenMediaFile::open(&path, None).ok().flatten()?;
                     Some(ResolvedAsset::File {
                         path,
@@ -673,7 +676,8 @@ impl AssetAccess {
                         render_intent,
                         file,
                     })
-                }),
+                },
+            ),
             AssetGrant::WorkspaceFileExact {
                 workspace_root,
                 relative_path,
@@ -801,6 +805,20 @@ impl AssetAccess {
         };
         Ok(asset)
     }
+}
+/// A stored attachment that is the file its entry names, opened under the attachments directory
+/// without following a link ([`ContainedFiles`](crate::contained_files::ContainedFiles)): the
+/// opened file must be the entry itself, so a planted link to a file outside or to another
+/// attachment is neither signed nor served.
+fn attachment_file(directory: &Path, id: &str, internal: &InternalPaths) -> Option<PathBuf> {
+    let path = attachments::resolve_by_id(directory, id)?;
+    let files = crate::contained_files::ContainedFiles::new(directory);
+    let real = files.realpath(&path).ok()?;
+    let stat = files.open(&real).ok()?.stat().ok()?;
+    (stat.regular
+        && files.lstat_identity(&path).ok()? == stat.identity
+        && !internal.contains(&real))
+    .then_some(real)
 }
 pub fn canonical_file(path: &Path, internal: &InternalPaths) -> Option<PathBuf> {
     let canonical = paths::canonicalize(path).ok()?;
