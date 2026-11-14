@@ -10,6 +10,10 @@ mod secret;
 mod socket;
 mod store;
 
+#[cfg(target_os = "ios")]
+pub use secret::KeychainStore;
+#[cfg(target_os = "android")]
+pub use secret::{AndroidKeystoreStore, set_android_vm};
 pub use secret::{EphemeralSecretStore, SecretKeyStore, SecretStoreError};
 pub use store::{OpenError, OpenReport};
 
@@ -76,6 +80,20 @@ impl NativeConfig {
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     pub fn desktop(data_dir: impl Into<PathBuf>) -> Self {
         Self::new(data_dir, <dyn SecretKeyStore>::os_default())
+    }
+    /// Mobile default: on Android the storage key is wrapped by an Android Keystore key (call
+    /// `set_android_vm` first); on iOS it is a keychain item.
+    #[cfg(target_os = "android")]
+    pub fn mobile(data_dir: impl Into<PathBuf>) -> Result<Self, SecretStoreError> {
+        let data_dir = data_dir.into();
+        let secrets = AndroidKeystoreStore::new(data_dir.join("keys"))?;
+        Ok(Self::new(data_dir, Box::new(secrets)))
+    }
+    /// Mobile default: on Android the storage key is wrapped by an Android Keystore key (call
+    /// `set_android_vm` first); on iOS it is a keychain item.
+    #[cfg(target_os = "ios")]
+    pub fn mobile(data_dir: impl Into<PathBuf>) -> Result<Self, SecretStoreError> {
+        Ok(Self::new(data_dir, Box::new(KeychainStore::new())))
     }
 }
 

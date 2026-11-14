@@ -10,6 +10,10 @@ pub use common::{EventSender, HostExtension};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
+#[cfg(target_os = "ios")]
+pub use native::KeychainStore;
+#[cfg(target_os = "android")]
+pub use native::{AndroidKeystoreStore, set_android_vm};
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{
     EphemeralSecretStore, NativeConfig, NativePlatform, OpenError, SecretKeyStore,
