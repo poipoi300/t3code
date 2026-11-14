@@ -289,49 +289,59 @@ impl OrchestrationAdapter {
 #[async_trait]
 impl AccessStore for OrchestrationAdapter {
     async fn thread_shell(&self, id: &ThreadId) -> Result<Option<ThreadShell>> {
-        let Some(shell) = self
-            .services
-            .reader
-            .shell(id.clone())
-            .await
-            .map_err(failure)?
-        else {
-            return Ok(None);
-        };
-        let value = encoded(&shell)?;
-        let background_subagent_providers = value["pendingBackgroundTasks"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|t| t["kind"] == "subagent")
-            .filter_map(|t| t["providerInstanceId"].as_str())
-            .map(|id| t3_contracts::provider_instance::ProviderInstanceId(id.into()))
-            .collect();
-        let link_origin = value
-            .get("linkOrigin")
-            .filter(|v| !v.is_null())
-            .map(|v| {
-                Ok(LinkOrigin {
-                    session_id: v["sessionId"].as_str().ok_or(McpError::Internal)?.into(),
-                    label: v["label"].as_str().ok_or(McpError::Internal)?.into(),
-                    access: decoded(v["access"].clone())?,
-                })
-            })
-            .transpose()?;
-        Ok(Some(ThreadShell {
-            id: id.clone(),
-            modes: Modes {
-                runtime_mode: shell.runtime_mode,
-                interaction_mode: shell.interaction_mode,
-            },
-            deleted: shell.deleted_at.is_some(),
-            archived: shell.archived_at.is_some(),
-            active: shell.active_run_id.is_some(),
-            provider_instance_id: Some(shell.provider_instance_id),
-            background_subagent_providers,
-            link_origin,
-        }))
+        projection_shell(self.services.reader.as_ref(), id).await
     }
+}
+
+/// Access rules over the projections alone, for a host that has no dispatcher to hand over.
+pub struct ProjectionAccess(pub Arc<dyn ProjectionReader>);
+#[async_trait]
+impl AccessStore for ProjectionAccess {
+    async fn thread_shell(&self, id: &ThreadId) -> Result<Option<ThreadShell>> {
+        projection_shell(self.0.as_ref(), id).await
+    }
+}
+
+async fn projection_shell(
+    reader: &dyn ProjectionReader,
+    id: &ThreadId,
+) -> Result<Option<ThreadShell>> {
+    let Some(shell) = reader.shell(id.clone()).await.map_err(failure)? else {
+        return Ok(None);
+    };
+    let value = encoded(&shell)?;
+    let background_subagent_providers = value["pendingBackgroundTasks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| t["kind"] == "subagent")
+        .filter_map(|t| t["providerInstanceId"].as_str())
+        .map(|id| t3_contracts::provider_instance::ProviderInstanceId(id.into()))
+        .collect();
+    let link_origin = value
+        .get("linkOrigin")
+        .filter(|v| !v.is_null())
+        .map(|v| {
+            Ok(LinkOrigin {
+                session_id: v["sessionId"].as_str().ok_or(McpError::Internal)?.into(),
+                label: v["label"].as_str().ok_or(McpError::Internal)?.into(),
+                access: decoded(v["access"].clone())?,
+            })
+        })
+        .transpose()?;
+    Ok(Some(ThreadShell {
+        id: id.clone(),
+        modes: Modes {
+            runtime_mode: shell.runtime_mode,
+            interaction_mode: shell.interaction_mode,
+        },
+        deleted: shell.deleted_at.is_some(),
+        archived: shell.archived_at.is_some(),
+        active: shell.active_run_id.is_some(),
+        provider_instance_id: Some(shell.provider_instance_id),
+        background_subagent_providers,
+        link_origin,
+    }))
 }
 
 #[async_trait]

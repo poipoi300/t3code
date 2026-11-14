@@ -10,7 +10,9 @@ use t3_contracts::{auth::AuthEnvironmentScope as Scope, base_schemas::Environmen
 
 pub struct OAuthAuthenticator {
     auth: EnvironmentAuth,
-    resource: reqwest::Url,
+    /// `None` takes the resource from each request's origin, as TypeScript's
+    /// `authenticateMcpClient` does; the token's signed audience must still name it.
+    resource: Option<reqwest::Url>,
     environment_id: EnvironmentId,
 }
 
@@ -34,9 +36,18 @@ impl OAuthAuthenticator {
         let environment_id = EnvironmentId(auth.config().environment_id.clone());
         Ok(Self {
             auth,
-            resource,
+            resource: Some(resource),
             environment_id,
         })
+    }
+    /// Verifies each token against the `/mcp` resource on the origin the request arrived at.
+    pub fn for_request_origin(auth: EnvironmentAuth) -> Self {
+        let environment_id = EnvironmentId(auth.config().environment_id.clone());
+        Self {
+            auth,
+            resource: None,
+            environment_id,
+        }
     }
 }
 
@@ -54,13 +65,13 @@ impl ClientAuthenticator for OAuthAuthenticator {
             uri.scheme_str().unwrap_or("http")
         };
         let resource = reqwest::Url::parse(&format!("{scheme}://{host}{}", uri.path())).ok()?;
-        if resource != self.resource {
+        if self.resource.as_ref().is_some_and(|fixed| *fixed != resource) {
             return None;
         }
         let session = self
             .auth
             .sessions
-            .verify_mcp(token, self.resource.as_str(), &[])
+            .verify_mcp(token, resource.as_str(), &[])
             .await
             .ok()?;
         let access = if !session.scopes.contains(&Scope::OrchestrationOperate) {

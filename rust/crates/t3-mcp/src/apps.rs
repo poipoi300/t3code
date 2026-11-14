@@ -40,6 +40,15 @@ pub trait AppBackend: Send + Sync {
     -> Result<Option<AppReference>>;
     /// Returns only an already running session; never starts or resumes a provider.
     async fn session(&self, provider_thread_id: &str) -> Result<Option<Arc<dyn AppSession>>>;
+    /// As `session`, for hosts that find the provider thread through the app's thread. Return
+    /// `fail(thread, "provider-unsupported")` for a running session without MCP apps.
+    async fn session_for(
+        &self,
+        _thread_id: &ThreadId,
+        provider_thread_id: &str,
+    ) -> Result<Option<Arc<dyn AppSession>>> {
+        self.session(provider_thread_id).await
+    }
     async fn fork_parent(&self, thread_id: &ThreadId) -> Result<Option<ThreadId>>;
     async fn set_model_context(&self, input: ModelContextInput) -> Result<()>;
 }
@@ -50,7 +59,7 @@ pub fn callable_by_app(meta: &Value) -> bool {
         .is_none_or(|visibility| visibility.iter().any(|entry| entry == "app"))
 }
 
-fn fail(thread: &ThreadId, reason: &str) -> McpError {
+pub fn fail(thread: &ThreadId, reason: &str) -> McpError {
     McpError::Domain {
         tag: "McpAppRequestError".into(),
         message: format!("MCP app request failed: {reason}"),
@@ -59,6 +68,9 @@ fn fail(thread: &ThreadId, reason: &str) -> McpError {
 }
 
 fn adapter_failure(thread: &ThreadId, error: McpError) -> McpError {
+    if matches!(&error, McpError::Domain { tag, .. } if tag == "McpAppRequestError") {
+        return error;
+    }
     fail(
         thread,
         if matches!(&error,McpError::Domain {tag,..} if tag == "ProviderAdapterSessionStoppedError")
@@ -93,7 +105,8 @@ impl AppRequests {
         let app = self.resolve_app(thread, item).await?;
         let session = self
             .backend
-            .session(
+            .session_for(
+                thread,
                 app.provider_thread_id
                     .as_deref()
                     .expect("resolved provider thread"),
