@@ -64,10 +64,15 @@ the file tracer is initialized and which configured signals are exporting.
 
 ## Source behavior
 
-* Local spans go through the SDK's batch processor: ending a span only queues it
-  (bounded SDK queue, 2,048 spans), and the SDK worker thread redacts, formats and
-  hands them to the sink every batch window or each 512 spans, instead of every span
-  end running that work behind one processor-wide lock.
+* Local spans go through the SDK's batch processor: ending a span only queues it, and the
+  SDK worker thread redacts, formats and hands spans to the sink every batch window or each
+  512 spans. Every sink flush first takes the spans still queued, so `TraceSink::flush` (as
+  trace diagnostics call it while the server runs), `TelemetryHandle::shutdown` and dropping the
+  handle without `shutdown` all leave them in the file. The local queue holds
+  max(trace file size, 4 MiB) / 256 spans (at least 2,048; 40,960 at the 10 MiB default): a
+  span record is at least about 256 bytes, so the sink's own byte bound, which the earlier
+  synchronous exporter also had, drops a burst first. Delay, queue and batch size are set
+  explicitly, so `OTEL_BSP_*` variables do not change the local file.
 * `serverLogger.ts`, `observability/Observability.ts`, shared `observability.ts`
   and `logging.ts`: console logging, level filters, sampled spans, trace events,
   size-based NDJSON rotation, startup backup pruning, bounded batching, shutdown
@@ -185,10 +190,12 @@ separate from product analytics opt-out, as in TypeScript.
 
 No prompt/file contents, provider credentials, bearer tokens, cookies or query
 tickets belong in these APIs. Redaction covers sensitive field names, URL ticket,
-DPoP/token/password parameters in a query, fragment (pairing links are
-`…/pair#token=…`) or `;` segment, OAuth `code` and `state` inside a URL's query or
-fragment (a bare `code=1` stays readable), URL user-info, bearer strings and private
-CLI arguments; nested values are bounded and strings truncated. Numeric provider
+DPoP/token/password/secret/API-key parameters, also with a prefix (`client_secret=`,
+`auth_token=`), in a query, fragment (pairing links are `…/pair#token=…`) or `;` segment,
+OAuth `code` and `state` inside a URL's query or fragment (a bare `code=1` stays readable),
+URL user-info up to the authority's last `@`, `Bearer` and `Basic` credentials, header-style
+`Authorization:`, `Cookie:`, `x-api-key:` and `*-token:` / `*-secret:` lines (the rest of the
+line), and private CLI arguments; nested values are bounded and strings truncated. Numeric provider
 token counters (`inputTokens`, `total_tokens` and the other usage counters analytics
 already exempts, in any of camel, snake or dotted spelling) keep their values in local
 traces, logs and OTLP although their names contain "token"; any other value under such
