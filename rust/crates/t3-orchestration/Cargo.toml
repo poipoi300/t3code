@@ -44,6 +44,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 thiserror = "2"
 async-trait = "0.1"
+# Names-only provider warnings (the Claude adapter's MCP registration).
+tracing = "0.1"
 tokio = { version = "1", features = ["sync", "rt", "macros", "time", "test-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tempfile = "3"

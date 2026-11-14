@@ -39,6 +39,23 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const EVENT_CAPACITY: usize = 64;
+// TypeScript's `CLAUDE_BOOT_TIMEOUT` (boot can take a minute on an oversubscribed host) and
+// `CLAUDE_MCP_REGISTRATION_TIMEOUT`.
+const CLAUDE_BOOT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const CLAUDE_MCP_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// `ClaudeMcpRegistrationTimeoutError`: the open fails with the phase that timed out.
+fn mcp_registration_timeout(thread: &ThreadId, phase: &'static str) -> ProviderError {
+    tracing::warn!(thread = ?thread, phase, "orchestration-v2.claude-mcp-registration-timeout");
+    operation(
+        ProviderOperation::Open,
+        if phase == "initialize" {
+            "Claude timed out while starting up. Retry the turn; if it keeps failing, check Claude and the server logs."
+        } else {
+            "Claude timed out while registering its MCP tools. Retry the turn; if it keeps failing, check Claude and the server logs."
+        },
+    )
+}
 pub const CLAUDE_ATTACHMENT_MAX_BYTES: u64 = 28 * 1024 * 1024;
 const CLAUDE_ATTACHMENT_MAX_PAGES: u64 = 100;
 
@@ -2523,20 +2540,54 @@ impl ClaudeSessionRuntime {
             selection_valid: true,
         });
         drop(current);
-        let result = tokio::select! { _ = cancellation.cancelled() => Err(ProviderError::Cancelled), result=client.initialize(description.initialize)=>result.map(|_|()).map_err(protocol) };
+        // TypeScript (`ClaudeAgentSdkQueryRunner`): MCP servers carry credentials, so they travel
+        // over stdin after initialize, never in argv or the environment. With servers to send,
+        // boot and registration are bounded; a failed registration is logged by server name only
+        // (its errors and mcp_status can echo headers) and the session goes on without them.
+        let boot = client.initialize(description.initialize);
+        let result = if dynamic_mcp.is_empty() {
+            tokio::select! { _ = cancellation.cancelled() => Err(ProviderError::Cancelled), result=boot=>result.map(|_|()).map_err(protocol) }
+        } else {
+            tokio::select! {
+                _ = cancellation.cancelled() => Err(ProviderError::Cancelled),
+                result = tokio::time::timeout(CLAUDE_BOOT_TIMEOUT, boot) => match result {
+                    Ok(result) => result.map(|_| ()).map_err(protocol),
+                    Err(_) => Err(mcp_registration_timeout(&input.thread_id, "initialize")),
+                },
+            }
+        };
         if let Err(error) = result {
             self.stop_query().await?;
             return Err(error);
         }
         if !dynamic_mcp.is_empty() {
-            let registration = client
-                .request(OutboundRequest::McpSetServers {
-                    servers: dynamic_mcp,
-                })
-                .await;
-            if let Err(error) = registration {
-                self.stop_query().await?;
-                return Err(protocol(error));
+            let names: Vec<String> = dynamic_mcp.keys().cloned().collect();
+            let registration = tokio::select! {
+                _ = cancellation.cancelled() => None,
+                result = tokio::time::timeout(
+                    CLAUDE_MCP_REGISTRATION_TIMEOUT,
+                    client.request(OutboundRequest::McpSetServers { servers: dynamic_mcp }),
+                ) => Some(result),
+            };
+            let failed: Vec<String> = match registration {
+                None => {
+                    self.stop_query().await?;
+                    return Err(ProviderError::Cancelled);
+                }
+                Some(Err(_)) => {
+                    self.stop_query().await?;
+                    return Err(mcp_registration_timeout(&input.thread_id, "setMcpServers"));
+                }
+                Some(Ok(Ok(reply))) => {
+                    match reply.decode::<t3_claude_cli::control::McpSetServersResult>() {
+                        Ok(result) => result.errors.into_keys().collect(),
+                        Err(_) => names,
+                    }
+                }
+                Some(Ok(Err(_))) => names,
+            };
+            if !failed.is_empty() {
+                tracing::warn!(thread = ?input.thread_id, servers = ?failed, "orchestration-v2.claude-mcp-servers-unavailable");
             }
         }
         Ok(client)
