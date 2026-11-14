@@ -209,9 +209,10 @@ pub fn popover_title(source: impl Into<String>) -> impl IntoElement {
     if let Some((handle, _)) = use_context::<(PopoverHandle, PopoverOptions)>() {
         handle.title.set(Some(source.clone()));
         let title = source.clone();
+        // NSH runs cleanups after the owners' values go: the popover's handle can already be gone.
         cleanup(move || {
-            if handle.title.get_untracked().as_ref() == Some(&title) {
-                handle.title.set(None);
+            if handle.title.try_get().flatten().as_ref() == Some(&title) {
+                handle.title.try_set(None);
             }
         });
     }

@@ -220,8 +220,10 @@ impl TimelineRewind {
                 self.error.set(None);
                 self.restored_prompt.set(None);
                 match client.rewind(key.clone(), target, restore_files).await {
-                    Ok(prompt) if self.nav.top().thread() == Some(&key) => self.restored_prompt.set(Some(prompt)),
-                    Ok(_) => {},
+                    Ok(prompt) if self.nav.top().thread() == Some(&key) => {
+                        self.restored_prompt.set(Some(prompt))
+                    }
+                    Ok(_) => {}
                     Err(error) => self.error.set(Some(error)),
                 }
             });

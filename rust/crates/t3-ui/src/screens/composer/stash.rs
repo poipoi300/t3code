@@ -3,12 +3,13 @@
 use futures::{StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
 use nsh_core::prelude::*;
 use std::rc::Rc;
+use std::time::Duration;
 use t3_client::services::config::timestamp_ms;
 use t3_client::thread_views::composer::stash_presentation::{
     AttachmentKind, Snippet, missing_image_count, stash_entry_snippet,
 };
 use t3_client::view_logic::session::timestamps::{
-    format_relative_elapsed, relative_time_elapsed_ms,
+    format_relative_elapsed, ms_until_relative_time_change, relative_time_elapsed_ms,
 };
 use t3_client::view_logic::shell::stash::Entry;
 
@@ -124,6 +125,14 @@ impl PromptStash {
         self.menu_open.set(true);
     }
 
+    fn toggle_menu(self) {
+        if self.menu_open.get_untracked() {
+            self.menu_open.set(false);
+        } else {
+            self.open_menu();
+        }
+    }
+
     fn restore(self, id: String) {
         if !self
             .state
@@ -168,13 +177,7 @@ fn show_result(stash: PromptStash, result: StashResult) {
                 MenuRequest::Keep => {}
                 MenuRequest::Close => stash.menu_open.set(false),
                 MenuRequest::Open => stash.open_menu(),
-                MenuRequest::Toggle => {
-                    if stash.menu_open.get_untracked() {
-                        stash.menu_open.set(false);
-                    } else {
-                        stash.open_menu();
-                    }
-                }
+                MenuRequest::Toggle => stash.toggle_menu(),
             }
             completion.notices
         }
@@ -217,7 +220,7 @@ pub fn composer_stash_badge(stash: PromptStash) -> impl IntoElement {
                 banner::row_button(context,banner::Layout::Inline,
                     move || UiText::content(tr("Stashed prompts: {count}. Open stash.", &[("count",Value::Int(count.get() as i64))])),
                     || false,
-                    move || { if !stash.menu_open.get_untracked() { stash.open_menu(); } },
+                    move || stash.toggle_menu(),
                     move |row| banner::RowSlots {
                         icon: Some(banner::lucide_icon(row,Icon::Bookmark).into_element()),
                         content: Some(banner::content(row,text(move || crate::i18n::ts("Stash"))
@@ -422,24 +425,46 @@ fn stash_entry_row(
                             .child(icon(Icon::File, 12.0, move || palette().muted_foreground))
                             .child(text(SharedString::from(crate::i18n::formats().decimal(count as f64)))))
                     }))
-                    .child(text(move || entry.with(|entry| relative_label(&entry.created_at))).app_class(tw("shrink-0 text-muted-foreground tabular-nums max-sm:hidden")))
+                    .child(view().app_class(tw("shrink-0 text-muted-foreground tabular-nums max-sm:hidden")).child(relative_time(move || entry.with(|entry| entry.created_at.clone()))))
                     .child(view().element_ref(&delete).app_class(tw("z-10")).child(banner::dismiss("Delete stashed prompt".into(), move || !stash.state.with(|state| state.can_delete), move || stash.delete(entry.with(|entry| entry.id.clone()))))))
                     .into_element()),
             }
         }))
 }
 
-fn relative_label(at: &str) -> SharedString {
-    let Some(at) = timestamp_ms(at) else {
-        return SharedString::default();
-    };
-    let parts =
-        format_relative_elapsed(relative_time_elapsed_ms(at, crate::state::clock::now_ms()));
-    if parts.suffix.is_some() {
-        tr("{time} ago", &[("time", Value::Text(parts.value))]).into()
-    } else {
-        UiText::client_key(parts.value).resolve()
-    }
+/// Port of apps/web/src/components/RelativeTime.tsx RelativeTime and its clock binding.
+fn relative_time(timestamp: impl Fn() -> String + 'static) -> impl IntoElement {
+    let timestamp = computed(timestamp);
+    dynamic(move || {
+        let date = timestamp_ms(&timestamp.get())?;
+        Some(untracked(move || {
+            let elapsed = signal(relative_time_elapsed_ms(
+                date,
+                nsh_core::time::unix_ms() as i64,
+            ));
+            spawn(async move {
+                loop {
+                    let now = nsh_core::time::unix_ms() as i64;
+                    timer(Duration::from_millis(
+                        ms_until_relative_time_change(date, now) as u64,
+                    ))
+                    .await;
+                    elapsed.set(relative_time_elapsed_ms(
+                        date,
+                        nsh_core::time::unix_ms() as i64,
+                    ));
+                }
+            });
+            text(move || {
+                let parts = format_relative_elapsed(elapsed.get());
+                if parts.suffix.is_some() {
+                    tr("{time} ago", &[("time", Value::Text(parts.value))]).into()
+                } else {
+                    UiText::client_key(parts.value).resolve()
+                }
+            })
+        }))
+    })
 }
 
 #[cfg(test)]

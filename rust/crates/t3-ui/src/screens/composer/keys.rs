@@ -16,6 +16,7 @@ use t3_client::thread_views::{
     composer::{
         code_pairs::CodePairs,
         keyboard::{self, Action, Options},
+        markdown_source,
         policy::{self, SendShortcut},
         structure::Rewrite,
     },
@@ -201,8 +202,11 @@ impl PluginSpec for ComposerKeys {
                 return true;
             }
             Action::Rewrite(rewrite) => rewrite_transaction(state, &rewrite),
-            Action::Split(rewrite) => native_command(state, &rewrite, split_block_keep_marks),
-            Action::Lift(rewrite) => native_command(state, &rewrite, lift),
+            Action::Split {
+                rewrite,
+                preserve_marks,
+            } => native_command(state, &rewrite, split_block_keep_marks, preserve_marks),
+            Action::Lift(rewrite) => native_command(state, &rewrite, lift, false),
         };
         match result {
             Ok(mut tr) => {
@@ -320,8 +324,32 @@ fn native_command(
     state: &EditorState,
     rewrite: &Rewrite,
     command: NativeCommand,
+    preserve_marks: bool,
 ) -> Result<Transaction, StateError> {
-    let prepared = state.apply(rewrite_transaction(state, rewrite)?)?;
+    let mut preparation = rewrite_transaction(state, rewrite)?;
+    if preserve_marks {
+        let marks = state
+            .stored_marks()
+            .map(<[_]>::to_vec)
+            .unwrap_or_else(|| state.selection().resolved_from().marks());
+        preparation.set_stored_marks(Some(
+            marks
+                .into_iter()
+                .filter(|mark| mark.ty().name() != markdown_source::SOURCE_MARK)
+                .collect(),
+        ));
+    }
+    // NSH clears stored marks on set_selection, even when preparation has not moved the caret.
+    let prepared = if !preserve_marks
+        && !preparation.doc_changed()
+        && state.selection().json_id() == "text"
+        && preparation.selection().anchor() == state.selection().anchor()
+        && preparation.selection().head() == state.selection().head()
+    {
+        state.clone()
+    } else {
+        state.apply(preparation)?
+    };
     let mut output = None;
     command(&prepared, Some(&mut |tr| output = Some(tr)));
     let Some(tr) = output else {

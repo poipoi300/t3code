@@ -7,17 +7,20 @@
 
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
-use std::rc::Rc;
-
 use futures::{FutureExt, StreamExt};
 use t3_client::composition::ClientRuntime;
 use t3_client::connection::{ConnectionFailure, FailureKind, PairingInput};
 use t3_client::platform::Platform;
 use t3_client::types::{EnvironmentId, ThreadKey};
 
-use crate::screens::composer::send::ComposerSendClient;
-
 pub use t3_client::composition::{EnvironmentEntry, SendError};
+
+/// The client the UI runs: the composition root over this target's host platform (the one type
+/// that differs by target). Service bindings in `runtime/services/` build their handles from it.
+#[cfg(not(target_arch = "wasm32"))]
+pub type HostClient = ClientRuntime<t3_platform::NativePlatform>;
+#[cfg(target_arch = "wasm32")]
+pub type HostClient = ClientRuntime<t3_platform::WebPlatform>;
 
 pub trait Backend {
     /// Pairs with the server the user described and registers it. Validation and its messages
@@ -47,9 +50,9 @@ pub trait Backend {
         text: String,
     ) -> LocalBoxFuture<'static, Result<(), SendError>>;
 
-    /// CMP-SEND's binding to the client's send service: validated submit, and the queued, failed
-    /// and restored messages (U1, U2). None where no client-backed send service exists.
-    fn composer_send_client(&self) -> Option<Rc<dyn ComposerSendClient>> {
+    /// The client itself, for the service bindings in `runtime/services/` (ui-package-addendum.md,
+    /// "Client services"). None for the demo and an unavailable host.
+    fn client(&self) -> Option<HostClient> {
         None
     }
 }
@@ -87,8 +90,9 @@ impl<P: Platform + Clone + 'static> Backend for ClientRuntime<P> {
         ClientRuntime::send_message(self, key, text)
     }
 
-    fn composer_send_client(&self) -> Option<Rc<dyn ComposerSendClient>> {
-        Some(Rc::new(self.clone()))
+    fn client(&self) -> Option<HostClient> {
+        // This runtime over the host's platform; a test runtime over another platform is not one.
+        (self as &dyn std::any::Any).downcast_ref::<HostClient>().cloned()
     }
 }
 

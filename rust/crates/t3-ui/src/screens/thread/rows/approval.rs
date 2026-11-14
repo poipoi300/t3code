@@ -5,7 +5,8 @@ use nsh_core::prelude::*;
 use std::{collections::BTreeMap, rc::Rc};
 use t3_client::state::sharing::SharedThreadProjection;
 use t3_client::thread_views::messages_timeline::{MessagesTimelineRow, MessagesTimelineRowContent};
-use t3_client::thread_views::requests::{self, PendingApproval};
+use t3_client::thread_views::requests;
+use t3_client::thread_views::thread_ops::approvals::{ApprovalMap, PendingApprovals, request_key};
 use t3_client::thread_views::threads::shell::ThreadShellViews;
 use t3_client::types::ThreadKey;
 use t3_contracts::base_schemas::RuntimeRequestId;
@@ -78,6 +79,7 @@ impl ApprovalRowsState {
 pub struct ApprovalContext {
     pub thread: ThreadKey,
     pub projection: Memo<Option<Shared<SharedThreadProjection>>>,
+    pub pending: Memo<Shared<ApprovalMap>>,
     pub state: ApprovalRowsState,
     pub services: Option<ApprovalServices>,
 }
@@ -90,9 +92,14 @@ impl ApprovalContext {
         projection: Memo<Option<Shared<SharedThreadProjection>>>,
         state: ApprovalRowsState,
     ) -> Self {
+        let selector = stored(PendingApprovals::default());
+        let pending = computed(move || projection.with(|projection| Shared(
+            projection.as_ref().map_or_else(Rc::default, |projection| selector.with(|selector| selector.project(projection)))
+        )));
         Self {
             thread,
             projection,
+            pending,
             state,
             services: use_context::<ApprovalServices>(),
         }
@@ -123,6 +130,9 @@ impl ApprovalRow {
         row: &MessagesTimelineRow,
         projection: &SharedThreadProjection,
     ) -> Vec<Self> {
+        Self::all_from_map(row, &PendingApprovals::default().project(projection))
+    }
+    pub fn all_from_map(row: &MessagesTimelineRow, pending: &ApprovalMap) -> Vec<Self> {
         let entries = match &row.content {
             MessagesTimelineRowContent::Work {
                 grouped_entries, ..
@@ -132,8 +142,6 @@ impl ApprovalRow {
             } => grouped_entries,
             _ => return Vec::new(),
         };
-        let source = projection.source();
-        let pending = requests::derive_pending(&source.runtime_requests, &source.turn_items);
         entries
             .iter()
             .filter_map(|entry| {
@@ -142,28 +150,12 @@ impl ApprovalRow {
                 else {
                     return None;
                 };
-                let pending = pending
-                    .approvals
-                    .iter()
-                    .find(|pending| pending.request.id == item.request_id)?;
-                Self::from_pending(pending, projection)
+                pending.get(&request_key(&item.request_id)).map(|row| Self::from_client(row))
             })
             .collect()
     }
-    pub fn from_pending(
-        pending: &PendingApproval<'_>,
-        projection: &SharedThreadProjection,
-    ) -> Option<Self> {
-        let t3_contracts::orchestration_v2::RuntimeRequestKind::ProviderRequestKind(kind) =
-            &pending.request.kind
-        else {
-            return None;
-        };
-        Some(Self {
-            request: projection.runtime_requests.iter().find(|request| request.id == pending.request.id)?.clone(),
-            item: pending.item.and_then(|item| projection.turn_items.iter().rev().find(|candidate| matches!(candidate.as_ref(), OrchestrationV2TurnItem::ApprovalRequest(candidate) if candidate.request_id == item.request_id)).cloned()),
-            request_kind: **kind, live: pending.live,
-        })
+    pub fn from_client(row: &t3_client::thread_views::thread_ops::approvals::PendingApproval) -> Self {
+        Self { request: row.request.clone(), item: row.item.clone(), request_kind: row.request_kind, live: row.live }
     }
     fn detail(&self) -> Option<&TurnItemApprovalRequest> {
         match self.item.as_deref() {
@@ -216,12 +208,12 @@ pub fn approval_timeline_row(
     row: Memo<Option<Shared<MessagesTimelineRow>>>,
     context: ApprovalContext,
 ) -> impl IntoElement {
-    let projection = context.projection;
+    let pending = context.pending;
     let approvals = computed(move || {
-        projection.with(|projection| {
-            row.with(|row| match (row, projection) {
-                (Some(row), Some(projection)) => ApprovalRow::all_from_row(row, projection),
-                _ => Vec::new(),
+        pending.with(|pending| {
+            row.with(|row| match row {
+                Some(row) => ApprovalRow::all_from_map(row, pending),
+                None => Vec::new(),
             })
         })
     });
@@ -240,28 +232,22 @@ pub fn unmatched_pending_approval_rows(
     rows: Memo<Shared<Vec<Rc<MessagesTimelineRow>>>>,
     context: ApprovalContext,
 ) -> impl IntoElement {
-    let projection = context.projection;
+    let pending = context.pending;
     let approvals = computed(move || {
-        projection.with(|projection| {
-            let Some(projection) = projection else {
-                return Vec::new();
-            };
-            let source = projection.source();
-            let pending = requests::derive_pending(&source.runtime_requests, &source.turn_items);
-            if pending.approvals.is_empty() {
+        pending.with(|pending| {
+            if pending.is_empty() {
                 return Vec::new();
             }
             let matched = rows.with(|rows| {
                 rows.iter()
-                    .flat_map(|row| ApprovalRow::all_from_row(row, projection))
+                    .flat_map(|row| ApprovalRow::all_from_map(row, pending))
                     .map(|row| row.request.id.clone())
                     .collect::<Vec<_>>()
             });
             pending
-                .approvals
-                .iter()
+                .values()
                 .filter(|pending| !matched.contains(&pending.request.id))
-                .filter_map(|pending| ApprovalRow::from_pending(pending, projection))
+                .map(|pending| ApprovalRow::from_client(pending))
                 .collect::<Vec<_>>()
         })
     });
@@ -502,20 +488,9 @@ pub fn child_thread_approvals(
             let closing = key.clone();
             cleanup(move || backend.close_thread(&closing));
             let projection = runtime.store.thread(key.clone());
-            let approvals = computed(move || {
-                projection.with(|projection| {
-                    let Some(projection) = projection else {
-                        return Vec::new();
-                    };
-                    let source = projection.source();
-                    requests::derive_pending(&source.runtime_requests, &source.turn_items)
-                        .approvals
-                        .iter()
-                        .filter_map(|pending| ApprovalRow::from_pending(pending, projection))
-                        .collect::<Vec<_>>()
-                })
-            });
             let context = ApprovalContext::from_projection(key, projection, state);
+            let pending = context.pending;
+            let approvals = computed(move || pending.with(|pending| pending.values().map(|row| ApprovalRow::from_client(row)).collect::<Vec<_>>()));
             view().child(each(
                 move || approvals.get(),
                 |approval| serde_json::to_string(&approval.request.id).unwrap_or_default(),

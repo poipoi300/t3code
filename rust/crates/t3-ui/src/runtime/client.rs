@@ -141,16 +141,17 @@ mod host {
         presentation::desktop(std::env::consts::OS, APP_VERSION.unwrap_or("0.0.0"))
     }
 
-    /// The OS key store (Android Keystore, iOS Keychain); without it saved credentials last one run.
+    /// The iOS Keychain. Android keeps saved credentials for one run until t3-platform can reach
+    /// the process's Java VM for its Keystore store (request U13 in client-seam-requests.md).
     #[cfg(any(target_os = "android", target_os = "ios"))]
     fn config(dir: std::path::PathBuf) -> NativeConfig {
-        #[cfg(target_os = "android")]
-        if let Some(vm) = android::java_vm() {
-            t3_platform::set_android_vm(vm);
+        let ephemeral = |dir| NativeConfig::new(dir, Box::new(t3_platform::EphemeralSecretStore::default()));
+        if cfg!(target_os = "android") {
+            return ephemeral(dir);
         }
         NativeConfig::mobile(dir.clone()).unwrap_or_else(|error| {
             log::warn!("t3-ui: no OS key store ({error}); saved servers last this run only");
-            NativeConfig::new(dir, Box::new(t3_platform::EphemeralSecretStore::default()))
+            ephemeral(dir)
         })
     }
 
@@ -195,38 +196,6 @@ mod host {
     )))]
     fn presentation_for_host() -> t3_contracts::auth::AuthClientPresentationMetadata {
         presentation::desktop(std::env::consts::OS, APP_VERSION.unwrap_or("0.0.0"))
-    }
-
-    #[cfg(target_os = "android")]
-    mod android {
-        use jni::sys::{JNI_OK, JavaVM as RawVm, jint, jsize};
-
-        type GetCreatedJavaVms = unsafe extern "system" fn(*mut *mut RawVm, jsize, *mut jsize) -> jint;
-
-        /// The process's Java VM through the NDK's public `JNI_GetCreatedJavaVMs` (libnativehelper,
-        /// API 31+), looked up at run time so older devices fall back to a one-run store. NSH keeps
-        /// its own handle private (`nsh-platform-android/src/java.rs`).
-        pub fn java_vm() -> Option<jni::JavaVM> {
-            // SAFETY: a public NDK library and symbol with the JNI signature above; the VM pointer
-            // it returns lives as long as the process.
-            unsafe {
-                let library = libc::dlopen(c"libnativehelper.so".as_ptr(), libc::RTLD_NOW);
-                if library.is_null() {
-                    return None;
-                }
-                let symbol = libc::dlsym(library, c"JNI_GetCreatedJavaVMs".as_ptr());
-                if symbol.is_null() {
-                    return None;
-                }
-                let get: GetCreatedJavaVms = std::mem::transmute(symbol);
-                let mut vm = std::ptr::null_mut();
-                let mut count: jsize = 0;
-                if get(&mut vm, 1, &mut count) != JNI_OK || count < 1 || vm.is_null() {
-                    return None;
-                }
-                jni::JavaVM::from_raw(vm).ok()
-            }
-        }
     }
 }
 

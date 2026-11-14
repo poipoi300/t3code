@@ -4,6 +4,7 @@ pub mod backend;
 pub mod client;
 pub mod demo;
 pub mod host;
+pub mod services;
 pub mod store;
 
 use std::rc::Rc;

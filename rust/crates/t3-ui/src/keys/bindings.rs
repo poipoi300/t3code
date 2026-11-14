@@ -421,7 +421,7 @@ fn native_stroke(shortcut: &KeybindingShortcut) -> Option<String> {
     });
     let stroke = parts.join("+");
     let parsed = Keystroke::parse_with(&stroke, apple_keys()).ok()?;
-    parsed.reserved(os()).is_none().then_some(stroke)
+    (!crate::host::reserved_stroke(&parsed)).then_some(stroke)
 }
 
 pub fn client_event(event: &nsh_core::KeyEvent, down: bool, editable_focus: bool) -> KeyEvent {

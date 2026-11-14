@@ -1,18 +1,24 @@
 //! The composed runtime end to end on package 12's Replay provider: a client creates a project
 //! and a thread, sends a message, watches the turn complete through the thread subscription, and
-//! a restart on the same database recovers to a settled thread. Requires `acp-adapter`.
+//! a restart on the same database recovers to a settled thread. The managed ceiling and a
+//! provider's offered modes are checked on the same runtime. Requires `acp-adapter`.
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use t3_contracts::settings::ServerSettings;
+use t3_contracts::{
+    managed_policy::ManagedPolicyDocument, provider_policy::RuntimeMode,
+    settings::ServerSettings,
+};
 use t3_orchestration::{
     adapters::acp::{DEV_REPLAY_INSTANCE_ID, dev_replay_registration},
     api::*,
     composition::{CheckpointPort, OrchestrationRuntime, RandomIds, RuntimePorts, StaticSettings},
+    effects::{EffectRequest, EffectStatus},
     error::{Error, Result},
+    provider::*,
     ports::{
         checkpoints_forks::checkpoint_service::CheckpointMetadata,
         sessions_recovery::provider_adapter_registry::AdapterRegistry,

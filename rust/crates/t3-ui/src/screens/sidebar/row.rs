@@ -209,23 +209,15 @@ fn class(classes: &str) -> SharedString {
 fn relative_time_label(timestamp: impl Fn() -> Option<String> + 'static) -> impl IntoElement {
     let now = signal(nsh_core::time::unix_ms() as i64);
     let timestamp = computed(timestamp);
-    let pending = stored(None::<nsh_core::element::Spawned<()>>);
+    // The timer belongs to the effect: NSH cancels it when the effect runs again or the row goes.
     effect(move || {
-        if let Some(task) = pending.replace(None) {
-            task.cancel();
-        }
         let at = timestamp.get().as_deref().and_then(timestamp_ms);
         let current = now.get();
         if let Some(at) = at {
             let delay = ms_until_relative_time_change(at, current).max(1) as u64;
-            let _ = pending.replace(Some(set_timeout(Duration::from_millis(delay), move || {
+            set_timeout(Duration::from_millis(delay), move || {
                 now.set(nsh_core::time::unix_ms() as i64);
-            })));
-        }
-    });
-    cleanup(move || {
-        if let Some(task) = pending.replace(None) {
-            task.cancel();
+            });
         }
     });
     text(move || {

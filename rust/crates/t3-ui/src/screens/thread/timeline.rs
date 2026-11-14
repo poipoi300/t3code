@@ -30,7 +30,7 @@ use crate::screens::thread::rows::assistant::{
     AssistantRowContext, AssistantRowsState, assistant_meta_timeline_row, assistant_row,
     assistant_timeline_row, sent_message_timeline_row,
 };
-use crate::screens::composer::send::{PendingMessages, pending_messages};
+use crate::screens::composer::send::{ComposerSendClient, PendingMessages, pending_messages};
 use crate::screens::thread::rows::events::{EventRowContext, v2_event_timeline_row};
 use crate::screens::thread::rows::groups::{
     WorkGroupsContext, WorkGroupsState, work_group_timeline_row,
@@ -151,8 +151,11 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
     };
     let pending = runtime
         .backend()
-        .composer_send_client()
-        .map(|client| (PendingMessages::attach(client.clone(), key.clone()), client));
+        .client()
+        .map(|client| -> (PendingMessages, Rc<dyn ComposerSendClient>) {
+            let client = Rc::new(client);
+            (PendingMessages::attach(client.clone(), key.clone()), client)
+        });
     let none_pending = {
         let pending = pending.as_ref().map(|(messages, _)| *messages);
         move || pending.is_none_or(|p| p.messages.with(|m| m.is_empty()))

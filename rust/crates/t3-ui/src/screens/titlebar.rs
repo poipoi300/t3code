@@ -1,37 +1,25 @@
 //! Port of apps/web/src/workspaceTitlebar.ts and apps/desktop/src/window/DesktopWindow.ts.
 
-use nsh_core::desktop::{TitleBarOptions, TitleBarStyle, WindowAttributes};
+use nsh_core::desktop::{TitleBarOptions, WindowAttributes};
 use nsh_core::element::desktop::{WindowRef, current_window};
-use nsh_core::geometry::{Points, point};
-use nsh_core::platform::Os;
+use nsh_core::geometry::Points;
 use nsh_core::prelude::*;
 
 use crate::i18n::Text;
 use crate::state::panels::panels;
 use crate::theme::tw;
 
-/// DesktopWindow.getWindowTitleBarOptions: the desktop bridge is a window capability here.
-pub fn window_title_bar_options(platform: Os, desktop: bool) -> Option<TitleBarOptions> {
-    if !desktop {
-        return None;
-    }
-    let mut options = TitleBarOptions::default();
-    options.style = TitleBarStyle::Hidden;
-    // DesktopWindow uses darwin's hiddenInset and traffic-light position; NSH names it Hidden.
-    if platform == Os::MacOs {
-        options.height = Some(px(52.0));
-        options.controls_offset = Some(point(px(16.0), px(20.0)));
-    } else {
-        options.height = Some(px(40.0));
-    }
-    Some(options)
+/// DesktopWindow.getWindowTitleBarOptions: the desktop bridge is a window capability here; its
+/// per-platform table is `crate::host`'s.
+pub fn window_title_bar_options(desktop: bool) -> Option<TitleBarOptions> {
+    crate::host::desktop_title_bar(desktop)
 }
 
 /// Install once in App. NSH paints and operates native traffic lights/caption buttons itself.
 pub fn install_window_titlebar(title: Text) {
     let window = current_window();
     effect(move || {
-        let Some(options) = window_title_bar_options(os(), window.state().is_some()) else {
+        let Some(options) = window_title_bar_options(window.state().is_some()) else {
             return;
         };
         let mut attributes = WindowAttributes::default();
@@ -56,8 +44,9 @@ pub fn workspace_titlebar_geometry(window: &WindowRef) -> WorkspaceTitlebarGeome
     let desktop = window.state().is_some();
     let area = window.title_bar();
     let safe = safe_area();
-    // .wco applies only while the native overlay is visible; otherwise index.css uses 52px.
-    let height = if desktop && os() != Os::MacOs && area.top.0 > 0.0 {
+    // .wco applies only while the native controls overlay is visible (caption buttons reserved
+    // at the right of the bar); otherwise index.css uses 52px.
+    let height = if desktop && area.right.0 > 0.0 && area.top.0 > 0.0 {
         area.top.0.max(40.0)
     } else {
         52.0

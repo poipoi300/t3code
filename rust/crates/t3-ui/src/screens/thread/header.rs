@@ -2,15 +2,18 @@
 
 use std::rc::Rc;
 
+use futures::{StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
 use nsh_core::prelude::*;
 use t3_client::types::{EnvironmentId, ThreadKey};
 use t3_client::view_logic::session::text::{TextDirection, text_direction};
+use t3_client::workspace::ProjectKey;
 use t3_contracts::orchestration_project::OrchestrationProjectShell;
 use t3_contracts::orchestration_v2::AppThreadLineageRelationshipToParent;
 
 use crate::i18n::{Text as I18nText, Value, t, tr};
 use crate::runtime::{Shared, rt};
 use crate::screens::panel::{Action, PanelHost};
+use crate::screens::sidebar::actions::ThreadActionMenu;
 use crate::state::layout::layout_class;
 use crate::state::nav::{Route, navigator};
 use crate::theme::tw;
@@ -18,8 +21,70 @@ use crate::ui::avatar::{ProjectFaviconProject, project_favicon};
 use crate::ui::badge;
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::{Icon, icon_with_class};
+use crate::ui::toast::{self, ToastOptions};
 use crate::ui::toggle::{Content, Size, Variant, toggle};
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
+
+/// Projection of the client-owned thread operations and project identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThreadHeaderState {
+    pub can_operate: bool,
+    pub unavailable_reason: Option<I18nText>,
+    pub menu: Option<ThreadActionMenu>,
+    pub is_scratch: Option<bool>,
+}
+
+impl Default for ThreadHeaderState {
+    fn default() -> Self {
+        Self {
+            can_operate: false,
+            unavailable_reason: Some("Thread actions unavailable".into()),
+            menu: None,
+            is_scratch: None,
+        }
+    }
+}
+
+/// Titles are client English keys; details distinguish catalogue keys from server content.
+#[derive(Clone, Debug)]
+pub enum HeaderError {
+    Interrupted,
+    Failed {
+        title: String,
+        detail: Option<I18nText>,
+    },
+}
+
+pub trait ThreadHeaderService {
+    fn watch(&self, key: ThreadKey) -> LocalBoxStream<'static, Rc<ThreadHeaderState>>;
+    fn rename_thread(
+        &self,
+        key: ThreadKey,
+        title: String,
+    ) -> LocalBoxFuture<'static, Result<(), HeaderError>>;
+    fn perform_action(
+        &self,
+        key: ThreadKey,
+        action: String,
+    ) -> LocalBoxFuture<'static, Result<(), HeaderError>>;
+    fn close_guest_share(&self, key: ThreadKey)
+    -> LocalBoxFuture<'static, Result<(), HeaderError>>;
+}
+
+#[derive(Clone)]
+pub struct ThreadHeaderRuntime(pub Rc<dyn ThreadHeaderService>);
+
+pub trait ThreadHeaderNavigationService {
+    /// Current availability first; dropping the stream releases the project demand.
+    fn watch(&self, project: ProjectKey) -> LocalBoxStream<'static, Option<I18nText>>;
+    fn new_thread_in_project(
+        &self,
+        project: ProjectKey,
+    ) -> LocalBoxFuture<'static, Result<crate::screens::new_thread::Destination, HeaderError>>;
+}
+
+#[derive(Clone)]
+pub struct ThreadHeaderNavigation(pub Rc<dyn ThreadHeaderNavigationService>);
 
 /// Canvas mode and TERM-1's controlled drawer binding, provided by the workspace owner.
 /// The header never creates a second panel or terminal visibility store.
@@ -42,6 +107,135 @@ struct Breadcrumb {
     project: Option<Rc<OrchestrationProjectShell>>,
     parent: Option<(ThreadKey, String)>,
     origin: Option<String>,
+    guest: Option<GuestShare>,
+}
+
+#[derive(Clone, PartialEq)]
+struct GuestShare {
+    expires_at: String,
+    name: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct HeaderController {
+    key: Stored<ThreadKey>,
+    service: Option<Stored<Rc<dyn ThreadHeaderService>>>,
+    state: Signal<Rc<ThreadHeaderState>>,
+    renaming: Signal<Option<String>>,
+    draft: Signal<String>,
+    menu_open: Signal<bool>,
+    closing_share: Signal<bool>,
+}
+
+impl HeaderController {
+    fn new(key: ThreadKey) -> Self {
+        let service = use_context::<ThreadHeaderRuntime>().map(|runtime| stored(runtime.0));
+        let state = signal(Rc::new(ThreadHeaderState::default()));
+        if let Some(service) = service {
+            let mut changes = service.get().watch(key.clone());
+            spawn(async move {
+                while let Some(next) = changes.next().await {
+                    state.set(next);
+                }
+                state.set(Rc::new(ThreadHeaderState::default()));
+            });
+        }
+        let this = Self {
+            key: stored(key),
+            service,
+            state,
+            renaming: signal(None),
+            draft: signal(String::new()),
+            menu_open: signal(false),
+            closing_share: signal(false),
+        };
+        // External permission changes cancel an editor that can no longer submit.
+        effect(move || {
+            if !this.state.with(|state| state.can_operate) {
+                this.renaming.set(None);
+            }
+        });
+        this
+    }
+
+    fn begin_rename(self, title: String) {
+        if self.service.is_some()
+            && self
+                .state
+                .with_untracked(|state| state.can_operate && state.unavailable_reason.is_none())
+        {
+            self.menu_open.set(false);
+            self.draft.set(title.clone());
+            self.renaming.set(Some(title));
+        }
+    }
+
+    fn commit_rename(self) {
+        let Some(original) = self.renaming.get_untracked() else {
+            return;
+        };
+        self.renaming.set(None);
+        if !self
+            .state
+            .with_untracked(|state| state.can_operate && state.unavailable_reason.is_none())
+        {
+            return;
+        }
+        let title = self.draft.get_untracked().trim().to_owned();
+        if title.is_empty() {
+            toast::toast_manager().add(ToastOptions {
+                variant: toast::Variant::Warning,
+                title: "Thread title cannot be empty".into(),
+                ..Default::default()
+            });
+        } else if title != original
+            && let Some(service) = self.service
+        {
+            spawn(async move {
+                if let Err(error) = service.get().rename_thread(self.key.get(), title).await {
+                    report_header_error(error, Some("Failed to rename thread"));
+                }
+            });
+        }
+    }
+
+    fn dispatch(self, action: String, title: String) {
+        self.menu_open.set(false);
+        if action == "rename" {
+            self.begin_rename(title);
+            return;
+        }
+        if self
+            .state
+            .with_untracked(|state| state.unavailable_reason.is_some())
+        {
+            return;
+        }
+        if let Some(service) = self.service {
+            spawn(async move {
+                if let Err(error) = service.get().perform_action(self.key.get(), action).await {
+                    report_header_error(error, None);
+                }
+            });
+        }
+    }
+}
+
+fn report_header_error(error: HeaderError, title: Option<&str>) {
+    if let HeaderError::Failed {
+        title: failure_title,
+        detail,
+    } = error
+    {
+        toast::toast_manager().add(ToastOptions {
+            variant: toast::Variant::Error,
+            title: title.unwrap_or(&failure_title).to_owned(),
+            description_content: detail.map(|detail| {
+                Rc::new(move || text(detail.resolve()).into_element()) as toast::Slot
+            }),
+            ..Default::default()
+        });
+    }
 }
 
 /// Compatibility with the slice's title-only caller; canonical rows come from its route.
@@ -53,10 +247,11 @@ pub fn header(titles: Memo<Option<(String, Option<String>)>>) -> impl IntoElemen
         untracked(|| match key {
             Some(key) => thread_header(key).into_element(),
             None => text(move || {
-                titles.get().map_or_else(
-                    || t("Loading thread…").into(),
-                    |(title, _)| SharedString::from(title),
-                )
+                titles
+                    .get()
+                    .map_or_else(SharedString::default, |(title, _)| {
+                        SharedString::from(title)
+                    })
             })
             .into_element(),
         })
@@ -82,20 +277,20 @@ pub fn thread_header(key: ThreadKey) -> impl IntoElement {
                 == Some(AppThreadLineageRelationshipToParent::Subagent))
             .then_some(row.lineage.parent_thread_id.as_ref())
             .flatten()
-            .map(|id| {
+            .and_then(|id| {
                 let title = shell
                     .threads
                     .iter()
                     .chain(shell.archived_threads.iter())
                     .find(|row| &row.id == id)
-                    .map_or_else(|| t("Parent thread"), |row| row.title.clone());
-                (
+                    .map(|row| row.title.clone())?;
+                Some((
                     ThreadKey {
                         environment: environment.clone(),
                         thread: id.clone(),
                     },
                     title,
-                )
+                ))
             });
             Some(Breadcrumb {
                 title: row.title.clone(),
@@ -107,11 +302,21 @@ pub fn thread_header(key: ThreadKey) -> impl IntoElement {
                     .and_then(Option::as_ref)
                     .map(|origin| origin.label.clone())
                     .filter(|label| !label.is_empty()),
+                guest: row
+                    .guest_share
+                    .as_ref()
+                    .and_then(Option::as_ref)
+                    .map(|share| GuestShare {
+                        expires_at: share.expires_at.0.clone(),
+                        name: share.guest_name.as_ref().map(|name| name.0.clone()),
+                    }),
             })
         })
     });
     let has_project =
         computed(move || breadcrumb.with(|b| b.as_ref().is_some_and(|b| b.project.is_some())));
+    let workspace_panel = use_context::<PanelHost>().map(|host| host.panel(key.clone()));
+    let controller = HeaderController::new(key.clone());
     view()
         // Electron drag/window reservations belong to the shell; no native overflow-clip-margin.
         .app_class(tw("relative bg-background flex h-[var(--workspace-topbar-height)] min-h-[var(--workspace-topbar-height)] shrink-0 items-center px-3 sm:px-5"))
@@ -122,9 +327,13 @@ pub fn thread_header(key: ThreadKey) -> impl IntoElement {
                 ButtonVariant::Ghost, ButtonSize::Icon, || false, move || nav.back(),
             ),
         ))
-        .child(chat_header(breadcrumb, key.environment.clone()))
+        .child(chat_header(breadcrumb, key.environment.clone(), controller))
         // The web fixes this group to window chrome; the shared header is its native anchor.
-        .child(panel_layout_controls(key, has_project))
+        .child(when(
+            move || !(layout_class() == crate::state::layout::LayoutClass::Wide
+                && workspace_panel.is_some_and(|panel| panel.with(|panel| panel.is_open))),
+            move || panel_layout_controls(key.clone(), has_project),
+        ))
 }
 
 /// Port of mobile/components/ui/AppBar.tsx's threadBelow condition (095611d1b5).
@@ -135,6 +344,7 @@ fn has_thread_below(stack: &[Route]) -> bool {
 fn chat_header(
     breadcrumb: Memo<Option<Breadcrumb>>,
     environment: EnvironmentId,
+    controller: HeaderController,
 ) -> impl IntoElement {
     let nav = navigator();
     let project = computed(move || {
@@ -142,6 +352,50 @@ fn chat_header(
     });
     let parent = computed(move || breadcrumb.with(|b| b.as_ref().and_then(|b| b.parent.clone())));
     let origin = computed(move || breadcrumb.with(|b| b.as_ref().and_then(|b| b.origin.clone())));
+    let guest = computed(move || breadcrumb.with(|b| b.as_ref().and_then(|b| b.guest.clone())));
+    let available_width = signal(0.0_f32);
+    let collapse_parent = computed(move || {
+        let available = available_width.get();
+        let Some((_, parent_title)) = parent.get() else {
+            return false;
+        };
+        if available <= 0.0 {
+            return false;
+        }
+        let tokens = tokens();
+        let family = tokens
+            .font(nsh_core::element::FONT_SANS)
+            .map_or("sans-serif", |name| name.as_ref());
+        let font = format!("500 14px {family}");
+        let title_width =
+            breadcrumb.with(|b| b.as_ref().map_or(0.0, |b| measure_text(&font, &b.title).0)) + 18.0;
+        let project_width = project.with(|project| {
+            project.as_ref().map(|project| {
+                let name = if controller
+                    .state
+                    .with(|state| state.is_scratch == Some(true))
+                {
+                    t("No project")
+                } else {
+                    project.title.0.clone()
+                };
+                measure_text(&font, &name).0.min(160.0) + 20.0
+            })
+        });
+        let separators = if project_width.is_some() { 2.0 } else { 1.0 };
+        let gaps = if project_width.is_some() { 4.0 } else { 2.0 };
+        let gap = if layout_class().is_compact() {
+            8.0
+        } else {
+            12.0
+        };
+        title_width
+            + measure_text(&font, &parent_title).0
+            + project_width.unwrap_or(0.0)
+            + separators * measure_text(&format!("400 14px {family}"), "/").0
+            + gaps * gap
+            > available
+    });
     view()
         // Sibling controls reserve their actual width instead of the web's pr-10/pr-24.
         .app_class(tw("flex min-w-0 flex-1 items-center gap-2 sm:gap-3"))
@@ -152,25 +406,13 @@ fn chat_header(
             // Native lists/text omit list-none, text-box and its supports padding hint.
             .child(view()
                 .app_class(tw("m-0 flex min-w-0 items-center gap-2 p-0 text-sm sm:gap-3"))
+                .on_layout(move |bounds: &Bounds<Points>| available_width.set(bounds.size.width.0))
                 .child(dynamic(move || {
                     let project = project.get();
                     let environment = environment.clone();
                     project.map(|project| untracked(|| {
-                        let project = ProjectFaviconProject::from_shell(environment, &project);
-                        let name = project.title.clone();
                         vec![
-                            view()
-                                .app_class(tw("flex min-w-0 items-center font-medium shrink-0 text-muted-foreground shrink"))
-                                .tooltip(tooltip(tooltip_create_handle(), TooltipOptions::default(), text(SharedString::from(tr("New thread in {project}", &[("project", Value::Text(name.clone()))])))))
-                                // MISC-NEW/runtime must expose project-scoped creation before this enables.
-                                .child(nsh_base::button()
-                                    .disabled(true)
-                                    .accessibility_label(Some(SharedString::from(tr("New thread in {project}", &[("project", Value::Text(name.clone()))]))))
-                                    .app_class(tw("inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1.5 rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
-                                    // UI-AVATAR's cached resource reader awaits runtime integration.
-                                    .child(project_favicon(move || project.clone(), |_| None, "size-3.5", None))
-                                    .child(text(SharedString::from(name)).app_class(tw("block min-w-0 truncate max-w-40"))))
-                                .into_element(),
+                            project_breadcrumb(project.0, environment, controller).into_element(),
                             workspace_breadcrumb_separator().into_element(),
                         ]
                     })).unwrap_or_default()
@@ -183,9 +425,11 @@ fn chat_header(
                             .tooltip(tooltip(tooltip_create_handle(), TooltipOptions::default(), text(SharedString::from(title.clone()))))
                             .child(nsh_base::button()
                                 .accessibility_label(Some(SharedString::from(tr("Open parent thread: {title}", &[("title", Value::Text(title.clone()))]))))
+                                .on_press_down(move || controller.renaming.set(None))
                                 .on_press(move || nav.open(Route::Thread(key.clone())))
                                 .app_class(tw("inline-flex min-w-0 max-w-full cursor-pointer items-center rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
-                                .child(text(SharedString::from(title)).app_class(tw("block min-w-0 truncate"))))
+                                .child(text(SharedString::from(title)).accessible(false).app_class(move || tw(if collapse_parent.get() { "block min-w-0 truncate w-0" } else { "block min-w-0 truncate" })))
+                                .child(when(move || collapse_parent.get(), || text(SharedString::from("...")).accessible(false))))
                             .into_element(),
                         workspace_breadcrumb_separator().into_element(),
                     ])).unwrap_or_default()
@@ -202,8 +446,8 @@ fn chat_header(
                             Some(TextDirection::Rtl) => LayoutDirection::Rtl,
                             None => LayoutDirection::Inherit,
                         }))
-                        .tooltip(tooltip(tooltip_create_handle(), TooltipOptions::default(), text(move || breadcrumb.with(|b| b.as_ref().map_or_else(|| t("Loading thread…"), |b| b.title.clone())))))
-                        .child(text(move || breadcrumb.with(|b| b.as_ref().map_or_else(|| t("Loading thread…"), |b| b.title.clone())))
+                        .tooltip(tooltip(tooltip_create_handle(), TooltipOptions::default(), text(move || breadcrumb.with(|b| b.as_ref().map_or_else(String::new, |b| b.title.clone())))))
+                        .child(text(move || breadcrumb.with(|b| b.as_ref().map_or_else(String::new, |b| b.title.clone())))
                             .app_class(tw("block min-w-0 truncate"))))
                     .child(dynamic(move || origin.get().map(|origin| untracked(|| {
                         let description = origin.clone();
@@ -213,6 +457,151 @@ fn chat_header(
                     }))))),
             ),
         )
+        .child(guest_share_indicator(guest, controller))
+}
+
+fn project_breadcrumb(
+    project: Rc<OrchestrationProjectShell>,
+    environment: EnvironmentId,
+    controller: HeaderController,
+) -> impl IntoElement {
+    let project_key = stored(ProjectKey {
+        environment: environment.clone(),
+        project: project.id.clone(),
+    });
+    let navigation = use_context::<ThreadHeaderNavigation>().map(|service| stored(service.0));
+    let unavailable = signal(Some(I18nText::from(
+        "This connection cannot change threads.",
+    )));
+    if let Some(navigation) = navigation {
+        let mut changes = navigation.get().watch(project_key.get());
+        spawn(async move {
+            while let Some(reason) = changes.next().await {
+                unavailable.set(reason);
+            }
+            unavailable.set(Some("This connection cannot change threads.".into()));
+        });
+    }
+    let name = stored(project.title.0.clone());
+    let display_name = move || {
+        if controller
+            .state
+            .with(|state| state.is_scratch == Some(true))
+        {
+            t("No project")
+        } else {
+            name.get()
+        }
+    };
+    let favicon = ProjectFaviconProject::from_shell(environment, &project);
+    let nav = navigator();
+    view().app_class(tw("flex min-w-0 items-center font-medium shrink-0 text-muted-foreground shrink"))
+        .tooltip(tooltip(tooltip_create_handle(), TooltipOptions::default(), text(move || unavailable.get().map_or_else(|| tr("New thread in {project}", &[("project", Value::Text(display_name()))]), |reason| reason.resolve().to_string()))))
+        .child(nsh_base::button()
+            .disabled(move || unavailable.with(Option::is_some))
+            .accessibility_label(move || tr("New thread in {project}", &[("project", Value::Text(display_name()))]))
+            .on_press_down(move || controller.renaming.set(None))
+            .on_press(move || {
+                if unavailable.get_untracked().is_none() && let Some(navigation) = navigation {
+                    spawn(async move {
+                        match navigation.get().new_thread_in_project(project_key.get()).await {
+                            Ok(destination) => nav.open(destination.route()),
+                            Err(error) => report_header_error(error, None),
+                        }
+                    });
+                }
+            })
+            .app_class(tw("inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1.5 rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
+            // The shared favicon resource reader remains the assets runtime owner's binding.
+            .child(project_favicon(move || favicon.clone(), |_| None, "size-3.5", None))
+            .child(text(move || display_name()).app_class(tw("block min-w-0 truncate max-w-40"))))
+}
+
+/// Port of chat/GuestShareControls.tsx GuestShareIndicator and GuestShareStatus.
+fn guest_share_indicator(
+    share: Memo<Option<GuestShare>>,
+    controller: HeaderController,
+) -> impl IntoElement {
+    view().child(dynamic(move || {
+        share.get().map(|_| {
+            untracked(|| {
+                let status = move || {
+                    share.with(|share| {
+                        let Some(share) = share else {
+                            return String::new();
+                        };
+                        let expired = t3_client::services::config::timestamp_ms(&share.expires_at)
+                            .is_some_and(|expires| {
+                                expires.div_euclid(60_000)
+                                    <= crate::state::clock::now_ms().div_euclid(60_000)
+                            });
+                        if expired {
+                            t("Guest link expired")
+                        } else if let Some(name) = &share.name {
+                            tr("{name} is a guest", &[("name", Value::Text(name.clone()))])
+                        } else {
+                            t("Guest link active")
+                        }
+                    })
+                };
+                view()
+                    .app_class(tw(
+                        "flex shrink-0 items-center gap-1 text-muted-foreground text-xs",
+                    ))
+                    .child(icon_with_class(Icon::User, "size-3.5"))
+                    .child(text(status))
+                    .child(
+                        view()
+                            .tooltip(tooltip(
+                                tooltip_create_handle(),
+                                TooltipOptions::default(),
+                                text(move || {
+                                    controller.state.with(|state| {
+                                        state.unavailable_reason.as_ref().map_or_else(
+                                            || t("Stop sharing"),
+                                            |reason| reason.resolve().to_string(),
+                                        )
+                                    })
+                                }),
+                            ))
+                            .child(button(
+                                ButtonContent::Label(t("Stop sharing")),
+                                ButtonVariant::GhostMuted,
+                                ButtonSize::Xs,
+                                move || {
+                                    controller.service.is_none()
+                                        || controller.closing_share.get()
+                                        || controller
+                                            .state
+                                            .with(|state| state.unavailable_reason.is_some())
+                                },
+                                move || {
+                                    if controller.closing_share.get_untracked()
+                                        || controller.state.with_untracked(|state| {
+                                            state.unavailable_reason.is_some()
+                                        })
+                                    {
+                                        return;
+                                    }
+                                    if let Some(service) = controller.service {
+                                        controller.closing_share.set(true);
+                                        spawn(async move {
+                                            let result = service
+                                                .get()
+                                                .close_guest_share(controller.key.get())
+                                                .await;
+                                            controller.closing_share.set(false);
+                                            if let Err(error) = result {
+                                                report_header_error(error, None);
+                                            }
+                                        });
+                                    }
+                                },
+                            )),
+                    )
+            })
+        })
+    }))
 }
 
 /// Port of apps/web/src/components/WorkspaceBreadcrumb.tsx WorkspaceBreadcrumbSeparator.
@@ -220,7 +609,7 @@ fn workspace_breadcrumb_separator() -> impl IntoElement {
     view()
         .accessible(false)
         .app_class(tw("flex shrink-0 items-center text-icon-muted"))
-        .child(text(t("/")).app_class(tw("block min-w-0 truncate")))
+        .child(text(SharedString::from("/")).app_class(tw("block min-w-0 truncate")))
 }
 
 /// Port of apps/web/src/components/chat/PanelLayoutControls.tsx PanelLayoutControls.

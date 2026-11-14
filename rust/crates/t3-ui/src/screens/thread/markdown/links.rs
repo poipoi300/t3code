@@ -18,7 +18,7 @@ use t3_client::view_logic::session::links::{
 use t3_client::view_logic::session::markdown_link_presentation::{
     ThreadLink, external_link_host, favicon_url_for_host, file_link_label,
     is_markdown_file_link_label, leading_external_link_text_length, markdown_file_copy_menu_items,
-    parse_thread_link_href, unknown_thread_link_label,
+    parse_thread_link_href, thread_link_candidates, unknown_thread_link_label,
 };
 
 use crate::i18n::{Text, Value, t, tr};
@@ -635,8 +635,8 @@ fn thread_chip(
             reachable,
             lookup.settled,
             &refs,
-            |key| lookup.metadata.get(&key.thread).cloned().or_else(|| find(key)),
             find,
+            |key| lookup.metadata.get(&key.thread).cloned().or_else(|| find(key)),
         );
     let unknown = Text::client_key(unknown_thread_link_label(link, environment));
     let title = resolution
@@ -702,6 +702,29 @@ pub fn markdown_thread_link(
             })
             .collect::<Vec<_>>()
     });
+    let lookup = signal(ThreadLinkLookup::default());
+    if let Some(service) = use_context::<MarkdownLinkRuntime>() {
+        let candidates = thread_link_candidates(&link, &environment);
+        let request = computed(move || {
+            let written = &candidates[0];
+            selectors.with(|selectors| {
+                selectors.iter().find(|(id, _)| *id == written.environment)
+                    .filter(|(_, shell)| !shell.with(|shell| shell.as_ref().is_some_and(|shell| shell.threads.iter().any(|thread| thread.id == written.thread))))
+                    .map(|_| (written.environment.clone(), candidates.iter().map(|key| key.thread.clone()).collect::<Vec<_>>()))
+            })
+        });
+        effect(move || {
+            let request = request.get();
+            lookup.set(ThreadLinkLookup::default());
+            if let Some((environment, threads)) = request {
+                let mut updates = service.0.thread_link_metadata(environment, threads);
+                let task = spawn(async move {
+                    while let Some(update) = updates.next().await { lookup.set(update); }
+                });
+                cleanup(move || task.cancel());
+            }
+        });
+    }
     let chip = computed(move || {
         let shells = selectors.with(|selectors| {
             selectors
@@ -709,7 +732,7 @@ pub fn markdown_thread_link(
                 .map(|(id, shell)| (id.clone(), shell.get()))
                 .collect::<Vec<_>>()
         });
-        thread_chip(&shells, &environment, &link, label.as_ref())
+        thread_chip(&shells, &environment, &link, label.as_ref(), &lookup.get())
     });
     let missing = computed(move || chip.with(|chip| chip.missing));
     let project = computed(move || chip.with(|chip| chip.project.clone()));

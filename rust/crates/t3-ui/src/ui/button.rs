@@ -166,6 +166,9 @@ pub enum ButtonContent {
     Label(String),
     Icon { icon: Icon, label: String },
     IconLabel { icon: Icon, label: String },
+    /// The caller's own element in the button's frame (a glyph at its own size, with its own
+    /// motion); `label` is the button's accessible name, already translated.
+    Custom { label: String, child: AnyElement },
 }
 
 /// A button. `disabled` follows a signal or closure; a disabled button is 64% opaque and inert.
@@ -178,10 +181,11 @@ pub fn button(
 ) -> impl IntoElement {
     let colors = move || variant_colors(variant, &palette());
     let m = metrics;
-    let (label, glyph, show_label) = match content {
-        ButtonContent::Label(label) => (label, None, true),
-        ButtonContent::Icon { icon, label } => (label, Some(icon), false),
-        ButtonContent::IconLabel { icon, label } => (label, Some(icon), true),
+    let (label, glyph, show_label, custom) = match content {
+        ButtonContent::Label(label) => (label, None, true, None),
+        ButtonContent::Icon { icon, label } => (label, Some(icon), false, None),
+        ButtonContent::IconLabel { icon, label } => (label, Some(icon), true, None),
+        ButtonContent::Custom { label, child } => (label, None, false, Some(child)),
     };
     let disabled = std::rc::Rc::new(disabled);
     let disabled_for_opacity = disabled.clone();
@@ -235,6 +239,7 @@ pub fn button(
                 .text_color(move || colors().foreground)
                 .number_of_lines(1u32)
         }))
+        .child(custom)
 }
 
 #[cfg(test)]
@@ -251,6 +256,55 @@ mod tests {
         assert_eq!(ButtonSize::Default.height(&large), 36.0);
         assert_eq!(ButtonSize::IconSm.height(&regular), 28.0);
         assert_eq!(ButtonSize::Compact.height(&large), 28.0);
+    }
+
+    mod custom_content {
+        use super::super::*;
+        use nsh_engine::{EngineConfig, Root};
+        use nsh_testing::Headless;
+
+        #[component]
+        fn CustomButtonProbe() -> impl IntoElement {
+            let presses = signal(0_u32);
+            view()
+                .child(button(
+                    ButtonContent::Custom {
+                        label: crate::i18n::t("Fork"),
+                        child: text(SharedString::from("custom glyph")).into_element(),
+                    },
+                    ButtonVariant::Ghost,
+                    ButtonSize::IconXs,
+                    || false,
+                    move || presses.update(|n| *n += 1),
+                ))
+                .child(button(
+                    ButtonContent::Label(crate::i18n::t("Copy")),
+                    ButtonVariant::Outline,
+                    ButtonSize::Sm,
+                    || false,
+                    || {},
+                ))
+                .child(text(move || SharedString::from(format!("presses {}", presses.get()))))
+        }
+
+        #[test]
+        fn custom_content_keeps_the_frame_label_and_press_and_leaves_labels_alone() {
+            let mut sets = crate::registries();
+            let mut fixtures = Registry::new();
+            fixtures.register::<CustomButtonProbe>();
+            sets.push(fixtures);
+            let mut app = Headless::start(EngineConfig {
+                ui_sets: sets,
+                viewport: size(px(390.0), px(844.0)),
+                ..EngineConfig::new(Root::of::<CustomButtonProbe>())
+            })
+            .expect("button probe starts");
+            app.wait_for("custom glyph").expect("the caller's element is drawn");
+            app.press("role:button[Fork]").expect("named by its label");
+            app.wait_for("presses 1").expect("the press reaches the handler");
+            assert!(app.screen().shows("Copy"), "a label button still draws its label");
+            assert!(!app.screen().shows("Fork"), "a custom button draws no label text");
+        }
     }
 
     #[test]

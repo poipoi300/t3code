@@ -12,7 +12,7 @@ use crate::theme::{cn, tw};
 use crate::ui::alert::composer_banner as banner;
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::Icon;
-use crate::ui::popover::{PopoverOptions, popover, popover_create_handle, popover_title};
+use crate::ui::popover::{PopoverOptions, popover, popover_create_handle};
 
 pub type Node = Rc<dyn Fn() -> AnyElement>;
 
@@ -335,7 +335,6 @@ pub fn notice_text(
             show_details.get().then(|| {
                 untracked(|| {
                     let handle = popover_create_handle();
-                    effect(move || println!("DETAIL OPEN {}", handle.is_open()));
                     let pending = stored(None::<Spawned<()>>);
                     let stay = move || {
                         if let Some(task) = pending.replace(None) {
@@ -357,7 +356,7 @@ pub fn notice_text(
                         ButtonVariant::GhostMuted,
                         ButtonSize::IconXs,
                         || false,
-                        move || { println!("DETAIL PRESS before {}",handle.is_open()); handle.set_open(!handle.is_open()); println!("DETAIL PRESS after {}",handle.is_open()); },
+                        move || handle.set_open(true),
                     );
                     // The details region owns and cancels its timers when removed.
                     view()
@@ -366,7 +365,7 @@ pub fn notice_text(
                             details_width.set(bounds.size.width.0)
                         })
                         .on_mouse_enter(move |_: &MouseEvent| {
-                            println!("DETAIL ENTER"); stay();
+                            stay();
                             handle.set_open(true);
                         })
                         .on_mouse_leave(move |_: &MouseEvent| leave())
@@ -381,12 +380,9 @@ pub fn notice_text(
                             move || {
                                 view()
                                     .test_id("notice-details-content")
-                                    // The primitive registers its popup name through the title slot.
-                                    .child(
-                                        view()
-                                            .app_class(tw("hidden"))
-                                            .child(popover_title("Notice details")),
-                                    )
+                                    // Popover has no label slot (popover_title draws a visible heading).
+                                    .role(AccessibilityRole::Group)
+                                    .label(move || crate::i18n::ts("Notice details"))
                                     .max_w(move || {
                                         px(480.0_f32.min((window().width.0 - 32.0).max(0.0)))
                                     })

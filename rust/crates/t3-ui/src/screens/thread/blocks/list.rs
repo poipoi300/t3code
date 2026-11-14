@@ -13,7 +13,9 @@ use super::code::{HighlightCache, HighlightCode, IncrementalHighlightedDocument,
 use super::flatten::{Block, BlockId, BlockKind, FlattenWork, MessageFlattener, StreamBlocks};
 use crate::i18n::t;
 use crate::runtime::Shared;
-use crate::screens::thread::markdown::base::chat_markdown;
+use crate::screens::thread::markdown::base::{
+    chat_markdown, chat_markdown_blocks, chat_markdown_leaf, starts_with_heading,
+};
 use crate::screens::thread::markdown::code_block::{
     CodeBlockOptions, CodeBlockProps, CodeBlockState, extract_fence_title, markdown_code_block,
 };
@@ -45,6 +47,8 @@ pub struct BlockLeaf {
     pub block: Rc<Block>,
     pub streaming: bool,
     pub preserve_line_breaks: bool,
+    pub block_position: usize,
+    pub starts_with_heading: bool,
     pub fence: Option<usize>,
     pub lexer_context: u64,
     lexer_exit: u64,
@@ -147,12 +151,23 @@ impl MessageDocument {
             self.work.changed_blocks += 1;
             let preserve_line_breaks = matches!(block.kind, BlockKind::Prose | BlockKind::Document)
                 && should_preserve_assistant_line_breaks(text);
+            let block_position =
+                self.leaves
+                    .range(..index)
+                    .next_back()
+                    .map_or(0, |(_, previous)| {
+                        previous.block_position + usize::from(semantic_block(&previous.block.kind))
+                    });
+            let starts_with_heading = matches!(block.kind, BlockKind::Prose | BlockKind::Document)
+                && starts_with_heading(text);
             self.leaves.insert(
                 index,
                 Rc::new(BlockLeaf {
                     block,
                     streaming: streaming && index + 1 == count,
                     preserve_line_breaks,
+                    block_position,
+                    starts_with_heading,
                     fence,
                     lexer_context,
                     lexer_exit: lexer.finish(),
@@ -184,6 +199,14 @@ impl MessageDocument {
             text.push_str(&code.text);
         }
         Some(text)
+    }
+}
+
+fn semantic_block(kind: &BlockKind) -> bool {
+    match kind {
+        BlockKind::Header | BlockKind::Definition { .. } => false,
+        BlockKind::Code(chunk) => chunk.first,
+        _ => true,
     }
 }
 
@@ -544,10 +567,22 @@ fn timeline_row_content(
         })
     });
     let footer = computed(move || cell.with(|cell| matches!(cell.id, CellId::Footer(_))));
+    let spacing = computed(move || {
+        leaf.with(|leaf| {
+            leaf.as_ref().map(|leaf| {
+                (
+                    leaf.block_position > 0 && semantic_block(&leaf.block.kind),
+                    leaf.starts_with_heading,
+                )
+            })
+        })
+    });
     view()
         // index.css .messages-timeline-scroll and .chat-content-lane; no nested scroller.
         .app_class(tw("w-full px-3 sm:px-12"))
-        .child(view().app_class(tw("mx-auto w-full min-w-0 max-w-(--chat-content-max-width) overflow-x-clip"))
+        .child(view().app_class(tw("mx-auto w-full min-w-0 max-w-(--chat-content-max-width)"))
+            // NSH's overflow flag clips both axes; this lane's natural height keeps vertical content intact.
+            .overflow_hidden()
             .child(view().app_class(move || Some(tw(&cn([
                 cell.with(|cell| cell.last).then_some(padding_of(&cell.with(|cell| cell.row.clone()))),
                 row.with(|row| row.as_ref().is_some_and(|row| matches!(&row.content,
@@ -558,22 +593,31 @@ fn timeline_row_content(
                 .child(dynamic(move || {
                     let kind = kind.get();
                     let footer = footer.get();
-                    untracked(|| match kind {
+                    let spacing = spacing.get();
+                    untracked(|| {
+                        let body = match kind {
                         Some(0) => empty_response(row).into_element(),
-                        Some(1) => view().app_class(tw("min-w-0 px-1"))
-                            .child(code_cell(cell, leaf, options.clone(), cache.clone())).into_element(),
+                        Some(1) => code_cell(cell, leaf, options.clone(), cache.clone()),
                         Some(2) => text(move || leaf.with(|leaf| leaf.as_ref().and_then(|leaf| leaf.block.text.as_ref()).map_or_else(String::new, |text| text.to_string())))
                             .select_text().app_class(tw("font-mono")).into_element(),
                         Some(4) => {
                             let source = computed(move || leaf.with(|leaf| leaf.as_ref()
                                 .and_then(|leaf| leaf.block.text.clone()).unwrap_or_else(|| Rc::from(""))));
-                            view().app_class(tw("min-w-0 px-1"))
-                                .child(crate::screens::thread::markdown::rich::markdown_table_block(source)).into_element()
+                            crate::screens::thread::markdown::rich::markdown_table_block(source).into_element()
                         }
                         Some(5) => view().into_element(),
                         Some(_) => prose_cell(leaf).into_element(),
                         None if footer => assistant_footer(row, options.assistant.clone()).into_element(),
                         None => standalone_row(row, options.clone()),
+                        };
+                        if !matches!(kind, Some(1..=4)) { return body; }
+                        let (gap, heading) = spacing.unwrap_or_default();
+                        // Virtual cells have separate parents; a zero-height sibling preserves the shared gap and first: rules.
+                        view().app_class(tw("min-w-0 px-1"))
+                            .child(chat_markdown_blocks()
+                                .child(gap.then(|| view().h(px(0.0))))
+                                .child(chat_markdown_leaf(heading, body)))
+                            .into_element()
                     })
                 })))).into_element()
 }
@@ -701,7 +745,7 @@ fn prose_cell(leaf: Memo<Option<Shared<BlockLeaf>>>) -> impl IntoElement {
     });
     let plugins = use_context::<nsh_base::text_view::MarkdownPlugins>().unwrap_or_default();
     view()
-        .app_class(tw("min-w-0 px-1"))
+        .app_class(tw("min-w-0"))
         .label(move || SharedString::from(t("T3 Code")))
         .child(dynamic(move || {
             let preserve = preserve.get();

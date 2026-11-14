@@ -20,6 +20,7 @@ use crate::screens::composer::editor::{
     EditorMode, composer_prompt_editor_tiptap,
 };
 use crate::screens::composer::keys::{ComposerKeyProps, composer_key_plugin};
+use crate::screens::composer::send::ComposerSendClient;
 use crate::theme::{palette, tw};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::text::{TextRole, Tone, label};
@@ -33,7 +34,7 @@ pub fn composer(key: ThreadKey) -> impl IntoElement {
     let deliver: Rc<dyn Fn(String) -> LocalBoxFuture<'static, Result<(), SendError>>> = {
         let key = key.clone();
         let backend = runtime.backend();
-        match backend.composer_send_client() {
+        match backend.client() {
             Some(client) => Rc::new(move |text| {
                 client.submit(&key, text, ComposerDispatchMode::Auto, SendOptions::default())
             }),

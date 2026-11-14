@@ -30,11 +30,6 @@ two-face = { version = "0.4.5", default-features = false, features = ["syntect-f
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread"] }
 
-# The process's Java VM for t3-platform's Android Keystore store (`runtime/client.rs`).
-[target.'cfg(target_os = "android")'.dependencies]
-jni = "0.21"
-libc = "0.2"
-
 [dev-dependencies]
 futures = { version = "0.3", features = ["executor"] }
 nsh-engine = { git = "https://github.com/longbridge/nsh", rev = "d6f549d5a85b6b23714249ddd572f922db961254" }

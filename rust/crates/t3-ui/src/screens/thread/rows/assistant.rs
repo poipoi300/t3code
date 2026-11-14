@@ -28,11 +28,12 @@ use t3_i18n::{DateFormat, Formats, TimeZone};
 
 use crate::i18n::{Text as I18nText, t};
 use crate::runtime::Shared;
+use crate::screens::thread::blocks::code::{CodeHighlightState, code_chunk_row, highlighted_chunk};
 use crate::screens::thread::blocks::flatten::{
     Block, BlockId, BlockKind, MessageFlattener, StreamBlocks,
 };
 use crate::screens::thread::markdown::{
-    base::chat_markdown,
+    base::{chat_markdown, chat_markdown_blocks, chat_markdown_leaf, starts_with_heading},
     code_block::{
         CodeBlockOptions, CodeBlockProps, CodeBlockState, extract_fence_title, markdown_code_block,
     },
@@ -41,7 +42,7 @@ use crate::screens::thread::markdown::{
 use crate::state::layout::{Pointer, pointer};
 use crate::theme::{cn, tw};
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
-use crate::ui::icon::Icon;
+use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::toast::{ANCHORED_COPY_TOAST_TIMEOUT_MS, show_anchored_copy_success_toast};
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
@@ -168,6 +169,8 @@ struct MarkdownLeaf {
     text: Rc<str>,
     streaming: bool,
     line_breaks: bool,
+    starts_with_heading: bool,
+    fence: Option<BlockId>,
 }
 
 struct MessageRenderer {
@@ -255,11 +258,24 @@ impl MessageRenderer {
         let text = block.text.clone().unwrap_or_else(|| Rc::from(""));
         self.inspected_bytes += text.len();
         let line_breaks = should_preserve_assistant_line_breaks(&text);
+        let starts_with_heading = starts_with_heading(&text);
+        let fence = match &block.kind {
+            BlockKind::Code(code) if code.first => Some(block.id.clone()),
+            BlockKind::Code(_) => block
+                .id
+                .index
+                .checked_sub(1)
+                .and_then(|index| self.leaves.get(index))
+                .and_then(|leaf| leaf.fence.clone()),
+            _ => None,
+        };
         Rc::new(MarkdownLeaf {
             block,
             text,
             streaming,
             line_breaks,
+            starts_with_heading,
+            fence,
         })
     }
 
@@ -279,6 +295,10 @@ impl MessageRenderer {
             if chunk.last {
                 break;
             }
+        }
+        // mdast-to-hast adds one LF to a nonempty code value before extractCodeBlock copies it.
+        if !code.is_empty() {
+            code.push('\n');
         }
         code
     }
@@ -305,8 +325,14 @@ struct MessageRenderState {
 
 impl MessageHandle {
     fn view(self, state: AssistantRowsState) -> impl IntoElement {
-        view().child(each(
-            move || self.keys.get(),
+        chat_markdown_blocks().child(each(
+            move || {
+                self.keys
+                    .get()
+                    .into_iter()
+                    .filter(|id| id.index != 0)
+                    .collect::<Vec<_>>()
+            },
             |id| id.clone(),
             move |id, _| {
                 let slot = self.slots.with(|slots| slots[id.get_untracked().index]);
@@ -365,15 +391,19 @@ impl nsh_base::text_view::MarkdownPlugin for PreserveAssistantBreaks {
 }
 
 fn render_prose_leaf(leaf: Signal<Shared<MarkdownLeaf>>) -> impl IntoElement {
-    let breaks = computed(move || leaf.with(|leaf| leaf.line_breaks));
+    let presentation =
+        computed(move || leaf.with(|leaf| (leaf.line_breaks, leaf.starts_with_heading)));
     let plugins = use_context::<nsh_base::text_view::MarkdownPlugins>().unwrap_or_default();
     dynamic(move || {
-        let preserve = breaks.get();
+        let (preserve, heading) = presentation.get();
         untracked(|| {
             provide_context(plugins.clone().with(PreserveAssistantBreaks(preserve)));
-            chat_markdown(
-                move || leaf.with(|leaf| leaf.text.to_string()),
-                move || leaf.with(|leaf| leaf.streaming),
+            chat_markdown_leaf(
+                heading,
+                chat_markdown(
+                    move || leaf.with(|leaf| leaf.text.to_string()),
+                    move || leaf.with(|leaf| leaf.streaming),
+                ),
             )
         })
     })
@@ -384,21 +414,38 @@ fn render_code_leaf(leaf: Signal<Shared<MarkdownLeaf>>, state: AssistantRowsStat
     let BlockKind::Code(code) = &initial.block.kind else {
         return view().into_element();
     };
-    let body = move || {
-        text(move || SharedString::from(leaf.with(|leaf| leaf.text.to_string())))
-            .select_text()
-            .app_class(tw("font-mono"))
+    let Some(fence) = initial.fence.clone() else {
+        return view().into_element();
     };
-    if !code.first {
-        return body().into_element();
-    }
-    let id = initial.block.id.clone();
-    let copy_id = id.clone();
+    let copy_id = fence.clone();
     let code_state = state.owner.run(|| {
         state
             .code_states
-            .with(|states| *states.entry(id).or_default())
+            .with(|states| *states.entry(fence.clone()).or_default())
     });
+    let wrapped = computed(move || code_state.wrap_override.get().unwrap_or(true));
+    let chunk = computed(move || {
+        leaf.with(|leaf| match &leaf.block.kind {
+            BlockKind::Code(code) => Some(code.clone()),
+            _ => None,
+        })
+    });
+    let highlight_state = state.owner.run(|| {
+        state
+            .highlights
+            .with(|documents| documents.entry(fence).or_default().clone())
+    });
+    let streaming = computed(move || leaf.with(|leaf| leaf.streaming));
+    let highlighted = highlighted_chunk(chunk, streaming, highlight_state);
+    if !code.first {
+        return view().direction(LayoutDirection::Ltr).writing_direction(WritingDirection::Ltr)
+            // A fence's continuation has no inter-block margin in the web's single pre.
+            .app_class(move || Some(tw(&cn([
+                Some("-mt-[0.65rem] min-w-0 text-start overflow-hidden border-x border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32"),
+                crate::theme::has_theme_id().then_some("bg-(--code-background) border-contrast-border text-code-foreground dark:border-contrast-border dark:bg-(--code-background)"),
+            ]))))
+            .child(code_chunk_row(chunk, highlighted, wrapped)).into_element();
+    }
     let props = computed(move || {
         leaf.with(|leaf| {
             let BlockKind::Code(code) = &leaf.block.kind else {
@@ -409,6 +456,7 @@ fn render_code_leaf(leaf: Signal<Shared<MarkdownLeaf>>, state: AssistantRowsStat
                 language: code.language.clone().unwrap_or_else(|| "text".into()),
                 fence_title: extract_fence_title(code.meta.as_deref()),
                 is_streaming: leaf.streaming,
+                themed: crate::theme::has_theme_id(),
                 ..Default::default()
             }
         })
@@ -431,8 +479,8 @@ fn render_code_leaf(leaf: Signal<Shared<MarkdownLeaf>>, state: AssistantRowsStat
         })),
         ..Default::default()
     };
-    markdown_code_block(props, code_state, options, move |_wrapped| {
-        body().into_element()
+    markdown_code_block(props, code_state, options, move |wrapped| {
+        code_chunk_row(chunk, highlighted, wrapped).into_element()
     })
     .into_element()
 }
@@ -451,6 +499,7 @@ pub struct AssistantRowsState {
     copy_resets: Stored<BTreeMap<String, Spawned<()>>>,
     messages: Stored<BTreeMap<String, MessageRenderState>>,
     code_states: Stored<BTreeMap<BlockId, CodeBlockState>>,
+    highlights: Stored<BTreeMap<BlockId, CodeHighlightState>>,
 }
 
 impl Default for AssistantRowsState {
@@ -461,6 +510,7 @@ impl Default for AssistantRowsState {
             copy_resets: stored(BTreeMap::new()),
             messages: stored(BTreeMap::new()),
             code_states: stored(BTreeMap::new()),
+            highlights: stored(BTreeMap::new()),
         }
     }
 }
@@ -499,6 +549,25 @@ impl AssistantRowsState {
                         row.message.streaming,
                         replace,
                     );
+                    self.highlights.with(|documents| {
+                        if updates.first().is_some_and(|(index, _)| *index == 0) {
+                            for (id, document) in documents.iter() {
+                                if id.message_id == message.renderer.id {
+                                    document.clear();
+                                }
+                            }
+                        }
+                        for (_, leaf) in &updates {
+                            if let BlockKind::Code(code) = &leaf.block.kind
+                                && let Some(fence) = &leaf.fence
+                            {
+                                documents
+                                    .entry(fence.clone())
+                                    .or_default()
+                                    .upsert(code, leaf.streaming);
+                            }
+                        }
+                    });
                     let count = message.renderer.leaves.len();
                     message.handle.slots.with(|slots| {
                         while slots.len() < count {
@@ -823,8 +892,16 @@ pub fn assistant_copy_button(
                             Icon::Copy
                         };
                         button(
-                            ButtonContent::Icon {
-                                icon: glyph,
+                            ButtonContent::Custom {
+                                child: icon_with_class(
+                                    glyph,
+                                    if copied.get() {
+                                        "size-3 text-primary"
+                                    } else {
+                                        "size-3 text-muted-foreground"
+                                    },
+                                )
+                                .into_element(),
                                 label: t("Copy message"),
                             },
                             ButtonVariant::GhostMuted,
@@ -884,60 +961,56 @@ pub fn assistant_fork_button(
         Some(
             view()
                 .tooltip(assistant_tooltip("Fork from this response"))
-                // The primitive owns its glyph; pulsing the transparent wrapper preserves its look.
-                .child(
-                    view()
-                        .app_class(move || {
-                            Some(tw(if busy.get() && !reduce_motion() {
-                                "animate-pulse"
-                            } else {
-                                "animate-none"
-                            }))
+                .child(button(
+                    ButtonContent::Custom {
+                        child: dynamic(move || {
+                            icon_with_class(
+                                Icon::GitFork,
+                                if busy.get() && !reduce_motion() {
+                                    "size-3 text-muted-foreground animate-pulse"
+                                } else {
+                                    "size-3 text-muted-foreground"
+                                },
+                            )
                         })
-                        .child(button(
-                            ButtonContent::Icon {
-                                icon: Icon::GitFork,
-                                label: t("Fork from this response"),
-                            },
-                            ButtonVariant::Ghost,
-                            ButtonSize::Xs,
-                            move || busy.get(),
-                            move || {
-                                let Some(current) = row.get() else { return };
-                                if message_key(&current) != id {
-                                    return;
-                                }
-                                let Some(projected) = &current.projected_item else {
-                                    return;
-                                };
-                                let capabilities = provider_capabilities
-                                    .as_ref()
-                                    .and_then(|lookup| lookup(projected));
-                                if !can_fork_projected_assistant_item(
-                                    projected,
-                                    capabilities.as_ref(),
-                                ) {
-                                    return;
-                                }
-                                let Some(run_id) = items::run_id(&projected.item).clone() else {
-                                    return;
-                                };
-                                if !state.begin(&id) {
-                                    return;
-                                }
-                                let future = on_fork(ForkRequest {
-                                    source_thread_id: projected.source_thread_id.clone(),
-                                    run_id,
-                                });
-                                let id = id.clone();
-                                state.owner.run(move || {
-                                    spawn(async move {
-                                        state.finish(&id, future.await);
-                                    })
-                                });
-                            },
-                        )),
-                ),
+                        .into_element(),
+                        label: t("Fork from this response"),
+                    },
+                    ButtonVariant::Ghost,
+                    ButtonSize::Xs,
+                    move || busy.get(),
+                    move || {
+                        let Some(current) = row.get() else { return };
+                        if message_key(&current) != id {
+                            return;
+                        }
+                        let Some(projected) = &current.projected_item else {
+                            return;
+                        };
+                        let capabilities = provider_capabilities
+                            .as_ref()
+                            .and_then(|lookup| lookup(projected));
+                        if !can_fork_projected_assistant_item(projected, capabilities.as_ref()) {
+                            return;
+                        }
+                        let Some(run_id) = items::run_id(&projected.item).clone() else {
+                            return;
+                        };
+                        if !state.begin(&id) {
+                            return;
+                        }
+                        let future = on_fork(ForkRequest {
+                            source_thread_id: projected.source_thread_id.clone(),
+                            run_id,
+                        });
+                        let id = id.clone();
+                        state.owner.run(move || {
+                            spawn(async move {
+                                state.finish(&id, future.await);
+                            })
+                        });
+                    },
+                )),
         )
     })
 }
@@ -958,8 +1031,9 @@ pub fn assistant_reply_button(
             view()
                 .tooltip(assistant_tooltip("Reply to this response"))
                 .child(button(
-                    ButtonContent::Icon {
-                        icon: Icon::Reply,
+                    ButtonContent::Custom {
+                        child: icon_with_class(Icon::Reply, "size-3 text-muted-foreground")
+                            .into_element(),
                         label: t("Reply to this response"),
                     },
                     ButtonVariant::GhostMuted,
@@ -1211,6 +1285,25 @@ mod tests {
         renderer.update(&source, true, false);
         assert!(Rc::ptr_eq(&first, &renderer.leaves[first.block.id.index]));
         assert_eq!(renderer.code_text(first.block.id.index), code);
+        for (source, expected) in [
+            ("```rust\nlast_line", "last_line\n"),
+            ("```rust\nlast_line\n```", "last_line\n"),
+            ("```rust\nlast_line\n\n```", "last_line\n\n"),
+            ("```rust\n```", ""),
+        ] {
+            let mut renderer = MessageRenderer::new("clipboard");
+            renderer.update(source, false, false);
+            let first = renderer
+                .leaves
+                .iter()
+                .find(|leaf| matches!(&leaf.block.kind, BlockKind::Code(code) if code.first))
+                .expect("code leaf");
+            assert_eq!(
+                renderer.code_text(first.block.id.index),
+                expected,
+                "{source:?}"
+            );
+        }
     }
 
     #[test]

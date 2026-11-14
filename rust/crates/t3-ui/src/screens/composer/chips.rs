@@ -30,6 +30,7 @@ use t3_contracts::{
         PreviewAnnotationContextRecord, PullRequestContextMetadata, TerminalContextRecord,
     },
     server::{ServerProvider, ServerProviderSkill},
+    wire::trim_js,
 };
 
 use super::editor::{
@@ -57,6 +58,9 @@ pub type CitationAction = Rc<dyn Fn(&AssistantCitation)>;
 /// Override for containing blocks whose font differs from the user message's `text-sm`.
 #[derive(Clone, Copy)]
 pub struct ChipFontSize(pub Prop<f32>);
+
+#[derive(Clone, Copy)]
+struct SentChip;
 
 fn chip_font_size() -> impl Fn() -> f32 + Copy {
     let size = use_context::<ChipFontSize>().map(|size| size.0);
@@ -153,16 +157,21 @@ pub fn install_composer_chip_views(session: &EditorSession) {
         "composer-citation",
         "composer-context-reference",
     ] {
-        views.insert(name, Arc::new(ComposerChipNodeView));
+        views.insert(name, Arc::new(ComposerChipNodeView(name)));
     }
     session.set_node_views(views);
 }
 
-struct ComposerChipNodeView;
+struct ComposerChipNodeView(&'static str);
+
+// Dynamic regions can be replaced before mounting; controls create state under their component.
+fn chip_scope(build: impl FnOnce() -> AnyElement + 'static) -> AnyElement {
+    popover::with_popup_context((), build).into_element()
+}
 
 impl NodeView for ComposerChipNodeView {
-    fn create(&self, cx: &NodeViewCx, _: &Node) -> AnyElement {
-        let node = cx.node();
+    fn create(&self, cx: &NodeViewCx, node: &Node) -> AnyElement {
+        let node = node.clone();
         let selected = cx.selected();
         let context = use_context::<ChipContext>()
             .unwrap_or_else(|| ChipContext::new(computed(ChipData::default)));
@@ -170,19 +179,16 @@ impl NodeView for ComposerChipNodeView {
             .app_class(tw(
                 "relative inline-flex min-w-0 max-w-full select-none items-baseline",
             ))
-            .child(dynamic(move || {
-                let node = node.get();
-                let context = context.clone();
-                untracked(|| match node.ty().name() {
-                    "composer-mention" => composer_mention_node_view(&node, context),
-                    "composer-skill" => composer_skill_node_view(&node, context),
-                    "composer-model" => composer_model_node_view(&node, context),
-                    "composer-citation" => composer_citation_node_view(&node, context),
-                    "composer-context-reference" => {
-                        composer_context_reference_node_view(&node, context)
-                    }
-                    _ => text(SharedString::from(attr(&node, "source").to_owned())).into_element(),
-                })
+            // NSH recreates inline NodeViews for changed attributes; avoid another transient region.
+            .child(untracked(move || match node.ty().name() {
+                "composer-mention" => composer_mention_node_view(&node, context),
+                "composer-skill" => composer_skill_node_view(&node, context),
+                "composer-model" => composer_model_node_view(&node, context),
+                "composer-citation" => composer_citation_node_view(&node, context),
+                "composer-context-reference" => {
+                    composer_context_reference_node_view(&node, context)
+                }
+                _ => text(SharedString::from(attr(&node, "source").to_owned())).into_element(),
             }))
             // NSH has no CSS system Highlight colour; the theme's selection accent replaces it.
             .child(
@@ -199,8 +205,8 @@ impl NodeView for ComposerChipNodeView {
             .into_element()
     }
 
-    fn update(&self, _: &Node, _: &[nsh_base::rich_editor::state::Decoration]) -> bool {
-        true
+    fn update(&self, node: &Node, _: &[nsh_base::rich_editor::state::Decoration]) -> bool {
+        node.ty().name() == self.0
     }
 }
 
@@ -259,6 +265,18 @@ fn interactive_chip_class(kind: &str) -> SharedString {
     ]))
 }
 
+fn sent_chip_ink(kind: &str) -> impl Fn() -> AdaptiveColor + use<> {
+    let accent = format!("context-chip-{kind}");
+    move || {
+        // The bubble's optional descendant variable has no default token/class in NSH.
+        let tokens = theme::current_tokens();
+        tokens
+            .color("context-chip-message")
+            .or_else(|| tokens.color(&accent))
+            .unwrap_or_else(|| theme::palette().message_foreground)
+    }
+}
+
 /// Port of ContextChip.tsx ContextChipLabel; NSH text owns single-line truncation.
 pub fn context_chip_label(label: Text) -> impl IntoElement {
     let size = chip_font_size();
@@ -311,10 +329,30 @@ fn context_chip_popover(
     accessible_label: Text,
     content: impl Fn() -> AnyElement + 'static,
 ) -> AnyElement {
-    let handle = popover::popover_create_handle();
+    context_chip_popover_with_handle(
+        popover::popover_create_handle(),
+        kind,
+        icon,
+        label,
+        accessible_label,
+        content,
+    )
+}
+
+fn context_chip_popover_with_handle(
+    handle: popover::PopoverHandle,
+    kind: &str,
+    icon: AnyElement,
+    label: Text,
+    accessible_label: Text,
+    content: impl Fn() -> AnyElement + 'static,
+) -> AnyElement {
     let size = chip_font_size();
     let trigger = nsh_base::button()
         .app_class(interactive_chip_class(kind))
+        .when(use_context::<SentChip>().is_some(), |chip| {
+            chip.text_color(sent_chip_ink(kind))
+        })
         // gap-[0.2em] and leading-[normal] are bound through NSH's typed style API.
         .gap(move || px(size() * 0.2))
         .line_height(nsh_core::LineHeight::Normal)
@@ -375,6 +413,9 @@ fn context_chip(
     let control = if let Some(action) = action {
         nsh_base::button()
             .app_class(interactive_chip_class(kind))
+            .when(use_context::<SentChip>().is_some(), |chip| {
+                chip.text_color(sent_chip_ink(kind))
+            })
             .gap(move || px(size() * 0.2))
             .line_height(nsh_core::LineHeight::Normal)
             .accessibility_label(move || Some(accessible_label.resolve()))
@@ -385,6 +426,9 @@ fn context_chip(
     } else {
         view()
             .app_class(context_chip_class(kind))
+            .when(use_context::<SentChip>().is_some(), |chip| {
+                chip.text_color(sent_chip_ink(kind))
+            })
             .gap(move || px(size() * 0.2))
             .line_height(nsh_core::LineHeight::Normal)
             .focusable(true)
@@ -433,7 +477,8 @@ fn mention_chip(path: String, label: String, context: ChipContext) -> AnyElement
         glyph(Icon::File),
         Text::content(label),
         Text::content(tr("Preview {path}", &[("path", Value::Text(path.clone()))])),
-        Some(Text::content(path)),
+        // FILES-* must supply WorkspaceEntryTooltip; a path-only hint is not its metadata view.
+        None,
         action,
     )
 }
@@ -452,6 +497,12 @@ fn document_kind(path: &str) -> Option<&'static str> {
 
 /// Port of ComposerPromptEditorTiptap.tsx ComposerSkillNodeView.
 pub fn composer_skill_node_view(node: &Node, context: ChipContext) -> AnyElement {
+    let node = node.clone();
+    chip_scope(move || composer_skill_node_view_inner(&node, context))
+}
+
+fn composer_skill_node_view_inner(node: &Node, context: ChipContext) -> AnyElement {
+    let popup = popover::popover_create_handle();
     let name = attr(node, "skillName").to_owned();
     let stored_label = attr(node, "skillLabel").to_owned();
     let stored_description = attr(node, "skillDescription").to_owned();
@@ -494,7 +545,7 @@ pub fn composer_skill_node_view(node: &Node, context: ChipContext) -> AnyElement
             let open = context.open_mention.clone()?;
             Some(Rc::new(move || open(&path)) as Rc<dyn Fn()>)
         });
-        untracked(|| skill_chip_popover(label, description, instructions))
+        chip_scope(move || skill_chip_popover_with_handle(popup, label, description, instructions))
     })
     .into_element()
 }
@@ -505,7 +556,7 @@ fn optional_string(
     value
         .as_ref()?
         .as_ref()
-        .map(|value| value.0.trim())
+        .map(|value| trim_js(&value.0))
         .filter(|value| !value.is_empty())
 }
 
@@ -515,11 +566,26 @@ pub fn skill_chip_popover(
     description: String,
     instructions: Option<Rc<dyn Fn()>>,
 ) -> AnyElement {
+    skill_chip_popover_with_handle(
+        popover::popover_create_handle(),
+        label,
+        description,
+        instructions,
+    )
+}
+
+fn skill_chip_popover_with_handle(
+    popup: popover::PopoverHandle,
+    label: String,
+    description: String,
+    instructions: Option<Rc<dyn Fn()>>,
+) -> AnyElement {
     let accessible = Text::content(tr(
         "Skill {label}",
         &[("label", Value::Text(label.clone()))],
     ));
-    context_chip_popover(
+    context_chip_popover_with_handle(
+        popup,
         "skill",
         glyph(Icon::Box),
         Text::content(label.clone()),
@@ -549,6 +615,12 @@ pub fn skill_chip_popover(
 
 /// Port of ComposerPromptEditorTiptap.tsx ComposerModelNodeView and chat/ModelMentionChip.tsx.
 pub fn composer_model_node_view(node: &Node, context: ChipContext) -> AnyElement {
+    let node = node.clone();
+    chip_scope(move || composer_model_node_view_inner(&node, context))
+}
+
+fn composer_model_node_view_inner(node: &Node, context: ChipContext) -> AnyElement {
+    let popup = popover::popover_create_handle();
     let instance = attr(node, "instanceId").to_owned();
     let model = attr(node, "model").to_owned();
     let source = attr(node, "source").to_owned();
@@ -575,7 +647,8 @@ pub fn composer_model_node_view(node: &Node, context: ChipContext) -> AnyElement
     });
     dynamic(move || {
         let presentation = presentation.get();
-        untracked(|| {
+        let source = source.clone();
+        chip_scope(move || {
             let Some((label, provider, driver)) = presentation else {
                 return text(SharedString::from(source.clone())).into_element();
             };
@@ -584,7 +657,8 @@ pub fn composer_model_node_view(node: &Node, context: ChipContext) -> AnyElement
                 &[("label", Value::Text(label.clone()))],
             ));
             let source = source.clone();
-            context_chip_popover(
+            context_chip_popover_with_handle(
+                popup,
                 "neutral",
                 model_glyph(&driver, &provider),
                 Text::content(label.clone()),
@@ -658,6 +732,15 @@ pub fn composer_context_reference_chip(
     label: String,
     context: ChipContext,
 ) -> AnyElement {
+    chip_scope(move || composer_context_reference_chip_inner(kind, id, label, context))
+}
+
+fn composer_context_reference_chip_inner(
+    kind: String,
+    id: String,
+    label: String,
+    context: ChipContext,
+) -> AnyElement {
     dynamic(move || {
         let record = context.data.with(|data| data.records.get(&id).cloned());
         let attachment = context.data.with(|data| {
@@ -670,7 +753,8 @@ pub fn composer_context_reference_chip(
                 .cloned()
         });
         let context = context.clone();
-        untracked(|| {
+        let (kind, id, label) = (kind.clone(), id.clone(), label.clone());
+        chip_scope(move || {
             attachment.map_or_else(
                 || {
                     render_context_reference(
@@ -696,14 +780,19 @@ pub fn user_message_context_reference_chip(
     record: Option<&ComposerContextRecord>,
     context: ChipContext,
 ) -> AnyElement {
-    render_context_reference(
-        &reference.kind,
-        &reference.context_id,
-        &reference.label,
-        record,
-        context,
-        false,
-    )
+    let reference = reference.clone();
+    let record = record.cloned();
+    popover::with_popup_context(SentChip, move || {
+        render_context_reference(
+            &reference.kind,
+            &reference.context_id,
+            &reference.label,
+            record.as_ref(),
+            context,
+            false,
+        )
+    })
+    .into_element()
 }
 
 /// Fits UserRowContext::context_chip directly; the row supplies its canonical records.
@@ -788,16 +877,35 @@ pub fn user_message_chip_renderer(
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
-        let mut context = context.clone();
-        let original = context.data;
-        context.data = computed(move || {
-            let mut data = original.get();
-            data.previews.extend(previews.clone());
-            data.video_attachments.extend(videos.clone());
-            data.message_attachments.extend(attachments.clone());
-            data
-        });
-        user_message_context_reference_chip(reference, record, context)
+        let context = context.clone();
+        let reference = reference.clone();
+        let record = record.cloned();
+        popover::with_popup_context(SentChip, move || {
+            let mut context = context;
+            let original = context.data;
+            context.data = computed(move || {
+                // Media chips need asset metadata, not copies of captured terminal/review text.
+                let mut data = original.with(|data| ChipData {
+                    previews: data.previews.clone(),
+                    video_attachments: data.video_attachments.clone(),
+                    message_attachments: data.message_attachments.clone(),
+                    ..Default::default()
+                });
+                data.previews.extend(previews.clone());
+                data.video_attachments.extend(videos.clone());
+                data.message_attachments.extend(attachments.clone());
+                data
+            });
+            render_context_reference(
+                &reference.kind,
+                &reference.context_id,
+                &reference.label,
+                record.as_ref(),
+                context,
+                false,
+            )
+        })
+        .into_element()
     })
 }
 
@@ -992,8 +1100,8 @@ fn render_context_reference(
                     .child(view().app_class(tw("space-y-1"))
                         .child(text(SharedString::from(record.file_path.0.clone())).app_class(tw("truncate text-xs font-medium text-foreground")))
                         .child(text(SharedString::from(format!("{} · {}", record.section_title, record.range_label))).app_class(tw("text-secondary-label text-2xs"))))
-                    .child((!record.text.trim().is_empty()).then(|| { let body = record.text.clone(); crate::screens::thread::markdown::base::chat_markdown(move || body.clone(), || false) }))
-                    .child((!record.diff.trim().is_empty()).then(|| source_preview(record.diff.clone(), "diff")))
+                    .child((!trim_js(&record.text).is_empty()).then(|| { let body = record.text.clone(); crate::screens::thread::markdown::base::chat_markdown(move || body.clone(), || false) }))
+                    .child((!trim_js(&record.diff).is_empty()).then(|| source_preview(record.diff.clone(), "diff")))
                     .into_element()
                 },
             )
@@ -1197,7 +1305,7 @@ fn user_message_preview_annotation_details(record: &PreviewAnnotationContextReco
                     .child(view().app_class(tw("flex min-w-0 items-center gap-2 text-xs"))
                         .child(text(SharedString::from(selector)).app_class(tw("truncate font-mono text-message-foreground")))
                         .child(source_label(element.source.as_ref()).map(|label| text(SharedString::from(label)).app_class(tw("ml-auto shrink-0 text-secondary-label")))))
-                    .child((!element.html_preview.trim().is_empty()).then(|| scroll().app_class(tw("mt-1 max-h-24 rounded bg-muted/60 px-2 py-1.5 text-3xs leading-relaxed")).child(text(SharedString::from(element.html_preview.trim().to_owned())).app_class(tw("font-mono")))))
+                    .child((!trim_js(&element.html_preview).is_empty()).then(|| scroll().app_class(tw("mt-1 max-h-24 rounded bg-muted/60 px-2 py-1.5 text-3xs leading-relaxed")).child(text(SharedString::from(trim_js(&element.html_preview).to_owned())).app_class(tw("font-mono")))))
             }).collect::<Vec<_>>()))).into_element()
 }
 
@@ -1247,14 +1355,14 @@ fn user_message_element_details(record: &ElementContextRecord) -> AnyElement {
                                 .app_class(tw("ml-auto shrink-0 text-secondary-label"))
                         })),
                 )
-                .child((!record.html_preview.trim().is_empty()).then(|| {
+                .child((!trim_js(&record.html_preview).is_empty()).then(|| {
                     view()
                         .app_class(tw(
                             "flex h-40 flex-col overflow-hidden rounded border border-border",
                         ))
                         .child(source_preview(record.html_preview.clone(), "html"))
                 }))
-                .child((!record.styles.trim().is_empty()).then(|| {
+                .child((!trim_js(&record.styles).is_empty()).then(|| {
                     view()
                         .app_class(tw(
                             "flex h-32 flex-col overflow-hidden rounded border border-border",
@@ -1276,8 +1384,8 @@ fn preview_annotation_tooltip(record: &PreviewAnnotationContextRecord) -> String
             .unwrap_or(&record.page_url)
             .to_owned(),
     ];
-    if !record.comment.trim().is_empty() {
-        lines.extend([String::new(), record.comment.trim().into()]);
+    if !trim_js(&record.comment).is_empty() {
+        lines.extend([String::new(), trim_js(&record.comment).into()]);
     }
     let elements = record
         .elements
@@ -1392,7 +1500,7 @@ fn terminal_context_inline_chip_with_expiration(
             // Text has no tab-size/white-space prop; captured output keeps native wrapping and tab stops.
             .child(scroll().app_class(tw("max-h-80"))
                 .child(text(SharedString::from(record.text.clone())).app_class(tw("bg-muted p-3 font-mono text-foreground text-xs leading-relaxed outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
-                    .focusable(true).label(t("Captured terminal output"))))
+                    .select_text().focusable(true).label(t("Captured terminal output"))))
             .into_element()
         },
     )
@@ -1452,6 +1560,8 @@ fn attachment_chip(
     ];
     let accessible = Text::content(if kind == "image" {
         tr("Image attachment, {name}, {size}", &arguments)
+    } else if video {
+        tr("Video attachment, {name}, {size}", &arguments)
     } else {
         tr("File attachment, {name}, {size}", &arguments)
     });
@@ -1504,6 +1614,8 @@ fn draft_attachment_chip(item: AttachmentItem, context: ChipContext) -> AnyEleme
     ];
     let label = if item.image {
         tr("Image attachment, {name}, {size}", &args)
+    } else if item.video && !item.needs_reattach {
+        tr("Preview video attachment, {name}, {size}", &args)
     } else {
         tr("File attachment, {name}, {size}", &args)
     };
@@ -1511,7 +1623,15 @@ fn draft_attachment_chip(item: AttachmentItem, context: ChipContext) -> AnyEleme
         format!("{label}, {}", suffix.resolve())
     });
     let tooltip = match &item.upload {
-        UploadState::Failed(reason) => format!("{}\n{size}\n\n{reason}", item.name),
+        _ if item.needs_reattach => tr(
+            "{name} was not saved with this draft. Attach it again to send it.",
+            &[("name", Value::Text(item.name.clone()))],
+        ),
+        UploadState::Failed(reason) => format!(
+            "{}\n{size}\n\n{}",
+            item.name,
+            Text::client_key(reason.clone()).resolve()
+        ),
         _ => format!("{}\n{size}", item.name),
     };
     let action = (!item.needs_reattach)
