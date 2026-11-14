@@ -1,6 +1,8 @@
+# shellcheck shell=bash
 # Helpers shared by the scripts in this directory (sourced, not run).
 
 CI_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck disable=SC2034 # used by the scripts that source this file
 REPO_ROOT=$(cd "$CI_DIR/../../.." && pwd)
 
 ci_log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
@@ -61,5 +63,8 @@ ci_probe() {
 
 # ocr_has <text-file> <phrase>: the OCR lines, joined with spaces, contain the phrase (any case).
 ocr_has() {
-  tr '\n' ' ' < "$1" | tr -s ' ' | grep -qiF -- "$2"
+  local text phrase
+  text=$(tr '\n' ' ' < "$1" | tr -s ' ' | tr '[:upper:]' '[:lower:]')
+  phrase=$(tr '[:upper:]' '[:lower:]' <<< "$2")
+  [[ $text == *"$phrase"* ]]
 }

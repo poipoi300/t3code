@@ -31,6 +31,7 @@ out=$(cd "$out" && pwd)
 prefix="$out/$label-ios"
 bundle=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")
 
+ci_log "app $app, bundle id $bundle; choosing an iPhone simulator${device:+ matching $device}"
 udid=$(xcrun simctl list devices available -j | python3 -I -c '
 import json, re, sys
 wanted = sys.argv[1]
@@ -49,10 +50,12 @@ else:
 print(match[0]["udid"] if match else "")
 ' "$device")
 [[ -n $udid ]] || ci_die "no matching iPhone simulator (xcrun simctl list devices available)"
-ci_log "simulator $udid"
+ci_log "booting simulator $udid and waiting for it (simctl bootstatus -b)"
 xcrun simctl boot "$udid" 2> /dev/null || true
 xcrun simctl bootstatus "$udid" -b > /dev/null
+ci_log "installing $app"
 xcrun simctl install "$udid" "$app"
+ci_log "streaming the app's log to $prefix-app.log"
 
 xcrun simctl spawn "$udid" log stream --level debug --style compact \
   --predicate "subsystem == \"$bundle\" OR process == \"$(basename "$app" .app)\"" > "$prefix-app.log" 2>&1 &
@@ -63,7 +66,9 @@ cleanup() {
   ((shutdown)) && xcrun simctl shutdown "$udid" || true
 }
 trap cleanup EXIT
+ci_log "launching $bundle"
 xcrun simctl launch --terminate-running-process "$udid" "$bundle"
+ci_log "waiting (up to 180 s) until OCR reads \"Connect to T3 Code\" in simctl io screenshot"
 
 shows() {
   xcrun simctl io "$udid" screenshot --type=png "$prefix-$1.png" > /dev/null 2>&1 &&

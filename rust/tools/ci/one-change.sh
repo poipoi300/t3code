@@ -22,12 +22,13 @@ replace() { # <from> <to>
 
 case ${1:-} in
   apply)
+    ci_log "applying the one change in $file: t(\"$before_text\") -> t(\"$after_text\")"
     status_before=$(git -C "$REPO_ROOT" status --porcelain -- rust .github)
     replace "$before_text" "$after_text"
     status_after=$(git -C "$REPO_ROOT" status --porcelain -- rust .github)
     numstat=$(git -C "$REPO_ROOT" diff --numstat -- "$file")
     [[ $numstat == $'1\t1\t'"$file" ]] || ci_die "the edit is not one line: $numstat"
-    changed=$(diff <(printf '%s\n' "$status_before") <(printf '%s\n' "$status_after") | sed -n 's/^> //p')
+    changed=$(comm -13 <(sort <<< "$status_before") <(sort <<< "$status_after"))
     [[ -z $changed || $changed == " M $file" ]] || ci_die "files other than $file changed: $changed"
     git -C "$REPO_ROOT" diff -- "$file"
     ;;
@@ -37,6 +38,7 @@ case ${1:-} in
   verify)
     (($# == 4)) || ci_die "usage: one-change.sh verify <before.txt> <after.txt> <name>"
     before=$2 after=$3 name=$4
+    ci_log "$name: checking $before and $after"
     for reading in "$before" "$after"; do
       [[ -f $reading ]] || ci_die "$name: no OCR reading at $reading"
       ocr_has "$reading" "$title" || ci_die "$name: $reading is not the connect screen"

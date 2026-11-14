@@ -47,6 +47,7 @@ case $command in
     [[ -x $t3 ]] || ci_die "no server binary at $t3"
     [[ ! -f $run/server.pid ]] || ! alive || ci_die "a server from $run is still running (PID $(cat "$run/server.pid"))"
     printf '%s\n' "$t3" > "$run/t3-path"
+    ci_log "starting: $t3 serve --home-dir $run/home --host 127.0.0.1 --port $port --dev-url http://127.0.0.1:5733"
     # A dev URL is what turns on dev mode; nothing is served there, and the apps pair with the
     # server's own origin.
     (
@@ -56,6 +57,7 @@ case $command in
     ) > "$log" 2>&1 &
     echo $! > "$run/server.pid"
     ci_log "server PID $(cat "$run/server.pid"), log $log"
+    ci_log "waiting (up to 120 s) for the server's \"Pairing URL:\" line in $log"
     wait_until 120 "the server's startup lines" ready
     startup 'Connection string' > "$run/origin"
     startup Token > "$run/startup-token"
@@ -65,11 +67,13 @@ case $command in
     [[ -n $seed ]] || usage
     [[ -x $seed ]] || ci_die "no seed_thread binary at $seed"
     # The startup token is single-use: the seeding client spends it, apps get their own (pair).
+    ci_log "seeding: $seed $(cat "$run/origin") <startup token> $run/seed-client replay-showcase \"Replay showcase\" devReplay showcase"
     "$seed" "$(cat "$run/origin")" "$(cat "$run/startup-token")" "$(native_path "$run/seed-client")" \
       replay-showcase "Replay showcase" devReplay showcase
     ci_log "seeded the thread \"Replay showcase\""
     ;;
   pair)
+    ci_log "minting a pairing link: t3 pair --home-dir $run/home --label ci"
     out=$(
       isolate_home "$run/home"
       "$(cat "$run/t3-path")" pair --home-dir "$(native_path "$run/home")" --label ci
@@ -84,6 +88,7 @@ case $command in
     [[ -f $run/server.pid ]] || exit 0
     pid=$(cat "$run/server.pid")
     if kill -0 "$pid" 2> /dev/null; then
+      ci_log "stopping server PID $pid (SIGTERM)"
       kill "$pid"
       wait_until 30 "server PID $pid to exit" bash -c "! kill -0 $pid 2> /dev/null" || kill -9 "$pid"
       ci_log "stopped server PID $pid"

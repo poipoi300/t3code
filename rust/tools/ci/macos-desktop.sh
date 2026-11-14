@@ -30,6 +30,7 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 prefix="$out/$label-macos"
 
+ci_log "launching $app with HOME=$out/$label-home, output in $prefix-app.log"
 (
   isolate_home "$out/$label-home"
   exec "$app"
@@ -56,8 +57,9 @@ give_up() {
 }
 
 wid=''
+ci_log "waiting (up to 120 s) for a window owned by PID $pid"
 wait_until 120 "the app's window" window_id || give_up window "no window appeared"
-ci_log "window $wid"
+ci_log "window $wid; waiting (up to 120 s) until OCR reads \"Connect to T3 Code\" in screencapture -l $wid"
 wait_until 120 "the connect screen" shows connect "Connect to T3 Code" || give_up connect "the connect screen did not show"
 ci_log "connect screen: $prefix-connect.png"
 [[ -n $pair_url ]] || exit 0
@@ -96,6 +98,8 @@ pairing_failed() {
   fi
   give_up shell "$1"
 }
+ci_log "pairing: typing the link into \"Pairing link\" and pressing \"Connect\" through System Events"
 pair || pairing_failed "System Events could not drive the form (Accessibility permission?)"
+ci_log "waiting (up to 60 s) until OCR reads \"Replay showcase\" in the window"
 wait_until 60 "the seeded thread in the sidebar" shows shell "Replay showcase" || pairing_failed "the thread list did not show after pairing"
 ci_log "paired: $prefix-shell.png"
