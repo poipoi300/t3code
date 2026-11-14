@@ -44,6 +44,22 @@ pub(super) async fn dispatch(
                 .map_err(|_| PlatformError::Denied("the browser refused to open the URL".into()))?;
             Ok(HostReply::Unit)
         }
+        // TypeScript's `openRemoteEditorUrl`: the page navigates to the editor's scheme, which
+        // the browser hands to the installed editor.
+        HostAction::OpenEditorLink(url) => {
+            let url = t3_client::persistence::external_links::safe_editor_link(
+                &url,
+                t3_client::persistence::external_links::ExternalUrlSurface::Web,
+            )
+            .ok_or_else(|| PlatformError::Denied("opening this link is not allowed".into()))?;
+            platform
+                .inner
+                .window
+                .location()
+                .assign(&url)
+                .map_err(|_| PlatformError::Denied("the browser refused the editor link".into()))?;
+            Ok(HostReply::Unit)
+        }
         HostAction::DpopThumbprint => {
             let key = dpop_key(platform).await?;
             Ok(HostReply::Text(Some(crate::common::dpop_thumbprint(

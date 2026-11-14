@@ -7,6 +7,8 @@ pub mod codex;
 mod collation;
 pub mod database;
 pub mod http;
+#[cfg(feature = "hub-client")]
+pub mod hub;
 pub mod limit_sources;
 pub mod limits;
 pub mod pricing;

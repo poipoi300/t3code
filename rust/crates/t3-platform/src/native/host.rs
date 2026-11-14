@@ -82,6 +82,19 @@ pub(super) async fn dispatch(
                 None => Err(unsupported(&HostAction::OpenUrl(url))),
             }
         }
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        HostAction::OpenEditorLink(url) => {
+            let url = t3_client::persistence::external_links::safe_editor_link(
+                &url,
+                t3_client::persistence::external_links::ExternalUrlSurface::Desktop,
+            )
+            .ok_or_else(|| PlatformError::Denied("opening this link is not allowed".into()))?;
+            desktop::open_url(platform, url).await
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        HostAction::OpenEditorLink(_) => Err(PlatformError::Denied(
+            "the mobile app has no editor to open a link in".into(),
+        )),
         action => match &platform.inner.extension {
             Some(extension) => extension.host(action).await,
             None => Err(unsupported(&action)),
