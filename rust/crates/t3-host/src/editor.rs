@@ -733,6 +733,16 @@ pub fn wsl_explorer_arguments(
     linux_path: &str,
     reveal: bool,
 ) -> Option<(String, Vec<String>)> {
+    // Explorer splits its command line at commas outside quotes, and WSL interop quotes only
+    // arguments with whitespace: with no `,` and no `"` Explorer reads exactly one location,
+    // which starts with `\\wsl.localhost\<distro>` and so cannot be a switch or a `shell:` name.
+    // A Linux name holding `\` would not map one-to-one onto `\\wsl.localhost` components.
+    if linux_path
+        .chars()
+        .any(|c| matches!(c, ',' | '"' | '\\') || c.is_control())
+    {
+        return None;
+    }
     let windows = |path: &str| format!("\\\\wsl.localhost\\{distro}{}", path.replace('/', "\\"));
     let target = windows(linux_path);
     let shown = if reveal {
