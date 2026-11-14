@@ -68,8 +68,8 @@ mod tests {
             params: json!(index),
         }
     }
-    #[test]
-    fn keeps_newest_count_and_full_batch_line_budget_including_oversized_latest() {
+    #[tokio::test]
+    async fn keeps_newest_count_and_full_batch_line_budget_including_oversized_latest() {
         let queue = RawQueue::default();
         for i in 0..40 {
             queue.push(event(i), 1);
@@ -83,5 +83,24 @@ mod tests {
         assert_eq!(queue.pop(), None);
         queue.push(event(44), 17 * 1024 * 1024);
         assert_eq!(queue.pop(), Some(event(44)));
+
+        let queue = Arc::new(RawQueue::default());
+        let (terminal, ended) = watch::channel(None);
+        let mut reader = RawNotifications {
+            queue: queue.clone(),
+            terminal: ended,
+        };
+        queue.push(event(1), 6 * 1024 * 1024);
+        queue.push(event(2), 6 * 1024 * 1024);
+        let first = reader.next().await.expect("first notification");
+        queue.push(event(3), 6 * 1024 * 1024);
+        queue.push(event(4), 6 * 1024 * 1024);
+        queue.push(event(5), 1);
+        terminal.send(Some(Error::Closed)).expect("close");
+        let mut delivered = vec![first];
+        while let Some(event) = reader.next().await {
+            delivered.push(event);
+        }
+        assert_eq!(delivered, [event(1), event(3), event(4), event(5)]);
     }
 }
