@@ -25,7 +25,9 @@ use url::{Host, Url};
 pub mod runtime;
 pub mod socket;
 pub mod threads;
-pub use runtime::{ConnectedClient, ConnectionTask, ServerCredential, connect, connect_into};
+pub use runtime::{
+    ConnectedClient, ConnectionTask, ServerCredential, connect, connect_into, supervise_saved,
+};
 pub use threads::ThreadLease;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionMode {
@@ -1307,16 +1309,18 @@ pub async fn prepare_pairing_registration(
     {
         return Err(failure);
     }
-    let metadata = platform
-        .client_presentation()
-        .await
-        .map_err(map_connection_platform_error)?;
+    // Presentation is an optional host capability; a host without one pairs unlabelled.
+    let metadata = match platform.client_presentation().await {
+        Ok(metadata) => Some(metadata),
+        Err(crate::platform::PlatformError::Unsupported(_)) => None,
+        Err(error) => return Err(map_connection_platform_error(error)),
+    };
     let access = crate::authorization::bootstrap_remote_session(
         platform,
         &target.http_base,
         target.credential.expose(),
         None,
-        Some(&metadata),
+        metadata.as_ref(),
         None,
     )
     .await

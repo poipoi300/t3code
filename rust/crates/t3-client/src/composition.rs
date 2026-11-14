@@ -7,9 +7,8 @@
 use crate::{
     ClientError, ClientStore,
     connection::{
-        ConnectedClient, ConnectionFailure, ConnectionState, ConnectionStores, ConnectionTask,
-        PairingInput, Phase, ServerCredential, ThreadLease, connect_into, resolve_pairing_target,
-        runtime::session_failure,
+        ConnectedClient, ConnectionFailure, ConnectionState, ConnectionTask, PairingInput, Phase,
+        ThreadLease, Time, prepare_pairing_registration, runtime::session_failure, supervise_saved,
     },
     environment::EnvironmentRegistry,
     platform::{NetworkStatus, Platform},
@@ -26,6 +25,7 @@ use futures::{
     FutureExt, StreamExt,
     channel::mpsc,
     future::{AbortHandle, Abortable, LocalBoxFuture},
+    lock::Mutex,
     stream::LocalBoxStream,
 };
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
@@ -78,6 +78,9 @@ struct Inner<P: Platform + Clone + 'static> {
     message_listeners: Rc<RefCell<Vec<mpsc::UnboundedSender<()>>>>,
     /// Mounted queries by identity, so every reader of one query shares one driver.
     queries: RefCell<BTreeMap<String, std::rc::Weak<dyn std::any::Any>>>,
+    /// Serializes changes to the saved environments (pair, restore, reconnect, remove) so they
+    /// apply in the order asked, as TypeScript's registry lease does.
+    registry: Mutex<()>,
 }
 
 impl<P: Platform + Clone + 'static> Drop for Inner<P> {
@@ -129,6 +132,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 listeners: RefCell::new(Vec::new()),
                 message_listeners: Rc::default(),
                 queries: RefCell::new(BTreeMap::new()),
+                registry: Mutex::new(()),
             }),
         }
     }
@@ -137,54 +141,23 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         &self.inner.store
     }
 
-    /// Reconnects every environment saved by an earlier run, with its saved credential, in
-    /// catalogue order. An environment that cannot connect stays listed with its failure.
+    /// Supervises every environment saved by an earlier run, in catalogue order, with its saved
+    /// credential. Returns without waiting for any server: each one connects, or retries with
+    /// backoff, in the background. A disabled environment is listed and left disconnected.
     pub fn restore(&self) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         let this = self.clone();
         async move {
-            let platform: Rc<dyn Platform> = Rc::new(this.inner.platform.clone());
-            let registry: EnvironmentRegistry<SessionEndpoint> = EnvironmentRegistry::load(
-                platform.as_ref(),
-                NetworkStatus::Unknown,
-                crate::connection::Time::from_platform(&this.inner.platform),
-            )
-            .await?;
-            let saved: Vec<_> = registry
+            let _lease = this.inner.registry.lock().await;
+            let saved: Vec<_> = this
+                .load_registry()
+                .await?
                 .entries()
-                .filter_map(|registration| {
-                    let route = registration.routes.first()?;
-                    Some((
-                        registration.id.clone(),
-                        registration.label.clone(),
-                        route.id.clone(),
-                        route.http_base.clone(),
-                    ))
-                })
+                .map(|registration| (registration.id.clone(), registration.label.clone()))
                 .collect();
-            let stores = ConnectionStores::new(platform);
-            for (id, label, route, origin) in saved {
-                this.list(id.clone(), label);
-                let credential = match stores.credential(&id, &route).await {
-                    Ok(Some(credential)) => credential,
-                    Ok(None) => {
-                        this.fail(&id, crate::connection::credential_missing_error(&route));
-                        continue;
-                    }
-                    Err(failure) => {
-                        this.fail(&id, failure);
-                        continue;
-                    }
-                };
-                let result = connect_into(
-                    this.inner.platform.clone(),
-                    this.inner.store.clone(),
-                    &origin,
-                    ServerCredential::Bearer(credential.token().clone()),
-                )
-                .await;
-                match result {
-                    Ok((client, driver)) => this.attach(client, driver, &origin),
-                    Err(error) => this.fail(&id, session_failure(&error)),
+            for (id, label) in saved {
+                if let Err(error) = this.start_saved(&id).await {
+                    this.list(id.clone(), label);
+                    this.fail(&id, session_failure(&error));
                 }
             }
             Ok(())
@@ -192,26 +165,65 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         .boxed_local()
     }
 
-    /// Pairs with the server the user described and saves it. Validation and its messages are
-    /// the client's (`connection::resolve_pairing_target`).
+    /// Pairs with the server the user described and saves it, then connects in the background.
+    /// The address and the expected environment are checked before the one-time code is spent,
+    /// and a server that needs an update is still saved so it can be updated from here
+    /// (`connection::prepare_pairing_registration`, as TypeScript's onboarding).
     pub fn pair(
         &self,
         input: PairingInput,
     ) -> LocalBoxFuture<'static, Result<EnvironmentId, ConnectionFailure>> {
         let this = self.clone();
         async move {
-            let target = resolve_pairing_target(&input)?;
-            let (client, driver) = connect_into(
-                this.inner.platform.clone(),
-                this.inner.store.clone(),
-                &target.http_base,
-                ServerCredential::PairingToken(target.credential),
-            )
-            .await
-            .map_err(|error| session_failure(&error))?;
-            let id = client.environment().clone();
-            this.attach(client, driver, &target.http_base);
+            let _lease = this.inner.registry.lock().await;
+            let platform = this.inner.platform.clone();
+            let mut registry = this
+                .load_registry()
+                .await
+                .map_err(|error| session_failure(&error))?;
+            let prepared = prepare_pairing_registration(&platform, &input, |route| {
+                registry.assert_known_address(route)
+            })
+            .await?;
+            let id = prepared.registration.id.clone();
+            registry
+                .register_prepared(
+                    &platform,
+                    prepared,
+                    input.expected_environment.is_none(),
+                    true,
+                    NetworkStatus::Unknown,
+                    Time::from_platform(&platform),
+                )
+                .await
+                .map_err(|error| session_failure(&error))?;
+            this.start_saved(&id)
+                .await
+                .map_err(|error| session_failure(&error))?;
             Ok(id)
+        }
+        .boxed_local()
+    }
+
+    /// Asks `environment` to connect again now. A connection whose supervisor stopped on an
+    /// error is started afresh from the saved registration.
+    pub fn reconnect(
+        &self,
+        environment: &EnvironmentId,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        let this = self.clone();
+        let environment = environment.clone();
+        async move {
+            let _lease = this.inner.registry.lock().await;
+            if let Some(client) = this.client(&environment)
+                && client.reconnect().is_ok()
+            {
+                return Ok(());
+            }
+            if this.load_registry().await?.get(&environment).is_none() {
+                return Err(ClientError::EnvironmentMismatch);
+            }
+            this.start_saved(&environment).await
         }
         .boxed_local()
     }
@@ -225,6 +237,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         let this = self.clone();
         let environment = environment.clone();
         async move {
+            let _lease = this.inner.registry.lock().await;
             this.inner
                 .threads
                 .borrow_mut()
@@ -257,7 +270,8 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 )?;
                 registry.save(&platform).await?;
             }
-            Ok(())
+            // A later pairing of the same server must not deliver what was queued for this one.
+            SendService::<P, SessionEndpoint>::forget_saved(Rc::new(platform), &environment).await
         }
         .boxed_local()
     }
@@ -560,6 +574,12 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
     }
 
     /// The draft a refused message of `key` was restored into, for the composer.
+    /// Why `environment`'s delivery is stalled (its saved messages could not be read or
+    /// written), while it waits to try again.
+    pub fn delivery_problem(&self, environment: &EnvironmentId) -> Option<String> {
+        self.messages(environment)?.delivery_problem()
+    }
+
     pub fn draft_text(&self, key: &ThreadKey) -> Option<String> {
         self.messages(&key.environment)?.draft_text(key)
     }
@@ -573,6 +593,55 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             .listeners
             .borrow_mut()
             .retain(|listener| listener.unbounded_send(()).is_ok());
+    }
+
+    async fn load_registry(&self) -> Result<EnvironmentRegistry<SessionEndpoint>, ClientError> {
+        let platform = &self.inner.platform;
+        EnvironmentRegistry::load(
+            platform,
+            NetworkStatus::Unknown,
+            Time::from_platform(platform),
+        )
+        .await
+    }
+
+    /// Starts supervising a saved environment and lists it; the caller holds the registry lease.
+    async fn start_saved(&self, id: &EnvironmentId) -> Result<(), ClientError> {
+        let registry = self.load_registry().await?;
+        let Some(registration) = registry.get(id).map(|handle| handle.registration().clone())
+        else {
+            return Ok(());
+        };
+        let origin = registration
+            .routes
+            .first()
+            .map(|route| route.http_base.clone())
+            .ok_or(ClientError::EnvironmentMismatch)?;
+        let (client, driver) =
+            supervise_saved(self.inner.platform.clone(), self.inner.store.clone(), id).await?;
+        self.attach(client, driver, registration.label, &origin);
+        Ok(())
+    }
+
+    /// The supervisor ended on an error, not a disconnect: show it as blocked with that error
+    /// until [`Self::reconnect`] starts a new one.
+    fn stopped(&self, environment: &EnvironmentId, serial: u64, failure: ConnectionFailure) {
+        let state = self
+            .client(environment)
+            .filter(|client| client.serial() == serial)
+            .map(|client| client.state());
+        if let Some(state) = state {
+            self.inner.store.publish_connection(
+                environment,
+                serial,
+                ConnectionState {
+                    phase: Phase::Blocked,
+                    last_failure: Some(failure),
+                    retry_at: None,
+                    ..state
+                },
+            );
+        }
     }
 
     fn list(&self, id: EnvironmentId, label: String) {
@@ -617,23 +686,18 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
 
     /// Installs a connected environment: its driver, its message delivery and the binding of
     /// delivery to each new session, and the leases of threads already open on it.
-    fn attach(&self, client: ConnectedClient, driver: ConnectionTask, origin: &str) {
+    fn attach(&self, client: ConnectedClient, driver: ConnectionTask, label: String, origin: &str) {
         let id = client.environment().clone();
-        let label = self
-            .inner
-            .store
-            .snapshot()
-            .environments
-            .get(&id)
-            .and_then(|state| state.config.as_ref())
-            .map_or_else(
-                || origin.to_owned(),
-                |config| config.environment.label.0.clone(),
-            );
         let (done, finished) = futures::channel::oneshot::channel();
+        let runtime = Rc::downgrade(&self.inner);
+        let (environment, serial) = (id.clone(), client.serial());
         (self.inner.spawn)(
             async move {
-                let _ = driver.await;
+                if let Err(error) = driver.await
+                    && let Some(inner) = runtime.upgrade()
+                {
+                    ClientRuntime { inner }.stopped(&environment, serial, session_failure(&error));
+                }
                 let _ = done.send(());
             }
             .boxed_local(),

@@ -8,6 +8,31 @@ use t3_contracts::provider_instance::{
 
 pub type Environment = BTreeMap<String, String>;
 
+pub(crate) fn canonicalize_existing_parent(path: &Path) -> std::io::Result<PathBuf> {
+    let mut candidate = std::path::absolute(path)?;
+    let mut missing = vec![];
+    loop {
+        match std::fs::canonicalize(&candidate) {
+            Ok(mut resolved) => {
+                for name in missing.into_iter().rev() {
+                    resolved.push(name);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = candidate.file_name().map(std::ffi::OsStr::to_os_string) else {
+                    return Err(error);
+                };
+                missing.push(name);
+                if !candidate.pop() {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
     Windows,
@@ -25,6 +50,19 @@ impl Platform {
             Self::Linux
         }
     }
+}
+pub fn archive_tar(platform: Platform, environment: &Environment) -> PathBuf {
+    if platform != Platform::Windows {
+        return "tar".into();
+    }
+    let root = environment
+        .get("SystemRoot")
+        .or_else(|| environment.get("SYSTEMROOT"))
+        .or_else(|| environment.get("windir"))
+        .or_else(|| environment.get("WINDIR"))
+        .map(String::as_str)
+        .unwrap_or("C:\\Windows");
+    Path::new(root).join("System32").join("tar.exe")
 }
 
 pub fn expand_home_path(value: &str, home: &Path) -> String {

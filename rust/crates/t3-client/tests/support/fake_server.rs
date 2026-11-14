@@ -43,6 +43,18 @@ pub struct ServerState {
     /// `getTurnDiff` requests answered.
     pub turn_diffs: usize,
     pub http: Vec<String>,
+    /// Failure injection: HTTP and sockets fail as from an unreachable host.
+    pub unreachable: bool,
+    /// Failure injection: HTTP works but every WebSocket upgrade fails (a proxy without upgrade).
+    pub refuse_sockets: bool,
+    /// Failure injection: dispatches are received and never answered.
+    pub hold_dispatches: bool,
+    /// Failure injection: the host cannot produce random bytes.
+    pub fail_random: bool,
+    /// The server speaks an older orchestration protocol and can update itself.
+    pub outdated: bool,
+    /// The client's host has no presentation to give when pairing.
+    pub anonymous: bool,
     /// Ends every socket the server holds, as a dropped connection does.
     hangups: Vec<mpsc::UnboundedSender<()>>,
 }
@@ -211,6 +223,9 @@ impl Platform for TestPlatform {
         self.fake.monotonic_ms()
     }
     fn random_bytes(&self, length: usize) -> Result<Vec<u8>, PlatformError> {
+        if self.server.state.borrow().fail_random {
+            return Err(PlatformError::Unsupported("random source".into()));
+        }
         self.fake.random_bytes(length)
     }
     fn sleep(&self, milliseconds: u64) -> LocalBoxFuture<'_, ()> {
@@ -228,9 +243,20 @@ impl Platform for TestPlatform {
             let url = url::Url::parse(&request.url).unwrap();
             let path = url.path().to_owned();
             server.state.borrow_mut().http.push(path.clone());
+            if server.state.borrow().unreachable {
+                return Err(PlatformError::Network("host unreachable".into()));
+            }
             let environment = server.environment.clone();
             Ok(match (request.method.as_str(), path.as_str()) {
-                ("GET", "/.well-known/t3/environment") => response(200, descriptor(&environment)),
+                ("GET", "/.well-known/t3/environment") => {
+                    let mut descriptor = descriptor(&environment);
+                    if server.state.borrow().outdated {
+                        descriptor["orchestrationProtocolVersion"] =
+                            json!(t3_contracts::environment::ORCHESTRATION_PROTOCOL_VERSION - 1);
+                        descriptor["capabilities"]["serverSelfUpdate"] = json!("respawn");
+                    }
+                    response(200, descriptor)
+                }
                 ("GET", "/api/auth/session") => response(
                     200,
                     json!({"authenticated":true,"auth":{"policy":"remote-reachable","bootstrapMethods":[],"sessionMethods":[],"sessionCookieName":"session"},"permissions":["orchestration:read","orchestration:operate"]}),
@@ -251,6 +277,13 @@ impl Platform for TestPlatform {
     fn websocket(&self, _request: SocketRequest) -> HostFuture<'_, Box<dyn WebSocket>> {
         let server = self.server.clone();
         async move {
+            let refused = {
+                let state = server.state.borrow();
+                state.unreachable || state.refuse_sockets
+            };
+            if refused {
+                return Err(PlatformError::Network("websocket upgrade refused".into()));
+            }
             let (to_server, server_incoming) = mpsc::unbounded::<Frame>();
             let (server_outgoing, from_server) = mpsc::unbounded::<Frame>();
             let (hangup, hung_up) = mpsc::unbounded();
@@ -305,6 +338,11 @@ impl Platform for TestPlatform {
         .boxed_local()
     }
     fn host(&self, action: HostAction) -> HostFuture<'_, HostReply> {
+        if matches!(action, HostAction::ClientPresentation) && !self.server.state.borrow().anonymous
+        {
+            // Every client presents itself when pairing, as the TypeScript clients do.
+            return async { Ok(HostReply::Document(json!({"label":"Test client"}))) }.boxed_local();
+        }
         self.fake.host(action)
     }
 }
@@ -405,6 +443,13 @@ impl Handler for FakeHandler {
                 ],
                 (),
             )
+        } else if tag == self::tag::<WsOrchestrationV2DispatchCommandRpc>()
+            && self
+                .server
+                .upgrade()
+                .is_some_and(|server| server.state.borrow().hold_dispatches)
+        {
+            HandlerOutput::Unary(futures::future::pending().boxed_local())
         } else if tag == self::tag::<WsOrchestrationV2DispatchCommandRpc>() {
             // The Rust server's refusal seen 2026-11-14 when no provider adapter is registered.
             let refusal = json!({"_tag":"OrchestrationV2DispatchCommandError","commandId":request.payload["commandId"],"commandType":request.payload["type"],"message":"Failed to dispatch orchestration V2 command","detail":"service ProviderAdapterRegistry.get: No orchestration provider adapter is registered for codex."});

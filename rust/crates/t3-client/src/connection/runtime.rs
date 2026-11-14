@@ -45,6 +45,8 @@ struct Owner {
     store_session: Cell<Option<Generation>>,
     threads: Rc<super::threads::ThreadDemand>,
     abort: AbortHandle,
+    /// This connection's claim on the environment's connection state in the store.
+    serial: u64,
 }
 impl Drop for Owner {
     fn drop(&mut self) {
@@ -65,6 +67,10 @@ pub struct ConnectedClient {
 impl ConnectedClient {
     pub fn environment(&self) -> &EnvironmentId {
         &self.owner.environment
+    }
+    /// Identifies this connection among every connection the environment has had.
+    pub fn serial(&self) -> u64 {
+        self.owner.serial
     }
     pub fn store(&self) -> &ClientStore {
         &self.owner.store
@@ -242,10 +248,83 @@ pub async fn connect_into<P: Platform + Clone + 'static>(
                 0.0,
             ),
     );
+    let (client, mut task) = start(
+        platform,
+        store,
+        registry,
+        environment,
+        shared,
+        authorization,
+        actions,
+    );
+    let initialized = {
+        match futures::future::select(client.wait_ready(false).boxed_local(), task.as_mut()).await {
+            futures::future::Either::Left((result, _)) => result,
+            futures::future::Either::Right((result, _)) => {
+                result.and(Err(ClientError::Disconnected))
+            }
+        }
+    };
+    initialized?;
+    Ok((client, task))
+}
+
+/// Supervises an environment saved in the catalogue, with its saved route and credential,
+/// without waiting for a connection: like TypeScript's registry, the supervisor retries with
+/// backoff and publishes its state into the store. A disabled environment is not connected.
+pub async fn supervise_saved<P: Platform + Clone + 'static>(
+    platform: P,
+    store: ClientStore,
+    environment: &EnvironmentId,
+) -> Result<(ConnectedClient, ConnectionTask), ClientError> {
+    let shared: Rc<dyn Platform> = Rc::new(platform.clone());
+    let authorization = RemoteAuthorization::direct(shared.clone());
+    let mut registry = EnvironmentRegistry::load(
+        &platform,
+        NetworkStatus::Unknown,
+        Time::from_platform(&platform),
+    )
+    .await?;
+    registry.bind_authorization(authorization.clone());
+    let handle = registry
+        .get_mut(environment)
+        .ok_or(ClientError::EnvironmentMismatch)?;
+    let actions = if handle.registration().enabled {
+        handle
+            .handle(
+                ConnectionEvent::Connect,
+                Time::from_platform(&platform),
+                0.0,
+            )
+            .into()
+    } else {
+        VecDeque::new()
+    };
+    Ok(start(
+        platform,
+        store,
+        registry,
+        environment.clone(),
+        shared,
+        authorization,
+        actions,
+    ))
+}
+
+fn start<P: Platform + Clone + 'static>(
+    platform: P,
+    store: ClientStore,
+    registry: EnvironmentRegistry<PlatformSession>,
+    environment: EnvironmentId,
+    shared: Rc<dyn Platform>,
+    authorization: RemoteAuthorization,
+    actions: VecDeque<ConnectionAction>,
+) -> (ConnectedClient, ConnectionTask) {
     let (events, receiver) = mpsc::unbounded();
     let (frames, frame_receiver) = mpsc::channel(1);
     let (abort, registration) = AbortHandle::new_pair();
     let (threads, thread_changes) = super::threads::ThreadDemand::new();
+    let serial = store.claim_sync(crate::store::Scope::Environment(environment.clone()));
     let owner = Rc::new(Owner {
         environment: environment.clone(),
         store: store.clone(),
@@ -254,6 +333,7 @@ pub async fn connect_into<P: Platform + Clone + 'static>(
         store_session: Cell::new(None),
         threads: threads.clone(),
         abort,
+        serial,
     });
     let runtime = Runtime {
         host: platform.events(),
@@ -262,6 +342,7 @@ pub async fn connect_into<P: Platform + Clone + 'static>(
         environment,
         store,
         owner: Rc::downgrade(&owner),
+        serial,
         resolver: ConnectionResolver::new(shared.clone(), authorization.clone()),
         factory: PlatformSessionFactory::new(shared, authorization).with_frames(frames),
         events,
@@ -277,23 +358,13 @@ pub async fn connect_into<P: Platform + Clone + 'static>(
         follows: Default::default(),
     };
     runtime.publish();
-    let mut task: ConnectionTask = async move {
+    let task: ConnectionTask = async move {
         Abortable::new(runtime.run(), registration)
             .await
             .unwrap_or(Ok(()))
     }
     .boxed_local();
-    let client = ConnectedClient { owner };
-    let initialized = {
-        match futures::future::select(client.wait_ready(false).boxed_local(), task.as_mut()).await {
-            futures::future::Either::Left((result, _)) => result,
-            futures::future::Either::Right((result, _)) => {
-                result.and(Err(ClientError::Disconnected))
-            }
-        }
-    };
-    initialized?;
-    Ok((client, task))
+    (ConnectedClient { owner }, task)
 }
 
 fn auth_failure(error: crate::authorization::AuthorizationError) -> ClientError {
@@ -349,6 +420,7 @@ struct Runtime<P: Platform + Clone + 'static> {
     environment: EnvironmentId,
     store: ClientStore,
     owner: Weak<Owner>,
+    serial: u64,
     resolver: ConnectionResolver,
     factory: PlatformSessionFactory,
     events: mpsc::UnboundedSender<ConnectionEvent>,
@@ -372,8 +444,9 @@ impl<P: Platform + Clone + 'static> Drop for Runtime<P> {
 impl<P: Platform + Clone + 'static> Runtime<P> {
     fn publish(&self) {
         if let Some(handle) = self.registry.get(&self.environment) {
-            self.store.set_connection(
-                self.environment.clone(),
+            self.store.publish_connection(
+                &self.environment,
+                self.serial,
                 handle.supervisor().state().clone(),
             );
         }
@@ -947,6 +1020,7 @@ mod tests {
             environment: EnvironmentId("env".into()),
             store: ClientStore::default(),
             owner: Weak::new(),
+            serial: 0,
             resolver: ConnectionResolver::new(shared.clone(), authorization.clone()),
             factory: PlatformSessionFactory::new(shared, authorization),
             events,

@@ -168,6 +168,9 @@ pub(super) struct SendInner<P: Platform, E: RpcEndpoint> {
     pub load_lock: Mutex<()>,
     pub disposed: Cell<bool>,
     pub running: Cell<bool>,
+    /// The delivery loop could not step (storage, unreadable records): how many times in a row,
+    /// until when it waits before trying again, and why.
+    pub stall: RefCell<Option<(u32, u64, String)>>,
     pub changes: Changes,
     pub interrupted: Changes,
     pub prepared: RefCell<BTreeMap<MessageId, PreparedAttachments>>,
@@ -221,6 +224,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                 load_lock: Mutex::new(()),
                 disposed: Cell::new(false),
                 running: Cell::new(false),
+                stall: RefCell::new(None),
                 changes: Changes::default(),
                 interrupted: Changes::default(),
                 prepared: RefCell::new(BTreeMap::new()),
@@ -916,6 +920,41 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             })
             .min()
     }
+    /// Why delivery is stalled, while it waits to try again; `None` while it works.
+    pub fn delivery_problem(&self) -> Option<String> {
+        self.inner
+            .stall
+            .borrow()
+            .as_ref()
+            .map(|(_, _, reason)| reason.clone())
+    }
+    fn stalled(&self, error: &ClientError) {
+        let now = self.inner.platform.monotonic_ms();
+        let mut stall = self.inner.stall.borrow_mut();
+        let attempts = stall.as_ref().map_or(0, |(attempts, ..)| *attempts) + 1;
+        *stall = Some((
+            attempts,
+            now.saturating_add(super::super::outbox::retry_delay_ms(attempts)),
+            error.to_string(),
+        ));
+        drop(stall);
+        self.inner.changes.notify();
+    }
+    fn stepped(&self) {
+        if self.inner.stall.borrow_mut().take().is_some() {
+            self.inner.changes.notify();
+        }
+    }
+    /// Deletes `environment`'s saved messages and delivery records, for a removed environment.
+    pub async fn forget_saved(
+        platform: Rc<P>,
+        environment: &EnvironmentId,
+    ) -> Result<(), ClientError> {
+        Outbox::new(SharedStorage(platform.clone()))
+            .clear_environment(environment)
+            .await?;
+        crate::operations::forget_environment(platform.as_ref(), environment).await
+    }
     pub fn run(&self) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         let service = self.clone();
         async move {
@@ -928,23 +967,41 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             }
             let _running=Running(service.inner.clone());
             let mut changes=service.changes();
-            let mut store=service.inner.store.subscribe().chain(futures::stream::pending());
+            let mut store=service.inner.store.subscribe_environment(&service.inner.environment).chain(futures::stream::pending());
             let mut events=service.inner.platform.events().chain(futures::stream::pending());
             let mut interrupted=service.inner.interrupted.subscribe();
             let _=interrupted.next().await;
             while !service.inner.disposed.get() {
+                // A step that failed outright waits out its backoff, so it cannot spin on the
+                // change it announced; the loop itself never ends on an error.
+                let stalled_until = service.inner.stall.borrow().as_ref().map(|(_, until, _)| *until);
+                if let Some(until) = stalled_until {
+                    let wait = service.inner.platform.sleep(until.saturating_sub(service.inner.platform.monotonic_ms()));
+                    futures::select_biased! {
+                        _=interrupted.next().fuse()=>{
+                            if service.inner.disposed.get(){return Ok(());}
+                        },
+                        _=wait.fuse()=>{},
+                    }
+                }
                 loop {
                     let outcome=futures::select_biased! {
                         _=interrupted.next().fuse()=>{
                             if service.inner.disposed.get(){return Ok(());}
                             continue;
                         },
-                        outcome=service.step().fuse()=>outcome?,
+                        outcome=service.step().fuse()=>match outcome {
+                            Ok(outcome)=>{service.stepped();outcome},
+                            Err(error)=>{service.stalled(&error);None},
+                        },
                     };
                     let Some(outcome)=outcome else {break;};
                     if matches!(outcome,DeliveryResult::Wait|DeliveryResult::Retry|DeliveryResult::StaleSession|DeliveryResult::StaleMessage) {
                         break;
                     }
+                }
+                if service.inner.stall.borrow().is_some() {
+                    continue;
                 }
                 let timer=match service.retry_deadline() {
                     Some(deadline)=>service.inner.platform.sleep(deadline.saturating_sub(service.inner.platform.monotonic_ms())),
@@ -952,7 +1009,9 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                 };
                 futures::select_biased! {
                     _=changes.next().fuse()=>{},
-                    _=store.next().fuse()=>{service.reconcile().await?;},
+                    _=store.next().fuse()=>{
+                        if let Err(error)=service.reconcile().await {service.stalled(&error);}
+                    },
                     event=events.next().fuse()=>{
                         if matches!(event,Some(PlatformEvent::Foreground|PlatformEvent::Network(NetworkStatus::Online))) {service.wake();}
                     },

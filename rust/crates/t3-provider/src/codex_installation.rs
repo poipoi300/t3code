@@ -21,7 +21,7 @@ use t3_contracts::{provider_setup::*, server::ServerProviderCompatibilityStatus}
 use t3_process::CancellationToken;
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock, watch};
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReleaseAsset {
     pub version: String,
@@ -30,6 +30,12 @@ pub struct ReleaseAsset {
     pub sha256: String,
     pub archive_bytes: Option<u64>,
 }
+impl std::fmt::Debug for ReleaseAsset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReleaseAsset([REDACTED])")
+    }
+}
+
 pub fn pinned_release(platform: &str, architecture: &str) -> Option<ReleaseAsset> {
     serde_json::from_str::<BTreeMap<String, ReleaseAsset>>(include_str!(
         "../data/codex-releases.json"
@@ -870,7 +876,8 @@ impl CodexInstallation {
         if self.directory.exists() {
             let root = self.root()?;
             for path in protected {
-                let path = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                let path = crate::environment::canonicalize_existing_parent(path)
+                    .map_err(|_| ServiceError::Storage)?;
                 if path.starts_with(&root) {
                     return Err(ServiceError::Busy);
                 }

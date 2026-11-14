@@ -105,6 +105,24 @@ pub struct OperationQueue<I> {
     inner: Rc<RefCell<Operations<I>>>,
 }
 const OUTBOX_NAMESPACE: &str = "operation-outbox";
+
+/// Deletes every saved delivery record of `environment`, for a removed environment.
+pub async fn forget_environment(
+    storage: &impl Storage,
+    environment: &EnvironmentId,
+) -> Result<(), ClientError> {
+    let writes: Vec<_> = storage
+        .list(StorageArea::Ordinary, OUTBOX_NAMESPACE.into())
+        .await?
+        .into_iter()
+        .filter(|key| key.environment.as_ref() == Some(environment))
+        .map(|key| StorageWrite { key, value: None })
+        .collect();
+    if !writes.is_empty() {
+        storage.write(StorageArea::Ordinary, writes).await?;
+    }
+    Ok(())
+}
 impl<I: Clone + Serialize + DeserializeOwned> OperationQueue<I> {
     pub fn new(environment: EnvironmentId) -> Self {
         Self {
@@ -2232,7 +2250,10 @@ mod tests {
             if let Some(callback) = &self.on_call {
                 callback();
             }
-            assert_eq!(serde_json::to_value(input).unwrap()["commandId"], self.command);
+            assert_eq!(
+                serde_json::to_value(input).unwrap()["commandId"],
+                self.command
+            );
             async move {
                 match self.reply {
                     Reply::Accepted(sequence) => {

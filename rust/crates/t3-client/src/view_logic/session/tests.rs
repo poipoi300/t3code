@@ -170,3 +170,108 @@ fn preview_projection_reuses_identity_renews_and_restores_source() {
         &projector.project(source.clone(), |_| None)
     ));
 }
+
+fn send_to_user_item(name: &str, status: &str, output: Option<Value>) -> OrchestrationV2TurnItem {
+    let mut item = json!({"id":"render","threadId":"render-thread","runId":"render-run","nodeId":null,"providerThreadId":null,"providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":2,"status":status,"title":null,"startedAt":"2026-09-04T12:00:02.000Z","completedAt":"2026-09-04T12:00:02.000Z","updatedAt":"2026-09-04T12:00:02.000Z","type":"dynamic_tool","toolName":name,"input":{"message":"Draft"}});
+    if let Some(output) = output {
+        item["output"] = output;
+    }
+    serde_json::from_value(item).unwrap()
+}
+
+fn sent_message(name: &str, output: Value) -> Option<String> {
+    match send_to_user_item(name, "completed", Some(output)) {
+        OrchestrationV2TurnItem::DynamicTool(tool) => sent_message_from_tool_item(&tool),
+        _ => unreachable!("a dynamic tool"),
+    }
+}
+
+#[test]
+fn keeps_a_send_to_user_message_up_to_its_limit_even_in_3_byte_characters() {
+    // toolOutput.test.ts, upstream aab388ddb1.
+    let longest = "界".repeat(SEND_TO_USER_MAX_LENGTH);
+    for text in ["Draft:\n\n> Hi Sam,".to_owned(), longest.clone()] {
+        let reply = json!({"sentMessage": text, "message": "Shown to the user."}).to_string();
+        assert_eq!(
+            sent_message(
+                "mcp__t3-code__send_to_user",
+                json!([{"type":"text","text": reply}])
+            ),
+            Some(text)
+        );
+    }
+    let over = json!({"sentMessage": format!("{longest}界")});
+    assert_eq!(sent_message("mcp__t3-code__send_to_user", over), None);
+    assert_eq!(
+        sent_message("mcp__t3-code__send_to_user", json!({"sentMessage": "  "})),
+        None
+    );
+    // OpenCode 2 Code Mode reports a script's nested send_to_user call as one `execute` item.
+    let nested = json!({"sentMessage": "Draft", "message": "Shown to the user."}).to_string();
+    assert_eq!(
+        sent_message("execute", Value::String(nested)),
+        Some("Draft".into())
+    );
+    assert_eq!(
+        sent_message("mcp__t3-code__html_render", json!({"sentMessage": "Draft"})),
+        None,
+        "only send_to_user's own output is a sent message"
+    );
+    assert_eq!(
+        sent_message(
+            "mcp__t3-code__send_to_user",
+            json!({"isError": true, "structuredContent": {"sentMessage": "Draft"}})
+        ),
+        None
+    );
+}
+
+#[test]
+fn shows_a_sent_message_in_place_and_only_once_sent() {
+    // session-logic.test.ts "shows a sent message in place through the turn fold, and only once
+    // sent", upstream aab388ddb1; the fold and row order belong to the timeline rows.
+    let text = "Draft reply:\n\n> Thanks, Thursday works.";
+    let entries = |status: &str, output: Option<Value>| {
+        let row: OrchestrationV2ProjectedTurnItem = serde_json::from_value(json!({
+            "position": 2,
+            "visibility": "local",
+            "sourceThreadId": "render-thread",
+            "sourceItemId": "render",
+            "item": send_to_user_item("mcp__t3-code__send_to_user", status, output),
+        }))
+        .unwrap();
+        derive_timeline_entries_from_visible_turn_items(&TimelineEntriesInput {
+            visible_turn_items: vec![Rc::new(row)],
+            ..TimelineEntriesInput::default()
+        })
+    };
+    let sent = entries(
+        "completed",
+        Some(json!({"structuredContent": {"sentMessage": text}, "content": []})),
+    );
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].id, "render");
+    assert_eq!(
+        serde_json::to_value(&sent[0].content).unwrap(),
+        json!({"kind": "sent-message", "runId": "render-run", "text": text})
+    );
+    assert!(
+        entries("running", None)
+            .iter()
+            .all(|entry| !matches!(entry.content, TimelineContent::SentMessage { .. }))
+    );
+}
+
+#[test]
+fn summarizes_send_to_user_calls_as_sent_messages() {
+    use crate::work_log::{T3ToolSummaryCall, summarize_t3_tool_calls};
+    let call = || T3ToolSummaryCall {
+        input: json!({"message": "Draft"}),
+        output: json!({"sentMessage": "Draft"}),
+        outcome: "completed".into(),
+    };
+    assert_eq!(
+        summarize_t3_tool_calls("send-to-user", &[call(), call()]).label,
+        "Sent 2 messages"
+    );
+}

@@ -4,65 +4,26 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use nsh_core::prelude::*;
-use t3_client::view_logic::session::{MessageAttachment, TimelineEntry};
+use t3_client::view_logic::session::MessageAttachment;
 use t3_contracts::chat_attachment::{ChatAttachment, ChatFileAttachment};
 use t3_contracts::composer_context::{ComposerContextRecord, PreviewAnnotationContextRecord};
 
 use crate::i18n::{Value, t, tr};
-use crate::runtime::Shared;
 use crate::state::layout::{Pointer, pointer};
 use crate::theme::{cn, palette, tw};
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::tooltip::{tooltip, tooltip_create_handle};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Attribution {
-    Own,
-    Automation,
-    Agent,
-    T3Code,
-    Guest(String),
-}
-
-/// Inputs resolved by the client; attribution, context and clipboard policy are not UI logic.
-#[derive(Clone, Debug, PartialEq)]
-pub struct UserRow {
-    pub id: String,
-    pub text: String,
-    pub copy_text: String,
-    pub prompt_link: Option<String>,
-    pub attribution: Attribution,
-    pub summary: String,
-    pub timestamp: String,
-    pub timestamp_tooltip: String,
-    pub status: Option<String>,
-    pub intent: Option<Intent>,
-    pub continues_steer: bool,
-    pub grouped_with_previous: bool,
-    pub grouped_with_next: bool,
-    pub sender_label: String,
-    pub can_open_sender: bool,
-    pub scheduled_task_title: Option<String>,
-    pub has_scheduled_task: bool,
-    pub revert_turn_count: Option<usize>,
-    pub fresh_context: bool,
-    pub model_switch: bool,
-    pub workflow_opening: bool,
-    pub has_media: bool,
-    pub has_audio: bool,
-    pub has_files: bool,
-    pub media_only: bool,
-    pub media_above_text: bool,
-    pub file_cards_only: bool,
-    pub audio_only: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Intent {
-    pub promoted: bool,
-    pub unread: bool,
-}
+use nsh_base::text_view::{
+    CustomNode, Inline, MarkdownOptions, MarkdownPlugin, ParseContext, Parser, TextViewClasses,
+    mdast,
+};
+use t3_client::thread_views::messages_timeline::MessagesTimelineRow;
+use t3_client::thread_views::user_message::present_user_message_row;
+pub use t3_client::thread_views::user_message::{Attribution, Intent, UserRow};
+use t3_client::view_logic::session::timestamps::{CalendarTimestamp, TimestampHost};
+use t3_contracts::settings::TimestampFormat;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct FoldState {
@@ -70,11 +31,17 @@ struct FoldState {
     body_expanded: bool,
     content_height: f32,
     lane_width: f32,
+    fold_threshold: f32,
+    copied: bool,
 }
 
 /// Construct above the virtual list: message-keyed state survives row recycling.
 #[derive(Clone, Copy)]
-pub struct UserRowState(Signal<BTreeMap<String, FoldState>>);
+pub struct UserRowState(
+    Signal<BTreeMap<String, FoldState>>,
+    Stored<BTreeMap<String, Spawned<()>>>,
+    Owner,
+);
 
 impl Default for UserRowState {
     fn default() -> Self {
@@ -84,7 +51,11 @@ impl Default for UserRowState {
 
 impl UserRowState {
     pub fn new() -> Self {
-        Self(signal(BTreeMap::new()))
+        Self(
+            signal(BTreeMap::new()),
+            stored(BTreeMap::new()),
+            Owner::current(),
+        )
     }
 
     fn read(self, id: &str) -> FoldState {
@@ -103,9 +74,39 @@ impl UserRowState {
             state.body_expanded = true;
         });
     }
+
+    fn copy(self, id: String, source: String, anchor: ElementRef) {
+        if source.is_empty() {
+            return;
+        }
+        set_clipboard(source.clone());
+        self.2.run(|| {
+            spawn(async move {
+                if clipboard_string().await != source {
+                    return;
+                }
+                self.update(&id, |state| state.copied = true);
+                crate::ui::toast::show_anchored_copy_success_toast(Some(&anchor));
+                self.1.with(|timers| {
+                    if let Some(timer) = timers.remove(&id) {
+                        timer.cancel();
+                    }
+                    let key = id.clone();
+                    timers.insert(
+                        id,
+                        set_timeout(
+                            std::time::Duration::from_millis(
+                                crate::ui::toast::ANCHORED_COPY_TOAST_TIMEOUT_MS,
+                            ),
+                            move || self.update(&key, |state| state.copied = false),
+                        ),
+                    );
+                });
+            })
+        });
+    }
 }
 
-pub type RowResolver = Rc<dyn Fn(&TimelineEntry) -> Result<UserRow, String>>;
 pub type RowSlot = Rc<dyn Fn(&UserRow) -> AnyElement>;
 pub type RowAction = Rc<dyn Fn(&UserRow)>;
 pub type RevertAction = Rc<dyn Fn(&UserRow, usize)>;
@@ -125,97 +126,236 @@ pub struct UserMarkdown {
 }
 
 pub type UserMarkdownRenderer = Rc<dyn Fn(UserMarkdown) -> AnyElement>;
+pub type ContextChipRenderer = Rc<
+    dyn Fn(
+        &t3_client::thread_views::user_message::Reference,
+        Option<&ComposerContextRecord>,
+        &UserRow,
+    ) -> AnyElement,
+>;
+
+#[derive(Clone)]
+struct UserMarkdownPlugin {
+    row: Rc<UserRow>,
+    chip: Option<ContextChipRenderer>,
+}
+
+impl MarkdownPlugin for UserMarkdownPlugin {
+    fn name(&self) -> &str {
+        "user-message"
+    }
+    fn inline(&self, node: &mdast::Node, context: &mut ParseContext<'_>) -> Option<Inline> {
+        if let mdast::Node::Text(text) = node {
+            return Some(Inline::Text {
+                text: text.value.clone(),
+            });
+        }
+        if !matches!(node, mdast::Node::Link(_) | mdast::Node::Image(_)) {
+            return None;
+        }
+        let source = context.node_source(node)?;
+        let reference = t3_client::thread_views::user_message::context_references(source)
+            .into_iter()
+            .next()?;
+        Some(Inline::Custom(
+            CustomNode::new("user-context-reference")
+                .with_attribute("context-id", reference.context_id)
+                .with_attribute("kind", reference.kind)
+                .with_text(reference.label),
+        ))
+    }
+    fn render(&self, node: &CustomNode) -> Option<AnyElement> {
+        if node.name != "user-context-reference" {
+            return None;
+        }
+        let reference =
+            self.row.references.iter().find(|reference| {
+                node.attributes.get("context-id") == Some(&reference.context_id)
+            })?;
+        let record = self.row.records.iter().find(|record| {
+            serde_json::to_value(record)
+                .ok()
+                .and_then(|value| value["contextId"].as_str().map(str::to_owned))
+                .as_deref()
+                == Some(&reference.context_id)
+        });
+        // CMP-CHIPS owns UserMessageContextReferenceChip and its detail popovers; no invented fallback copy.
+        Some(self.chip.as_ref().map_or_else(
+            || view().into_element(),
+            |render| render(reference, record, &self.row),
+        ))
+    }
+}
+
+struct LocalTimestampHost {
+    formats: t3_i18n::Formats,
+    zone: t3_i18n::TimeZone,
+    hour12: bool,
+}
+
+impl LocalTimestampHost {
+    fn current() -> Self {
+        let settings = locale_settings();
+        let name = settings.time_zone.to_string();
+        let zone = if matches!(name.as_str(), "UTC" | "Etc/UTC" | "GMT") {
+            t3_i18n::TimeZone::Utc
+        } else {
+            t3_i18n::TimeZone::Iana(name)
+        };
+        Self {
+            formats: t3_i18n::Formats::new(&locale().to_string()),
+            zone,
+            hour12: settings.hour_cycle.twelve_hour(),
+        }
+    }
+}
+
+impl TimestampHost for LocalTimestampHost {
+    fn parse_epoch_ms(&self, iso: &str) -> Option<i64> {
+        // t3-i18n's frozen dependency needs its iana feature to resolve named host zones.
+        self.zone
+            .is_known()
+            .then(|| t3_client::time::epoch_ms(iso))
+            .flatten()
+    }
+    fn calendar(&self, epoch_ms: i64, _: Option<&str>) -> CalendarTimestamp {
+        let day = t3_i18n::format::civil(epoch_ms, &self.zone).day;
+        CalendarTimestamp {
+            epoch_ms,
+            day_index: day.index,
+            year: day.year,
+            month: day.month,
+            day: day.day,
+        }
+    }
+    fn short_time(&self, epoch_ms: i64, format: &TimestampFormat, _: Option<&str>) -> String {
+        self.formats.date(
+            t3_i18n::DateFormat::TimeHm,
+            epoch_ms,
+            &self.zone,
+            Some(t3_client::view_logic::session::timestamps::resolve_hour12(
+                format,
+                self.hour12,
+            )),
+        )
+    }
+    fn numeric_date(&self, epoch_ms: i64, year: bool, _: Option<&str>) -> String {
+        self.formats.date(
+            if year {
+                t3_i18n::DateFormat::MonthDayYearNumeric
+            } else {
+                t3_i18n::DateFormat::MonthDayNumeric
+            },
+            epoch_ms,
+            &self.zone,
+            None,
+        )
+    }
+    fn full_timestamp(&self, iso: &str, format: &TimestampFormat) -> String {
+        self.parse_epoch_ms(iso)
+            .map_or_else(String::new, |epoch_ms| {
+                self.formats.date(
+                    t3_i18n::DateFormat::DefaultDateTime,
+                    epoch_ms,
+                    &self.zone,
+                    Some(t3_client::view_logic::session::timestamps::resolve_hour12(
+                        format,
+                        self.hour12,
+                    )),
+                )
+            })
+    }
+    fn locale_hour12(&self) -> bool {
+        self.hour12
+    }
+}
 
 /// Slots are the existing TSX dependencies (ChatMarkdown, media, lifecycle and workflow).
 /// Absent services stay unsupported; callers must supply permission-checked operations.
 #[derive(Clone)]
 pub struct UserRowContext {
-    pub resolve: RowResolver,
     pub state: UserRowState,
     pub find_active: Signal<bool>,
     pub working: Signal<bool>,
     pub reverting: Signal<bool>,
     pub body: Option<UserMarkdownRenderer>,
-    pub media: Option<RowSlot>,
+    pub timestamp_format: Signal<TimestampFormat>,
+    pub context_chip: Option<ContextChipRenderer>,
     pub audio: Option<RowSlot>,
-    pub files: Option<RowSlot>,
     pub workflow: Option<RowSlot>,
     pub fresh_session: Option<RowSlot>,
     pub model_switch: Option<RowSlot>,
     pub open_sender: Option<RowAction>,
     pub open_automation: Option<RowAction>,
     pub revert: Option<RevertAction>,
-    pub copy: Option<RowAction>,
+    pub file_open: Option<FileAction>,
+    pub file_download: Option<FileAction>,
 }
 
 impl UserRowContext {
-    pub fn new(state: UserRowState, resolve: RowResolver) -> Self {
+    pub fn new(state: UserRowState) -> Self {
         Self {
-            resolve,
             state,
             find_active: signal(false),
             working: signal(false),
             reverting: signal(false),
             body: None,
-            media: None,
+            timestamp_format: signal(TimestampFormat::Locale),
+            context_chip: None,
             audio: None,
-            files: None,
             workflow: None,
             fresh_session: None,
             model_switch: None,
             open_sender: None,
             open_automation: None,
             revert: None,
-            copy: None,
+            file_open: None,
+            file_download: None,
         }
     }
 }
 
 pub fn user_message_row(
-    entry: Memo<Option<Shared<TimelineEntry>>>,
+    projection: Memo<Option<Rc<MessagesTimelineRow>>>,
     context: UserRowContext,
 ) -> impl IntoElement {
-    let resolve = context.resolve.clone();
-    let row = computed(move || entry.with(|entry| entry.as_ref().map(|entry| resolve(entry))));
+    let timestamp_format = context.timestamp_format;
+    let row = computed(move || {
+        projection.with(|projection| {
+            projection.as_ref().and_then(|row| {
+                present_user_message_row(
+                    row,
+                    LocalTimestampHost::current(),
+                    &timestamp_format.get(),
+                    nsh_core::time::unix_ms() as i64,
+                )
+            })
+        })
+    });
     dynamic(move || {
-        let row = row.get()?;
-        Some(untracked(|| match row {
-            Err(reason) => unsupported(&reason).into_element(),
-            Ok(row) => {
+        row.get().map(|row| {
+            untracked(|| {
                 let mut root = view();
-                for (enabled, slot, label) in [
-                    (
-                        row.fresh_context,
-                        &context.fresh_session,
-                        "Fresh session is unavailable.",
-                    ),
-                    (
-                        row.model_switch,
-                        &context.model_switch,
-                        "Model switch is unavailable.",
-                    ),
+                for (enabled, slot) in [
+                    (row.fresh_context, &context.fresh_session),
+                    (row.model_switch, &context.model_switch),
                 ] {
                     if enabled {
-                        root =
-                            root.child(slot.as_ref().map_or_else(
-                                || unsupported(label).into_element(),
-                                |slot| slot(&row),
-                            ));
+                        root = root.child(slot.as_ref().map(|slot| slot(&row)));
                     }
                 }
                 root.child(user_message_content(Rc::new(row), context.clone()))
-                    .into_element()
-            }
-        }))
+            })
+        })
     })
 }
 
 fn user_message_content(row: Rc<UserRow>, context: UserRowContext) -> AnyElement {
     if row.workflow_opening {
-        return context.workflow.as_ref().map_or_else(
-            || unsupported("Workflow opening is unavailable.").into_element(),
-            |render| render(&row),
-        );
+        return context
+            .workflow
+            .as_ref()
+            .map_or_else(|| view().into_element(), |render| render(&row));
     }
     if row.attribution == Attribution::Automation {
         automation_message_row(row, context).into_element()
@@ -256,6 +396,7 @@ fn automation_message_row(row: Rc<UserRow>, context: UserRowContext) -> impl Int
                 .test_id("data-user-message-bubble")
                 .label(SharedString::from(t("Automation")))
                 .child(folded_message_header(
+                    Icon::CalendarClock,
                     t("Automation"),
                     summary,
                     fold,
@@ -264,15 +405,18 @@ fn automation_message_row(row: Rc<UserRow>, context: UserRowContext) -> impl Int
                 ))
                 .child(dynamic(move || {
                     (fold.get().expanded || body_context.find_active.get()).then(|| {
-                        // No nested scroll: the timeline owns scrolling, including expanded runbooks.
+                        let body = untracked(|| user_message_body(&body_row, &body_context));
+                        let body = if body_context.find_active.get() {
+                            view().app_class(tw("px-3 pb-3")).child(body).into_element()
+                        } else {
+                            scroll()
+                                .app_class(tw("px-3 pb-3 max-h-96"))
+                                .child(body)
+                                .into_element()
+                        };
                         view()
-                            .app_class(move || {
-                                Some(tw(&cn([
-                                    Some("px-3 pb-3"),
-                                    (!fold.get().expanded).then_some("hidden"),
-                                ])))
-                            })
-                            .child(untracked(|| user_message_body(&body_row, &body_context)))
+                            .app_class(move || (!fold.get().expanded).then(|| tw("hidden")))
+                            .child(body)
                     })
                 })),
         )
@@ -326,11 +470,7 @@ fn user_timeline_row(row: Rc<UserRow>, context: UserRowContext) -> impl IntoElem
             view()
                 .app_class(tw("flex max-w-[80%] justify-end"))
                 .label(SharedString::from(t("You")))
-                .child(row_slot(
-                    &context.media,
-                    &row,
-                    "Media preview is unavailable.",
-                )),
+                .child(default_media_block(&row, &context)),
         );
     }
     let background = !row.media_only && !row.file_cards_only && !row.audio_only;
@@ -358,6 +498,7 @@ fn user_timeline_row(row: Rc<UserRow>, context: UserRowContext) -> impl IntoElem
         });
     if folded {
         bubble = bubble.child(folded_message_header(
+            Icon::MessagesSquare,
             row.sender_label.clone(),
             row.summary.clone(),
             fold,
@@ -407,6 +548,7 @@ fn user_timeline_row(row: Rc<UserRow>, context: UserRowContext) -> impl IntoElem
 }
 
 fn folded_message_header(
+    which: Icon,
     label: String,
     summary: String,
     fold: Memo<FoldState>,
@@ -418,7 +560,7 @@ fn folded_message_header(
         .hit_slop(move || control_hit_slop(36.0))
         .on_press(move || state.update(&id, |state| state.expanded = !state.expanded))
         .app_class(tw("flex w-full min-w-0 items-center gap-1.5 rounded-2xl px-3 py-2 text-left text-sm focus-visible:outline-2 focus-visible:outline-ring"))
-        // CalendarClock and MessagesSquare await UI-ICONS; do not substitute another symbol.
+        .child(icon(which, 16.0, || palette().muted_foreground))
         .child(text(label).app_class(tw("max-w-1/2 shrink-0 truncate text-muted-foreground")))
         .child(text(summary).app_class(tw("min-w-0 flex-1 truncate")))
         .child(view().app_class(move || Some(tw(&cn([
@@ -440,7 +582,7 @@ pub fn user_message_intent_marker(intent: &Intent) -> impl IntoElement + use<> {
     } else {
         "Steered the active turn"
     };
-    // Redo2 awaits UI-ICONS; no unrelated glyph stands in for it.
+
     view()
         .app_class(tw(
             "me-1 flex items-center justify-end gap-1 text-xs leading-none text-muted-foreground",
@@ -450,6 +592,7 @@ pub fn user_message_intent_marker(intent: &Intent) -> impl IntoElement + use<> {
             Default::default(),
             text(t(hint)),
         ))
+        .child(icon(Icon::Redo2, 12.0, || palette().muted_foreground))
         .child(text(t(label)))
 }
 
@@ -465,25 +608,52 @@ pub fn user_message_projected_status(status: Option<&str>) -> impl IntoElement +
 fn user_row_body(row: Rc<UserRow>, context: UserRowContext, collapsible: bool) -> impl IntoElement {
     let mut body = view();
     if row.has_media && !row.media_above_text {
-        body = body.child(row_slot(
-            &context.media,
-            &row,
-            "Media preview is unavailable.",
-        ));
+        body = body.child(default_media_block(&row, &context));
     }
+    // CMP-ATTACH owns InlineAudioPreview; mount its real renderer when that package lands.
     if row.has_audio {
-        body = body.child(row_slot(
-            &context.audio,
-            &row,
-            "Audio preview is unavailable.",
-        ));
+        body = body.child(context.audio.as_ref().map(|render| render(&row)));
     }
     if row.has_files {
-        body = body.child(row_slot(
-            &context.files,
-            &row,
-            "Attachment preview is unavailable.",
-        ));
+        let mut files = view().app_class(tw(if row.file_cards_only {
+            "flex flex-col items-end gap-1"
+        } else {
+            "mb-2 flex flex-col gap-1"
+        }));
+        for attachment in &row.files {
+            if let ChatAttachment::File(file) = &attachment.attachment {
+                let props = FilePresentation {
+                    file: file.clone(),
+                    downloadable: true,
+                    extension: file_extension(&file.name),
+                    open: context.file_open.clone(),
+                    download: context.file_download.clone(),
+                    entry_icon: Some(Rc::new(|_| {
+                        icon(Icon::File, 16.0, || palette().muted_foreground).into_element()
+                    })),
+                    download_icon: Some(Rc::new(|| {
+                        icon(Icon::Download, 16.0, || palette().muted_foreground).into_element()
+                    })),
+                };
+                files = files.child(if row.file_cards_only {
+                    user_file_card(props).into_element()
+                } else {
+                    user_file_attachment(props).into_element()
+                });
+            }
+        }
+        for attachment in &row.unknown {
+            if let ChatAttachment::Unknown(attachment) = &attachment.attachment {
+                files = files.child(
+                    view()
+                        .app_class(tw("flex min-w-0 items-center gap-2 py-1 text-sm"))
+                        .child(
+                            text(attachment.name.clone()).app_class(tw("min-w-0 flex-1 truncate")),
+                        ),
+                );
+            }
+        }
+        body = body.child(files);
     }
     if !row.file_cards_only && !row.audio_only {
         body = body.child(collapsible_user_message_body(row, context, collapsible));
@@ -491,11 +661,42 @@ fn user_row_body(row: Rc<UserRow>, context: UserRowContext, collapsible: bool) -
     body
 }
 
-fn row_slot(slot: &Option<RowSlot>, row: &UserRow, unavailable: &str) -> AnyElement {
-    slot.as_ref().map_or_else(
-        || unsupported(unavailable).into_element(),
-        |render| render(row),
-    )
+fn file_extension(name: &str) -> String {
+    name.rsplit_once('.')
+        .map(|(_, extension)| extension)
+        .filter(|extension| {
+            !extension.is_empty()
+                && extension.len() <= 8
+                && extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+        .map_or_else(|| t("File"), str::to_ascii_uppercase)
+}
+
+fn default_media_block(row: &UserRow, _context: &UserRowContext) -> impl IntoElement + use<> {
+    let videos = row
+        .videos
+        .iter()
+        .filter_map(|attachment| {
+            let ChatAttachment::File(file) = &attachment.attachment else {
+                return None;
+            };
+            let player = attachment.preview_url.as_ref().map(|src| {
+                nsh_core::element::video(src.clone())
+                    .app_class(tw("block aspect-[4/3] w-full"))
+                    .into_element()
+            });
+            Some(
+                user_video_attachment(
+                    &file.name,
+                    row.media_only || row.media_above_text,
+                    "",
+                    player,
+                )
+                .into_element(),
+            )
+        })
+        .collect();
+    media_block(&row.images, videos, row, None, None)
 }
 
 fn message_actions(
@@ -540,10 +741,11 @@ fn message_actions(
             .tooltip(tooltip(
                 tooltip_create_handle(),
                 Default::default(),
-                text(t(&row.timestamp_tooltip)),
+                text(row.timestamp_tooltip.clone()),
             ))
             .child(
-                text(t(&row.timestamp)).app_class(tw("text-muted-foreground text-xs tabular-nums")),
+                text(row.timestamp.clone())
+                    .app_class(tw("text-muted-foreground text-xs tabular-nums")),
             ),
     );
     let mut controls = view().app_class(tw(&cn([
@@ -554,51 +756,59 @@ fn message_actions(
         controls = controls.child(revert_user_message_button(row.clone(), count, context));
     }
     if !row.copy_text.is_empty() {
-        let row = row.clone();
-        let copy = context.copy.clone();
-        let disabled = copy.is_none();
-        controls = controls.child(
-            view()
-                .tooltip(tooltip(
-                    tooltip_create_handle(),
-                    Default::default(),
-                    text(t(if disabled {
-                        "Copying this message is unavailable."
-                    } else {
-                        "Copy message"
-                    })),
-                ))
-                .child(button(
-                    ButtonContent::Icon {
-                        icon: Icon::Copy,
-                        label: t("Copy message"),
-                    },
-                    ButtonVariant::GhostMuted,
-                    ButtonSize::Xs,
-                    move || disabled,
-                    move || {
-                        if let Some(copy) = &copy {
-                            copy(&row);
-                        }
-                    },
-                )),
-        );
+        controls = controls.child(message_copy_button(
+            row,
+            context.state,
+            row.copy_text.clone(),
+            "Copy message",
+            Icon::Copy,
+        ));
     }
     if let Some(link) = &row.prompt_link {
-        let link = link.clone();
-        // NSH clipboard writes have no acknowledgement: do not claim Copied or suppress retries.
-        controls = controls.child(button(
-            ButtonContent::Icon {
-                icon: Icon::Link,
-                label: t("Copy prompt link"),
-            },
-            ButtonVariant::GhostMuted,
-            ButtonSize::Xs,
-            || false,
-            move || set_clipboard(link.clone()),
+        controls = controls.child(message_copy_button(
+            row,
+            context.state,
+            link.clone(),
+            "Copy prompt link",
+            Icon::Link,
         ));
     }
     actions.child(controls)
+}
+
+fn message_copy_button(
+    row: &UserRow,
+    state: UserRowState,
+    source: String,
+    label: &'static str,
+    glyph: Icon,
+) -> impl IntoElement + use<> {
+    let key = format!("{}:{label}", row.id);
+    let observe_key = key.clone();
+    let copied = computed(move || state.read(&observe_key).copied);
+    let source = Rc::new(source);
+    dynamic(move || {
+        let anchor = element_ref();
+        let key = key.clone();
+        let source = source.clone();
+        view()
+            .element_ref(&anchor)
+            .tooltip(tooltip(
+                tooltip_create_handle(),
+                Default::default(),
+                text(t(label)),
+            ))
+            .child(button(
+                ButtonContent::Icon {
+                    icon: if copied.get() { Icon::Check } else { glyph },
+                    label: t(label),
+                },
+                ButtonVariant::GhostMuted,
+                ButtonSize::Xs,
+                move || copied.get(),
+                move || state.copy(key.clone(), source.as_ref().clone(), anchor),
+            ))
+    })
 }
 
 fn actions_frame(actions: impl IntoElement) -> impl IntoElement {
@@ -621,15 +831,11 @@ fn revert_user_message_button(
         .tooltip(tooltip(
             tooltip_create_handle(),
             Default::default(),
-            text(t(if missing {
-                "Editing from this message is unavailable."
-            } else {
-                "Edit from here"
-            })),
+            text(t("Edit from here")),
         ))
         .child(button(
             ButtonContent::Icon {
-                icon: Icon::SquarePen,
+                icon: Icon::Pencil,
                 label: t("Edit from here"),
             },
             ButtonVariant::Ghost,
@@ -655,10 +861,28 @@ fn collapsible_user_message_body(
     let id = row.id.clone();
     let fold = computed(move || state.read(&id));
     let has_body = !row.text.trim().is_empty();
-    let can_collapse = move || collapsible && has_body && fold.get().content_height >= 352.0;
+    let can_collapse = move || {
+        collapsible
+            && has_body
+            && fold.get().fold_threshold > 0.0
+            && fold.get().content_height >= fold.get().fold_threshold
+    };
     let measure_id = row.id.clone();
     let toggle_id = row.id.clone();
+    let threshold_id = row.id.clone();
     view()
+        .child(
+            view()
+                .accessible(false)
+                .pointer_events(PointerEvents::None)
+                .app_class(tw("absolute w-px h-[22rem] invisible"))
+                .on_layout(move |bounds: &Bounds<Points>| {
+                    let threshold = bounds.size.height.0;
+                    if state.read(&threshold_id).fold_threshold != threshold {
+                        state.update(&threshold_id, |state| state.fold_threshold = threshold);
+                    }
+                }),
+        )
         .child(has_body.then(|| {
             view()
                 // NSH has clipping but no CSS mask-image: the web's 1.75rem fade needs an NSH mask primitive.
@@ -716,17 +940,27 @@ fn user_message_body(row: &UserRow, context: &UserRowContext) -> AnyElement {
             heading_level_offset: 3,
         });
     }
-    // ChatMarkdown's renderer must apply BUBBLE_CHIP_CLASS_NAME's context-chip-message ink to its chips.
-    // TL-MARKDOWN owns the user plugins, context chips, line breaks and heading offset.
-    // Keep the original text until it exists: neither raw HTML nor context links are executed.
-    text(row.text.clone())
-        .select_text()
-        .app_class(tw("text-sm leading-relaxed text-message-foreground"))
+    let plugin = UserMarkdownPlugin {
+        row: Rc::new(row.clone()),
+        chip: context.context_chip.clone(),
+    };
+    let document = Parser::new()
+        .options(MarkdownOptions {
+            html: false,
+            ..Default::default()
+        })
+        .plugin(plugin.clone())
+        .markdown(&row.text);
+    nsh_base::text_view()
+        .document(Some(document))
+        .render_custom(Some(nsh_core::element::Renderer::new(move |node| {
+            plugin.render(node).unwrap_or_else(|| view().into_element())
+        })))
+        .selectable(true)
+        .classes(TextViewClasses::default())
+        .text_color(move || palette().message_foreground)
+        .app_class(tw("text-message-foreground text-sm leading-relaxed"))
         .into_element()
-}
-
-fn unsupported(reason: &str) -> impl IntoElement + use<> {
-    text(t(reason)).app_class(tw("text-xs text-muted-foreground"))
 }
 
 fn control_hit_slop(control_size: f32) -> EdgeInsets {
@@ -809,7 +1043,7 @@ pub fn user_file_card(file: FilePresentation) -> impl IntoElement {
     let hint = if !downloadable {
         t("Sending attachment")
     } else if disabled || file.open.is_none() {
-        t("Attachment actions are unavailable.")
+        download_label.clone()
     } else {
         download_label
     };
@@ -879,7 +1113,7 @@ pub fn user_file_attachment(file: FilePresentation) -> impl IntoElement {
     let disabled = download.is_none();
     let download_label = tr("Download {label}", &[("label", Value::Text(label))]);
     let hint = if disabled || file.open.is_none() {
-        t("Attachment actions are unavailable.")
+        download_label.clone()
     } else {
         download_label.clone()
     };
@@ -929,7 +1163,6 @@ pub fn media_block(
     ])));
     for (index, attachment) in images.iter().enumerate() {
         let ChatAttachment::Image(image) = &attachment.attachment else {
-            grid = grid.child(unsupported("Image preview is unavailable."));
             continue;
         };
         let snapshot = image.source.as_ref().and_then(Option::as_ref).is_some();
@@ -986,10 +1219,11 @@ pub fn media_block(
             ]))).child(text(image.name.clone())));
         }
         if snapshot && attachment.preview_url.is_some() {
-            frame = frame.child(snapshot_details.as_ref().map_or_else(
-                || unsupported("Snapshot details are unavailable.").into_element(),
-                |render| render(attachment),
-            ));
+            frame = frame.child(
+                snapshot_details
+                    .as_ref()
+                    .map_or_else(|| view().into_element(), |render| render(attachment)),
+            );
         }
         if framed {
             frame = frame.child(media_edge(if lone { &corners } else { "" }));

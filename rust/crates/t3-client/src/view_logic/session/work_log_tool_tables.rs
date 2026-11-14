@@ -555,6 +555,11 @@ fn tool_definition(name: &str) -> Option<ToolDefinition> {
             icon: "t3-code",
             action: "html-render",
         }),
+        "send_to_user" => Some(ToolDefinition {
+            labels: ["Send", "Sending", "Sent", "a message"],
+            icon: "t3-code",
+            action: "send-to-user",
+        }),
         _ => None,
     }
 }

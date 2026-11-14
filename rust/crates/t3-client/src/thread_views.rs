@@ -6,6 +6,7 @@ pub mod drafts;
 pub mod entities;
 pub mod languages;
 pub mod lists;
+pub mod messages_timeline;
 pub mod outbox;
 pub mod questions;
 pub mod relationships;
@@ -15,6 +16,7 @@ pub mod shelves;
 pub mod tag_filter;
 pub mod threads;
 pub mod undo;
+pub mod user_message;
 pub mod visits;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadShelf {

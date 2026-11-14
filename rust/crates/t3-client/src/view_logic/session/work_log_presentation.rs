@@ -20,7 +20,7 @@ pub fn normalize_compact_tool_label(value: &str) -> &str {
     }
     value.js_trim()
 }
-fn tool_id(value: &str) -> Option<String> {
+pub(crate) fn tool_id(value: &str) -> Option<String> {
     let label = normalize_compact_tool_label(value);
     let lower = label.to_ascii_lowercase();
     let candidate = if lower.starts_with("mcp__") {
@@ -952,6 +952,7 @@ pub fn summarize_t3_tool_calls(action: &str, calls: &[T3ToolSummaryCall]) -> T3T
         "environment-links" => Some(("Listed", "list", "", "linked environments", true)),
         "browser" => Some(("Used", "use", "", "browser", true)),
         "device" => Some(("Used", "use", "", "device controls", true)),
+        "send-to-user" => Some(("Sent", "send", "", "message", false)),
         "capabilities" => Some(("Checked", "check", "", "orchestration capabilities", true)),
         _ => None,
     };

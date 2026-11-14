@@ -158,6 +158,21 @@ impl ClientStore {
         self.publish(BTreeSet::from([Scope::Environment(environment.clone())]));
         true
     }
+    /// Sets the environment's connection state if `owner` still holds its connection claim
+    /// (`claim_sync(Scope::Environment(..))`): a replaced or removed connection cannot overwrite
+    /// its successor's state or bring a removed environment back.
+    pub fn publish_connection(
+        &self,
+        environment: &EnvironmentId,
+        owner: u64,
+        connection: crate::connection::ConnectionState,
+    ) -> bool {
+        if !self.owns_sync(&Scope::Environment(environment.clone()), owner) {
+            return false;
+        }
+        self.set_connection(environment.clone(), connection);
+        true
+    }
     pub fn claim_sync(&self, scope: Scope) -> u64 {
         let owner = {
             let mut inner = self.inner.borrow_mut();

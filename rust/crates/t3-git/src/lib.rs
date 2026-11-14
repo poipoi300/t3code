@@ -2,31 +2,44 @@
 //! This crate is server-only and does not target wasm32-unknown-unknown.
 
 mod actions;
+mod application;
+mod broadcaster;
 mod checkpoint;
 mod core;
 mod diagnostics;
 mod diff;
+mod followups;
 mod progress;
 mod registry;
 mod remotes;
 mod review;
 mod safety;
+mod setup_tracker;
 mod workflow;
 mod worktree;
+mod worktree_progress;
 pub use actions::{CheckoutRefresh, parse_commit_message};
 pub use actions::{CommitOptions, PreparedCommit, PushTarget};
+pub use application::{GitActionEffects, GitActionSubscription, GitApplicationService};
+pub use broadcaster::{
+    DEFAULT_VCS_FETCH_INTERVAL, DisabledVcsPolling, VcsBranchSubscription, VcsStatusBroadcaster,
+    VcsStatusPolicy, VcsStatusSubscription, refresh_failure_delay,
+};
 pub use core::parse_remote_ref;
 pub use core::{GitStatusDetails, LocalStatusOptions, RemoteStatusDetails};
 pub use diagnostics::{
     CommandError, INDEX_LOCKED_DETAIL, VcsFailure, classify_git_failure, classify_process_failure,
 };
+pub use followups::{CreatedPullRequestKey, GitActionFollowups, GitActionHost};
 pub use progress::{CommitProgress, CommitReporter};
 pub use registry::{ProjectConfigWarning, VcsDriverRegistry, VcsSelection, resolve_vcs_kind};
 pub use remotes::remote_repository_key;
 pub use review::RangeContext;
+pub use setup_tracker::{SetupTask, WorktreeSetupSubscription, WorktreeSetupTracker};
 pub use workflow::{
     ActionProgress, BranchHeadContext, GitManager, GitWorkflowService, PullRequestContent,
-    ReviewHost, available_feature_branch, matches_branch_head, sanitize_feature_branch,
+    ReviewHost, WorkflowTextGenerator, WorktreeCreationSettings, WorktreeHost,
+    available_feature_branch, matches_branch_head, sanitize_feature_branch,
 };
 
 pub use checkpoint::{CHECKPOINT_REF_PREFIX, checkpoint_ref};
@@ -46,6 +59,7 @@ pub use t3_process::{CancellationToken, OutputMode};
 use t3_process::{Environment, ProcessError, ProcessOptions, ProcessOutput, run};
 use tokio::sync::Semaphore;
 pub use worktree::{Worktree, WorktreeOptions, WorktreeSubmodules};
+pub use worktree_progress::{WorktreeCreationOptions, WorktreeProgress, WorktreeReporter};
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -154,6 +168,7 @@ pub struct Git {
     program: OsString,
     environment: Environment,
     cancellation: CancellationToken,
+    status_fetch_scope: Option<CancellationToken>,
     permits: Arc<Semaphore>,
     core: Arc<core::CoreState>,
     internal_paths: Option<(PathBuf, PathBuf)>,
@@ -168,6 +183,7 @@ impl Git {
             program: "git".into(),
             environment: Environment::new(),
             cancellation: CancellationToken::new(),
+            status_fetch_scope: None,
             permits: PERMITS.get_or_init(|| Arc::new(Semaphore::new(8))).clone(),
             core: Arc::new(core::CoreState::default()),
             internal_paths: None,

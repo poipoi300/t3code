@@ -1223,3 +1223,108 @@ fn an_endpoint_invalidated_mid_delivery_keeps_the_message_queued_for_retry() {
         }
     });
 }
+
+#[test]
+fn a_delivery_step_that_fails_outright_says_why_and_tries_again() {
+    // Review M7: the loop used to end on the first step error, leaving messages queued silently.
+    block_on(async {
+        use t3_client::platform::{StorageKey, StorageWrite};
+        let platform = Rc::new(FakePlatform::default());
+        let (store, generation) = store();
+        let earlier = Service::new(
+            key().environment,
+            platform.clone(),
+            store.clone(),
+            OrchestrationV2CreationSource::Web,
+        );
+        let id = earlier
+            .send_message(&key(), "after the stall".into())
+            .await
+            .expect("submit");
+        earlier.dispose();
+        let unreadable = StorageKey {
+            namespace: "operation-outbox".into(),
+            environment: Some(key().environment),
+            record: "garbled".into(),
+        };
+        platform
+            .write(
+                StorageArea::Ordinary,
+                vec![StorageWrite {
+                    key: unreadable.clone(),
+                    value: Some(b"{".to_vec()),
+                }],
+            )
+            .await
+            .expect("seed");
+
+        let (wire, mut requests) = mpsc::unbounded::<Frame>();
+        let (mut peer, incoming) = mpsc::unbounded::<Result<Frame, mpsc::SendError>>();
+        let (endpoint, rpc_driver) = rpc::session(wire, incoming, key().environment, grants(), 0);
+        let endpoint = Rc::new(endpoint);
+        let service = Service::new(
+            key().environment,
+            platform.clone(),
+            store,
+            OrchestrationV2CreationSource::Web,
+        );
+        let changes = service.changes();
+        let scenario = async {
+            service
+                .connect(generation, endpoint.clone(), config())
+                .expect("connect");
+            let mut stalled = changes
+                .filter_map(|()| futures::future::ready(service.delivery_problem().map(|_| ())));
+            stalled.next().await.expect("stall notification");
+            assert!(
+                service
+                    .delivery_problem()
+                    .is_some_and(|problem| problem.contains("Unreadable delivery records")),
+                "{:?}",
+                service.delivery_problem()
+            );
+            platform
+                .write(
+                    StorageArea::Ordinary,
+                    vec![StorageWrite {
+                        key: unreadable,
+                        value: None,
+                    }],
+                )
+                .await
+                .expect("repair");
+            platform.advance(1_000);
+            let command = request(requests.next().await.expect("dispatch after the backoff"));
+            assert_eq!(command.tag, "orchestration.dispatchCommand");
+            peer.send(Ok(codec::encode(&ServerMessage::<Value>::Exit {
+                request_id: command.id,
+                exit: Exit::success(json!({"sequence":9})),
+            })
+            .expect("encode")))
+                .await
+                .expect("reply");
+            let mut accepted = service.changes().filter_map(|()| {
+                futures::future::ready(
+                    matches!(service.state(&id), Some(SendState::Accepted { .. })).then_some(()),
+                )
+            });
+            if !matches!(service.state(&id), Some(SendState::Accepted { .. })) {
+                accepted.next().await.expect("accepted");
+            }
+            assert_eq!(service.delivery_problem(), None);
+        };
+        let supervised = async {
+            match futures::future::select(service.run(), scenario.boxed_local()).await {
+                futures::future::Either::Left((result, _)) => {
+                    panic!("the delivery loop ended: {result:?}")
+                }
+                futures::future::Either::Right(((), run)) => {
+                    service.dispose();
+                    assert!(run.await.is_ok());
+                }
+            }
+            endpoint.invalidate();
+        };
+        futures::join!(rpc_driver.run(futures::stream::pending(), || 0), supervised);
+    });
+}

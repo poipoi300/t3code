@@ -21,6 +21,8 @@ pub struct Worktree {
 pub enum WorktreeSubmodules {
     #[default]
     None,
+    Auto,
+    TopLevel,
     Recursive,
 }
 #[derive(Debug, Clone)]
@@ -98,11 +100,14 @@ impl Git {
         Ok(worktrees)
     }
     pub async fn add_worktree(&self, options: WorktreeOptions) -> Result<PathBuf, GitError> {
-        let result = self.add_worktree_inner(options).await;
+        self.add_worktree_with_progress(options, None).await
+    }
+    pub async fn add_worktree_with_progress(&self, options: WorktreeOptions, progress: Option<crate::WorktreeReporter>) -> Result<PathBuf, GitError> {
+        let result = self.add_worktree_inner(options, progress).await;
         self.invalidate_caches().await;
         result
     }
-    async fn add_worktree_inner(&self, options: WorktreeOptions) -> Result<PathBuf, GitError> {
+    async fn add_worktree_inner(&self, options: WorktreeOptions, progress: Option<crate::WorktreeReporter>) -> Result<PathBuf, GitError> {
         if options.reference != "-" {
             validate_revision(&options.reference)?;
         }
@@ -203,12 +208,15 @@ impl Git {
             path.as_os_str().to_owned(),
             target_branch.into(),
         ];
+        if let Some(progress) = &progress { progress(crate::WorktreeProgress::CheckoutStarted); }
         let result = self
             .execute(
                 &args,
                 ExecuteOptions {
                     timeout: None,
                     append_truncation_marker: true,
+                    env: crate::env(&[("GIT_PROGRESS_DELAY", "0"), ("LANGUAGE", "C")]),
+                    on_stderr_chunk: progress.clone().map(|reporter| crate::worktree_progress::lines(reporter, true)),
                     ..Default::default()
                 },
             )
@@ -219,18 +227,69 @@ impl Git {
             }
             return Err(error);
         }
-        if options.submodules == WorktreeSubmodules::Recursive
-            && path.join(".gitmodules").try_exists()?
-        {
-            self.at(&path)
-                .execute(
-                    &["submodule", "update", "--init", "--recursive"],
-                    ExecuteOptions {
-                        timeout: None,
-                        ..Default::default()
-                    },
-                )
-                .await?;
+        if let Some(progress) = &progress { progress(crate::WorktreeProgress::CheckoutFinished); }
+        if path.join(".gitmodules").try_exists()? {
+            let mut source = "settings";
+            let mode = if options.submodules == WorktreeSubmodules::Auto {
+                let project = tokio::fs::read_to_string(path.join("t3.json"))
+                    .await
+                    .ok()
+                    .and_then(|text| {
+                        serde_json::from_str::<t3_contracts::t3_project_file::T3ProjectFile>(&text)
+                            .ok()
+                    });
+                let configured = project.and_then(|project| project.worktree_submodules);
+                if configured.is_some() { source = "t3.json"; }
+                match configured {
+                    Some(t3_contracts::environment::WorktreeSubmodules::None) => {
+                        WorktreeSubmodules::None
+                    }
+                    Some(t3_contracts::environment::WorktreeSubmodules::TopLevel) => {
+                        WorktreeSubmodules::TopLevel
+                    }
+                    _ => WorktreeSubmodules::Recursive,
+                }
+            } else {
+                options.submodules
+            };
+            if mode != WorktreeSubmodules::None {
+                if let Some(progress) = &progress { progress(crate::WorktreeProgress::SubmodulesStarted); }
+                let git = self.at(&path);
+                let _lock = git.shared_config_lock().await;
+                let initialized = git
+                    .execute(
+                        &["submodule", "init"],
+                        ExecuteOptions {
+                            timeout: None,
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                drop(_lock);
+                let result = if initialized.is_ok() {
+                    let mut args = vec!["submodule", "update", "--init"];
+                    if mode == WorktreeSubmodules::Recursive {
+                        args.push("--recursive");
+                    }
+                    if progress.is_some() { args.push("--progress"); }
+                    let on_line = progress.clone().map(|reporter| crate::worktree_progress::lines(reporter, false));
+                    git
+                        .execute(
+                            &args,
+                            ExecuteOptions {
+                                timeout: None,
+                                append_truncation_marker: true,
+                                env: crate::env(&[("LANGUAGE", "C")]),
+                                on_stdout_chunk: on_line.clone(), on_stderr_chunk: on_line,
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                } else { initialized };
+                if let Some(progress) = &progress { progress(crate::WorktreeProgress::SubmodulesFinished { ok: result.is_ok() }); }
+            } else if let Some(progress) = &progress {
+                progress(crate::WorktreeProgress::SubmodulesDisabled { source });
+            }
         }
         Ok(path)
     }

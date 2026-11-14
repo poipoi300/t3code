@@ -31,6 +31,12 @@ pub enum TimelineContent {
         #[serde(rename = "htmlRender")]
         html_render: Value,
     },
+    /// What the agent showed the user mid-turn with `send_to_user`, in its own words.
+    SentMessage {
+        #[serde(rename = "runId")]
+        run_id: Option<IdOrIndex<RunId>>,
+        text: String,
+    },
     McpApp {
         #[serde(rename = "runId")]
         run_id: Option<IdOrIndex<RunId>>,
@@ -141,6 +147,15 @@ pub fn derive_timeline_entries_from_visible_turn_items(
         let created_at = projected_created_at(row);
         let mut id = id_key(items::id(item));
         let attempt = resolve_attempt(input, item);
+        let mut sent_message = match item {
+            OrchestrationV2TurnItem::DynamicTool(v)
+                if v.status == OrchestrationV2TurnItemStatus::Completed
+                    && html_render_from_tool_item(v).is_none() =>
+            {
+                sent_message_from_tool_item(v)
+            }
+            _ => None,
+        };
         let content = match item {
             OrchestrationV2TurnItem::UserMessage(_)
             | OrchestrationV2TurnItem::AssistantMessage(_) => {
@@ -245,6 +260,12 @@ pub fn derive_timeline_entries_from_visible_turn_items(
                     html_render: html_render_from_tool_item(v).unwrap_or(Value::Null),
                 }
             }
+            OrchestrationV2TurnItem::DynamicTool(v) if sent_message.is_some() => {
+                TimelineContent::SentMessage {
+                    run_id: v.run_id.clone(),
+                    text: sent_message.take().unwrap_or_default(),
+                }
+            }
             OrchestrationV2TurnItem::Fork(_)
             | OrchestrationV2TurnItem::Handoff(_)
             | OrchestrationV2TurnItem::RunInterruptRequest(_)
@@ -258,7 +279,10 @@ pub fn derive_timeline_entries_from_visible_turn_items(
                 entry: Box::new(projected_work_entry(row.clone())),
             },
         };
-        let html = matches!(content, TimelineContent::HtmlRender { .. });
+        let html = matches!(
+            content,
+            TimelineContent::HtmlRender { .. } | TimelineContent::SentMessage { .. }
+        );
         entries.push(Rc::new(TimelineEntry {
             id,
             created_at: created_at.clone(),

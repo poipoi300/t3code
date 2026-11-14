@@ -184,6 +184,30 @@ fn tool_result(item: &TurnItemDynamicTool) -> (Option<Value>, bool) {
         .map_or((None, false), |v| read_result(v, &mut budget, 0));
     (if budget.exceeded { None } else { result.0 }, result.1)
 }
+/// 4,000 UTF-16 units stay inside the 16 KiB read budget even as 3-byte characters.
+pub const SEND_TO_USER_MAX_LENGTH: usize = 4_000;
+
+/// The text `send_to_user` showed the user, which clients render as the agent's own words.
+pub fn sent_message_from_tool_item(item: &TurnItemDynamicTool) -> Option<String> {
+    let name = item.tool_name.as_ref()?.0.as_str();
+    // OpenCode 2 Code Mode reports a script's nested T3 calls as one `execute` item.
+    if name != "execute"
+        && crate::work_log::presentation::tool_id(name).as_deref() != Some("send_to_user")
+    {
+        return None;
+    }
+    let (output, failed) = tool_result(item);
+    if failed {
+        return None;
+    }
+    output?["sentMessage"]
+        .as_str()
+        .filter(|text| {
+            !text.js_trim().is_empty() && text.encode_utf16().count() <= SEND_TO_USER_MAX_LENGTH
+        })
+        .map(str::to_owned)
+}
+
 pub fn html_render_from_tool_item(item: &TurnItemDynamicTool) -> Option<Value> {
     let name = item.tool_name.as_ref()?.0.as_str();
     if name != "execute"

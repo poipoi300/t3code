@@ -147,9 +147,21 @@ async fn verified_recorded_package_publishes_compatible_disk_records_and_active_
     let path = lease.executable.path.clone();
     drop(lease);
     assert_eq!(
-        installation.remove(&[path]).await.unwrap_err(),
+        installation
+            .remove(std::slice::from_ref(&path))
+            .await
+            .unwrap_err(),
         ServiceError::Busy
     );
+    let missing = PathBuf::from(path.to_string_lossy().trim_start_matches(r"\\?\"))
+        .parent()
+        .unwrap()
+        .join("selected-but-not-materialized");
+    assert_eq!(
+        installation.remove(&[missing]).await.unwrap_err(),
+        ServiceError::Busy
+    );
+
     installation.remove(&[]).await.unwrap();
     assert_eq!(installation.state().phase, ProviderInstallPhase::Idle);
 }
