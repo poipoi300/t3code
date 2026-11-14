@@ -485,7 +485,11 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
     ) -> LocalBoxFuture<'static, Result<ThreadKey, ClientError>> {
         let service = self.clone();
         async move {
-            if !service.rewind_state(&key).can_fork { return Err(ClientError::Unsupported("forking this response")); }
+            // forkThreadFromRun dispatches without a provider-capability gate (the button already
+            // follows the item's session); only the operate permission is checked here.
+            if !service.can_operate(&key) {
+                return Err(ClientError::PermissionDenied { method: "orchestration.dispatchCommand".into() });
+            }
             let projection=service.projection(&key)?;
             let capabilities=crate::thread_views::threads::workflows::resolve_thread_provider_session(&projection).map(|s|&s.capabilities);
             if !projection.visible_turn_items.iter().any(|item|matches!(&item.item, OrchestrationV2TurnItem::AssistantMessage(message) if message.run_id==Some(IdOrIndex::Id(run.clone()))) && crate::thread_views::threads::workflows::can_fork_projected_assistant_item(item,capabilities)) {
