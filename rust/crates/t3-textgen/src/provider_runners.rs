@@ -366,6 +366,11 @@ pub fn claude_args(
     }
     args.push("--settings".into());
     args.push(claude_settings(run).to_string());
+    // `-p` skips the workspace trust check, so a checkout's own `.claude/settings*.json` would
+    // load: its allow rules add to the read-only list and its `env` can redirect the user's
+    // credential. Only the user's own settings apply (a review checkout is a fork's tree, and a
+    // commit runs in a checkout that may be a clone of a hostile repository).
+    args.extend(["--setting-sources", "user"].map(str::to_owned));
     if investigate {
         args.extend(
             [
