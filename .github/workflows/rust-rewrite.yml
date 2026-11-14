@@ -1,0 +1,331 @@
+# The Rust rewrite on Apple hosts: the shared UI built, launched and read on macOS and in the iOS
+# simulator, one change to the shared UI crate shown on both, and the client crates' tests.
+# The steps are the scripts in rust/tools/ci and rust/shells/ui.ps1, which run the same on a Mac.
+# Only GitHub's standard macOS runners: no secrets, no signing, nothing paid.
+name: Rust rewrite (Apple)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - rust-rewrite
+    paths:
+      - "rust/**"
+      - ".github/workflows/rust-rewrite.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-rewrite-${{ github.ref }}
+  cancel-in-progress: true
+
+# Naming bash makes GitHub run it with -eo pipefail, so `cargo … | tee log` fails when cargo does.
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  # The image's default Xcode, named so that a new default does not change the build unannounced.
+  DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+
+jobs:
+  # The small, certain part: the toolchain, the dependencies, a type-check of the shared crates for
+  # both Apple targets with the real SDK, then the macOS shell's build (compiles and links AppKit).
+  # The other jobs do not wait for it; each check step runs even when an earlier one failed.
+  check:
+    name: Check and build (Apple targets)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Set up
+        run: |
+          {
+            echo "CARGO_TARGET_DIR=$RUNNER_TEMP/target"
+            echo "T3_SHELLS_TARGET=$RUNNER_TEMP/shells"
+            echo "LOGS=$RUNNER_TEMP/logs"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/logs"
+          echo "+ rustup toolchain install (rust/rust-toolchain.toml) and the iOS simulator target"
+          (cd rust && rustup toolchain install && rustup target add aarch64-apple-ios-sim && rustc --version && cargo --version)
+          xcodebuild -version
+          sw_vers
+          sysctl -n hw.ncpu hw.memsize
+          df -h "$RUNNER_TEMP"
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-home-check-${{ hashFiles('rust/Cargo.lock', 'rust/crates/t3-ui/Cargo.lock', 'rust/shells/desktop/Cargo.lock') }}
+          restore-keys: cargo-home-check-
+
+      - name: Check t3-client and t3-platform for macOS
+        working-directory: rust
+        run: cargo check --locked --target aarch64-apple-darwin -p t3-client -p t3-platform 2>&1 | tee "$LOGS/check-client-platform-macos.log"
+
+      - name: Check t3-client and t3-platform for the iOS simulator
+        if: ${{ !cancelled() }}
+        working-directory: rust
+        run: cargo check --locked --target aarch64-apple-ios-sim -p t3-client -p t3-platform 2>&1 | tee "$LOGS/check-client-platform-ios-sim.log"
+
+      - name: Check t3-ui for macOS
+        if: ${{ !cancelled() }}
+        working-directory: rust/crates/t3-ui
+        run: cargo check --locked --target aarch64-apple-darwin --lib 2>&1 | tee "$LOGS/check-t3-ui-macos.log"
+
+      - name: Check t3-ui for the iOS simulator
+        if: ${{ !cancelled() }}
+        working-directory: rust/crates/t3-ui
+        run: cargo check --locked --target aarch64-apple-ios-sim --lib 2>&1 | tee "$LOGS/check-t3-ui-ios-sim.log"
+
+      - name: Build the macOS desktop shell
+        if: ${{ !cancelled() }}
+        run: |
+          pwsh -NoProfile -File rust/shells/ui.ps1 desktop-build 2>&1 | tee "$LOGS/build-desktop-macos.log"
+          file "$T3_SHELLS_TARGET/debug/t3-desktop" | tee -a "$LOGS/build-desktop-macos.log"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apple-check-logs
+          path: ${{ runner.temp }}/logs/*.log
+          if-no-files-found: warn
+
+  # Build the desktop shell, show its connect screen, pair with the dev server and show the thread
+  # list; then the one change, an incremental rebuild and the same captures again.
+  macos-desktop:
+    name: macOS desktop
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Set up
+        run: |
+          {
+            echo "T3_SHELLS_TARGET=$RUNNER_TEMP/shells"
+            echo "SERVER_TARGET=$RUNNER_TEMP/server-target"
+            echo "RUN=$RUNNER_TEMP/server-run"
+            echo "CAPTURES=$RUNNER_TEMP/captures"
+            echo "T3_CI_BIN=$RUNNER_TEMP/ci-bin"
+          } >> "$GITHUB_ENV"
+          (cd rust && rustup toolchain install && rustc --version)
+          xcodebuild -version
+          df -h "$RUNNER_TEMP"
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-home-macos-desktop-${{ hashFiles('rust/Cargo.lock', 'rust/crates/t3-ui/Cargo.lock', 'rust/shells/desktop/Cargo.lock') }}
+          restore-keys: cargo-home-macos-desktop-
+
+      - name: Build the server and the seeding tool
+        run: |
+          (cd rust && CARGO_TARGET_DIR="$SERVER_TARGET" cargo build --locked -p t3-server --bin t3)
+          (cd rust/crates/t3-ui && CARGO_TARGET_DIR="$T3_SHELLS_TARGET" cargo build --locked --example seed_thread)
+
+      - name: Build the desktop app
+        run: pwsh -NoProfile -File rust/shells/ui.ps1 desktop-build
+
+      - name: Start the dev server and seed a Replay thread
+        run: |
+          bash rust/tools/ci/server.sh start "$RUN" --t3 "$SERVER_TARGET/debug/t3"
+          bash rust/tools/ci/server.sh seed "$RUN" --seed "$T3_SHELLS_TARGET/debug/examples/seed_thread"
+
+      # Pairing drives the app's form through the Accessibility API; until a first run shows that
+      # the runner allows it, a failure there is a warning, and the connect screen is the gate.
+      - name: Capture before the change
+        run: |
+          url=$(bash rust/tools/ci/server.sh pair "$RUN")
+          bash rust/tools/ci/macos-desktop.sh --app "$T3_SHELLS_TARGET/debug/t3-desktop" --out "$CAPTURES"             --label before --pair-url "$url" --pairing-optional
+
+      - name: Make the one change in rust/crates/t3-ui
+        run: bash rust/tools/ci/one-change.sh apply
+
+      - name: Rebuild the desktop app
+        run: pwsh -NoProfile -File rust/shells/ui.ps1 desktop-build
+
+      - name: Capture after the change
+        run: |
+          url=$(bash rust/tools/ci/server.sh pair "$RUN")
+          bash rust/tools/ci/macos-desktop.sh --app "$T3_SHELLS_TARGET/debug/t3-desktop" --out "$CAPTURES"             --label after --pair-url "$url" --pairing-optional
+
+      - name: Check the change is on screen
+        run: bash rust/tools/ci/one-change.sh verify "$CAPTURES/before-macos-connect.txt" "$CAPTURES/after-macos-connect.txt" macOS | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Stop the dev server
+        if: always()
+        run: |
+          bash rust/tools/ci/server.sh stop "$RUN"
+          cp "$RUN/server.log" "$CAPTURES/" || true
+
+      - name: Upload captures and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apple-macos-desktop
+          path: |
+            ${{ runner.temp }}/captures/*.png
+            ${{ runner.temp }}/captures/*.txt
+            ${{ runner.temp }}/captures/*.log
+          if-no-files-found: warn
+
+  # Package the simulator app with the NSH CLI (its UIKit runner), install, launch and read its
+  # connect screen; then the one change, a rebuild and the same capture again.
+  ios-simulator:
+    name: iOS simulator
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Set up
+        run: |
+          {
+            echo "T3_SHELLS_TARGET=$RUNNER_TEMP/shells"
+            echo "CAPTURES=$RUNNER_TEMP/captures"
+            echo "T3_CI_BIN=$RUNNER_TEMP/ci-bin"
+          } >> "$GITHUB_ENV"
+          (cd rust && rustup toolchain install && rustc --version)
+          xcodebuild -version
+          xcrun simctl list runtimes available
+          df -h "$RUNNER_TEMP"
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-home-ios-simulator-${{ hashFiles('rust/crates/t3-ui/Cargo.lock', 'rust/shells/packaging.Cargo.lock') }}
+          restore-keys: cargo-home-ios-simulator-
+
+      - name: Install the NSH CLI at the UI's pin
+        run: pwsh -NoProfile -File rust/shells/ui.ps1 install-cli
+
+      - name: Build the simulator app
+        run: pwsh -NoProfile -File rust/shells/ui.ps1 ios-sim
+
+      - name: Capture before the change
+        run: bash rust/tools/ci/ios-sim.sh --app "$T3_SHELLS_TARGET/out/T3 Code Dev.app" --out "$CAPTURES" --label before
+
+      - name: Make the one change in rust/crates/t3-ui
+        run: bash rust/tools/ci/one-change.sh apply
+
+      - name: Rebuild the simulator app
+        run: pwsh -NoProfile -File rust/shells/ui.ps1 ios-sim
+
+      - name: Capture after the change
+        run: bash rust/tools/ci/ios-sim.sh --app "$T3_SHELLS_TARGET/out/T3 Code Dev.app" --out "$CAPTURES" --label after --shutdown
+
+      - name: Check the change is on screen
+        run: bash rust/tools/ci/one-change.sh verify "$CAPTURES/before-ios-connect.txt" "$CAPTURES/after-ios-connect.txt" iOS | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload captures and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apple-ios-simulator
+          path: |
+            ${{ runner.temp }}/captures/*.png
+            ${{ runner.temp }}/captures/*.txt
+            ${{ runner.temp }}/captures/*.log
+            ${{ runner.temp }}/captures/*.ips
+          if-no-files-found: warn
+
+  # One verdict for the requirement: the same edit shows on both Apple platforms.
+  one-change:
+    name: One change, both Apple platforms
+    needs: [macos-desktop, ios-simulator]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          sparse-checkout: rust/tools/ci
+
+      - name: Download the readings
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: apple-*
+          path: readings
+
+      - name: Check both platforms
+        run: |
+          status=0
+          bash rust/tools/ci/one-change.sh verify readings/apple-macos-desktop/before-macos-connect.txt readings/apple-macos-desktop/after-macos-connect.txt macOS || status=1
+          bash rust/tools/ci/one-change.sh verify readings/apple-ios-simulator/before-ios-connect.txt readings/apple-ios-simulator/after-ios-connect.txt iOS || status=1
+          exit $status
+
+  # The crates with Apple-specific code paths: t3-platform (keychain, the OS trust store, system
+  # proxy) and t3-client, then the UI crate's library tests (headless; no window or display).
+  tests:
+    name: Tests on macOS
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Set up
+        run: |
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/target" >> "$GITHUB_ENV"
+          (cd rust && rustup toolchain install && rustc --version)
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-home-tests-${{ hashFiles('rust/Cargo.lock', 'rust/crates/t3-ui/Cargo.lock') }}
+          restore-keys: cargo-home-tests-
+
+      - name: t3-client and t3-platform
+        working-directory: rust
+        run: cargo test --locked -p t3-client -p t3-platform
+
+      - name: t3-ui library
+        if: ${{ !cancelled() }}
+        working-directory: rust/crates/t3-ui
+        run: cargo test --locked --lib
