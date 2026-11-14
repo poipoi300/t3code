@@ -82,6 +82,29 @@ fn portable_budget_preserves_intact_priority_items_and_accounts_for_json_utf8() 
         0
     );
     assert_eq!(estimate_text_tokens("日本語 🧪"), 4);
+    let mut original = messages[0].clone();
+    original.item_id = TurnItemId("constraint".into());
+    original.text = "Preserve every line.\n\n  And this indentation.\n".into();
+    let mut huge = original.clone();
+    huge.item_id = TurnItemId("huge".into());
+    huge.role = HistoricalMessageRole::Assistant;
+    huge.text = "界🧪".repeat(20_000);
+    let mut old = huge.clone();
+    old.item_id = TurnItemId("old".into());
+    old.text = "a".repeat(4_000);
+    let mut recent = huge.clone();
+    recent.item_id = TurnItemId("recent".into());
+    recent.text = format!("Partial work: 日本語 🧪 مرحبا\n{}", "x".repeat(600));
+    let selected = budget.select(
+        vec![original.clone(), huge, old, recent.clone()],
+        "thread:handoff runs 1-4".into(),
+        0,
+        vec![],
+        3_000,
+    )?;
+    assert_eq!(selected.messages, vec![original, recent]);
+    assert_eq!(selected.omitted_items, 2);
+    assert!(selected.context.contains("huge") && selected.context.contains("old"));
     Ok(())
 }
 
@@ -237,6 +260,17 @@ fn real_history_budget_keeps_outcomes_excludes_reasoning_and_fits_counter_bounda
     assert_eq!(command.role, HistoricalMessageRole::Assistant);
     assert_eq!(command.kind, "command_execution");
     assert!(command.text.contains("Exit code: 1") && command.text.contains(&"界".repeat(300)));
+    let response = history_response_items(std::slice::from_ref(&command), "Historical activity");
+    assert_eq!(response[0]["role"], "user");
+    assert_eq!(response[1]["type"], "message");
+    assert_eq!(response[1]["role"], "assistant");
+    assert_eq!(response[1]["content"][0]["type"], "output_text");
+    assert!(
+        response[1]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("[Historical assistant; command_execution; thread=")
+    );
     let mut reasoning = super::provider_event_ingestor_test::item("reasoning", "item:reasoning");
     reasoning["text"] = "private reasoning".into();
     reasoning["streaming"] = false.into();
@@ -345,6 +379,24 @@ struct Inject {
     accepted: bool,
     persist: Arc<Persist>,
     calls: Mutex<usize>,
+}
+
+struct CaptureInjection {
+    requests: Mutex<Vec<(Vec<OrchestrationV2HistoricalMessage>, String)>>,
+}
+#[async_trait]
+impl HistoryInjection for CaptureInjection {
+    async fn inject(
+        &self,
+        messages: &[OrchestrationV2HistoricalMessage],
+        context: &str,
+    ) -> Result<bool> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push((messages.to_vec(), context.into()));
+        Ok(true)
+    }
 }
 #[async_trait]
 impl HistoryInjection for Inject {
@@ -484,12 +536,224 @@ async fn compaction_defers_inline_and_restores_uninjected_history() -> Result<()
             already_delivered: &seen,
             inject: Some(&inject),
         },
-        &Budget,
+        &PortableHandoffBudget,
         persist.clone(),
     )
     .await?;
     assert_eq!(delivery.context, "");
     assert_eq!(persist.0.lock().unwrap().last(), Some(&handoff));
+    let retained = vec![persist.0.lock().unwrap().last().unwrap().clone()];
+    let delivery = deliver_context_handoffs(
+        DeliveryInput {
+            handoffs: &retained,
+            provider_thread: &provider,
+            budget: 16_000,
+            defer_inline: false,
+            already_delivered: &seen,
+            inject: Some(&inject),
+        },
+        &PortableHandoffBudget,
+        persist.clone(),
+    )
+    .await?;
+    assert!(delivery.context.contains("Partial work"));
+    assert_eq!(
+        persist
+            .0
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .delivery
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .status,
+        ContextHandoffDeliveryStatus::Pending
+    );
+    delivery.delivered().await?;
+    assert_eq!(
+        persist
+            .0
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .delivery
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .status,
+        ContextHandoffDeliveryStatus::Inline
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn successful_injection_is_durable_before_start_skips_retries_and_refuses_zero_budget()
+-> Result<()> {
+    let (handoff, provider) = records();
+    let persistence = Arc::new(Persist::default());
+    let injection = CaptureInjection {
+        requests: Mutex::new(vec![]),
+    };
+    let seen = HashSet::new();
+    deliver_context_handoffs(
+        DeliveryInput {
+            handoffs: std::slice::from_ref(&handoff),
+            provider_thread: &provider,
+            budget: 16_000,
+            defer_inline: false,
+            already_delivered: &seen,
+            inject: Some(&injection),
+        },
+        &PortableHandoffBudget,
+        persistence.clone(),
+    )
+    .await?;
+    let receipts = persistence.0.lock().unwrap().clone();
+    assert_eq!(
+        receipts
+            .iter()
+            .map(|handoff| handoff
+                .delivery
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .status
+                .clone())
+            .collect::<Vec<_>>(),
+        vec![
+            ContextHandoffDeliveryStatus::Pending,
+            ContextHandoffDeliveryStatus::Injected
+        ]
+    );
+    let retry = deliver_context_handoffs(
+        DeliveryInput {
+            handoffs: &[receipts.last().unwrap().clone()],
+            provider_thread: &provider,
+            budget: 16_000,
+            defer_inline: false,
+            already_delivered: &seen,
+            inject: Some(&injection),
+        },
+        &PortableHandoffBudget,
+        persistence.clone(),
+    )
+    .await?;
+    assert!(retry.context.is_empty());
+    assert_eq!(injection.requests.lock().unwrap().len(), 1);
+    let before = persistence.0.lock().unwrap().len();
+    assert!(
+        deliver_context_handoffs(
+            DeliveryInput {
+                handoffs: &[handoff],
+                provider_thread: &provider,
+                budget: 0,
+                defer_inline: false,
+                already_delivered: &seen,
+                inject: Some(&injection)
+            },
+            &PortableHandoffBudget,
+            persistence.clone()
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(injection.requests.lock().unwrap().len(), 1);
+    assert_eq!(persistence.0.lock().unwrap().len(), before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn accumulated_handoffs_bound_recovery_markers_deduplicate_and_skip_already_delivered_items()
+-> Result<()> {
+    let (mut handoff, mut provider) = records();
+    handoff.thread_id =
+        t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(ThreadId("thread:handoff".into()));
+    provider.app_thread_id = Some(handoff.thread_id.clone());
+    let mut user = handoff.history.as_ref().unwrap().as_ref().unwrap().messages[0].clone();
+    user.text = "Preserve every line".into();
+    let mut partial = user.clone();
+    partial.item_id = TurnItemId("item:partial".into());
+    partial.role = HistoricalMessageRole::Assistant;
+    partial.text = format!("Partial work {}", "x".repeat(600));
+    handoff.history.as_mut().unwrap().as_mut().unwrap().messages = vec![user.clone(), partial];
+    let handoffs: Vec<_> = (0..100)
+        .map(|index| {
+            let mut handoff = handoff.clone();
+            handoff.id = t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(ContextHandoffId(
+                format!("handoff:retry:{index}"),
+            ));
+            handoff
+        })
+        .collect();
+    let capture = CaptureInjection {
+        requests: Mutex::new(vec![]),
+    };
+    let persistence = Arc::new(Persist::default());
+    deliver_context_handoffs(
+        DeliveryInput {
+            handoffs: &handoffs,
+            provider_thread: &provider,
+            budget: 2_500,
+            defer_inline: false,
+            already_delivered: &HashSet::new(),
+            inject: Some(&capture),
+        },
+        &PortableHandoffBudget,
+        persistence.clone(),
+    )
+    .await?;
+    let (messages, context) = capture.requests.lock().unwrap()[0].clone();
+    assert!(
+        context.contains("detailed coverage references omitted")
+            && context.contains("t3_thread_read")
+            && context.contains("thread:handoff")
+    );
+    assert!(!messages.is_empty());
+    assert!(PortableHandoffBudget.cost(&messages, &context) <= 2_500);
+    let mut extra = handoff.clone();
+    extra.id = t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(ContextHandoffId(
+        "handoff:extra".into(),
+    ));
+    let mut latest = user.clone();
+    latest.item_id = TurnItemId("item:latest".into());
+    latest.role = HistoricalMessageRole::Assistant;
+    latest.text = "Latest result".into();
+    extra
+        .history
+        .as_mut()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .messages
+        .push(latest);
+    let capture = CaptureInjection {
+        requests: Mutex::new(vec![]),
+    };
+    deliver_context_handoffs(
+        DeliveryInput {
+            handoffs: &[handoff, extra],
+            provider_thread: &provider,
+            budget: 2_500,
+            defer_inline: false,
+            already_delivered: &HashSet::from([user.item_id]),
+            inject: Some(&capture),
+        },
+        &PortableHandoffBudget,
+        persistence,
+    )
+    .await?;
+    let (messages, context) = capture.requests.lock().unwrap()[0].clone();
+    let serialized = serde_json::to_string(&history_response_items(&messages, &context))?;
+    assert!(serialized.len() <= 2_500);
+    assert!(!serialized.contains("Preserve every line"));
+    assert_eq!(serialized.matches("Partial work").count(), 1);
+    assert!(serialized.contains("Latest result"));
     Ok(())
 }
 

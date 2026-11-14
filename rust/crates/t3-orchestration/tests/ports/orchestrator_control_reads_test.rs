@@ -636,7 +636,7 @@ fn stop_requires_execution_records_to_end_preparation_and_holds_the_queue_either
         assert!(
             events
                 .iter()
-                .any(|event| event["type"] == "turn-item.created"
+                .any(|event| event["type"] == "turn-item.updated"
                     && event["payload"]["type"] == "run_interrupt_request")
         );
         assert!(events.iter().any(|event| event["type"] == "run.updated"

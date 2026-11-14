@@ -82,7 +82,7 @@ async fn opencode_sse_events_precede_the_concurrent_http_response_and_gates_canc
     )?;
     controller.subscribe()?;
     let cancellation = CancellationToken::new();
-    let (response, event, release) = tokio::join!(
+    let (response, event, _) = tokio::join!(
         controller.request("session.get", json!({"id":"s"})),
         controller.next_event(&cancellation),
         async {
@@ -90,7 +90,6 @@ async fn opencode_sse_events_precede_the_concurrent_http_response_and_gates_canc
             gate.release("held");
         }
     );
-    let _ = release;
     assert_eq!(response?["id"], "s");
     assert_eq!(event?.unwrap()["type"], "session.status");
     assert!(controller.next_event(&cancellation).await?.is_none());

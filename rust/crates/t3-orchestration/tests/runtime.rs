@@ -1,255 +1,33 @@
-//! The composed runtime end to end: a client creates a project and a thread, sends a message,
-//! watches the turn complete through the thread subscription, and a restart on the same
-//! database recovers to a settled thread.
-//!
-//! The provider sits behind the real adapter registry: package 12's Replay adapter when the
-//! `acp-adapter` feature is on, and otherwise a scripted adapter that replays one completed
-//! turn on `start_turn`.
+//! The composed runtime end to end on package 12's Replay provider: a client creates a project
+//! and a thread, sends a message, watches the turn complete through the thread subscription, and
+//! a restart on the same database recovers to a settled thread. Requires `acp-adapter`.
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
-use t3_contracts::{
-    orchestration_v2_id_table::IdOrIndex,
-    provider_instance::{ProviderDriverKind, ProviderInstanceId},
-    settings::ServerSettings,
-};
+use t3_contracts::settings::ServerSettings;
 use t3_orchestration::{
+    adapters::acp::{DEV_REPLAY_INSTANCE_ID, dev_replay_registration},
     api::*,
-    composition::{CheckpointPort, OrchestrationRuntime, RuntimePorts, StaticSettings},
+    composition::{CheckpointPort, OrchestrationRuntime, RandomIds, RuntimePorts, StaticSettings},
     error::{Error, Result},
     ports::{
         checkpoints_forks::checkpoint_service::CheckpointMetadata,
         sessions_recovery::provider_adapter_registry::AdapterRegistry,
         transport::live_stream_budget::LiveStreamLimits,
     },
-    provider::*,
     stores::StoreDatabase,
     testing::ManualClock,
     transport::service::ThreadSubscription,
 };
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const NOW: &str = "2026-11-13T12:00:00.000Z";
 const THREAD: &str = "thread:runtime";
-
-fn sample(name: &str) -> Value {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/samples")
-        .join(format!("{name}.jsonl"));
-    let text = std::fs::read_to_string(path).expect("sample fixture");
-    serde_json::from_str(text.lines().next().expect("sample line")).expect("sample json")
-}
-
-fn expanded<T: Clone>(id: &IdOrIndex<T>) -> ProviderResult<T> {
-    match id {
-        IdOrIndex::Id(id) => Ok(id.clone()),
-        _ => Err(ProviderError::Unsupported("compact id in scripted adapter")),
-    }
-}
-
-fn provider_error(error: serde_json::Error) -> ProviderError {
-    ProviderError::Operation {
-        operation: ProviderOperation::Open,
-        detail: error.to_string(),
-    }
-}
-
-struct ScriptedAdapter {
-    instance: ProviderInstanceId,
-    capabilities: OrchestrationV2ProviderCapabilities,
-}
-
-impl ScriptedAdapter {
-    fn new() -> Self {
-        Self {
-            instance: ProviderInstanceId("replay".into()),
-            capabilities: serde_json::from_value(
-                sample("OrchestrationV2ProviderSession")["capabilities"].clone(),
-            )
-            .expect("capabilities"),
-        }
-    }
-}
-
-#[async_trait]
-impl ProviderAdapter for ScriptedAdapter {
-    fn instance_id(&self) -> &ProviderInstanceId {
-        &self.instance
-    }
-    fn driver(&self) -> ProviderDriverKind {
-        ProviderDriverKind("replay".into())
-    }
-    async fn capabilities(&self) -> ProviderResult<OrchestrationV2ProviderCapabilities> {
-        Ok(self.capabilities.clone())
-    }
-    async fn plan_selection_transition(
-        &self,
-        _input: SelectionTransitionInput,
-    ) -> ProviderResult<SelectionTransitionPlan> {
-        Ok(SelectionTransitionPlan::ApplyOnNextTurn)
-    }
-    async fn open_session(
-        &self,
-        input: OpenSession,
-        _cancellation: CancellationToken,
-    ) -> ProviderResult<Arc<dyn SessionRuntime>> {
-        let mut session = sample("OrchestrationV2ProviderSession");
-        session["id"] = json!(input.provider_session_id);
-        session["driver"] = "replay".into();
-        session["providerInstanceId"] = "replay".into();
-        session["status"] = "ready".into();
-        session["model"] = json!(input.model_selection.model);
-        session["capabilities"] =
-            serde_json::to_value(&self.capabilities).map_err(provider_error)?;
-        Ok(Arc::new(ScriptedSession {
-            session: serde_json::from_value(session).map_err(provider_error)?,
-            subscribers: Mutex::new(Vec::new()),
-        }))
-    }
-}
-
-struct ScriptedSession {
-    session: OrchestrationV2ProviderSession,
-    subscribers: Mutex<Vec<mpsc::Sender<ProviderResult<ProviderEvent>>>>,
-}
-
-impl ScriptedSession {
-    fn event(kind: ProviderEventKind) -> ProviderEvent {
-        ProviderEvent {
-            driver: ProviderDriverKind("replay".into()),
-            kind,
-        }
-    }
-
-    /// One completed turn: started, an assistant reply, completed, terminal.
-    fn turn_events(input: &TurnInput) -> ProviderResult<Vec<ProviderEvent>> {
-        let provider_thread_id = expanded(&input.provider_thread.id)?;
-        let provider_turn_id = ProviderTurnId(format!("provider-turn:{}", input.run_id.0));
-        let turn = |status: &str, completed: Option<&str>| -> ProviderResult<ProviderEvent> {
-            let turn = json!({"id":provider_turn_id,"providerThreadId":provider_thread_id,"nodeId":input.root_node_id,"runAttemptId":input.attempt_id,"nativeTurnRef":null,"ordinal":input.provider_turn_ordinal,"status":status,"startedAt":NOW,"completedAt":completed});
-            Ok(Self::event(ProviderEventKind::Turn {
-                provider_turn: Box::new(serde_json::from_value(turn).map_err(provider_error)?),
-                thread_id: None,
-            }))
-        };
-        let reply = json!({"createdBy":"agent","creationSource":"server","id":format!("message:reply:{}", input.run_id.0),"threadId":input.thread_id,"runId":input.run_id,"nodeId":input.root_node_id,"role":"assistant","text":"Replayed reply","attachments":[],"streaming":false,"createdAt":NOW,"updatedAt":NOW});
-        Ok(vec![
-            turn("running", None)?,
-            Self::event(ProviderEventKind::Message(Box::new(
-                serde_json::from_value(reply).map_err(provider_error)?,
-            ))),
-            turn("completed", Some(NOW))?,
-            Self::event(ProviderEventKind::Terminal {
-                provider_thread_id,
-                provider_turn_id: provider_turn_id.clone(),
-                run_ordinal: input.run_ordinal,
-                disposition: ThreadDisposition::Reusable,
-                outcome: TerminalOutcome::Completed { reason: None },
-            }),
-        ])
-    }
-}
-
-#[async_trait]
-impl SessionRuntime for ScriptedSession {
-    fn session(&self) -> &OrchestrationV2ProviderSession {
-        &self.session
-    }
-    fn can_resume_after_restart(&self) -> bool {
-        true
-    }
-    fn background_tasks_end_with_process(&self) -> bool {
-        true
-    }
-    async fn subscribe(&self) -> ProviderResult<EventSubscription> {
-        let (sender, events) = mpsc::channel(64);
-        self.subscribers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(sender);
-        Ok(EventSubscription {
-            events,
-            cancellation: CancellationToken::new(),
-        })
-    }
-    async fn close(&self) -> ProviderResult<()> {
-        self.subscribers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
-        Ok(())
-    }
-    async fn ensure_thread(
-        &self,
-        input: EnsureThread,
-    ) -> ProviderResult<OrchestrationV2ProviderThread> {
-        let mut thread = match input.existing_provider_thread {
-            Some(thread) => serde_json::to_value(thread).map_err(provider_error)?,
-            None => {
-                let mut thread = sample("OrchestrationV2ProviderThread");
-                thread["id"] = format!("provider-thread:{}", input.thread_id.0).into();
-                thread["ownerNodeId"] = Value::Null;
-                thread["lastRunOrdinal"] = Value::Null;
-                thread["createdAt"] = NOW.into();
-                thread["updatedAt"] = NOW.into();
-                thread
-            }
-        };
-        thread["driver"] = "replay".into();
-        thread["providerInstanceId"] = "replay".into();
-        thread["providerSessionId"] = json!(self.session.id);
-        thread["appThreadId"] = json!(input.thread_id);
-        thread["nativeThreadRef"] = json!({"driver":"replay","nativeId":format!("native:{}", input.thread_id.0),"strength":"strong"});
-        serde_json::from_value(thread).map_err(provider_error)
-    }
-    async fn resume_thread(
-        &self,
-        input: ResumeThread,
-    ) -> ProviderResult<OrchestrationV2ProviderThread> {
-        Ok(input.provider_thread)
-    }
-    async fn start_turn(&self, input: TurnInput) -> ProviderResult<()> {
-        let events = Self::turn_events(&input)?;
-        let subscribers = self
-            .subscribers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        tokio::spawn(async move {
-            for event in events {
-                for subscriber in &subscribers {
-                    let _ = subscriber.send(Ok(event.clone())).await;
-                }
-            }
-        });
-        Ok(())
-    }
-    async fn steer_turn(&self, _input: SteerInput) -> ProviderResult<()> {
-        Err(ProviderError::Unsupported("steer_turn"))
-    }
-    async fn interrupt_turn(&self, _input: InterruptInput) -> ProviderResult<()> {
-        Err(ProviderError::Unsupported("interrupt_turn"))
-    }
-    async fn respond(&self, _input: RuntimeResponse) -> ProviderResult<()> {
-        Err(ProviderError::Unsupported("respond"))
-    }
-    async fn snapshot(
-        &self,
-        _thread: OrchestrationV2ProviderThread,
-    ) -> ProviderResult<ThreadSnapshot> {
-        Err(ProviderError::Unsupported("snapshot"))
-    }
-    async fn rollback(&self, _input: RollbackInput) -> ProviderResult<ThreadSnapshot> {
-        Err(ProviderError::Unsupported("rollback"))
-    }
-    async fn fork(&self, _input: ForkInput) -> ProviderResult<OrchestrationV2ProviderThread> {
-        Err(ProviderError::Unsupported("fork"))
-    }
-}
+/// The Replay scenario that answers without approvals.
+const MODEL: &str = "multi-turn";
 
 /// A workspace that is not a Git repository: capture is skipped, as for a plain folder.
 struct NoRepository;
@@ -312,76 +90,26 @@ impl CheckpointMetadata for NoRepository {
     }
 }
 
-/// The provider behind the real adapter registry.
-#[derive(Clone, Copy)]
-enum Provider {
-    /// The scripted adapter above, for builds without the ACP adapter.
-    Scripted,
-    /// Package 12's Replay adapter (`devReplay`, the dev server's free provider).
-    #[cfg(feature = "acp-adapter")]
-    Replay,
-}
-
-impl Provider {
-    fn instance(self) -> &'static str {
-        match self {
-            Self::Scripted => "replay",
-            #[cfg(feature = "acp-adapter")]
-            Self::Replay => t3_orchestration::adapters::acp::DEV_REPLAY_INSTANCE_ID,
-        }
-    }
-    fn driver(self) -> &'static str {
-        match self {
-            Self::Scripted => "replay",
-            #[cfg(feature = "acp-adapter")]
-            Self::Replay => "acpRegistry",
-        }
-    }
-    /// `multi-turn` replays an approval-free conversation.
-    fn model(self) -> &'static str {
-        match self {
-            Self::Scripted => "replay-model",
-            #[cfg(feature = "acp-adapter")]
-            Self::Replay => "multi-turn",
-        }
-    }
-    fn registry(
-        self,
-        // Only the Replay registration takes the clock.
-        #[cfg_attr(not(feature = "acp-adapter"), allow(unused_variables))] clock: Arc<dyn Clock>,
-    ) -> AdapterRegistry {
-        match self {
-            Self::Scripted => {
-                AdapterRegistry::from_adapters(vec![Arc::new(ScriptedAdapter::new())])
-            }
-            #[cfg(feature = "acp-adapter")]
-            Self::Replay => AdapterRegistry::new(vec![
-                t3_orchestration::adapters::acp::dev_replay_registration(
-                    clock,
-                    Arc::new(t3_orchestration::composition::RandomIds),
-                    false,
-                ),
-            ]),
-        }
-    }
-}
-
 async fn start(
     database: &Path,
-    provider: Provider,
     checkpoints: Arc<dyn CheckpointPort>,
 ) -> Result<OrchestrationRuntime> {
     let clock: Arc<dyn Clock> = Arc::new(ManualClock::new(NOW));
+    let registry = AdapterRegistry::new(vec![dev_replay_registration(
+        clock.clone(),
+        Arc::new(RandomIds),
+        false,
+    )]);
     let mut ports = RuntimePorts::new(
         StoreDatabase(t3_persistence::Database::open(database)?),
-        Arc::new(provider.registry(clock.clone())),
+        Arc::new(registry),
         checkpoints,
         clock,
     );
-    // Like the dev server's Replay provider: an instance only exists once it is configured.
+    // As the dev server configures Replay: an instance only exists once it is in settings.
     let mut settings = serde_json::to_value(ServerSettings::default())?;
-    settings["providerInstances"][provider.instance()] =
-        json!({"driver":provider.driver(),"enabled":true});
+    settings["providerInstances"][DEV_REPLAY_INSTANCE_ID] =
+        json!({"driver":"acpRegistry","displayName":"Replay (dev)","enabled":true});
     ports.settings = Arc::new(StaticSettings::new(serde_json::from_value(settings)?));
     OrchestrationRuntime::start(ports).await
 }
@@ -485,10 +213,7 @@ impl Workspace {
 }
 
 /// Reads the thread stream until a run settles; checks the turn's visible milestones.
-async fn await_completed_turn(
-    subscription: &mut ThreadSubscription,
-    provider: Provider,
-) -> Result<RunId> {
+async fn await_completed_turn(subscription: &mut ThreadSubscription) -> Result<RunId> {
     let mut statuses = Vec::new();
     let mut reply = None;
     let run_id = loop {
@@ -515,11 +240,7 @@ async fn await_completed_turn(
             break serde_json::from_value::<RunId>(run)?;
         }
     };
-    match provider {
-        Provider::Scripted => assert_eq!(reply.as_deref(), Some("Replayed reply")),
-        #[cfg(feature = "acp-adapter")]
-        Provider::Replay => assert!(reply.is_some_and(|text| !text.is_empty())),
-    }
+    assert!(reply.is_some_and(|text| !text.is_empty()));
     assert!(
         statuses.iter().any(|status| status == "running"),
         "{statuses:?}"
@@ -536,19 +257,18 @@ async fn await_completed_turn(
 /// thread subscription, then restarts on the same database: recovery finds nothing to repair
 /// and every run is settled.
 async fn client_turn_and_restart(
-    provider: Provider,
     directory: &Path,
     workspace: &Workspace,
 ) -> Result<OrchestrationV2ThreadProjection> {
     let database = directory.join("statev2.sqlite");
     let thread_id = ThreadId(THREAD.into());
 
-    let runtime = start(&database, provider, workspace.checkpoints.clone()).await?;
+    let runtime = start(&database, workspace.checkpoints.clone()).await?;
     runtime
         .project_command(serde_json::from_value(json!({"type":"project.create","commandId":"command:project","projectId":"project:runtime","title":"Runtime","workspaceRoot":workspace.path}))?)
         .await?;
     runtime
-        .dispatch_command(command(json!({"type":"thread.create","commandId":"command:thread","threadId":THREAD,"projectId":"project:runtime","title":"Runtime thread","modelSelection":{"instanceId":provider.instance(),"model":provider.model()},"runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"}))?)
+        .dispatch_command(command(json!({"type":"thread.create","commandId":"command:thread","threadId":THREAD,"projectId":"project:runtime","title":"Runtime thread","modelSelection":{"instanceId":DEV_REPLAY_INSTANCE_ID,"model":MODEL},"runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"}))?)
         .await?;
     let mut subscription = runtime
         .transport
@@ -560,12 +280,12 @@ async fn client_turn_and_restart(
     runtime
         .dispatch_command(command(json!({"type":"message.dispatch","commandId":"command:message","threadId":THREAD,"messageId":"message:runtime","text":"Hello","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"}))?)
         .await?;
-    let run_id = await_completed_turn(&mut subscription, provider).await?;
+    let run_id = await_completed_turn(&mut subscription).await?;
     subscription.close().await?;
     runtime.shutdown().await?;
     drop(runtime);
 
-    let restarted = start(&database, provider, workspace.checkpoints.clone()).await?;
+    let restarted = start(&database, workspace.checkpoints.clone()).await?;
     assert_eq!(restarted.recovery(), &RecoverySummary::default());
     let run = restarted
         .projections
@@ -593,7 +313,7 @@ async fn client_turn_and_restart(
 async fn a_message_runs_a_turn_and_a_restart_recovers_a_settled_thread() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let workspace = Workspace::plain(directory.path())?;
-    client_turn_and_restart(Provider::Scripted, directory.path(), &workspace).await?;
+    client_turn_and_restart(directory.path(), &workspace).await?;
     Ok(())
 }
 
@@ -603,8 +323,7 @@ async fn a_message_runs_a_turn_and_a_restart_recovers_a_settled_thread() -> Resu
 async fn a_turn_in_a_git_repository_captures_its_checkpoint() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let workspace = Workspace::repository(directory.path()).await?;
-    let projection =
-        client_turn_and_restart(Provider::Scripted, directory.path(), &workspace).await?;
+    let projection = client_turn_and_restart(directory.path(), &workspace).await?;
     let captured: Vec<_> = projection
         .checkpoints
         .iter()
@@ -620,14 +339,5 @@ async fn a_turn_in_a_git_repository_captures_its_checkpoint() -> Result<()> {
             ])
             .await?;
     }
-    Ok(())
-}
-
-#[cfg(feature = "acp-adapter")]
-#[tokio::test]
-async fn a_message_runs_a_replay_turn_and_a_restart_recovers_a_settled_thread() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let workspace = Workspace::plain(directory.path())?;
-    client_turn_and_restart(Provider::Replay, directory.path(), &workspace).await?;
     Ok(())
 }

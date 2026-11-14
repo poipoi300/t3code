@@ -18,6 +18,8 @@ async fn transcript_authorizes_and_maps_missing_and_oversized_history() {
     let fixture = TestDatabase::memory().unwrap();
     let (service, sink) = service(&fixture);
     seed(&fixture, &sink).await.unwrap();
+    let item = super::thread_stream_test::command("export-command", 1);
+    super::bounded_snapshot_transport_test::commit(&sink,vec![serde_json::from_value(serde_json::json!({"id":"export-row","threadId":"thread","type":"turn-item.updated","occurredAt":TEST_TIME,"payload":item})).unwrap()]).await.unwrap();
     let management = ThreadManagementService::new(ThreadManagementServices {
         reader: service.projections.clone(),
         committer: service.events.clone(),
@@ -72,6 +74,11 @@ async fn transcript_authorizes_and_maps_missing_and_oversized_history() {
         .unwrap();
     assert_eq!(transcript.title, "Test");
     assert_eq!(transcript.thread_id.0, "thread");
+    assert_eq!(transcript.items.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&transcript.items[0]).unwrap()["item"]["output"],
+        "private output"
+    );
     management.shutdown().await;
 }
 #[test]

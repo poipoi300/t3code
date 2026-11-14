@@ -343,7 +343,7 @@ mod reactor {
     use t3_contracts::{pull_request::*, thread_pull_request::*};
     use t3_orchestration::{
         api::*,
-        error::{Error, Result},
+        error::{Error, PullRequestHostError, Result},
         ports::thread_project::pull_request_watch_reactor::*,
         testing::{SequenceIds, TEST_TIME},
     };
@@ -358,6 +358,11 @@ mod reactor {
         detail_calls: AtomicUsize,
         activity_calls: AtomicUsize,
         page_calls: AtomicUsize,
+        host_failure: Mutex<Option<PullRequestHostError>>,
+        invalidations: Mutex<Vec<bool>>,
+        change_tick: tokio::sync::watch::Sender<u64>,
+        feed_entered: Mutex<Option<tokio::sync::mpsc::UnboundedSender<()>>>,
+        detail_entered: Mutex<Option<tokio::sync::mpsc::UnboundedSender<u64>>>,
         gate: Option<(
             tokio::sync::mpsc::UnboundedSender<()>,
             Arc<tokio::sync::Semaphore>,
@@ -394,13 +399,19 @@ mod reactor {
         json!({"host":"github.com","repository":"owner/repo","number":number,"url":format!("https://github.com/owner/repo/pull/{number}"),"source":"manual","linkedAt":"2026-09-02T00:00:00.000Z","snapshot":null,"stack":null,"watch":watch(passed, number)})
     }
     fn backend() -> Backend {
-        Backend { details: Mutex::new([(1,detail(1,"open","failure")),(2,detail(2,"open","failure"))].into_iter().collect()), activity: Mutex::new(serde_json::from_value(json!({"comments":[],"commentCount":0,"commentsTruncated":false,"reviewThreads":[],"commits":[]})).unwrap()), pages: Mutex::new(BTreeMap::new()), fingerprint: Mutex::new(Some(PullRequestWatchFingerprint { status: "status".into(), remarks: "remarks".into() })), activity_failure: AtomicBool::new(false), fingerprint_failure: AtomicBool::new(false), detail_calls: AtomicUsize::new(0), activity_calls: AtomicUsize::new(0), page_calls: AtomicUsize::new(0), gate: None }
+        Backend { details: Mutex::new([(1,detail(1,"open","failure")),(2,detail(2,"open","failure"))].into_iter().collect()), activity: Mutex::new(serde_json::from_value(json!({"comments":[],"commentCount":0,"commentsTruncated":false,"reviewThreads":[],"commits":[]})).unwrap()), pages: Mutex::new(BTreeMap::new()), fingerprint: Mutex::new(Some(PullRequestWatchFingerprint { status: "status".into(), remarks: "remarks".into() })), activity_failure: AtomicBool::new(false), fingerprint_failure: AtomicBool::new(false), detail_calls: AtomicUsize::new(0), activity_calls: AtomicUsize::new(0), page_calls: AtomicUsize::new(0), host_failure: Mutex::new(None), invalidations: Mutex::new(Vec::new()), change_tick: tokio::sync::watch::channel(0).0, feed_entered: Mutex::new(None), detail_entered: Mutex::new(None), gate: None }
     }
     #[async_trait]
     impl PullRequestBackend for Backend {
         async fn detail(&self, input: PullRequestRef) -> Result<PullRequestDetail> {
             assert_eq!(input.allow_stale, Some(Some(false)));
             self.detail_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(entered) = self.detail_entered.lock().unwrap().as_ref() {
+                entered.send(input.number).unwrap();
+            }
+            if let Some(error) = self.host_failure.lock().unwrap().clone() {
+                return Err(Error::PullRequestHost(error));
+            }
             if let Some((sender, gate)) = &self.gate {
                 sender.send(()).unwrap();
                 gate.acquire().await.unwrap().forget();
@@ -439,12 +450,27 @@ mod reactor {
             _: PullRequestRef,
         ) -> Result<Option<PullRequestWatchFingerprint>> {
             if self.fingerprint_failure.load(Ordering::SeqCst) {
-                return Err(Error::Service {
-                    operation: "watch.test.fingerprint",
+                return Err(Error::PullRequestHost(PullRequestHostError::RateLimited {
+                    retry_at: None,
                     detail: "host is paused".into(),
-                });
+                }));
             }
             Ok(self.fingerprint.lock().unwrap().clone())
+        }
+        async fn invalidate(
+            &self,
+            _: PullRequestInvalidateInput,
+            notify_readers: bool,
+        ) -> Result<()> {
+            self.invalidations.lock().unwrap().push(notify_readers);
+            Ok(())
+        }
+        async fn changes(&self, _: PullRequestRef) -> Result<tokio::sync::watch::Receiver<u64>> {
+            let changes = self.change_tick.subscribe();
+            if let Some(entered) = self.feed_entered.lock().unwrap().as_ref() {
+                entered.send(()).unwrap();
+            }
+            Ok(changes)
         }
         async fn refresh(
             &self,
@@ -765,6 +791,186 @@ mod reactor {
         assert!(matches!(reactor.sweep().await, Err(Error::Cancelled)));
         assert!(matches!(reactor.start().await, Err(Error::Cancelled)));
         reactor.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_reactor_only_ends_repeated_permanent_reads_and_resets_on_transport_failures()
+    -> Result<()> {
+        for failure in [
+            PullRequestHostError::NotFound {
+                detail: "gone".into(),
+            },
+            PullRequestHostError::Permanent {
+                detail: "auth".into(),
+            },
+            PullRequestHostError::Failed {
+                transient: true,
+                detail: "offline".into(),
+            },
+            PullRequestHostError::RateLimited {
+                retry_at: None,
+                detail: "paused".into(),
+            },
+        ] {
+            let harness = Harness::new(None, false);
+            seed(&harness, "thread", vec![link(1, false)]).await?;
+            let backend = Arc::new(backend());
+            *backend.host_failure.lock().unwrap() = Some(failure.clone());
+            let (reactor, commands) = reactor(&harness, backend.clone());
+            for _ in 0..7 {
+                reactor.sweep().await?;
+            }
+            assert!(commands.commands.lock().unwrap().is_empty());
+            *backend.host_failure.lock().unwrap() = Some(PullRequestHostError::Failed {
+                transient: true,
+                detail: "network outage".into(),
+            });
+            reactor.sweep().await?;
+            *backend.host_failure.lock().unwrap() = Some(failure.clone());
+            for _ in 0..7 {
+                reactor.sweep().await?;
+            }
+            assert!(commands.commands.lock().unwrap().is_empty());
+            reactor.sweep().await?;
+            let commands = commands.commands.lock().unwrap().clone();
+            if matches!(
+                failure,
+                PullRequestHostError::NotFound { .. } | PullRequestHostError::Permanent { .. }
+            ) {
+                assert_eq!(commands.len(), 1);
+                assert!(commands[0]["watch"].is_null());
+                assert!(
+                    commands[0]["wake"]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("8 times in a row")
+                );
+            } else {
+                assert!(commands.is_empty());
+            }
+            reactor.shutdown().await;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_reactor_host_feed_invalidates_and_notifies_readers_before_fresh_detail()
+    -> Result<()> {
+        let harness = Harness::new(None, false);
+        seed(&harness, "thread", vec![link(1, true)]).await?;
+        let backend = Arc::new(backend());
+        backend
+            .details
+            .lock()
+            .unwrap()
+            .insert(1, detail(1, "open", "success"));
+        let (feed, mut following) = tokio::sync::mpsc::unbounded_channel();
+        let (details, mut reads) = tokio::sync::mpsc::unbounded_channel();
+        *backend.feed_entered.lock().unwrap() = Some(feed);
+        *backend.detail_entered.lock().unwrap() = Some(details);
+        let (reactor, commands) = reactor(&harness, backend.clone());
+        reactor.start().await?;
+        reads.recv().await.unwrap();
+        following.recv().await.unwrap();
+        assert_eq!(*backend.invalidations.lock().unwrap(), vec![false]);
+        let before = commands.commands.lock().unwrap().len();
+        backend
+            .details
+            .lock()
+            .unwrap()
+            .insert(1, detail(1, "open", "failure"));
+        backend.fingerprint.lock().unwrap().as_mut().unwrap().status = "changed".into();
+        backend.change_tick.send_replace(1);
+        reads.recv().await.unwrap();
+        reactor.sweep().await?;
+        assert_eq!(
+            *backend.invalidations.lock().unwrap(),
+            vec![false, true, false]
+        );
+        let recorded = commands.commands.lock().unwrap();
+        assert_eq!(recorded.len(), before + 1);
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|command| command.get("wake").is_some())
+                .count(),
+            1
+        );
+        drop(recorded);
+        reactor.shutdown().await;
+        let before = backend.detail_calls.load(Ordering::SeqCst);
+        backend.change_tick.send_replace(2);
+        assert!(matches!(reactor.sweep().await, Err(Error::Cancelled)));
+        assert_eq!(backend.detail_calls.load(Ordering::SeqCst), before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_reactor_terminal_updates_contain_target_rejections_and_propagate_cancellation()
+    -> Result<()> {
+        struct RejectFirst {
+            calls: AtomicUsize,
+            cancelled: bool,
+            recorder: Arc<Recorder>,
+        }
+        #[async_trait]
+        impl CommandDispatcher for RejectFirst {
+            async fn dispatch(
+                &self,
+                command: OrchestrationV2ServerCommand,
+            ) -> Result<t3_orchestration::stores::receipts::CommandReceipt> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return if self.cancelled {
+                        Err(Error::Cancelled)
+                    } else {
+                        Err(Error::Rejected {
+                            command_id: CommandId("stale".into()),
+                            reason: "watch restarted during read".into(),
+                        })
+                    };
+                }
+                self.recorder.dispatch(command).await
+            }
+        }
+        for cancelled in [false, true] {
+            let harness = Harness::new(None, false);
+            seed(&harness, "one", vec![link(1, false)]).await?;
+            seed(&harness, "two", vec![link(1, false)]).await?;
+            let backend = Arc::new(backend());
+            backend
+                .details
+                .lock()
+                .unwrap()
+                .insert(1, detail(1, "merged", "success"));
+            let recorder = Arc::new(Recorder {
+                commands: Mutex::new(Vec::new()),
+                downstream: None,
+            });
+            let dispatcher = Arc::new(RejectFirst {
+                calls: AtomicUsize::new(0),
+                cancelled,
+                recorder: recorder.clone(),
+            });
+            let reactor = Arc::new(PullRequestWatchReactor::new(PullRequestWatchServices {
+                projections: harness.reader.clone(),
+                commands: dispatcher.clone(),
+                pull_requests: backend,
+                clock: harness.clock.clone(),
+                ids: Arc::new(SequenceIds::new("terminal")),
+            }));
+            let result = reactor.sweep().await;
+            if cancelled {
+                assert!(matches!(result, Err(Error::Cancelled)));
+                assert!(recorder.commands.lock().unwrap().is_empty());
+                assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 1);
+            } else {
+                result?;
+                assert_eq!(recorder.commands.lock().unwrap().len(), 1);
+                assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 2);
+            }
+            reactor.shutdown().await;
+        }
         Ok(())
     }
 }

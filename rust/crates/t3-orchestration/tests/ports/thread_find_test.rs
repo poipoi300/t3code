@@ -72,6 +72,14 @@ async fn repeated_find_uses_completed_counts_and_a_new_revision_invalidates_them
     assert_eq!(frame.complete, None);
     assert_eq!(frame.total_matches, 2);
     assert!(repeated.pull().await.unwrap().is_none());
+    let mut captured = find
+        .search_thread_stream(input(json!({"query":"RUST"})))
+        .await
+        .unwrap();
+    assert_eq!(
+        captured.pull().await.unwrap().unwrap().complete,
+        Some(false)
+    );
     let (_, sink) = service(&fixture);
     let mut item = command("item-later", 2);
     item["type"] = "assistant_message".into();
@@ -80,6 +88,8 @@ async fn repeated_find_uses_completed_counts_and_a_new_revision_invalidates_them
     item["streaming"] = false.into();
     item["attachments"] = json!([]);
     commit(&sink,vec![serde_json::from_value(json!({"id":"event-later","threadId":"thread","type":"turn-item.updated","occurredAt":t3_orchestration::testing::TEST_TIME,"payload":item})).unwrap()]).await.unwrap();
+    let captured = captured.pull().await.unwrap().unwrap();
+    assert_eq!(captured.total_matches, 2);
     let frame = find.search_thread(input(json!({}))).await.unwrap();
     assert_eq!(frame.total_matches, 3);
 }
@@ -135,4 +145,15 @@ async fn navigation_is_a_wrapped_seventeen_entry_window_and_no_match_is_complete
     assert_eq!(frame.total_matches, 0);
     assert!(frame.r#match.is_none());
     assert_eq!(frame.navigation, Some(vec![]));
+    let many = "rust ".repeat(3000);
+    let (_fixture, find) = fixture(&[&many]).await;
+    let frame = find
+        .search_thread(input(json!({"index":1499})))
+        .await
+        .unwrap();
+    assert_eq!(frame.total_matches, 3000);
+    assert_eq!(frame.r#match.unwrap().occurrence, 1499);
+    let navigation = frame.navigation.unwrap();
+    assert_eq!(navigation.len(), 1);
+    assert_eq!(navigation[0].count, 3000);
 }

@@ -413,13 +413,22 @@ async fn stop_and_queue_holding_interrupt_end_preparing_runs_hold_followups_and_
     for kind in ["thread.stop", "run.interrupt"] {
         let harness = Harness::new(None, false);
         harness.create("thread").await?;
+        let mut preparing = run("active", 1, "preparing");
+        preparing["startedAt"] = serde_json::Value::Null;
+        preparing["completedAt"] = serde_json::Value::Null;
+        preparing["workspacePreparation"] = json!({"type":"worktree","baseRef":"main"});
+        emit(&harness, "preparing", "run.created", preparing).await?;
+        let mut provider = provider_thread();
+        provider["providerSessionId"] = serde_json::Value::Null;
         emit(
             &harness,
-            "preparing",
-            "run.created",
-            run("active", 1, "preparing"),
+            "prepared-provider",
+            "provider-thread.updated",
+            provider,
         )
         .await?;
+        emit(&harness, "prepared-root", "node.updated", json!({"id":"node","threadId":"thread","runId":"active","parentNodeId":null,"rootNodeId":"node","kind":"root_turn","status":"pending","countsForRun":true,"providerThreadId":"provider-thread","providerTurnId":null,"nativeItemRef":null,"runtimeRequestId":null,"checkpointScopeId":null,"startedAt":null,"completedAt":null})).await?;
+        emit(&harness, "prepared-attempt", "run-attempt.created", json!({"id":"attempt","runId":"active","attemptOrdinal":1,"rootNodeId":"node","providerInstanceId":"codex","providerThreadId":"provider-thread","providerTurnId":null,"reason":"initial","status":"pending","startedAt":null,"completedAt":null})).await?;
         emit(
             &harness,
             "queued",
@@ -453,6 +462,12 @@ async fn stop_and_queue_holding_interrupt_end_preparing_runs_hold_followups_and_
             .find(|run| json!(run.id) == "active")
             .unwrap();
         assert_eq!(json!(active.status), "interrupted", "{kind}");
+        assert_eq!(
+            json!(projection.attempts[0].status),
+            "interrupted",
+            "{kind}"
+        );
+        assert_eq!(json!(projection.nodes[0].status), "interrupted", "{kind}");
         let queued = json!(
             projection
                 .runs

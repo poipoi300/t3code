@@ -211,7 +211,8 @@ process.stdout.write(JSON.stringify(JSON.parse(readFileSync(0,'utf8')).map(v2Pul
 async fn fixture_registry_metadata_equals_all_typescript_provider_variants()
 -> Result<(), Box<dyn std::error::Error>> {
     use t3_orchestration::ports::acp_replay::testkit::{
-        fixtures::index::replay_fixture_definitions, provider_replay_fixtures::fixture_cases,
+        fixtures::index::{RECORDED_FIXTURES, replay_fixture_definitions},
+        provider_replay_fixtures::{OWNED_OUTPUT_ASSERTIONS, fixture_cases},
     };
     let mut options=t3_process::ProcessOptions::new("node").args(["--input-type=module","--eval",r#"
 import {registerHooks} from 'node:module';
@@ -229,7 +230,32 @@ process.stdout.write(JSON.stringify(fixtures,(key,value)=>typeof value==='functi
             .iter()
             .map(|fixture| fixture.providers.len())
             .sum::<usize>(),
-        160
+        159
+    );
+    let steering = actual
+        .iter()
+        .find(|fixture| fixture.name == "message_steering")
+        .ok_or("steering fixture")?;
+    assert!(
+        !steering
+            .providers
+            .iter()
+            .any(|provider| provider.driver.0 == "grok")
+    );
+    for driver in ["fx", "acpRegistry"] {
+        let provider = steering
+            .providers
+            .iter()
+            .find(|provider| provider.driver.0 == driver)
+            .ok_or("interrupt/restart steering fixture")?;
+        assert_eq!(provider.assert_output, "assertGrokMessageSteeringOutput");
+        assert!(OWNED_OUTPUT_ASSERTIONS.contains(&provider.assert_output.as_str()));
+    }
+    assert_eq!(RECORDED_FIXTURES.len(), 170);
+    assert!(
+        !RECORDED_FIXTURES
+            .iter()
+            .any(|recording| recording.file == "message_steering/grok_transcript.ndjson")
     );
     assert_eq!(serde_json::to_value(actual)?, expected);
     assert_eq!(fixture_cases("cursor")?.len(), 10);

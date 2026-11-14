@@ -148,3 +148,18 @@ pub mod native {
         }
     }
 }
+
+#[cfg(all(feature = "codex-adapter", feature = "git-backend"))]
+#[tokio::test(start_paused = true)]
+async fn codex_recorded_simple_runs_through_fixture_host_and_real_git_checkpoints() -> Result<()> {
+    let (fixture, variant) = fixture_cases("codex")?
+        .into_iter()
+        .find(|(fixture, _)| fixture.name == "simple")
+        .ok_or(Error::Unsupported("Codex simple replay fixture"))?;
+    run_fixture_case(
+        &fixture, variant, &native::CodexFixtureFactory,
+        &t3_orchestration::ports::acp_replay::testkit::provider_replay_harness::git_fixture::GitReplayFixtureHost,
+        FixtureObservations::default(),
+    ).await?;
+    Ok(())
+}

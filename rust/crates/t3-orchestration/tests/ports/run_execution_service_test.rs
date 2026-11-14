@@ -4,6 +4,427 @@ use t3_orchestration::{
     api::*, error::Result, ports::runs_ingestion::run_execution_service::*, provider::*,
 };
 
+struct LifecycleHost {
+    events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+    fail_context: bool,
+}
+struct PreviewLog(std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>);
+impl PreviewActivity for PreviewLog {
+    fn end(self: Box<Self>) {
+        self.0.lock().unwrap().push("preview-end");
+    }
+}
+#[async_trait::async_trait]
+impl RunExecutionHost for LifecycleHost {
+    async fn app_context(&self, _thread: ThreadId) -> Result<Vec<AppModelContext>> {
+        self.events.lock().unwrap().push("app-context");
+        if self.fail_context {
+            return Err(t3_orchestration::error::Error::Unsupported(
+                "fixture MCP context failure",
+            ));
+        }
+        Ok(vec![AppModelContext {
+            item_id: TurnItemId("unsafe\"<🧪".into()),
+            text: "Keep this context verbatim".into(),
+        }])
+    }
+    async fn touch_mcp_credential(&self, _thread: ThreadId) -> Result<()> {
+        self.events.lock().unwrap().push("touch");
+        if self.fail_context {
+            return Err(t3_orchestration::error::Error::Unsupported(
+                "fixture credential refresh failure",
+            ));
+        }
+        Ok(())
+    }
+    fn begin_preview(&self, _thread: ThreadId) -> Box<dyn PreviewActivity> {
+        self.events.lock().unwrap().push("preview-begin");
+        Box::new(PreviewLog(self.events.clone()))
+    }
+    async fn run_started(&self, context: ProviderTurnAnalyticsContext) -> Result<()> {
+        assert_eq!(context.run_id, Some(RunId("run:test".into())));
+        assert!(matches!(
+            context.segment,
+            Some(ProviderTurnSegment::Attempt(RunAttemptReason::Initial))
+        ));
+        self.events.lock().unwrap().push("run-started");
+        Ok(())
+    }
+    async fn refresh_after_turn(&self, _project: ProjectId) -> Result<()> {
+        self.events.lock().unwrap().push("refresh-after-turn");
+        Err(t3_orchestration::error::Error::Unsupported(
+            "fixture refresh failure",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn snapshot_batches_normalize_inside_the_writer_and_flush_before_root_completion()
+-> Result<()> {
+    use super::{
+        provider_event_ingestor_test::Harness,
+        provider_turn_start_service_test::{finish, policy, seed, service, sessions},
+    };
+    use std::sync::Arc;
+    use t3_orchestration::ports::commit_worker::provider_commit_batch::ProviderCommitBatch;
+    use tokio_util::sync::CancellationToken;
+    let h = Harness::new().await?;
+    let state = seed(&h).await?;
+    let batches = ProviderCommitBatch::new((*h.sink).clone(), true);
+    let mut stats = batches.subscribe_stats();
+    let (adapter, _calls) = h.fake();
+    let adapter = Arc::new(adapter);
+    let mut start = service(&h, sessions(adapter.clone()));
+    start.execution = Arc::new((*start.execution).clone().with_batches(batches.clone()));
+    let handle = start
+        .start(
+            ThreadId("thread:test".into()),
+            RunId("run:test".into()),
+            policy(),
+            false,
+            CancellationToken::new(),
+        )
+        .await?
+        .unwrap();
+    adapter
+        .runtime
+        .emit(ProviderEvent {
+            driver: adapter.driver(),
+            kind: turn("pt:test", Some("attempt:test"), "turn:test"),
+        })
+        .await?;
+    let mut node = state.root_node;
+    node.id = t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(NodeId("node:batch".into()));
+    node.kind = ExecutionNodeKind::ToolCall;
+    node.status = ExecutionNodeStatus::Completed;
+    node.completed_at = Some(h.clock.now());
+    for _ in 0..2 {
+        adapter
+            .runtime
+            .emit(ProviderEvent {
+                driver: adapter.driver(),
+                kind: ProviderEventKind::Node(Box::new(node.clone())),
+            })
+            .await?;
+    }
+    for index in 0..8 {
+        let mut tool = item("dynamic_tool", &format!("item:batch:{index}"));
+        tool["toolName"] = "record".into();
+        tool["input"] = json!({"index":index});
+        tool["status"] = "completed".into();
+        tool["completedAt"] = json!(h.clock.now());
+        adapter
+            .runtime
+            .emit(ProviderEvent {
+                driver: adapter.driver(),
+                kind: ProviderEventKind::TurnItem {
+                    item: Box::new(decode(tool)),
+                    session_scoped: None,
+                },
+            })
+            .await?;
+    }
+    finish(&adapter, &h, handle).await?;
+    let mut jobs = 0;
+    while jobs < 10 {
+        let report = stats.recv().await.unwrap();
+        assert!(report.committed);
+        assert!(report.jobs <= 64);
+        assert!(report.bytes <= 1024 * 1024);
+        jobs += report.jobs;
+    }
+    assert_eq!(jobs, 10);
+    let stored = h
+        .sink
+        .events_by_command(CommandId(
+            "command:effect:provider-turn.start:run:test".into(),
+        ))
+        .await?;
+    let values = stored
+        .iter()
+        .map(|stored| t3_contracts::stored::to_value(&stored.event))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(
+        values
+            .iter()
+            .filter(
+                |event| event["type"] == "node.updated" && event["payload"]["id"] == "node:batch"
+            )
+            .count(),
+        1
+    );
+    assert_eq!(
+        values
+            .iter()
+            .filter(|event| event["type"] == "turn-item.updated"
+                && event["payload"]["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("item:batch:")))
+            .count(),
+        8
+    );
+    let projection = h
+        .reader
+        .projection(ThreadId("thread:test".into()))
+        .await?
+        .unwrap();
+    assert_eq!(projection.runs[0].status, OrchestrationV2RunStatus::Waiting);
+    assert_eq!(
+        projection
+            .turn_items
+            .iter()
+            .filter(|item| t3_contracts::stored::to_value(item).unwrap()["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("item:batch:")))
+            .count(),
+        8
+    );
+    start.execution.shutdown().await?;
+    batches.shutdown().await
+}
+
+#[tokio::test(start_paused = true)]
+async fn held_streaming_text_flushes_after_idle_and_keeps_its_reserved_position_before_later_items()
+-> Result<()> {
+    use super::{
+        provider_event_ingestor_test::Harness,
+        provider_turn_start_service_test::{finish, policy, seed, service, sessions},
+    };
+    use std::sync::Arc;
+    use t3_contracts::application_event::ApplicationStoredEvent;
+    use t3_orchestration::composition::StaticSettings;
+    use tokio_util::sync::CancellationToken;
+    for batched in [false, true] {
+        let h = Harness::new().await?;
+        let state = seed(&h).await?;
+        let batches = batched.then(|| {
+            t3_orchestration::ports::commit_worker::provider_commit_batch::ProviderCommitBatch::new(
+                (*h.sink).clone(),
+                true,
+            )
+        });
+        let (adapter, _calls) = h.fake();
+        let adapter = Arc::new(adapter);
+        let mut start = service(&h, sessions(adapter.clone()));
+        if let Some(batches) = &batches {
+            start.execution = Arc::new((*start.execution).clone().with_batches(batches.clone()));
+        }
+        let mut settings = serde_json::to_value(t3_contracts::settings::ServerSettings::default())?;
+        settings["responseStreamingMode"] = "turn".into();
+        settings["projectSettingsOverrides"]["project:test"] =
+            json!({"responseStreamingMode":"paragraph"});
+        start.execution = Arc::new((*start.execution).clone().with_settings(Arc::new(
+            StaticSettings::new(serde_json::from_value(settings)?),
+        )));
+        let handle = start
+            .start(
+                ThreadId("thread:test".into()),
+                RunId("run:test".into()),
+                policy(),
+                false,
+                CancellationToken::new(),
+            )
+            .await?
+            .unwrap();
+        let mut events = h.sink.subscribe();
+        adapter
+            .runtime
+            .emit(ProviderEvent {
+                driver: adapter.driver(),
+                kind: turn("pt:test", Some("attempt:test"), "turn:test"),
+            })
+            .await?;
+        let mut ghost = state.root_node;
+        ghost.id =
+            t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(NodeId("node:ghost".into()));
+        ghost.kind = ExecutionNodeKind::AssistantMessage;
+        ghost.status = ExecutionNodeStatus::Running;
+        adapter
+            .runtime
+            .emit(ProviderEvent {
+                driver: adapter.driver(),
+                kind: ProviderEventKind::Node(Box::new(ghost)),
+            })
+            .await?;
+        let mut held = item("assistant_message", "item:held");
+        held["messageId"] = "message:held".into();
+        held["providerTurnId"] = "turn:test".into();
+        held["text"] = "Incomplete paragraph".into();
+        held["streaming"] = true.into();
+        held["attachments"] = json!([]);
+        adapter
+            .runtime
+            .emit(ProviderEvent {
+                driver: adapter.driver(),
+                kind: ProviderEventKind::TurnItem {
+                    item: Box::new(decode(held.clone())),
+                    session_scoped: None,
+                },
+            })
+            .await?;
+        let mut later = item("dynamic_tool", "item:later");
+        later["toolName"] = "marker".into();
+        later["input"] = json!({});
+        later["status"] = "completed".into();
+        later["completedAt"] = json!(h.clock.now());
+        adapter
+            .runtime
+            .emit(ProviderEvent {
+                driver: adapter.driver(),
+                kind: ProviderEventKind::TurnItem {
+                    item: Box::new(decode(later)),
+                    session_scoped: None,
+                },
+            })
+            .await?;
+        loop {
+            if let ApplicationStoredEvent::Orchestration(stored) = events.recv().await.unwrap()
+                && let OrchestrationV2DomainEvent::TurnItemUpdated(event) = stored.event
+                && t3_contracts::stored::to_value(&event.payload)?["id"] == "item:later"
+            {
+                break;
+            }
+        }
+        assert!(
+            h.reader
+                .turn_item(
+                    ThreadId("thread:test".into()),
+                    TurnItemId("item:held".into())
+                )
+                .await?
+                .is_none()
+        );
+        let nodes = h
+            .reader
+            .records(
+                ThreadId("thread:test".into()),
+                vec![RecordKind::Nodes],
+                RecordFilter::default(),
+            )
+            .await?;
+        assert!(!nodes.records.iter().any(|records|matches!(records,ProjectionRecordSet::Nodes(nodes) if nodes.iter().any(|node|node.id==t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(NodeId("node:ghost".into()))))));
+        let positions=h.database.stores.read(|db| {
+        let position=|id:&str|db.query_row("SELECT ordinal FROM orchestration_v2_turn_item_positions WHERE thread_id='thread:test' AND turn_item_id=?1",[id],|row|row.get::<_,i64>(0));
+        Ok((position("item:held")?,position("item:later")?))
+    }).await?;
+        assert!(positions.0 < positions.1);
+        h.clock.set("2026-09-03T00:00:00.800Z");
+        tokio::time::advance(std::time::Duration::from_millis(800)).await;
+        loop {
+            if let ApplicationStoredEvent::Orchestration(stored) = events.recv().await.unwrap()
+                && let OrchestrationV2DomainEvent::TurnItemUpdated(event) = stored.event
+                && t3_contracts::stored::to_value(&event.payload)?["id"] == "item:held"
+            {
+                break;
+            }
+        }
+        let saved = t3_contracts::stored::to_value(
+            &h.reader
+                .turn_item(
+                    ThreadId("thread:test".into()),
+                    TurnItemId("item:held".into()),
+                )
+                .await?
+                .unwrap(),
+        )?;
+        assert_eq!(saved["text"], "Incomplete paragraph");
+        assert_eq!(saved["ordinal"], positions.0);
+        held["text"] = "Incomplete paragraph completed.".into();
+        held["streaming"] = false.into();
+        held["status"] = "completed".into();
+        held["completedAt"] = json!(h.clock.now());
+        adapter
+            .runtime
+            .emit(ProviderEvent {
+                driver: adapter.driver(),
+                kind: ProviderEventKind::TurnItem {
+                    item: Box::new(decode(held)),
+                    session_scoped: None,
+                },
+            })
+            .await?;
+        finish(&adapter, &h, handle).await?;
+        start.execution.shutdown().await?;
+        if let Some(batches) = batches {
+            batches.shutdown().await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn context_and_liveness_failures_do_not_block_a_restart_and_preview_ends_on_scope_cancellation()
+-> Result<()> {
+    use super::{
+        provider_event_ingestor_test::Harness,
+        provider_turn_start_service_test::{call, finish, policy, seed, service, sessions},
+    };
+    use std::sync::{Arc, Mutex};
+    use t3_orchestration::{error::Error, testing::FakeCall};
+    use tokio_util::sync::CancellationToken;
+    for cancel in [false, true] {
+        let h = Harness::new().await?;
+        let mut state = seed(&h).await?;
+        state.attempt.reason = RunAttemptReason::SteeringRestart;
+        h.write(
+            "run-attempt.updated",
+            t3_contracts::stored::to_value(&state.attempt)?,
+        )
+        .await?;
+        let (adapter, mut calls) = h.fake();
+        let adapter = Arc::new(adapter);
+        let mut service = service(&h, sessions(adapter.clone()));
+        let lifecycle = Arc::new(Mutex::new(vec![]));
+        service.execution = Arc::new((*service.execution).clone().with_host(Arc::new(
+            LifecycleHost {
+                events: lifecycle.clone(),
+                fail_context: true,
+            },
+        )));
+        let handle = service
+            .start(
+                ThreadId("thread:test".into()),
+                RunId("run:test".into()),
+                policy(),
+                false,
+                CancellationToken::new(),
+            )
+            .await?
+            .unwrap();
+        assert!(matches!(call(&mut calls).await, FakeCall::Open(_)));
+        assert!(matches!(call(&mut calls).await, FakeCall::Ensure(_)));
+        assert!(matches!(call(&mut calls).await, FakeCall::Subscribe));
+        let FakeCall::Start(turn) = call(&mut calls).await else {
+            panic!("expected start despite context failure")
+        };
+        assert!(turn.app_context.is_empty());
+        if cancel {
+            service.execution.shutdown().await?;
+            assert!(matches!(handle.settled().await, Err(Error::Cancelled)));
+        } else {
+            finish(&adapter, &h, handle).await?;
+            service.execution.shutdown().await?;
+        }
+        let events = lifecycle.lock().unwrap();
+        assert!(!events.contains(&"run-started"));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|&&event| event == "preview-end")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|&&event| event == "refresh-after-turn")
+                .count(),
+            usize::from(!cancel)
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_provider_turn_persists_items_drains_finalization_and_recovers_after_reopening_sqlite()
 -> Result<()> {
@@ -82,10 +503,25 @@ async fn a_provider_turn_persists_items_drains_finalization_and_recovers_after_r
         directory: None,
     };
     let h = Harness::with_database(database).await?;
-    seed(&h).await?;
+    let mut state = seed(&h).await?;
+    state.attempt.reason = RunAttemptReason::Initial;
+    h.write(
+        "run-attempt.updated",
+        t3_contracts::stored::to_value(&state.attempt)?,
+    )
+    .await?;
     let (adapter, mut calls) = h.fake();
     let adapter = Arc::new(adapter);
-    let start = service(&h, sessions(adapter.clone()));
+    let mut start = service(&h, sessions(adapter.clone()));
+    let lifecycle = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    start.execution = Arc::new(
+        (*start.execution)
+            .clone()
+            .with_host(Arc::new(LifecycleHost {
+                events: lifecycle.clone(),
+                fail_context: false,
+            })),
+    );
     let handle = start
         .start(
             ThreadId("thread:test".into()),
@@ -99,7 +535,16 @@ async fn a_provider_turn_persists_items_drains_finalization_and_recovers_after_r
     assert!(matches!(call(&mut calls).await, FakeCall::Open(_)));
     assert!(matches!(call(&mut calls).await, FakeCall::Ensure(_)));
     assert!(matches!(call(&mut calls).await, FakeCall::Subscribe));
-    assert!(matches!(call(&mut calls).await, FakeCall::Start(_)));
+    let FakeCall::Start(turn_input) = call(&mut calls).await else {
+        panic!("expected provider start")
+    };
+    assert_eq!(
+        turn_input.app_context,
+        vec![(
+            "mcp_app_unsafe____".into(),
+            "Keep this context verbatim".into()
+        )]
+    );
     adapter
         .runtime
         .emit(ProviderEvent {
@@ -144,6 +589,17 @@ async fn a_provider_turn_persists_items_drains_finalization_and_recovers_after_r
         })
         .await?;
     handle.settled().await?;
+    assert_eq!(
+        *lifecycle.lock().unwrap(),
+        vec![
+            "run-started",
+            "preview-begin",
+            "touch",
+            "app-context",
+            "refresh-after-turn",
+            "preview-end"
+        ]
+    );
     assert_eq!(
         h.reader
             .run(ThreadId("thread:test".into()), RunId("run:test".into()))

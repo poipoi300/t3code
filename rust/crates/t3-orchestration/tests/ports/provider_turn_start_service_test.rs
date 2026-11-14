@@ -143,6 +143,66 @@ pub fn sessions(adapter: Arc<FakeProviderAdapter>) -> Arc<Sessions> {
     })
 }
 
+pub(crate) struct ProjectComposer;
+impl t3_orchestration::ports::runs_ingestion::provider_turn_start_service::ComposerContextProjector
+    for ProjectComposer
+{
+    fn project(&self, message: &OrchestrationV2ConversationMessage) -> Result<String> {
+        assert!(message.text.contains("t3-context://"));
+        Ok("Read the resolved context\n\n<context>exact source data</context>".into())
+    }
+}
+
+#[tokio::test]
+async fn composer_projection_reaches_the_provider_without_rewriting_the_saved_message() -> Result<()>
+{
+    let h = Harness::new().await?;
+    seed(&h).await?;
+    let mut message = h
+        .reader
+        .run_message(ThreadId("thread:test".into()), RunId("run:test".into()))
+        .await?
+        .unwrap();
+    let original = "Read [source](t3-context://v1/file/file_context)";
+    message.text = original.into();
+    h.write("message.updated", t3_contracts::stored::to_value(&message)?)
+        .await?;
+    let (adapter, mut calls) = h.fake();
+    let adapter = Arc::new(adapter);
+    let start = service(&h, sessions(adapter.clone()));
+    let handle = start
+        .start_configured_with_projector(
+            ThreadId("thread:test".into()),
+            RunId("run:test".into()),
+            policy().with_reasoning_effort(None),
+            false,
+            CancellationToken::new(),
+            Some(Arc::new(ProjectComposer)),
+        )
+        .await?
+        .unwrap();
+    assert!(matches!(call(&mut calls).await, FakeCall::Open(_)));
+    assert!(matches!(call(&mut calls).await, FakeCall::Ensure(_)));
+    assert!(matches!(call(&mut calls).await, FakeCall::Subscribe));
+    let FakeCall::Start(turn) = call(&mut calls).await else {
+        panic!("expected start")
+    };
+    assert_eq!(
+        turn.message.text,
+        "Read the resolved context\n\n<context>exact source data</context>"
+    );
+    assert_eq!(
+        h.reader
+            .run_message(ThreadId("thread:test".into()), RunId("run:test".into()))
+            .await?
+            .unwrap()
+            .text,
+        original
+    );
+    finish(&adapter, &h, handle).await?;
+    start.execution.shutdown().await
+}
+
 pub fn policy() -> RuntimePolicy {
     resolve_base(&decode(fixture("OrchestrationV2AppThread")))
 }
@@ -637,6 +697,12 @@ async fn native_goal_defers_history_until_the_next_prompt_even_after_the_goal_ru
     );
     finish(&adapter, &h, handle).await?;
     let mut next = root_state();
+    let outside_repository=Arc::new(t3_orchestration::ports::runs_ingestion::provider_turn_start_service_testkit::NoRepositoryCheckpoints);
+    t3_orchestration::ports::checkpoints_forks::checkpoint_capture_service::CheckpointCaptureService {
+        checkpoints:Arc::new(t3_orchestration::ports::checkpoints_forks::checkpoint_service::CheckpointService::new(
+            outside_repository.clone(),outside_repository,Arc::new(t3_orchestration::ports::checkpoints_forks::checkpoint_service::WorkspaceLocks::default()))),
+        projections:h.reader.clone(),events:h.sink.clone(),ids:Arc::new(SequenceIds::new("goal-checkpoint")),clock:h.clock.clone(),
+    }.execute(ThreadId("thread:test".into()),RunId("run:test".into()),CheckpointScopeId("scope:test".into()),CancellationToken::new()).await?;
     next.run.id = IdOrIndex::Id(RunId("run:next".into()));
     next.run.ordinal = 2;
     next.run.status = OrchestrationV2RunStatus::Starting;
@@ -656,6 +722,7 @@ async fn native_goal_defers_history_until_the_next_prompt_even_after_the_goal_ru
     next.root_node.id = IdOrIndex::Id(NodeId("node:next".into()));
     next.root_node.run_id = Some(next.run.id.clone());
     next.root_node.status = ExecutionNodeStatus::Pending;
+    next.root_node.provider_turn_id = None;
     next.root_node.checkpoint_scope_id = Some(next.checkpoint_scope.id.clone());
     message.id = next.run.user_message_id.clone();
     message.run_id = Some(next.run.id.clone());
@@ -674,6 +741,35 @@ async fn native_goal_defers_history_until_the_next_prompt_even_after_the_goal_ru
     ] {
         h.write(kind, value).await?;
     }
+    let before = h
+        .reader
+        .turn_start_context(ThreadId("thread:test".into()), RunId("run:next".into()))
+        .await?;
+    assert!(
+        before
+            .projection
+            .messages
+            .iter()
+            .any(|message| message.text.starts_with("/goal ")),
+        "turn-start seam must include deferred control messages"
+    );
+    let goal_run = before
+        .projection
+        .runs
+        .iter()
+        .find(|run| run.id == IdOrIndex::Id(RunId("run:test".into())))
+        .unwrap();
+    assert_eq!(goal_run.status, OrchestrationV2RunStatus::Completed);
+    assert!(before.projection.messages.iter().any(|message| message.id
+        == goal_run.user_message_id
+        && message.text.starts_with("/goal ")));
+    assert!(
+        before.projection.context_handoffs[0]
+            .delivery
+            .as_ref()
+            .and_then(Option::as_ref)
+            .is_none()
+    );
     let handle = start
         .start(
             ThreadId("thread:test".into()),
@@ -707,12 +803,12 @@ async fn native_goal_defers_history_until_the_next_prompt_even_after_the_goal_ru
             .status,
         ContextHandoffDeliveryStatus::Inline
     );
-    // The second run uses its own attempt/node identity in the terminal stream.
     let mut turn = fixture("OrchestrationV2ProviderTurn");
     turn["id"] = "turn:next".into();
     turn["providerThreadId"] = "pt:test".into();
     turn["nodeId"] = "node:next".into();
     turn["runAttemptId"] = "attempt:next".into();
+    turn["ordinal"] = json!(prompt.provider_turn_ordinal);
     turn["status"] = "completed".into();
     turn["completedAt"] = json!(h.clock.now());
     adapter
@@ -948,11 +1044,22 @@ async fn resume_recovers_lost_or_uncertain_native_context_and_budget_exhaustion_
                     projection.context_transfers[0].status,
                     ContextTransferStatus::ResolvedPortable
                 );
-                assert!(
-                    projection
-                        .turn_items
-                        .iter()
-                        .any(|item| matches!(item, OrchestrationV2TurnItem::Handoff(_)))
+                let recovery_notice = projection
+                    .turn_items
+                    .iter()
+                    .find_map(|item| match item {
+                        OrchestrationV2TurnItem::Handoff(item)
+                            if item.title.as_deref() == Some("Recovered context") =>
+                        {
+                            Some(item)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    recovery_notice.ordinal,
+                    target.run.ordinal * 1_000_000,
+                    "recovery history must precede the current run's own message: {mode}"
                 );
                 assert_eq!(
                     turn.provider_thread

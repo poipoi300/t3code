@@ -38,6 +38,60 @@ async fn running_turn(h: &Harness) -> Result<OrchestrationV2ProviderTurn> {
 }
 
 #[tokio::test]
+async fn steering_uses_projected_composer_context_without_rewriting_the_saved_input()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let h = Harness::new().await?;
+    running_turn(&h).await?;
+    let mut message = h
+        .reader
+        .run_message(ThreadId("thread:test".into()), RunId("run:test".into()))
+        .await?
+        .unwrap();
+    let original = "Read [source](t3-context://v1/file/file_context)";
+    message.text = original.into();
+    h.write("message.updated", t3_contracts::stored::to_value(&message)?)
+        .await?;
+    let (adapter, mut calls) = h.fake();
+    let control = ProviderTurnControlService {
+        projections: h.reader.clone(),
+        sessions: sessions(Arc::new(adapter)),
+        events: h.sink.clone(),
+    };
+    control
+        .steer_with_projector(
+            SteerTurn {
+                target: target(),
+                message_id: match message.id.clone() {
+                    IdOrIndex::Id(id) => id,
+                    _ => unreachable!(),
+                },
+                model_selection: None,
+            },
+            CancellationToken::new(),
+            Some(Arc::new(
+                super::provider_turn_start_service_test::ProjectComposer,
+            )),
+        )
+        .await?;
+    let FakeCall::Steer(input) = call(&mut calls).await else {
+        panic!("expected native steering input")
+    };
+    assert_eq!(
+        input.message.text,
+        "Read the resolved context\n\n<context>exact source data</context>"
+    );
+    assert_eq!(
+        h.reader
+            .run_message(ThreadId("thread:test".into()), RunId("run:test".into()))
+            .await?
+            .unwrap()
+            .text,
+        original
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn historical_interrupt_requires_the_exact_committed_restart_replacement()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let h = Harness::new().await?;
