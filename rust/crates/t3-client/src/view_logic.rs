@@ -11,6 +11,7 @@ pub mod context_references;
 pub mod errors;
 #[path = "view_logic/onboarding.rs"]
 pub mod onboarding;
+pub mod provider_readiness;
 #[path = "view_logic/session.rs"]
 pub mod session;
 #[path = "view_logic/shell.rs"]

@@ -587,6 +587,15 @@ impl<P: Platform + Clone + 'static> LinkRequests<P> {
     }
 }
 
+/// Serves `peerLinks.list` and `peerLinks.answerRequest` on a fake environment, for other crates'
+/// tests, which cannot name the RPC call kinds.
+#[cfg(any(test, feature = "testing"))]
+pub fn serve_peer_links(server: &crate::testing::environment::FakeEnvironment) {
+    use t3_contracts::rpc::RpcMethod;
+    server.register(WsPeerLinksListRpc::TAG, t3_rpc::CallKind::Unary);
+    server.register(WsPeerLinksAnswerRequestRpc::TAG, t3_rpc::CallKind::Unary);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
