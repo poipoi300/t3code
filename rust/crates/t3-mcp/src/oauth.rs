@@ -65,7 +65,11 @@ impl ClientAuthenticator for OAuthAuthenticator {
             uri.scheme_str().unwrap_or("http")
         };
         let resource = reqwest::Url::parse(&format!("{scheme}://{host}{}", uri.path())).ok()?;
-        if self.resource.as_ref().is_some_and(|fixed| *fixed != resource) {
+        if self
+            .resource
+            .as_ref()
+            .is_some_and(|fixed| *fixed != resource)
+        {
             return None;
         }
         let session = self
