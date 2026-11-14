@@ -1,0 +1,118 @@
+{
+  "openCodeForkContinuationSessionId": "ses_e9f847594ffetYJnuLwILjFktF",
+  "openCodeForkMessages": [
+    {
+      "id": "msg_usageproofuser0000000000001",
+      "session_id": "ses_e9f85baeeffec3vOG8D972DJeK",
+      "type": "user",
+      "seq": 1,
+      "time_created": 1792619988283,
+      "time_updated": 1792620016408,
+      "data": "{\"time\":{\"created\":1792619988283},\"text\":\"Say usage proof\"}"
+    },
+    {
+      "id": "msg_usageproofassistant0000001",
+      "session_id": "ses_e9f85baeeffec3vOG8D972DJeK",
+      "type": "assistant",
+      "seq": 2,
+      "time_created": 1792619988284,
+      "time_updated": 1792620016408,
+      "data": "{\"time\":{\"created\":1792619988284,\"completed\":1792619988285},\"agent\":\"build\",\"model\":{\"id\":\"claude-sonnet-4-5\",\"providerID\":\"anthropic\"},\"content\":[{\"type\":\"text\",\"text\":\"usage proof\"}],\"finish\":\"stop\",\"cost\":0.01,\"tokens\":{\"input\":1000,\"output\":200,\"reasoning\":0,\"cache\":{\"read\":300,\"write\":0}}}"
+    },
+    {
+      "id": "msg_1607ab38e001GxURO0NU4GY4Az_1",
+      "session_id": "ses_e9f854c73ffezSCt9xY4yA99bP",
+      "type": "user",
+      "seq": 1,
+      "time_created": 1792619988283,
+      "time_updated": 1792620016408,
+      "data": "{\"time\":{\"created\":1792619988283},\"text\":\"Say usage proof\"}"
+    },
+    {
+      "id": "msg_1607ab38e001GxURO0NU4GY4Az_2",
+      "session_id": "ses_e9f854c73ffezSCt9xY4yA99bP",
+      "type": "assistant",
+      "seq": 2,
+      "time_created": 1792619988284,
+      "time_updated": 1792620016408,
+      "data": "{\"time\":{\"created\":1792619988284,\"completed\":1792619988285},\"agent\":\"build\",\"model\":{\"id\":\"claude-sonnet-4-5\",\"providerID\":\"anthropic\"},\"content\":[{\"type\":\"text\",\"text\":\"usage proof\"}],\"finish\":\"stop\",\"cost\":0.01,\"tokens\":{\"input\":1000,\"output\":200,\"reasoning\":0,\"cache\":{\"read\":300,\"write\":0}}}"
+    },
+    {
+      "id": "msg_1607b8a6d001MA7a5GgmyUywMf_1",
+      "session_id": "ses_e9f847594ffetYJnuLwILjFktF",
+      "type": "user",
+      "seq": 1,
+      "time_created": 1792619988283,
+      "time_updated": 1792620016408,
+      "data": "{\"time\":{\"created\":1792619988283},\"text\":\"Say usage proof\"}"
+    },
+    {
+      "id": "msg_1607b8a6d001MA7a5GgmyUywMf_2",
+      "session_id": "ses_e9f847594ffetYJnuLwILjFktF",
+      "type": "assistant",
+      "seq": 2,
+      "time_created": 1792619988284,
+      "time_updated": 1792620016408,
+      "data": "{\"time\":{\"created\":1792619988284,\"completed\":1792619988285},\"agent\":\"build\",\"model\":{\"id\":\"claude-sonnet-4-5\",\"providerID\":\"anthropic\"},\"content\":[{\"type\":\"text\",\"text\":\"usage proof\"}],\"finish\":\"stop\",\"cost\":0.01,\"tokens\":{\"input\":1000,\"output\":200,\"reasoning\":0,\"cache\":{\"read\":300,\"write\":0}}}"
+    },
+    {
+      "id": "msg_1607b8b990025w0634bKiaIXmD",
+      "session_id": "ses_e9f847594ffetYJnuLwILjFktF",
+      "type": "location-switched",
+      "seq": 6,
+      "time_created": 1792620071833,
+      "time_updated": 1792620071838,
+      "data": "{\"time\":{\"created\":1792620071833},\"location\":{\"directory\":\"/tmp/triage-23104\"},\"projectID\":\"98021609e205cae99a3b3545f6e3643a33b807b5\",\"subpath\":\"\",\"previous\":{\"location\":{\"directory\":\"/home/ubuntu/wt/issue-23104\"},\"projectID\":\"66c815350f7a94ca31c5664e5e983b8692210bdc\",\"subpath\":\"\"}}"
+    },
+    {
+      "id": "msg_1607b8ba5001oCiDSgDjIcR3Nc",
+      "session_id": "ses_e9f847594ffetYJnuLwILjFktF",
+      "type": "idle",
+      "seq": 7,
+      "time_created": 1792620071845,
+      "time_updated": 1792620071846,
+      "data": "{\"time\":{\"created\":1792620071845},\"outcome\":\"succeeded\"}"
+    }
+  ],
+  "openCodeForkSchema": [
+    "CREATE TABLE `session_v2` (\n    `id` text PRIMARY KEY,\n    `project_id` text NOT NULL,\n    `workspace_id` text,\n    `parent_id` text,\n    `fork_session_id` text,\n    `fork_boundary` text,\n    `slug` text NOT NULL,\n    `directory` text NOT NULL,\n    `path` text,\n    `title` text,\n    `version` text NOT NULL,\n    `share_url` text,\n    `summary_additions` integer,\n    `summary_deletions` integer,\n    `summary_files` integer,\n    `summary_diffs` text,\n    `metadata` text,\n    `cost` real DEFAULT 0 NOT NULL,\n    `tokens_input` integer DEFAULT 0 NOT NULL,\n    `tokens_output` integer DEFAULT 0 NOT NULL,\n    `tokens_reasoning` integer DEFAULT 0 NOT NULL,\n    `tokens_cache_read` integer DEFAULT 0 NOT NULL,\n    `tokens_cache_write` integer DEFAULT 0 NOT NULL,\n    `revert` text,\n    `permission` text,\n    `agent` text,\n    `model` text,\n    `time_created` integer NOT NULL,\n    `time_updated` integer NOT NULL,\n    `time_idle` integer,\n    `time_viewed` integer,\n    `idle_outcome` text,\n    `time_compacting` integer,\n    `time_archived` integer,\n    `time_suspended` integer,\n    `resume_attempts` integer DEFAULT 0 NOT NULL\n  )",
+    "CREATE TABLE `session_message` (\n    `id` text PRIMARY KEY,\n    `session_id` text NOT NULL,\n    `type` text NOT NULL,\n    `seq` integer NOT NULL,\n    `time_created` integer NOT NULL,\n    `time_updated` integer NOT NULL,\n    `data` text NOT NULL,\n    CONSTRAINT `fk_session_message_session_id_session_v2_id_fk` FOREIGN KEY (`session_id`) REFERENCES `session_v2`(`id`) ON DELETE CASCADE\n  )"
+  ],
+  "openCodeForkSessions": [
+    {
+      "id": "ses_e9f85baeeffec3vOG8D972DJeK",
+      "project_id": "66c815350f7a94ca31c5664e5e983b8692210bdc",
+      "fork_session_id": null,
+      "fork_boundary": null,
+      "slug": "mighty-engine",
+      "directory": "/home/ubuntu/wt/issue-23104",
+      "version": "2.1.2",
+      "time_created": 1792619988283,
+      "time_updated": 1792620016405
+    },
+    {
+      "id": "ses_e9f854c73ffezSCt9xY4yA99bP",
+      "project_id": "66c815350f7a94ca31c5664e5e983b8692210bdc",
+      "fork_session_id": "ses_e9f85baeeffec3vOG8D972DJeK",
+      "fork_boundary": "{\"type\":\"through\",\"messageID\":\"msg_usageproofassistant0000001\"}",
+      "slug": "silent-meadow",
+      "directory": "/home/ubuntu/wt/issue-23104",
+      "version": "2.1.2",
+      "time_created": 1792620016526,
+      "time_updated": 1792620016526
+    },
+    {
+      "id": "ses_e9f847594ffetYJnuLwILjFktF",
+      "project_id": "98021609e205cae99a3b3545f6e3643a33b807b5",
+      "fork_session_id": "ses_e9f854c73ffezSCt9xY4yA99bP",
+      "fork_boundary": "{\"type\":\"through\",\"messageID\":\"msg_1607ab38e001GxURO0NU4GY4Az_2\"}",
+      "slug": "playful-star",
+      "directory": "/tmp/triage-23104",
+      "version": "2.1.2",
+      "time_created": 1792620071533,
+      "time_updated": 1792620071833
+    }
+  ],
+  "openCodeForkSourceAssistantId": "msg_usageproofassistant0000001",
+  "openCodeForkSourceSessionId": "ses_e9f85baeeffec3vOG8D972DJeK"
+}

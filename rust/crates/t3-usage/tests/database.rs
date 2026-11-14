@@ -28,6 +28,115 @@ fn records(read: t3_usage::database::DatabaseRead) -> Vec<t3_usage::UsageRecord>
     assert!(read.errors.is_empty(), "{:?}", read.errors);
     read.files.into_iter().flat_map(|(_, r)| r).collect()
 }
+
+fn fork_database(root: &Path) -> (rusqlite::Connection, Value) {
+    let fixture: Value =
+        serde_json::from_slice(&fs::read(fixtures().join("opencode-forks.json")).unwrap()).unwrap();
+    let db = rusqlite::Connection::open(root.join("opencode.db")).unwrap();
+    for sql in fixture["openCodeForkSchema"].as_array().unwrap() {
+        db.execute_batch(sql.as_str().unwrap()).unwrap();
+    }
+    for s in fixture["openCodeForkSessions"].as_array().unwrap() {
+        db.execute("INSERT INTO session_v2 (id,project_id,fork_session_id,fork_boundary,slug,directory,version,time_created,time_updated) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",rusqlite::params![s["id"].as_str(),s["project_id"].as_str(),s["fork_session_id"].as_str(),s["fork_boundary"].as_str(),s["slug"].as_str(),s["directory"].as_str(),s["version"].as_str(),s["time_created"].as_i64(),s["time_updated"].as_i64()]).unwrap();
+    }
+    for m in fixture["openCodeForkMessages"].as_array().unwrap() {
+        db.execute(
+            "INSERT INTO session_message VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            rusqlite::params![
+                m["id"].as_str(),
+                m["session_id"].as_str(),
+                m["type"].as_str(),
+                m["seq"].as_i64(),
+                m["time_created"].as_i64(),
+                m["time_updated"].as_i64(),
+                m["data"].as_str()
+            ],
+        )
+        .unwrap();
+    }
+    (db, fixture)
+}
+#[test]
+fn opencode_recorded_forks_bill_copies_once_and_preserve_continuations() {
+    let temp = tempfile::tempdir().unwrap();
+    let (db, fixture) = fork_database(temp.path());
+    let continuation = fixture["openCodeForkContinuationSessionId"]
+        .as_str()
+        .unwrap();
+    let reply=json!({"time":{"created":1792620090000_i64},"model":{"id":"claude-sonnet-4-5","providerID":"anthropic"},"tokens":{"input":50,"output":10,"cache":{"read":1500}},"cost":0.02}).to_string();
+    db.execute("INSERT INTO session_message VALUES ('continued',?1,'assistant',8,1792620090000,1792620090500,?2)",rusqlite::params![continuation,reply]).unwrap();
+    let actual = records(read_opencode(temp.path(), 0.0));
+    assert_eq!(
+        actual
+            .iter()
+            .map(|r| (r.dedupe_key.as_deref(), r.session_id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                Some(
+                    format!(
+                        "opencode:{}",
+                        fixture["openCodeForkSourceAssistantId"].as_str().unwrap()
+                    )
+                    .as_str()
+                ),
+                fixture["openCodeForkSourceSessionId"].as_str().unwrap()
+            ),
+            (Some("opencode:continued"), continuation)
+        ]
+    );
+    assert_eq!(actual[0].totals.uncached_input_tokens, 1000);
+    assert_eq!(actual[0].reported_cost_usd, Some(0.01));
+}
+#[test]
+fn opencode_sibling_replies_and_deleted_or_unknown_fork_boundaries_keep_usage() {
+    let temp = tempfile::tempdir().unwrap();
+    let (db, fixture) = fork_database(temp.path());
+    let source = fixture["openCodeForkSourceSessionId"].as_str().unwrap();
+    let fork = fixture["openCodeForkSessions"][1]["id"].as_str().unwrap();
+    let copied = fixture["openCodeForkMessages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == fixture["openCodeForkSourceAssistantId"])
+        .unwrap();
+    db.execute("INSERT INTO session_v2 (id,project_id,fork_session_id,fork_boundary,slug,directory,version,time_created,time_updated) SELECT 'sibling',project_id,fork_session_id,fork_boundary,slug,directory,version,time_created,time_updated FROM session_v2 WHERE id=?1",[fork]).unwrap();
+    db.execute(
+        "INSERT INTO session_message VALUES ('sibling-copy','sibling','assistant',?1,?2,?2,?3)",
+        rusqlite::params![
+            copied["seq"].as_i64(),
+            copied["time_created"].as_i64(),
+            copied["data"].as_str()
+        ],
+    )
+    .unwrap();
+    let mut reply: Value = serde_json::from_str(copied["data"].as_str().unwrap()).unwrap();
+    reply["time"]["created"] = json!(1792620090000_i64);
+    for (id, session) in [("fork-reply", fork), ("sibling-reply", "sibling")] {
+        db.execute("INSERT INTO session_message VALUES (?1,?2,'assistant',3,1792620090000,1792620090000,?3)",rusqlite::params![id,session,reply.to_string()]).unwrap();
+    }
+    assert_eq!(
+        records(read_opencode(temp.path(), 0.0))
+            .iter()
+            .map(|r| r.session_id.as_str())
+            .collect::<Vec<_>>(),
+        [source, fork, "sibling"]
+    );
+    db.execute("DELETE FROM session_message WHERE session_id=?1", [source])
+        .unwrap();
+    db.execute("DELETE FROM session_v2 WHERE id=?1", [source])
+        .unwrap();
+    let remaining = records(read_opencode(temp.path(), 0.0));
+    let keys: Vec<_> = remaining
+        .iter()
+        .filter_map(|r| r.dedupe_key.as_deref())
+        .collect();
+    assert!(keys.contains(&"opencode:msg_1607ab38e001GxURO0NU4GY4Az_2"));
+    assert!(!keys.contains(&"opencode:msg_1607b8a6d001MA7a5GgmyUywMf_2"));
+    db.execute("UPDATE session_v2 SET fork_boundary='{}'", [])
+        .unwrap();
+    assert!(records(read_opencode(temp.path(), 0.0)).len() > remaining.len());
+}
 #[test]
 fn opencode_sqlite_and_legacy_messages_match_typescript_and_are_read_only() {
     let temp = tempfile::tempdir().unwrap();
@@ -83,6 +192,83 @@ fn opencode_reads_wal_updates_without_loading_message_bodies() {
     assert_eq!(
         records(read_opencode(temp.path(), 1780000000001.0)).len(),
         1
+    );
+}
+
+#[test]
+fn opencode_reuses_unchanged_sparse_rows_across_windows_and_invalidates_restores() {
+    use t3_usage::database::OpenCodeCache;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("opencode.db");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE message(id TEXT,session_id TEXT,time_created INTEGER,time_updated INTEGER,data TEXT)").unwrap();
+    for (rowid, created, id) in [(1000000, 1, "old"), (8, 3, "new"), (8000, 2, "middle")] {
+        db.execute(
+            "INSERT INTO message VALUES (?1,'s',?2,1,?3)",
+            rusqlite::params![
+                id,
+                created,
+                json!({"modelID":"m","tokens":{"input":100}}).to_string()
+            ],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE message SET rowid=?1 WHERE id=?2",
+            rusqlite::params![rowid, id],
+        )
+        .unwrap();
+    }
+    let mut cache = OpenCodeCache::default();
+    let first = cache.read(temp.path(), 0.0, 0.0);
+    assert_eq!(first.parsed_rows, 3);
+    assert_eq!(records(first).len(), 3);
+    let narrow = cache.read(temp.path(), 3.0, 0.0);
+    assert_eq!(narrow.parsed_rows, 0);
+    assert_eq!(records(narrow).len(), 1);
+    let wide = cache.read(temp.path(), 0.0, 0.0);
+    assert_eq!(wide.parsed_rows, 0);
+    assert_eq!(records(wide).len(), 3);
+    db.execute(
+        "UPDATE message SET time_updated=2,data=?1 WHERE id='new'",
+        [json!({"modelID":"m","tokens":{"input":900}}).to_string()],
+    )
+    .unwrap();
+    let changed = cache.read(temp.path(), 0.0, 0.0);
+    assert_eq!(changed.parsed_rows, 1);
+    assert_eq!(records(changed)[0].totals.uncached_input_tokens, 900);
+    drop(db);
+    let replacement = temp.path().join("replacement.db");
+    let write = |input| {
+        let db = rusqlite::Connection::open(&replacement).unwrap();
+        db.execute_batch("DROP TABLE IF EXISTS message; CREATE TABLE message(id TEXT,session_id TEXT,time_created INTEGER,time_updated INTEGER,data TEXT)").unwrap();
+        db.execute(
+            "INSERT INTO message VALUES ('new','s',3,2,?1)",
+            [json!({"modelID":"m","tokens":{"input":input}}).to_string()],
+        )
+        .unwrap();
+    };
+    write(500);
+    fs::remove_file(&path).unwrap();
+    fs::rename(&replacement, &path).unwrap();
+    assert_eq!(
+        records(cache.read(temp.path(), 0.0, 0.0))[0]
+            .totals
+            .uncached_input_tokens,
+        500
+    );
+    write(700);
+    fs::copy(&replacement, &path).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+        .unwrap();
+    assert_eq!(
+        records(cache.read(temp.path(), 0.0, 0.0))[0]
+            .totals
+            .uncached_input_tokens,
+        700
     );
 }
 #[test]

@@ -13,6 +13,113 @@ use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::dialog::{PopupOptions, dialog, dialog_popup};
 use crate::ui::icon::{Icon, icon};
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct IgnoredFileChoice {
+    pub file: t3_contracts::project::ProjectIgnoredFile,
+    pub size_label: String,
+    pub selected: bool,
+    pub disabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct IgnoredFilesView {
+    pub query: String,
+    pub can_search: bool,
+    pub show_search: bool,
+    pub loading: bool,
+    pub searching: bool,
+    pub truncated: bool,
+    pub all_shown_selected: bool,
+    pub selected_summary: String,
+    pub error: Option<Text>,
+    pub files: Vec<IgnoredFileChoice>,
+}
+
+/// Selection, default picks, totals and the debounced server query belong to t3-client.
+pub trait IgnoredFilesClient {
+    fn watch(&self) -> LocalBoxStream<'static, Rc<IgnoredFilesView>>;
+    fn set_query(&self, query: String) -> Result<(), Text>;
+    fn toggle_file(&self, path: &str, checked: bool) -> Result<(), Text>;
+    fn toggle_shown(&self) -> Result<(), Text>;
+}
+
+/// Port of AddProjectToMachineDialog.tsx's Copy ignored files section and IgnoredFileRow.
+pub fn ignored_files(client: Rc<dyn IgnoredFilesClient>) -> AnyElement {
+    let mut changes = client.watch();
+    let current = signal(None::<Rc<IgnoredFilesView>>);
+    let error = signal(None::<Text>);
+    spawn(async move {
+        while let Some(value) = changes.next().await {
+            current.set(Some(value));
+        }
+    });
+    let client = stored(client);
+    view().app_class(tw("flex flex-col gap-1.5"))
+        .child(view().app_class(tw("flex items-center gap-2"))
+            .child(text(t("Copy ignored files")).app_class(tw("flex-1")))
+            .child(text(move || current.get().map_or_else(String::new, |value| value.selected_summary.clone()))
+                .app_class(tw("text-muted-foreground text-xs")))
+            .child(dynamic(move || current.get().filter(|value| !value.files.is_empty()).map(|value| {
+                button(ButtonContent::Label(if value.all_shown_selected { t("None") } else { t("All") }),
+                    ButtonVariant::Ghost, ButtonSize::Xs, || false, move || {
+                        if let Err(message) = client.get().toggle_shown() { error.set(Some(message)); }
+                    })
+            }))))
+        .child(dynamic(move || current.get().filter(|value| value.can_search && value.show_search).map(|_| {
+            nsh_base::input().label(t("Search ignored files"))
+                .placeholder(t("Search ignored files"))
+                .value(move || current.get().map_or_else(String::new, |value| value.query.clone()))
+                .on_change(move |query: &str| {
+                    if current.get_untracked().is_some_and(|value| value.can_search)
+                        && let Err(message) = client.get().set_query(query.into()) { error.set(Some(message)); }
+                })
+                // This is never a form submit; Enter cannot trigger the clone operation.
+                .on_submit(|_: &str| {})
+                .submit_behavior(SubmitBehavior::Submit)
+        })))
+        .child(dynamic(move || {
+            let Some(value) = current.get() else { return Some(text(t("Finding ignored files…")).into_element()); };
+            if let Some(message) = error.get().or_else(|| value.error.clone()) {
+                return Some(text(message.resolve()).role(AccessibilityRole::Alert).app_class(tw("text-destructive-foreground text-xs")).into_element());
+            }
+            if !value.files.is_empty() { return None; }
+            Some(text(if value.loading { t("Finding ignored files…") } else if value.searching {
+                t("No ignored files match.")
+            } else { t("No ignored files to copy.") }).app_class(tw("text-muted-foreground text-xs")).into_element())
+        }))
+        .child(scroll().app_class(tw("max-h-52 rounded-md border"))
+            .child(dynamic(move || {
+                let mut rows = view();
+                let Some(value) = current.get() else { return rows; };
+                for choice in &value.files {
+                    let path = choice.file.path.0.clone();
+                    let current_path = path.clone();
+                    let disabled_path = path.clone();
+                    rows = rows.child(view().app_class(tw("flex items-center gap-2 px-3 py-2"))
+                        // UI-FORM's Checkbox translates runtime labels; file paths are content.
+                        .child(nsh_base::checkbox().accessibility_label(Some(path.clone().into()))
+                            .checked(move || current.get().is_some_and(|value| value.files.iter().any(|file| file.file.path.0 == current_path && file.selected)))
+                            .disabled(move || current.get().is_none_or(|value| value.files.iter().find(|file| file.file.path.0 == disabled_path).is_none_or(|file| file.disabled)))
+                            .on_change(move |checked: &bool| {
+                                if current.get_untracked().is_some_and(|value| value.files.iter().any(|file| file.file.path.0 == path && !file.disabled))
+                                    && let Err(message) = client.get().toggle_file(&path, *checked) { error.set(Some(message)); }
+                            }))
+                        .child(text(choice.file.path.0.clone()).app_class(tw("min-w-0 flex-1 truncate font-mono text-xs")))
+                        .child(text(choice.size_label.clone()).app_class(tw("shrink-0 text-muted-foreground text-xs"))));
+                }
+                rows
+            })))
+        .child(dynamic(move || current.get().filter(|value| value.truncated).map(|value| {
+            text(if value.can_search {
+                tr("Showing the first {count} files. Search to find the rest.", &[("count", Value::Int(value.files.len() as i64))])
+            } else { tr("Showing the first {count} files.", &[("count", Value::Int(value.files.len() as i64))]) })
+                .app_class(tw("text-muted-foreground text-xs"))
+        })))
+        .child(text(t("Files are copied after the clone finishes. Folders git ignores whole, like node_modules, are left out."))
+            .app_class(tw("text-muted-foreground text-xs")))
+        .into_element()
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Step {
     #[default]

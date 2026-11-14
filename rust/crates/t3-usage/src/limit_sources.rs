@@ -21,7 +21,66 @@ pub struct UsageLimitSources {
     lock: Mutex<()>,
     snapshots: watch::Sender<Vec<UsageLimitSourceSnapshot>>,
 }
+pub fn hub_pool_reset_at(
+    sources: &[UsageLimitSourceSnapshot],
+    driver: &str,
+    model: Option<&str>,
+    now: f64,
+) -> Option<String> {
+    let mut earliest: Option<f64> = None;
+    for account in sources
+        .iter()
+        .flat_map(|s| &s.accounts)
+        .filter(|a| a.driver.0 == driver)
+    {
+        if account
+            .usage_limits
+            .unavailable
+            .as_ref()
+            .is_some_and(Option::is_some)
+        {
+            return None;
+        }
+        let mut recovers: Option<f64> = None;
+        for window in account.usage_limits.windows.iter().filter(|w| matches!(&w.used_percent, t3_contracts::speech::SpeechNumber::Finite(n) if f64::from(n.clone()) >= 100.0) && crate::limits::window_limits_model(w,model)) {
+            let reset = crate::timestamp_ms(&window.resets_at.as_ref()?.as_ref()?.0)?;
+            recovers = Some(recovers.map_or(reset, |r| r.max(reset)));
+        }
+        let recovers = recovers.filter(|r| *r > now)?;
+        earliest = Some(earliest.map_or(recovers, |r| r.min(recovers)));
+    }
+    earliest.map(crate::iso)
+}
 impl UsageLimitSources {
+    pub async fn reset_at(
+        &self,
+        configs: &[SourceConfig],
+        driver: &str,
+        endpoint: &str,
+        model: Option<&str>,
+        clock: &dyn crate::service::Clock,
+    ) -> Option<String> {
+        let at_endpoint = || {
+            self.current()
+                .into_iter()
+                .filter(|s| {
+                    s.origin
+                        .as_ref()
+                        .and_then(Option::as_ref)
+                        .is_some_and(|o| o.0 == endpoint)
+                })
+                .collect::<Vec<_>>()
+        };
+        if at_endpoint().is_empty() {
+            return None;
+        }
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.refresh(configs, &crate::iso(clock.now_ms())),
+        )
+        .await;
+        hub_pool_reset_at(&at_endpoint(), driver, model, clock.now_ms())
+    }
     pub fn new(probe: Arc<dyn LimitSourceProbe>) -> Self {
         let (snapshots, _) = watch::channel(vec![]);
         Self {
@@ -70,6 +129,11 @@ impl UsageLimitSources {
                 })
         };
         let mut snapshot = json!({"id":config.id,"kind":"cliproxy","label":label,"checkedAt":checked_at,"accounts":[]});
+        if let Ok(url) = url::Url::parse(&config.url)
+            && matches!(url.scheme(), "http" | "https")
+        {
+            snapshot["origin"] = json!(url.origin().ascii_serialization());
+        }
         if config.management_key.is_empty() {
             snapshot["error"] = json!("No management key configured.");
         } else {

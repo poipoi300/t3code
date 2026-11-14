@@ -24,6 +24,122 @@ pub struct DatabaseRead {
     pub files: Vec<(PathBuf, Vec<UsageRecord>)>,
     pub missing: bool,
     pub errors: Vec<PathBuf>,
+    pub parsed_rows: usize,
+}
+#[derive(Default, Clone)]
+pub struct OpenCodeCache {
+    tables: HashMap<(PathBuf, String), CachedTable>,
+}
+#[derive(Clone)]
+struct CachedTable {
+    version: String,
+    rows: HashMap<i64, CachedRow>,
+}
+#[derive(Clone)]
+struct CachedRow {
+    updated: rusqlite::types::Value,
+    size: rusqlite::types::Value,
+    created: Option<f64>,
+    record: Option<UsageRecord>,
+}
+impl OpenCodeCache {
+    pub(crate) fn retained_size(&self) -> usize {
+        self.tables
+            .iter()
+            .map(|((path, table), cached)| {
+                path.as_os_str().len()
+                    + table.len()
+                    + cached.version.len()
+                    + cached
+                        .rows
+                        .values()
+                        .map(|row| 96 + row.record.as_ref().map_or(0, UsageRecord::retained_size))
+                        .sum::<usize>()
+            })
+            .sum()
+    }
+    pub fn read(&mut self, root: &Path, since: f64, retention_cutoff: f64) -> DatabaseRead {
+        self.read_bounded(root, since, retention_cutoff, &ScanBudget::default())
+    }
+    pub(crate) fn read_bounded(
+        &mut self,
+        root: &Path,
+        since: f64,
+        retention_cutoff: f64,
+        budget: &ScanBudget,
+    ) -> DatabaseRead {
+        read_opencode_cached(root, since, retention_cutoff, budget, self)
+    }
+}
+fn columns(c: &Connection, table: &str) -> Result<HashSet<String>, Error> {
+    Ok(c.prepare(&format!("PRAGMA table_info({table})"))?
+        .query_map([], |r| r.get(1))?
+        .collect::<Result<_, _>>()?)
+}
+#[derive(Debug)]
+struct Fork {
+    parent: String,
+    last_copied: f64,
+    created: f64,
+}
+fn read_forks(c: &Connection, tables: &HashSet<String>) -> Result<HashMap<String, Fork>, Error> {
+    let mut forks = HashMap::new();
+    if !tables.contains("session_v2")
+        || !tables.contains("session_message")
+        || !columns(c, "session_v2")?.contains("fork_boundary")
+        || !columns(c, "session_message")?.contains("seq")
+    {
+        return Ok(forks);
+    }
+    let mut statement = c.prepare(
+        "SELECT fork.id, fork.fork_session_id, fork.time_created,
+           (SELECT MAX(copied.seq) FROM session_message AS copied
+            WHERE copied.session_id=fork.fork_session_id
+              AND CASE json_extract(fork.fork_boundary,'$.type')
+                WHEN 'through' THEN copied.seq<=boundary.seq
+                WHEN 'before' THEN copied.seq<boundary.seq END)
+         FROM session_v2 AS fork
+         JOIN session_message AS boundary
+           ON boundary.session_id=fork.fork_session_id
+          AND boundary.id=json_extract(fork.fork_boundary,'$.messageID')
+         WHERE fork.fork_session_id IS NOT NULL AND json_valid(fork.fork_boundary)
+         LIMIT 20000",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        if let (Ok(id), Ok(parent), Ok(created), Ok(last_copied)) = (
+            row.get::<_, String>(0),
+            row.get::<_, String>(1),
+            row.get::<_, f64>(2),
+            row.get::<_, f64>(3),
+        ) {
+            forks.insert(
+                id,
+                Fork {
+                    parent,
+                    last_copied,
+                    created,
+                },
+            );
+        }
+    }
+    Ok(forks)
+}
+fn original_session<'a>(
+    session: &'a str,
+    seq: f64,
+    created: f64,
+    forks: &'a HashMap<String, Fork>,
+) -> &'a str {
+    let mut current = session;
+    let mut visited = HashSet::new();
+    while let Some(fork) = forks.get(current) {
+        if seq > fork.last_copied || created >= fork.created || !visited.insert(current) {
+            break;
+        }
+        current = &fork.parent;
+    }
+    current
 }
 fn tables(c: &Connection) -> Result<HashSet<String>, Error> {
     Ok(
@@ -95,9 +211,15 @@ pub fn parse_opencode_message(
 }
 
 pub fn read_opencode(root: &Path, since: f64) -> DatabaseRead {
-    read_opencode_bounded(root, since, &ScanBudget::default())
+    OpenCodeCache::default().read(root, since, since)
 }
-pub(crate) fn read_opencode_bounded(root: &Path, since: f64, budget: &ScanBudget) -> DatabaseRead {
+fn read_opencode_cached(
+    root: &Path,
+    since: f64,
+    retention_cutoff: f64,
+    budget: &ScanBudget,
+    cache: &mut OpenCodeCache,
+) -> DatabaseRead {
     let mut result = DatabaseRead {
         missing: true,
         ..Default::default()
@@ -146,55 +268,150 @@ pub(crate) fn read_opencode_bounded(root: &Path, since: f64, budget: &ScanBudget
             if !tables.contains("message") && !tables.contains("session_message") {
                 return Err(Error::ScanFailed("Missing OpenCode message tables".into()));
             }
+            let forks = read_forks(&c, &tables)?;
+            let mut originals = HashSet::new();
             for table in ["message", "session_message"] {
                 if !tables.contains(table) {
                     continue;
                 }
-                let columns: HashSet<String> = c
-                    .prepare(&format!("PRAGMA table_info({table})"))?
-                    .query_map([], |r| r.get(1))?
-                    .collect::<Result<_, _>>()?;
+                let columns = columns(&c, table)?;
                 let timestamp = if columns.contains("time_created") {
                     "time_created"
                 } else {
                     "NULL"
                 };
+                let updated = if columns.contains("time_updated") {
+                    "time_updated"
+                } else {
+                    "NULL"
+                };
+                let lineage =
+                    if table == "session_message" && !forks.is_empty() && columns.contains("seq") {
+                        "seq"
+                    } else {
+                        "NULL"
+                    };
                 let predicate = if table == "session_message" {
                     " AND type='assistant'"
                 } else {
                     ""
                 };
-                let query = format!(
-                    "SELECT id,session_id,{timestamp},json_object('tokens',data -> '$.tokens','cost',data -> '$.cost', \
-                    'model',data -> '$.model','modelID',data -> '$.modelID','providerID',data -> '$.providerID', \
-                    'time',data -> '$.time','id',data -> '$.id','sessionID',data -> '$.sessionID') FROM {table} \
-                    WHERE ({timestamp} IS NULL OR {timestamp} >= ?1){predicate} AND CASE WHEN typeof(data)='text' AND json_valid(data) \
-                    THEN json_type(data,'$.role') IS NULL OR data ->> '$.role'='assistant' END ORDER BY rowid LIMIT 20000"
-                );
-                let mut statement = c.prepare(&query)?;
+                let version = if updated == "NULL" {
+                    &c.fingerprint
+                } else {
+                    &c.main_fingerprint
+                };
+                let key = (path.clone(), table.to_owned());
+                let reusable = cache.tables.get(&key).filter(|t| &t.version == version);
+                let mut listed = Vec::new();
+                let mut statement=c.prepare(&format!("SELECT rowid,{updated},octet_length(data),{timestamp},{lineage} FROM {table} WHERE ({timestamp} IS NULL OR {timestamp}>=?1){predicate} ORDER BY rowid LIMIT 20000"))?;
                 let mut rows = statement.query([since])?;
                 while let Some(row) = rows.next()? {
-                    let raw: String = row.get(3)?;
-                    budget.charge(raw.len() as u64)?;
-                    let value = match project_json(raw.as_bytes(), &Value::Bool(true)) {
-                        Ok(value) => value,
-                        Err(_) => continue,
-                    };
-                    let id = row.get::<_, String>(0).unwrap_or_default();
-                    let session = row.get::<_, String>(1).unwrap_or_default();
-                    if let Some(r) = parse_opencode_message(&value, &id, &session, row.get(2).ok())
-                        && r.timestamp_ms >= since
-                        && r.dedupe_key.as_ref().is_none_or(|k| seen.insert(k.clone()))
+                    listed.push((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, rusqlite::types::Value>(1)?,
+                        row.get::<_, rusqlite::types::Value>(2)?,
+                        row.get::<_, Option<f64>>(3)?,
+                        row.get::<_, Option<f64>>(4)?,
+                    ));
+                }
+                let mut cached = HashMap::new();
+                let mut misses = Vec::new();
+                for row in &listed {
+                    if let Some(hit) = reusable
+                        .and_then(|t| t.rows.get(&row.0))
+                        .filter(|h| h.updated == row.1 && h.size == row.2)
                     {
-                        let bytes = serde_json::to_vec(&r)?.len();
-                        budget.retain(bytes)?;
-                        retained += bytes;
-                        if records.len() >= MAX_RECORDS || retained > MAX_RETAINED_BYTES {
-                            return Err(safety::exceeded().into());
-                        }
-                        records.push(r);
+                        cached.insert(row.0, hit.clone());
+                    } else {
+                        misses.push(row);
                     }
                 }
+                for page in misses.chunks(64) {
+                    let placeholders = vec!["?"; page.len()].join(",");
+                    let query = format!(
+                        "SELECT rowid,id,session_id,{timestamp},json_object('tokens',data -> '$.tokens','cost',data -> '$.cost',                         'model',data -> '$.model','modelID',data -> '$.modelID','providerID',data -> '$.providerID',                         'time',data -> '$.time','id',data -> '$.id','sessionID',data -> '$.sessionID') FROM {table}                         WHERE rowid IN ({placeholders}) AND CASE WHEN typeof(data)='text' AND json_valid(data)                         THEN json_type(data,'$.role') IS NULL OR data ->> '$.role'='assistant' END ORDER BY rowid"
+                    );
+                    let mut statement = c.prepare(&query)?;
+                    let mut rows =
+                        statement.query(rusqlite::params_from_iter(page.iter().map(|r| r.0)))?;
+                    let mut parsed = HashMap::new();
+                    while let Some(row) = rows.next()? {
+                        result.parsed_rows += 1;
+                        let raw: String = row.get(4)?;
+                        budget.charge(raw.len() as u64)?;
+                        let value = match project_json(raw.as_bytes(), &Value::Bool(true)) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        let id = row.get::<_, String>(1).unwrap_or_default();
+                        let session = row.get::<_, String>(2).unwrap_or_default();
+                        parsed.insert(
+                            row.get::<_, i64>(0)?,
+                            parse_opencode_message(&value, &id, &session, row.get(3).ok()),
+                        );
+                    }
+                    for row in page {
+                        let record = parsed.remove(&row.0).flatten();
+                        budget
+                            .retain(96 + record.as_ref().map_or(0, UsageRecord::retained_size))?;
+                        cached.insert(
+                            row.0,
+                            CachedRow {
+                                updated: row.1.clone(),
+                                size: row.2.clone(),
+                                created: row.3,
+                                record,
+                            },
+                        );
+                    }
+                }
+                for row in &listed {
+                    let Some(record) = cached.get(&row.0).and_then(|r| r.record.as_ref()) else {
+                        continue;
+                    };
+                    if record.timestamp_ms < since {
+                        continue;
+                    }
+                    if let Some(seq) = row.4 {
+                        let original =
+                            original_session(&record.session_id, seq, record.timestamp_ms, &forks);
+                        if !originals.insert(format!("{original}:{seq}")) {
+                            continue;
+                        }
+                    }
+                    if !record
+                        .dedupe_key
+                        .as_ref()
+                        .is_none_or(|k| seen.insert(k.clone()))
+                    {
+                        continue;
+                    }
+                    let bytes = record.retained_size();
+                    budget.retain(bytes)?;
+                    retained += bytes;
+                    if records.len() >= MAX_RECORDS || retained > MAX_RETAINED_BYTES {
+                        return Err(safety::exceeded().into());
+                    }
+                    records.push(record.clone());
+                }
+                if let Some(previous) = reusable {
+                    for (id, row) in &previous.rows {
+                        if row
+                            .created
+                            .is_some_and(|at| at < since && at >= retention_cutoff)
+                        {
+                            cached.insert(*id, row.clone());
+                        }
+                    }
+                }
+                cache.tables.insert(
+                    key,
+                    CachedTable {
+                        version: version.clone(),
+                        rows: cached,
+                    },
+                );
             }
             Ok(())
         })();

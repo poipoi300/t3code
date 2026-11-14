@@ -592,9 +592,9 @@ fn production_workspace_mounts_real_details_and_header_toggle_targets() {
         }
         app.press("role:button[Toggle right panel]")
             .expect("open workspace panel");
-        app.wait_for("role:button[Close workspace panel]")
+        app.wait_for("Open a surface")
             .expect("actual workspace panel target");
-        app.press("role:button[Close workspace panel]")
+        app.press("role:button[Toggle right panel]")
             .expect("close workspace panel");
         app.wait_for("role:button[Toggle right panel]")
             .expect("return to thread");

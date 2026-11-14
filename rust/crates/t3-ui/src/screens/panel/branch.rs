@@ -111,11 +111,12 @@ fn thread_details_control(
 ) -> impl IntoElement {
     // Selector classes move to their children; coarse after: becomes native hit slop.
     // text-box cap trimming is unavailable; UI-TRUNCATE owns that declared limitation.
+    // NSH cannot parse the source shadow/scale transition list; scale stays 100 on this trigger.
     nsh_base::button()
         .role(AccessibilityRole::Combobox)
         .accessibility_label(move || Some(tr("Branch: {branch}", &[("branch", Value::Text(label.get().to_string()))]).into()))
         .on_layout(move |bounds: &Bounds<Points>| anchor_width.set(bounds.size.width.0))
-        .app_class(tw("group/branch-select relative inline-flex shrink-0 cursor-pointer items-center whitespace-nowrap border outline-none transition-[box-shadow,scale] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 h-8 min-w-0 rounded-lg border-transparent text-left text-[13px] font-medium text-foreground/80 w-full justify-start bg-transparent shadow-none hover:!bg-black/[0.035] active:!bg-black/[0.035] dark:hover:!bg-white/[0.08] dark:active:!bg-white/[0.08] gap-0 px-0 max-w-full active:scale-100"))
+        .app_class(tw("group/branch-select relative inline-flex shrink-0 cursor-pointer items-center whitespace-nowrap border outline-none transition-shadow focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 h-8 min-w-0 rounded-lg border-transparent text-left text-[13px] font-medium text-foreground/80 w-full justify-start bg-transparent shadow-none hover:!bg-black/[0.035] active:!bg-black/[0.035] dark:hover:!bg-white/[0.08] dark:active:!bg-white/[0.08] gap-0 px-0 max-w-full active:scale-100"))
         .hit_slop(move || EdgeInsets::all(px(if pointer() == Pointer::Coarse { 6.0 } else { 0.0 })))
         .child(
             view()

@@ -7,7 +7,7 @@ use crate::{
         CachedFile, LEGACY_SCAN_CACHE_FILE_NAMES, SCAN_CACHE_FILE_NAME, ScanCache,
         decode_scan_cache, dedupe_within_file, prune_scan_cache, write_scan_cache,
     },
-    database::{AntigravityCache, read_antigravity_bounded, read_opencode_bounded},
+    database::{AntigravityCache, OpenCodeCache, read_antigravity_bounded},
     iso,
     pricing::{RateTable, create_override_rate_table, parse_rate_table},
     provider_name,
@@ -94,6 +94,7 @@ struct State {
     source_cache: indexmap::IndexMap<String, Value>,
     covered: BTreeMap<String, f64>,
     antigravity: AntigravityCache,
+    opencode: OpenCodeCache,
     rates: RateTable,
     rates_document: Value,
     rates_fetched_at: Option<f64>,
@@ -375,6 +376,7 @@ impl UsageService {
                 state.cache = shared.cache.clone();
                 state.covered = shared.covered.clone();
                 state.antigravity = shared.antigravity.clone();
+                state.opencode = shared.opencode.clone();
                 state.cache_dirty |= shared.cache_dirty;
                 state.rates = shared.rates.clone();
                 state.rates_document = shared.rates_document.clone();
@@ -624,7 +626,8 @@ fn scan(
                     .map_or(crate::safety::MAX_STATE_BYTES, |v| v.len())
         })
         .sum::<usize>()
-        + state.antigravity.retained_size();
+        + state.antigravity.retained_size()
+        + state.opencode.retained_size();
     let budget = crate::safety::ScanBudget::new(
         crate::safety::MAX_SCAN_BYTES,
         crate::safety::MAX_SCAN_RETAINED_BYTES.saturating_sub(retained as u64),
@@ -855,7 +858,12 @@ fn scan(
                     }
                 }
                 SourceKind::OpenCode => {
-                    let read = read_opencode_bounded(&source.directory, window_start, &budget);
+                    let read = state.opencode.read_bounded(
+                        &source.directory,
+                        window_start,
+                        cutoff,
+                        &budget,
+                    );
                     result.missing = read.missing;
                     failed += read.errors.len() as u64;
                     result.files = read

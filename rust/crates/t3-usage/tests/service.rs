@@ -311,6 +311,93 @@ async fn summary_counts_partial_copies_once_and_survives_deletion_and_restart() 
     assert_eq!(saved["buckets"], buckets);
     assert_eq!(saved["sources"][0]["distinctSessions"], 1);
 }
+
+#[tokio::test]
+async fn upgrades_legacy_codex_caches_reparses_live_files_and_keeps_deleted_history() {
+    for version in [4, 14, 15] {
+        let temp = tempfile::tempdir().unwrap();
+        let live = dunce::canonicalize(copy_transcript(&temp, "codex-cumulative.jsonl")).unwrap();
+        let deleted = live.with_file_name("deleted.jsonl");
+        let mut conf = config(&temp);
+        conf.sources
+            .push(Source::transcripts(P::Codex, live.parent().unwrap()));
+        let parsed = t3_usage::reader::read_transcript(&live, &P::Codex, None).unwrap();
+        let entry = t3_usage::cache::CachedFile {
+            size: fs::metadata(&live).unwrap().len() as i64,
+            mtime_ms: fs::metadata(&live)
+                .unwrap()
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64()
+                * 1000.0,
+            provider: P::Codex,
+            records: parsed.records,
+            tail_records: parsed.tail_records,
+            malformed_records: parsed.malformed_records,
+            position: parsed.position,
+        };
+        let expected: u64 = entry
+            .records
+            .iter()
+            .chain(&entry.tail_records)
+            .map(|r| r.totals.output_tokens)
+            .sum();
+        let mut deleted_entry = entry.clone();
+        for record in deleted_entry
+            .records
+            .iter_mut()
+            .chain(&mut deleted_entry.tail_records)
+        {
+            record.session_id = "deleted-session".into();
+        }
+        let cache = [
+            (live.to_string_lossy().to_string(), entry.clone()),
+            (deleted.to_string_lossy().to_string(), deleted_entry),
+        ]
+        .into_iter()
+        .collect();
+        let mut encoded = vec![];
+        t3_usage::cache::write_scan_cache(&mut encoded, &cache, &serde_json::Map::new()).unwrap();
+        let mut document: Value = serde_json::from_slice(&encoded).unwrap();
+        document["version"] = json!(version);
+        document["files"][live.to_string_lossy().as_ref()]["r"][0][6] = json!(99999);
+        assert_eq!(
+            t3_usage::cache::decode_scan_cache(&document).len(),
+            2,
+            "v{version} decoded"
+        );
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&live)
+            .unwrap()
+            .write_all(b"\n")
+            .unwrap();
+        let old = if version == 4 {
+            "usage-scan-cache.json".to_string()
+        } else {
+            format!("usage-scan-cache-v{version}.json")
+        };
+        fs::create_dir_all(&conf.state_dir).unwrap();
+        fs::write(
+            conf.state_dir.join(&old),
+            serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+        let summary = json!(
+            service(conf.clone())
+                .await
+                .read_summary(window())
+                .await
+                .unwrap()
+        );
+        assert_eq!(output(&summary), expected * 2, "v{version}: {summary}");
+        assert_eq!(SCAN_CACHE_FILE_NAME, "usage-scan-cache-v16.json");
+        assert!(conf.state_dir.join(SCAN_CACHE_FILE_NAME).is_file());
+        assert!(!conf.state_dir.join(old).exists());
+    }
+}
 #[tokio::test]
 async fn malformed_codex_records_report_partial_source_with_saved_diagnostics() {
     let temp = tempfile::tempdir().unwrap();

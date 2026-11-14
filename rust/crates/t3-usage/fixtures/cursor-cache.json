@@ -1,0 +1,60 @@
+{
+  "document": {
+    "version": 2,
+    "strings": [
+      "cursor-grok-4-thinking-high-fast",
+      "conversation"
+    ],
+    "accounts": {
+      "credential-hash": {
+        "accountKey": "fixture-account",
+        "sinceMs": 0,
+        "untilMs": 100,
+        "fetchedAtMs": 101,
+        "records": [
+          [
+            50,
+            0,
+            1,
+            100,
+            1000,
+            10,
+            50,
+            null,
+            null
+          ]
+        ]
+      }
+    }
+  },
+  "expected": [
+    [
+      "credential-hash",
+      {
+        "accountKey": "fixture-account",
+        "sinceMs": 0,
+        "untilMs": 100,
+        "fetchedAtMs": 101,
+        "records": [
+          {
+            "provider": "cursor",
+            "timestampMs": 50,
+            "model": "cursor-grok-4-thinking-high-fast",
+            "rateModel": "xai/grok-4",
+            "sessionId": "conversation",
+            "totals": {
+              "uncachedInputTokens": 100,
+              "cachedInputTokens": 1000,
+              "cacheCreationTokens": 10,
+              "outputTokens": 50,
+              "reasoningTokens": 0
+            },
+            "reportedCostUsd": null,
+            "speed": "standard",
+            "dedupeKey": null
+          }
+        ]
+      }
+    ]
+  ]
+}

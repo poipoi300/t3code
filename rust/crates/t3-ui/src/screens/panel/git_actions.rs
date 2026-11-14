@@ -698,7 +698,8 @@ fn mounted_control(
 // Child selectors move to icons; coarse after hit-box becomes hit_slop; will-change/text-box drop.
 const CONTROL_CLASS: &str = "relative inline-flex shrink-0 cursor-pointer items-center whitespace-nowrap border outline-none transition-[box-shadow,scale] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 h-8 min-w-0 rounded-lg border-transparent gap-2.5 px-2.5 text-left text-[13px] font-medium text-foreground/80 bg-transparent shadow-none hover:bg-black/[0.035] dark:hover:bg-white/[0.08]";
 
-fn details_button(
+/// Port of apps/web/src/components/chat/ThreadDetailsControl.tsx ThreadDetailsControl.
+fn thread_details_control(
     part: &'static str,
     label: Prop<SharedString>,
     disabled: Prop<bool>,
@@ -736,7 +737,7 @@ fn details_button(
 }
 
 fn initialize_control(control: Control) -> impl IntoElement {
-    details_button(
+    thread_details_control(
         "row",
         Prop::bind(move || {
             t(if control.initiating.get() {
@@ -798,9 +799,9 @@ fn action_row(control: Control) -> impl IntoElement {
             if let Some(progress) = progress(&snapshot) {
                 let status = progress_status(&snapshot, &progress);
                 let label = progress.output.as_ref().map_or_else(|| status.clone(), |output| format!("{status} {output}"));
-                return details_button("primary", label.into(), true.into(), true, git_action_progress_button_content(progress, status), || {}).into_element();
+                return thread_details_control("primary", label.into(), true.into(), true, git_action_progress_button_content(progress, status), || {}).into_element();
             }
-            if let Some(success) = control.success.get() { return details_button("primary", success.title.resolve().into(), true.into(), true, git_action_success_button_content(success), || {}).into_element(); }
+            if let Some(success) = control.success.get() { return thread_details_control("primary", success.title.resolve().into(), true.into(), true, git_action_success_button_content(success), || {}).into_element(); }
             let action = quick(&snapshot);
             let reason = if !control.can_write() { Some(t("This connection cannot change source control.")) }
                 else { match &action.kind { QuickActionKind::Hint(reason) if action.disabled => Some(Text::client_key(reason.clone()).resolve().to_string()), _ => None } };
@@ -816,7 +817,7 @@ fn action_row(control: Control) -> impl IntoElement {
             if let Some(progress) = control.snapshot.with(progress) { return git_action_elapsed_time(progress.started_at).into_element(); }
             untracked(|| view().app_class(tw("flex items-center"))
                 .child(view().app_class(move || Some(tw(if control.menu_open.get() { "h-4 w-px shrink-0 bg-border/65" } else { "h-4 w-px shrink-0 bg-transparent group-hover/details-split:bg-border/65" }))))
-                .child(menu::menu(details_button("secondary", t("Git action options").into(), Prop::bind(move || control.initiating.get() || control.snapshot.with(busy) || !has_menu(control)), false,
+                .child(menu::menu(thread_details_control("secondary", t("Git action options").into(), Prop::bind(move || control.initiating.get() || control.snapshot.with(busy) || !has_menu(control)), false,
                     icon_with_class(Icon::ChevronDown, "size-4 shrink-0 text-muted-foreground"), || {}), MenuOptions { open: Some(control.menu_open), align: Align::End, width: menu::Width::Content, ..Default::default() },
                     menu::menu_popup_with(move || git_items(control)))).into_element())
         }))
@@ -1120,7 +1121,7 @@ fn changes_row(control: Control, props: Stored<GitActionsControlProps>) -> impl 
             .snapshot
             .with(|s| logic::changes_totals(s.status.as_deref(), s.branch_preview.clone()))
     });
-    details_button("row", t("Changes").into(), Prop::bind(move || props.with(|p| p.on_open_changes.is_none())), false,
+    thread_details_control("row", t("Changes").into(), Prop::bind(move || props.with(|p| p.on_open_changes.is_none())), false,
         view().app_class(tw("flex w-full min-w-0 items-center gap-2.5"))
             .child(icon_with_class(Icon::FileDiff, "size-4 shrink-0 text-muted-foreground"))
             .child(view().app_class(tw("flex min-w-0 flex-1 items-baseline gap-1.5"))
@@ -1574,7 +1575,7 @@ fn publish_repository_dialog(control: Control) -> impl IntoElement {
             .child(dialog::dialog_header(state, view()
                 .child(dialog::dialog_title(state, || "Publish repository".into()))
                 .child(dialog::dialog_description(state, || "Pick where to host it, then point us at a repo to push to.".into()))
-                .child(publish_steps(control, publish))))
+                .child(wizard_steps(control, publish))))
             .child(view().app_class(tw("min-w-0 space-y-4 bg-background/80 px-6 py-5 ring-1 ring-black/5 dark:bg-white/2 dark:ring-white/5"))
                 .child(when(move || publish.step.get() == 0, move || publish_provider_panel(control, publish, nav)))
                 .child(when(move || publish.step.get() == 1, move || publish_repository_panel(control, publish)))
@@ -1601,7 +1602,8 @@ fn publish_repository_dialog(control: Control) -> impl IntoElement {
     })
 }
 
-fn publish_steps(control: Control, publish: PublishState) -> impl IntoElement {
+/// Port of apps/web/src/components/ui/wizard.tsx WizardSteps.
+fn wizard_steps(control: Control, publish: PublishState) -> impl IntoElement {
     view().role(AccessibilityRole::List).label(t("Setup progress"))
         .app_class(tw("grid auto-cols-fr grid-flow-col gap-1 rounded-xl bg-background p-1 ring-1 ring-black/5 dark:bg-white/4 dark:ring-white/5"))
         .child(["Provider", "Repository", "Summary"].into_iter().enumerate().map(move |(index, key)| {

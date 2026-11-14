@@ -12,6 +12,27 @@ pub fn clamp_percent(n: f64) -> f64 {
         0.0
     }
 }
+fn scope_token(name: &str) -> String {
+    let mut token = String::new();
+    let mut separator = false;
+    for c in name.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            token.push(c);
+            separator = false;
+        } else if !separator {
+            token.push('_');
+            separator = true;
+        }
+    }
+    token
+}
+pub fn window_limits_model(window: &Window, model: Option<&str>) -> bool {
+    window
+        .id
+        .0
+        .strip_prefix("seven_day_")
+        .is_none_or(|scope| model.is_some_and(|model| scope_token(model).contains(scope)))
+}
 fn rank(v: &Value) -> u8 {
     match text(&v["kind"]) {
         "session" => 0,
@@ -267,17 +288,7 @@ pub fn claude_limits(response: &Value, checked_at: &str) -> Result<Limits, Error
         let Some(n) = finite(&w["utilization"]) else {
             continue;
         };
-        let mut id = String::from("seven_day_");
-        let mut separator = false;
-        for c in display.to_lowercase().chars() {
-            if c.is_ascii_alphanumeric() {
-                id.push(c);
-                separator = false;
-            } else if !separator {
-                id.push('_');
-                separator = true;
-            }
-        }
+        let id = format!("seven_day_{}", scope_token(display));
         windows.push(window(
             &id,
             "weekly",
@@ -326,7 +337,11 @@ pub fn claude_limits(response: &Value, checked_at: &str) -> Result<Limits, Error
             None,
         ));
     }
-    make_limits(checked_at, windows)
+    let mut limits = make_limits(checked_at, windows)?;
+    if extra["is_enabled"] == true && extra["monthly_limit"].as_f64() == Some(0.0) {
+        limits.zero_spend_cap = Some(Some(true));
+    }
+    Ok(limits)
 }
 pub fn grok_limits(response: &Value, checked_at: &str) -> Result<Limits, Error> {
     let r = &response["config"];

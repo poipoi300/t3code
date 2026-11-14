@@ -183,6 +183,130 @@ fn scan_cache_matches_typescript_migrations_validation_and_round_trip() {
 }
 
 #[test]
+fn v15_codex_totals_survive_but_only_v16_can_resume() {
+    let cases = fixture("cache.json");
+    let mut document = cases[0]["document"].clone();
+    for version in [15, 16] {
+        document["version"] = json!(version);
+        let decoded = decode_scan_cache(&document);
+        let codex: Vec<_> = decoded
+            .values()
+            .filter(|f| f.provider == t3_usage::UsageProviderKind::Codex)
+            .collect();
+        assert!(!codex.is_empty());
+        assert!(codex.iter().any(|f| !f.records.is_empty()));
+        assert!(
+            codex
+                .iter()
+                .all(|f| (f.position.resume_offset > 0) == (version == 16))
+        );
+        let mut encoded = vec![];
+        write_scan_cache(&mut encoded, &decoded, &serde_json::Map::new()).unwrap();
+        let encoded: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(encoded["version"], 16);
+        assert_eq!(decode_scan_cache(&encoded), decoded);
+    }
+    assert_eq!(
+        t3_usage::cache::SCAN_CACHE_FILE_NAME,
+        "usage-scan-cache-v16.json"
+    );
+    assert!(t3_usage::cache::LEGACY_SCAN_CACHE_FILE_NAMES.contains(&"usage-scan-cache-v15.json"));
+}
+
+#[test]
+fn typescript_reads_rust_written_v16_cache() {
+    let cases = fixture("cache.json");
+    let decoded = decode_scan_cache(
+        &cases
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["document"]["version"] == 16)
+            .unwrap()["document"],
+    );
+    let mut encoded = vec![];
+    write_scan_cache(&mut encoded, &decoded, &serde_json::Map::new()).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("cache.json");
+    let expected: Vec<_> = decoded.into_iter().map(|(p, e)| json!([p, e])).collect();
+    fs::write(&path,serde_json::to_vec(&json!({"document":serde_json::from_slice::<Value>(&encoded).unwrap(),"expected":expected})).unwrap()).unwrap();
+    let output = std::process::Command::new("node")
+        .arg("--experimental-strip-types")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/verify-cache.mjs"))
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn cursor_account_v2_cache_roundtrips_both_runtimes_and_rejects_personal_only_v1() {
+    use t3_usage::cache::{
+        CURSOR_ACCOUNT_CACHE_FILE_NAME, decode_cursor_account_caches, write_cursor_account_caches,
+    };
+    let case = fixture("cursor-cache.json");
+    let decoded = decode_cursor_account_caches(&case["document"]);
+    equivalent(
+        &json!(
+            decoded
+                .iter()
+                .map(|(k, c)| json!([k, c]))
+                .collect::<Vec<_>>()
+        ),
+        &case["expected"],
+        "cursor",
+    );
+    assert_eq!(
+        CURSOR_ACCOUNT_CACHE_FILE_NAME,
+        "usage-cursor-account-cache-v2.json"
+    );
+    let mut legacy = case["document"].clone();
+    legacy["version"] = json!(1);
+    assert!(decode_cursor_account_caches(&legacy).is_empty());
+    let mut corrupt = case["document"].clone();
+    corrupt["accounts"]["credential-hash"]["records"][0][1] = json!(999);
+    assert!(decode_cursor_account_caches(&corrupt).is_empty());
+    let mut encoded = vec![];
+    write_cursor_account_caches(&mut encoded, &decoded).unwrap();
+    let encoded: Value = serde_json::from_slice(&encoded).unwrap();
+    equivalent(&encoded, &case["document"], "cursor written format");
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("cursor.json");
+    fs::write(
+        &path,
+        serde_json::to_vec(
+            &json!({"kind":"cursor","document":encoded,"expected":case["expected"]}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let output = std::process::Command::new("node")
+        .arg("--experimental-strip-types")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/verify-cache.mjs"))
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn claude_zero_monthly_cap_has_no_percentage_window() {
+    let response = json!({"rate_limits_available":true,"rate_limits":{"five_hour":null,"seven_day":null,"extra_usage":{"is_enabled":true,"used_credits":0,"monthly_limit":0,"utilization":null}}});
+    assert_eq!(
+        json!(limits::claude_limits(&response, "2026-08-01T10:00:00.000Z").unwrap()),
+        json!({"checkedAt":"2026-08-01T10:00:00.000Z","windows":[],"zeroSpendCap":true})
+    );
+}
+
+#[test]
 fn legacy_cache_without_reducer_state_keeps_deleted_history() {
     let cases = fixture("cache.json");
     let mut document = cases

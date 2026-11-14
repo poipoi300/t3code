@@ -15,6 +15,7 @@ use std::{
 pub(crate) struct Snapshot {
     connection: Connection,
     pub(crate) fingerprint: String,
+    pub(crate) main_fingerprint: String,
     _directory: tempfile::TempDir,
 }
 impl Deref for Snapshot {
@@ -58,6 +59,7 @@ pub(crate) fn connect_bounded(path: &Path, budget: &ScanBudget) -> Result<Snapsh
         return Err(safety::exceeded().into());
     }
     let mut hash = Sha256::new();
+    let mut main_fingerprint = String::new();
     for (index, source) in source_paths.iter().enumerate() {
         let Some((length, _)) = before[index] else {
             hash.update([0]);
@@ -83,6 +85,13 @@ pub(crate) fn connect_bounded(path: &Path, budget: &ScanBudget) -> Result<Snapsh
             hash.update(&buffer[..n]);
             output.write_all(&buffer[..n])?;
             copied += n as u64;
+        }
+        if index == 0 {
+            main_fingerprint = format!(
+                "{:?}:{:x}",
+                file_id::get_file_id(path).ok(),
+                hash.clone().finalize()
+            );
         }
         if copied != length {
             return Err(safety::exceeded().into());
@@ -116,6 +125,7 @@ pub(crate) fn connect_bounded(path: &Path, budget: &ScanBudget) -> Result<Snapsh
     Ok(Snapshot {
         connection,
         fingerprint: format!("{:x}", hash.finalize()),
+        main_fingerprint,
         _directory: directory,
     })
 }

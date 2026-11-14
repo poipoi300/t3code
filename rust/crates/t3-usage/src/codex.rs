@@ -157,12 +157,15 @@ impl CodexScanState {
         self.last_usage_signature = None;
         false
     }
+    fn date_baseline(&mut self, at: f64) {
+        self.latest_cumulative_at_ms = Some(self.latest_cumulative_at_ms.unwrap_or(at).max(at));
+    }
     fn rebase(&mut self, usage: TokenUsage, at: f64) {
         if usage.input_tokens + usage.output_tokens == 0 {
             self.sequence_start_signature = None;
         }
         self.last_cumulative_usage = Some(usage);
-        self.latest_cumulative_at_ms = Some(self.latest_cumulative_at_ms.unwrap_or(at).max(at));
+        self.date_baseline(at);
         self.unreported_requests = None;
     }
     fn attribution(&self, usage: TokenUsage, at: f64) -> PendingRequest {
@@ -266,6 +269,7 @@ impl CodexScanState {
                     }
                     self.last_cumulative_usage =
                         TokenUsage::plus(self.last_cumulative_usage.as_ref(), &usage);
+                    self.date_baseline(at);
                     let mut out: Vec<_> = pending.iter().map(|r| self.record(r)).collect();
                     let mut r = self.record(&self.attribution(usage, at));
                     r.dedupe_key =
@@ -312,6 +316,7 @@ impl CodexScanState {
             {
                 self.last_cumulative_usage =
                     TokenUsage::plus(self.last_cumulative_usage.as_ref(), &l);
+                self.date_baseline(at);
             }
             self.last_usage_signature = signature;
             return vec![];
@@ -350,12 +355,15 @@ impl CodexScanState {
             let sequence_start = format!("[{},{}]", json!(at as i64), signature);
             if restarted && self.sequence_start_signature.as_ref() == Some(&sequence_start) {
                 self.last_cumulative_usage = previous;
+                if latest.is_none() {
+                    self.latest_cumulative_at_ms = None;
+                }
                 return vec![];
             }
-            let rewound = previous.as_ref().is_some_and(|p| {
-                latest.is_none_or(|t| at > t)
-                    && c.values().iter().zip(p.values()).any(|(a, b)| *a < b)
-            });
+            let lowered = previous
+                .as_ref()
+                .is_some_and(|p| c.values().iter().zip(p.values()).any(|(a, b)| *a < b));
+            let rewound = lowered && latest.is_some_and(|t| at > t);
             let reconciled = if previous.is_none() || rewound {
                 c.minus(&last).is_some()
             } else {
@@ -378,10 +386,24 @@ impl CodexScanState {
                     Some(requests)
                 })();
                 let Some(requests) = bridged else {
+                    if latest.is_some_and(|t| {
+                        at < t || (at == t && lowered && c.input_tokens + c.output_tokens > 0)
+                    }) {
+                        self.last_cumulative_usage = previous;
+                        if pending.is_some() {
+                            self.unreported_requests = pending;
+                        }
+                    }
                     self.malformed_records += 1;
                     return vec![];
                 };
                 unreported = requests;
+            } else if !restarted
+                && rewound
+                && let Some(pending) = &pending
+            {
+                let reported = pending.last().is_some_and(|r| r.usage == last);
+                self.malformed_records += pending.len() as u64 - u64::from(reported);
             }
             if restarted {
                 self.sequence_start_signature = Some(sequence_start);
@@ -395,6 +417,7 @@ impl CodexScanState {
                 return vec![];
             };
             self.last_cumulative_usage = Some(advanced);
+            self.date_baseline(at);
         }
         self.last_usage_signature = Some(signature);
         let mut out: Vec<_> = unreported.iter().map(|r| self.record(r)).collect();

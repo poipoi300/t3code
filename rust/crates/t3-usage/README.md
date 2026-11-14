@@ -17,13 +17,13 @@ Wasm and does not spawn processes or start a server.
   lock. Failed publications remain dirty and retry on the next read.
 - `reader::{read_transcript,list_transcripts}`: streaming JSON projection, plain
   and zstd JSONL, tentative tails, FNV-1a guards and resumable reducer state.
-- `database::{read_opencode,read_antigravity}`: read-only SQLite and legacy JSON
+- `database::{read_opencode,OpenCodeCache,read_antigravity}`: read-only SQLite and legacy JSON
   readers. SQLite projects OpenCode usage fields before returning message data.
   Antigravity decodes metadata protobufs, retries, model evidence and shared IDs.
 - `aggregation::{UsageAggregator,resolve_model_aliases,canonical_model_filter}`
   and `pricing::*`: period/model/source buckets, channel-max deduplication,
   pricing tiers, cache savings, category costs and speed premiums.
-- `cache::{decode_scan_cache,write_scan_cache,prune_scan_cache}`: TypeScript v15
+- `cache::{decode_scan_cache,write_scan_cache,prune_scan_cache}`: TypeScript v16
   disk format, intern tables, legacy invalidation and retained deleted history.
 - `limits::*`: contract windows, reset times, Codex/Claude streamed updates,
   provider response conversion, merge/freshness rules and probe interfaces.
@@ -47,7 +47,7 @@ Wasm and does not spawn processes or start a server.
 | Cursor | account API via `ProviderUsageProbe::scan`; no local transcript format |
 
 Writes are `<base>/usage-host-id`, `<state>/usage-model-rates.json` and
-`<state>/usage-scan-cache-v15.json`. Cache version 4–15 history is understood;
+`<state>/usage-scan-cache-v16.json`. Cache version 4–16 history is understood;
 pre-v13 Claude and incompatible Codex reducers force reparsing. The service keeps
 92 days of cached file history, uses 36-hour mtime slack, limits hourly windows
 to 24 hours, and reads at most four transcripts concurrently. Live files retain
@@ -57,6 +57,16 @@ once per service lifetime. Unchanged reads do not rewrite either document. Rates
 are saved only after a successful fetch; each fetch has a ten-second timeout and
 runs outside the state lock.
 Sources retain their saved volume identity while retained usage depends on it.
+
+Codex cache entries before v16 retain totals but cannot resume a grown transcript.
+Every baseline movement is dated; re-emitted older or same-time lower snapshots
+retain the current baseline. OpenCode caches projected rows by database identity,
+table, rowid and update/size markers; fork lineage deduplicates copied replies
+without dropping replies after the fork boundary. Database work runs on the
+service's blocking worker. `cache::{CursorAccountCache,decode_cursor_account_caches,
+write_cursor_account_caches}` supplies the interoperable v2 Cursor account format;
+the authenticated account adapter owns loading and publishing
+`usage-cursor-account-cache-v2.json` and must reject personal-only v1 caches.
 
 Provider input is bounded: 16 MiB per JSON line, 64 nesting levels, 20,000 JSON
 structural nodes or protobuf fields, 4 KiB per selected string, 256 MiB per file,
@@ -138,6 +148,10 @@ sort keys retain insertion order across sources. Time zone names ignore ASCII
 case. Atomic writes retry rename three times, warn once on failure, and sync
 the parent directory on Unix; cache-file symlinks are replaced by regular files.
 Hub account refreshes are serialized rather than four-way concurrent.
+Source snapshots expose HTTP(S) origins. `UsageLimitSources::reset_at` refreshes
+under a five-second bound, selects the failed turn's endpoint and driver/model,
+and returns the earliest account recovery only if every matching account is spent.
+Claude enabled $0 extra-usage budgets expose `zeroSpendCap` without a percentage.
 POSIX behavior has not been run on this Windows host.
 
 The TypeScript aggregation test "splits a bucket's cost by category and speed"

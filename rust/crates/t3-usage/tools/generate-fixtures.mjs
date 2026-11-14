@@ -24,9 +24,12 @@ const require = createRequire(new URL("../../../../apps/server/package.json", im
 const Effect = await import(pathToFileURL(require.resolve("effect/Effect")).href);
 const NodeServices = await import(pathToFileURL(require.resolve("@effect/platform-node/NodeServices")).href);
 
+const cursorCache = await import("../../../../packages/provider-cursor/src/server/accountCache.ts");
+const forkRows = await import("../../../../packages/provider-opencode/src/server/usage.fixture.ts");
 const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../fixtures");
 await fs.mkdir(dir, { recursive: true });
 const write = (name, value) => fs.writeFile(path.join(dir, name), JSON.stringify(value, null, 2) + "\n");
+await write("opencode-forks.json", forkRows);
 const formats = { claude: claudeUsageFormat, codex: codexUsageFormat, grok: grokUsageFormat, pi: piUsageFormat, muse: museUsageFormat };
 const readers = [];
 async function transcript(name, provider, lines, tail = false) {
@@ -125,6 +128,9 @@ for(const [key,value] of [["o",-1],["o",1.5],["gl",65],["gl",-1],["gh","x"],["mr
  cacheCases.push({name:"bad "+key+JSON.stringify(value),document,expected:[...decodeScanCache(document,new Map(Object.entries(formats)))]});
 }
 await write("cache.json",cacheCases);
+const cursorCaches = new Map([["credential-hash", {accountKey:"fixture-account",sinceMs:0,untilMs:100,fetchedAtMs:101,records:[record({provider:"cursor",model:"cursor-grok-4-thinking-high-fast",sessionId:"conversation",timestampMs:50})]}]]);
+const cursorDocument=JSON.parse(cursorCache.encodeCursorAccountCaches(cursorCaches));
+await write("cursor-cache.json",{document:cursorDocument,expected:[...cursorCache.decodeCursorAccountCaches(cursorDocument)]});
 const checkedAt="2026-08-01T10:00:00.000Z";
 const limits=[];
 for(const provider of ["codex","claude","grok","cursor"]){

@@ -829,13 +829,16 @@ impl RunExecutionService {
         let Error::Provider(error) = error else {
             return Ok(false);
         };
-        if self
-            .stream_context
-            .as_ref()
-            .and_then(|context| context.detached_thread_id(error))
-            .as_ref()
-            != Some(&state.identity.thread_id)
-        {
+        let detached_thread = match error {
+            ProviderError::EventStream {
+                detached_thread_id, ..
+            } => detached_thread_id.clone(),
+            _ => self
+                .stream_context
+                .as_ref()
+                .and_then(|context| context.detached_thread_id(error)),
+        };
+        if detached_thread.as_ref() != Some(&state.identity.thread_id) {
             return Ok(false);
         }
         let Some(current) = self

@@ -608,3 +608,16 @@ async fn failed_launcher_close_retains_claim_until_release_succeeds() {
     assert!(service.sessions_for_thread(&"t".into()).await.is_empty());
     assert_eq!(launchers.released.lock().await.len(), 2);
 }
+
+#[tokio::test]
+async fn process_shutdown_retires_hosts_without_disabling_saved_device_support() {
+    let host=FakeHost::new("local",FakeOps::new("local",DevicePlatform::Ios,true),FakeCommands::encoder(),None);
+    let settings=settings(true,true);
+    let service=t3_device::DeviceService::new(vec![host.clone()],settings.clone(),None,None,None,None).await.unwrap();
+    service.open(open("local","phone","t",DevicePlatform::Ios),OpenContext::default()).await.unwrap();
+    service.stop().await.unwrap();
+    assert!(settings.0.lock().await.enabled);
+    assert!(settings.0.lock().await.agent_access_enabled);
+    assert_eq!(host.stops.load(Ordering::SeqCst),1);
+    assert!(service.state().await.sessions.is_empty());
+}

@@ -10,8 +10,9 @@ use std::{
     io::{self, Write},
 };
 
-pub const SCAN_CACHE_FILE_NAME: &str = "usage-scan-cache-v15.json";
-pub const LEGACY_SCAN_CACHE_FILE_NAMES: [&str; 11] = [
+pub const SCAN_CACHE_FILE_NAME: &str = "usage-scan-cache-v16.json";
+pub const LEGACY_SCAN_CACHE_FILE_NAMES: [&str; 12] = [
+    "usage-scan-cache-v15.json",
     "usage-scan-cache-v14.json",
     "usage-scan-cache-v13.json",
     "usage-scan-cache-v12.json",
@@ -37,6 +38,138 @@ pub struct CachedFile {
     pub position: ParsePosition,
 }
 pub type ScanCache = IndexMap<String, CachedFile>;
+pub const CURSOR_ACCOUNT_CACHE_FILE_NAME: &str = "usage-cursor-account-cache-v2.json";
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorAccountCache {
+    pub account_key: String,
+    pub since_ms: f64,
+    pub until_ms: f64,
+    pub fetched_at_ms: f64,
+    pub records: Vec<UsageRecord>,
+}
+pub fn decode_cursor_account_caches(document: &Value) -> IndexMap<String, CursorAccountCache> {
+    let mut caches = IndexMap::new();
+    if document["version"] != 2 {
+        return caches;
+    }
+    let Some(strings) = document["strings"].as_array().filter(|s| {
+        s.len() <= crate::safety::MAX_ENTRIES
+            && s.iter()
+                .all(|v| v.as_str().is_some_and(|s| s.len() <= 4096))
+    }) else {
+        return caches;
+    };
+    let Some(accounts) = document["accounts"].as_object() else {
+        return caches;
+    };
+    let string_at = |v: &Value| {
+        strings
+            .get(safe_uint(v)? as usize)?
+            .as_str()
+            .map(str::to_owned)
+    };
+    for (key, account) in accounts.iter().take(crate::safety::MAX_ENTRIES) {
+        let decoded = (|| {
+            let account_key = account["accountKey"].as_str()?.to_owned();
+            let since_ms = finite(&account["sinceMs"])?;
+            let until_ms = finite(&account["untilMs"])?;
+            let fetched_at_ms = finite(&account["fetchedAtMs"])?;
+            let rows = account["records"]
+                .as_array()
+                .filter(|r| r.len() <= crate::safety::MAX_RECORDS)?;
+            let mut records = Vec::with_capacity(rows.len());
+            for row in rows {
+                let row = row.as_array().filter(|r| r.len() >= 9)?;
+                let model = string_at(&row[1])?;
+                let base = model.strip_prefix("cursor-").unwrap_or(&model);
+                let base = base.strip_suffix("-fast").unwrap_or(base);
+                let base = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+                    .iter()
+                    .find_map(|suffix| base.strip_suffix(&format!("-{suffix}")))
+                    .unwrap_or(base);
+                let base = base.strip_suffix("-thinking").unwrap_or(base);
+                let rate_model = if base.starts_with("grok-") {
+                    format!("xai/{base}")
+                } else {
+                    base.to_owned()
+                };
+                let reported_cost_usd = if row[7].is_null() {
+                    None
+                } else {
+                    Some(finite(&row[7])?)
+                };
+                let dedupe_key = if row[8].is_null() {
+                    None
+                } else {
+                    Some(row[8].as_str()?.to_owned())
+                };
+                records.push(UsageRecord {
+                    provider: P::Cursor,
+                    timestamp_ms: finite(&row[0])?,
+                    model,
+                    rate_model: Some(rate_model),
+                    session_id: string_at(&row[2])?,
+                    totals: UsageTokenTotals {
+                        uncached_input_tokens: safe_uint(&row[3])?,
+                        cached_input_tokens: safe_uint(&row[4])?,
+                        cache_creation_tokens: safe_uint(&row[5])?,
+                        output_tokens: safe_uint(&row[6])?,
+                        reasoning_tokens: 0,
+                    },
+                    cache_creation1h_tokens: None,
+                    reported_cost_usd,
+                    speed: UsageSpeed::Standard,
+                    unresolved_service_tier_turn_id: None,
+                    dedupe_key,
+                });
+            }
+            Some(CursorAccountCache {
+                account_key,
+                since_ms,
+                until_ms,
+                fetched_at_ms,
+                records,
+            })
+        })();
+        if let Some(cache) = decoded {
+            caches.insert(key.clone(), cache);
+        }
+    }
+    caches
+}
+pub fn write_cursor_account_caches(
+    output: impl Write,
+    caches: &IndexMap<String, CursorAccountCache>,
+) -> io::Result<()> {
+    let mut strings = IndexMap::new();
+    let mut accounts = serde_json::Map::new();
+    for (key, cache) in caches {
+        let records: Vec<_> = cache
+            .records
+            .iter()
+            .map(|r| {
+                json!([
+                    r.timestamp_ms,
+                    intern(&mut strings, &r.model),
+                    intern(&mut strings, &r.session_id),
+                    r.totals.uncached_input_tokens,
+                    r.totals.cached_input_tokens,
+                    r.totals.cache_creation_tokens,
+                    r.totals.output_tokens,
+                    r.reported_cost_usd,
+                    r.dedupe_key
+                ])
+            })
+            .collect();
+        accounts.insert(key.clone(),json!({"accountKey":cache.account_key,"sinceMs":cache.since_ms,"untilMs":cache.until_ms,"fetchedAtMs":cache.fetched_at_ms,"records":records}));
+    }
+    serde_json::to_writer(
+        output,
+        &json!({"version":2,"strings":strings.into_keys().collect::<Vec<_>>(),"accounts":accounts}),
+    )
+    .map_err(io::Error::other)
+}
 
 fn intern(values: &mut IndexMap<String, usize>, value: &str) -> usize {
     let next = values.len();
@@ -101,7 +234,7 @@ pub fn write_scan_cache(
         output.write_all(b":")?;
         serde_json::to_writer(&mut output, value)?;
     }
-    output.write_all(b",\"version\":15,\"models\":")?;
+    output.write_all(b",\"version\":16,\"models\":")?;
     serde_json::to_writer(&mut output, &models.into_keys().collect::<Vec<_>>())?;
     output.write_all(b",\"sessions\":")?;
     serde_json::to_writer(&mut output, &sessions.into_keys().collect::<Vec<_>>())?;
@@ -120,7 +253,7 @@ pub fn decode_scan_cache(document: &Value) -> ScanCache {
     let mut out = ScanCache::new();
     let Some(version) = document["version"]
         .as_u64()
-        .filter(|v| (4..=15).contains(v))
+        .filter(|v| (4..=16).contains(v))
     else {
         return out;
     };
@@ -251,7 +384,7 @@ pub fn decode_scan_cache(document: &Value) -> ScanCache {
                 records: decode(&v["r"])?,
                 tail_records: decode(&v["t"])?,
                 malformed_records: malformed,
-                position: if legacy || (provider == P::Codex && version < 15) {
+                position: if legacy || (provider == P::Codex && version < 16) {
                     ParsePosition::default()
                 } else {
                     ParsePosition {

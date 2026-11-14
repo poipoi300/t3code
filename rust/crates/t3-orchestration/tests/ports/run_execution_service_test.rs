@@ -2043,6 +2043,11 @@ async fn detached_workspace_handoff_settles_without_interrupt_but_unmarked_strea
         "unmarked",
         "ordinary-eof",
         "unchanged",
+        "typed-detached-moved",
+        "typed-wrong-thread",
+        "typed-unmarked",
+        "typed-unchanged",
+        "typed-stop",
     ] {
         let h = super::provider_event_ingestor_test::Harness::new().await?;
         seed(&h).await?;
@@ -2053,11 +2058,13 @@ async fn detached_workspace_handoff_settles_without_interrupt_but_unmarked_strea
             events: Mutex::new(Some(events)),
         });
         let mut start = service(&h, Arc::new(StreamDirectory(runtime)));
-        start.execution = Arc::new(
-            (*start.execution)
-                .clone()
-                .with_stream_context(Arc::new(ProvedDetach)),
-        );
+        if !mode.starts_with("typed-") {
+            start.execution = Arc::new(
+                (*start.execution)
+                    .clone()
+                    .with_stream_context(Arc::new(ProvedDetach)),
+            );
+        }
         let handle = start
             .start(
                 ThreadId("thread:test".into()),
@@ -2085,7 +2092,7 @@ async fn detached_workspace_handoff_settles_without_interrupt_but_unmarked_strea
                 break;
             }
         }
-        if mode != "unchanged" {
+        if !mode.ends_with("unchanged") {
             let mut thread = h
                 .reader
                 .thread(ThreadId("thread:test".into()))
@@ -2100,8 +2107,47 @@ async fn detached_workspace_handoff_settles_without_interrupt_but_unmarked_strea
             )
             .await?;
         }
+        if mode == "typed-stop" {
+            let id = t3_orchestration::ports::runs_ingestion::provider_event_ingestor::derive_id(
+                "turn-item",
+                &["run", "run:test", "signal", "interrupt-request"],
+            );
+            let mut request = item("run_interrupt_request", &id);
+            request["message"] = "Stopped by user".into();
+            h.write("turn-item.updated", request).await?;
+        }
         if mode != "ordinary-eof" {
-            sender.send(Err(ProviderError::Protocol {reason:None,detail:"Session closed during detach".into(),payload:if mode=="unmarked" {None} else {Some(json!({"detachedThreadId":if mode=="wrong-thread" {"thread:other"} else {"thread:test"}}))}})).await.unwrap();
+            let error = if mode.starts_with("typed-") {
+                ProviderError::EventStream {
+                    provider_session_id: ProviderSessionId("session:test".into()),
+                    detached_thread_id: if mode.ends_with("unmarked") {
+                        None
+                    } else {
+                        Some(ThreadId(
+                            if mode.ends_with("wrong-thread") {
+                                "thread:other"
+                            } else {
+                                "thread:test"
+                            }
+                            .into(),
+                        ))
+                    },
+                    detail: "Session closed during detach".into(),
+                }
+            } else {
+                ProviderError::Protocol {
+                    reason: None,
+                    detail: "Session closed during detach".into(),
+                    payload: if mode == "unmarked" {
+                        None
+                    } else {
+                        Some(
+                            json!({"detachedThreadId":if mode=="wrong-thread" {"thread:other"} else {"thread:test"}}),
+                        )
+                    },
+                }
+            };
+            sender.send(Err(error)).await.unwrap();
         }
         drop(sender);
         handle.settled().await?;
@@ -2110,11 +2156,13 @@ async fn detached_workspace_handoff_settles_without_interrupt_but_unmarked_strea
             .projection(ThreadId("thread:test".into()))
             .await?
             .unwrap();
-        let handed_off = mode == "detached-moved";
+        let handed_off = matches!(mode, "detached-moved" | "typed-detached-moved");
         assert_eq!(
             projection.runs[0].status,
             if handed_off {
                 OrchestrationV2RunStatus::Waiting
+            } else if mode == "typed-stop" {
+                OrchestrationV2RunStatus::Interrupted
             } else {
                 OrchestrationV2RunStatus::Failed
             },
@@ -2135,7 +2183,10 @@ async fn detached_workspace_handoff_settles_without_interrupt_but_unmarked_strea
         while let Ok(call) = calls.try_recv() {
             interrupted |= matches!(call, t3_orchestration::testing::FakeCall::Interrupt(_));
         }
-        assert_eq!(interrupted, !handed_off, "{mode}");
+        assert_eq!(interrupted, !(handed_off || mode == "typed-stop"), "{mode}");
+        if mode == "typed-stop" {
+            assert!(projection.turn_items.iter().any(|item| matches!(item, OrchestrationV2TurnItem::RunInterruptResult(item) if item.message == "Stopped by user")));
+        }
         start.execution.shutdown().await?;
     }
     Ok(())

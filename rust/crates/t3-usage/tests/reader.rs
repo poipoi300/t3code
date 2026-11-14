@@ -14,6 +14,109 @@ fn fixture(name: &str) -> PathBuf {
         .join("fixtures")
         .join(name)
 }
+
+#[test]
+fn codex_dates_every_baseline_and_rejects_reemitted_snapshots() {
+    use t3_usage::codex::CodexScanState;
+    let usage = |input, output| json!({"input_tokens":input,"output_tokens":output});
+    let count = |second, last, total: Option<(u64, u64)>| {
+        let mut info = json!({"last_token_usage":usage(last, last / 5)});
+        if let Some((input, output)) = total {
+            info["total_token_usage"] = usage(input, output);
+        }
+        json!({"type":"event_msg","timestamp":format!("2026-08-01T10:00:{second:02}.000Z"),"payload":{"type":"token_count","info":info}})
+    };
+    let anonymous = |second, input| json!({"type":"token_usage_record","timestamp":format!("2026-08-01T10:00:{second:02}.000Z"),"payload":{"usage":usage(input,input/5)}});
+    let cases = [
+        (
+            vec![
+                count(0, 100, Some((100, 20))),
+                count(5, 20, None),
+                count(10, 30, None),
+                count(5, 20, Some((120, 24))),
+            ],
+            None,
+            vec![120, 24, 36, 0],
+            1,
+        ),
+        (
+            vec![count(0, 100, None), count(10, 20, Some((60, 12)))],
+            None,
+            vec![120, 24],
+            0,
+        ),
+        (
+            vec![
+                count(0, 100, Some((100, 20))),
+                count(5, 20, Some((120, 24))),
+                count(10, 30, Some((150, 30))),
+                count(5, 20, Some((120, 24))),
+                count(10, 30, Some((150, 30))),
+            ],
+            None,
+            vec![120, 24, 36, 0, 0],
+            1,
+        ),
+        (
+            vec![
+                count(0, 100, Some((100, 20))),
+                count(0, 20, Some((120, 24))),
+                count(0, 30, Some((150, 30))),
+                count(0, 20, Some((120, 24))),
+                count(0, 30, Some((150, 30))),
+            ],
+            None,
+            vec![120, 24, 36, 0, 0],
+            1,
+        ),
+        (
+            vec![
+                count(0, 100, Some((100, 20))),
+                count(5, 20, Some((120, 24))),
+                count(10, 30, Some((150, 30))),
+                count(0, 100, Some((100, 20))),
+                count(5, 20, Some((120, 24))),
+            ],
+            Some(3),
+            vec![120, 24, 36, 0, 0],
+            1,
+        ),
+        (
+            vec![
+                count(0, 100, Some((100, 20))),
+                anonymous(5, 40),
+                anonymous(6, 20),
+                count(7, 20, Some((60, 12))),
+                count(8, 10, Some((70, 14))),
+            ],
+            None,
+            vec![120, 0, 0, 24, 12],
+            1,
+        ),
+    ];
+    for (index, (lines, undated_after, expected, malformed)) in cases.into_iter().enumerate() {
+        let mut state = CodexScanState {
+            model: "gpt-6-astra".into(),
+            ..Default::default()
+        };
+        let actual: Vec<_> = lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                if undated_after == Some(i) {
+                    state.latest_cumulative_at_ms = None;
+                }
+                state
+                    .parse(line)
+                    .iter()
+                    .map(|r| t3_usage::total_tokens(&r.totals))
+                    .sum::<u64>()
+            })
+            .collect();
+        assert_eq!(actual, expected, "case {index}");
+        assert_eq!(state.malformed_records, malformed, "case {index}");
+    }
+}
 fn line(id: u64, output: u64) -> String {
     format!(
         "{}\n",
