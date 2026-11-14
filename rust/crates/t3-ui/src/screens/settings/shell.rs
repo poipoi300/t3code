@@ -225,6 +225,8 @@ pub struct SettingsContext {
     pub content_width: Signal<f32>,
     /// Bumped by Restore device defaults to remount the content (`restoreSignal`).
     pub restore_signal: Signal<u64>,
+    /// The settings screen's owner: writes started by a control outlive it (rule 7).
+    owner: Owner,
 }
 
 pub fn use_settings() -> SettingsContext {
@@ -272,6 +274,7 @@ impl SettingsContext {
             location,
             view,
             client,
+            owner: Owner::current(),
             content_width: signal(0.0),
             restore_signal: signal(0),
         }
@@ -350,12 +353,20 @@ impl SettingsContext {
         };
         let patch = patch.as_object().cloned().unwrap_or_default();
         let outcome = runtime.0.update(&view, patch);
-        spawn(async move {
+        self.spawn(async move {
             let outcome = outcome.await;
             if outcome.failed {
                 on_failed();
             }
             show_outcome(&outcome);
+        });
+    }
+
+    /// Starts a write under the screen's owner: a select or menu disposes the control that
+    /// picked the value as it closes, and the write must still run.
+    pub fn spawn(self, task: impl std::future::Future<Output = ()> + 'static) {
+        self.owner.run(move || {
+            spawn(task);
         });
     }
 
@@ -365,7 +376,7 @@ impl SettingsContext {
             return;
         };
         let outcome = runtime.0.clear(&view, keys);
-        spawn(async move { show_outcome(&outcome.await) });
+        self.spawn(async move { show_outcome(&outcome.await) });
     }
 
     /// `useClearProjectOverrides()(entries, keys)`.
@@ -378,7 +389,7 @@ impl SettingsContext {
             return;
         };
         let outcome = runtime.0.clear_project_overrides(&view, entries, keys);
-        spawn(async move { show_outcome(&outcome.await) });
+        self.spawn(async move { show_outcome(&outcome.await) });
     }
 
     /// Bumped by every client change, including reads `view()` compares equal (model lists).
@@ -423,7 +434,7 @@ impl SettingsContext {
     pub fn remember_enabled_grouping_mode(self, mode: &str) {
         if let Some(runtime) = self.runtime.get() {
             let remember = runtime.0.remember_enabled_grouping_mode(mode);
-            spawn(remember);
+            self.spawn(remember);
         }
     }
 
@@ -880,7 +891,7 @@ fn restore_defaults(context: SettingsContext, labels: Vec<&'static str>) {
     ) else {
         return;
     };
-    spawn(async move {
+    context.spawn(async move {
         if !confirm.await {
             return;
         }

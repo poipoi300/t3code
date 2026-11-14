@@ -168,6 +168,59 @@ fn config(window: (f32, f32), os: Option<Os>, root: Root) -> EngineConfig {
 #[derive(Clone, PartialEq, Props)]
 struct WorkspaceProps {
     terminal_open: bool,
+    terminal_granted: bool,
+}
+
+/// The client's terminal service with the session's `terminal:read` grant (the fake platform has
+/// no live session, so the toggle would be disabled).
+struct Granted<T>(T);
+
+impl<T: t3_ui::runtime::services::terminal::TerminalClient> t3_ui::runtime::services::terminal::TerminalClient for Granted<T> {
+    fn load(&self) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
+        self.0.load()
+    }
+    fn drawer(&self, key: &ThreadKey, launch: Option<t3_client::services::terminal_sessions::LaunchLocation>) -> t3_client::services::terminal_sessions::TerminalDrawerLease {
+        self.0.drawer(key, launch)
+    }
+    fn session(&self, key: &ThreadKey, terminal: &str, launch: &t3_client::services::terminal_sessions::TerminalLaunch) -> t3_client::services::terminal_sessions::TerminalSessionLease {
+        self.0.session(key, terminal, launch)
+    }
+    fn can_operate(&self, key: &ThreadKey) -> bool {
+        self.0.can_operate(key)
+    }
+    fn can_read(&self, _: &ThreadKey) -> bool {
+        true
+    }
+    fn is_open(&self, key: &ThreadKey) -> bool {
+        self.0.is_open(key)
+    }
+    fn ui_changes(&self) -> futures::stream::LocalBoxStream<'static, ()> {
+        self.0.ui_changes()
+    }
+    fn set_open(&self, key: &ThreadKey, open: bool) {
+        self.0.set_open(key, open)
+    }
+    fn toggle(&self, key: &ThreadKey) {
+        self.0.toggle(key)
+    }
+    fn set_height(&self, key: &ThreadKey, height: f64) {
+        self.0.set_height(key, height)
+    }
+    fn activate(&self, key: &ThreadKey, terminal: &str) {
+        self.0.activate(key, terminal)
+    }
+    fn launch(&self, key: &ThreadKey, placement: t3_client::services::terminal_sessions::Placement, location: Option<t3_client::services::terminal_sessions::LaunchLocation>) -> Option<(String, futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>>)> {
+        self.0.launch(key, placement, location)
+    }
+    fn close_terminal(&self, key: &ThreadKey, terminal: &str) -> Option<futures::future::LocalBoxFuture<'static, ()>> {
+        self.0.close_terminal(key, terminal)
+    }
+    fn write(&self, key: &ThreadKey, terminal: &str, data: String) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
+        self.0.write(key, terminal, data)
+    }
+    fn resize(&self, key: &ThreadKey, terminal: &str, grid: t3_client::services::terminal::TerminalGrid) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
+        self.0.resize(key, terminal, grid)
+    }
 }
 
 #[component]
@@ -181,6 +234,11 @@ fn ClientWorkspace(props: WorkspaceProps) -> impl IntoElement {
     provide_context(Rt::new(store, backend, Choice::Client));
     provide_context(Navigator::new(Route::Thread(key())));
     t3_ui::app::provide_client_services(&client);
+    if props.terminal_granted {
+        provide_context(t3_ui::runtime::services::terminal::TerminalServices(Rc::new(Granted(
+            client.terminals(),
+        ))));
+    }
     if props.terminal_open {
         client.terminals().set_open(&key(), true);
     }
@@ -207,7 +265,14 @@ fn ClientWorkspace(props: WorkspaceProps) -> impl IntoElement {
 }
 
 fn workspace(window: (f32, f32), terminal_open: bool) -> Headless {
-    let root = Root::new::<ClientWorkspace>(move || WorkspaceProps { terminal_open });
+    start_workspace(window, terminal_open, false)
+}
+
+fn start_workspace(window: (f32, f32), terminal_open: bool, terminal_granted: bool) -> Headless {
+    let root = Root::new::<ClientWorkspace>(move || WorkspaceProps {
+        terminal_open,
+        terminal_granted,
+    });
     let mut app = Headless::start(config(window, None, root)).expect("client workspace");
     app.wait_for("role:button[Follow file link]")
         .expect("mounted");
@@ -260,7 +325,7 @@ fn the_terminal_drawer_follows_the_clients_drawer_record() {
 /// The header's toggle (integration 4 saw it highlight without a drawer on desktop).
 #[test]
 fn the_header_toggle_opens_and_closes_the_terminal_drawer() {
-    let mut app = workspace(DESKTOP, false);
+    let mut app = start_workspace(DESKTOP, false, true);
     app.press("role:button[Toggle terminal drawer]")
         .expect("the toggle is enabled for a thread with a project");
     app.wait_for("id:thread-terminal-drawer")

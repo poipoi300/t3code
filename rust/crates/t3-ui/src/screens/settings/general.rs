@@ -104,7 +104,7 @@ fn notification_settings(context: SettingsContext) -> impl IntoElement {
                         }
                         requesting.set(true);
                         let answer = request_notification_permission();
-                        spawn(async move {
+                        context.spawn(async move {
                             use nsh_core::notifications::NotificationPermission as P;
                             let permission = answer.await;
                             let _ = requesting.try_set(false);

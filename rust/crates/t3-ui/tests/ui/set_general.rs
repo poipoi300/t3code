@@ -65,7 +65,8 @@ fn the_page_shows_the_web_sections_and_restore_lists_what_changed() {
 #[test]
 fn a_language_picked_in_the_select_is_saved_after_it_closes() {
     let mut app = start((1280.0, 4000.0), SettingsPage::General);
-    app.press("role:combobox[Language]").expect("open the select");
+    app.press("role:combobox[Language]")
+        .expect("open the select");
     app.wait_for("role:option[English]").expect("its options");
     app.press("role:option[English]").expect("pick");
     app.wait_for_gone("role:option", std::time::Duration::from_secs(5))
