@@ -364,10 +364,18 @@ impl Platform for EnvironmentPlatform {
                 ("POST", "/api/auth/websocket-ticket" | "/api/auth/websocket-ticket/rpc") => {
                     response(200, json!({"ticket":"ticket","expiresAt":"2036-01-01T00:00:00.000Z"}))
                 }
-                ("POST", "/oauth/token") => response(
-                    200,
-                    json!({"access_token":"paired-bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","token_type":"Bearer","expires_in":3600,"scope":permissions.join(" ")}),
-                ),
+                // A DPoP-bound exchange (through the relay) gets a DPoP token, as the server does.
+                ("POST", "/oauth/token") => {
+                    let bound = request
+                        .headers
+                        .keys()
+                        .any(|name| name.eq_ignore_ascii_case("dpop"));
+                    let token_type = if bound { "DPoP" } else { "Bearer" };
+                    response(
+                        200,
+                        json!({"access_token":"paired-bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","token_type":token_type,"expires_in":3600,"scope":permissions.join(" ")}),
+                    )
+                }
                 // Snapshots come over the socket; HTTP answers that it cannot serve them.
                 _ => response(503, json!({})),
             })
