@@ -45,30 +45,21 @@ use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::confirm::{ConfirmDialogOptions, ConfirmDialogVariant, request_confirm_dialog};
 use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::input::{InputSize, text_field};
-use crate::ui::menu::{ItemOptions, MenuOptions, menu, menu_item, menu_popup, menu_separator, menu_trigger};
-use crate::ui::toast::{ToastOptions, Variant as ToastVariant, stacked_thread_toast, toast_manager};
+use crate::ui::menu::{
+    ItemOptions, MenuOptions, menu, menu_item, menu_popup, menu_separator, menu_trigger,
+};
+use crate::ui::toast::{
+    ToastOptions, Variant as ToastVariant, stacked_thread_toast, toast_manager,
+};
 
 /// The operations the saved-environment rows need, bound to the client in
-/// `runtime/services/connection.rs`. Tests provide one through context.
+/// `runtime/services/connection.rs`.
 pub trait ConnectionActions {
     fn remove(&self, environment: &EnvironmentId) -> LocalBoxFuture<'static, Result<(), Text>>;
     fn reconnect(&self, environment: &EnvironmentId) -> LocalBoxFuture<'static, Result<(), Text>>;
     /// What failed on the way to `environment` (`useConnectionDiagnosis`), `None` while it is
     /// connected, off, or has not failed.
     fn diagnosis(&self, environment: &EnvironmentId) -> Option<ConnectionDiagnosis>;
-}
-
-/// Provided by a test root to stand in for the client.
-#[derive(Clone)]
-pub struct ConnectionActionsContext(pub Rc<dyn ConnectionActions>);
-
-fn connection_actions() -> Option<Rc<dyn ConnectionActions>> {
-    if let Some(ConnectionActionsContext(actions)) = use_context::<ConnectionActionsContext>() {
-        return Some(actions);
-    }
-    rt().backend()
-        .client()
-        .map(|client| crate::runtime::services::connection::actions(&client))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,7 +105,22 @@ impl PartialEq for HostedLaunch {
     }
 }
 
+/// `/pair`, as the router mounts it: over the app's client (none for the demo and an unavailable
+/// host, which hides the saved environments' actions).
 pub fn screen() -> AnyElement {
+    screen_for(rt().backend().client())
+}
+
+/// [`screen`] over a given client runtime: the same screen, with the saved environments' actions
+/// bound to `client` (`runtime/services/connection.rs`).
+pub fn screen_for<P: t3_client::platform::Platform + Clone + 'static>(
+    client: Option<t3_client::composition::ClientRuntime<P>>,
+) -> AnyElement {
+    let actions = stored(
+        client
+            .as_ref()
+            .map(|client| crate::runtime::services::connection::actions(client)),
+    );
     let page = signal(Page::Reading);
     let nav = navigator();
     let runtime = rt();
@@ -161,7 +167,7 @@ pub fn screen() -> AnyElement {
             let current = page.get();
             untracked(move || match current {
                 Page::Reading => standalone_page(view()).into_element(),
-                Page::Form => pairing_route_surface().into_element(),
+                Page::Form => pairing_route_surface(actions.get()).into_element(),
                 Page::Launch(launch) => hosted_pairing_route_surface(launch).into_element(),
             })
         }))
@@ -274,7 +280,9 @@ pub fn connection_notices() -> impl IntoElement {
 fn storage_notice_toast(notice: &t3_client::composition::StorageNotice) -> ToastOptions {
     let mut parts = Vec::new();
     if notice.reset_catalog {
-        parts.push(t("The list of saved environments could not be read and was reset."));
+        parts.push(t(
+            "The list of saved environments could not be read and was reset.",
+        ));
     }
     if notice.storage.recreated_database {
         parts.push(t("Saved data was damaged and was set aside."));
@@ -314,17 +322,26 @@ fn standalone_page(children: impl IntoElement) -> impl IntoElement {
 }
 
 /// Port of standalone-page.tsx StandalonePageHeader.
-fn standalone_page_header(title: impl Fn() -> String + 'static, description: impl Fn() -> String + 'static) -> impl IntoElement {
+fn standalone_page_header(
+    title: impl Fn() -> String + 'static,
+    description: impl Fn() -> String + 'static,
+) -> impl IntoElement {
     view()
         .child(
             view()
-                .app_class(tw("flex flex-row items-baseline justify-between gap-3 text-muted-foreground"))
+                .app_class(tw(
+                    "flex flex-row items-baseline justify-between gap-3 text-muted-foreground",
+                ))
                 .child(
                     // NSH gives a plain view no accessible name (the web's `role="img"
                     // aria-label="T3 Code"`): the mark is hidden and "Code" is read.
                     view()
                         .app_class(tw("flex flex-row items-baseline gap-1.5"))
-                        .child(svg(t3_wordmark()).app_class(tw("h-3 w-[20px] shrink-0 text-foreground")).accessible(false))
+                        .child(
+                            svg(t3_wordmark())
+                                .app_class(tw("h-3 w-[20px] shrink-0 text-foreground"))
+                                .accessible(false),
+                        )
                         .child(text(t("Code")).app_class(tw("text-lg font-medium tracking-tight"))),
                 ),
         )
@@ -466,18 +483,25 @@ fn failure_message(failure: &ConnectionFailure) -> String {
     t(&failure.detail) // client English key
 }
 
-fn pairing_input(method: Method, link: &str, host: &str, code: &str) -> Result<PairingInput, ConnectionFailure> {
+fn pairing_input(
+    method: Method,
+    link: &str,
+    host: &str,
+    code: &str,
+) -> Result<PairingInput, ConnectionFailure> {
     match method {
         Method::Link => Ok(PairingInput {
             pairing_url: Some(link.trim().to_owned()),
             ..PairingInput::default()
         }),
-        Method::Code => parse_remote_pairing_fields(host, code, None).map(|fields| fields.pairing_input()),
+        Method::Code => {
+            parse_remote_pairing_fields(host, code, None).map(|fields| fields.pairing_input())
+        }
     }
 }
 
 /// The form: PairingRouteSurface's page and buttons, with AddEnvironmentDialog's remote fields.
-fn pairing_route_surface() -> impl IntoElement {
+fn pairing_route_surface(connection: Option<Rc<dyn ConnectionActions>>) -> impl IntoElement {
     let method = signal(Method::Link);
     let link = signal(String::new());
     let host = signal(String::new());
@@ -511,43 +535,45 @@ fn pairing_route_surface() -> impl IntoElement {
         input.expected_environment = target.as_ref().map(|target| target.environment.clone());
         attempt.set(Attempt::Connecting);
         let pairing = runtime.backend().pair(input);
-        owner.get().run(|| spawn(async move {
-            let outcome = pairing.await;
-            // A pairing link or code is spent on any answer: neither stays in a field.
-            link.try_set(String::new());
-            code.try_set(String::new());
-            match outcome {
-                Ok(_) => {
-                    attempt.try_set(Attempt::Idle);
-                    host.try_set(String::new());
-                    toast_manager().add(match &target {
-                        Some(target) => ToastOptions {
-                            variant: ToastVariant::Success,
-                            title: "Route added".into(),
-                            description: Some(
-                                tr(
-                                    "{label} now has another way to connect.",
-                                    &[("label", Value::Text(target.label.clone().into()))],
-                                )
-                                .into(),
-                            ),
-                            ..ToastOptions::default()
-                        },
-                        None => ToastOptions {
-                            variant: ToastVariant::Success,
-                            title: "Backend added".into(),
-                            description: reconnect_promise(),
-                            ..ToastOptions::default()
-                        },
-                    });
-                    route_target.try_set(None);
-                    nav.open(Route::Home);
+        owner.get().run(|| {
+            spawn(async move {
+                let outcome = pairing.await;
+                // A pairing link or code is spent on any answer: neither stays in a field.
+                link.try_set(String::new());
+                code.try_set(String::new());
+                match outcome {
+                    Ok(_) => {
+                        attempt.try_set(Attempt::Idle);
+                        host.try_set(String::new());
+                        toast_manager().add(match &target {
+                            Some(target) => ToastOptions {
+                                variant: ToastVariant::Success,
+                                title: "Route added".into(),
+                                description: Some(
+                                    tr(
+                                        "{label} now has another way to connect.",
+                                        &[("label", Value::Text(target.label.clone().into()))],
+                                    )
+                                    .into(),
+                                ),
+                                ..ToastOptions::default()
+                            },
+                            None => ToastOptions {
+                                variant: ToastVariant::Success,
+                                title: "Backend added".into(),
+                                description: reconnect_promise(),
+                                ..ToastOptions::default()
+                            },
+                        });
+                        route_target.try_set(None);
+                        nav.open(Route::Home);
+                    }
+                    Err(failure) => {
+                        attempt.try_set(Attempt::Failed(Text::client_key(failure.detail)));
+                    }
                 }
-                Err(failure) => {
-                    attempt.try_set(Attempt::Failed(Text::client_key(failure.detail)));
-                }
-            }
-        }));
+            })
+        });
     };
 
     // AddEnvironmentDialog handleSavedBackendHostChange: a full pairing link pasted into the host
@@ -567,9 +593,20 @@ fn pairing_route_surface() -> impl IntoElement {
         .child(when(
             move || method.get() == Method::Link,
             move || {
-                view().app_class(tw("flex flex-col gap-2"))
-                    .child(text(t("Pairing link")).app_class(tw("text-sm font-medium")).accessible(false))
-                    .child(text_field(link, t("https://host/pair#token=…"), t("Pairing link"), InputSize::Lg, submit))
+                view()
+                    .app_class(tw("flex flex-col gap-2"))
+                    .child(
+                        text(t("Pairing link"))
+                            .app_class(tw("text-sm font-medium"))
+                            .accessible(false),
+                    )
+                    .child(text_field(
+                        link,
+                        t("https://host/pair#token=…"),
+                        t("Pairing link"),
+                        InputSize::Lg,
+                        submit,
+                    ))
             },
         ))
         .child(when(
@@ -581,17 +618,48 @@ fn pairing_route_surface() -> impl IntoElement {
                         view()
                             .app_class(tw("flex flex-col gap-3 sm:flex-row"))
                             .child(
-                                view().app_class(tw("flex min-w-0 flex-1 flex-col"))
-                                    .child(text(t("Host")).app_class(tw("mb-1.5 text-xs font-medium text-foreground")).accessible(false))
-                                    .child(text_field(host, t("backend.example.com"), t("Host"), InputSize::Default, submit)),
+                                view()
+                                    .app_class(tw("flex min-w-0 flex-1 flex-col"))
+                                    .child(
+                                        text(t("Host"))
+                                            .app_class(tw(
+                                                "mb-1.5 text-xs font-medium text-foreground",
+                                            ))
+                                            .accessible(false),
+                                    )
+                                    .child(text_field(
+                                        host,
+                                        t("backend.example.com"),
+                                        t("Host"),
+                                        InputSize::Default,
+                                        submit,
+                                    )),
                             )
                             .child(
-                                view().app_class(tw("flex flex-col sm:w-40"))
-                                    .child(text(t("Pairing code")).app_class(tw("mb-1.5 text-xs font-medium text-foreground")).accessible(false))
-                                    .child(text_field(code, t("PAIRCODE"), t("Pairing code"), InputSize::Default, submit)),
+                                view()
+                                    .app_class(tw("flex flex-col sm:w-40"))
+                                    .child(
+                                        text(t("Pairing code"))
+                                            .app_class(tw(
+                                                "mb-1.5 text-xs font-medium text-foreground",
+                                            ))
+                                            .accessible(false),
+                                    )
+                                    .child(text_field(
+                                        code,
+                                        t("PAIRCODE"),
+                                        t("Pairing code"),
+                                        InputSize::Default,
+                                        submit,
+                                    )),
                             ),
                     )
-                    .child(text(t("Paste a full pairing URL here to fill both fields automatically.")).app_class(tw("mt-1 text-2xs text-muted-foreground")))
+                    .child(
+                        text(t(
+                            "Paste a full pairing URL here to fill both fields automatically.",
+                        ))
+                        .app_class(tw("mt-1 text-2xs text-muted-foreground")),
+                    )
             },
         ));
 
@@ -608,8 +676,20 @@ fn pairing_route_surface() -> impl IntoElement {
     let actions = view()
         .app_class(tw("flex flex-row flex-wrap items-center gap-2"))
         .child(dynamic(move || {
-            let label = if connecting() { t("Connecting…") } else { t("Connect") };
-            untracked(move || button(ButtonContent::Label(label), ButtonVariant::Default, ButtonSize::Sm, connecting, submit))
+            let label = if connecting() {
+                t("Connecting…")
+            } else {
+                t("Connect")
+            };
+            untracked(move || {
+                button(
+                    ButtonContent::Label(label),
+                    ButtonVariant::Default,
+                    ButtonSize::Sm,
+                    connecting,
+                    submit,
+                )
+            })
         }))
         .child(button(
             ButtonContent::Label(t("Use a pairing code")),
@@ -628,10 +708,16 @@ fn pairing_route_surface() -> impl IntoElement {
         ))
         .child(dynamic(move || {
             route_target.get().map(|_| {
-                button(ButtonContent::Label(t("Cancel")), ButtonVariant::Ghost, ButtonSize::Sm, connecting, move || {
-                    route_target.set(None);
-                    attempt.set(Attempt::Idle);
-                })
+                button(
+                    ButtonContent::Label(t("Cancel")),
+                    ButtonVariant::Ghost,
+                    ButtonSize::Sm,
+                    connecting,
+                    move || {
+                        route_target.set(None);
+                        attempt.set(Attempt::Idle);
+                    },
+                )
             })
         }));
     // Only the demo backend knows the demo server.
@@ -675,7 +761,7 @@ fn pairing_route_surface() -> impl IntoElement {
                     .app_class(tw("mt-6 rounded-lg border border-border/70 bg-background/55 px-3 py-3 text-xs leading-relaxed text-muted-foreground"))
                     .child(text(t("This environment accepts one-time pairing tokens. Pairing links can open this page directly, or you can paste the token here.")).app_class(tw("text-xs leading-relaxed text-muted-foreground"))),
             )
-            .child(saved_environments(entries, route_target, method, attempt)),
+            .child(saved_environments(entries, connection, route_target, method, attempt)),
     )
 }
 
@@ -684,12 +770,19 @@ fn pairing_route_surface() -> impl IntoElement {
 /// (`ConnectionsSettings.tsx`, `SavedBackendListRow`), reduced to what pairing needs.
 fn saved_environments(
     entries: Signal<Vec<EnvironmentEntry>>,
+    actions: Option<Rc<dyn ConnectionActions>>,
     route_target: Signal<Option<RouteTarget>>,
     method: Signal<Method>,
     attempt: Signal<Attempt>,
 ) -> impl IntoElement {
-    let actions = stored(connection_actions());
-    let ids = computed(move || entries.with(|list| list.iter().map(|entry| entry.id.clone()).collect::<Vec<_>>()));
+    let actions = stored(actions);
+    let ids = computed(move || {
+        entries.with(|list| {
+            list.iter()
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>()
+        })
+    });
     dynamic(move || {
         let list = ids.get();
         untracked(move || {
@@ -698,15 +791,27 @@ fn saved_environments(
                 for (index, id) in list.into_iter().enumerate() {
                     let entry = computed({
                         let id = id.clone();
-                        move || entries.with(|list| list.iter().find(|entry| entry.id == id).cloned())
+                        move || {
+                            entries.with(|list| list.iter().find(|entry| entry.id == id).cloned())
+                        }
                     });
                     rows = rows
                         .child((index > 0).then(|| view().app_class(tw("h-px w-full bg-border"))))
-                        .child(saved_backend_list_row(entry, actions, route_target, method, attempt));
+                        .child(saved_backend_list_row(
+                            entry,
+                            actions,
+                            route_target,
+                            method,
+                            attempt,
+                        ));
                 }
                 view()
                     .app_class(tw("mt-6 flex flex-col gap-2"))
-                    .child(text(t("Environments")).role(AccessibilityRole::Header).app_class(tw("text-sm font-medium text-foreground")))
+                    .child(
+                        text(t("Environments"))
+                            .role(AccessibilityRole::Header)
+                            .app_class(tw("text-sm font-medium text-foreground")),
+                    )
                     .child(rows)
             })
         })
@@ -716,7 +821,9 @@ fn saved_environments(
 fn status_text(text: &StatusText) -> String {
     match text {
         StatusText::Key(key) => t(key),
-        StatusText::WithReason { key, reason } => tr(key, &[("reason", Value::Text(t(reason).into()))]), // reason: client English key
+        StatusText::WithReason { key, reason } => {
+            tr(key, &[("reason", Value::Text(t(reason).into()))])
+        } // reason: client English key
         StatusText::Content(content) => content.clone(),
     }
 }
@@ -747,12 +854,16 @@ fn saved_backend_list_row(
     let headline = computed(move || {
         entry.with(|e| {
             let e = e.as_ref()?;
-            actions.with(|a| a.as_ref()?.diagnosis(&e.id)).map(|d| d.headline)
+            actions
+                .with(|a| a.as_ref()?.diagnosis(&e.id))
+                .map(|d| d.headline)
         })
     });
     let subtitle = move || {
         entry.with(|e| {
-            let Some(e) = e else { return (String::new(), false) };
+            let Some(e) = e else {
+                return (String::new(), false);
+            };
             let presentation = present_connection_state(&e.state);
             // The entry carries no saved switch: a switched-off environment is listed and not
             // wanted (`desired`), and one that never started is blocked, not off.
@@ -765,12 +876,17 @@ fn saved_backend_list_row(
             } else {
                 format!("{transport} · {}", status_text(&status.text))
             };
-            (text, status.tone == StatusTone::Error && headline.get().is_none())
+            (
+                text,
+                status.tone == StatusTone::Error && headline.get().is_none(),
+            )
         })
     };
     let damaged = move || entry.with(|e| e.as_ref().is_some_and(|e| e.damaged));
     let remove = move || {
-        let Some(e) = entry.get_untracked() else { return };
+        let Some(e) = entry.get_untracked() else {
+            return;
+        };
         let Some(actions) = actions.get() else { return };
         let message = tr(
             "Remove {label} from this device?\nThis forgets its pairing, credentials, and cached threads here. Switch it off instead to keep it saved.",
@@ -785,25 +901,29 @@ fn saved_backend_list_row(
         ) else {
             return;
         };
-        owner.get().run(|| spawn(async move {
-            if !confirmation.await {
-                return;
-            }
-            removing.try_set(true);
-            let result = actions.remove(&e.id).await;
-            removing.try_set(false);
-            if let Err(message) = result {
-                toast_manager().add(stacked_thread_toast(ToastOptions {
-                    variant: ToastVariant::Error,
-                    title: "Could not remove backend".into(),
-                    description: Some(message),
-                    ..ToastOptions::default()
-                }));
-            }
-        }));
+        owner.get().run(|| {
+            spawn(async move {
+                if !confirmation.await {
+                    return;
+                }
+                removing.try_set(true);
+                let result = actions.remove(&e.id).await;
+                removing.try_set(false);
+                if let Err(message) = result {
+                    toast_manager().add(stacked_thread_toast(ToastOptions {
+                        variant: ToastVariant::Error,
+                        title: "Could not remove backend".into(),
+                        description: Some(message),
+                        ..ToastOptions::default()
+                    }));
+                }
+            })
+        });
     };
     let add_route = move || {
-        let Some(e) = entry.get_untracked() else { return };
+        let Some(e) = entry.get_untracked() else {
+            return;
+        };
         route_target.set(Some(RouteTarget {
             environment: e.id,
             label: e.label,
@@ -812,21 +932,30 @@ fn saved_backend_list_row(
         attempt.set(Attempt::Idle);
     };
     let retry = move || {
-        let Some(e) = entry.get_untracked() else { return };
+        let Some(e) = entry.get_untracked() else {
+            return;
+        };
         let Some(actions) = actions.get() else { return };
-        owner.get().run(|| spawn(async move {
-            if let Err(message) = actions.reconnect(&e.id).await {
-                toast_manager().add(stacked_thread_toast(ToastOptions {
-                    variant: ToastVariant::Error,
-                    title: "Could not reconnect".into(),
-                    description: Some(message),
-                    ..ToastOptions::default()
-                }));
-            }
-        }));
+        owner.get().run(|| {
+            spawn(async move {
+                if let Err(message) = actions.reconnect(&e.id).await {
+                    toast_manager().add(stacked_thread_toast(ToastOptions {
+                        variant: ToastVariant::Error,
+                        title: "Could not reconnect".into(),
+                        description: Some(message),
+                        ..ToastOptions::default()
+                    }));
+                }
+            })
+        });
     };
     let has_actions = actions.with(|a| a.is_some());
-    let more_label = move || tr("More actions for {label}", &[("label", Value::Text(label().into()))]);
+    let more_label = move || {
+        tr(
+            "More actions for {label}",
+            &[("label", Value::Text(label().into()))],
+        )
+    };
     view()
         .app_class(tw("flex flex-row items-center gap-x-3 px-3 py-2.5 sm:px-4"))
         .child(icon_with_class(Icon::Server, "size-4 text-muted-foreground"))
@@ -899,24 +1028,49 @@ mod tests {
 
     #[test]
     fn the_link_method_sends_only_the_trimmed_link() {
-        let input = pairing_input(Method::Link, "  https://h.test/pair#token=abc ", "ignored", "ignored")
-            .expect("a link is passed through");
-        assert_eq!(input.pairing_url.as_deref(), Some("https://h.test/pair#token=abc"));
+        let input = pairing_input(
+            Method::Link,
+            "  https://h.test/pair#token=abc ",
+            "ignored",
+            "ignored",
+        )
+        .expect("a link is passed through");
+        assert_eq!(
+            input.pairing_url.as_deref(),
+            Some("https://h.test/pair#token=abc")
+        );
         assert!(input.host.is_none() && input.pairing_code.is_none());
-        let target = resolve_pairing_target(&input).map_err(|f| f.detail).expect("valid");
+        let target = resolve_pairing_target(&input)
+            .map_err(|f| f.detail)
+            .expect("valid");
         assert_eq!(target.http_base, "https://h.test/");
     }
 
     #[test]
     fn the_code_method_says_what_is_missing_before_the_client_is_asked() {
-        let input = pairing_input(Method::Code, "ignored", " h.test:3773 ", " 1234 ").expect("both fields");
+        let input =
+            pairing_input(Method::Code, "ignored", " h.test:3773 ", " 1234 ").expect("both fields");
         assert_eq!(input.pairing_url, None);
         assert_eq!(input.host.as_deref(), Some("h.test:3773"));
         assert_eq!(input.pairing_code.as_deref(), Some("1234"));
-        let missing = |host, code| pairing_input(Method::Code, "", host, code).err().map(|f| f.detail);
-        assert_eq!(missing("h.test", "  ").as_deref(), Some("Enter a pairing code."));
-        assert_eq!(missing(" ", "1234").as_deref(), Some("Enter a backend host."));
-        let pasted = pairing_input(Method::Code, "", "https://h.test/pair#token=xyz", "").expect("a link in the host field");
-        assert_eq!((pasted.host.as_deref(), pasted.pairing_code.as_deref()), (Some("https://h.test"), Some("xyz")));
+        let missing = |host, code| {
+            pairing_input(Method::Code, "", host, code)
+                .err()
+                .map(|f| f.detail)
+        };
+        assert_eq!(
+            missing("h.test", "  ").as_deref(),
+            Some("Enter a pairing code.")
+        );
+        assert_eq!(
+            missing(" ", "1234").as_deref(),
+            Some("Enter a backend host.")
+        );
+        let pasted = pairing_input(Method::Code, "", "https://h.test/pair#token=xyz", "")
+            .expect("a link in the host field");
+        assert_eq!(
+            (pasted.host.as_deref(), pasted.pairing_code.as_deref()),
+            (Some("https://h.test"), Some("xyz"))
+        );
     }
 }

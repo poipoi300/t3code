@@ -252,10 +252,13 @@ impl MarkdownLinkPlugin {
                 let plugin = self.clone();
                 // TextView names a custom inline U+FFFC; the native link supplies the authored name.
                 Some(
-                    nsh_base::link()
-                        .href(Some(SharedString::from(
-                            node.attributes.get("href")?.clone(),
-                        )))
+                    crate::runtime::services::links::external_link(
+                        {
+                            let href = node.attributes.get("href")?.clone();
+                            move || Some(href.clone())
+                        },
+                        |_| {},
+                    )
                         .title(
                             node.attributes
                                 .get("title")
@@ -613,10 +616,12 @@ fn render_file_link_chip(
     };
     let trigger = if let Some((thread, panel)) = panel_target {
         let target = meta.clone();
-        nsh_base::link()
+        // A workspace file opens in the app's own panel (`on_open`), never outside it.
+        crate::runtime::services::links::in_app_link({
+            let path = SharedString::from(meta.target_path.clone());
+            move || Some(path.clone())
+        })
             .direction(LayoutDirection::Ltr)
-            .href(Some(SharedString::from(meta.target_path.clone())))
-            .open_with(nsh_base::LinkOpenWith::App)
             .accessibility_label(Some(SharedString::from(label.clone())))
             .gap(px(MARKDOWN_FONT_SIZE * 0.2)).line_height(nsh_core::LineHeight::Normal)
         .app_class(tw("inline-block max-w-full items-center font-medium text-(--context-chip-mention) cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-current rounded-sm disabled:cursor-default"))
@@ -951,9 +956,7 @@ pub fn markdown_thread_link(
                 .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
                 .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
                 .tooltip(tooltip(tooltip_create_handle(), Default::default(), text(move || t("Open thread"))))
-                .child(nsh_base::link()
-                    .href(move || Some(SharedString::from(Route::Thread(chip.with(|chip| chip.key.clone())).path())))
-                    .open_with(nsh_base::LinkOpenWith::App)
+                .child(crate::runtime::services::links::in_app_link(move || Some(SharedString::from(Route::Thread(chip.with(|chip| chip.key.clone())).path())))
                     .accessibility_label(move || Some(tr("Thread, {title}", &[("title", Value::Text(chip.with(|chip| chip.title.resolve().to_string())))]).into()))
                     .gap(px(MARKDOWN_FONT_SIZE * 0.2)).line_height(nsh_core::LineHeight::Normal)
         .app_class(tw("inline-flex max-w-full items-center font-medium text-(--context-chip-thread) cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-current rounded-sm no-underline"))

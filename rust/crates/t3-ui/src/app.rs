@@ -147,6 +147,8 @@ pub fn provide_client_services<P: Platform + Clone + 'static>(client: &ClientRun
     provide_context(navigation::add_project_runtime(client.add_project()));
     provide_context(files::files(client));
     provide_context(files::file_viewer(client));
+    // Every address opened outside the app goes through the client's policy (`links.rs`).
+    provide_context(crate::runtime::services::links::link_opener(client));
     provide_context(shell::sidebar_width_store(client));
     provide_context(shell::sidebar_shelves_store(client));
     provide_context(crate::screens::notifications::notification_settings(client));

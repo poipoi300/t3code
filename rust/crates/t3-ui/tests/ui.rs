@@ -324,3 +324,5 @@ mod dsk_ssh;
 mod dsk_backend;
 #[path = "ui/ui_mounts_app_root.rs"]
 mod ui_mounts_app_root;
+#[path = "ui/ui_mounts_links.rs"]
+mod ui_mounts_links;

@@ -194,12 +194,14 @@ pub fn badge_link(
     on_open: impl Fn(&str) + 'static,
 ) -> impl IntoElement {
     let measured = signal(size(px(0.0), px(0.0)));
-    let root = nsh_base::link()
+    // The address goes through the client's link policy (`runtime/services/links.rs`).
+    let root = crate::runtime::services::links::external_link(
+        move || Some(href().to_string()),
+        on_open,
+    )
         .accessibility_label(move || label.resolve())
-        .href(href)
         .disabled(disabled)
         .hit_slop(move || coarse_target(measured.get()))
-        .on_open(move |href: &SharedString| on_open(href))
         .app_class(tw_with(props.scope, &classes(props, true), &[]))
         .children(children(content, ICON_CLASSES));
     let root = match props.variant {

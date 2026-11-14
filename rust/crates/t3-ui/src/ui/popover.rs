@@ -563,12 +563,18 @@ pub fn preview_card_trigger(
     children: impl IntoElement,
 ) -> impl IntoElement {
     let label = label.into();
-    // NSH Link supplies native navigation and its destination hint when href is present.
-    nsh_base::link()
-        .href(href)
-        .open_with(open_with)
-        .on_open(on_open)
-        .accessibility_label(move || Some(label.resolve()))
+    // NSH Link supplies its destination hint when href is present; an address outside the app
+    // opens through the client's policy (`runtime/services/links.rs`), an app's own route only
+    // through `on_open`.
+    let link = if open_with == nsh_base::LinkOpenWith::App {
+        crate::runtime::services::links::in_app_link(move || href.clone()).on_open(on_open)
+    } else {
+        crate::runtime::services::links::external_link(
+            move || href.as_ref().map(ToString::to_string),
+            move |opened: &str| on_open(&SharedString::from(opened.to_owned())),
+        )
+    };
+    link.accessibility_label(move || Some(label.resolve()))
         .child(children)
 }
 

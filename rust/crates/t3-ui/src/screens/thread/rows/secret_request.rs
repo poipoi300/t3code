@@ -156,6 +156,7 @@ fn pending_secret_request_form(
     let reason = item.reason.clone();
     let url = item.url.clone().flatten();
     let decline = send.clone();
+    let opener = crate::runtime::services::links::link_opener_here();
     view()
         .test_id("data-v2-item-type-secret_request")
         .app_class(tw(
@@ -192,12 +193,7 @@ fn pending_secret_request_form(
                     ButtonVariant::Outline,
                     ButtonSize::Sm,
                     || false,
-                    move || {
-                        let href = href.clone();
-                        spawn(async move {
-                            let _ = open_url(href).await;
-                        });
-                    },
+                    move || opener.open(href.clone()),
                 ))
                 // A link found in the reason is already shown there.
                 .child(url.clone().map(|url| {

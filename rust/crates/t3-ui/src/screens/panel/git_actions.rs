@@ -800,13 +800,17 @@ fn action_row(control: Control) -> impl IntoElement {
         .app_class(move || Some(tw(&cn([Some("shrink-0 group/details-split flex w-full items-center rounded-lg hover:bg-black/[0.035] dark:hover:bg-white/[0.08]"),
             control.menu_open.get().then_some("bg-black/[0.035] dark:bg-white/[0.08]"), control.snapshot.with(|s| progress(s).is_some()).then_some("bg-black/[0.035] dark:bg-white/[0.055]")]))))
         .child(dynamic(move || {
+            // Built untracked: only the snapshot and the success state select this control
+            // (a tooltip handle, a translation read while building must not re-run it mid-commit).
             let snapshot = control.snapshot.get();
+            let success = control.success.get();
+            untracked(move || {
             if let Some(progress) = progress(&snapshot) {
                 let status = progress_status(&snapshot, &progress);
                 let label = progress.output.as_ref().map_or_else(|| status.clone(), |output| format!("{status} {output}"));
                 return thread_details_control("primary", label.into(), true.into(), true, git_action_progress_button_content(progress, status), || {}).into_element();
             }
-            if let Some(success) = control.success.get() { return thread_details_control("primary", success.title.resolve().into(), true.into(), true, git_action_success_button_content(success), || {}).into_element(); }
+            if let Some(success) = success { return thread_details_control("primary", success.title.resolve().into(), true.into(), true, git_action_success_button_content(success), || {}).into_element(); }
             let action = quick(&snapshot);
             let reason = if !control.can_write() { Some(t("This connection cannot change source control.")) }
                 else { match &action.kind { QuickActionKind::Hint(reason) if action.disabled => Some(Text::client_key(reason.clone()).resolve().to_string()), _ => None } };
@@ -817,6 +821,7 @@ fn action_row(control: Control) -> impl IntoElement {
                 .app_class(tw(&cn([Some(CONTROL_CLASS), Some("flex-1 justify-start rounded-e-none")])))
                 .child(git_quick_action_icon(&action, &snapshot))
                 .child(text(label).app_class(tw("ml-0 min-w-0 truncate")))).into_element()
+            })
         }))
         .child(dynamic(move || {
             if let Some(progress) = control.snapshot.with(progress) { return git_action_elapsed_time(progress.started_at).into_element(); }
@@ -1763,11 +1768,18 @@ fn publish_protocol_control(publish: PublishState) -> impl IntoElement {
 }
 
 fn publish_summary(control: Control, publish: PublishState) -> impl IntoElement {
+    // Built untracked: only the result selects this view; the provider and snapshot read while
+    // building it must not rebuild it (and its button) mid-commit.
     dynamic(move || {
-        let Some(result) = publish.result.get() else {
+        let result = publish.result.get();
+        untracked(move || {
+        let Some(result) = result else {
             return text(t("Publish result unavailable.")).app_class(tw("rounded-md border border-input bg-background px-3 py-2 text-xs text-muted-foreground dark:border-transparent dark:bg-white/[0.035]")).into_element();
         };
         let pushed = result.status == SourceControlPublishStatus::Pushed;
+        // The publish response's URL is the environment's: opened only through the client's
+        // policy (a hostile server's `search-ms:` or `vscode://file/<UNC>` opens nothing).
+        let opener = crate::runtime::services::links::link_opener_here();
         let url = result.repository.url.0;
         view().app_class(tw("space-y-4"))
             .child(view().app_class(tw("flex flex-col items-center gap-2 py-1 text-center"))
@@ -1779,7 +1791,8 @@ fn publish_summary(control: Control, publish: PublishState) -> impl IntoElement 
                 .child(publish.selected(control).map(|p| publish_provider_icon(&p, "size-3.5 shrink-0 text-muted-foreground")))
                 .child(text(result.repository.name_with_owner.0).app_class(tw("min-w-0 flex-1 truncate font-mono text-xs text-foreground"))))
             .child(button(ButtonContent::Label(tr("Open on {provider}", &[("provider", Value::Text(publish.selected(control).map_or_else(String::new, |p| p.label)))])), ButtonVariant::Outline, ButtonSize::Sm, || false,
-                move || { let url = url.clone(); spawn(async move { let _ = open_url(url).await; }); })).into_element()
+                move || opener.open(url.clone()))).into_element()
+        })
     })
 }
 

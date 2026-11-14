@@ -9,10 +9,8 @@ use futures::future::LocalBoxFuture;
 use nsh_core::prelude::*;
 use t3_client::ClientStore;
 use t3_client::composition::{ClientRuntime, Spawner};
-use t3_client::connection::Time;
-use t3_client::environment::EnvironmentRegistry;
-use t3_client::platform::NetworkStatus;
-use t3_client::rpc::SessionEndpoint;
+use t3_client::platform::Platform;
+use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
 
 use super::backend::Unavailable;
 use super::host::{Choice, Started};
@@ -49,24 +47,7 @@ pub fn start(store: ClientStore) -> LocalBoxFuture<'static, Started> {
                 };
             }
         };
-        let paired = EnvironmentRegistry::<SessionEndpoint>::load(
-            &platform,
-            NetworkStatus::Unknown,
-            Time::from_platform(&platform),
-        )
-        .await
-        .is_ok_and(|registry| registry.entries().next().is_some());
-        let runtime = ClientRuntime::new(platform, store, host::SOURCE, spawner.clone());
-        let restoring = runtime.clone();
-        spawner(
-            async move {
-                // Per-environment failures are listed with their state; this is the catalogue.
-                if let Err(error) = restoring.restore().await {
-                    log::warn!("t3-ui: restoring saved environments failed: {error}");
-                }
-            }
-            .boxed_local(),
-        );
+        let (runtime, paired) = start_on(platform, store, host::SOURCE, spawner).await;
         Started {
             backend: Rc::new(runtime),
             choice: Choice::Client,
@@ -74,6 +55,25 @@ pub fn start(store: ClientStore) -> LocalBoxFuture<'static, Started> {
         }
     }
     .boxed_local()
+}
+
+/// The client over an opened platform. The saved environments are restored first: restoring
+/// settles the catalog (a damaged one is set aside, and the runtime keeps that for its one-time
+/// storage notice), and starts each environment's connection without waiting for its server.
+/// Whether an environment is saved is then read from the runtime, never from a second load.
+pub async fn start_on<P: Platform + Clone + 'static>(
+    platform: P,
+    store: ClientStore,
+    source: OrchestrationV2CreationSource,
+    spawner: Spawner,
+) -> (ClientRuntime<P>, bool) {
+    let runtime = ClientRuntime::new(platform, store, source, spawner);
+    // Per-environment failures are listed with their state; this is the catalogue.
+    if let Err(error) = runtime.restore().await {
+        log::warn!("t3-ui: restoring saved environments failed: {error}");
+    }
+    let paired = !runtime.environments().is_empty();
+    (runtime, paired)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -156,13 +156,41 @@ mod host {
         presentation::desktop(std::env::consts::OS, APP_VERSION.unwrap_or("0.0.0"))
     }
 
-    /// The Android Keystore (t3-platform finds the Java VM itself, U13) or the iOS Keychain.
+    /// The Android Keystore or the iOS Keychain. Android below API 31 has no Keystore store yet:
+    /// t3-platform finds the Java VM itself only from API 31, and NSH does not hand its VM to app
+    /// code (request in client-seam-requests.md, "CONN lane: the Java VM on Android 26 to 30").
     #[cfg(any(target_os = "android", target_os = "ios"))]
     fn config(dir: std::path::PathBuf) -> (NativeConfig, bool) {
         mobile_config(
             || NativeConfig::mobile(dir.clone()).map_err(|error| error.to_string()),
-            || NativeConfig::new(dir.clone(), Box::new(t3_platform::EphemeralSecretStore::default())),
+            || in_memory_config(&dir),
         )
+    }
+
+    /// Keys in process memory, over a directory of its own emptied first: what a run without a
+    /// key store saves is unreadable after it, so it must never share (and then discard) the rows
+    /// a run with the key store saved, nor list environments it cannot authenticate.
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    fn in_memory_config(dir: &std::path::Path) -> NativeConfig {
+        NativeConfig::new(
+            fresh_in_memory_dir(dir),
+            Box::new(t3_platform::EphemeralSecretStore::default()),
+        )
+    }
+
+    /// `client-memory` beside the persistent `client` directory, emptied.
+    #[cfg(any(
+        test,
+        not(any(target_os = "windows", target_os = "macos", target_os = "linux"))
+    ))]
+    fn fresh_in_memory_dir(dir: &std::path::Path) -> std::path::PathBuf {
+        let memory = dir.with_file_name("client-memory");
+        if let Err(error) = std::fs::remove_dir_all(&memory)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("t3-ui: the last run's in-memory storage was not cleared: {error}");
+        }
+        memory
     }
 
     /// The OS key store when it opens; otherwise keys in memory, and saved servers last this run.
@@ -209,10 +237,7 @@ mod host {
         target_os = "ios"
     )))]
     fn config(dir: std::path::PathBuf) -> (NativeConfig, bool) {
-        (
-            NativeConfig::new(dir, Box::new(t3_platform::EphemeralSecretStore::default())),
-            false,
-        )
+        (in_memory_config(&dir), false)
     }
 
     #[cfg(not(any(
@@ -227,13 +252,44 @@ mod host {
     }
     #[cfg(test)]
     mod tests {
-        use super::mobile_config;
+        use super::{fresh_in_memory_dir, mobile_config};
+
+        // Platform re-review 2, B2: the fallback shared the persistent directory and discarded the
+        // rows a run with the Keystore had saved.
+        #[test]
+        fn the_in_memory_fallback_never_touches_the_persistent_directory() {
+            let root =
+                std::env::temp_dir().join(format!("t3-ui-memory-dir-{}", std::process::id()));
+            let persistent = root.join("client");
+            std::fs::create_dir_all(&persistent).unwrap();
+            std::fs::write(persistent.join("client-storage.sqlite"), b"saved").unwrap();
+            std::fs::create_dir_all(root.join("client-memory")).unwrap();
+            std::fs::write(
+                root.join("client-memory").join("client-storage.sqlite"),
+                b"last run",
+            )
+            .unwrap();
+            let memory = fresh_in_memory_dir(&persistent);
+            assert_eq!(memory, root.join("client-memory"));
+            assert!(
+                !memory.exists(),
+                "the last run's in-memory rows are gone before it opens"
+            );
+            assert_eq!(
+                std::fs::read(persistent.join("client-storage.sqlite")).unwrap(),
+                b"saved"
+            );
+            std::fs::remove_dir_all(&root).unwrap();
+        }
 
         // Integration 3 (U13): Android was given in-memory keys even with a working Keystore, so
         // nothing paired survived a restart.
         #[test]
         fn a_mobile_host_keeps_its_servers_when_its_key_store_opens() {
-            assert_eq!(mobile_config(|| Ok("key store"), || "memory"), ("key store", true));
+            assert_eq!(
+                mobile_config(|| Ok("key store"), || "memory"),
+                ("key store", true)
+            );
             assert_eq!(
                 mobile_config(|| Err("no Java VM".to_owned()), || "memory"),
                 ("memory", false),
@@ -256,5 +312,40 @@ mod host {
             .await
             .map(|platform| (platform, true))
             .map_err(|error| format!("The client's storage did not open: {error}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::start_on;
+    use futures::executor::block_on;
+    use std::rc::Rc;
+    use t3_client::ClientStore;
+    use t3_client::platform::{Storage, StorageArea, StorageKey, StorageWrite};
+    use t3_client::testing::FakePlatform;
+    use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+
+    // Platform re-review 2, B1: start loaded the catalog once to decide `paired`, which set a
+    // damaged catalog aside before `restore` could report it, so the notice never said so.
+    #[test]
+    fn starting_over_a_damaged_catalog_reports_the_reset_and_opens_unpaired() {
+        let platform = FakePlatform::default();
+        block_on(platform.write(
+            StorageArea::Ordinary,
+            vec![StorageWrite {
+                key: StorageKey::new("connection-catalog", None, "current"),
+                value: Some(b"{not a catalog".to_vec()),
+            }],
+        ))
+        .expect("written");
+        let (runtime, paired) = block_on(start_on(
+            platform,
+            ClientStore::default(),
+            OrchestrationV2CreationSource::Web,
+            Rc::new(|_| {}),
+        ));
+        assert!(!paired, "nothing usable is saved");
+        let notice = runtime.take_storage_notice().expect("the user is told");
+        assert!(notice.reset_catalog, "the notice says the list was reset");
     }
 }
