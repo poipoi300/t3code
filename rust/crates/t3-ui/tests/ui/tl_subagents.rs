@@ -88,6 +88,20 @@ fn fixture(window: (f32, f32)) -> Headless {
     let mut app = Headless::start(EngineConfig {
         ui_sets: sets,
         viewport: size(px(window.0), px(window.1)),
+        environment: nsh_core::platform::Environment {
+            os: if window == PHONE {
+                nsh_core::platform::Os::Android
+            } else {
+                nsh_core::platform::Os::Windows
+            },
+            idiom: if window == PHONE {
+                nsh_core::platform::Idiom::Phone
+            } else {
+                nsh_core::platform::Idiom::Desktop
+            },
+            reduce_motion: true,
+            ..Default::default()
+        },
         ..EngineConfig::new(Root::of::<SubagentFixture>())
     })
     .expect("fixture");

@@ -233,8 +233,18 @@ fn client_flags_reveal_real_meta_and_copy_after_settlement_at_both_widths() {
             app.hover("role:button[Copy message]").expect("reveal meta");
         }
         app.wait_for("12:34").expect("client-formatted timestamp");
+        let copy_button = app
+            .screen()
+            .id("role:button[Copy message]")
+            .expect("copy button identity");
         app.press("role:button[Copy message]").expect("copy");
         app.wait_for("Copied!").expect("source anchored copy toast");
+        assert_eq!(
+            app.screen()
+                .id("role:button[Copy message]")
+                .expect("copied button identity"),
+            copy_button
+        );
         assert_eq!(app.screen().clipboard(), Some(FINAL));
         assert!(
             !app.screen()
@@ -247,6 +257,12 @@ fn client_flags_reveal_real_meta_and_copy_after_settlement_at_both_widths() {
             app.screen()
                 .enabled("role:button[Copy message]")
                 .expect("copy state reset")
+        );
+        assert_eq!(
+            app.screen()
+                .id("role:button[Copy message]")
+                .expect("reset button identity"),
+            copy_button
         );
     }
 }
@@ -373,6 +389,7 @@ fn sent_message_uses_the_complete_client_source_for_reference_links() {
 
 #[test]
 fn the_demo_timeline_mounts_meta_and_copies_the_terminal_response_without_an_injected_renderer() {
+    let response_copy = "label:T3 Code >> role:button[Copy message]";
     for window in [PHONE, DESKTOP] {
         let mut app = crate::support::start(window);
         crate::support::pair(&mut app);
@@ -380,13 +397,13 @@ fn the_demo_timeline_mounts_meta_and_copies_the_terminal_response_without_an_inj
             .expect("open the real thread page");
         app.wait_for("I added clamp next to sum and the tests pass.")
             .expect("real timeline body");
-        app.wait_for("role:button[Copy message]")
+        app.wait_for(response_copy)
             .expect("client-derived terminal response meta");
         if window == DESKTOP {
-            app.hover("role:button[Copy message]")
+            app.hover(response_copy)
                 .expect("assistant frame reveals meta on hover");
         }
-        app.press("role:button[Copy message]").expect("copy reply");
+        app.press(response_copy).expect("copy reply");
         app.wait_until(
             "terminal reply reaches the clipboard",
             Duration::from_secs(2),

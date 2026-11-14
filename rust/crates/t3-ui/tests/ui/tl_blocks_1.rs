@@ -4,49 +4,53 @@ use t3_ui::screens::thread::blocks::flatten::{MessageFlattener, split_markdown_b
 
 #[test]
 fn appended_deltas_do_not_scan_the_settled_prefix() {
-    fn measure(fences: usize, legacy: bool, definitions: bool, newline: &str) -> (usize, usize) {
+    fn measure(prefix: usize, reconcile: bool, definitions: bool, newline: &str) -> (usize, usize) {
         let mut source = if definitions {
-            (0..fences)
+            (0..prefix)
                 .map(|index| format!("[ref-{index}]: /target\n\n"))
                 .collect::<String>()
         } else {
-            "```rs\nlet settled = 1;\n```\n\n".repeat(fences)
+            "```rs\nlet settled = 1;\n```\n\n".repeat(prefix)
         };
         source.push_str("```rs\n");
         source = source.replace('\n', newline);
         let mut flattener = MessageFlattener::new("work-proof");
-        if legacy {
-            flattener.update(&source);
-        } else {
-            flattener.ingest("work-proof", &source);
-        }
+        flattener.replace("work-proof", &source);
         let before = flattener.work();
+        let mut replacements = (0, 0);
         for _ in 0..128 {
             let previous_len = source.len();
             source.push('x');
             source.push_str(newline);
-            if legacy {
-                flattener.update(&source);
+            if reconcile {
+                flattener.replace("work-proof", &source);
+                let work = flattener.work();
+                replacements.0 += work.byte_work();
+                replacements.1 += work.visited_rows;
             } else {
                 flattener.append(&source[previous_len..]);
             }
         }
         let after = flattener.work();
-        (
-            after.byte_work() - before.byte_work(),
-            after.visited_rows - before.visited_rows,
-        )
+        if reconcile {
+            replacements
+        } else {
+            (
+                after.byte_work() - before.byte_work(),
+                after.visited_rows - before.visited_rows,
+            )
+        }
     }
-    let legacy_small = measure(4, true, false, "\n");
-    let legacy_large = measure(512, true, false, "\n");
+    let reset_small = measure(4, true, false, "\n");
+    let reset_large = measure(512, true, false, "\n");
     assert!(
-        legacy_large.0 > legacy_small.0 * 8,
-        "the full-source control must exhibit the reviewed defect"
+        reset_large.0 > reset_small.0 * 8,
+        "full reconciliation must exhibit prefix-dependent work"
     );
     let small = measure(4, false, false, "\n");
     let large = measure(512, false, false, "\n");
     eprintln!(
-        "128 deltas: legacy 4/512 settled fences = {legacy_small:?}/{legacy_large:?}; append 4/512 = {small:?}/{large:?}"
+        "128 deltas: replace 4/512 fences = {reset_small:?}/{reset_large:?}; append = {small:?}/{large:?}"
     );
     assert_eq!(
         large, small,
@@ -118,7 +122,7 @@ fn borrowed_projection_updates_preserve_rows_and_reset_edits() {
 fn document_context_is_gathered_incrementally_and_resolved_once() {
     let mut flattener = MessageFlattener::new("context");
     let mut source = "[ref]\n\n[ref]: /target\n\n".to_owned();
-    let initial = flattener.ingest("context", &source);
+    let initial = flattener.replace("context", &source);
     let definition = initial
         .document
         .definition("ref", false)
@@ -128,7 +132,7 @@ fn document_context_is_gathered_incrementally_and_resolved_once() {
     let before = flattener.work();
     for _ in 0..128 {
         source.push('x');
-        flattener.ingest("context", &source);
+        flattener.append("x");
     }
     let after = flattener.work();
     assert!(after.parsed_bytes - before.parsed_bytes < 20_000);
@@ -155,13 +159,13 @@ fn late_definition_and_list_continuation_keep_completed_block_identity() {
     use std::rc::Rc;
     let mut flattener = MessageFlattener::new("late");
     let mut source = "```rs\nlet settled = \"😀\";\n```\n\nBefore\n\nList\n\n- first".to_owned();
-    let first = flattener.ingest("late", &source);
+    let first = flattener.replace("late", &source);
     let code = first.document.block(1).expect("completed fence");
     let before = first.document.block(2).expect("completed paragraph");
     assert_eq!(before.text.as_deref(), Some("Before\n\n"));
     let open_list = first.document.block(3).expect("open list group");
     source.push_str("\n\n  continued\n\n- second");
-    let continued = flattener.ingest("late", &source);
+    let continued = flattener.append("\n\n  continued\n\n- second");
     assert!(!Rc::ptr_eq(
         &open_list,
         &continued.document.block(3).expect("changed list")
@@ -185,7 +189,7 @@ fn late_definition_and_list_continuation_keep_completed_block_identity() {
             .contains("  continued")
     );
     source.push_str("\n\nAfter [ref].\n\n[ref]: /target");
-    let late = flattener.ingest("late", &source);
+    let late = flattener.append("\n\nAfter [ref].\n\n[ref]: /target");
     let definition = late
         .document
         .definition("ref", false)
@@ -202,7 +206,7 @@ fn late_definition_and_list_continuation_keep_completed_block_identity() {
         &late.document.block(2).expect("retained paragraph")
     ));
     source.push_str("\n\n[ref]: /duplicate");
-    let duplicate = flattener.ingest("late", &source);
+    let duplicate = flattener.append("\n\n[ref]: /duplicate");
     assert!(Rc::ptr_eq(
         &definition,
         &duplicate
@@ -213,9 +217,44 @@ fn late_definition_and_list_continuation_keep_completed_block_identity() {
 }
 
 #[test]
+fn paragraph_followed_by_list_is_open_until_a_new_noncontinuation_group() {
+    use std::rc::Rc;
+    let prefix = "```rs\nlet settled = \"😀\";\n```\n\n";
+    let source = format!("{prefix}Before\n\n- first");
+    assert_eq!(
+        split_markdown_blocks(&source),
+        Some(vec![prefix, "Before\n\n- first"])
+    );
+    let mut flattener = MessageFlattener::new("original-fixture");
+    let initial = flattener.replace("original-fixture", &source);
+    let code = initial.document.block(1).expect("settled code");
+    let open = initial.document.block(2).expect("open paragraph/list");
+    let continuation = flattener.append("\n\n  continued\n\n- second");
+    assert!(Rc::ptr_eq(
+        &code,
+        &continuation.document.block(1).expect("same code")
+    ));
+    assert!(!Rc::ptr_eq(
+        &open,
+        &continuation.document.block(2).expect("changed open group")
+    ));
+    assert_eq!(continuation.changed_from, 2);
+    let ended = flattener.append("\n\nAfter [ref].");
+    let settled = ended.document.block(2).expect("completed list group");
+    let late = flattener.append("\n\n[ref]: /target");
+    let retained = late.document.block(2).expect("retained list group");
+    assert!(Rc::ptr_eq(&settled, &retained));
+    assert_eq!(settled.id, retained.id);
+    assert!(Rc::ptr_eq(
+        &code,
+        &late.document.block(1).expect("retained code")
+    ));
+}
+
+#[test]
 fn an_append_can_invalidate_an_open_reference_definition() {
     let mut flattener = MessageFlattener::new("definition-edit");
-    let initial = flattener.ingest("definition-edit", "See [ref].\n\n[ref]: /target");
+    let initial = flattener.replace("definition-edit", "See [ref].\n\n[ref]: /target");
     assert!(initial.document.definition("ref", false).is_some());
     let invalid = flattener.append(" extra");
     assert!(invalid.document.definition("ref", false).is_none());

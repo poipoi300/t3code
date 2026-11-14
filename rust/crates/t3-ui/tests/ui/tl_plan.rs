@@ -167,8 +167,10 @@ fn copy_exports_original_markdown_including_the_heading_with_one_final_newline()
     assert_eq!(app.screen().clipboard(), Some(source().as_str()));
     app.press("role:button[Plan actions]").expect("reopen");
     assert!(
-        app.press("role:menuitem[Download as markdown]").is_err(),
-        "no download capability must stay inert"
+        app.screen()
+            .id("role:menuitem[Download as markdown]")
+            .is_err(),
+        "an unsupported host export is omitted rather than disabled without a reason"
     );
 }
 #[test]
@@ -218,10 +220,11 @@ fn saving_guards_concurrency_rechecks_permission_and_preserves_a_failed_form_for
 }
 
 fn code_value() -> String {
-    (0..85)
+    let code = (0..85)
         .map(|line| format!("let line_{line} = {line};"))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    format!("{}# keep this as code\n{code}", "\n".repeat(41))
 }
 #[component]
 fn CodePlanFixture() -> impl IntoElement {
@@ -229,7 +232,7 @@ fn CodePlanFixture() -> impl IntoElement {
     provide_context(t3_ui::theme::text_view_parts());
     let row = computed(|| {
         Some(projected(&format!(
-            "# Code plan\n\n```rust title=example.rs\n{}\n```",
+            "# Code plan\n\nContext paragraph\n\n```rust title=example.rs\n{}\n```",
             code_value()
         )))
     });
@@ -244,6 +247,13 @@ fn code_copy_collects_every_chunk_in_the_fence() {
     })
     .expect("start code plan");
     app.first_render().expect("render");
+    assert!(
+        app.screen().layout_nodes().iter().any(|node| node
+            .text
+            .as_ref()
+            .is_some_and(|text| text.text.text.contains("# keep this as code"))),
+        "the collapsed continuation must preserve code syntax instead of parsing it as a heading"
+    );
     app.press("role:button[Expand plan]")
         .expect("expand full fence");
     app.press("role:button[Copy code]")

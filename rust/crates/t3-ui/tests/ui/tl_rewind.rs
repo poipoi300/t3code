@@ -141,6 +141,7 @@ fn RewindFixture() -> impl IntoElement {
     let mut user = UserRowContext::new(UserRowState::new());
     rewind.bind_user_row(&mut user);
     on_key("ctrl+d", move |_| allowed.set(false));
+    on_key("ctrl+o", move |_| nav.open(Route::Thread(key("other"))));
     view()
         .w_full()
         .h_full()
@@ -223,6 +224,16 @@ fn start(root: Root, window: (f32, f32)) -> Headless {
         ui_sets: sets,
         viewport: size(px(window.0), px(window.1)),
         environment: nsh_core::platform::Environment {
+            os: if window == PHONE {
+                nsh_core::platform::Os::Android
+            } else {
+                nsh_core::platform::Os::Windows
+            },
+            idiom: if window == PHONE {
+                nsh_core::platform::Idiom::Phone
+            } else {
+                nsh_core::platform::Idiom::Desktop
+            },
             reduce_motion: true,
             ..Default::default()
         },
@@ -301,6 +312,21 @@ fn confirmation_rechecks_availability_and_failures_release_the_busy_state() {
         .expect("error surfaced");
     app.wait_for("Busy: false").expect("error releases state");
     assert!(app.screen().shows("/environment/parent"));
+}
+
+#[test]
+fn a_rewind_result_never_replaces_the_new_threads_visible_prompt() {
+    let mut app = fixture(DESKTOP);
+    app.press("role:button[Edit from here]").expect("edit");
+    app.wait_for("Edit from here?").expect("confirm");
+    app.press_key("ctrl+o")
+        .expect("open another thread while deciding");
+    app.press("role:button[Confirm]")
+        .expect("confirm original target");
+    app.wait_for("Calls: 1").expect("original thread operation");
+    assert!(app.screen().shows("/environment/other"));
+    assert!(app.screen().shows("Restored: None"));
+    assert!(!app.screen().shows("Restored prompt from client"));
 }
 
 #[test]

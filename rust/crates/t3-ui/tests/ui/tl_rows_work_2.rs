@@ -338,7 +338,7 @@ fn deferred_folds_retry_the_service_and_reload_changed_anchors_while_open() {
     app.press("role:button[Deferred example]")
         .expect("deferred history");
     app.press("id:turn-fold:run").expect("expand deferred fold");
-    app.wait_for("Couldn't load work. Click to retry.")
+    app.wait_for("Worked for 30s · Couldn't load work. Click to retry.")
         .expect("source's retry state");
     app.wait_for("Loaded anchors: anchor-one")
         .expect("exact anchor sent");

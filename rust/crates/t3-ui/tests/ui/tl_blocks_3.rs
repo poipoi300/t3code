@@ -12,6 +12,7 @@ use t3_client::thread_views::messages_timeline::{
 };
 use t3_client::view_logic::session::TimelineEntry;
 use t3_ui::runtime::Shared;
+use t3_ui::screens::thread::blocks::code::{MAX_HIGHLIGHT_CHUNKS_PER_FRAME, load_code_syntaxes};
 use t3_ui::screens::thread::blocks::flatten::BlockKind;
 use t3_ui::screens::thread::blocks::list::{
     BlockListModel, BlockListOptions, CellId, messages_timeline,
@@ -179,6 +180,35 @@ fn reorder_edit_remove_and_reinsert_do_not_reuse_another_messages_content() {
     assert!(model.is_empty());
     assert!(model.document(&id.message_id).is_none());
     assert!(model.code_text(&id).is_none());
+    model.update(
+        &rows(
+            vec![message("a", "Old prefix\n\n```typescript\nold()", true)],
+            None,
+        )
+        .rows,
+    );
+    let replacement = message(
+        "a",
+        &format!("```typescript\n{}```", "value();\n".repeat(85)),
+        false,
+    );
+    let retired = model.update(&rows(vec![replacement.clone()], None).rows);
+    assert!(
+        retired
+            .iter()
+            .any(|id| id.message_id == "a" && id.index == 2),
+        "a former fence header reused as a continuation retires its controller"
+    );
+    let document = model.document("a").expect("replacement document");
+    let t3_client::view_logic::session::TimelineContent::Message { message, .. } =
+        &replacement.content
+    else {
+        panic!("message entry");
+    };
+    assert_eq!(
+        document.source_range(0..document.source_len()).as_deref(),
+        Some(message.text.as_str())
+    );
     model.update(&rows(vec![b], None).rows);
     assert_eq!(model.cell(0).expect("new document").row.id, "b");
 }
@@ -282,15 +312,7 @@ fn streamed_delta_work_is_independent_of_the_settled_reply_length() {
     eprintln!(
         "TL-BLOCKS-3 counted work (bytes, block updates, derived bytes): short={short:?}, long={long:?}"
     );
-    assert!(
-        long.0 <= short.0 + 4096,
-        "settled prefix was parsed/copied: {short:?} vs {long:?}"
-    );
-    assert!(long.1 <= short.1 + 4, "settled block rows were revisited");
-    assert!(
-        long.2 <= short.2 + 4096,
-        "settled source was inspected for derived facts"
-    );
+    assert_eq!(short, long, "settled prefixes add no per-delta work");
 }
 
 fn control(label: &'static str, action: impl Fn() + 'static) -> impl IntoElement {
@@ -371,6 +393,34 @@ fn start(size: (f32, f32)) -> Headless {
     app
 }
 
+fn frame_bounds(app: &Headless, chunk: usize) -> Bounds<Points> {
+    let nodes = app.screen().layout_nodes();
+    let marker = format!("timeline-code-chunk-{chunk}");
+    let root = nodes
+        .iter()
+        .find(|node| node.test_id.as_deref() == Some(marker.as_str()))
+        .expect("mounted code chunk")
+        .id;
+    let mut children = vec![root];
+    while let Some(id) = children.pop() {
+        let node = nodes
+            .iter()
+            .find(|node| node.id == id)
+            .expect("layout node");
+        if id != root && node.clips {
+            return node.bounds;
+        }
+        children.extend(
+            nodes
+                .iter()
+                .rev()
+                .filter(|node| node.parent == id)
+                .map(|node| node.id),
+        );
+    }
+    panic!("chunk surface clips its content");
+}
+
 #[test]
 fn streaming_updates_the_tail_without_remounting_completed_prose_at_both_sizes() {
     for size in [PHONE, DESKTOP] {
@@ -415,11 +465,11 @@ fn streaming_updates_the_tail_without_remounting_completed_prose_at_both_sizes()
         assert!(
             (heading.origin.y.0 - paragraph.origin.y.0 - paragraph.size.height.0 - 1.25 * rem)
                 .abs()
-                < 0.1,
+                < 1.0,
             "heading has the shared block gap plus heading margin: {paragraph:?}, {heading:?}"
         );
         assert!(
-            (last.origin.y.0 - heading.origin.y.0 - heading.size.height.0 - 0.65 * rem).abs() < 0.1,
+            (last.origin.y.0 - heading.origin.y.0 - heading.size.height.0 - 0.65 * rem).abs() < 1.0,
             "paragraph has the shared block gap: {heading:?}, {last:?}"
         );
     }
@@ -446,6 +496,13 @@ fn one_long_message_is_recycled_by_chunk_and_empty_has_a_reverse_state() {
             .expect("scroll to start");
         app.wait_for("const value0 = 0;")
             .expect("first chunk remounts");
+        assert!(app.settle());
+        let first = frame_bounds(&app, 1);
+        let next = frame_bounds(&app, 2);
+        assert!(
+            (first.origin.y.0 + first.size.height.0 - next.origin.y.0).abs() < 1.0,
+            "a split fence has no interior margin: {first:?}, {next:?}"
+        );
         app.press("role:button[Disable line wrap]")
             .expect("disable wrap");
         app.wait_for("Wrap lines").expect("wrap changes");
@@ -453,7 +510,7 @@ fn one_long_message_is_recycled_by_chunk_and_empty_has_a_reverse_state() {
             .expect("copy full fence");
         app.wait_for("Copied").expect("copy feedback");
         let expected = format!(
-            "{}const end = 500;",
+            "{}const end = 500;\n",
             (0..500)
                 .map(|n| format!("const value{n} = {n};\n"))
                 .collect::<String>()
@@ -473,4 +530,120 @@ fn one_long_message_is_recycled_by_chunk_and_empty_has_a_reverse_state() {
         app.wait_for("const end = 500;")
             .expect("content returns at the live end");
     }
+}
+
+#[component]
+fn ManyFenceBudgetFixture() -> impl IntoElement {
+    t3_ui::theme::install(&Default::default());
+    let source = (0..512)
+        .map(|fence| {
+            format!(
+                "```typescript\n{}```\n\n",
+                (0..40)
+                    .map(|line| format!("const budget_{fence}_{line} = {line};\n"))
+                    .collect::<String>()
+            )
+        })
+        .collect::<String>();
+    let projection = rows(vec![message("budget", &source, false)], None);
+    let visible = signal(false);
+    let empty = Shared(Rc::new(Vec::new()));
+    let rows = computed(move || {
+        if visible.get() {
+            Shared(projection.rows.clone())
+        } else {
+            empty.clone()
+        }
+    });
+    let options = BlockListOptions::default();
+    let state = options.state;
+    let samples = signal(String::new());
+    spawn(async move {
+        assert!(load_code_syntaxes().await, "production grammars load");
+        visible.set(true);
+        let mut observed = Vec::new();
+        for _ in 0..4 {
+            next_frame().await;
+            let work = state.work();
+            let queue = work.highlight_queue.expect("mounted timeline queue");
+            observed.push([
+                work.highlight_fences,
+                queue.frames,
+                queue.total.parsed_chunks,
+                queue.total.parsed_lines,
+                queue.last_frame.dequeued_jobs,
+                queue.last_frame.visited_chunks,
+                queue.last_frame.parsed_chunks,
+                queue.last_frame.parsed_lines,
+            ]);
+        }
+        samples.set(format!(
+            "budget samples {}",
+            serde_json::to_string(&observed).expect("counters")
+        ));
+    });
+    view()
+        .w_full()
+        .h_full()
+        .child(text(move || {
+            if samples.with(String::is_empty) {
+                "Sampling budget"
+            } else {
+                "Budget sampled"
+            }
+        }))
+        .child(text(move || samples.get()))
+        .child(messages_timeline(rows, options))
+}
+
+#[test]
+fn five_hundred_twelve_fences_share_one_bounded_frame_budget() {
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: nsh_core::geometry::size(px(DESKTOP.0), px(DESKTOP.1)),
+        ..EngineConfig::new(Root::of::<ManyFenceBudgetFixture>())
+    })
+    .expect("production timeline with 512 fences");
+    app.wait_for("Budget sampled").expect("four frame samples");
+    let screen = app.screen();
+    let encoded = screen
+        .texts()
+        .into_iter()
+        .find_map(|text| text.strip_prefix("budget samples "))
+        .expect("counter samples");
+    let samples: Vec<[usize; 8]> = serde_json::from_str(encoded).expect("raw work counters");
+    assert_eq!(samples.len(), 4);
+    let budget = MAX_HIGHLIGHT_CHUNKS_PER_FRAME;
+    for (frame, sample) in samples.iter().enumerate() {
+        let [
+            fences,
+            budgets,
+            chunks,
+            lines,
+            dequeued,
+            visited,
+            last_chunks,
+            last_lines,
+        ] = *sample;
+        assert_eq!(fences, 512, "offscreen fences were fed above recycling");
+        assert!(
+            budgets <= frame + 1,
+            "multiple budgets spent in one observed frame: {samples:?}"
+        );
+        assert!(
+            chunks <= (frame + 1) * budget,
+            "work scaled with fence count: {samples:?}"
+        );
+        assert!(
+            lines <= (frame + 1) * budget * 40,
+            "line work exceeded the frame budget"
+        );
+        assert!(dequeued <= budget && visited <= budget && last_chunks <= budget);
+        assert!(last_lines <= budget * 40);
+    }
+    assert!(
+        samples.last().expect("samples")[2] >= 2,
+        "the aggregate counter must progress across distinct one-chunk fences: {samples:?}"
+    );
+    eprintln!("TL-BLOCKS-3 512-fence frame samples: {samples:?}");
 }

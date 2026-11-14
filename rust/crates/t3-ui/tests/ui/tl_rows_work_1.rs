@@ -28,21 +28,39 @@ fn source_entry(id: &str, suffix: &str) -> Rc<TimelineEntry> {
         ));
         work.as_object_mut().expect("object").remove("command");
     }
+    if id == "created" || id == "notified" {
+        let mut item = json!({"id":id,"threadId":"thread","runId":null,"nodeId":null,"providerThreadId":null,"providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":1,"title":"Child chat","startedAt":null,"completedAt":null,"updatedAt":AT,"type":"thread_created","status":"completed","targetThreadId":"created-child","targetRunId":null,"targetProviderInstanceId":"replay","targetModel":"replay"});
+        if id == "notified" {
+            item["type"] = json!("notification");
+            item["source"] = json!({"kind":"subagent","childThreadId":"notified-child"});
+            item["outcome"] = json!("completed");
+            item["summary"] = json!("Child completed");
+        }
+        work["projectedItem"] = json!({"position":0,"visibility":"local","sourceThreadId":"thread","sourceItemId":id,"item":item});
+    }
+    if id == "custom" {
+        work["toolLifecycleStatus"] = json!("failed");
+        work["toolIcon"] = json!({"_tag":"themed-logo","logoUrl":"data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22/%3E"});
+    }
     if id == "content" {
         work["command"] = json!("Copy");
         work["detail"] = json!("Settings");
     }
-    if id == "omitted" || id == "limit" || id == "failure" {
+    if id == "omitted" || id == "limit" || id == "failure" || id == "workspace" {
         let mut item = json!({"id":id,"threadId":"thread","runId":null,"nodeId":null,
             "providerThreadId":null,"providerTurnId":null,"nativeItemRef":null,"parentItemId":null,
             "ordinal":1,"title":null,"startedAt":null,"completedAt":null,"updatedAt":AT,
             "type":"command_execution","status":"completed","input":"vp test run",
             "output":null,"exitCode":null,"outputOmitted":true});
-        if id == "limit" || id == "failure" {
+        if id == "limit" || id == "failure" || id == "workspace" {
             item["type"] = json!("error");
             item["status"] = json!("failed");
             item["failure"] = json!({"class":if id == "limit" {"usage_limit"} else {"provider_error"},
                 "message":"Settings", "code":null,"retryable":true,"resetAt":"2026-11-14T15:30:00Z"});
+            if id == "workspace" {
+                item["runId"] = json!("run");
+                item["failure"]["code"] = json!("workspace_preparation_failed");
+            }
             work["itemType"] = json!("error");
             work["label"] = json!("Provider error");
         }
@@ -66,6 +84,13 @@ fn control(label: &'static str, id: &str, press: impl Fn() + 'static) -> impl In
 #[component]
 fn WorkFixture() -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
+    let nav = t3_ui::state::nav::Navigator::new(t3_ui::state::nav::Route::Thread(
+        t3_client::types::ThreadKey {
+            environment: t3_client::types::EnvironmentId("test-env".into()),
+            thread: t3_client::types::ThreadId("thread".into()),
+        },
+    ));
+    provide_context(nav);
     let selected = signal("command");
     let suffix = signal(String::new());
     let mounted = signal(true);
@@ -99,15 +124,22 @@ fn WorkFixture() -> impl IntoElement {
     let mut root = view().w_full().h_full();
     for (label, id) in [
         ("Command example", "command"),
+        ("Created example", "created"),
+        ("Notified example", "notified"),
         ("Reasoning example", "reasoning"),
         ("Omitted example", "omitted"),
         ("Limit example", "limit"),
         ("Failure example", "failure"),
+        ("Workspace failure example", "workspace"),
         ("Content example", "content"),
+        ("Custom icon example", "custom"),
     ] {
         root = root.child(control(label, id, move || selected.set(id)));
     }
-    root.child(control("Recycle cell", "recycle", move || {
+    root.child(text(move || {
+        SharedString::from(format!("Route: {}", nav.top().path()))
+    }))
+    .child(control("Recycle cell", "recycle", move || {
         mounted.update(|value| *value = !*value)
     }))
     .child(control("Finish run", "finish", move || active.set(false)))
@@ -135,12 +167,16 @@ fn fixture(window: (f32, f32)) -> Headless {
     let mut fixtures = Registry::new();
     fixtures.register::<WorkFixture>();
     sets.push(fixtures);
-    let mut app = Headless::start(EngineConfig {
+    let mut config = EngineConfig {
         ui_sets: sets,
         viewport: size(px(window.0), px(window.1)),
         ..EngineConfig::new(Root::of::<WorkFixture>())
-    })
-    .expect("fixture starts");
+    };
+    if window == DESKTOP {
+        config.environment.os = nsh_core::platform::Os::Windows;
+        config.environment.idiom = nsh_core::platform::Idiom::Desktop;
+    }
+    let mut app = Headless::start(config).expect("fixture starts");
     app.wait_for("vp test run").expect("C3 command row mounted");
     app
 }
@@ -150,9 +186,11 @@ fn client_projected_disclosures_keep_keyed_state_after_recycling() {
     for window in [PHONE, DESKTOP] {
         let mut app = fixture(window);
         assert!(!app.screen().shows("42 tests passed"));
-        app.hover("id:work-entry-command").expect("timestamp hover");
-        app.wait_for("12:34")
-            .expect("owned TimestampPresenter in the default UTC host");
+        if window == DESKTOP {
+            app.hover("id:work-entry-command").expect("timestamp hover");
+            app.wait_for("text:/12:34$/")
+                .expect("owned TimestampPresenter in the default UTC host");
+        }
         app.press("id:work-entry-command").expect("expand");
         app.wait_for("42 tests passed")
             .expect("body from work entry");
@@ -193,10 +231,18 @@ fn deferred_inspector_and_output_do_not_add_copy_absent_from_the_web() {
 fn usage_reset_and_failure_details_use_owned_presenters_and_preserve_content() {
     let mut app = fixture(DESKTOP);
     app.press("id:limit").expect("limit notice");
-    app.wait_for("Usage limit reached.").expect("warning");
-    app.wait_for("15:30 (UTC)")
-        .expect("reset time in the actual host zone");
+    app.wait_for(r"text:/^Usage limit reached\. Retry after .*15:30 \(UTC\)\.$/")
+        .expect("complete warning with reset time in the actual host zone");
     assert!(!app.screen().shows("Settings"));
+    app.press("id:workspace")
+        .expect("workspace preparation failure");
+    app.wait_for("Settings").expect("workspace failure detail");
+    assert!(
+        !app.screen()
+            .matches("role:button[Retry]")
+            .expect("retry selector"),
+        "the web hides Retry without a bound service"
+    );
     app.press("id:failure").expect("failure");
     app.wait_for("Settings").expect("server detail");
     app.press("id:french").expect("locale switch");
@@ -254,4 +300,38 @@ fn working_indicator_disappears_when_the_run_finishes() {
         app.press("id:finish").expect("finish");
         assert!(!app.screen().shows("Working..."));
     }
+}
+
+#[test]
+fn thread_actions_are_owned_and_do_not_toggle_the_work_disclosure() {
+    let mut app = fixture(DESKTOP);
+    app.press("id:created").expect("created entry");
+    app.press("role:button[Open Child chat]")
+        .expect("owned Open chat action");
+    app.wait_for("text:Route: /test-env/created-child")
+        .expect("scoped created thread route");
+    assert!(app.screen().shows("Collapsed: true"));
+    app.press("id:notified").expect("notification entry");
+    app.press("role:button[Open subagent thread]")
+        .expect("owned Open subagent action");
+    app.wait_for("text:Route: /test-env/notified-child")
+        .expect("scoped subagent route");
+    assert!(app.screen().shows("Collapsed: true"));
+}
+
+#[test]
+fn untintable_tool_icons_keep_the_separate_failure_marker() {
+    let mut app = fixture(DESKTOP);
+    app.press("id:custom").expect("custom tool icon");
+    app.wait_for("id:work-tool-failure")
+        .expect("web failure X beside untintable icon");
+    app.wait_for("label:Tool call failed")
+        .expect("web failure icon label");
+    app.press("id:command")
+        .expect("ordinary successful command");
+    assert!(
+        !app.screen()
+            .matches("id:work-tool-failure")
+            .expect("failure selector")
+    );
 }

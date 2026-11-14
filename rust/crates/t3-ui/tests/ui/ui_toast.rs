@@ -85,6 +85,20 @@ fn ToastFixture() -> impl IntoElement {
     let visible_timed = manager.clone();
     let scoped = manager.clone();
     let action = manager.clone();
+    let page_focused = signal(false);
+    let page_escapes = signal(0_i64);
+    effect(move || {
+        if page_focused.get() {
+            on_key_with(
+                "escape",
+                KeyOptions {
+                    when: nsh_core::keymap::When::Always,
+                    ..Default::default()
+                },
+                move |_| page_escapes.update(|count| *count += 1),
+            );
+        }
+    });
     view()
         .w_full()
         .h_full()
@@ -206,9 +220,17 @@ fn ToastFixture() -> impl IntoElement {
                     nsh_base::input()
                         .test_id("outside-focus")
                         .label(SharedString::from(t("Page input")))
+                        .on_focus(move || page_focused.set(true))
+                        .on_blur(move || page_focused.set(false))
                         .w(px(140.0))
                         .h(px(28.0)),
-                ),
+                )
+                .child(text(move || {
+                    t3_ui::i18n::tr(
+                        "Page escapes: {count}",
+                        &[("count", t3_ui::i18n::Value::Int(page_escapes.get()))],
+                    )
+                })),
         )
         .child(toast::toasts(manager, Position::TopRight, move || {
             active.get()
@@ -397,6 +419,29 @@ fn focused_toast_controls_pause_dismissal_until_focus_leaves_the_stack() {
     app.run_for(Duration::from_secs(3))
         .expect("remaining timeout");
     assert!(!app.screen().shows("Timed notification"));
+}
+
+#[test]
+fn escape_reaches_the_page_input_and_only_closes_a_toast_with_focus_inside() {
+    let mut app = start(DESKTOP);
+    clear(&mut app);
+    app.press("role:button[Raise visible-time toast]")
+        .expect("raise toast");
+    app.wait_for("Timed notification").expect("toast mounted");
+    app.type_text("id:outside-focus", "page")
+        .expect("focus page input");
+    app.press_key("Escape").expect("input owns Escape");
+    app.wait_for("Page escapes: 1")
+        .expect("focused input received Escape");
+    assert!(app.screen().shows("Timed notification"));
+    app.press("role:button[Show details]")
+        .expect("expand focusable details");
+    app.type_text("id:toast-focus-input", "toast")
+        .expect("focus inside toast");
+    app.press_key("Escape").expect("toast owns Escape");
+    app.wait_for_gone("Timed notification", Duration::from_secs(1))
+        .expect("focused toast closed");
+    assert!(app.screen().shows("Page escapes: 1"));
 }
 
 #[test]
