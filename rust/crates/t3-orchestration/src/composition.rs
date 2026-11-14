@@ -36,7 +36,8 @@ use crate::{
             legacy::legacy_v1_thread_importer::LegacyV1ThreadImporter,
             provider_runtime_recovery_service::ProviderRuntimeRecoveryService,
             provider_session_manager::{
-                ProviderSessionManager, SessionManagerOptions, SessionPersistence, SessionServices,
+                ProviderSessionManager, SessionCredentials, SessionManagerOptions,
+                SessionPersistence, SessionServices,
             },
             runtime_layer::RuntimeLayer,
         },
@@ -107,6 +108,9 @@ pub struct RuntimePorts {
     pub workspaces: Arc<dyn WorkspaceBackend>,
     /// Thread-owned agent processes (kill, OOM detection). Without it force-stop cannot kill.
     pub agent_scope: Option<Arc<dyn AgentScope>>,
+    /// MCP credentials for provider sessions (package 05's `SessionCredentials`, with
+    /// `prepare_reserved` for managed leases); without it sessions start without them.
+    pub credentials: Option<Arc<dyn SessionCredentials>>,
     /// Usage refresh and completed-turn analytics.
     pub telemetry: Option<Arc<dyn ProviderTelemetry>>,
     pub titles: Option<Arc<dyn TitleGenerator>>,
@@ -154,6 +158,7 @@ impl RuntimePorts {
             cleanup: Arc::new(Unbound),
             workspaces: Arc::new(Unbound),
             agent_scope: None,
+            credentials: None,
             telemetry: None,
             titles: None,
             message_context: None,
@@ -224,6 +229,7 @@ impl OrchestrationRuntime {
             cleanup,
             workspaces,
             agent_scope,
+            credentials,
             telemetry,
             titles,
             message_context,
@@ -263,10 +269,11 @@ impl OrchestrationRuntime {
         ingestor.agent_scope = agent_scope.clone();
         ingestor.telemetry = telemetry;
         let ingestor = Arc::new(ingestor);
-        // Run execution ingests run events; the manager would ingest every event again.
+        // The manager ingests only session-scoped artifacts (requests and recovered commands that
+        // can arrive before a run subscribes); run events reach run execution alone.
         let sessions = ProviderSessionManager::with_options(
             providers.clone(),
-            None,
+            Some(ingestor.clone() as Arc<dyn EventIngestor>),
             session_options,
             Some(SessionServices {
                 persistence: Some(SessionPersistence {
@@ -275,19 +282,22 @@ impl OrchestrationRuntime {
                     clock: clock.clone(),
                     ids: ids.clone(),
                 }),
-                credentials: None,
+                credentials,
             }),
         );
         let session_directory: Arc<dyn SessionDirectory> = Arc::new(sessions.clone());
-        let recovery = Arc::new(ProviderRuntimeRecoveryService::new(
-            database.clone(),
-            reader.clone(),
-            events.clone(),
-            session_directory.clone(),
-            clock.clone(),
-            ids.clone(),
-            signals.clone(),
-        ));
+        let recovery = Arc::new(
+            ProviderRuntimeRecoveryService::new(
+                database.clone(),
+                reader.clone(),
+                events.clone(),
+                session_directory.clone(),
+                clock.clone(),
+                ids.clone(),
+                signals.clone(),
+            )
+            .with_restart_settings(settings.clone()),
+        );
         // Package 04's input loaders, outermost last: live sessions and runtime policy over the
         // projection reads, then provider settings, restart continuations and message context.
         let inputs: Arc<dyn CommandInputs> = Arc::new(RuntimeCommandInputs {
@@ -407,12 +417,15 @@ impl OrchestrationRuntime {
             signals.clone(),
             worker_options,
         );
-        let layer = Arc::new(RuntimeLayer::new(
-            raw_dispatcher,
-            recovery,
-            Arc::new(worker.clone()),
-            session_directory.clone(),
-        ));
+        let layer = Arc::new(
+            RuntimeLayer::new(
+                raw_dispatcher,
+                recovery,
+                Arc::new(worker.clone()),
+                session_directory.clone(),
+            )
+            .with_run_execution(execution.clone()),
+        );
         // Client-facing commands pass the layer's admission gate; effect-driven ones do not.
         let threads = ThreadManagementService::new(ThreadManagementServices {
             reader: reader.clone(),
@@ -619,10 +632,14 @@ impl OrchestrationRuntime {
             .await
     }
 
-    /// Stops the settlement and watch producers and the client-facing services, then the runtime
-    /// layer (admission, provider preparation, effect worker, sessions), then waits for run
-    /// execution and pending commits. Returns the first failure after attempting every step.
+    /// Closes admission, stops the settlement, watch and launch producers, stops the effect worker,
+    /// then the title, stop and thread-management services, then run execution, provider sessions
+    /// and recovery reconciliation, then drains ingestion and pending commits. Returns the first
+    /// failure after attempting every step.
     pub async fn shutdown(&self) -> Result<()> {
+        // Package 05 and 08's order: close admission, stop producers, stop the worker, stop the
+        // services its effects use, then sessions (with run execution) and pending commits.
+        self.layer.close_admission().await;
         if let Some(watch) = &self.watch {
             watch.shutdown().await;
         }
@@ -630,14 +647,7 @@ impl OrchestrationRuntime {
         if let Some(launches) = &self.launches {
             launches.shutdown().await;
         }
-        // Package 08's order puts the worker before these three; the runtime layer stops the
-        // worker and the sessions together, so they close first and in-flight effects retry.
-        if let Some(Some(titles)) = self.operations.titles.get() {
-            titles.shutdown().await;
-        }
-        self.stop.shutdown().await;
-        self.threads.shutdown().await;
-        let mut failure = self.layer.shutdown().await.err();
+        let mut failure = self.layer.shutdown_worker().await.err();
         let task = self
             .worker_task
             .lock()
@@ -657,8 +667,13 @@ impl OrchestrationRuntime {
                 }
             }
         }
+        if let Some(Some(titles)) = self.operations.titles.get() {
+            titles.shutdown().await;
+        }
+        self.stop.shutdown().await;
+        self.threads.shutdown().await;
         self.operations.cancellation.cancel();
-        if let Err(error) = self.execution.shutdown().await {
+        if let Err(error) = self.layer.shutdown_sessions().await {
             failure.get_or_insert(error);
         }
         self.ingestor.shutdown().await;

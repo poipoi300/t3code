@@ -8,7 +8,7 @@ It was built outside the workspace before its complete directory was moved in.
 The staging copy at
 `D:\t3code-rust-target\server-k\staging-t3-pull-request` is stale.
 Use `CARGO_TARGET_DIR=D:\t3code-rust-target\server-k` for every Cargo command.
-Respect the workspace's configured four Cargo jobs; do not override them.
+Respect the workspace's configured two Cargo jobs; do not override them.
 
 ## Completed work
 
@@ -58,12 +58,16 @@ Final scoped format check and all-feature Clippy with `--no-deps -D warnings`
 passed. The final all-feature suite passed **55 tests**: 1 classifier, 20
 application, 7 cache, 7 Forge, 6 guide, 5 orchestration adapter, 4 SQLite, 1 viewed
 race and 4 watch tests. Default Clippy with `-D warnings` and all **39 default
-tests** also passed. A subsequent dependency-wide all-feature Clippy run met new
-concurrent compile errors in `t3-forge/src/gitlab/activity.rs:43,287` (E0716) and
-`t3-forge/src/gitlab/read.rs:594` (E0373); those files are outside this task's
-ownership. The 55-test pass above predates those new upstream changes. Retry the
-all-feature lint/tests after the Forge owner finishes. Do not patch those files
-from this task.
+tests** also passed. After the service-restart recheck, formatting still passes.
+The earlier upstream GitLab borrow errors are repaired. Dependency-wide
+all-feature Clippy now fails on the Forge owner's GitLab lints:
+`checkout.rs:359`, `decode.rs:83`, `read.rs:169` (`collapsible_if`) and
+`mod.rs:19` (`type_complexity`), plus the orchestration owner's
+`src/ports/runs_ingestion/context_handoff_delivery.rs:334`
+(`needless_borrows_for_generic_args`). These files are outside this task's ownership.
+The chained all-feature tests did not start because lint failed; the previously
+recorded 55-test pass remains the latest complete test run. Retry the all-feature
+lint/tests after the Forge owner finishes. Do not patch those files from this task.
 No live host/provider calls, credentials, dev servers or user state were used.
 
 First integration step: wire the host-owned contexts/checkout adapter, then the
