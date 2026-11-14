@@ -314,6 +314,20 @@ impl McpAdapter {
         let access: Arc<dyn AccessStore> = Arc::new(ProjectionAccess(projections.clone()));
 
         let mut adapters = ServiceAdapters::default();
+        #[cfg(feature = "mcp-orchestration")]
+        {
+            // Thread writes go through `commands_for(caller)`: the caller's modes, a requested
+            // escalation and the link fence are checked under the command lock.
+            let orchestration = Arc::new(t3_mcp::adapters::orchestration::OrchestrationAdapter {
+                reader: projections.clone(),
+                database: t3_orchestration::stores::StoreDatabase(context.database.clone()),
+                commands: runtime.clone(),
+            });
+            adapters.orchestration = Some(orchestration.clone());
+            adapters.worktree = Some(Arc::new(t3_mcp::adapters::worktree::WorktreeAdapter {
+                orchestration,
+            }));
+        }
         #[cfg(feature = "scheduler")]
         if let Some(scheduler) = domains.get::<crate::adapters::scheduler::SchedulerAdapter>() {
             adapters.scheduler = Some(Arc::new(SchedulerAdapter {

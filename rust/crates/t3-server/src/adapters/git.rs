@@ -387,6 +387,10 @@ impl GitAdapter {
     ) -> Revocable<S> {
         Revocable {
             subscription: Some((subscription, permit)),
+            changes: self
+                .authority
+                .as_ref()
+                .and_then(|authority| authority.changes()),
             adapter: self.clone(),
             session: session.clone(),
             cwd,
@@ -514,20 +518,47 @@ impl crate::services::DomainRuntime for GitAdapter {
     }
 }
 
-/// A status or branch subscription that asks the workspace authority again before each value,
-/// so revoked access (a removed project) ends it with the typed refusal. The authority has no
-/// change signal, so an idle subscription ends at its next value.
+/// A status or branch subscription that asks the workspace authority again before each value
+/// and whenever the authority signals a change, so revoked access (a removed project) ends it
+/// with the typed refusal, idle or not, releasing its slot and its status worker.
 #[cfg(feature = "local-services")]
 pub struct Revocable<S> {
     /// The subscription and its slot under the subscription limits, released together.
     subscription: Option<(S, SubscriptionPermit)>,
+    /// The authority's change signal; `None` when it has none (or it closed).
+    changes: Option<tokio::sync::watch::Receiver<u64>>,
     adapter: Arc<GitAdapter>,
     session: AuthSessionId,
     cwd: String,
 }
 
+/// The values a [`Revocable`] forwards: a t3-git subscription's next one.
+pub trait StatusStream: Send {
+    type Item: Send;
+    fn next_value(&mut self) -> impl std::future::Future<Output = Option<Self::Item>> + Send;
+}
+
+impl StatusStream for t3_git::VcsBranchSubscription {
+    type Item = VcsBranchStatus;
+    fn next_value(&mut self) -> impl std::future::Future<Output = Option<Self::Item>> + Send {
+        self.recv()
+    }
+}
+
+impl StatusStream for t3_git::VcsStatusSubscription {
+    type Item = VcsStatusStreamEvent;
+    fn next_value(&mut self) -> impl std::future::Future<Output = Option<Self::Item>> + Send {
+        self.recv()
+    }
+}
+
 #[cfg(feature = "local-services")]
-impl<S> Revocable<S> {
+impl<S: StatusStream> Revocable<S> {
+    pub async fn recv(&mut self) -> Option<Result<S::Item, Error>> {
+        let value = self.subscription.as_mut()?.0.next_value().await?;
+        self.still_granted(value).await
+    }
+
     async fn still_granted<T>(&mut self, value: T) -> Option<Result<T, Error>> {
         match self.adapter.directory(&self.session, &self.cwd).await {
             Ok(_) => Some(Ok(value)),
@@ -539,19 +570,60 @@ impl<S> Revocable<S> {
     }
 }
 
-#[cfg(feature = "local-services")]
-impl Revocable<t3_git::VcsBranchSubscription> {
-    pub async fn recv(&mut self) -> Option<Result<VcsBranchStatus, Error>> {
-        let value = self.subscription.as_mut()?.0.recv().await?;
-        self.still_granted(value).await
-    }
-}
+#[cfg(all(test, feature = "local-services"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod revocable_tests {
+    use super::*;
+    use futures::FutureExt;
 
-#[cfg(feature = "local-services")]
-impl Revocable<t3_git::VcsStatusSubscription> {
-    pub async fn recv(&mut self) -> Option<Result<VcsStatusStreamEvent, Error>> {
-        let value = self.subscription.as_mut()?.0.recv().await?;
-        self.still_granted(value).await
+    struct Idle(tokio::sync::mpsc::UnboundedReceiver<u32>);
+    impl StatusStream for Idle {
+        type Item = u32;
+        fn next_value(&mut self) -> impl std::future::Future<Output = Option<u32>> + Send {
+            self.0.recv()
+        }
+    }
+
+    /// The authority signals a change while the stream has nothing to deliver. The adapter here
+    /// grants nothing, so the re-check refuses without I/O and the outcome is visible at the
+    /// first poll: a bounded check, with no waiting.
+    #[tokio::test]
+    async fn an_idle_stream_ends_when_the_authority_signals_a_change() {
+        let (_values, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (signal, changes) = tokio::sync::watch::channel(0u64);
+        let limits = Arc::<SubscriptionLimits>::default();
+        let mut stream = Revocable {
+            subscription: Some((
+                Idle(receiver),
+                limits
+                    .acquire(Some(1), "subscribeVcsStatus", "repo")
+                    .unwrap(),
+            )),
+            changes: Some(changes),
+            adapter: Arc::new(GitAdapter {
+                git: Git::new(std::env::temp_dir()),
+                authority: None,
+                vcs: None,
+            }),
+            session: AuthSessionId("session".into()),
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+        };
+        // Idle and unchanged: still open.
+        assert!(stream.recv().now_or_never().is_none());
+
+        signal.send_modify(|revision| *revision += 1);
+        let ended = stream
+            .recv()
+            .now_or_never()
+            .expect("the change signal re-checks an idle stream at once");
+        assert!(
+            matches!(ended, Some(Err(Error::Authorization(_)))),
+            "{ended:?}"
+        );
+        assert!(stream.recv().now_or_never().expect("ended").is_none());
+        // The subscription (and so its status worker lease) and its slot are released.
+        assert!(stream.subscription.is_none());
+        assert_eq!(limits.counts.lock().unwrap().0, 0);
     }
 }
 

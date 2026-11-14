@@ -26,6 +26,23 @@ const SECRET: &str = "native-provider-secret-5f1d2c";
 const THREAD: &str = "thread:native";
 
 fn main() -> ExitCode {
+    // Managed Codex runs the server's own executable as its token helper; here that is this
+    // test binary, so route it to the server's real helper.
+    let arguments: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if arguments
+        .first()
+        .is_some_and(|a| a == "__managed-chatgpt-token")
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        return runtime
+            .block_on(t3_server::adapters::providers::managed_token_helper(
+                &arguments,
+            ))
+            .unwrap_or(ExitCode::FAILURE);
+    }
     if let Ok(kind) = std::env::var("T3_FAKE_PROVIDER") {
         return fake::run(&kind);
     }
@@ -65,8 +82,12 @@ fn main() -> ExitCode {
         ("claude_model_selection_compiles_as_typescript_does", || {
             Box::pin(async { claude_model_compiler() })
         }),
-        ("claude_entrypoint_comes_from_the_instance_settings_file", || {
-            Box::pin(claude_entrypoint())
+        (
+            "claude_entrypoint_comes_from_the_instance_settings_file",
+            || Box::pin(claude_entrypoint()),
+        ),
+        ("managed_codex_runs_signed_in_and_stops_on_sign_out", || {
+            Box::pin(managed_codex())
         }),
     ];
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -619,6 +640,20 @@ mod harness {
                 Err(ServiceError::Response)
             }
         }
+        /// The "installed" Codex a managed instance resolves: this test binary, at a version the
+        /// manifest supports. Nothing probes it.
+        pub struct FakeLocalCodex;
+        #[async_trait]
+        impl LocalCodex for FakeLocalCodex {
+            async fn resolve(&self) -> ServiceResult<Option<CodexExecutable>> {
+                Ok(Some(CodexExecutable {
+                    path: std::env::current_exe().unwrap(),
+                    version: "0.160.0".into(),
+                    source: t3_contracts::provider_setup::ProviderInstallSource::Local,
+                    managed_directory: None,
+                }))
+            }
+        }
         pub fn provider_effects() -> Arc<t3_server::adapters::providers::ProviderEffects> {
             let effects = Arc::new(Effects);
             Arc::new(t3_server::adapters::providers::ProviderEffects {
@@ -629,7 +664,7 @@ mod harness {
                 codex: t3_provider::domain::CodexInstallEffects {
                     transport: effects.clone(),
                     validator: effects,
-                    local: Arc::new(NoLocalCodex),
+                    local: Arc::new(FakeLocalCodex),
                 },
                 maintenance_probe: None,
                 maintenance_executor: None,
@@ -983,6 +1018,192 @@ async fn disallowed_driver() {
     server.stop().await;
 }
 
+const MANAGED_TOKEN: &str = "managed-access-token-9c41e7";
+
+/// Managed Codex (`setupMode: "managed"`, `CodexManagedRuntime`): the session runs the
+/// installed Codex with the signed-in profile; Codex gets the account token only by running the
+/// server's token helper against its private broker (no token on any command line, in any
+/// client frame, the snapshot or the server's files); signing out stops the running session.
+async fn managed_codex() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().to_path_buf();
+    // A signed-in ChatGPT profile with the token-sharing scope, unexpired by the provider clock.
+    let credentials: t3_provider::chatgpt::Credentials = serde_json::from_value(json!({
+        "clientId": "client-managed",
+        "accessToken": MANAGED_TOKEN,
+        "refreshToken": null,
+        "expiresAt": 1.9e12,
+        "earliestRefreshAt": null,
+        "scopes": [t3_provider::chatgpt::REQUIRED_SCOPE],
+        "subject": "user-managed",
+        "email": null,
+    }))
+    .unwrap();
+    use t3_provider::chatgpt::ProfileStore;
+    t3_provider::chatgpt::ConfigProfileStore::new(home.join("userdata").join("secrets"), "codex")
+        .save(&t3_provider::chatgpt::SavedProfiles {
+            sessions: t3_provider::chatgpt::Sessions {
+                active_client_id: Some("client-managed".into()),
+                sessions: vec![credentials],
+            },
+            registrations: Default::default(),
+        })
+        .await
+        .unwrap();
+    let mut codex = instance(Provider::Codex, &home, None, true);
+    codex["config"]["setupMode"] = json!("managed");
+    let mut server = Server::start(&home, &settings_with(json!({ "codex": codex })), None).await;
+    server
+        .create_thread(Provider::Codex, "approval-required")
+        .await
+        .unwrap();
+    server.subscribe();
+    server
+        .send("first", "Write the fixture file.")
+        .await
+        .unwrap();
+    server
+        .until(|values| {
+            objects(values, &|value| {
+                value["responseCapability"].is_object() && value["status"] == "pending"
+            })
+            .first()
+            .map(|_| ())
+        })
+        .await;
+
+    // The installed executable ran with the managed launch arguments, and its token helper
+    // returned the profile's token through the broker.
+    let launch = &launches(&home)[0];
+    let pid = launch["pid"].as_u64().unwrap();
+    let args = launch["args"].to_string();
+    assert!(args.contains("openai_token_sharing"), "{args}");
+    assert!(args.contains("__managed-chatgpt-token"), "{args}");
+    assert!(!args.contains(MANAGED_TOKEN), "{args}");
+    let token = std::fs::read_to_string(home.join("reports").join(format!("{pid}.token"))).unwrap();
+    assert_eq!(token, MANAGED_TOKEN);
+    assert!(alive(pid));
+
+    // Signing out is a sign-in change: the running session stops and its process exits.
+    server
+        .call("provider.auth.logout", json!({"instanceId":"codex"}))
+        .await
+        .unwrap();
+    let status = server
+        .until(|values| {
+            run_status(values).filter(|status| {
+                !matches!(
+                    status.as_str(),
+                    "queued" | "starting" | "running" | "waiting"
+                )
+            })
+        })
+        .await;
+    assert!(
+        matches!(status.as_str(), "failed" | "interrupted"),
+        "{status}"
+    );
+    assert!(!alive(pid), "managed Codex {pid} outlived its sign-in");
+
+    let snapshot = server.snapshot().await;
+    assert!(!snapshot.to_string().contains(MANAGED_TOKEN));
+    let (home, received) = server.stop().await;
+    assert!(!received.contains(MANAGED_TOKEN));
+    // The server's files hold the token only in the encrypted credential store.
+    fn scan(dir: &Path) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                scan(&path);
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                assert!(
+                    !bytes
+                        .windows(MANAGED_TOKEN.len())
+                        .any(|w| w == MANAGED_TOKEN.as_bytes()),
+                    "{path:?}"
+                );
+            }
+        }
+    }
+    scan(&home.join("userdata"));
+    for entry in std::fs::read_dir(home.join("reports")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.to_string_lossy().ends_with(".wire.log") {
+            assert!(
+                !std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains(MANAGED_TOKEN)
+            );
+        }
+    }
+}
+
+/// Starts one Claude turn against `settings_json` (written as the instance home's
+/// `settings.json`, or none) and returns the `CLAUDE_CODE_ENTRYPOINT` the CLI received.
+async fn claude_entrypoint_with(settings_json: Option<Vec<u8>>) -> Value {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().to_path_buf();
+    let claude_home = home.join("claudeAgent-home");
+    std::fs::create_dir_all(&claude_home).unwrap();
+    if let Some(contents) = settings_json {
+        std::fs::write(claude_home.join("settings.json"), contents).unwrap();
+    }
+    let settings =
+        settings_with(json!({ "claudeAgent": instance(Provider::Claude, &home, None, true) }));
+    let mut server = Server::start(&home, &settings, None).await;
+    server
+        .create_thread(Provider::Claude, "approval-required")
+        .await
+        .unwrap();
+    server.subscribe();
+    server
+        .send("first", "Write the fixture file.")
+        .await
+        .unwrap();
+    // The CLI has started once its approval request is pending.
+    server
+        .until(|values| {
+            objects(values, &|value| {
+                value["responseCapability"].is_object() && value["status"] == "pending"
+            })
+            .first()
+            .map(|_| ())
+        })
+        .await;
+    let entrypoint = launches(&home)[0]["entrypoint"].clone();
+    server.stop().await;
+    entrypoint
+}
+
+/// `mergeClaudeProcessEnvironment` + `readClaudeSettingsEnv`: the instance home's
+/// `settings.json` (lenient JSON) names Claude's entrypoint; without one, or with a file that
+/// does not match the shape or exceeds the size cap, T3's own entrypoint stays.
+async fn claude_entrypoint() {
+    let lenient = br#"{
+        // Comments and trailing commas, as Claude Code accepts.
+        "env": { "CLAUDE_CODE_ENTRYPOINT": "my-wrapper", "OTHER": 1, },
+    }"#;
+    assert_eq!(
+        claude_entrypoint_with(Some(lenient.to_vec())).await,
+        json!("my-wrapper")
+    );
+    assert_eq!(claude_entrypoint_with(None).await, json!("t3-code"));
+    // A value that is not a string discards the file, as TypeScript's schema decode does.
+    let wrong_shape = br#"{"env":{"CLAUDE_CODE_ENTRYPOINT":{"path":"../../evil"}}}"#;
+    assert_eq!(
+        claude_entrypoint_with(Some(wrong_shape.to_vec())).await,
+        json!("t3-code")
+    );
+    // Larger than the reader's 8 MiB cap: not read at all.
+    let mut oversized = br#"{"env":{"CLAUDE_CODE_ENTRYPOINT":"too-big"},"pad":""#.to_vec();
+    oversized.extend(std::iter::repeat_n(b'x', 8 * 1024 * 1024));
+    oversized.extend(br#""}"#);
+    assert_eq!(
+        claude_entrypoint_with(Some(oversized)).await,
+        json!("t3-code")
+    );
+}
+
 /// The manifest marks Codex below 0.149.0 `broken` for this release: the session is refused at
 /// initialize with TypeScript's setup error (`CodexInstallation.compatibility`), the run fails
 /// with it, and no turn reaches the provider.
@@ -1218,6 +1439,22 @@ mod fake {
             .to_string(),
         )
         .unwrap();
+        // Managed Codex: fetch the account token the way Codex does, by running the
+        // `model_providers.openai_token_sharing` auth command it was launched with.
+        if kind == "codex"
+            && let Some((command, args)) = token_command()
+        {
+            let output = std::process::Command::new(command)
+                .args(args)
+                .output()
+                .unwrap();
+            std::fs::write(
+                std::path::Path::new(&std::env::var("T3_FAKE_REPORT").unwrap())
+                    .join(format!("{}.token", std::process::id())),
+                &output.stdout,
+            )
+            .unwrap();
+        }
         let log = std::path::Path::new(&std::env::var("T3_FAKE_REPORT").unwrap())
             .join(format!("{}.wire.log", std::process::id()));
         let mut wire = Wire {
@@ -1230,6 +1467,27 @@ mod fake {
             _ => claude(&mut wire, &steps, exit_after.as_deref()),
         }
         ExitCode::SUCCESS
+    }
+
+    /// The `auth={command=…,args=[…]}` of a `-c model_providers.openai_token_sharing=…` launch
+    /// argument (`managed_launch_args`), as Codex reads it.
+    fn token_command() -> Option<(String, Vec<String>)> {
+        let config = std::env::args()
+            .find(|arg| arg.starts_with("model_providers.openai_token_sharing="))?;
+        let value_after = |key: &str| -> Option<Value> {
+            let rest = &config[config.find(key)? + key.len()..];
+            serde_json::Deserializer::from_str(rest)
+                .into_iter::<Value>()
+                .next()?
+                .ok()
+        };
+        let command = value_after("command=")?.as_str()?.to_owned();
+        let args = value_after("args=")?
+            .as_array()?
+            .iter()
+            .filter_map(|arg| arg.as_str().map(str::to_owned))
+            .collect();
+        Some((command, args))
     }
 
     /// Codex app-server JSON-RPC: requests are answered from the transcript's responses for the

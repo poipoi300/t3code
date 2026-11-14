@@ -178,9 +178,11 @@ fn glab_calls(home: &Path) -> Vec<String> {
 
 /// Requests the github.com stand-in received: method, path, authorization, body.
 #[derive(Clone, Default)]
-struct Recorded(Arc<Mutex<Vec<(String, String, String, String)>>>);
+struct Recorded(Arc<Mutex<Vec<Request>>>);
+/// Method, path, authorization, body.
+type Request = (String, String, String, String);
 impl Recorded {
-    fn all(&self) -> Vec<(String, String, String, String)> {
+    fn all(&self) -> Vec<Request> {
         self.0.lock().unwrap().clone()
     }
 }

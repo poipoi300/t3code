@@ -1180,21 +1180,24 @@ async fn the_managed_policy_caps_thread_runtime_modes() {
     server.shutdown().await.unwrap();
 }
 
-/// Waits on `subscribeThread` for the first chunk whose text contains one of `needles`, and
-/// returns that needle.
+/// Waits on `subscribeThread` for the first chunk whose text contains every part of one of
+/// `outcomes`, and returns that outcome's first part.
 async fn thread_outcome(
     socket: &mut Socket,
     client: &mut Client,
     subscription: &t3_rpc::RequestId,
-    needles: &[&'static str],
+    outcomes: &[&[&'static str]],
 ) -> &'static str {
     loop {
         match event(socket, client).await {
             CallEvent::Chunk { id, values } if id == *subscription => {
                 client.acknowledge(id);
                 let text = Value::Array(values).to_string();
-                if let Some(needle) = needles.iter().find(|needle| text.contains(**needle)) {
-                    return needle;
+                if let Some(outcome) = outcomes
+                    .iter()
+                    .find(|parts| parts.iter().all(|part| text.contains(part)))
+                {
+                    return outcome[0];
                 }
             }
             CallEvent::Chunk { id, .. } => client.acknowledge(id),
@@ -1317,7 +1320,13 @@ async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
     )
     .await;
     assert_eq!(sent["_tag"], "Success", "{sent}");
-    thread_outcome(&mut socket, &mut client, &subscription, &["\"completed\""]).await;
+    thread_outcome(
+        &mut socket,
+        &mut client,
+        &subscription,
+        &[&["\"run.updated\"", "\"completed\""]],
+    )
+    .await;
 
     // The thread-start checkpoint, as the client's rewind picks it.
     let origin = format!("http://{}", server.address);
@@ -1331,7 +1340,7 @@ async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
         .json()
         .await
         .unwrap();
-    let checkpoint = snapshot["checkpoints"]
+    let checkpoint = snapshot["projection"]["checkpoints"]
         .as_array()
         .into_iter()
         .flatten()
@@ -1361,7 +1370,7 @@ async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
             &mut socket,
             &mut client,
             &subscription,
-            &["still writing to its folder: terminal `", "\"rolled_back\""],
+            &[&["still writing to its folder: terminal `"], &["\"rolled_back\""]],
         )
         .await,
         "still writing to its folder: terminal `",
@@ -1388,7 +1397,11 @@ async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
             &mut socket,
             &mut client,
             &subscription,
-            &["\"rolled_back\"", "could not roll back", "Files can't be restored"],
+            &[
+                &["\"rolled_back\""],
+                &["could not roll back"],
+                &["Files can't be restored"],
+            ],
         )
         .await,
         "\"rolled_back\"",
