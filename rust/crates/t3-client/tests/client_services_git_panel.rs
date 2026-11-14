@@ -624,7 +624,11 @@ fn remote_editor_refusal_does_not_mark_hint_seen_and_accepted_launch_does() {
         .store()
         .set_config(&environment("env"), generation, config);
     let picker = runtime.editor_picker(&scope().thread);
-    h.platform.fake.push_host(Ok(HostReply::Granted(false)));
+    h.platform
+        .fake
+        .push_host(Err(t3_client::platform::PlatformError::Denied(
+            "scheme not registered".into(),
+        )));
     assert!(!h.run(picker.open_editor(EditorId::Vscode)).unwrap());
     assert!(!h.run(picker.snapshot()).unwrap().hint_seen);
     h.platform.fake.push_host(Ok(HostReply::Unit));

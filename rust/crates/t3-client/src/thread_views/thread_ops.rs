@@ -39,6 +39,25 @@ pub struct ThreadOpsState {
     unsupported: RefCell<BTreeMap<(EnvironmentId, &'static str), u64>>,
     answering: RefCell<BTreeSet<(ThreadKey, String)>>,
 }
+impl ThreadOpsState {
+    pub(crate) fn forget_environment(&self, environment: &EnvironmentId) {
+        self.approvals
+            .borrow_mut()
+            .retain(|key, _| &key.environment != environment);
+        self.files.remove_environment(environment);
+        self.actions.forget_environment(environment);
+        self.undo.forget_environment(environment);
+        self.rewind.forget_environment(environment);
+        self.unsupported
+            .borrow_mut()
+            .retain(|(key, _), _| key != environment);
+        self.answering
+            .borrow_mut()
+            .retain(|(key, _)| &key.environment != environment);
+        *self.shells.borrow_mut() = Rc::default();
+        self.actions.notify();
+    }
+}
 
 #[derive(Clone)]
 pub struct ThreadOperations<P: Platform + Clone + 'static> {
@@ -108,5 +127,16 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
     }
     pub(crate) fn refused(message: &str) -> ClientError {
         ClientError::InvalidPayload(message.into())
+    }
+    fn command_failure(
+        &self,
+        environment: &EnvironmentId,
+        method: &'static str,
+        generation: Option<u64>,
+        error: crate::rpc::RpcCallError,
+    ) -> ClientError {
+        let error = error.into_client_error();
+        self.remember_unsupported(environment, method, generation, &error);
+        error
     }
 }

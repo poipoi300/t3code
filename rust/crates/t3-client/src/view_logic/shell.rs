@@ -10,8 +10,12 @@
 //! bytes and old keys until a successful migration; stash writers report durability explicitly.
 #[path = "shell/closed_views.rs"]
 pub mod closed_views;
+#[path = "shell/desktop_update.rs"]
+pub mod desktop_update;
 #[path = "shell/diff_state.rs"]
 pub mod diff_state;
+#[path = "shell/history_swipe.rs"]
+pub mod history_swipe;
 #[path = "shell/keybindings.rs"]
 pub mod keybindings;
 #[path = "shell/models.rs"]
@@ -36,6 +40,8 @@ pub mod shortcuts;
 pub mod shortcut_config;
 #[path = "shell/sidebar.rs"]
 pub mod sidebar;
+#[path = "shell/sidebar_width.rs"]
+pub mod sidebar_width;
 #[path = "shell/skill_search.rs"]
 pub mod skill_search;
 #[path = "shell/stash.rs"]

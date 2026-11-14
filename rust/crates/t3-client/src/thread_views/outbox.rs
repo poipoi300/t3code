@@ -139,6 +139,12 @@ pub struct QueuedCreation {
         with = "t3_contracts::wire::optional"
     )]
     pub pull_request_reference: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "t3_contracts::wire::optional"
+    )]
+    pub checkout_pull_request_url: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

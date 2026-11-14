@@ -58,7 +58,8 @@ fn remove_label(prompt: &mut String, header: &str) {
         "@{}:{lines}",
         trim_js(name)
             .to_lowercase()
-            .split_whitespace()
+            .split(crate::view_logic::is_js_whitespace)
+            .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join("-")
     );
@@ -179,6 +180,17 @@ mod tests {
     }
     #[test]
     fn source_legacy_context_and_exact_inline_terminal_labels() {
+        for (name, label) in [
+            ("Terminal\u{feff}1", "@terminal-1:4"),
+            ("Terminal\u{85}1", "@terminal\u{85}1:4"),
+        ] {
+            assert_eq!(
+                recallable_prompt(&format!(
+                    "Look {label}\n\n<terminal_context>\n- {name} line 4:\n  4 | ls\n</terminal_context>"
+                )),
+                "Look"
+            );
+        }
         for (typed, expected) in [
             ("Look at @terminal-1:4 please", "Look at please"),
             (

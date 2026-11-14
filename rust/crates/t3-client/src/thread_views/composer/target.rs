@@ -9,6 +9,27 @@ pub enum ComposerTarget {
     },
 }
 impl ComposerTarget {
+    pub fn thread_key(&self, document: &serde_json::Value) -> Option<ThreadKey> {
+        match self {
+            Self::Thread(key) => Some(key.clone()),
+            Self::Draft {
+                draft_id,
+                environment_id,
+            } => {
+                let session = &document["draftThreadsByThreadKey"][draft_id];
+                let environment = environment_id.clone().or_else(|| {
+                    session["environmentId"]
+                        .as_str()
+                        .map(|id| EnvironmentId(id.into()))
+                })?;
+                let thread = crate::types::ThreadId(session["threadId"].as_str()?.into());
+                Some(ThreadKey {
+                    environment,
+                    thread,
+                })
+            }
+        }
+    }
     pub fn environment(&self) -> Option<&EnvironmentId> {
         match self {
             Self::Thread(key) => Some(&key.environment),

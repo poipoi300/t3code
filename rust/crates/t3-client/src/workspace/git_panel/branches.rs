@@ -42,6 +42,9 @@ pub struct BranchSelectorState {
     pub previous_worktree: Option<PreviousWorktree>,
     pub create_name: Option<String>,
     pub project_cloning: bool,
+    /// The checkout's `isRepo`; `None` until its status arrives.
+    pub is_repo: Option<bool>,
+    pub offers_git: bool,
 }
 struct Core {
     view: Resource<BranchSelectorState>,
@@ -332,6 +335,8 @@ fn recompute<P: Platform + Clone + 'static>(
     state.selecting_worktree_base =
         c.env_mode == EnvMode::Worktree && !state.env_locked && c.worktree_path.is_none();
     let status = checkout.and_then(|c| c.status.snapshot().value);
+    state.is_repo = status.as_ref().map(|s| s.is_repo);
+    state.offers_git = service.offers_git(key);
     state.current_git_branch = status
         .as_ref()
         .and_then(|s| s.ref_name.as_ref().map(|b| b.0.clone()))

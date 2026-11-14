@@ -790,7 +790,10 @@ fn an_open_command_row_streams_its_output_and_a_settled_one_is_kept_for_five_min
 
     harness.advance(5 * 60_000 + 1_000);
     let expired = client.command_output(&key("t1"), &item);
-    assert!(expired.read(None).is_none(), "loading again after five minutes");
+    assert!(
+        expired.read(None).is_none(),
+        "loading again after five minutes"
+    );
     harness.settle();
     assert!(expired.read(None).is_some());
     assert_eq!(harness.server().state.borrow().command_output_subscribes, 3);
@@ -907,7 +910,122 @@ fn an_unreadable_catalog_is_quarantined_and_pairing_starts_afresh() {
         1,
         "the unreadable catalog is kept aside, not discarded"
     );
+    // Re-review N8: the user is told, once.
+    let notice = client.take_storage_notice().expect("a notice");
+    assert!(notice.reset_catalog);
+    assert_eq!(client.take_storage_notice(), None);
+    // Re-review N5: nothing can reach these once the catalog is empty, so they go with it.
+    for namespace in [
+        "connection-credential",
+        "connection-profile",
+        "authorization.remote-dpop",
+    ] {
+        assert_eq!(
+            saved(&mut harness, StorageArea::Secure, namespace),
+            0,
+            "{namespace}"
+        );
+    }
     still_removable_and_pairable(&mut harness, &client);
+}
+
+#[test]
+fn a_catalog_target_this_build_does_not_know_is_kept_once_with_its_secrets() {
+    // Re-review N4: each registry load wrote another copy, and the next save deleted the
+    // unknown target's rows, which the copy could then no longer bring back.
+    let mut harness = Harness::new(ENV);
+    let future_rows = [
+        t3_client::platform::StorageKey::new("connection-profile", None, "future-connection"),
+        t3_client::platform::StorageKey::new("connection-credential", None, "future-connection"),
+        t3_client::persistence::remote_dpop_token_key(&environment("future")),
+    ];
+    let rows = future_rows.clone();
+    let client = restored_after(&mut harness, move |harness| {
+        let platform = harness.platform.clone();
+        harness.run(async move {
+            let key = t3_client::platform::StorageKey::new("connection-catalog", None, "current");
+            let bytes = platform
+                .get(StorageArea::Ordinary, key.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut catalog =
+                t3_client::persistence::decode_record::<serde_json::Value>(&bytes, &key, 1)
+                    .unwrap()
+                    .payload;
+            catalog["targets"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "_tag": "FutureConnectionTarget",
+                    "environmentId": "future",
+                    "label": "Future",
+                    "connectionId": "future-connection",
+                }));
+            let record = t3_client::persistence::Record::new(
+                "connection-catalog",
+                None,
+                "current",
+                1,
+                catalog,
+            );
+            platform
+                .write(
+                    StorageArea::Ordinary,
+                    vec![t3_client::platform::StorageWrite {
+                        key,
+                        value: Some(record.encode().unwrap()),
+                    }],
+                )
+                .await
+                .unwrap();
+            platform
+                .write(
+                    StorageArea::Secure,
+                    rows.into_iter()
+                        .map(|key| t3_client::platform::StorageWrite {
+                            key,
+                            value: Some(b"written by a newer build".to_vec()),
+                        })
+                        .collect(),
+                )
+                .await
+                .unwrap();
+        });
+    });
+    assert_eq!(client.environments().len(), 1);
+    // Later launches and loads see the same catalog.
+    harness.advance(1_000);
+    let again = runtime(&harness);
+    harness.run(again.restore()).unwrap();
+    harness.settle();
+    assert_eq!(
+        saved(
+            &mut harness,
+            StorageArea::Ordinary,
+            "connection-catalog-quarantine"
+        ),
+        1,
+        "one copy of one catalog"
+    );
+    // A save (removing the known environment) leaves the unknown target's rows alone.
+    harness.run(again.remove(&environment(ENV))).unwrap();
+    harness.settle();
+    let platform = harness.platform.clone();
+    let kept = harness.run(async move {
+        let mut kept = 0;
+        for key in future_rows {
+            kept += usize::from(
+                platform
+                    .get(StorageArea::Secure, key)
+                    .await
+                    .unwrap()
+                    .is_some(),
+            );
+        }
+        kept
+    });
+    assert_eq!(kept, 3);
 }
 
 #[test]
@@ -947,7 +1065,7 @@ fn removing_an_environment_leaves_no_copy_of_its_token_in_storage() {
                 "connection-credential",
                 "connection-profile",
                 "connection-catalog",
-                "remote-dpop-token",
+                "authorization.remote-dpop",
                 "import-backup",
                 "quarantine",
                 "import-conflict",
@@ -1052,6 +1170,10 @@ fn one_unreadable_profile_does_not_stop_saving_the_other_environments() {
     let damaged: Vec<_> = entries.iter().filter(|entry| entry.damaged).collect();
     assert_eq!(damaged.len(), 1, "the user can tell which one");
     assert_eq!(damaged[0].id, environment("other"));
+    assert_eq!(
+        client.take_storage_notice().map(|notice| notice.damaged),
+        Some(vec![environment("other")])
+    );
 
     // Pairing the healthy server again saves every entry.
     assert_eq!(harness.run(client.pair(pairing())), Ok(environment(ENV)));
@@ -1067,7 +1189,12 @@ fn one_unreadable_profile_does_not_stop_saving_the_other_environments() {
         .unwrap();
         for enabled in [false, true] {
             registry
-                .set_enabled_persisted(&platform, &environment(ENV), enabled, Time::from_platform(&platform))
+                .set_enabled_persisted(
+                    &platform,
+                    &environment(ENV),
+                    enabled,
+                    Time::from_platform(&platform),
+                )
                 .await
                 .unwrap();
         }
@@ -1079,4 +1206,62 @@ fn one_unreadable_profile_does_not_stop_saving_the_other_environments() {
     harness.run(client.remove(&environment("other"))).unwrap();
     harness.settle();
     assert!(client.environments().is_empty());
+}
+
+#[test]
+fn signing_out_with_a_relay_only_and_a_mixed_environment_saved_together() {
+    // Re-review N3: removing the relay-only one saved its own registry, so the stale outer
+    // save failed and the mixed environment kept its relay route.
+    let mut harness = Harness::new(ENV);
+    harness.server().state.borrow_mut().signed_in = true;
+    let client = relay_runtime(&harness);
+    harness.run(client.pair(pairing())).unwrap();
+    harness
+        .run(client.add_relay_environment(&environment(ENV), "Fake host"))
+        .unwrap();
+    harness
+        .run(client.add_relay_environment(&environment("other"), "Other host"))
+        .unwrap();
+    harness.advance(5_000);
+    assert_eq!(client.environments().len(), 2);
+    let signed_out = harness.run(client.remove_relay_environments());
+    assert!(signed_out.is_ok(), "{signed_out:?}");
+    harness.advance(5_000);
+    let entries = client.environments();
+    assert_eq!(entries.len(), 1, "the relay-only environment is gone");
+    assert_eq!(entries[0].id, environment(ENV));
+    assert_eq!(
+        entries[0]
+            .routes
+            .iter()
+            .map(|route| route.mode.clone())
+            .collect::<Vec<_>>(),
+        [ConnectionMode::Remote]
+    );
+    assert_eq!(entries[0].state.phase, Phase::Connected);
+}
+
+#[test]
+fn a_malformed_config_chunk_resubscribes_on_the_same_socket() {
+    // WP5: the runtime's config job ended on a chunk failure, which replaced a healthy session.
+    use futures::StreamExt;
+    use t3_contracts::rpc::RpcMethod;
+    let mut harness = Harness::new(ENV);
+    let failed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let seen = failed.clone();
+    harness.server().state.borrow_mut().extra_rpc = Some(std::rc::Rc::new(move |request| {
+        if request.tag != t3_contracts::rpc::WsSubscribeServerConfigRpc::TAG || seen.replace(true) {
+            return None;
+        }
+        Some(t3_rpc::HandlerOutput::Stream(
+            futures::stream::iter([Ok(vec![serde_json::json!({"version": 1, "type": "bogus"})])])
+                .chain(futures::stream::pending())
+                .boxed_local(),
+        ))
+    }));
+    let client = paired(&mut harness);
+    harness.advance(5_000);
+    assert!(failed.get(), "the malformed chunk was served");
+    assert_eq!(harness.server().state.borrow().sockets_opened, 1);
+    assert_eq!(client.environments()[0].state.phase, Phase::Connected);
 }

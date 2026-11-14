@@ -107,7 +107,8 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
                 }
             };
             let command: OrchestrationV2Command = serde_json::from_value(serde_json::json!({"type":"prepared-run.retry","commandId":crate::operations::allocate_command_id(&service.platform,None)?,"threadId":key.thread,"runId":id}))?;
-            service.endpoint(&key.environment)?.command::<WsOrchestrationV2DispatchCommandRpc>(command).await.map_err(|e| e.into_client_error())?; Ok(())
+            let generation=service.session_generation(&key.environment);
+            service.endpoint(&key.environment)?.command::<WsOrchestrationV2DispatchCommandRpc>(command).await.map_err(|error| service.command_failure(&key.environment,"orchestration.dispatchCommand",generation,error))?; Ok(())
         }.boxed_local()
     }
 }

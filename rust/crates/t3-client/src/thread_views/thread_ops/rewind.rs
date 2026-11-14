@@ -121,11 +121,20 @@ pub struct RewindStateStore {
     attachments: RefCell<Option<Rc<dyn RewindAttachments>>>,
     failures: RefCell<BTreeMap<ThreadKey, String>>,
 }
+impl RewindStateStore {
+    pub(super) fn forget_environment(&self, environment: &crate::types::EnvironmentId) {
+        self.confirmations
+            .borrow_mut()
+            .retain(|(key, _, _), _| &key.environment != environment);
+        self.failures
+            .borrow_mut()
+            .retain(|key, _| &key.environment != environment);
+    }
+}
 struct Reverting<P: Platform + Clone + 'static>(ThreadOperations<P>, ThreadKey);
 impl<P: Platform + Clone + 'static> Drop for Reverting<P> {
     fn drop(&mut self) {
         self.0.state.rewind.reverting.borrow_mut().remove(&self.1);
-        self.0.runtime.close_thread(&self.1);
         self.0.state.actions.notify();
     }
 }
@@ -380,11 +389,17 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
                 Some(restore_files),
             )?;
             let endpoint = service.endpoint(&key.environment)?;
+            let generation = service.session_generation(&key.environment);
             let drafts = service.runtime.composer_drafts();
             let draft_key = drafts.thread_draft_key(&key);
             if !drafts.view_key(&draft_key).writable {
                 return Err(ClientError::Unsupported("composer draft restoration"));
             }
+            let demand = service
+                .runtime
+                .client(&key.environment)
+                .ok_or(ClientError::Disconnected)?
+                .open_thread(key.thread.clone());
             service
                 .state
                 .rewind
@@ -392,14 +407,12 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
                 .borrow_mut()
                 .insert(key.clone());
             service.state.rewind.failures.borrow_mut().remove(&key);
-            service.runtime.open_thread(&key);
             service.state.actions.notify();
             let reverting = Reverting(service.clone(), key.clone());
             let runtime = service.runtime.clone();
             let (send, receive) = futures::channel::oneshot::channel();
             runtime.spawn(
                 async move {
-                    let _reverting = reverting;
                     let result = async {
                         crate::view_logic::chat_view::wait_for_reverted_message(
                             service.runtime.store(),
@@ -411,7 +424,14 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
                                 endpoint
                                     .command::<WsOrchestrationV2DispatchCommandRpc>(command)
                                     .await
-                                    .map_err(|e| e.into_client_error())?;
+                                    .map_err(|error| {
+                                        service.command_failure(
+                                            &key.environment,
+                                            "orchestration.dispatchCommand",
+                                            generation,
+                                            error,
+                                        )
+                                    })?;
                                 Ok(())
                             },
                             30_000,
@@ -448,6 +468,8 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
                             .borrow_mut()
                             .insert(key, error.to_string());
                     }
+                    drop(demand);
+                    drop(reverting);
                     let _ = send.send(result);
                 }
                 .boxed_local(),
@@ -473,7 +495,8 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
             let target = ThreadKey { environment:key.environment.clone(),thread:crate::types::ThreadId(crate::operations::allocate_command_id(&service.platform,None)?.0) };
             let input: OrchestrationV2Command = serde_json::from_value(serde_json::json!({"type":"thread.fork","commandId":crate::operations::allocate_command_id(&service.platform,None)?,"createdBy":"user","creationSource":"web","sourceThreadId":key.thread,"targetThreadId":target.thread,"sourcePoint":{"type":"run","runId":run},"title":format!("{} fork",source.title)}))?;
             let mut changes = service.changes(&target);
-            service.endpoint(&key.environment)?.command::<WsOrchestrationV2DispatchCommandRpc>(input).await.map_err(|e|e.into_client_error())?;
+            let generation=service.session_generation(&key.environment);
+            service.endpoint(&key.environment)?.command::<WsOrchestrationV2DispatchCommandRpc>(input).await.map_err(|error|service.command_failure(&key.environment,"orchestration.dispatchCommand",generation,error))?;
             let timeout = service.platform.sleep(10_000).fuse(); futures::pin_mut!(timeout);
             loop {
                 if service.thread_shell(&target).is_some() { return Ok(target); }

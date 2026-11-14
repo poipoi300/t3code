@@ -44,6 +44,11 @@ pub struct ActionState {
     listeners: RefCell<Vec<futures::channel::mpsc::UnboundedSender<()>>>,
 }
 impl ActionState {
+    pub(super) fn forget_environment(&self, environment: &EnvironmentId) {
+        if let Some(queue) = self.queues.borrow_mut().remove(environment) {
+            queue.queue.disconnect();
+        }
+    }
     pub(super) fn notify(&self) {
         self.listeners
             .borrow_mut()

@@ -347,6 +347,10 @@ impl Storage for TestPlatform {
 }
 
 impl Platform for TestPlatform {
+    // The desktop host: it also serves the SSH actions, and opens editor deep links.
+    fn external_url_surface(&self) -> t3_client::persistence::external_links::ExternalUrlSurface {
+        t3_client::persistence::external_links::ExternalUrlSurface::Desktop
+    }
     fn now_epoch_ms(&self) -> u64 {
         self.fake.now_epoch_ms()
     }

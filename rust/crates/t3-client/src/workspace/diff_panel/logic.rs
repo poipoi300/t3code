@@ -25,14 +25,16 @@ pub fn ordered_turn_summaries<'a>(
 ) -> Vec<TurnSummary> {
     let mut summaries: Vec<_> = checkpoints
         .into_iter()
-        .filter_map(|checkpoint| match (&checkpoint.run_id, checkpoint.app_run_ordinal) {
-            (Some(IdOrIndex::Id(run_id)), Some(turn_count)) => Some(TurnSummary {
-                run_id: run_id.clone(),
-                turn_count,
-                completed_at: checkpoint.captured_at.0.clone(),
-            }),
-            _ => None,
-        })
+        .filter_map(
+            |checkpoint| match (&checkpoint.run_id, checkpoint.app_run_ordinal) {
+                (Some(IdOrIndex::Id(run_id)), Some(turn_count)) => Some(TurnSummary {
+                    run_id: run_id.clone(),
+                    turn_count,
+                    completed_at: checkpoint.captured_at.0.clone(),
+                }),
+                _ => None,
+            },
+        )
         .collect();
     summaries.sort_by(|left, right| {
         right
@@ -66,12 +68,31 @@ pub enum DiffLabel {
     CommitSha(String),
 }
 
+/// The section title as AnnotatableCodeView.tsx stores it on a comment (`sectionTitle`), in
+/// the web's English: it is data in the composer draft, not a label.
+pub fn section_title_text(label: &DiffLabel) -> String {
+    match label {
+        DiffLabel::ToolCall => "Tool call".into(),
+        DiffLabel::LatestTurn => "Latest turn".into(),
+        DiffLabel::Turn(Some(count)) => format!("Turn {count}"),
+        DiffLabel::Turn(None) => "Turn ?".into(),
+        DiffLabel::Changes => "Changes".into(),
+        DiffLabel::Uncommitted => "Uncommitted".into(),
+        DiffLabel::Commit => "Commit".into(),
+        DiffLabel::CommitSubject(subject) => subject.clone(),
+        DiffLabel::CommitSha(sha) => format!("Commit {sha}"),
+    }
+}
+
 /// What the panel reads for a selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffQuery {
     None,
     /// `getFullThreadDiff` when `from` is 0, else `getTurnDiff`.
-    Checkpoint { from: u64, to: u64 },
+    Checkpoint {
+        from: u64,
+        to: u64,
+    },
     /// `review.getDiffPreview` for the thread's checkout.
     Git {
         scope: GitScope,
@@ -171,8 +192,8 @@ pub fn resolve_selection(
         (None, GitScope::Unstaged) => DiffLabel::Uncommitted,
         _ => DiffLabel::Changes,
     };
-    let same_as_latest = selected_turn.as_ref().map(|t| &t.run_id)
-        == latest_turn.as_ref().map(|t| &t.run_id);
+    let same_as_latest =
+        selected_turn.as_ref().map(|t| &t.run_id) == latest_turn.as_ref().map(|t| &t.run_id);
     let scope_label = if tool_call {
         DiffLabel::ToolCall
     } else if selected_run.is_none() {
@@ -271,7 +292,11 @@ pub enum ScopeAction {
 }
 
 /// `selectScopeValue`.
-pub fn scope_action(value: &str, resolved: &ResolvedSelection, turns: &[TurnSummary]) -> ScopeAction {
+pub fn scope_action(
+    value: &str,
+    resolved: &ResolvedSelection,
+    turns: &[TurnSummary],
+) -> ScopeAction {
     let commit_value = resolved
         .commit_sha
         .as_ref()
@@ -288,12 +313,16 @@ pub fn scope_action(value: &str, resolved: &ResolvedSelection, turns: &[TurnSumm
         resolved
             .latest_turn
             .as_ref()
-            .map_or(ScopeAction::Nothing, |t| ScopeAction::Turn(t.run_id.clone()))
+            .map_or(ScopeAction::Nothing, |t| {
+                ScopeAction::Turn(t.run_id.clone())
+            })
     } else {
         turns
             .iter()
             .find(|t| format!("turn:{}", t.run_id.0) == value)
-            .map_or(ScopeAction::Nothing, |t| ScopeAction::Turn(t.run_id.clone()))
+            .map_or(ScopeAction::Nothing, |t| {
+                ScopeAction::Turn(t.run_id.clone())
+            })
     }
 }
 
@@ -343,7 +372,9 @@ pub enum DiffBody {
     AccessDenied(Option<String>),
     Loading(LoadingLabel),
     /// "No net changes in this selection." or "No patch available for this selection."
-    Empty { no_net_changes: bool },
+    Empty {
+        no_net_changes: bool,
+    },
     /// "Unsupported diff format. Showing raw patch." over the text.
     Raw(Rc<str>),
     Files(Rc<PatchFiles>),
@@ -422,8 +453,8 @@ pub fn resolve_body(
         });
     }
     let error = state.error.clone().filter(|_| renderable.is_none());
-    let loading = state.pending
-        && (!state.answered || (git && state.incomplete && !state.source_has_files));
+    let loading =
+        state.pending && (!state.answered || (git && state.incomplete && !state.source_has_files));
     let body = match renderable {
         Some(RenderablePatch::Files(files)) => DiffBody::Files(files.clone()),
         Some(RenderablePatch::Raw(text)) => DiffBody::Raw(text.clone()),
@@ -450,9 +481,7 @@ pub fn resolve_body(
                 .filter(|_| git)
                 .unwrap_or_else(|| PatchFiles::line_stat(&files.files)),
         ),
-        _ => state
-            .source_stat
-            .filter(|_| git && state.source_has_files),
+        _ => state.source_stat.filter(|_| git && state.source_has_files),
     };
     DiffBodyView {
         body,
@@ -517,7 +546,15 @@ mod tests {
             .patch
             .as_ref()
             .and_then(super::super::files::renderable_patch);
-        resolve_body(thread, repo, resolved, turns, access, state, renderable.as_ref())
+        resolve_body(
+            thread,
+            repo,
+            resolved,
+            turns,
+            access,
+            state,
+            renderable.as_ref(),
+        )
     }
     fn access() -> FileAccess {
         FileAccess {
@@ -611,11 +648,17 @@ mod tests {
         };
         let resolved = resolve_selection(&key(), &commit, &turns(), None);
         assert_eq!(resolved.scope_label, DiffLabel::Commit);
-        assert_eq!(resolved.section_title, DiffLabel::CommitSha("abcdef1".into()));
+        assert_eq!(
+            resolved.section_title,
+            DiffLabel::CommitSha("abcdef1".into())
+        );
         assert_eq!(resolved.header_commit.as_deref(), Some("abcdef1234"));
         assert_eq!(resolved.scope_value, "commit:abcdef1234");
         let answered = resolve_selection(&key(), &commit, &turns(), Some("Fix it"));
-        assert_eq!(answered.scope_label, DiffLabel::CommitSubject("Fix it".into()));
+        assert_eq!(
+            answered.scope_label,
+            DiffLabel::CommitSubject("Fix it".into())
+        );
         assert_eq!(
             resolve_selection(&key(), &Selection::Unstaged, &[], None).scope_label,
             DiffLabel::Uncommitted
@@ -664,7 +707,10 @@ mod tests {
             scope_action("turn:r1", &resolved, &turns()),
             ScopeAction::Turn(RunId("r1".into()))
         );
-        assert_eq!(scope_action("turn:x", &resolved, &turns()), ScopeAction::Nothing);
+        assert_eq!(
+            scope_action("turn:x", &resolved, &turns()),
+            ScopeAction::Nothing
+        );
     }
 
     #[test]

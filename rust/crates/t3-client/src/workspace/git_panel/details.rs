@@ -90,7 +90,27 @@ pub fn environment_config(
         .config
         .clone()
 }
+/// `isScratchProject`: the shared No project folder must never offer git.
+pub fn is_scratch_project(workspace_root: &str, scratch_workspace_root: Option<&str>) -> bool {
+    scratch_workspace_root.is_some_and(|root| {
+        super::super::project_ops::paths::find_project_by_path(&[workspace_root], root, |p| *p)
+            .is_some()
+    })
+}
 impl<P: Platform + Clone + 'static> GitPanel<P> {
+    /// ThreadDetailsPanel's `offersGit`: a checkout, a loaded config and a project that is not
+    /// the scratch folder. Until the config loads, a No project thread looks like any folder.
+    pub fn offers_git(&self, key: &ThreadKey) -> bool {
+        let Some(context) = self.workspace_context(key, None) else {
+            return false;
+        };
+        environment_config(self.runtime.store(), &key.environment).is_some_and(|config| {
+            !is_scratch_project(
+                &context.project.workspace_root.0,
+                config.scratch_workspace_root.as_ref().map(|p| p.0.as_str()),
+            )
+        })
+    }
     pub fn details_visibility(&self) -> BTreeMap<String, bool> {
         resolve_thread_details_visibility(&self.runtime.composer_preferences().snapshot())
     }
@@ -132,5 +152,26 @@ impl<P: Platform + Clone + 'static> GitPanel<P> {
                 .await
         }
         .boxed_local()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_scratch_root_itself_is_a_scratch_project() {
+        assert!(is_scratch_project("/home/me/.t3/scratch", Some("/home/me/.t3/scratch/")));
+        assert!(!is_scratch_project("/home/me/repo", Some("/home/me/.t3/scratch")));
+        assert!(!is_scratch_project("/home/me/.t3/scratch", None));
+    }
+
+    #[test]
+    fn density_falls_back_from_full_to_compact_to_essential() {
+        assert_eq!(resolve_thread_details_density(300.0, 0.0, 0.0), DetailsDensity::Full);
+        assert_eq!(resolve_thread_details_density(300.0, 280.0, 0.0), DetailsDensity::Full);
+        assert_eq!(resolve_thread_details_density(300.0, 320.0, 0.0), DetailsDensity::Compact);
+        assert_eq!(resolve_thread_details_density(300.0, 320.0, 240.0), DetailsDensity::Compact);
+        assert_eq!(resolve_thread_details_density(200.0, 320.0, 240.0), DetailsDensity::Essential);
     }
 }

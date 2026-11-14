@@ -1,0 +1,246 @@
+#![allow(clippy::unwrap_used)]
+//! The settings pages' service against the fake server: scope views from the store, device
+//! writes, `server.updateSettings` writes, permission refusals, rejections and older servers.
+#[path = "support/fake_server.rs"]
+mod fake_server;
+
+use futures::FutureExt;
+use serde_json::{Value, json};
+use std::rc::Rc;
+use t3_client::navigation::SettingsPage;
+use t3_client::services::settings::scope::{ScopeKindName, SettingsScopeSearch};
+use t3_client::services::settings::service::SettingsWriteAccess;
+
+fn settings_runtime(
+    permissions: &[&str],
+    settings: Value,
+) -> (
+    fake_server::Harness,
+    t3_client::composition::ClientRuntime<fake_server::TestPlatform>,
+) {
+    let mut h = fake_server::Harness::new("env");
+    h.server().state.borrow_mut().permissions =
+        Some(permissions.iter().map(|p| (*p).to_owned()).collect());
+    let mut config = fake_server::config("env");
+    let mut base = serde_json::to_value(t3_contracts::settings::ServerSettings::default()).unwrap();
+    base.as_object_mut()
+        .unwrap()
+        .extend(settings.as_object().unwrap().clone());
+    config["settings"] = base;
+    let source = config.clone();
+    h.server().state.borrow_mut().extra_rpc = Some(Rc::new(move |request| {
+        let config = source.clone();
+        match request.tag.as_str() {
+            "server.getConfig" => Some(t3_rpc::HandlerOutput::Unary(
+                async move { t3_rpc::Exit::success(config) }.boxed_local(),
+            )),
+            "subscribeServerConfig" => Some(t3_rpc::HandlerOutput::Stream(
+                futures::stream::once(async move {
+                    Ok(vec![json!({"version":1,"type":"snapshot","config":config})])
+                })
+                .chain(futures::stream::pending())
+                .boxed_local(),
+            )),
+            _ => None,
+        }
+    }));
+    let runtime = t3_client::composition::ClientRuntime::new(
+        h.platform.clone(),
+        t3_client::ClientStore::default(),
+        t3_contracts::orchestration_v2::OrchestrationV2CreationSource::Web,
+        h.spawner(),
+    );
+    h.run(runtime.pair(t3_client::connection::PairingInput {
+        pairing_url: Some(format!("{}/pair#token=pairing-token", fake_server::ORIGIN)),
+        ..Default::default()
+    }))
+    .unwrap();
+    h.settle();
+    // Session grants are read when a connection authenticates, as composer_services.rs does.
+    h.run(runtime.reconnect(&t3_client::types::EnvironmentId("env".into())))
+        .unwrap();
+    h.settle();
+    (h, runtime)
+}
+
+use futures::StreamExt;
+
+fn patch(value: Value) -> serde_json::Map<String, Value> {
+    value.as_object().unwrap().clone()
+}
+
+fn update_calls(h: &fake_server::Harness) -> Vec<Value> {
+    h.server()
+        .state
+        .borrow()
+        .rpc_calls
+        .iter()
+        .filter(|(tag, _)| tag == "server.updateSettings")
+        .map(|(_, input)| input["patch"].clone())
+        .collect()
+}
+
+#[test]
+fn the_scope_view_reads_environments_and_project_groups_from_the_store() {
+    let (_h, runtime) = settings_runtime(&["orchestration:read", "settings:write"], json!({}));
+    let settings = runtime.settings();
+    let view = settings.scope_view(SettingsPage::Threads, &SettingsScopeSearch::default());
+    assert_eq!(view.scope.kind_name(), ScopeKindName::All);
+    assert_eq!(view.selected.connected.len(), 1);
+    assert_eq!(view.groups.len(), 1);
+    assert_eq!(view.groups[0].display_name, "Project");
+    assert_eq!(view.targets.len(), 1);
+    assert!(!view.device_only && view.page == SettingsPage::Threads);
+    assert_eq!(settings.write_access(&view), SettingsWriteAccess::Writable);
+    let project = SettingsScopeSearch {
+        project: Some(view.groups[0].project_key.clone()),
+        ..Default::default()
+    };
+    let scoped = settings.scope_view(SettingsPage::Threads, &project);
+    assert_eq!(scoped.scope.kind_name(), ScopeKindName::Project);
+    assert_eq!(scoped.targets[0].project_id.as_ref().unwrap().0, "project");
+    let stale = SettingsScopeSearch {
+        machine: Some("gone".into()),
+        ..Default::default()
+    };
+    let unavailable = settings.scope_view(SettingsPage::Threads, &stale);
+    assert_eq!(unavailable.scope.kind_name(), ScopeKindName::Unavailable);
+    assert!(unavailable.targets.is_empty());
+}
+
+#[test]
+fn device_settings_save_to_the_client_record_without_a_server_call() {
+    let (mut h, runtime) = settings_runtime(&["orchestration:read", "settings:write"], json!({}));
+    let settings = runtime.settings();
+    let mut changes = settings.changes();
+    let view = settings.scope_view(SettingsPage::General, &SettingsScopeSearch::default());
+    let before = settings.client_settings().confirm_thread_delete;
+    let outcome = h.run(settings.update(&view, patch(json!({"confirmThreadDelete": !before}))));
+    assert!(!outcome.failed && outcome.toast.is_none());
+    assert_eq!(settings.client_settings().confirm_thread_delete, !before);
+    assert!(changes.next().now_or_never().is_some());
+    assert!(update_calls(&h).is_empty());
+    // A second service reads the same record: there is one authority.
+    assert_eq!(runtime.settings().client_settings().confirm_thread_delete, !before);
+}
+
+#[test]
+fn server_settings_save_through_update_settings_and_report_refusals() {
+    let (mut h, runtime) = settings_runtime(&["orchestration:read", "settings:write"], json!({}));
+    let settings = runtime.settings();
+    let view = settings.scope_view(SettingsPage::Threads, &SettingsScopeSearch::default());
+    let saved = view.server_settings();
+    let mut saved_json = serde_json::to_value(saved.as_ref()).unwrap();
+    saved_json["autoResumeLimitedThreads"] = json!(true);
+    h.server()
+        .state
+        .borrow_mut()
+        .rpc_script
+        .entry("server.updateSettings".into())
+        .or_default()
+        .push_back(Ok(saved_json));
+    let outcome = h.run(settings.update(&view, patch(json!({"autoResumeLimitedThreads": true}))));
+    assert!(!outcome.failed, "{outcome:?}");
+    assert_eq!(outcome.saved_environments, vec!["Fake host".to_string()]);
+    assert_eq!(update_calls(&h), vec![json!({"autoResumeLimitedThreads": true})]);
+
+    // A server that answers without the key is an older server that dropped it.
+    let unchanged = serde_json::to_value(saved.as_ref()).unwrap();
+    h.server()
+        .state
+        .borrow_mut()
+        .rpc_script
+        .entry("server.updateSettings".into())
+        .or_default()
+        .push_back(Ok(unchanged));
+    let dropped = h.run(settings.update(&view, patch(json!({"autoResumeLimitedThreads": true}))));
+    let toast = dropped.toast.unwrap();
+    assert!(dropped.failed && toast.error);
+    assert_eq!(toast.title.key, "Setting not saved");
+    assert_eq!(
+        toast.description[0].english(),
+        "Could not save on Fake host: This environment does not support this setting. Update T3 Code on it."
+    );
+
+    h.server()
+        .state
+        .borrow_mut()
+        .rpc_script
+        .entry("server.updateSettings".into())
+        .or_default()
+        .push_back(Err(json!({"_tag":"ServerSettingsError","settingsPath":"settings.json","operation":"normalize","message":"Settings refused","detail":"read-only mount"})));
+    let rejected = h.run(settings.update(&view, patch(json!({"autoResumeLimitedThreads": false}))));
+    let description = rejected.toast.unwrap().description[0].english();
+    assert!(description.starts_with("Could not save on Fake host: "), "{description}");
+    assert!(description.contains("read-only mount"), "{description}");
+}
+
+#[test]
+fn a_connection_without_the_settings_grant_is_refused_before_sending() {
+    let (mut h, runtime) = settings_runtime(&["orchestration:read"], json!({}));
+    let settings = runtime.settings();
+    let view = settings.scope_view(SettingsPage::Threads, &SettingsScopeSearch::default());
+    assert_eq!(
+        settings.write_access(&view),
+        SettingsWriteAccess::Denied {
+            labels: "Fake host".into()
+        }
+    );
+    let outcome = h.run(settings.update(&view, patch(json!({"autoResumeLimitedThreads": true}))));
+    assert!(outcome.failed);
+    assert_eq!(
+        outcome.toast.unwrap().description[0].english(),
+        "Could not save on Fake host: This connection lacks permission to change these settings."
+    );
+    assert!(update_calls(&h).is_empty());
+}
+
+#[test]
+fn project_scope_writes_overrides_and_refuses_device_settings() {
+    let (mut h, runtime) = settings_runtime(
+        &["orchestration:read", "settings:write"],
+        json!({"projectSettingsOverrides": {"project": {"responseStreamingMode": "paragraph"}}}),
+    );
+    let settings = runtime.settings();
+    let all = settings.scope_view(SettingsPage::Threads, &SettingsScopeSearch::default());
+    let view = settings.scope_view(
+        SettingsPage::Threads,
+        &SettingsScopeSearch {
+            project: Some(all.groups[0].project_key.clone()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(view.scope.kind_name(), ScopeKindName::Project);
+    let refused = h.run(settings.update(&view, patch(json!({"confirmThreadDelete": false}))));
+    assert_eq!(
+        refused.toast.unwrap().description[0].key,
+        "This setting is environment-wide and cannot be overridden by a project."
+    );
+    let current = serde_json::to_value(view.server_settings().as_ref()).unwrap();
+    let mut saved = serde_json::to_value(all.server_settings().as_ref()).unwrap();
+    saved["projectSettingsOverrides"]["project"]["sidebarAutoSettleOnMerge"] = json!(true);
+    assert_eq!(current["responseStreamingMode"], "paragraph");
+    h.server()
+        .state
+        .borrow_mut()
+        .rpc_script
+        .entry("server.updateSettings".into())
+        .or_default()
+        .push_back(Ok(saved));
+    let outcome = h.run(settings.update(&view, patch(json!({"sidebarAutoSettleOnMerge": true}))));
+    assert!(!outcome.failed, "{outcome:?}");
+    assert_eq!(
+        update_calls(&h),
+        vec![json!({"projectSettingsOverrides": {"project": {"responseStreamingMode": "paragraph", "sidebarAutoSettleOnMerge": true}}})]
+    );
+}
+
+#[test]
+fn the_last_enabled_grouping_mode_is_remembered() {
+    let (mut h, runtime) = settings_runtime(&["orchestration:read"], json!({}));
+    let settings = runtime.settings();
+    assert_eq!(h.run(settings.last_enabled_grouping_mode()), "repository");
+    h.run(settings.remember_enabled_grouping_mode("repository_path"));
+    h.run(settings.remember_enabled_grouping_mode("separate"));
+    assert_eq!(h.run(settings.last_enabled_grouping_mode()), "repository_path");
+}

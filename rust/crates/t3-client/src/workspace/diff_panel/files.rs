@@ -38,6 +38,18 @@ pub struct PatchFile {
     pub hunks: u32,
     /// This file's bytes in [`PatchFiles::source`].
     pub range: Range<usize>,
+    /// Each hunk's first line numbers and how many of its lines each side shows.
+    pub hunk_lines: Vec<HunkLines>,
+}
+
+/// A hunk as the view lays it out: the old side shows its context and deleted lines, the new
+/// side its context and added lines, numbered from the header's starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HunkLines {
+    pub old_start: u64,
+    pub old_lines: u64,
+    pub new_start: u64,
+    pub new_lines: u64,
 }
 
 impl PatchFile {
@@ -189,7 +201,7 @@ fn process_file(data: &str, range: Range<usize>, git: bool) -> Option<PatchFile>
         {
             lines.pop();
         }
-        let (mut additions, mut deletions) = (0u64, 0u64);
+        let (mut additions, mut deletions, mut context) = (0u64, 0u64, 0u64);
         for line in &lines[1..] {
             if additions >= header.addition_count
                 && deletions >= header.deletion_count
@@ -201,9 +213,16 @@ fn process_file(data: &str, range: Range<usize>, git: bool) -> Option<PatchFile>
             match line.as_bytes().first() {
                 Some(b'+') => additions += 1,
                 Some(b'-') => deletions += 1,
+                Some(b' ') => context += 1,
                 _ => {}
             }
         }
+        current.hunk_lines.push(HunkLines {
+            old_start: header.deletion_start,
+            old_lines: context + deletions,
+            new_start: header.addition_start,
+            new_lines: context + additions,
+        });
         current.additions += additions;
         current.deletions += deletions;
         current.hunks += 1;
@@ -237,6 +256,7 @@ fn read_file_header(lines: &[&str], git: bool, range: Range<usize>) -> PatchFile
         deletions: 0,
         hunks: 0,
         range,
+        hunk_lines: Vec::new(),
     };
     for raw in lines {
         let line = raw.trim_end_matches(['\n', '\r']);
@@ -312,13 +332,15 @@ fn git_header_names(line: &str) -> Option<(String, String)> {
             return None;
         }
         // The shortest a-part after which the rest is a valid b-part.
-        let split = (3..rest.len()).filter(|i| rest.is_char_boundary(*i)).find(|i| {
-            let b = &rest[*i..];
-            b.strip_prefix(' ').is_some_and(|b| {
-                (b.starts_with("b/") && b.len() > 2)
-                    || (b.starts_with("\"b/") && quoted_end(b) == Some(b.len()))
-            })
-        })?;
+        let split = (3..rest.len())
+            .filter(|i| rest.is_char_boundary(*i))
+            .find(|i| {
+                let b = &rest[*i..];
+                b.strip_prefix(' ').is_some_and(|b| {
+                    (b.starts_with("b/") && b.len() > 2)
+                        || (b.starts_with("\"b/") && quoted_end(b) == Some(b.len()))
+                })
+            })?;
         (&rest[..split], &rest[split + 1..])
     };
     let b_valid = if b.starts_with('"') {
@@ -326,7 +348,12 @@ fn git_header_names(line: &str) -> Option<(String, String)> {
     } else {
         b.starts_with("b/") && b.len() > 2
     };
-    b_valid.then(|| (decode_diff_file_name(a, true), decode_diff_file_name(b, true)))
+    b_valid.then(|| {
+        (
+            decode_diff_file_name(a, true),
+            decode_diff_file_name(b, true),
+        )
+    })
 }
 
 /// The byte just past a quoted name's closing quote.
@@ -403,7 +430,9 @@ fn parse_quoted_name(input: &str) -> Option<String> {
             bytes.push((a * 64 + b * 8 + c) as u8);
             index += 4;
             if !(chars.get(index) == Some(&'\\')
-                && chars.get(index + 1).is_some_and(|c| ('0'..='7').contains(c)))
+                && chars
+                    .get(index + 1)
+                    .is_some_and(|c| ('0'..='7').contains(c)))
             {
                 break;
             }
@@ -414,7 +443,9 @@ fn parse_quoted_name(input: &str) -> Option<String> {
 }
 
 struct HunkHeader {
+    deletion_start: u64,
     deletion_count: u64,
+    addition_start: u64,
     addition_count: u64,
 }
 
@@ -422,16 +453,18 @@ struct HunkHeader {
 fn parse_hunk_header(line: &str) -> Option<HunkHeader> {
     let bytes = line.strip_prefix("@@ -")?.as_bytes();
     let mut index = 0;
-    let mut number = |index: &mut usize| {
+    let number = |index: &mut usize| {
         let start = *index;
         let mut value = 0u64;
         while let Some(digit) = bytes.get(*index).filter(|b| b.is_ascii_digit()) {
-            value = value.saturating_mul(10).saturating_add(u64::from(digit - b'0'));
+            value = value
+                .saturating_mul(10)
+                .saturating_add(u64::from(digit - b'0'));
             *index += 1;
         }
         (*index > start).then_some(value)
     };
-    number(&mut index)?;
+    let deletion_start = number(&mut index)?;
     let mut deletion_count = 1;
     if bytes.get(index) == Some(&b',') {
         index += 1;
@@ -441,14 +474,16 @@ fn parse_hunk_header(line: &str) -> Option<HunkHeader> {
         return None;
     }
     index += 2;
-    number(&mut index)?;
+    let addition_start = number(&mut index)?;
     let mut addition_count = 1;
     if bytes.get(index) == Some(&b',') {
         index += 1;
         addition_count = number(&mut index)?;
     }
     (bytes.get(index..index + 3) == Some(b" @@")).then_some(HunkHeader {
+        deletion_start,
         deletion_count,
+        addition_start,
         addition_count,
     })
 }
@@ -525,10 +560,11 @@ fn unified_file_header_at(contents: &str, start: usize) -> bool {
 
 /// `splitUnifiedDiffFiles`: file headers outside hunk bodies start a file.
 fn split_unified_files(contents: &str) -> Vec<Range<usize>> {
-    if contents.is_empty() {
-        return vec![0..0];
-    }
     let mut parts = Vec::new();
+    if contents.is_empty() {
+        parts.push(0..0);
+        return parts;
+    }
     let (mut part_start, mut line_start) = (0, 0);
     let (mut deletions, mut additions) = (0u64, 0u64);
     let mut opened = false;
@@ -672,12 +708,14 @@ mod tests {
 
     #[test]
     fn unified_patches_and_unsupported_text() {
-        let unified = "--- a/x.txt\n+++ b/x.txt\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n--- a/y.txt\n+++ b/y.txt\n@@ -1 +1 @@\n-1\n+2\n";
+        // `diff -u` names: no git prefixes to strip (with `a/` and `b/` @pierre/diffs keeps them,
+        // and the differing names read as a rename).
+        let unified = "--- x.txt\n+++ x.txt\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n--- y.txt\n+++ y.txt\n@@ -1 +1 @@\n-1\n+2\n";
         let parsed = files(unified);
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].path(), "x.txt");
         assert_eq!(parsed[0].change, FileChangeType::Change);
-        assert_eq!(parsed[1].range.start, unified.find("--- a/y.txt").unwrap());
+        assert_eq!(parsed[1].range.start, unified.find("--- y.txt").unwrap());
         assert_eq!(
             renderable_patch(&Rc::from("not a patch")),
             Some(RenderablePatch::Raw(Rc::from("not a patch")))

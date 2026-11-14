@@ -106,6 +106,13 @@ impl ThreadUndoRegistry {
             true
         });
     }
+    pub fn invalidate_environment(&self, environment: &crate::types::EnvironmentId) {
+        change(&self.0, |state| {
+            let before = state.actions.len();
+            state.actions.retain(|(_, key), _| &key.environment != environment);
+            state.actions.len() != before
+        });
+    }
     pub fn subscribe(&self) -> UndoSubscription {
         let mut state = self.0.borrow_mut();
         let slot = Rc::new(RefCell::new(UndoObservation {

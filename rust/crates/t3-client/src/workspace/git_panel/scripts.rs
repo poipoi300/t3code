@@ -209,6 +209,19 @@ pub fn reusable_script_terminal(
         .or_else(|| drawer.iter().find(|id| idle(id)))
         .cloned()
 }
+/// `keybindingValueForCommand` for a script's run command: its last rule's shortcut.
+pub fn script_keybinding_value(
+    keybindings: &t3_contracts::keybindings::ResolvedKeybindingsConfig,
+    script_id: &str,
+) -> Option<String> {
+    let command = format!("script.{script_id}.run");
+    keybindings
+        .0
+        .iter()
+        .rev()
+        .find(|b| b.command.0 == command)
+        .map(binding_key)
+}
 fn binding_key(binding: &t3_contracts::keybindings::ResolvedKeybindingRule) -> String {
     let s = &binding.shortcut;
     let mut parts = Vec::new();

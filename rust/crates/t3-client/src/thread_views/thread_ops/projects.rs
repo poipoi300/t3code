@@ -78,6 +78,7 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
             for member in members {
                 service.check_project(&member, organizing)?;
                 let endpoint = service.endpoint(&member.environment)?;
+                let generation = service.session_generation(&member.environment);
                 let mut input = update.clone();
                 input["type"] = json!("project.update");
                 input["projectId"] = json!(member.project);
@@ -89,9 +90,16 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
                 service
                     .state
                     .files
-                    .mutate(member.environment, &endpoint, mutation)
+                    .mutate(member.environment.clone(), &endpoint, mutation)
                     .await
-                    .map_err(|e| e.into_client_error())?;
+                    .map_err(|error| {
+                        service.command_failure(
+                            &member.environment,
+                            "projects.mutate",
+                            generation,
+                            error,
+                        )
+                    })?;
             }
             service.state.actions.notify();
             Ok(())
@@ -99,6 +107,9 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
         .boxed_local()
     }
     fn check_project(&self, key: &ProjectKey, organizing: bool) -> Result<(), ClientError> {
+        if self.unsupported(&key.environment, "projects.mutate") {
+            return Err(ClientError::Unsupported("projects.mutate"));
+        }
         let endpoint = self.endpoint(&key.environment)?;
         if organizing
             && !self
@@ -150,7 +161,8 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
         async move {
             service.check_project(&key, false)?;
             let endpoint = service.endpoint(&key.environment)?;
-            service.state.files.mutate(key.environment, &endpoint, serde_json::from_value(json!({"type":"project.delete","commandId":crate::operations::allocate_command_id(&service.platform,None)?,"projectId":key.project,"force":force}))?).await.map_err(|e| e.into_client_error())?;
+            let generation=service.session_generation(&key.environment);
+            service.state.files.mutate(key.environment.clone(), &endpoint, serde_json::from_value(json!({"type":"project.delete","commandId":crate::operations::allocate_command_id(&service.platform,None)?,"projectId":key.project,"force":force}))?).await.map_err(|error| service.command_failure(&key.environment,"projects.mutate",generation,error))?;
             service.state.actions.notify(); Ok(())
         }.boxed_local()
     }

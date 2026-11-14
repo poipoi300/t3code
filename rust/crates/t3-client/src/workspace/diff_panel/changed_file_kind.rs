@@ -139,7 +139,10 @@ fn docs_name(name: &str) -> bool {
     let Some((stem, extension)) = lower.rsplit_once('.') else {
         return false;
     };
-    let docs = matches!(extension, "md" | "mdx" | "markdown" | "rst" | "adoc" | "txt");
+    let docs = matches!(
+        extension,
+        "md" | "mdx" | "markdown" | "rst" | "adoc" | "txt"
+    );
     let not_docs = extension == "txt"
         && (stem.starts_with("requirements")
             || stem.starts_with("constraints")

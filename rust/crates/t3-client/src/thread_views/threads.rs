@@ -86,6 +86,7 @@ pub mod minimap;
 pub mod feedback;
 pub mod item_support;
 pub mod lifecycle;
+pub mod notification_center;
 pub mod notifications;
 pub mod older_settled;
 pub mod pending_work;

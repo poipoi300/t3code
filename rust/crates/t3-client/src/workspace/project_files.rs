@@ -1,6 +1,7 @@
 //! The workspace Files panel's client services: the lazy file tree (useDirectoryEntries.ts and
 //! FileBrowserPanel.tsx's model), file access (state/filesystem.ts), the panel's workspace target
 //! (RightPanelSurfaceContent.tsx's `files`) and file reads (projectFilesQueryState.ts).
+pub mod formats;
 pub mod preview;
 pub mod read;
 pub mod tree;
@@ -76,6 +77,13 @@ impl<P: Platform + Clone + 'static> ProjectFiles<P> {
         self.runtime.client(environment).and_then(|c| c.session())
     }
 
+    /// `useEnvironmentScope(AuthFilesystemWriteScope)`: whether this session may write files.
+    pub fn can_write(&self, environment: &EnvironmentId) -> bool {
+        self.endpoint(environment)
+            .and_then(|endpoint| endpoint.grants_scope(AuthEnvironmentScope::FilesystemWrite))
+            .unwrap_or(false)
+    }
+
     /// useFilesystemReadAccess: the session's `filesystem:read` grant once it is known, else
     /// pending while connecting, else why the environment cannot be read.
     pub fn read_access(&self, environment: &EnvironmentId) -> ReadAccess {
@@ -127,6 +135,77 @@ impl<P: Platform + Clone + 'static> ProjectFiles<P> {
                 .map_or_else(|| project.workspace_root.0.clone(), |path| path.0.clone()),
             project_name: project.title.0.clone(),
         })
+    }
+
+    /// `assets.createUrl` for `resource`, resolved against the environment's HTTP origin
+    /// (useAssetUrlState). Media and documents load their bytes from this signed URL.
+    pub fn asset_url(
+        &self,
+        environment: &EnvironmentId,
+        resource: t3_contracts::assets::AssetResource,
+    ) -> LocalBoxFuture<'static, Result<String, Problem>> {
+        let endpoint = self.endpoint(environment);
+        let base = self
+            .runtime
+            .environments()
+            .into_iter()
+            .find(|entry| &entry.id == environment)
+            .and_then(|entry| {
+                entry
+                    .routes
+                    .into_iter()
+                    .map(|route| route.http_base)
+                    .find(|base| !base.is_empty())
+            });
+        async move {
+            let endpoint = endpoint.ok_or_else(|| Problem::client(NOT_CONNECTED))?;
+            let asset = endpoint
+                .call::<t3_contracts::rpc::WsAssetsCreateUrlRpc>(
+                    t3_contracts::assets::AssetCreateUrlInput { resource },
+                )
+                .await
+                .map_err(|error| match error {
+                    ClientError::Rejected { message, .. } => Problem::server(message),
+                    error => Problem::server(error.to_string()),
+                })?;
+            let base = base.ok_or_else(|| Problem::client(NOT_CONNECTED))?;
+            crate::services::assets::resolve_asset_url(&base, &asset.relative_url.0)
+                .ok_or_else(|| Problem::server(asset.relative_url.0.clone()))
+        }
+        .boxed_local()
+    }
+
+    /// A web `localStorage` preference of the panel (explorer width and visibility, rendered
+    /// modes), kept in the client's local preferences under the web's own key.
+    pub fn preference(&self, key: &'static str) -> LocalBoxFuture<'static, Option<serde_json::Value>> {
+        let platform = self.platform.clone();
+        async move {
+            let bytes = platform
+                .get(StorageArea::Ordinary, StorageKey::new("local-preferences", None, key))
+                .await
+                .ok()
+                .flatten()?;
+            serde_json::from_slice(&bytes).ok()
+        }
+        .boxed_local()
+    }
+    pub fn set_preference(&self, key: &'static str, value: serde_json::Value) {
+        let platform = self.platform.clone();
+        let _ = self.runtime.spawn(
+            async move {
+                let Ok(bytes) = serde_json::to_vec(&value) else { return };
+                let _ = platform
+                    .write(
+                        StorageArea::Ordinary,
+                        vec![StorageWrite {
+                            key: StorageKey::new("local-preferences", None, key),
+                            value: Some(bytes),
+                        }],
+                    )
+                    .await;
+            }
+            .boxed_local(),
+        );
     }
 
     /// ChatView's `workspaceMutationId`: the token the panel refreshes on.

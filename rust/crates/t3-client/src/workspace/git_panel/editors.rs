@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     connection::{ConnectionMode, ConnectionProfile, ConnectionStores},
-    platform::{HostAction, HostReply, StorageArea, StorageKey, StorageWrite},
+    platform::{StorageArea, StorageKey, StorageWrite},
     rpc::RpcEndpoint,
     workspace::project_ops::editor::{EDITOR_ORDER, LAST_EDITOR_KEY, preferred_editor},
 };
@@ -37,6 +37,8 @@ pub struct EditorPickerSnapshot {
     pub hint_seen: bool,
     pub shortcut: Option<String>,
     pub target_path: Option<String>,
+    /// The environment's saved label, or "this machine"; OpenInPicker's copy interpolates it.
+    pub environment_label: String,
 }
 #[derive(Clone)]
 pub struct EditorPicker<P: Platform + Clone + 'static> {
@@ -391,6 +393,7 @@ impl<P: Platform + Clone + 'static> EditorPicker<P> {
                 hint_seen,
                 shortcut,
                 target_path: target,
+                environment_label: label,
             })
         }
         .boxed_local()
@@ -477,13 +480,7 @@ impl<P: Platform + Clone + 'static> EditorPicker<P> {
                     else {
                         return Ok(false);
                     };
-                    let accepted =
-                        match picker.service.platform.host(HostAction::OpenUrl(url)).await {
-                            Ok(HostReply::Unit) => true,
-                            Ok(HostReply::Granted(value)) => value,
-                            _ => false,
-                        };
-                    if !accepted {
+                    if picker.service.platform.open_url(url).await.is_err() {
                         return Ok(false);
                     }
                     picker.select_editor(editor).await?;

@@ -83,6 +83,11 @@ impl<P: Platform + 'static> ComposerDraftService<P> {
             if incoming["prompt"].as_str().is_none_or(str::is_empty) {
                 incoming["prompt"] = json!(message.text);
             }
+            if let Some(creation) = &message.creation
+                && creation.checkout_pull_request_url.is_some()
+            {
+                incoming["queuedCreation"] = serde_json::to_value(creation)?;
+            }
             let prior = web_models::draft(document, &key);
             let mut next = incoming.clone();
             if let (Some(next), Some(prior)) = (next.as_object_mut(), prior.as_object()) {

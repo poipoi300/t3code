@@ -130,6 +130,83 @@ fn favorites_publish_optimistically_roll_back_refusal_and_send_explicit_desired_
 }
 
 #[test]
+fn new_thread_models_use_the_literal_draft_revision_and_its_project_catalog() {
+    use t3_client::{
+        thread_views::composer::web_sessions,
+        types::{ThreadId, ThreadKey},
+    };
+    let (mut h, runtime, key, _) = model_runtime();
+    let drafts = runtime.composer_drafts();
+    let target = ThreadKey {
+        thread: ThreadId("reserved".into()),
+        ..key.clone()
+    };
+    let project = t3_contracts::environment::ScopedProjectRef {
+        environment_id: key.environment.clone(),
+        project_id: t3_client::types::ProjectId("project".into()),
+    };
+    drafts
+        .update(|document| {
+            web_sessions::set_logical_project(
+                document,
+                "logical",
+                &project,
+                "literal",
+                &json!({"threadId":"reserved"}),
+                fake_server::NOW,
+                &Default::default(),
+            );
+            Ok(())
+        })
+        .unwrap();
+    let before = drafts.view_key("literal");
+    assert_eq!(drafts.thread_draft_key(&target), "literal");
+    let models = runtime.composer_models(&target);
+    let mut selection = models.snapshot().selection.clone();
+    selection.model = "alternate".into();
+    h.run(models.set_model_selection(selection)).unwrap();
+    assert!(drafts.view_key("literal").revision > before.revision);
+    assert_eq!(
+        drafts.document().borrow()["draftsByThreadKey"]["literal"]["modelSelectionByProvider"]["codex"]
+            ["model"],
+        "alternate"
+    );
+    assert!(
+        drafts.document().borrow()["draftsByThreadKey"]
+            .get("env:reserved")
+            .is_none()
+    );
+    assert!(
+        !drafts
+            .clear_key_revision("literal", before.revision)
+            .unwrap()
+    );
+    let generation = runtime.store().snapshot().environments[&key.environment].session;
+    let mut config = (*runtime.store().snapshot().environments[&key.environment]
+        .config
+        .as_ref()
+        .unwrap()
+        .as_ref())
+    .clone();
+    let mut raw = serde_json::to_value(&config).unwrap();
+    raw["settings"]["projectSettingsOverrides"]["project"] =
+        json!({"providerInstances":{"codex":{"enabled":false}}});
+    config = serde_json::from_value(raw).unwrap();
+    runtime
+        .store()
+        .set_config(&key.environment, generation, config);
+    assert!(
+        !models
+            .snapshot()
+            .providers
+            .iter()
+            .find(|provider| provider.snapshot.instance_id.0 == "codex")
+            .unwrap()
+            .enabled
+    );
+}
+
+#[test]
 fn model_mutations_keep_failed_picks_refresh_only_catalogs_and_recheck_permissions() {
     let (mut h, runtime, key, _) = model_runtime();
     let models = runtime.composer_models(&key);
@@ -276,6 +353,41 @@ fn suggestion_queries_and_selection_are_fenced_by_generation_and_current_source(
     ));
     h.run(session.query(None)).unwrap();
     assert!(session.snapshot().is_none());
+    let pending = session.query(Some(request.clone()));
+    drop(pending);
+    assert!(!session.snapshot().unwrap().loading);
+    let generation = runtime.store().snapshot().environments[&key.environment].session;
+    runtime
+        .store()
+        .update_shell(&key.environment, generation, |state| {
+            let shell = std::rc::Rc::make_mut(state.snapshot.as_mut().unwrap());
+            let mut other = shell.threads[0].clone();
+            other.id = t3_client::types::ThreadId("other".into());
+            other.title = "Referenced thread".into();
+            shell.threads.push(other);
+            true
+        });
+    drafts.set_prompt(&key, "@Referenced".into(), 11).unwrap();
+    let mention = SuggestionRequest {
+        trigger: detect_trigger("@Referenced", 11).unwrap(),
+        generation: 3,
+    };
+    h.run(session.query(Some(mention.clone()))).unwrap();
+    assert_eq!(session.snapshot().unwrap().items[0].id, "thread:env:other");
+    session
+        .select(&mention, "thread:env:other", "@Referenced", 11)
+        .unwrap();
+    assert!(
+        drafts
+            .view(&key)
+            .prompt
+            .contains("t3-context://v1/thread/thread_other")
+    );
+    assert_eq!(
+        drafts.document().borrow()["draftsByThreadKey"][drafts.thread_draft_key(&key)]["threadContexts"]
+            [0]["threadId"],
+        "other"
+    );
 }
 
 #[test]

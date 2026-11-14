@@ -56,6 +56,7 @@ pub struct DiffPanelState {
     file_tree_open: Cell<bool>,
     hide_test_files: Cell<bool>,
     loaded: Cell<bool>,
+    comment_sequence: Cell<u64>,
     changes: Changes,
 }
 
@@ -74,6 +75,12 @@ pub struct DiffPanelSnapshot {
     /// Keys of every file of the selection.
     pub file_keys: Rc<Vec<String>>,
     pub collapsed: Rc<BTreeSet<String>>,
+    /// The shown files with the view's line layout, for review comments.
+    pub shown: Option<Rc<ShownFiles>>,
+    /// The section's saved review comments under their lines.
+    pub annotations: Rc<Vec<super::comments::CommentAnnotation>>,
+    /// The file tree's rows over the shown files (`diffFileTreeEntries`).
+    pub tree: Rc<Vec<super::tree::DiffTreeNode>>,
     pub test_file_count: usize,
     pub layout: DiffLayout,
     pub word_wrap: bool,
@@ -86,6 +93,20 @@ pub struct DiffPanelSnapshot {
     pub refreshing: bool,
     /// `comparisonHeadRef` and `comparisonBaseRef`, shown for the branch scope.
     pub comparison: Option<(String, Option<String>)>,
+}
+
+/// The shown files of the patch and where their lines are in the view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShownFiles {
+    pub files: Rc<PatchFiles>,
+    pub indices: Vec<usize>,
+    pub map: super::comments::ExcerptMap,
+}
+
+impl ShownFiles {
+    fn shown(&self) -> Vec<&super::files::PatchFile> {
+        self.indices.iter().map(|&i| &self.files.files[i]).collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -189,10 +210,15 @@ impl<P: Platform + Clone + 'static> DiffPanelService<P> {
         .boxed_local()
     }
 
-    fn save_toggle(&self, record: &'static str, value: bool) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    fn save_toggle(
+        &self,
+        record: &'static str,
+        value: bool,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         let platform = self.platform.clone();
         async move {
-            let bytes = serde_json::to_vec(&Record::new("diff-panel-state", None, record, 1, value))?;
+            let bytes =
+                serde_json::to_vec(&Record::new("diff-panel-state", None, record, 1, value))?;
             platform
                 .write(
                     StorageArea::Ordinary,
@@ -217,9 +243,14 @@ impl<P: Platform + Clone + 'static> DiffPanelService<P> {
         let selection = self.selection(key);
         let resolved = resolve_selection(key, &selection, &turns, None);
         match scope_action(value, &resolved, &turns) {
-            ScopeAction::Git { unstaged } => self.store().borrow_mut().select_git(key.clone(), unstaged),
+            ScopeAction::Git { unstaged } => {
+                self.store().borrow_mut().select_git(key.clone(), unstaged)
+            }
             ScopeAction::Commit(sha) => self.store().borrow_mut().select_commit(key.clone(), sha),
-            ScopeAction::Turn(run) => self.store().borrow_mut().select_turn(key.clone(), run, None),
+            ScopeAction::Turn(run) => self
+                .store()
+                .borrow_mut()
+                .select_turn(key.clone(), run, None),
             ScopeAction::Nothing => return async { Ok(()) }.boxed_local(),
         }
         self.changed();
@@ -233,7 +264,9 @@ impl<P: Platform + Clone + 'static> DiffPanelService<P> {
         run: RunId,
         file_path: Option<&str>,
     ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
-        self.store().borrow_mut().select_turn(key.clone(), run, file_path);
+        self.store()
+            .borrow_mut()
+            .select_turn(key.clone(), run, file_path);
         self.changed();
         self.save_selection()
     }
@@ -255,18 +288,32 @@ impl<P: Platform + Clone + 'static> DiffPanelService<P> {
         self.changed();
     }
 
-    pub fn set_layout(&self, layout: DiffLayout) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    pub fn set_layout(
+        &self,
+        layout: DiffLayout,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         let preferences = self.runtime.composer_preferences();
-        async move { preferences.update(|settings| settings.diff_layout = layout).await }.boxed_local()
+        async move {
+            preferences
+                .update(|settings| settings.diff_layout = layout)
+                .await
+        }
+        .boxed_local()
     }
 
-    pub fn set_hide_test_files(&self, hide: bool) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    pub fn set_hide_test_files(
+        &self,
+        hide: bool,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         self.state().hide_test_files.set(hide);
         self.changed();
         self.save_toggle(HIDE_TEST_FILES_KEY, hide)
     }
 
-    pub fn set_file_tree_open(&self, open: bool) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    pub fn set_file_tree_open(
+        &self,
+        open: bool,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         self.state().file_tree_open.set(open);
         self.changed();
         self.save_toggle(FILE_TREE_KEY, open)
@@ -319,8 +366,14 @@ impl<P: Platform + Clone + 'static> DiffPanelService<P> {
 
     /// Expand all or collapse all over the shown files (`toggleAllDiffFiles`).
     pub fn toggle_all_files(&self, snapshot: &DiffPanelSnapshot) {
-        let keys: Vec<String> = snapshot.shown_files.iter().map(|(key, _)| key.clone()).collect();
-        self.update_collapsed(snapshot, |current| super::logic::toggle_all_files(&keys, current));
+        let keys: Vec<String> = snapshot
+            .shown_files
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect();
+        self.update_collapsed(snapshot, |current| {
+            super::logic::toggle_all_files(&keys, current)
+        });
     }
 
     /// The refresh button: the git diff is read again.
@@ -334,8 +387,122 @@ impl<P: Platform + Clone + 'static> DiffPanelService<P> {
         }
     }
 
+    /// The draft's range label and the view line it shows under, as AnnotatableCodeView.tsx's
+    /// `beginComment` builds an empty comment for them. `None` when the lines span two files.
+    pub fn draft_comment(
+        &self,
+        snapshot: &DiffPanelSnapshot,
+        side: super::comments::Side,
+        lines: (usize, usize),
+    ) -> Option<super::comments::CommentAnnotation> {
+        let shown = snapshot.shown.as_ref()?;
+        let comment = super::comments::review_comment(
+            "draft",
+            &snapshot.resolved.section_id,
+            &super::logic::section_title_text(&snapshot.resolved.section_title),
+            &shown.shown(),
+            &shown.files.source,
+            &shown.map,
+            side,
+            lines,
+            "",
+        )?;
+        Some(super::comments::CommentAnnotation {
+            id: "draft".into(),
+            side,
+            line: lines.0.max(lines.1),
+            range_label: comment.range_label,
+            text: String::new(),
+        })
+    }
+
+    /// `submitEntry`: the comment joins the composer draft's review comments, its reference
+    /// placed in the prompt (`addReviewComment`).
+    pub fn add_review_comment(
+        &self,
+        key: &ThreadKey,
+        snapshot: &DiffPanelSnapshot,
+        side: super::comments::Side,
+        lines: (usize, usize),
+        text: &str,
+    ) -> Result<(), ClientError> {
+        let shown = snapshot.shown.as_ref().ok_or_else(|| {
+            ClientError::InvalidPayload("The diff has no files to comment on.".into())
+        })?;
+        let sequence = self.state().comment_sequence.get() + 1;
+        self.state().comment_sequence.set(sequence);
+        let id = format!("file-comment-{}-{sequence}", self.platform.monotonic_ms());
+        let comment = super::comments::review_comment(
+            &id,
+            &snapshot.resolved.section_id,
+            &super::logic::section_title_text(&snapshot.resolved.section_title),
+            &shown.shown(),
+            &shown.files.source,
+            &shown.map,
+            side,
+            lines,
+            text,
+        )
+        .ok_or_else(|| ClientError::InvalidPayload("Those lines are not in one file.".into()))?;
+        let drafts = self.runtime.composer_drafts();
+        let draft_key = drafts.editor_draft_key(key);
+        let value = serde_json::to_value(&comment)?;
+        drafts.update(|document| {
+            crate::thread_views::composer::web_context::add(
+                document,
+                &draft_key,
+                crate::thread_views::composer::web_context::Kind::Review,
+                &[value],
+                &key.thread.0,
+                Default::default(),
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// `removeReviewComment`.
+    pub fn remove_review_comment(&self, key: &ThreadKey, id: &str) -> Result<(), ClientError> {
+        let drafts = self.runtime.composer_drafts();
+        let draft_key = drafts.editor_draft_key(key);
+        drafts.update(|document| {
+            crate::thread_views::composer::web_context::remove(
+                document,
+                &draft_key,
+                crate::thread_views::composer::web_context::Kind::Review,
+                id,
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    fn review_comments(
+        &self,
+        key: &ThreadKey,
+    ) -> Vec<crate::view_logic::session::review::ReviewCommentContext> {
+        let drafts = self.runtime.composer_drafts();
+        let draft_key = drafts.editor_draft_key(key);
+        let document = drafts.document();
+        let document = document.borrow();
+        document["draftsByThreadKey"][&draft_key]["reviewComments"]
+            .as_array()
+            .map(|comments| {
+                comments
+                    .iter()
+                    .filter_map(|c| serde_json::from_value(c.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn default_collapsed(&self, keys: &[String]) -> BTreeSet<String> {
-        if self.runtime.composer_preferences().snapshot().diff_files_collapsed {
+        if self
+            .runtime
+            .composer_preferences()
+            .snapshot()
+            .diff_files_collapsed
+        {
             keys.iter().cloned().collect()
         } else {
             BTreeSet::new()
@@ -363,24 +530,34 @@ impl<P: Platform + Clone + 'static> DiffPanelService<P> {
     fn cwd(&self, key: &ThreadKey) -> Option<(bool, Option<String>)> {
         let shell = self.runtime.store().shared_shell(&key.environment)?;
         let thread = shell.threads.iter().find(|t| t.id.0 == key.thread.0)?;
-        let cwd = thread.worktree_path.as_ref().map(|p| p.0.clone()).or_else(|| {
-            shell
-                .projects
-                .iter()
-                .find(|p| p.id == thread.project_id)
-                .map(|p| p.workspace_root.0.clone())
-        });
+        let cwd = thread
+            .worktree_path
+            .as_ref()
+            .map(|p| p.0.clone())
+            .or_else(|| {
+                shell
+                    .projects
+                    .iter()
+                    .find(|p| p.id == thread.project_id)
+                    .map(|p| p.workspace_root.0.clone())
+            });
         Some((true, cwd))
     }
 
     fn ignore_whitespace(&self) -> bool {
-        self.store()
-            .borrow()
-            .ignore_whitespace
-            .unwrap_or_else(|| self.runtime.composer_preferences().snapshot().diff_ignore_whitespace)
+        self.store().borrow().ignore_whitespace.unwrap_or_else(|| {
+            self.runtime
+                .composer_preferences()
+                .snapshot()
+                .diff_ignore_whitespace
+        })
     }
 
-    fn git_input(&self, key: &ThreadKey, resolved: &ResolvedSelection) -> Option<ReviewDiffPreviewInput> {
+    fn git_input(
+        &self,
+        key: &ThreadKey,
+        resolved: &ResolvedSelection,
+    ) -> Option<ReviewDiffPreviewInput> {
         let DiffQuery::Git {
             scope,
             base_ref,
@@ -405,7 +582,11 @@ impl<P: Platform + Clone + 'static> DiffPanelService<P> {
         })
     }
 
-    fn git_lease(&self, key: &ThreadKey, input: ReviewDiffPreviewInput) -> Option<QueryLease<ReviewDiffPreviewResult>> {
+    fn git_lease(
+        &self,
+        key: &ThreadKey,
+        input: ReviewDiffPreviewInput,
+    ) -> Option<QueryLease<ReviewDiffPreviewResult>> {
         Some(self.runtime.query::<WsReviewGetDiffPreviewRpc>(
             &key.environment,
             input,
@@ -415,8 +596,13 @@ impl<P: Platform + Clone + 'static> DiffPanelService<P> {
 
     /// `useFilesystemReadAccess` for the git preview: the connected session's grant for it.
     fn file_access(&self, key: &ThreadKey, input: Option<&ReviewDiffPreviewInput>) -> FileAccess {
-        if let Some(session) = self.runtime.client(&key.environment).and_then(|c| c.session()) {
-            let allowed = input.is_none_or(|input| session.available::<WsReviewGetDiffPreviewRpc>(input));
+        if let Some(session) = self
+            .runtime
+            .client(&key.environment)
+            .and_then(|c| c.session())
+        {
+            let allowed =
+                input.is_none_or(|input| session.available::<WsReviewGetDiffPreviewRpc>(input));
             return FileAccess {
                 allowed,
                 pending: false,
@@ -428,9 +614,12 @@ impl<P: Platform + Clone + 'static> DiffPanelService<P> {
             .environments
             .get(&key.environment)
             .and_then(|e| e.connection.clone());
-        let pending = connection
-            .as_ref()
-            .is_none_or(|c| matches!(c.phase, Phase::Connected | Phase::Connecting | Phase::Backoff));
+        let pending = connection.as_ref().is_none_or(|c| {
+            matches!(
+                c.phase,
+                Phase::Connected | Phase::Connecting | Phase::Backoff
+            )
+        });
         FileAccess {
             allowed: false,
             pending,
@@ -457,6 +646,7 @@ impl<P: Platform + Clone + 'static> DiffPanelService<P> {
         triggers.push(self.state().changes.subscribe());
         triggers.push(self.shared.diff_changes());
         triggers.push(self.runtime.composer_preferences().changes());
+        triggers.push(self.runtime.composer_drafts().changes());
         let watch = Watch {
             service,
             key,
@@ -464,6 +654,8 @@ impl<P: Platform + Clone + 'static> DiffPanelService<P> {
             active: None,
             parsed: None,
             shown: None,
+            tree: None,
+            comments: None,
             last: None,
             started: false,
         };
@@ -498,7 +690,13 @@ impl<P: Platform + Clone + 'static> DiffPanelService<P> {
         let Some((_, Some(cwd))) = self.cwd(key) else {
             return futures::stream::once(async { BranchCommitsView::default() }).boxed_local();
         };
-        let base = self.store().borrow().branch_base.get(key).cloned().flatten();
+        let base = self
+            .store()
+            .borrow()
+            .branch_base
+            .get(key)
+            .cloned()
+            .flatten();
         let input = ReviewBranchCommitsInput {
             cwd: trimmed(&cwd),
             base_ref: base.as_deref().map(|b| Some(trimmed(b))),
@@ -542,9 +740,36 @@ struct Active {
     identity: String,
     query: ActiveQuery,
     changes: LocalBoxStream<'static, u64>,
-    /// The answer's diff as shared text, kept while the answer is the same allocation.
-    text: Option<(usize, Rc<str>)>,
+    /// The answer's diff as shared text, kept while the answer is the same allocation (held
+    /// here, so a later answer cannot take its address).
+    text: Option<(TextSource, Rc<str>)>,
 }
+
+#[derive(Clone)]
+enum TextSource {
+    Checkpoint(Rc<ThreadTurnDiff>),
+    Git(Rc<ReviewDiffPreviewResult>, usize),
+}
+
+impl TextSource {
+    fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Checkpoint(a), Self::Checkpoint(b)) => Rc::ptr_eq(a, b),
+            (Self::Git(a, i), Self::Git(b, j)) => Rc::ptr_eq(a, b) && i == j,
+            _ => false,
+        }
+    }
+}
+
+/// The shown patch text for (files, test files hidden, requested path).
+type ShownPatch = (Rc<PatchFiles>, bool, Option<String>, Rc<str>);
+
+type CachedAnnotations = (
+    Rc<ShownFiles>,
+    u64,
+    String,
+    Rc<Vec<super::comments::CommentAnnotation>>,
+);
 
 struct Watch<P: Platform + Clone + 'static> {
     service: DiffPanelService<P>,
@@ -554,7 +779,11 @@ struct Watch<P: Platform + Clone + 'static> {
     /// The parsed files of the last patch text, by its allocation.
     parsed: Option<(Rc<str>, Option<RenderablePatch>)>,
     /// The shown patch for (files, hidden, requested path).
-    shown: Option<(Rc<PatchFiles>, bool, Option<String>, Rc<str>)>,
+    shown: Option<ShownPatch>,
+    /// The tree of the shown patch, by its allocation.
+    tree: Option<(Rc<str>, Rc<Vec<super::tree::DiffTreeNode>>)>,
+    /// The section's annotations by (shown files, draft revision, section).
+    comments: Option<CachedAnnotations>,
     last: Option<Rc<DiffPanelSnapshot>>,
     started: bool,
 }
@@ -578,12 +807,16 @@ impl<P: Platform + Clone + 'static> Watch<P> {
         });
     }
 
-    fn shared_text(active: &mut Active, rc: usize, text: &str) -> Rc<str> {
-        match &active.text {
-            Some((at, shared)) if *at == rc => shared.clone(),
+    fn shared_text(
+        cache: &mut Option<(TextSource, Rc<str>)>,
+        source: TextSource,
+        text: &str,
+    ) -> Rc<str> {
+        match cache {
+            Some((at, shared)) if at.same(&source) => shared.clone(),
             _ => {
                 let shared: Rc<str> = Rc::from(text);
-                active.text = Some((rc, shared.clone()));
+                *cache = Some((source, shared.clone()));
                 shared
             }
         }
@@ -650,7 +883,9 @@ impl<P: Platform + Clone + 'static> Watch<P> {
                     })
                 });
             }
-            (DiffQuery::Git { .. }, Some(input)) if service.file_access(&key, Some(input)).allowed => {
+            (DiffQuery::Git { .. }, Some(input))
+                if service.file_access(&key, Some(input)).allowed =>
+            {
                 let identity = format!("git:{}", serde_json::to_string(input).unwrap_or_default());
                 let lease = service.git_lease(&key, input.clone());
                 if let Some(lease) = lease {
@@ -659,21 +894,26 @@ impl<P: Platform + Clone + 'static> Watch<P> {
             }
             _ => self.active = None,
         }
-        if let Some(active) = self.active.as_mut() {
-            match &active.query {
+        if let Some(Active { query, text, .. }) = self.active.as_mut() {
+            match query {
                 ActiveQuery::Checkpoint(lease) => {
                     let state = lease.resource().snapshot();
-                    patch.pending = state.loading || (state.value.is_none() && state.error.is_none());
+                    patch.pending =
+                        state.loading || (state.value.is_none() && state.error.is_none());
                     patch.answered = state.value.is_some();
                     patch.error = state.error.clone();
                     if let Some(value) = &state.value {
-                        let rc = Rc::as_ptr(value) as usize;
-                        patch.patch = Some(Self::shared_text(active, rc, &value.diff));
+                        patch.patch = Some(Self::shared_text(
+                            text,
+                            TextSource::Checkpoint(value.clone()),
+                            &value.diff,
+                        ));
                     }
                 }
                 ActiveQuery::Git(lease) => {
                     let state = lease.resource().snapshot();
-                    patch.pending = state.loading || (state.value.is_none() && state.error.is_none());
+                    patch.pending =
+                        state.loading || (state.value.is_none() && state.error.is_none());
                     patch.answered = state.value.is_some();
                     patch.error = state.error.clone();
                     if let Some(value) = &state.value {
@@ -683,25 +923,39 @@ impl<P: Platform + Clone + 'static> Watch<P> {
                             GitScope::Branch => ReviewDiffPreviewSourceKind::BranchRange,
                         };
                         patch.incomplete = value.incomplete == Some(true);
-                        if let Some(source) = value.sources.iter().find(|s| s.kind == kind) {
-                            let rc = std::ptr::from_ref(source) as usize;
-                            patch.patch = Some(Self::shared_text(active, rc, &source.diff));
+                        if let Some((at, source)) = value
+                            .sources
+                            .iter()
+                            .enumerate()
+                            .find(|(_, s)| s.kind == kind)
+                        {
+                            patch.patch = Some(Self::shared_text(
+                                text,
+                                TextSource::Git(value.clone(), at),
+                                &source.diff,
+                            ));
                             patch.truncated = source.truncated;
-                            patch.source_has_files = source.files.as_ref().is_some_and(|f| !f.is_empty());
+                            patch.source_has_files =
+                                source.files.as_ref().is_some_and(|f| !f.is_empty());
                             patch.source_stat = source.files.as_ref().map(|files| {
-                                files.iter().fold(Default::default(), |total: super::files::DiffLineStat, file| {
-                                    super::files::DiffLineStat {
-                                        additions: total.additions + encoded(&file.additions),
-                                        deletions: total.deletions + encoded(&file.deletions),
-                                    }
-                                })
+                                files.iter().fold(
+                                    Default::default(),
+                                    |total: super::files::DiffLineStat, file| {
+                                        super::files::DiffLineStat {
+                                            additions: total.additions + encoded(&file.additions),
+                                            deletions: total.deletions + encoded(&file.deletions),
+                                        }
+                                    },
+                                )
                             });
                             comparison_head = source.head_ref.as_ref().map(|r| r.0.clone());
                             source_base = source.base_ref.as_ref().map(|r| r.0.clone());
                             if resolved.commit_sha.is_some()
-                                && source.head_ref.as_ref().map(|r| &r.0) == resolved.commit_sha.as_ref()
+                                && source.head_ref.as_ref().map(|r| &r.0)
+                                    == resolved.commit_sha.as_ref()
                             {
-                                commit_subject = source.commit_subject.as_ref().map(|s| s.0.clone());
+                                commit_subject =
+                                    source.commit_subject.as_ref().map(|s| s.0.clone());
                             }
                         }
                     }
@@ -711,9 +965,18 @@ impl<P: Platform + Clone + 'static> Watch<P> {
         let resolved = resolve_selection(&key, &selection, &turns, commit_subject.as_deref());
         let access = service.file_access(&key, git_input.as_ref());
         let renderable = patch.patch.clone().and_then(|p| self.renderable(&p));
-        let view = resolve_body(thread_present, true, &resolved, &turns, &access, &patch, renderable.as_ref());
+        let view = resolve_body(
+            thread_present,
+            true,
+            &resolved,
+            &turns,
+            &access,
+            &patch,
+            renderable.as_ref(),
+        );
         let hide = service.state().hide_test_files.get();
-        let (shown_patch, shown_files, file_keys, test_file_count) = match &view.body {
+        let mut shown_index = None;
+        let (shown_patch, shown_files, file_keys, test_file_count, tree) = match &view.body {
             super::logic::DiffBody::Files(files) => {
                 let keys = files.file_keys(resolved.is_git());
                 let is_shown = |path: &str| {
@@ -728,13 +991,20 @@ impl<P: Platform + Clone + 'static> Watch<P> {
                     .count();
                 let shown_text = match &self.shown {
                     Some((source, h, path, text))
-                        if Rc::ptr_eq(source, files) && *h == hide && path == &resolved.file_path =>
+                        if Rc::ptr_eq(source, files)
+                            && *h == hide
+                            && path == &resolved.file_path =>
                     {
                         text.clone()
                     }
                     _ => {
                         let text = files.joined(|f| is_shown(f.path()));
-                        self.shown = Some((files.clone(), hide, resolved.file_path.clone(), text.clone()));
+                        self.shown = Some((
+                            files.clone(),
+                            hide,
+                            resolved.file_path.clone(),
+                            text.clone(),
+                        ));
                         text
                     }
                 };
@@ -745,9 +1015,82 @@ impl<P: Platform + Clone + 'static> Watch<P> {
                     .filter(|(f, _)| is_shown(f.path()))
                     .map(|(f, key)| (key.clone(), f.path().to_owned()))
                     .collect();
-                (Some(shown_text), Rc::new(shown), Rc::new(keys), test_count)
+                let tree = match &self.tree {
+                    Some((text, tree)) if Rc::ptr_eq(text, &shown_text) => tree.clone(),
+                    _ => {
+                        let entries = super::tree::diff_file_tree_entries(
+                            files.files.iter().filter(|f| is_shown(f.path())),
+                        );
+                        let tree = Rc::new(super::tree::diff_file_tree(&entries));
+                        self.tree = Some((shown_text.clone(), tree.clone()));
+                        tree
+                    }
+                };
+                let indices: Vec<usize> = files
+                    .files
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| is_shown(f.path()))
+                    .map(|(i, _)| i)
+                    .collect();
+                shown_index = Some(match &self.comments {
+                    Some((index, ..))
+                        if Rc::ptr_eq(&index.files, files) && index.indices == indices =>
+                    {
+                        index.clone()
+                    }
+                    _ => Rc::new(ShownFiles {
+                        map: super::comments::ExcerptMap::new(
+                            indices.iter().map(|&i| &files.files[i]),
+                        ),
+                        files: files.clone(),
+                        indices,
+                    }),
+                });
+                (
+                    Some(shown_text),
+                    Rc::new(shown),
+                    Rc::new(keys),
+                    test_count,
+                    tree,
+                )
             }
-            _ => (None, Rc::default(), Rc::default(), 0),
+            _ => (None, Rc::default(), Rc::default(), 0, Rc::default()),
+        };
+        let annotations = match &shown_index {
+            None => {
+                self.comments = None;
+                Rc::default()
+            }
+            Some(index) => {
+                let drafts = service.runtime.composer_drafts();
+                let revision = drafts.view_key(&drafts.editor_draft_key(&key)).revision;
+                match &self.comments {
+                    Some((cached, at, section, annotations))
+                        if Rc::ptr_eq(cached, index)
+                            && *at == revision
+                            && section == &resolved.section_id =>
+                    {
+                        annotations.clone()
+                    }
+                    _ => {
+                        let annotations = Rc::new(super::comments::comment_annotations(
+                            &service.review_comments(&key),
+                            &resolved.section_id,
+                            &index.shown(),
+                            &index.files.source,
+                            &index.map,
+                        ));
+                        self.comments = Some((
+                            index.clone(),
+                            revision,
+                            resolved.section_id.clone(),
+                            annotations.clone(),
+                        ));
+                        annotations
+                    }
+                }
+            }
         };
         let defaults = service.default_collapsed(&file_keys);
         let collapsed = service
@@ -758,12 +1101,13 @@ impl<P: Platform + Clone + 'static> Watch<P> {
             .cloned()
             .unwrap_or(defaults);
         let can_refresh = resolved.is_git() && git_input.is_some();
-        let comparison = (resolved.git_scope == GitScope::Branch && can_refresh && access.allowed).then(|| {
-            (
-                comparison_head.unwrap_or_else(|| "HEAD".into()),
-                source_base.or_else(|| resolved.base_ref.clone()),
-            )
-        });
+        let comparison = (resolved.git_scope == GitScope::Branch && can_refresh && access.allowed)
+            .then(|| {
+                (
+                    comparison_head.unwrap_or_else(|| "HEAD".into()),
+                    source_base.or_else(|| resolved.base_ref.clone()),
+                )
+            });
         let refreshing = can_refresh && patch.pending;
         DiffPanelSnapshot {
             thread_present,
@@ -773,6 +1117,9 @@ impl<P: Platform + Clone + 'static> Watch<P> {
             shown_files,
             file_keys,
             collapsed: Rc::new(collapsed),
+            shown: shown_index,
+            annotations,
+            tree,
             test_file_count,
             layout: settings.diff_layout.clone(),
             word_wrap: settings.word_wrap,

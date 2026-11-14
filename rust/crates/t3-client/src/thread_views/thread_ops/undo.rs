@@ -38,6 +38,17 @@ pub struct UndoState {
     deadline: Cell<Option<u64>>,
     claimed: Cell<bool>,
 }
+impl UndoState {
+    pub(super) fn forget_environment(&self, environment: &crate::types::EnvironmentId) {
+        self.registry.invalidate_environment(environment);
+        let mut entries = self.entries.borrow_mut();
+        entries.retain(|entry| &entry.key.environment != environment);
+        if entries.is_empty() {
+            self.deadline.set(None);
+            self.claimed.set(false);
+        }
+    }
+}
 pub(super) struct PendingUndo(Option<Entry>);
 impl Drop for PendingUndo {
     fn drop(&mut self) {
