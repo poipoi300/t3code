@@ -45,8 +45,13 @@ struct FakeInner {
     sockets: RefCell<VecDeque<ScriptedSocket>>,
     host: RefCell<VecDeque<Result<HostReply, PlatformError>>>,
     events: RefCell<Vec<mpsc::UnboundedSender<PlatformEvent>>>,
+    route_policies: RefCell<Vec<crate::navigation::RoutePolicy>>,
 }
 impl FakePlatform {
+    /// Every route policy the client published, in order.
+    pub fn route_policies(&self) -> Vec<crate::navigation::RoutePolicy> {
+        self.inner.route_policies.borrow().clone()
+    }
     pub fn advance(&self, milliseconds: u64) {
         self.inner.epoch.set(self.inner.epoch.get() + milliseconds);
         self.inner.ticks.set(self.inner.ticks.get() + milliseconds);
@@ -210,6 +215,9 @@ impl Platform for FakePlatform {
     }
     fn yield_to_host(&self) -> LocalBoxFuture<'_, ()> {
         futures::future::ready(()).boxed_local()
+    }
+    fn set_route_policy(&self, policy: crate::navigation::RoutePolicy) {
+        self.inner.route_policies.borrow_mut().push(policy);
     }
     fn events(&self) -> LocalBoxStream<'static, PlatformEvent> {
         let (tx, rx) = mpsc::unbounded();

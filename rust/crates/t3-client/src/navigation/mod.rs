@@ -154,7 +154,7 @@ pub enum Route {
     Draft(String),
     Thread(ThreadKey),
     ThreadPanel(ThreadKey, ThreadPanel),
-    /// `/projects/$projectKey`: a project link, with pairing handled by its screen.
+    /// `/projects/$projectKey`: a project link, which the route policy always redirects.
     ProjectLink(String),
     AddProject,
     PullRequests,
@@ -178,6 +178,45 @@ pub struct RoutePolicy {
     pub secrets_enabled: bool,
     pub connect_cli_enabled: bool,
     pub approve_agent_enabled: bool,
+}
+
+impl RoutePolicy {
+    /// This client's answers to the web router's auth gate and build flags: signed in exactly
+    /// when an environment is saved (T3 Connect's relay environments included). The hosted static
+    /// app, its cloud public config and connect-CLI OAuth client, and `T3CODE_FEATURE_SECRETS`
+    /// are web build facts this client does not have, so those routes stay closed.
+    pub fn for_client(signed_in: bool) -> Self {
+        Self {
+            authenticated_or_hosted: signed_in,
+            ..Self::default()
+        }
+    }
+}
+
+/// Routes under the web's `_chat` layout, plus `/welcome`: both send a signed-out client to
+/// `/pair`. Exhaustive, so a new route needs a decision.
+fn needs_sign_in(route: &Route) -> bool {
+    match route {
+        Route::Home
+        | Route::NewThread
+        | Route::Draft(_)
+        | Route::Thread(_)
+        | Route::ThreadPanel(..)
+        | Route::AddProject
+        | Route::PullRequests
+        | Route::Usage
+        | Route::Archived
+        | Route::Search
+        | Route::Settings(_)
+        | Route::Welcome => true,
+        Route::ProjectLink(_)
+        | Route::Pair
+        | Route::Connect
+        | Route::ConnectAgent
+        | Route::ApproveAgent
+        | Route::Guest
+        | Route::NotFound(_) => false,
+    }
 }
 
 /// Raw search and hash belong to the location, rather than the route identity. In particular,
@@ -223,13 +262,14 @@ impl Location {
     }
 
     /// `beforeLoad` redirects replace history; callers compare the returned href to the input.
-    pub fn resolve(path: &str, policy: RoutePolicy) -> Self {
+    /// Without a policy (not known yet) only the redirects that need none apply.
+    pub fn resolve(path: &str, policy: impl Into<Option<RoutePolicy>>) -> Self {
         let mut location = Self::parse(path);
+        if let Some(redirect) = policy.into().and_then(|policy| location.guard(policy)) {
+            return Self::parse(&redirect);
+        }
         let pathname = location.pathname.trim_end_matches('/');
         let redirect = match &location.route {
-            Route::Settings(SettingsPage::Secrets) if !policy.secrets_enabled => {
-                return Self::parse("/settings/general");
-            }
             Route::Settings(page) if pathname == "/settings" => {
                 return Self::parse(&format!("/settings/{}", page.slug()));
             }
@@ -248,24 +288,42 @@ impl Location {
             {
                 path_for(&Route::Thread(key.clone()))
             }
-            Route::ProjectLink(key) => {
-                return if policy.authenticated_or_hosted {
-                    Self::parse(&format!(
-                        "/settings/projects?project={}",
-                        encode_search_string(key)
-                    ))
-                } else {
-                    Self::parse("/pair")
-                };
-            }
-            Route::Connect if !policy.connect_cli_enabled => return Self::parse("/"),
-            Route::ApproveAgent if !policy.approve_agent_enabled => return Self::parse("/"),
             _ => None,
         };
         if let Some(pathname) = redirect {
             location.pathname = pathname;
         }
         location
+    }
+
+    /// The web router's guards that read the auth gate or a build flag, a parent route's
+    /// (`_chat`) before its page's.
+    fn guard(&self, policy: RoutePolicy) -> Option<String> {
+        let signed_in = policy.authenticated_or_hosted;
+        Some(match &self.route {
+            route if !signed_in && needs_sign_in(route) => "/pair".into(),
+            Route::Pair if signed_in && !self.is_hosted_pairing_request() => "/".into(),
+            Route::Settings(SettingsPage::Secrets) if !policy.secrets_enabled => {
+                "/settings/general".into()
+            }
+            Route::ProjectLink(key) if signed_in => format!(
+                "/settings/projects?project={}",
+                encode_search_string(key)
+            ),
+            Route::ProjectLink(_) => "/pair".into(),
+            Route::Connect if !policy.connect_cli_enabled => "/".into(),
+            Route::ApproveAgent if !policy.approve_agent_enabled => "/".into(),
+            _ => return None,
+        })
+    }
+
+    /// `/pair?host=…#token=…`, a hosted pairing launch: `/pair` keeps it even when signed in.
+    fn is_hosted_pairing_request(&self) -> bool {
+        url::Url::parse("http://app.invalid")
+            .and_then(|base| base.join(&self.href()))
+            .is_ok_and(|url| {
+                crate::connection::pairing_link::read_hosted_pairing_request(&url).is_some()
+            })
     }
 }
 
@@ -532,7 +590,10 @@ pub struct AppUrlSnapshot {
     pub entry_key: Option<String>,
     pub can_go_back: bool,
     pub can_go_forward: bool,
-    pub policy: RoutePolicy,
+    /// `None` until the client knows it (before its first restore): the guards that need it
+    /// wait, as the web's `beforeLoad` awaits the auth gate, instead of redirecting on a guess.
+    #[serde(default)]
+    pub policy: Option<RoutePolicy>,
 }
 
 pub fn history_entry_identity(key: Option<&str>, index: u64) -> String {

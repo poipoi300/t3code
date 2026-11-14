@@ -549,6 +549,9 @@ pub trait Platform: Storage {
         }
         .boxed_local()
     }
+    /// What the client's auth and config allow (`ClientRuntime` publishes it from its first
+    /// restore on). Hosts with app URL history republish it in their snapshots; others ignore it.
+    fn set_route_policy(&self, _policy: crate::navigation::RoutePolicy) {}
     /// Whether this host can open a file picker; the composer hides "Attach files" where it
     /// cannot. A picker that fails anyway answers `Unsupported`, and a cancel an empty list.
     fn can_pick_resources(&self) -> bool {

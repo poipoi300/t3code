@@ -96,7 +96,7 @@ fn every_addressed_route_has_the_same_parameters_after_navigation() {
 
 #[test]
 fn redirects_match_the_captured_settings_aliases_and_preserve_legacy_thread_search() {
-    let policy = RoutePolicy::default();
+    let policy = RoutePolicy::for_client(true);
     for (from, to) in [
         ("/settings", "/settings/general"),
         ("/settings/beta", "/settings/labs"),
@@ -320,4 +320,52 @@ fn the_launch_address_picks_the_first_route_and_unpaired_apps_start_at_pairing()
         initial_route(Some("new"), true),
         Route::NotFound("new".into())
     );
+}
+
+#[test]
+fn each_launch_address_lands_where_the_web_router_sends_it_in_each_state() {
+    // Unknown: before the first restore. Signed out: unpaired, or signed in to T3 Connect with
+    // no environment yet. Signed in: an environment is saved, a relay one included.
+    let unknown: Option<RoutePolicy> = None;
+    let signed_out = Some(RoutePolicy::for_client(false));
+    let signed_in = Some(RoutePolicy::for_client(true));
+    let pairing = "/pair?host=https%3A%2F%2Fbox.example&label=Box#token=abc";
+    let project = "/projects/env%3Arepo";
+    for (launch, before_restore, unpaired, paired) in [
+        ("/", "/", "/pair", "/"),
+        ("/new?prompt=hi", "/new?prompt=hi", "/pair", "/new?prompt=hi"),
+        ("/e/t?diff=1", "/e/t?diff=1", "/pair", "/e/t?diff=1"),
+        ("/threads/e/t", "/e/t", "/pair", "/e/t"),
+        ("/draft/d", "/draft/d", "/pair", "/draft/d"),
+        ("/pull-requests", "/pull-requests", "/pair", "/pull-requests"),
+        ("/settings", "/settings/general", "/pair", "/settings/general"),
+        ("/settings/beta", "/settings/labs", "/pair", "/settings/labs"),
+        ("/settings/secrets", "/settings/secrets", "/pair", "/settings/general"),
+        ("/welcome", "/welcome", "/pair", "/welcome"),
+        ("/pair", "/pair", "/pair", "/"),
+        // A pairing launch stays on `/pair` even when already paired.
+        (pairing, pairing, pairing, pairing),
+        ("/pair#token=abc", "/pair#token=abc", "/pair#token=abc", "/"),
+        // An agent approval or connect-CLI launch: hosted static app only, which this is not.
+        ("/approve-agent?code=x", "/approve-agent?code=x", "/", "/"),
+        ("/connect?state=s", "/connect?state=s", "/", "/"),
+        ("/connect-agent", "/connect-agent", "/connect-agent", "/connect-agent"),
+        ("/guest", "/guest", "/guest", "/guest"),
+        (project, project, "/pair", "/settings/projects?project=env%3Arepo"),
+        ("/nope", "/nope", "/nope", "/nope"),
+    ] {
+        for (state, policy, expected) in [
+            ("before restore", unknown, before_restore),
+            ("unpaired", signed_out, unpaired),
+            ("paired", signed_in, paired),
+        ] {
+            let landed = Location::resolve(launch, policy).href();
+            assert_eq!(landed, expected, "{launch} {state}");
+            assert_eq!(
+                Location::resolve(&landed, policy).href(),
+                landed,
+                "{launch} {state}: the redirect settles"
+            );
+        }
+    }
 }

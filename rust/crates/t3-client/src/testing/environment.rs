@@ -240,6 +240,9 @@ impl Platform for EnvironmentPlatform {
     fn events(&self) -> futures::stream::LocalBoxStream<'static, PlatformEvent> {
         self.fake.events()
     }
+    fn set_route_policy(&self, policy: crate::navigation::RoutePolicy) {
+        self.fake.set_route_policy(policy);
+    }
     fn http(&self, request: HttpRequest) -> HostFuture<'_, HttpResponse> {
         let server = self.server.clone();
         async move {

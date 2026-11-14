@@ -1296,7 +1296,7 @@ fn prompt_link_replays_follow_platform_entry_keys_when_back_then_push_reuses_an_
         entry_key: key.map(str::to_owned),
         can_go_back: true,
         can_go_forward: false,
-        policy: RoutePolicy::default(),
+        policy: Some(RoutePolicy::default()),
     };
     let first = snapshot(Some("platform-first"));
     let pushed = snapshot(Some("platform-next"));
