@@ -807,15 +807,20 @@ impl t3_mcp::services::OrchestratorService for Orchestrator {
         context: t3_mcp::CallContext,
         input: t3_contracts::orchestrator_mcp::OrchestratorMcpDelegateTaskInput,
     ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpDelegateTaskResult> {
-        t3_mcp::services::OrchestratorService::delegate_task(self.delegation.as_ref(), context, input)
-            .await
+        t3_mcp::services::OrchestratorService::delegate_task(
+            self.delegation.as_ref(),
+            context,
+            input,
+        )
+        .await
     }
     async fn task_status(
         &self,
         context: t3_mcp::CallContext,
         input: t3_contracts::orchestrator_mcp::OrchestratorMcpTaskStatusInput,
     ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpDelegateTaskResult> {
-        t3_mcp::services::OrchestratorService::task_status(self.delegation.as_ref(), context, input).await
+        t3_mcp::services::OrchestratorService::task_status(self.delegation.as_ref(), context, input)
+            .await
     }
     async fn task_cancel(
         &self,

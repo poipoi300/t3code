@@ -658,6 +658,31 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
         .await;
     assert_eq!(value(&disabled)["task"]["enabled"], false, "{disabled}");
 
+    // An unbound task's existing worktree is checked when it fires, as a client's launch is: a
+    // UNC path and a folder that is not one of the project's worktrees are refused with the
+    // typed reason, and nothing is created or bound.
+    let unregistered = home.join("unregistered");
+    std::fs::create_dir_all(&unregistered).unwrap();
+    for (id, path) in [
+        ("task:unc", r"\\t3-unreachable.invalid\share".to_owned()),
+        ("task:folder", unregistered.to_string_lossy().into_owned()),
+    ] {
+        let mut input = launch_task(id, &project, EVERY_MINUTE(), "continue");
+        input["enabled"] = json!(false);
+        input["workspaceStrategy"] = json!({"type": "existing_worktree", "worktreePath": path});
+        value(&admin.call("scheduledTasks.upsert", input).await);
+        let threads = thread_count(&home, None);
+        let ran = admin.call("scheduledTasks.runNow", json!({"id": id})).await;
+        let ran = &value(&ran)["task"];
+        assert_eq!(ran["lastRunStatus"], "failed", "{ran}");
+        assert_eq!(
+            ran["lastRunError"], "The worktree is not a registered worktree of this project.",
+            "{ran}"
+        );
+        assert!(ran.get("threadId").is_none_or(Value::is_null), "{ran}");
+        assert_eq!(thread_count(&home, None), threads, "{id} created a thread");
+    }
+
     // Unbound tasks that launch their own thread: one continuing in the thread its first run
     // creates, and one (saved before the organisation's ceiling exists) that fires after the
     // restart below.
@@ -835,6 +860,19 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
         )
         .unwrap();
     assert_eq!(stale, 2);
+    // What a crash inside `task:launch`'s firing leaves behind: the launch committed (its thread
+    // exists), the run still `running` with the firing's start time and not yet bound. Recovery
+    // must not launch that occurrence again.
+    let interrupted = t3_persistence::rusqlite::Connection::open(layout.database())
+        .unwrap()
+        .execute(
+            "UPDATE scheduled_tasks SET last_run_status = 'running', thread_id = NULL,
+                 run_count = run_count - 1, next_run_at = ?1
+             WHERE task_id = 'task:launch'",
+            [T0],
+        )
+        .unwrap();
+    assert_eq!(interrupted, 1);
 
     // Restart at T0+90 under a ceiling below the thread's full access. Only `task:once` is due;
     // the dispatch ceiling refuses its turn as it refuses a client's, with TypeScript's text.
@@ -886,11 +924,17 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
     );
     assert!(fresh.get("threadId").is_none_or(Value::is_null), "{fresh}");
     assert_eq!(thread_count(&home, Some("task:fresh")), 0);
-    // No double launch: the restart neither relaunched nor re-ran the launched task.
+    // No double launch: the interrupted firing is recorded as interrupted, and its occurrence is
+    // not launched again (one thread with the task's title, the one launched before the crash).
     let launch = task(&after, "task:launch");
+    assert_eq!(launch["lastRunStatus"], "failed", "{after}");
+    assert_eq!(
+        launch["lastRunError"], "Run was interrupted by a server restart.",
+        "{after}"
+    );
     assert_eq!(launch["runCount"], 1, "{after}");
-    assert_eq!(launch["threadId"], launched_thread.as_str(), "{after}");
     assert_eq!(thread_count(&home, Some("task:launch")), 1);
+    let _ = launched_thread;
     // Saving an unbound task above the ceiling is refused; within it, it saves.
     let above = admin
         .call(
@@ -905,6 +949,20 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
     let mut within = launch_task("task:within", &project, EVERY_MINUTE(), "continue");
     within["runtimeMode"] = json!("auto-accept-edits");
     value(&admin.call("scheduledTasks.upsert", within).await);
+    // A disabled one above the ceiling saves, so it can be lowered first; enabling it is refused.
+    let mut dormant = launch_task("task:dormant", &project, EVERY_MINUTE(), "continue");
+    dormant["enabled"] = json!(false);
+    value(&admin.call("scheduledTasks.upsert", dormant).await);
+    let enable = admin
+        .call(
+            "scheduledTasks.setEnabled",
+            json!({"id": "task:dormant", "enabled": true}),
+        )
+        .await;
+    assert_eq!(
+        scheduled_task_error(&enable),
+        "Acme limits threads to Auto-accept edits."
+    );
     drop(admin);
     server.shutdown().await.unwrap();
 }

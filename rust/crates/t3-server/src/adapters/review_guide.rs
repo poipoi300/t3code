@@ -119,7 +119,12 @@ impl ReviewGuideGenerator {
         else {
             return;
         };
-        let git = self.git.at(&run.workspace_root);
+        // Cleanup also runs while the server shuts down, when the environment's Git root is
+        // already cancelled; these commands are bounded by their own timeouts instead.
+        let git = self
+            .git
+            .at(&run.workspace_root)
+            .with_cancellation(CancellationToken::new());
         if let Some(worktree) = &run.worktree {
             let path = worktree.to_string_lossy().into_owned();
             if git
@@ -149,44 +154,13 @@ impl ReviewGuideGenerator {
     /// The project's repository identity (`requireOwnRepository`'s locator), resolved when it
     /// is not cached yet.
     async fn locator(&self, workspace_root: &str) -> Result<(String, String)> {
-        let cached = self
+        let identity = self
             .projects
             .enrichment()
             .read_repository_identity(workspace_root)
-            .await;
-        let fresh = match &cached {
-            Some(_) => None,
-            None => {
-                t3_project::identity::RepositoryIdentityResolver::default()
-                    .resolve(workspace_root, true)
-                    .await
-            }
-        };
-        let identity = cached
-            .or(fresh)
+            .await
             .map(|identity| serde_json::to_value(identity).unwrap_or_default())
-            ;
-        let identity = match identity {
-            Some(identity) => identity,
-            None => {
-                let git = t3_git::Git::new(workspace_root);
-                let top = git
-                    .execute(&["rev-parse", "--show-toplevel"], ExecuteOptions { allow_nonzero: true, ..Default::default() })
-                    .await
-                    .map(|out| format!("{:?} {}", out.code, out.stdout_text().trim()))
-                    .map_err(|e| e.to_string());
-                let remotes = git
-                    .execute(&["remote", "-v"], ExecuteOptions { allow_nonzero: true, ..Default::default() })
-                    .await
-                    .map(|out| format!("{:?} {}", out.code, out.stdout_text().trim()))
-                    .map_err(|e| e.to_string());
-                let normalized = t3_workspace::paths::normalize_root(workspace_root, std::path::Path::new(workspace_root), false)
-                    .await
-                    .map(|p| p.display().to_string())
-                    .map_err(|e| e.to_string());
-                return Err(failed(&format!("Guides are written from this project's checkout, and this pull request is in another repository. Write it from a project that is a checkout of that repository. [diagnostic root={workspace_root} top={top:?} remotes={remotes:?} normalized={normalized:?}]")));
-            }
-        };
+            .ok_or_else(|| failed("Guides are written from this project's checkout, and this pull request is in another repository. Write it from a project that is a checkout of that repository."))?;
         let locator = &identity["locator"];
         Ok((
             locator["remoteName"]

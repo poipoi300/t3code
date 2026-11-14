@@ -675,6 +675,7 @@ async fn workflow_scripts_are_read_only_inside_the_claude_projects_folder() {
     let elsewhere = s.home().join("elsewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
     std::fs::write(elsewhere.join("secret.js"), "outside").unwrap();
+    std::fs::create_dir(elsewhere.join("dir.js")).unwrap();
     #[cfg(windows)]
     std::os::windows::fs::symlink_file(elsewhere.join("secret.js"), session.join("link.js"))
         .unwrap();
@@ -709,7 +710,11 @@ async fn workflow_scripts_are_read_only_inside_the_claude_projects_folder() {
         (session.join("notes.txt"), "invalid-path"),
         (session.join("dir.js"), "not-regular-file"),
         (session.join("absent.js"), "not-found"),
-        (elsewhere.join("secret.js"), "outside-root"),
+        // Outside the folder, existing, missing or not a file: one refusal, decided from the
+        // path's text before anything is resolved.
+        (elsewhere.join("secret.js"), "not-found"),
+        (elsewhere.join("absent.js"), "not-found"),
+        (elsewhere.join("dir.js"), "not-found"),
         // A link inside the folder resolves to its target, which is outside.
         (session.join("link.js"), "outside-root"),
     ] {
@@ -809,4 +814,63 @@ async fn setup_scripts_publish_output_and_their_end_on_the_setup_stream() {
     assert_eq!(script_stage["status"], "failed", "{failed}");
     assert_eq!(script_stage["detail"], "exited with 3", "{failed}");
     s.runtime.take().unwrap().shutdown().await.unwrap();
+}
+
+/// Cancelling a launch ends its setup script's whole process tree, not only the shell: a child
+/// the script started (as `npm install` starts node) holds a loopback connection to the test and
+/// waits on a gate file. After the cancel and the server's shutdown (which awaits the stopped
+/// terminals), the gate opens: a surviving child would answer, a dead one closed the socket.
+#[cfg(windows)]
+#[tokio::test]
+async fn cancelling_a_launch_ends_its_setup_scripts_child_processes() {
+    use tokio::io::AsyncReadExt;
+    let mut s = Server::start().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let gate = s.home().join("child-gate");
+    let child = s.home().join("child.ps1");
+    std::fs::write(
+        &child,
+        format!(
+            "$c = New-Object Net.Sockets.TcpClient('127.0.0.1', {port}); $s = $c.GetStream(); \
+             $s.WriteByte(42); $s.Flush(); \
+             while (-not (Test-Path -LiteralPath '{}')) {{ Start-Sleep -Milliseconds 50 }}; \
+             $s.WriteByte(77); $s.Flush()",
+            gate.display()
+        ),
+    )
+    .unwrap();
+    let project = s.home().join("child-project");
+    repository(&project);
+    let command = format!(
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File '{}'",
+        child.display()
+    );
+    let scripts = json!([{"id":"setup","name":"Setup","command":command,"icon":"configure","runOnWorktreeCreate":true,"async":false}]).to_string();
+    s.insert_project("project-child", &project, &scripts);
+    ok(s.call(
+        "orchestration.launchThread",
+        launch(
+            "thread:child",
+            "project-child",
+            json!({"type": "worktree", "baseRef": "main", "branch": "feature/child"}),
+            "auto-accept-edits",
+        ),
+    )
+    .await);
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let mut byte = [0u8; 1];
+    socket.read_exact(&mut byte).await.unwrap();
+    assert_eq!(byte[0], 42, "the child started");
+    let cancelled = ok(s
+        .call("worktreeSetup.cancel", json!({"threadId": "thread:child"}))
+        .await);
+    assert_eq!(cancelled["cancelled"], true);
+    s.runtime.take().unwrap().shutdown().await.unwrap();
+    std::fs::write(&gate, "open").unwrap();
+    let read = socket.read(&mut byte).await;
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "the setup script's child survived the cancel: {read:?} {byte:?}"
+    );
 }

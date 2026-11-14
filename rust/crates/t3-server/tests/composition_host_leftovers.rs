@@ -375,6 +375,35 @@ async fn editor_links_open_only_local_targets_inside_server_workspaces() {
         );
         assert!(launches.try_recv().is_err());
     }
+    // The UNC case above is refused by either resolver (the old one fails reaching the share).
+    // This one tells them apart: a link to `target.`, which Windows opens as `target`, inside the
+    // workspace. A plain `canonicalize` follows it and the editor would start; the hardened
+    // resolver refuses the trailing dot before following the link.
+    #[cfg(windows)]
+    {
+        let target = scratch.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("notes.md"), "x").unwrap();
+        let dotted = scratch.join("dotted");
+        std::os::windows::fs::symlink_dir(format!("{}.", target.display()), &dotted).unwrap();
+        for editor in ["vscode", "file-manager"] {
+            let exit = unary(
+                &mut socket,
+                &mut client,
+                "shell.openInEditor",
+                json!({"cwd": dotted.join("notes.md").display().to_string(), "editor": editor, "reveal": true}),
+            )
+            .await;
+            assert_eq!(
+                failure(exit)["_tag"],
+                "ExternalLauncherUnsupportedTargetError"
+            );
+            assert!(
+                launches.try_recv().is_err(),
+                "{editor} was launched through the link"
+            );
+        }
+    }
     server.runtime.shutdown().await.unwrap();
 }
 

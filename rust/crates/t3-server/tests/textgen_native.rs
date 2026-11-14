@@ -42,7 +42,6 @@ fn main() -> ExitCode {
             "review_guides_check_out_in_isolation_and_leave_nothing_behind",
             || Box::pin(review_guides()),
         ),
-        ("diagnose_identity", || Box::pin(diagnose_identity())),
     ];
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.iter().any(|argument| argument == "--list") {
@@ -1016,15 +1015,17 @@ async fn review_guides() {
     std::fs::write(&mode, "reply").unwrap();
     // The fork: `main` and a `topic` branch the project's checkout has never fetched.
     let served = temp.path().join("served");
-    std::fs::create_dir_all(&served).unwrap();
+    std::fs::create_dir_all(served.join("owner")).unwrap();
     let seed = temp.path().join("seed");
     repository(&seed);
     git(
-        &served,
+        &served.join("owner"),
         &["clone", "-q", "--bare", &seed.to_string_lossy(), "repo.git"],
     );
     let daemon = Daemon::start(&served).await;
-    let remote = format!("git://127.0.0.1:{}/repo.git", daemon.port);
+    // A fork URL names `owner/repo`; the project's identity (its locator) comes from it.
+    let remote = format!("git://127.0.0.1:{}/owner/repo.git", daemon.port);
+    let bare = served.join("owner").join("repo.git");
     let repo = temp.path().join("work").join("review");
     std::fs::create_dir_all(repo.parent().unwrap()).unwrap();
     git(
@@ -1039,7 +1040,7 @@ async fn review_guides() {
         &[
             "push",
             "-q",
-            &served.join("repo.git").to_string_lossy(),
+            &bare.to_string_lossy(),
             "topic",
         ],
     );
@@ -1124,7 +1125,7 @@ async fn review_guides() {
         &[
             "push",
             "-q",
-            &served.join("repo.git").to_string_lossy(),
+            &bare.to_string_lossy(),
             "topic",
         ],
     );
@@ -1150,7 +1151,7 @@ async fn review_guides() {
         &[
             "push",
             "-q",
-            &served.join("repo.git").to_string_lossy(),
+            &bare.to_string_lossy(),
             "topic",
         ],
     );
@@ -1165,74 +1166,3 @@ async fn review_guides() {
     drop(daemon);
 }
 
-async fn diagnose_identity() {
-    let temp = tempfile::tempdir().unwrap();
-    let served = temp.path().join("served");
-    std::fs::create_dir_all(served.join("owner")).unwrap();
-    let seed = temp.path().join("seed");
-    repository(&seed);
-    git(&served.join("owner"), &["clone", "-q", "--bare", &seed.to_string_lossy(), "repo.git"]);
-    let daemon = review::Daemon::start(&served).await;
-    let remote = format!("git://127.0.0.1:{}/owner/repo.git", daemon.port);
-    let repo = temp.path().join("work").join("review");
-    std::fs::create_dir_all(repo.parent().unwrap()).unwrap();
-    git(temp.path(), &["clone", "-q", &remote, &repo.to_string_lossy()]);
-    let listing = git(&repo, &["remote", "-v"]);
-    println!("remote -v: {listing:?}");
-    let remotes = t3_project::identity::parse_fetch_urls(&listing);
-    println!("parsed: {remotes:?}");
-    println!("picked: {:?}", t3_project::identity::pick_primary_remote(&remotes, ""));
-    println!("key: {}", t3_git::remote_repository_key(&remote));
-    let resolver = t3_project::identity::RepositoryIdentityResolver::default();
-    let identity = resolver.resolve(&repo.to_string_lossy(), true).await;
-    println!("identity before server: {}", identity.is_some());
-    let marker = temp.path().join("hook-ran");
-    let hook = repo.join(".git").join("hooks").join("post-checkout");
-    std::fs::write(
-        &hook,
-        format!(
-            "#!/bin/sh\necho ran > '{}'\n",
-            marker.to_string_lossy().replace('\\', "/")
-        ),
-    )
-    .unwrap();
-    let probe = |label: &str| {
-        let repo = repo.clone();
-        let label = label.to_owned();
-        async move {
-            let identity = t3_project::identity::RepositoryIdentityResolver::default()
-                .resolve(&repo.to_string_lossy(), true)
-                .await;
-            println!("identity after {label}: {}", identity.is_some());
-        }
-    };
-    probe("hook").await;
-    let control = temp.path().join("control");
-    git(&repo, &["worktree", "add", "-q", "--detach", &control.to_string_lossy(), "HEAD"]);
-    probe("control add").await;
-    git(&repo, &["worktree", "remove", "--force", &control.to_string_lossy()]);
-    probe("control remove").await;
-    println!("marker: {}", marker.exists());
-    println!("repo string: {}", repo.to_string_lossy());
-    let short = repo
-        .to_string_lossy()
-        .replace(r"C:\Users\Administrator\", r"C:\Users\ADMINI~1\");
-    let identity = t3_project::identity::RepositoryIdentityResolver::default()
-        .resolve(&short, true)
-        .await;
-    println!("identity short form ({short}): {}", identity.is_some());
-    println!("normalize short: {:?}", t3_workspace::paths::normalize_root(&short, std::path::Path::new(&short), false).await.map(|p| p.display().to_string()).map_err(|e| e.to_string()));
-    let settings = json!({});
-    let mut server = Server::start(temp, settings, None).await;
-    let resolver = t3_project::identity::RepositoryIdentityResolver::default();
-    let identity = resolver.resolve(&repo.to_string_lossy(), true).await;
-    println!("identity with server: {}", identity.is_some());
-    let top = std::process::Command::new("git").args(["rev-parse", "--show-toplevel"]).current_dir(&repo).output().unwrap();
-    println!("toplevel: {:?} {:?}", String::from_utf8_lossy(&top.stdout), String::from_utf8_lossy(&top.stderr));
-    println!("cwd: {:?}", std::env::current_dir());
-    for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_CEILING_DIRECTORIES", "GIT_CONFIG_GLOBAL", "PATH"] {
-        println!("env {key}: {:?}", std::env::var(key).map(|v| v.len()));
-    }
-    server.shutdown().await;
-    drop(daemon);
-}

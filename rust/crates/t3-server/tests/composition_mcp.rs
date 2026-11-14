@@ -988,17 +988,26 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
     );
     for (tool, input) in [
         ("t3_thread_wait", json!({"threadId":PEER,"timeoutMs":1})),
-        ("t3_thread_organize", json!({"threadId":PEER,"action":"pin"})),
+        (
+            "t3_thread_organize",
+            json!({"threadId":PEER,"action":"pin"}),
+        ),
         ("t3_pending_request", json!({"action":"list"})),
         ("t3_queue", json!({"action":"list"})),
-        ("t3_thread_transfer", json!({"action":"status","threadId":PEER})),
+        (
+            "t3_thread_transfer",
+            json!({"action":"status","threadId":PEER}),
+        ),
         ("t3_thread_configure", json!({"threadId":PEER})),
         ("t3_project_list", json!({})),
         ("t3_project_read", json!({"projectId":"project:mcp"})),
         ("t3_background_wait", json!({"taskIds":["task:none"]})),
         ("t3_thread_interrupt", json!({"threadId":PEER})),
         ("t3_worktree_list", json!({})),
-        ("t3_workflow_stop", json!({"threadId":PEER,"subagentId":"subagent:none"})),
+        (
+            "t3_workflow_stop",
+            json!({"threadId":PEER,"subagentId":"subagent:none"}),
+        ),
     ] {
         let body = mcp.call(&token, tool, input).await;
         assert!(!unavailable(&body), "{tool} is bound: {body}");
@@ -1007,7 +1016,11 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
     let projects = mcp.call(&token, "t3_project_list", json!({})).await;
     assert!(projects.to_string().contains("project:mcp"), "{projects}");
     let background = mcp
-        .call(&token, "t3_background_wait", json!({"taskIds":["task:none"]}))
+        .call(
+            &token,
+            "t3_background_wait",
+            json!({"taskIds":["task:none"]}),
+        )
         .await;
     // The stand-in provider cannot mark background work awaited: TypeScript's typed refusal.
     assert!(
@@ -1028,11 +1041,17 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
     assert!(
         is_error(&stop)
             && stop.to_string().contains("invalid_request")
-            && stop.to_string().contains("This workflow is no longer running."),
+            && stop
+                .to_string()
+                .contains("This workflow is no longer running."),
         "{stop}"
     );
     let missing_project = mcp
-        .call(&token, "t3_project_read", json!({"projectId":"project:absent"}))
+        .call(
+            &token,
+            "t3_project_read",
+            json!({"projectId":"project:absent"}),
+        )
         .await;
     assert!(is_error(&missing_project), "{missing_project}");
     // Attachment sends need the runtime's attachment backend, which the server does not bind.
@@ -1237,7 +1256,9 @@ async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
         .await;
     assert!(
         is_error(&broader)
-            && broader.to_string().contains("runtime_mode_escalation_denied")
+            && broader
+                .to_string()
+                .contains("runtime_mode_escalation_denied")
             && broader.to_string().contains(
                 "Child runtime mode full-access is broader than parent mode approval-required."
             ),
@@ -1276,7 +1297,11 @@ async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
             json!({"task":"Summarise the workspace","target":{"providerInstanceId":"devReplay","model":"multi-turn"},"clientRequestId":"delegate-1"}),
         )
         .await;
-    assert_eq!(again["result"]["structuredContent"]["taskId"], task_id.as_str(), "{again}");
+    assert_eq!(
+        again["result"]["structuredContent"]["taskId"],
+        task_id.as_str(),
+        "{again}"
+    );
 
     // The child runs to completion on Replay.
     let watched = client
@@ -1310,7 +1335,30 @@ async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
         "ThreadManagementService::delegated_task_result_pending",
         "{status}"
     );
-    // Another thread's credential cannot read this task.
+    // Another live thread cannot read this task: it is not its owner.
+    const NEIGHBOUR: &str = "thread:mcp-neighbour";
+    command(&mut socket, &mut client, json!({"type":"thread.create","commandId":"create:neighbour","threadId":NEIGHBOUR,"projectId":"project:mcp","title":"Neighbour","modelSelection":{"instanceId":"replay","model":"replay-model"},"runtimeMode":"approval-required","interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"})).await;
+    command(&mut socket, &mut client, json!({"type":"message.dispatch","commandId":"command:neighbour","threadId":NEIGHBOUR,"messageId":"message:neighbour","text":"Work","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"})).await;
+    changes
+        .wait_for(|_| seen.turns.lock().unwrap().iter().any(|t| t.0 == NEIGHBOUR))
+        .await
+        .unwrap();
+    let neighbour = sessions
+        .read(&ThreadId(NEIGHBOUR.into()))
+        .expect("the neighbour session's credential")
+        .authorization_header;
+    let foreign = mcp
+        .call(&neighbour, "task_status", json!({"taskId": task_id}))
+        .await;
+    assert!(
+        is_error(&foreign)
+            && foreign.to_string().contains("task_not_found")
+            && foreign.to_string().contains(&format!(
+                "Delegated task {task_id} does not belong to thread {NEIGHBOUR}."
+            )),
+        "{foreign}"
+    );
+    // The child's own token, its run over, is not a live caller.
     let stranger = sessions
         .registry()
         .unwrap()
@@ -1319,21 +1367,6 @@ async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
             ProviderInstanceId("devReplay".into()),
         ))
         .unwrap();
-    let foreign = mcp
-        .call(
-            &stranger.authorization_header,
-            "task_status",
-            json!({"taskId": task_id}),
-        )
-        .await;
-    assert!(
-        is_error(&foreign)
-            && foreign.to_string().contains("task_not_found")
-            && foreign
-                .to_string()
-                .contains(&format!("Delegated task {task_id} does not belong to thread {child}.")),
-        "{foreign}"
-    );
     // A caller with no live run cannot delegate.
     let idle = mcp
         .call(

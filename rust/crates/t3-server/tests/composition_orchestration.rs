@@ -1184,12 +1184,12 @@ async fn the_managed_policy_caps_thread_runtime_modes() {
 /// Waits on `subscribeThread` for the first chunk whose text contains every part of one of
 /// `outcomes`, and returns that outcome's first part with the chunk. List every way the awaited
 /// step can end, failures included, or a failure waits forever.
-async fn thread_outcome(
+async fn thread_outcome<'a>(
     socket: &mut Socket,
     client: &mut Client,
     subscription: &t3_rpc::RequestId,
-    outcomes: &[&[&'static str]],
-) -> (&'static str, String) {
+    outcomes: &[&[&'a str]],
+) -> (&'a str, String) {
     loop {
         match event(socket, client).await {
             CallEvent::Chunk { id, values } if id == *subscription => {
@@ -1214,37 +1214,24 @@ async fn thread_outcome(
     }
 }
 
-/// t3-git H-2 at the server: a file restore refuses while the thread has a live terminal,
-/// naming it, and goes ahead once the terminal is closed.
-#[tokio::test]
-async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path();
-    std::fs::create_dir_all(home.join("userdata")).unwrap();
-    std::fs::write(
-        home.join("userdata").join("settings.json"),
-        r#"{"providerInstances":{"replay":{"driver":"replay","enabled":true}}}"#,
-    )
-    .unwrap();
-    let workspace = home.join("workspace");
-    std::fs::create_dir_all(&workspace).unwrap();
-    std::fs::write(workspace.join("tracked.txt"), "first\n").unwrap();
-    let gitconfig = home.join("gitconfig");
-    let git = |args: &[&str]| {
-        let status = std::process::Command::new("git")
-            .args(["-c", "user.name=T3", "-c", "user.email=t3@example.invalid"])
-            .args(args)
-            .current_dir(&workspace)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", &gitconfig)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["add", "."]);
-    git(&["commit", "-q", "-m", "first"]);
-    // A shell for the terminal, and nothing of the developer's profile.
+const RESTORE_THREAD: &str = "thread:restore";
+
+/// Git in `dir` with nothing of the developer's configuration.
+fn git_in(dir: &Path, gitconfig: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(["-c", "user.name=T3", "-c", "user.email=t3@example.invalid"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", gitconfig)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+/// The scripted provider's server on `home`, with a shell for terminals and nothing of the
+/// developer's profile.
+async fn restore_server(home: &Path) -> t3_server::runtime::RunningServer {
     let mut env = std::collections::BTreeMap::new();
     for key in ["PATH", "SystemRoot", "ComSpec", "WINDIR", "SHELL"] {
         if let Ok(value) = std::env::var(key) {
@@ -1256,9 +1243,9 @@ async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
     }
     env.insert(
         "GIT_CONFIG_GLOBAL".into(),
-        gitconfig.to_string_lossy().into_owned(),
+        home.join("gitconfig").to_string_lossy().into_owned(),
     );
-    let server = t3_server::runtime::start_with(
+    t3_server::runtime::start_with(
         ConfigInputs {
             flags: ServerFlags {
                 base_dir: Some(home.to_string_lossy().into_owned()),
@@ -1285,140 +1272,255 @@ async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
         },
     )
     .await
-    .unwrap();
-    let layout = t3_config::home::HomeLayout {
-        base_dir: home.into(),
-        state_dir: home.join("userdata"),
-    };
-    t3_persistence::rusqlite::Connection::open(layout.database())
-        .unwrap()
-        .execute(
-            "INSERT INTO projection_projects
-             (project_id, title, workspace_root, scripts_json, created_at, updated_at)
-             VALUES ('project:restore', 'Restore', ?1, '[]', '2026-11-13T12:00:00.000Z', '2026-11-13T12:00:00.000Z')",
-            [workspace.to_string_lossy()],
+    .unwrap()
+}
+
+/// A server whose project folder is `<home>/repository/<scope>` in a committed Git checkout,
+/// and one thread in that folder whose first turn has run.
+struct RestoreFixture {
+    _temp: tempfile::TempDir,
+    home: std::path::PathBuf,
+    repository: std::path::PathBuf,
+    folder: std::path::PathBuf,
+    server: t3_server::runtime::RunningServer,
+    socket: Socket,
+    client: Client,
+    subscription: t3_rpc::RequestId,
+    /// The thread-start checkpoint, as the client's rewind picks it.
+    checkpoint: Value,
+}
+
+impl RestoreFixture {
+    async fn start(scope: Option<&str>) -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_path_buf();
+        std::fs::create_dir_all(home.join("userdata")).unwrap();
+        std::fs::write(
+            home.join("userdata").join("settings.json"),
+            r#"{"providerInstances":{"replay":{"driver":"replay","enabled":true}}}"#,
         )
         .unwrap();
-    let (cookie, mut socket, mut client) = admin_session(&server).await;
-    let thread = "thread:restore";
-    let folder = workspace.to_string_lossy().into_owned();
-    let created = call_exit(
-        &mut socket,
-        &mut client,
-        "orchestration.dispatchCommand",
-        json!({"type":"thread.create","commandId":"command:thread","threadId":thread,"projectId":"project:restore","title":"Restore","modelSelection":{"instanceId":"replay","model":"replay-model"},"runtimeMode":"full-access","interactionMode":"default","branch":"main","worktreePath":folder,"createdBy":"user","creationSource":"web"}),
-    )
-    .await;
-    assert_eq!(created["_tag"], "Success", "{created}");
-    let subscription = client
-        .start(
-            "orchestration.subscribeThread",
-            json!({"threadId": thread}),
-            CallKind::Stream,
+        let repository = home.join("repository");
+        let folder = scope.map_or_else(|| repository.clone(), |scope| repository.join(scope));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("tracked.txt"), "first\n").unwrap();
+        let gitconfig = home.join("gitconfig");
+        git_in(&repository, &gitconfig, &["init", "-q", "-b", "main"]);
+        git_in(&repository, &gitconfig, &["add", "."]);
+        git_in(&repository, &gitconfig, &["commit", "-q", "-m", "first"]);
+        let server = restore_server(&home).await;
+        let layout = t3_config::home::HomeLayout {
+            base_dir: home.clone(),
+            state_dir: home.join("userdata"),
+        };
+        t3_persistence::rusqlite::Connection::open(layout.database())
+            .unwrap()
+            .execute(
+                "INSERT INTO projection_projects
+                 (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+                 VALUES ('project:restore', 'Restore', ?1, '[]', '2026-11-13T12:00:00.000Z', '2026-11-13T12:00:00.000Z')",
+                [folder.to_string_lossy()],
+            )
+            .unwrap();
+        let (cookie, mut socket, mut client) = admin_session(&server).await;
+        let created = call_exit(
+            &mut socket,
+            &mut client,
+            "orchestration.dispatchCommand",
+            json!({"type":"thread.create","commandId":"command:thread","threadId":RESTORE_THREAD,"projectId":"project:restore","title":"Restore","modelSelection":{"instanceId":"replay","model":"replay-model"},"runtimeMode":"full-access","interactionMode":"default","branch":"main","worktreePath":folder,"createdBy":"user","creationSource":"web"}),
         )
-        .unwrap();
-    let sent = call_exit(
-        &mut socket,
-        &mut client,
-        "orchestration.dispatchCommand",
-        json!({"type":"message.dispatch","commandId":"command:message","threadId":thread,"messageId":"message:restore","text":"Hello","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"}),
-    )
-    .await;
-    assert_eq!(sent["_tag"], "Success", "{sent}");
-    let turn = thread_outcome(
-        &mut socket,
-        &mut client,
-        &subscription,
-        &[
-            &["\"run.updated\"", "\"completed\""],
-            &["\"run.updated\"", "\"failed\""],
-            &["\"run.updated\"", "\"interrupted\""],
-        ],
-    )
-    .await;
-    assert_eq!(turn.0, "\"run.updated\"", "{}", turn.1);
-    assert!(turn.1.contains("\"completed\""), "the turn did not complete: {}", turn.1);
+        .await;
+        assert_eq!(created["_tag"], "Success", "{created}");
+        let subscription = client
+            .start(
+                "orchestration.subscribeThread",
+                json!({"threadId": RESTORE_THREAD}),
+                CallKind::Stream,
+            )
+            .unwrap();
+        let sent = call_exit(
+            &mut socket,
+            &mut client,
+            "orchestration.dispatchCommand",
+            json!({"type":"message.dispatch","commandId":"command:message","threadId":RESTORE_THREAD,"messageId":"message:restore","text":"Hello","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"}),
+        )
+        .await;
+        assert_eq!(sent["_tag"], "Success", "{sent}");
+        let (outcome, text) = thread_outcome(
+            &mut socket,
+            &mut client,
+            &subscription,
+            &[
+                &["\"run.updated\"", "\"completed\""],
+                &["\"run.updated\"", "\"failed\""],
+                &["\"run.updated\"", "\"interrupted\""],
+            ],
+        )
+        .await;
+        assert!(
+            outcome == "\"run.updated\"" && text.contains("\"completed\""),
+            "the turn did not complete: {text}"
+        );
+        let snapshot: Value = reqwest::Client::new()
+            .get(format!(
+                "http://{}/api/orchestration/threads/{RESTORE_THREAD}",
+                server.address
+            ))
+            .header("cookie", &cookie)
+            .header("x-t3-orchestration-protocol", "2")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let checkpoint = snapshot["projection"]["checkpoints"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|checkpoint| {
+                checkpoint["ordinalWithinScope"] == 0 && checkpoint["status"] == "ready"
+            })
+            .unwrap_or_else(|| panic!("no thread-start checkpoint: {snapshot}"))
+            .clone();
+        Self {
+            _temp: temp,
+            home,
+            repository,
+            folder,
+            server,
+            socket,
+            client,
+            subscription,
+            checkpoint,
+        }
+    }
 
-    // The thread-start checkpoint, as the client's rewind picks it.
-    let origin = format!("http://{}", server.address);
-    let snapshot: Value = reqwest::Client::new()
-        .get(format!("{origin}/api/orchestration/threads/{thread}"))
-        .header("cookie", &cookie)
-        .header("x-t3-orchestration-protocol", "2")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let checkpoint = snapshot["projection"]["checkpoints"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|checkpoint| checkpoint["ordinalWithinScope"] == 0 && checkpoint["status"] == "ready")
-        .unwrap_or_else(|| panic!("no thread-start checkpoint: {snapshot}"))
-        .clone();
-    let rollback = |id: &str| json!({"type":"checkpoint.rollback","commandId":id,"threadId":thread,"checkpointId":checkpoint["id"],"scopeId":checkpoint["scopeId"],"restoreFiles":true});
+    fn folder(&self) -> String {
+        self.folder.to_string_lossy().into_owned()
+    }
 
-    let opened = call_exit(
-        &mut socket,
-        &mut client,
-        "terminal.open",
-        json!({"threadId":thread,"terminalId":"writer","cwd":folder,"worktreePath":folder}),
-    )
-    .await;
+    async fn call(&mut self, tag: &str, payload: Value) -> Value {
+        call_exit(&mut self.socket, &mut self.client, tag, payload).await
+    }
+
+    /// Requests a file restore to the thread-start checkpoint and returns how it ended: the
+    /// failure's message, or `None` once its runs are rolled back.
+    async fn restore(&mut self, command: &str) -> Option<String> {
+        let requested = self
+            .call(
+                "orchestration.dispatchCommand",
+                json!({"type":"checkpoint.rollback","commandId":command,"threadId":RESTORE_THREAD,"checkpointId":self.checkpoint["id"],"scopeId":self.checkpoint["scopeId"],"restoreFiles":true}),
+            )
+            .await;
+        assert_eq!(requested["_tag"], "Success", "{requested}");
+        let failure = format!("\"rollbackFailure\":{{\"requestId\":\"{command}\"");
+        let (outcome, text) = thread_outcome(
+            &mut self.socket,
+            &mut self.client,
+            &self.subscription,
+            &[&["\"rolled_back\""], &[failure.as_str()]],
+        )
+        .await;
+        (outcome == failure).then_some(text)
+    }
+
+    /// Stops the server, runs `between` on its home and the project folder, starts it again on
+    /// the same home and resubscribes to the thread.
+    async fn restart(self, between: impl FnOnce(&Path, &Path)) -> Self {
+        let Self {
+            _temp,
+            home,
+            repository,
+            folder,
+            server,
+            socket,
+            client,
+            subscription: _,
+            checkpoint,
+        } = self;
+        drop((socket, client));
+        server.shutdown().await.unwrap();
+        between(&home, &folder);
+        let server = restore_server(&home).await;
+        let (_, socket, mut client) = admin_session(&server).await;
+        let subscription = client
+            .start(
+                "orchestration.subscribeThread",
+                json!({"threadId": RESTORE_THREAD}),
+                CallKind::Stream,
+            )
+            .unwrap();
+        Self {
+            _temp,
+            home,
+            repository,
+            folder,
+            server,
+            socket,
+            client,
+            subscription,
+            checkpoint,
+        }
+    }
+}
+
+/// t3-git H-2 at the server: a file restore refuses while the thread has a live terminal,
+/// naming it, and goes ahead once the terminal is closed.
+#[tokio::test]
+async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
+    let mut fixture = RestoreFixture::start(None).await;
+    let folder = fixture.folder();
+    let opened = fixture
+        .call(
+            "terminal.open",
+            json!({"threadId":RESTORE_THREAD,"terminalId":"writer","cwd":folder,"worktreePath":folder}),
+        )
+        .await;
     assert_eq!(opened["_tag"], "Success", "{opened}");
-    let refused = call_exit(
-        &mut socket,
-        &mut client,
-        "orchestration.dispatchCommand",
-        rollback("command:rollback-refused"),
-    )
-    .await;
-    assert_eq!(refused["_tag"], "Success", "{refused}");
-    // The refusal and any other failure end the wait; only the named terminal passes.
-    let (outcome, text) = thread_outcome(
-        &mut socket,
-        &mut client,
-        &subscription,
-        &[
-            &["\"rollbackFailure\":{\"requestId\":\"command:rollback-refused\""],
-            &["\"rolled_back\""],
-        ],
-    )
-    .await;
+    let refused = fixture.restore("command:rollback-refused").await;
     assert!(
-        outcome.starts_with("\"rollbackFailure\"")
-            && text.contains("still writing to its folder: terminal `writer`"),
-        "{text}"
+        refused
+            .as_deref()
+            .is_some_and(|text| text.contains("still writing to its folder: terminal `writer`")),
+        "{refused:?}"
     );
-
-    let closed = call_exit(
-        &mut socket,
-        &mut client,
-        "terminal.close",
-        json!({"threadId":thread,"terminalId":"writer","deleteHistory":true}),
-    )
-    .await;
+    let closed = fixture
+        .call(
+            "terminal.close",
+            json!({"threadId":RESTORE_THREAD,"terminalId":"writer","deleteHistory":true}),
+        )
+        .await;
     assert_eq!(closed["_tag"], "Success", "{closed}");
-    let restored = call_exit(
-        &mut socket,
-        &mut client,
-        "orchestration.dispatchCommand",
-        rollback("command:rollback"),
+    assert_eq!(fixture.restore("command:rollback").await, None);
+    fixture.server.shutdown().await.unwrap();
+}
+
+/// t3-git H-1 at the server: the repository a project folder belongs to is saved in the state
+/// folder, so after a restart a repository planted in that folder refuses the restore with
+/// `checkpoint.git.repository-changed`'s message instead of restoring against the plant.
+#[tokio::test]
+async fn a_repository_planted_in_a_bound_folder_refuses_the_restore_after_a_restart() {
+    // A project in a subdirectory of its repository, the layout a nested `.git` redirects.
+    let fixture = RestoreFixture::start(Some("pkg")).await;
+    let saved = std::fs::read_to_string(
+        fixture
+            .home
+            .join("userdata")
+            .join("repository-bindings.json"),
     )
-    .await;
-    assert_eq!(restored["_tag"], "Success", "{restored}");
-    let (outcome, text) = thread_outcome(
-        &mut socket,
-        &mut client,
-        &subscription,
-        &[
-            &["\"rolled_back\""],
-            &["\"rollbackFailure\":{\"requestId\":\"command:rollback\""],
-        ],
-    )
-    .await;
-    assert_eq!(outcome, "\"rolled_back\"", "{text}");
-    server.shutdown().await.unwrap();
+    .unwrap();
+    assert!(saved.contains("pkg"), "{saved}");
+    let mut fixture = fixture
+        .restart(|home, folder| git_in(folder, &home.join("gitconfig"), &["init", "-q"]))
+        .await;
+    assert!(fixture.folder.join(".git").exists() && fixture.repository.join(".git").exists());
+    let refused = fixture.restore("command:rollback-planted").await;
+    assert!(
+        refused.as_deref().is_some_and(
+            |text| text.contains("no longer belongs to the repository this thread started in")
+        ),
+        "{refused:?}"
+    );
+    fixture.server.shutdown().await.unwrap();
 }

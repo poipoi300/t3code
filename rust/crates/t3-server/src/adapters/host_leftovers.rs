@@ -155,23 +155,21 @@ pub mod editors {
         }
     }
 
-    /// A path naming this machine's disks only: never two leading separators (`//host`,
-    /// `\\?\`, `/\host`), and on Windows no prefix but a drive letter. A `~/` file-manager
-    /// target is checked after the tilde.
+    /// A path naming this machine's disks only: not a network path by the workspace crate's
+    /// rule, and on Windows no prefix but a plain or verbatim drive. A `~/` file-manager target
+    /// is checked after the tilde.
     pub fn local_path(raw: &str) -> bool {
         let path = raw
             .strip_prefix("~/")
             .or_else(|| raw.strip_prefix("~\\"))
             .unwrap_or(raw);
-        let mut chars = path.chars();
-        let separator = |c: Option<char>| matches!(c, Some('/' | '\\'));
-        if separator(chars.next()) && separator(chars.next()) {
-            return false;
-        }
-        match Path::new(path).components().next() {
-            Some(Component::Prefix(prefix)) => matches!(prefix.kind(), Prefix::Disk(_)),
-            _ => true,
-        }
+        !t3_workspace::paths::is_network_path(path)
+            && match Path::new(path).components().next() {
+                Some(Component::Prefix(prefix)) => {
+                    matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+                }
+                _ => true,
+            }
     }
 
     /// Every workspace the server owns: managed worktree folders, live project roots, live
@@ -255,8 +253,9 @@ pub mod editors {
                 r"\\attacker.example\share\file.ts",
                 r"/\attacker.example\share",
                 r"\/attacker.example/share",
-                r"\\?\C:\Users\me\file.ts",
+                r"\\?\UNC\attacker.example\share\file.ts",
                 r"\\.\pipe\name",
+                r"\\.\C:\Users\me\file.ts",
                 "//?/C:/x",
                 r"~/\\attacker.example\share",
             ] {
@@ -265,7 +264,15 @@ pub mod editors {
             assert!(super::local_path("/home/me/project/src/main.rs:3:1"));
             assert!(super::local_path("~/project"));
             #[cfg(windows)]
-            assert!(super::local_path(r"C:\Users\me\project\file.ts:12"));
+            {
+                assert!(super::local_path(r"C:\Users\me\project\file.ts:12"));
+                // A verbatim drive path is local exactly when the workspace classifier says so.
+                let verbatim = r"\\?\C:\Users\me\file.ts";
+                assert_eq!(
+                    super::local_path(verbatim),
+                    !t3_workspace::paths::is_network_path(verbatim)
+                );
+            }
         }
     }
 }
