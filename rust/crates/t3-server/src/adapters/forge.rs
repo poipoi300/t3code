@@ -53,7 +53,6 @@ use t3_forge::{
     services::{CloneOptions, SourceControlRepositoryService, SourceControlSignIn},
 };
 
-use t3_git::ReviewHost as _;
 use t3_workspace::paths::{validate_host_path, within};
 
 pub use t3_forge::registry::ForgeRegistry;

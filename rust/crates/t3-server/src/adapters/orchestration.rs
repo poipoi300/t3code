@@ -157,6 +157,14 @@ impl t3_orchestration::api::SettingsService for LiveSettings {
     }
 }
 
+/// What a checkpoint file restore needs from the host (t3-git H-2).
+pub struct RestorePorts {
+    /// The thread's terminals and setup scripts, held through a restore.
+    pub writers: Option<Arc<dyn t3_orchestration::api::ThreadWriters>>,
+    /// Managed worktree folders at start, where rollback may recreate a missing worktree.
+    pub managed_worktrees: Vec<std::path::PathBuf>,
+}
+
 impl OrchestrationAdapter {
     /// Starts the composed runtime (`t3_orchestration::composition`): recovery runs before this
     /// returns. Host ports supplied here: the database, the provider registry over `providers`,
@@ -172,8 +180,7 @@ impl OrchestrationAdapter {
         >,
         titles: Option<Arc<dyn t3_orchestration::api::TitleGenerator>>,
         launch: Option<LaunchPorts>,
-        writers: Option<Arc<dyn t3_orchestration::api::ThreadWriters>>,
-        managed_worktrees: Vec<std::path::PathBuf>,
+        restore: RestorePorts,
     ) -> crate::Result<Arc<Self>> {
         use t3_orchestration::{
             composition::{OrchestrationRuntime, RandomIds, RuntimePorts},
@@ -222,7 +229,7 @@ impl OrchestrationAdapter {
             t3_orchestration::runtime::checkpoints::GitRollbackWorkspaceRecovery {
                 backend: checkpoints.clone(),
                 database: StoreDatabase(context.database.clone()),
-                managed_roots: managed_worktrees,
+                managed_roots: restore.managed_worktrees,
             },
         ));
         // `orchestration.launchThread` and launch workspace preparation (`adapters/launch.rs`).
@@ -253,7 +260,7 @@ impl OrchestrationAdapter {
         // Each provider session opens with its thread's MCP credential (`adapters/mcp.rs`).
         ports.credentials = credentials;
         // A file restore holds the thread's terminals and setup scripts (t3-git H-2).
-        ports.thread_writers = writers;
+        ports.thread_writers = restore.writers;
         // Turns run in the project's root, in the modes their provider instance offers.
         let (provider_snapshots, offered) = tokio::sync::watch::channel(Arc::new(Vec::new()));
         ports.provider_snapshots = Some(offered.clone());

@@ -207,12 +207,12 @@ pub mod editors {
                 t3_process::DetachedConsole::None,
                 command.verbatim,
             )
-                .await
-                .map(|_| ())
-                .map_err(|error| {
-                    tracing::warn!(kind = error_kind(&error), "could not start the editor");
-                    t3_host::Error::Io
-                })
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                tracing::warn!(kind = error_kind(&error), "could not start the editor");
+                t3_host::Error::Io
+            })
         }
     }
 

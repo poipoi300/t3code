@@ -302,55 +302,66 @@ mod agent_sessions {
         })
     }
 
-    pub fn register(registry: &mut HandlerRegistry, agents: Arc<AgentSessions>) -> crate::Result<()> {
+    pub fn register(
+        registry: &mut HandlerRegistry,
+        agents: Arc<AgentSessions>,
+    ) -> crate::Result<()> {
         let a = agents.clone();
         registry.register::<WsAgentSessionsScanRpc, _, _>(move |_, _| {
             let a = a.clone();
             async move {
-                a.scanner.scan().await.map_err(|error| match scan_error(&error) {
-                    Some(typed) => {
-                        Failure::Typed(WsAgentSessionsScanError::AgentSessionScanError(Box::new(typed)))
-                    }
-                    None => {
-                        tracing::warn!("agent session scan failed");
-                        defect()
-                    }
-                })
+                a.scanner
+                    .scan()
+                    .await
+                    .map_err(|error| match scan_error(&error) {
+                        Some(typed) => Failure::Typed(
+                            WsAgentSessionsScanError::AgentSessionScanError(Box::new(typed)),
+                        ),
+                        None => {
+                            tracing::warn!("agent session scan failed");
+                            defect()
+                        }
+                    })
             }
         })?;
         registry.register::<WsAgentSessionsImportRpc, _, _>(move |_, input| {
             let a = agents.clone();
             async move {
                 let project_id: ProjectId = input.project_id.clone();
-                a.importer.import(input).await.map_err(|error| match &error {
-                    Error::NotFound(_) => Failure::Typed(
-                        WsAgentSessionsImportError::AgentSessionImportProjectNotFoundError(Box::new(
-                            AgentSessionImportProjectNotFoundError {
-                                _tag: AgentSessionImportProjectNotFoundErrorTag::Error,
-                                project_id,
-                            },
-                        )),
-                    ),
-                    Error::Invalid(message) if message == "The project's workspace root changed." => {
-                        Failure::Typed(
-                            WsAgentSessionsImportError::AgentSessionImportProjectChangedError(
-                                Box::new(AgentSessionImportProjectChangedError {
-                                    _tag: AgentSessionImportProjectChangedErrorTag::Error,
+                a.importer
+                    .import(input)
+                    .await
+                    .map_err(|error| match &error {
+                        Error::NotFound(_) => Failure::Typed(
+                            WsAgentSessionsImportError::AgentSessionImportProjectNotFoundError(
+                                Box::new(AgentSessionImportProjectNotFoundError {
+                                    _tag: AgentSessionImportProjectNotFoundErrorTag::Error,
                                     project_id,
                                 }),
                             ),
-                        )
-                    }
-                    _ => match scan_error(&error) {
-                        Some(typed) => Failure::Typed(
-                            WsAgentSessionsImportError::AgentSessionScanError(Box::new(typed)),
                         ),
-                        None => {
-                            tracing::warn!("agent session import failed");
-                            defect()
+                        Error::Invalid(message)
+                            if message == "The project's workspace root changed." =>
+                        {
+                            Failure::Typed(
+                                WsAgentSessionsImportError::AgentSessionImportProjectChangedError(
+                                    Box::new(AgentSessionImportProjectChangedError {
+                                        _tag: AgentSessionImportProjectChangedErrorTag::Error,
+                                        project_id,
+                                    }),
+                                ),
+                            )
                         }
-                    },
-                })
+                        _ => match scan_error(&error) {
+                            Some(typed) => Failure::Typed(
+                                WsAgentSessionsImportError::AgentSessionScanError(Box::new(typed)),
+                            ),
+                            None => {
+                                tracing::warn!("agent session import failed");
+                                defect()
+                            }
+                        },
+                    })
             }
         })?;
         Ok(())

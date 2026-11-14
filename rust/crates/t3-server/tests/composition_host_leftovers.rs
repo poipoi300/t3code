@@ -348,7 +348,10 @@ async fn editor_links_open_only_local_targets_inside_server_workspaces() {
             assert_eq!(launched.args[0], "-R");
             assert!(last.ends_with(name), "{last}");
         }
-        assert!(launches.try_recv().is_err(), "{name} started a second process");
+        assert!(
+            launches.try_recv().is_err(),
+            "{name} started a second process"
+        );
     }
 
     // A link inside a workspace to a network share is refused before it is followed.
@@ -366,7 +369,10 @@ async fn editor_links_open_only_local_targets_inside_server_workspaces() {
             json!({"cwd": link.join("notes.md").display().to_string(), "editor": editor, "reveal": true}),
         )
         .await;
-        assert_eq!(failure(exit)["_tag"], "ExternalLauncherUnsupportedTargetError");
+        assert_eq!(
+            failure(exit)["_tag"],
+            "ExternalLauncherUnsupportedTargetError"
+        );
         assert!(launches.try_recv().is_err());
     }
     server.runtime.shutdown().await.unwrap();
@@ -1155,12 +1161,20 @@ async fn agent_sessions_are_scanned_and_imported_once_from_the_server_home() {
     let candidates = scanned["candidates"].as_array().unwrap();
     assert_eq!(candidates.len(), 1, "{scanned}");
     let candidate = &candidates[0];
-    assert!(same_dir(candidate["path"].as_str().unwrap(), &workspace), "{candidate}");
+    assert!(
+        same_dir(candidate["path"].as_str().unwrap(), &workspace),
+        "{candidate}"
+    );
     assert_eq!(candidate["title"], "agent-project");
     assert_eq!(candidate["threadCount"], 2);
     assert_eq!(candidate["alreadyImported"], false);
     assert_eq!(candidate["git"], Value::Null);
-    let mut sources: Vec<_> = candidate["sources"].as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_owned()).collect();
+    let mut sources: Vec<_> = candidate["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().to_owned())
+        .collect();
     sources.sort();
     assert_eq!(sources, ["claudeAgent", "codex"]);
     assert!(scanned["scannedAt"].is_string());
@@ -1180,13 +1194,26 @@ async fn agent_sessions_are_scanned_and_imported_once_from_the_server_home() {
         )
         .unwrap();
     let scanned = ok(unary(&mut socket, &mut client, "agentSessions.scan", json!({})).await);
-    assert_eq!(scanned["candidates"][0]["alreadyImported"], true, "{scanned}");
+    assert_eq!(
+        scanned["candidates"][0]["alreadyImported"], true,
+        "{scanned}"
+    );
     assert_eq!(scanned["candidates"][0]["projectId"], "project:agents");
 
-    let imported = ok(unary(&mut socket, &mut client, "agentSessions.import", json!({"projectId": "project:agents"})).await);
+    let imported = ok(unary(
+        &mut socket,
+        &mut client,
+        "agentSessions.import",
+        json!({"projectId": "project:agents"}),
+    )
+    .await);
     assert_eq!(imported, json!({"importedCount": 2, "skippedCount": 0}));
     let snapshot = |id: String| {
-        let (http, base, cookie) = (server.http.clone(), server.base.clone(), server.admin.clone());
+        let (http, base, cookie) = (
+            server.http.clone(),
+            server.base.clone(),
+            server.admin.clone(),
+        );
         async move {
             http.get(format!("{base}/api/orchestration/threads/{id}"))
                 .header("cookie", cookie)
@@ -1201,19 +1228,42 @@ async fn agent_sessions_are_scanned_and_imported_once_from_the_server_home() {
     };
     let claude = snapshot(format!("import:claudeAgent:{claude_id}")).await;
     let text = claude.to_string();
-    assert!(text.contains("Fix the project") && text.contains("Done"), "{text}");
+    assert!(
+        text.contains("Fix the project") && text.contains("Done"),
+        "{text}"
+    );
     let codex = snapshot(format!("import:codex:{codex_id}")).await;
     assert!(codex.to_string().contains("Review this code"), "{codex}");
 
     // A second import finds both already imported and adds nothing.
-    let again = ok(unary(&mut socket, &mut client, "agentSessions.import", json!({"projectId": "project:agents"})).await);
+    let again = ok(unary(
+        &mut socket,
+        &mut client,
+        "agentSessions.import",
+        json!({"projectId": "project:agents"}),
+    )
+    .await);
     assert_eq!(again, json!({"importedCount": 2, "skippedCount": 0}));
     let messages = |snapshot: &Value| snapshot.to_string().matches("Fix the project").count();
-    assert_eq!(messages(&snapshot(format!("import:claudeAgent:{claude_id}")).await), messages(&claude));
+    assert_eq!(
+        messages(&snapshot(format!("import:claudeAgent:{claude_id}")).await),
+        messages(&claude)
+    );
 
     // TypeScript's typed failures.
-    let error = failure(unary(&mut socket, &mut client, "agentSessions.import", json!({"projectId": "project:absent"})).await);
-    assert_eq!(error["_tag"], "AgentSessionImportProjectNotFoundError", "{error}");
+    let error = failure(
+        unary(
+            &mut socket,
+            &mut client,
+            "agentSessions.import",
+            json!({"projectId": "project:absent"}),
+        )
+        .await,
+    );
+    assert_eq!(
+        error["_tag"], "AgentSessionImportProjectNotFoundError",
+        "{error}"
+    );
     assert_eq!(error["projectId"], "project:absent");
     let error = failure(
         unary(
@@ -1224,16 +1274,34 @@ async fn agent_sessions_are_scanned_and_imported_once_from_the_server_home() {
         )
         .await,
     );
-    assert_eq!(error["_tag"], "AgentSessionImportProjectChangedError", "{error}");
+    assert_eq!(
+        error["_tag"], "AgentSessionImportProjectChangedError",
+        "{error}"
+    );
 
     // Missing scopes: scan needs orchestration:read, import orchestration:operate.
     let none = server.cookie(&["access:read"]).await;
     let (mut other, mut other_client) = server.socket(&none).await;
-    missing_scope(unary(&mut other, &mut other_client, "agentSessions.scan", json!({})).await, "orchestration:read");
+    missing_scope(
+        unary(
+            &mut other,
+            &mut other_client,
+            "agentSessions.scan",
+            json!({}),
+        )
+        .await,
+        "orchestration:read",
+    );
     let reader = server.cookie(&["orchestration:read"]).await;
     let (mut other, mut other_client) = server.socket(&reader).await;
     missing_scope(
-        unary(&mut other, &mut other_client, "agentSessions.import", json!({"projectId": "project:agents"})).await,
+        unary(
+            &mut other,
+            &mut other_client,
+            "agentSessions.import",
+            json!({"projectId": "project:agents"}),
+        )
+        .await,
         "orchestration:operate",
     );
     drop((socket, other));

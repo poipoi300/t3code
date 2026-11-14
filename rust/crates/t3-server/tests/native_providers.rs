@@ -89,9 +89,10 @@ fn main() -> ExitCode {
         ("managed_codex_runs_signed_in_and_stops_on_sign_out", || {
             Box::pin(managed_codex())
         }),
-        ("claude_gets_t3_mcp_only_over_stdin_and_never_echoes_it", || {
-            Box::pin(claude_mcp_over_stdin())
-        }),
+        (
+            "claude_gets_t3_mcp_only_over_stdin_and_never_echoes_it",
+            || Box::pin(claude_mcp_over_stdin()),
+        ),
     ];
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.iter().any(|argument| argument == "--list") {
@@ -1041,18 +1042,26 @@ async fn claude_mcp_over_stdin() {
         let home = temp.path().to_path_buf();
         let mut claude = instance(Provider::Claude, &home, None, true);
         if let Some(failure) = failure {
-            claude["environment"].as_array_mut().unwrap().push(
-                json!({"name":"T3_FAKE_MCP_FAILURE","value":failure,"sensitive":false}),
-            );
+            claude["environment"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"name":"T3_FAKE_MCP_FAILURE","value":failure,"sensitive":false}));
         }
-        let mut server =
-            Server::start(&home, &settings_with(json!({ "claudeAgent": claude })), None).await;
+        let mut server = Server::start(
+            &home,
+            &settings_with(json!({ "claudeAgent": claude })),
+            None,
+        )
+        .await;
         server
             .create_thread(Provider::Claude, "approval-required")
             .await
             .unwrap();
         server.subscribe();
-        server.send("first", "Write the fixture file.").await.unwrap();
+        server
+            .send("first", "Write the fixture file.")
+            .await
+            .unwrap();
         let outcome = server
             .until(|values| {
                 if !objects(values, &|value| {
@@ -1063,7 +1072,10 @@ async fn claude_mcp_over_stdin() {
                     return Some("pending".to_owned());
                 }
                 run_status(values).filter(|status| {
-                    !matches!(status.as_str(), "queued" | "starting" | "running" | "waiting")
+                    !matches!(
+                        status.as_str(),
+                        "queued" | "starting" | "running" | "waiting"
+                    )
                 })
             })
             .await;
@@ -1106,13 +1118,19 @@ async fn claude_mcp_over_stdin() {
         let env = launch["env"].to_string();
         for secret in [&token, &authorization, &url] {
             assert!(!argv.contains(secret.as_str()), "{failure:?} argv: {argv}");
-            assert!(!env.contains(secret.as_str()), "{failure:?} env has the T3 MCP server");
+            assert!(
+                !env.contains(secret.as_str()),
+                "{failure:?} env has the T3 MCP server"
+            );
         }
         assert_eq!(outcome, "pending", "{failure:?}: {streamed}");
         let snapshot = server.snapshot().await;
         assert!(!snapshot.to_string().contains(&token), "{failure:?}");
         let (_, received) = server.stop().await;
-        assert!(!received.contains(&token), "{failure:?}: token reached a client");
+        assert!(
+            !received.contains(&token),
+            "{failure:?}: token reached a client"
+        );
     }
 }
 

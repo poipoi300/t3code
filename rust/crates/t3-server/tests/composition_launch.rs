@@ -678,10 +678,14 @@ async fn workflow_scripts_are_read_only_inside_the_claude_projects_folder() {
         .unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(elsewhere.join("secret.js"), session.join("link.js")).unwrap();
-    let read = |path: &Path| json!({"threadId": "thread:any", "scriptPath": path.to_string_lossy()});
+    let read =
+        |path: &Path| json!({"threadId": "thread:any", "scriptPath": path.to_string_lossy()});
 
     let script = ok(s
-        .call("orchestration.getWorkflowScript", read(&session.join("flow.js")))
+        .call(
+            "orchestration.getWorkflowScript",
+            read(&session.join("flow.js")),
+        )
         .await);
     assert_eq!(script["contents"], "export default 1;\n");
     assert_eq!(script["truncated"], false);
@@ -691,7 +695,10 @@ async fn workflow_scripts_are_read_only_inside_the_claude_projects_folder() {
     );
     // TypeScript's 256 KiB cap.
     let big = ok(s
-        .call("orchestration.getWorkflowScript", read(&session.join("big.js")))
+        .call(
+            "orchestration.getWorkflowScript",
+            read(&session.join("big.js")),
+        )
         .await);
     assert_eq!(big["truncated"], true);
     assert_eq!(big["contents"].as_str().unwrap().len(), 256 * 1024);
@@ -704,19 +711,22 @@ async fn workflow_scripts_are_read_only_inside_the_claude_projects_folder() {
         // A link inside the folder resolves to its target, which is outside.
         (session.join("link.js"), "outside-root"),
     ] {
-        let error = failure(
-            s.call("orchestration.getWorkflowScript", read(&path))
-                .await,
+        let error = failure(s.call("orchestration.getWorkflowScript", read(&path)).await);
+        assert_eq!(
+            error["_tag"], "OrchestrationGetWorkflowScriptError",
+            "{error}"
         );
-        assert_eq!(error["_tag"], "OrchestrationGetWorkflowScriptError", "{error}");
         assert_eq!(error["reason"], reason, "{}: {error}", path.display());
         assert!(!error.to_string().contains("outside\""), "{error}");
     }
 
     s.reconnect_with(&["filesystem:read"]).await;
     let error = failure(
-        s.call("orchestration.getWorkflowScript", read(&session.join("flow.js")))
-            .await,
+        s.call(
+            "orchestration.getWorkflowScript",
+            read(&session.join("flow.js")),
+        )
+        .await,
     );
     assert_eq!(error["_tag"], "EnvironmentAuthorizationError", "{error}");
     assert_eq!(error["requiredPermission"], "orchestration:read", "{error}");
@@ -737,8 +747,9 @@ async fn setup_scripts_publish_output_and_their_end_on_the_setup_stream() {
     s.insert_project("project-pass", &passing, &script("echo t3-setup-output"));
     let failing = s.home().join("failing");
     repository(&failing);
-    // The terminal's shell is PowerShell on Windows and the test server passes no PATH, so the
-    // native child that exits 3 is named by its full path.
+    // On Windows the terminal's shell is PowerShell, which sets the status itself here: a native
+    // child's exit code (`cmd.exe /c exit 3`) currently reaches the runner as 0 (t3-workspace
+    // request in `server-seam-requests.md`).
     let exit_three = if cfg!(windows) {
         "$global:LASTEXITCODE = 3".to_owned()
     } else {

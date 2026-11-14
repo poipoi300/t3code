@@ -495,8 +495,10 @@ async fn start_domains(
             mcp_sessions,
             titles,
             launch_ports,
-            writers,
-            managed_worktrees,
+            crate::adapters::orchestration::RestorePorts {
+                writers,
+                managed_worktrees,
+            },
         )
         .await?,
     )?;
