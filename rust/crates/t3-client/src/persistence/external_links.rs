@@ -189,10 +189,22 @@ mod tests {
             ("vscode://file/%2F%2Fserver/share", false, false),
             ("vscode://vscode-remote//server/share", false, false),
             ("vscode://vscode-remote/ssh-remote+box/a\\b", false, false),
-            ("vscode://user:pw@vscode-remote/ssh-remote+box/home", false, false),
-            ("vscode://vscode-remote:22/ssh-remote+box/home", false, false),
+            (
+                "vscode://user:pw@vscode-remote/ssh-remote+box/home",
+                false,
+                false,
+            ),
+            (
+                "vscode://vscode-remote:22/ssh-remote+box/home",
+                false,
+                false,
+            ),
         ] {
-            assert_eq!(safe_editor_link(address, Desktop).is_some(), desktop, "{address}");
+            assert_eq!(
+                safe_editor_link(address, Desktop).is_some(),
+                desktop,
+                "{address}"
+            );
             assert_eq!(safe_editor_link(address, Web).is_some(), web, "{address}");
             assert!(safe_editor_link(address, Mobile).is_none(), "{address}");
         }

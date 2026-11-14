@@ -38,12 +38,14 @@ pub struct PrimaryActionState {
     pub can_resume: bool,
 }
 
+type CachedThreadFacts = (Rc<OrchestrationV2ThreadProjection>, Rc<ThreadFacts>);
+
 #[derive(Clone)]
 pub struct ComposerActionsSession<P: Platform + Clone + 'static> {
     runtime: ClientRuntime<P>,
     key: ThreadKey,
     view: Rc<RefCell<Option<Rc<PrimaryActionState>>>>,
-    facts: Rc<RefCell<Option<(Rc<OrchestrationV2ThreadProjection>, Rc<ThreadFacts>)>>>,
+    facts: Rc<RefCell<Option<CachedThreadFacts>>>,
     derivations: Rc<std::cell::Cell<u64>>,
 }
 

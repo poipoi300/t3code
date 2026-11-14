@@ -470,6 +470,22 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         crate::view_logic::shell::sidebar_list::SidebarShelves::new(self.inner.platform.clone())
     }
 
+    /// The address this host would open for `raw` (`external_links::safe_external_url` for its
+    /// surface), or `None` when the policy refuses it: what a UI link may carry as its `href`.
+    pub fn external_link(&self, raw: &str) -> Option<String> {
+        crate::persistence::external_links::safe_external_url(
+            raw,
+            self.inner.platform.external_url_surface(),
+        )
+    }
+
+    /// Opens an ordinary link outside the app through the host's policy (`Platform::open_url`);
+    /// a refused address is an error and nothing opens.
+    pub fn open_external_url(&self, url: String) -> LocalBoxFuture<'static, Result<(), crate::platform::PlatformError>> {
+        let platform = self.inner.platform.clone();
+        async move { platform.open_url(url).await }.boxed_local()
+    }
+
     /// Threads' terminals: tabs and groups, sessions, known sessions and commands.
     pub fn terminals(&self) -> crate::services::terminal_sessions::TerminalSessions<P> {
         crate::services::terminal_sessions::TerminalSessions::new(
@@ -1302,12 +1318,6 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         } else {
             self.inner.damaged.borrow_mut().remove(id);
         }
-        // Relay and SSH routes have no saved address; their uploads take the RPC path.
-        let origin = registration
-            .routes
-            .first()
-            .map(|route| route.http_base.clone())
-            .filter(|base| !base.is_empty());
         let (client, driver) = supervise_saved(
             self.inner.platform.clone(),
             self.inner.store.clone(),
@@ -1316,13 +1326,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             Some(self.route_learner()),
         )
         .await?;
-        self.attach(
-            client,
-            driver,
-            registration.label,
-            registration.routes,
-            origin,
-        );
+        self.attach(client, driver, registration.label, registration.routes);
         Ok(())
     }
 
@@ -1462,7 +1466,6 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         driver: ConnectionTask,
         label: String,
         routes: Vec<Route>,
-        origin: Option<String>,
     ) {
         let id = client.environment().clone();
         let (done, finished) = futures::channel::oneshot::channel();
@@ -1509,7 +1512,6 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 self.inner.store.clone(),
                 client.clone(),
                 send.clone(),
-                origin,
             )),
         ];
         let replaced = {
@@ -1552,11 +1554,12 @@ fn notify_all(listeners: &RefCell<Vec<mpsc::UnboundedSender<()>>>) {
 }
 
 /// Binds message delivery to each new session of `client`, and unbinds it while there is none.
+/// Uploads go to that session's own HTTP address, whatever the route (TypeScript resolves them
+/// against the prepared connection at transfer time).
 fn bind_sessions<P: Platform + 'static>(
     store: ClientStore,
     client: ConnectedClient,
     send: SendService<P, SessionEndpoint>,
-    origin: Option<String>,
 ) -> LocalBoxFuture<'static, ()> {
     // Holds the client until the composition root aborts this task (removal, replacement, drop).
     async move {
@@ -1571,12 +1574,12 @@ fn bind_sessions<P: Platform + 'static>(
                 .and_then(|state| Some((state.session, state.config.clone()?, client.session()?)));
             match current {
                 Some((generation, config, endpoint)) if bound != Some(generation) => {
-                    let connected = match &origin {
-                        Some(origin) => send.connect_with_upload_base(
+                    let connected = match client.http_base_url().filter(|base| !base.is_empty()) {
+                        Some(base) => send.connect_with_upload_base(
                             generation,
                             Rc::new(endpoint),
                             config,
-                            origin,
+                            &base,
                         ),
                         None => send.connect(generation, Rc::new(endpoint), config),
                     };

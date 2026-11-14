@@ -172,10 +172,7 @@ fn match_at(text: &str, at: usize) -> Option<(usize, Found)> {
         let start = at + 2;
         let mut end = start + scheme;
         let mut units = 0;
-        loop {
-            let Some(ch) = text[end..].chars().next() else {
-                break;
-            };
+        while let Some(ch) = text[end..].chars().next() {
             if ch == '(' {
                 let close = text[end + 1..]
                     .char_indices()

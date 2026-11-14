@@ -40,7 +40,11 @@ pub type ConnectionTask = LocalBoxFuture<'static, Result<(), ClientError>>;
 /// environment's routes when they changed (TypeScript's `learnRoutes` registry option). Called
 /// with the environment, the active route's id and the announced endpoints.
 pub type LearnRoutes = Rc<
-    dyn Fn(EnvironmentId, String, Vec<ReportedEndpoint>) -> LocalBoxFuture<'static, Option<Vec<Route>>>,
+    dyn Fn(
+        EnvironmentId,
+        String,
+        Vec<ReportedEndpoint>,
+    ) -> LocalBoxFuture<'static, Option<Vec<Route>>>,
 >;
 
 struct Owner {
@@ -406,7 +410,9 @@ fn start<P: Platform + Clone + 'static>(
 }
 
 /// The direct addresses a server announces in its config, as `ReportedEndpoint`s.
-fn reported_endpoints(config: &t3_contracts::server::ServerConfig) -> Option<Vec<ReportedEndpoint>> {
+fn reported_endpoints(
+    config: &t3_contracts::server::ServerConfig,
+) -> Option<Vec<ReportedEndpoint>> {
     let endpoints = config.direct_endpoints.as_ref()?;
     Some(
         endpoints
@@ -1120,6 +1126,7 @@ mod tests {
         let authorization = RemoteAuthorization::direct(shared.clone());
         let (events, receiver) = mpsc::unbounded();
         let (_, frames) = mpsc::channel(1);
+        let (learned, learned_routes) = mpsc::unbounded();
         let mut runtime = Runtime {
             host: platform.events(),
             platform,
@@ -1141,6 +1148,9 @@ mod tests {
             threads: super::super::threads::ThreadDemand::new().0,
             thread_changes: mpsc::unbounded().1,
             follows: Default::default(),
+            learn: None,
+            learned,
+            learned_routes,
         };
         let key = Key::Shell(1);
         runtime.schedule(key, futures::future::pending().boxed_local());

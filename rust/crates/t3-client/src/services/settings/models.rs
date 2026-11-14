@@ -298,7 +298,7 @@ pub fn managed_runtime_mode_denial(
     };
     view.selected.connected.iter().find_map(|environment| {
         let policy = environment.config.as_ref()?.managed_policy.as_ref()?;
-        let ceiling = policy.limits.as_ref()?.max_runtime_mode.clone()?;
+        let ceiling = policy.limits.as_ref()?.max_runtime_mode?;
         (rank(&mode) > rank(&ceiling)).then(|| SettingsText {
             key: "{organization} limits threads to {mode}.",
             args: vec![
