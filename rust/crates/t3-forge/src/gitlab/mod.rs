@@ -16,6 +16,7 @@ pub struct GitLab {
     cli: Arc<dyn ForgeCli>,
     git: t3_git::Git,
     environment: t3_process::Environment,
+    configured_hosts: std::collections::BTreeSet<String>,
     capabilities: PullRequestCapabilities,
     details: DetailCache,
     projects: Arc<Mutex<HashMap<String, (tokio::time::Instant, Value)>>>,
@@ -66,6 +67,7 @@ impl GitLab {
             cli: Arc::new(ProcessForgeCli),
             git,
             environment: Default::default(),
+            configured_hosts: ["gitlab.com".into()].into(),
             capabilities: parse(
                 json!({"diff":true,"comment":true,"actions":["merge","ready","draft","close","reopen","delete-branch","update-branch","enable-auto-merge","disable-auto-merge","revert"],"mergeMethods":["merge","squash","rebase"],"deleteBranch":true,"updateMethods":["rebase"],"search":true,"reactions":true,"mentions":true,"referenceSigils":["#","!"],"viewedFiles":"environment","review":{"inlineComment":true,"rangeComment":true,"reply":true,"resolve":true,"verdicts":["comment","approve","request-changes"]},"reviewers":{"request":true,"listCandidates":true,"searchCandidates":true},"labels":true,"edit":{"changeRequest":true,"comment":true,"maintainerEdits":true}}),
                 "capabilities",
@@ -96,6 +98,41 @@ impl GitLab {
         self.revision = self.revision.wrapping_add(1);
         self
     }
+    /// Hosts from server configuration, never from an RPC request or a forge response.
+    pub fn with_configured_hosts(
+        mut self,
+        hosts: impl IntoIterator<Item = String>,
+    ) -> Result<Self> {
+        for host in hosts {
+            let host = host.trim().to_ascii_lowercase();
+            if !crate::github::transport::valid_host(&host) {
+                return Err(error("configure", "Invalid GitLab host."));
+            }
+            self.configured_hosts.insert(host);
+        }
+        self.revision = self.revision.wrapping_add(1);
+        Ok(self)
+    }
+    fn configured_host(&self) -> String {
+        self.environment
+            .get(std::ffi::OsStr::new("GITLAB_HOST"))
+            .cloned()
+            .unwrap_or_else(|| std::env::var_os("GITLAB_HOST"))
+            .map(|v| v.to_string_lossy().trim().to_ascii_lowercase())
+            .unwrap_or_else(|| "gitlab.com".into())
+    }
+    fn check_host(&self, host: &str, operation: &str) -> Result<String> {
+        let host = host.trim().to_ascii_lowercase();
+        if !crate::github::transport::valid_host(&host)
+            || (!self.configured_hosts.contains(&host) && host != self.configured_host())
+        {
+            return Err(error(
+                operation,
+                "The GitLab host is not configured for this operation.",
+            ));
+        }
+        Ok(host)
+    }
     async fn execute(
         &self,
         cwd: &Path,
@@ -105,14 +142,9 @@ impl GitLab {
         stdin: Option<Value>,
         max_bytes: usize,
     ) -> Result<CliResponse> {
+        let host = self.check_host(host.unwrap_or(&self.configured_host()), operation)?;
         let mut environment = self.environment.clone();
-        if let Some(host) = host {
-            let host = host.trim().to_lowercase();
-            if !crate::github::transport::valid_host(&host) {
-                return Err(error(operation, "Invalid GitLab host."));
-            }
-            environment.insert("GITLAB_HOST".into(), Some(host.into()));
-        }
+        environment.insert("GITLAB_HOST".into(), Some(host.into()));
         let response = self
             .cli
             .run(CliRequest {
@@ -237,3 +269,4 @@ impl GitLab {
         json!({"fullPath":input.repo.repository,"iid":input.number.to_string()})
     }
 }
+

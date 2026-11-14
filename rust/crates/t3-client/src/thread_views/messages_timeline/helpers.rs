@@ -6,7 +6,7 @@ pub(super) fn tool_action(entry: &WorkLogEntry) -> &'static str {
     if entry.item_type.as_deref() == Some("thread_created") {
         return "thread-create";
     }
-    if let Some(p) = resolve_work_entry_tool_presentation(entry, None) {
+    if let Some(p) = super::presentation::tool_presentation(entry, None) {
         match p.action.as_deref() {
             Some("link-pr") => return "link-pr",
             Some("unlink-pr") => return "unlink-pr",
@@ -313,7 +313,7 @@ pub fn work_entry_display_label(entry: &WorkLogEntry, workspace_root: Option<&st
             thought
         };
     }
-    if let Some(p) = resolve_work_entry_tool_presentation(entry, None) {
+    if let Some(p) = super::presentation::tool_presentation(entry, None) {
         return p.display_name;
     }
     if let Some(command) = entry.command.as_deref().filter(|s| !s.js_trim().is_empty()) {
@@ -390,7 +390,7 @@ pub(super) fn single_tool_label(entry: &WorkLogEntry) -> String {
             thought
         };
     }
-    if let Some(p) = resolve_work_entry_tool_presentation(entry, Some("completed")) {
+    if let Some(p) = super::presentation::tool_presentation(entry, Some("completed")) {
         return p.display_name;
     }
     if let Some(title) = dynamic_title(entry) {
@@ -422,7 +422,7 @@ pub fn live_work_entry_label(
     }
     let mut displayed = entry.clone();
     displayed.tool_lifecycle_status = Some(status.into());
-    if let Some(p) = resolve_work_entry_tool_presentation(&displayed, None) {
+    if let Some(p) = super::presentation::tool_presentation(&displayed, None) {
         return p.display_name;
     }
     if let Some(command) = entry
@@ -495,8 +495,7 @@ fn windows_absolute(path: &str) -> bool {
 pub fn thread_read_target_id(entry: &WorkLogEntry) -> Option<String> {
     let item = entry.structured_payload.as_ref().map(value)?;
     if item["type"] != "dynamic_tool"
-        || crate::work_log::presentation::tool_id(s(&item["toolName"])).as_deref()
-            != Some("t3_thread_read")
+        || super::presentation::tool_id(s(&item["toolName"])) != Some("t3_thread_read")
     {
         return None;
     }
@@ -700,8 +699,7 @@ pub(super) fn shown_entries(input: &MessagesTimelineRowsInput, entries: &[Entry]
         };
         if item["type"] != "dynamic_tool"
             || !matches!(s(&item["status"]), "running" | "completed")
-            || crate::work_log::presentation::tool_id(s(&item["toolName"])).as_deref()
-                != Some("delegate_task")
+            || super::presentation::tool_id(s(&item["toolName"])) != Some("delegate_task")
         {
             return true;
         }
@@ -832,9 +830,7 @@ pub(super) fn patch_streaming(
     input: &MessagesTimelineRowsInput,
     previous: &MessagesTimelineRowsProjection,
 ) -> Option<Vec<Rc<MessagesTimelineRow>>> {
-    let mut context = input.clone();
-    context.timeline_entries = previous.input.timeline_entries.clone();
-    if context != previous.input
+    if !same_rows_context(input, &previous.input)
         || input.timeline_entries.len() != previous.input.timeline_entries.len()
     {
         return None;
@@ -847,7 +843,7 @@ pub(super) fn patch_streaming(
         .iter()
         .zip(&previous.input.timeline_entries)
     {
-        if Rc::ptr_eq(e, p) {
+        if Rc::ptr_eq(e, p) || e == p {
             continue;
         }
         if e.id != p.id || e.created_at != p.created_at || e.attempt != p.attempt {

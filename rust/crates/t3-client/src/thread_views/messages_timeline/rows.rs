@@ -540,7 +540,7 @@ pub(super) fn derive(input: &MessagesTimelineRowsInput, raw: &[Entry]) -> Vec<Va
                 }
             } else if work.len() == 1 && session::work_log_entry_is_tool_like(work[0]) {
                 let label = if helpers::tool_action(work[0]) == "edit" {
-                    summarize_tool_group(&owned).summary
+                    super::presentation::summarize(&owned).summary
                 } else {
                     helpers::single_tool_label(work[0])
                 };
@@ -582,7 +582,7 @@ pub(super) fn derive(input: &MessagesTimelineRowsInput, raw: &[Entry]) -> Vec<Va
                 let summary = if work.len() == 1 && !session::work_log_entry_is_tool_like(work[0]) {
                     work[0].label.clone()
                 } else {
-                    summarize_tool_group(&owned).summary
+                    super::presentation::summarize(&owned).summary
                 };
                 let mut row = json!({"kind":"work-toggle","id":format!("work-toggle:{}",e.id()),"createdAt":e.at(),"runId":e.w()["runId"],"groupId":id,"hiddenCount":work.len(),"expanded":expanded,"summary":summary,"summaryKind":tool_group_summary_kind(&owned),"hasFailure":latest_tool.is_some_and(|w|session::work_entry_display_indicates_tool_failure(w))});
                 if let Some(surface) = surface {

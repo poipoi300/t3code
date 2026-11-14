@@ -234,6 +234,46 @@ pub fn approval_timeline_row(
     ))
 }
 
+/// Requests can arrive before their turn item. Keep those actionable without duplicating
+/// requests already mounted by Work/WorkLive rows from the client projection.
+pub fn unmatched_pending_approval_rows(
+    rows: Memo<Vec<Rc<MessagesTimelineRow>>>,
+    context: ApprovalContext,
+) -> impl IntoElement {
+    let projection = context.projection;
+    let approvals = computed(move || {
+        projection.with(|projection| {
+            let Some(projection) = projection else {
+                return Vec::new();
+            };
+            let source = projection.source();
+            let pending = requests::derive_pending(&source.runtime_requests, &source.turn_items);
+            if pending.approvals.is_empty() {
+                return Vec::new();
+            }
+            let matched = rows.with(|rows| {
+                rows.iter()
+                    .flat_map(|row| ApprovalRow::all_from_row(row, projection))
+                    .map(|row| row.request.id.clone())
+                    .collect::<Vec<_>>()
+            });
+            pending
+                .approvals
+                .iter()
+                .filter(|pending| !matched.contains(&pending.request.id))
+                .filter_map(|pending| ApprovalRow::from_pending(pending, projection))
+                .collect::<Vec<_>>()
+        })
+    });
+    view().child(each(
+        move || approvals.get(),
+        |approval| serde_json::to_string(&approval.request.id).expect("request identity"),
+        move |approval, _| {
+            timeline_pending_approval_row(computed(move || Some(approval.get())), context.clone())
+        },
+    ))
+}
+
 /// Also mounts unmatched client requests, which have no timeline entry yet.
 pub fn timeline_pending_approval_row(
     row: Memo<Option<ApprovalRow>>,

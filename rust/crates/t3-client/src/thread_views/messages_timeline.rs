@@ -16,8 +16,10 @@ use t3_contracts::orchestration_v2::OrchestrationV2ProjectedTurnItem;
 
 mod folds;
 mod helpers;
+mod presentation;
 mod rows;
 pub mod viewport;
+pub mod work_entry;
 pub use helpers::{
     AssistantMessageCopyState, live_answer_preview, live_work_entry_label,
     resolve_assistant_message_copy_state, thread_read_label_prefix, thread_read_target_id,
@@ -546,6 +548,19 @@ pub fn same_rows_input(
     left: &MessagesTimelineRowsInput,
     right: &MessagesTimelineRowsInput,
 ) -> bool {
+    left.timeline_entries.len() == right.timeline_entries.len()
+        && left
+            .timeline_entries
+            .iter()
+            .zip(&right.timeline_entries)
+            .all(|(a, b)| Rc::ptr_eq(a, b))
+        && same_rows_context(left, right)
+}
+fn same_rows_context(left: &MessagesTimelineRowsInput, right: &MessagesTimelineRowsInput) -> bool {
+    let mut left = left.clone();
+    left.timeline_entries.clear();
+    let mut right = right.clone();
+    right.timeline_entries.clear();
     left == right
 }
 pub fn derive_messages_timeline_rows_with_state(
@@ -553,16 +568,25 @@ pub fn derive_messages_timeline_rows_with_state(
     previous: Option<&MessagesTimelineRowsProjection>,
 ) -> MessagesTimelineRowsProjection {
     if let Some(previous) = previous {
-        if previous.input == *input {
+        if same_rows_input(&previous.input, input) {
             return MessagesTimelineRowsProjection {
                 input: input.clone(),
                 rows: previous.rows.clone(),
             };
         }
         if let Some(rows) = helpers::patch_streaming(input, previous) {
+            let unchanged = rows.len() == previous.rows.len()
+                && rows
+                    .iter()
+                    .zip(previous.rows.iter())
+                    .all(|(a, b)| Rc::ptr_eq(a, b));
             return MessagesTimelineRowsProjection {
                 input: input.clone(),
-                rows: Rc::new(rows),
+                rows: if unchanged {
+                    previous.rows.clone()
+                } else {
+                    Rc::new(rows)
+                },
             };
         }
     }

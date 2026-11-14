@@ -248,20 +248,11 @@ fn assert_case(case: &Value) {
             assert_reuse(&case["identity"], &next.result, &previous.result);
             value(&next.result)
         }
-        "timelineTurnFoldRunIdsByEntryId" => {
-            let input = input(&args[0]);
-            let entries = helpers::shown_entries(&input, &raw_entries(&input));
-            let result: Vec<_> = folds::turn_folds(&entries, &input)
+        "timelineTurnFoldRunIdsByEntryId" => value(
+            &timeline_turn_fold_run_ids_by_entry_id(&input(&args[0]))
                 .into_iter()
-                .flat_map(|f| {
-                    f.members
-                        .into_iter()
-                        .filter(move |id| f.hidden.contains(id))
-                        .map(move |id| json!([id, f.run_id]))
-                })
-                .collect();
-            json!(result)
-        }
+                .collect::<Vec<_>>(),
+        ),
         "liveAnswerPreview" => {
             let entries: Vec<_> = serde_json::from_value(args[0].clone()).expect("preview entries");
             json!(live_answer_preview(&entries))

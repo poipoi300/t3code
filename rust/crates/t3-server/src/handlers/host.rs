@@ -1,4 +1,5 @@
-//! Package A: host-service RPCs (`server.reportClientActivity`).
+//! Package A: host-service RPCs: client activity, npm release lookup, triage preparation and
+//! database storage.
 #[cfg(feature = "host")]
 use crate::registry::{Failure, ServerDefect};
 use crate::{registry::HandlerRegistry, services::Domains};
@@ -7,8 +8,9 @@ use t3_contracts::rpc::*;
 pub fn register_with(registry: &mut HandlerRegistry, domains: &Domains) -> crate::Result<()> {
     #[cfg(feature = "host")]
     if let Some(host) = domains.get::<crate::adapters::host::HostAdapter>() {
+        let h = host.clone();
         registry.register::<WsServerReportClientActivityRpc, _, _>(move |ctx, input| {
-            let host = host.clone();
+            let host = h.clone();
             async move {
                 // The lease belongs to this socket; a call outside a socket has none to renew.
                 let client = ctx
@@ -30,8 +32,72 @@ pub fn register_with(registry: &mut HandlerRegistry, domains: &Domains) -> crate
                     })
             }
         })?;
+        let h = host.clone();
+        registry.register::<WsServerGetNpmReleaseRpc, _, _>(move |_, input| {
+            let h = h.clone();
+            async move {
+                h.npm.get(&input.spec).await.map_err(|error| {
+                    Failure::Typed(WsServerGetNpmReleaseError::ServerNpmReleaseError(Box::new(
+                        error,
+                    )))
+                })
+            }
+        })?;
+        let h = host.clone();
+        registry.register::<WsServerPrepareTriageRpc, _, _>(move |_, input| {
+            let h = h.clone();
+            async move {
+                h.triage.prepare(input).await.map_err(|error| {
+                    Failure::Typed(WsServerPrepareTriageError::ServerPrepareTriageError(
+                        Box::new(t3_contracts::server::ServerPrepareTriageError {
+                            tag: t3_contracts::server::ServerPrepareTriageErrorTag::ServerPrepareTriageError,
+                            cause: Some(Some(serde_json::json!({"message": error.to_string()}))),
+                        }),
+                    ))
+                })
+            }
+        })?;
+        #[cfg(feature = "orchestration")]
+        {
+            let h = host.clone();
+            // The current status (null until known), then each change; dropping it unsubscribes.
+            registry.register_stream::<WsServerGetDatabaseStorageRpc, _, _, _>(move |_, _| {
+                let mut status = h.storage.service.status();
+                async move {
+                    Ok(async_stream::stream! {
+                        loop {
+                            let current = status.borrow_and_update().clone();
+                            yield Ok(current);
+                            if status.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                    })
+                }
+            })?;
+            let h = host;
+            registry.register::<WsServerReclaimDatabaseSpaceRpc, _, _>(move |_, _| {
+                let h = h.clone();
+                async move {
+                    h.storage.service.request_reclaim().await.map_err(|error| {
+                        Failure::Typed(WsServerReclaimDatabaseSpaceError::DatabaseReclaimError(
+                            Box::new(error),
+                        ))
+                    })
+                }
+            })?;
+        }
+        #[cfg(not(feature = "orchestration"))]
+        {
+            registry.unimplemented::<WsServerGetDatabaseStorageRpc>()?;
+            registry.unimplemented::<WsServerReclaimDatabaseSpaceRpc>()?;
+        }
         return Ok(());
     }
     let _ = domains;
-    registry.unimplemented::<WsServerReportClientActivityRpc>()
+    registry.unimplemented::<WsServerReportClientActivityRpc>()?;
+    registry.unimplemented::<WsServerGetNpmReleaseRpc>()?;
+    registry.unimplemented::<WsServerPrepareTriageRpc>()?;
+    registry.unimplemented::<WsServerGetDatabaseStorageRpc>()?;
+    registry.unimplemented::<WsServerReclaimDatabaseSpaceRpc>()
 }

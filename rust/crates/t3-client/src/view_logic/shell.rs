@@ -30,6 +30,8 @@ pub mod request_latency;
 pub mod search;
 #[path = "shell/shortcuts.rs"]
 pub mod shortcuts;
+#[path = "shell/shortcut_config.rs"]
+pub mod shortcut_config;
 #[path = "shell/sidebar.rs"]
 pub mod sidebar;
 #[path = "shell/skill_search.rs"]

@@ -17,6 +17,8 @@ mod resources;
 pub use resources::*;
 #[path = "session/links.rs"]
 pub mod links;
+#[path = "session/markdown_link_presentation.rs"]
+pub mod markdown_link_presentation;
 #[path = "session/markdown.rs"]
 pub mod markdown;
 #[path = "session/questions.rs"]

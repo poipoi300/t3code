@@ -4,6 +4,7 @@ use super::messages_timeline::{MessagesTimelineRow, MessagesTimelineRowContent};
 use crate::view_logic::{
     JsTrim,
     context_references::collect_references,
+    is_js_whitespace,
     session::{
         ChatMessage, MessageAttachment,
         timestamps::{TimestampHost, TimestampPresenter},
@@ -13,7 +14,7 @@ use serde_json::Value;
 use std::{collections::BTreeSet, rc::Rc};
 use t3_contracts::{
     chat_attachment::{ChatAttachment, ChatFileAttachment},
-    composer_context::ComposerContextRecord,
+    composer_context::{COMPOSER_CONTEXT_LABEL_MAX_CHARS, ComposerContextRecord},
     settings::TimestampFormat,
 };
 
@@ -147,6 +148,23 @@ pub fn message_id(message: &ChatMessage) -> String {
         })
 }
 
+pub fn sender_thread_key(
+    message: &ChatMessage,
+    active_environment: &crate::types::EnvironmentId,
+) -> Option<crate::types::ThreadKey> {
+    use crate::types::{EnvironmentId, ThreadId, ThreadKey};
+    if let Some(sender) = message.metadata.get("linkedSender") {
+        return Some(ThreadKey {
+            environment: EnvironmentId(sender["environmentId"].as_str()?.into()),
+            thread: ThreadId(sender["threadId"].as_str()?.into()),
+        });
+    }
+    Some(ThreadKey {
+        environment: active_environment.clone(),
+        thread: ThreadId(message.metadata.get("senderThreadId")?.as_str()?.into()),
+    })
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Grouping {
     pub grouped_with_previous: bool,
@@ -185,6 +203,35 @@ pub struct Reference {
     pub end: usize,
 }
 
+fn sanitize_label(label: &str, kind: &str) -> String {
+    let mut cleaned = String::new();
+    let mut separator = false;
+    for ch in label.chars() {
+        if is_js_whitespace(ch) || matches!(ch, '[' | ']' | '\\') {
+            separator = !cleaned.is_empty();
+            continue;
+        }
+        if separator {
+            cleaned.push(' ');
+        }
+        cleaned.push(ch);
+        separator = false;
+    }
+    let mut units = 0;
+    let end = cleaned.char_indices().find_map(|(index, ch)| {
+        units += ch.len_utf16();
+        (units > COMPOSER_CONTEXT_LABEL_MAX_CHARS).then_some(index)
+    });
+    if let Some(end) = end {
+        cleaned.truncate(end);
+    }
+    if cleaned.is_empty() {
+        kind.into()
+    } else {
+        cleaned
+    }
+}
+
 pub fn context_references(text: &str) -> Vec<Reference> {
     collect_references(text)
         .into_iter()
@@ -193,16 +240,11 @@ pub fn context_references(text: &str) -> Vec<Reference> {
             let label = source
                 .split_once('[')
                 .and_then(|(_, tail)| tail.split_once("](t3-context:"))
-                .map_or(reference.kind, |(label, _)| label)
-                .js_trim();
+                .map_or(reference.kind, |(label, _)| label);
             Reference {
                 kind: reference.kind.into(),
                 context_id: reference.context_id.into(),
-                label: if label.is_empty() {
-                    reference.kind.into()
-                } else {
-                    label.into()
-                },
+                label: sanitize_label(label, reference.kind),
                 source: source.into(),
                 start: reference.start,
                 end: reference.end,
@@ -357,7 +399,7 @@ pub struct UserRow {
     pub continues_steer: bool,
     pub grouped_with_previous: bool,
     pub grouped_with_next: bool,
-    pub sender_label: String,
+    pub sender_label: Option<String>,
     pub can_open_sender: bool,
     pub scheduled_task_title: Option<String>,
     pub has_scheduled_task: bool,
@@ -506,19 +548,42 @@ pub fn present_user_message_row(
         .metadata
         .get("linkedSender")
         .and_then(|sender| sender["title"].as_str())
-        .map(str::trim)
+        .map(JsTrim::js_trim)
         .filter(|title| !title.is_empty())
-        .unwrap_or("Agent")
-        .to_owned();
+        .map(str::to_owned);
+    let copy_text =
+        if media_only && presentation.text.is_empty() {
+            records
+                .iter()
+                .filter_map(|record| {
+                    let (context_id, attachment_id) = attachment_record(record)?;
+                    if !images.iter().chain(&videos).any(|attachment| {
+                        match &attachment.attachment {
+                            ChatAttachment::Image(image) => image.id == attachment_id,
+                            ChatAttachment::File(file) => file.id == attachment_id,
+                            _ => false,
+                        }
+                    }) {
+                        return None;
+                    }
+                    let record = serde_json::to_value(record).ok()?;
+                    let kind = record["kind"].as_str()?;
+                    let label = sanitize_label(record["label"].as_str()?, kind);
+                    Some(format!(
+                        "{}[{label}](t3-context://v1/{kind}/{context_id})",
+                        if kind == "image" { "!" } else { "" }
+                    ))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            presentation.text.clone()
+        };
     let timestamps = TimestampPresenter(host);
     Some(UserRow {
         id: message_id(message),
         text: presentation.text.clone(),
-        copy_text: if records.is_empty() {
-            plain_text.clone()
-        } else {
-            presentation.text.clone()
-        },
+        copy_text,
         prompt_link: prompt_link_for(&plain_text),
         plain_text,
         attribution: presentation.attribution,
@@ -538,7 +603,9 @@ pub fn present_user_message_row(
         scheduled_task_id: presentation.scheduled_task_id,
         revert_turn_count: revert_turn_count.and_then(|count| usize::try_from(count).ok()),
         fresh_context: item["item"]["freshContext"] == true,
-        model_switch: item["item"].get("modelSwitch").is_some(),
+        model_switch: item["item"]
+            .get("modelSwitch")
+            .is_some_and(|value| !value.is_null()),
         workflow_opening: false,
         has_media: !images.is_empty() || !videos.is_empty(),
         has_audio: !audio.is_empty(),

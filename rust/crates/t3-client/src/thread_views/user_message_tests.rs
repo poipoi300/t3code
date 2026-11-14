@@ -259,5 +259,47 @@ fn derives_media_only_media_above_text_file_cards_and_audio_from_projected_messa
         assert_eq!(p.images.len(), 1);
     }
     assert!(row(message(json!({"text":REFERENCE,"attachments":[file()],"context":{"version":1,"records":[record()]}}))).file_cards_only);
+    let linked = row(message(
+        json!({"text":REFERENCE,"context":{"version":1,"records":[record()]}}),
+    ));
+    assert_eq!(linked.copy_text, REFERENCE);
+    assert_eq!(linked.plain_text, "report.pdf");
+    assert!(!linked.model_switch);
+    let label = format!("{} 😀", "a".repeat(198));
+    assert_eq!(
+        context_references(&format!("[{label}](t3-context://v1/file/report)"))[0].label,
+        format!("{} ", "a".repeat(198))
+    );
     assert!(row(message(json!({"text":"","attachments":[{"type":"file","id":"voice","name":"voice.mp3","mimeType":"audio/mpeg","sizeBytes":2}]}))).audio_only);
+    let media = row(message(
+        json!({"text":"","attachments":[{"type":"image","id":"photo","name":"photo.png","mimeType":"image/png","sizeBytes":2}],
+        "context":{"version":1,"records":[{"version":1,"kind":"image","contextId":"photo","attachmentId":"photo","label":"photo.png","name":"photo.png","mimeType":"image/png","sizeBytes":2}]}}),
+    ));
+    assert_eq!(media.copy_text, "![photo.png](t3-context://v1/image/photo)");
+}
+
+#[test]
+fn sender_links_keep_the_destination_environment_and_prefer_linked_sender() {
+    use crate::types::{EnvironmentId, ThreadId, ThreadKey};
+    let active = EnvironmentId("active".into());
+    assert_eq!(sender_thread_key(&message(json!({})), &active), None);
+    assert_eq!(
+        sender_thread_key(&message(json!({"senderThreadId":"sender"})), &active),
+        Some(ThreadKey {
+            environment: active.clone(),
+            thread: ThreadId("sender".into()),
+        })
+    );
+    assert_eq!(
+        sender_thread_key(
+            &message(
+                json!({"senderThreadId":"local","linkedSender":{"environmentId":"remote","threadId":"sender","title":"Agent"}})
+            ),
+            &active
+        ),
+        Some(ThreadKey {
+            environment: EnvironmentId("remote".into()),
+            thread: ThreadId("sender".into()),
+        })
+    );
 }

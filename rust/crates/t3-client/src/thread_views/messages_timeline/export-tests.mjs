@@ -62,6 +62,13 @@ const copyProbes = [
 ];
 for(const [i,text] of copyProbes.entries()) {globalThis.__timelineTitle=`copy adapter differential probe ${i+1}`;globalThis.__timelineTitles.push(globalThis.__timelineTitle);copy({text,showCopyButton:true,streaming:false});}
 const derive = (await import(pathToFileURL(resolve(root,source)).href)).deriveMessagesTimelineRows;
+for(const status of ['inProgress','completed','failed','stopped']) {
+  globalThis.__timelineTitle=`upstream theme tool labels and priority ${status}`;globalThis.__timelineTitles.push(globalThis.__timelineTitle);
+  const tools=['t3_theme_read','t3_theme_set','t3_theme_read','t3_theme_set'];
+  const timelineEntries=tools.map((tool,index)=>({kind:'work',id:`theme-${index}`,createdAt:'2026-01-01T00:00:00Z',entry:{id:`theme-${index}`,createdAt:'2026-01-01T00:00:00Z',runId:null,label:tool,tone:'tool',itemType:'dynamic_tool',toolTitle:`t3-code.${tool}`,toolLifecycleStatus:status}}));
+  for(const e of timelineEntries) (await import(pathToFileURL(resolve(root,source)).href)).workEntryDisplayLabel(e.entry,undefined);
+  derive({timelineEntries,isWorking:false,turnDiffSummaries:[],supportsConversationRollback:false});
+}
 for(const [i,fields] of [
   {label:'Read'}, {label:'Read file',toolTitle:'Read'},
   {label:'Search',toolData:{kind:'search'}}, {label:'Read a file',toolData:{kind:'read'}},
@@ -71,12 +78,23 @@ for(const [i,fields] of [
   const timelineEntries=[0,1].map(index=>({kind:'work',id:`classifier-${index}`,createdAt:'2026-01-01T00:00:00Z',entry:{id:`classifier-${index}`,createdAt:'2026-01-01T00:00:00Z',runId:null,tone:'tool',toolLifecycleStatus:'completed',...fields}}));
   derive({timelineEntries,isWorking:false,turnDiffSummaries:[],supportsConversationRollback:false});
 }
+globalThis.__timelineTitle='upstream theme-set keeps actionable summary priority';globalThis.__timelineTitles.push(globalThis.__timelineTitle);
+derive({timelineEntries:[
+  {toolTitle:'t3-code.t3_theme_read',itemType:'dynamic_tool'},
+  {toolTitle:'Read',itemType:'dynamic_tool'},
+  {command:'pwd',itemType:'command_execution'},
+  {toolTitle:'t3-code.t3_theme_set',itemType:'dynamic_tool'},
+].map((fields,index)=>({kind:'work',id:`priority-${index}`,createdAt:'2026-01-01T00:00:00Z',entry:{id:`priority-${index}`,createdAt:'2026-01-01T00:00:00Z',runId:null,label:'tool',tone:'tool',toolLifecycleStatus:'completed',...fields}})),isWorking:false,turnDiffSummaries:[],supportsConversationRollback:false});
 const destination = resolve(dirname(fileURLToPath(import.meta.url)), 'typescript-cases.json');
-const hashes = Object.fromEntries([source,tests,activeTests].map(path=>[path,createHash('sha256').update(readFileSync(resolve(root,path))).digest('hex')]));
+const toolDefinitionsSource='packages/shared/src/t3McpToolPresentation.ts';
+const {T3_MCP_TOOL_NAMES,resolveT3McpToolDefinition}=await import(pathToFileURL(resolve(root,toolDefinitionsSource)).href);
+const definitions=[...T3_MCP_TOOL_NAMES].map(name=>[name,resolveT3McpToolDefinition(name)]);
+const hashes = Object.fromEntries([source,tests,activeTests,toolDefinitionsSource].map(path=>[path,createHash('sha256').update(readFileSync(resolve(root,path))).digest('hex')]));
 const corpus = {source,tests,activeTests,hashes,titles:globalThis.__timelineTitles,cases:globalThis.__timelineCases};
 if(process.argv.includes('--stdout')) process.stdout.write(JSON.stringify(corpus));
 else {
   writeFileSync(destination,JSON.stringify(corpus));
+  writeFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'tool_definitions.rs'),'// Generated from packages/shared/src/t3McpToolPresentation.ts by export-tests.mjs.\nconst TOOL_DEFINITIONS: &[(&str, [&str; 4], &str, &str)] = &[\n'+definitions.map(([name,d])=>`    (${JSON.stringify(name)}, [${d.labels.map(JSON.stringify).join(', ')}], ${JSON.stringify(d.icon)}, ${JSON.stringify(d.summaryAction)}),`).join('\n')+'\n];\n');
   writeFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'test_cases.rs'),globalThis.__timelineTitles.map((title,index)=>`#[test]\nfn ts_case_${String(index+1).padStart(3,'0')}() { check_test(${index}); } // ${title.replaceAll('\n',' ')}`).join('\n')+'\n');
   console.log(JSON.stringify({destination,tests:globalThis.__timelineTitles.length,calls:globalThis.__timelineCases.length}));
 }

@@ -1,4 +1,6 @@
 //! Inline Markdown parsing retains source offsets in browser UTF-16 units.
+mod literal_underscore_runs;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mark {
     Bold,
@@ -67,6 +69,7 @@ fn word(ch: u16) -> bool {
     matches!(ch, 48..=57 | 65..=90 | 97..=122 | 95)
 }
 pub fn parse_inline_pieces(text: &str) -> Vec<SourcePiece> {
+    let literal_runs = literal_underscore_runs::starts(text);
     let units: Vec<u16> = text.encode_utf16().collect();
     let mut root = Vec::new();
     let mut stack: Vec<Frame> = Vec::new();
@@ -110,6 +113,11 @@ pub fn parse_inline_pieces(text: &str) -> Vec<SourcePiece> {
             continue;
         }
         let end = index + units[index..].iter().take_while(|u| **u == ch).count();
+        if literal_runs.contains(&index) {
+            append(&mut root, &mut stack, index, end, vec![]);
+            index = end;
+            continue;
+        }
         let before = index.checked_sub(1).and_then(|i| units.get(i)).copied();
         let after = units.get(end).copied();
         let can_close =
