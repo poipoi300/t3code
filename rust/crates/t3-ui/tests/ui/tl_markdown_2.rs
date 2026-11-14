@@ -257,7 +257,7 @@ fn external_links_keep_literal_labels_open_the_url_and_share_failed_favicon_stat
         );
         app.press("role:link[Settings]")
             .expect("activate external link");
-        assert_eq!(app.screen().opened_urls(), &["https://example.com"]);
+        assert_eq!(app.screen().opened_urls(), &["https://example.com/"]);
         app.fail_images("https://www.google.com/s2/favicons?domain=example.com&sz=32")
             .expect("favicon fails");
         app.wait_for("role:link[another]")

@@ -51,8 +51,39 @@ fn shell_items_with(
     completed_at: Option<&str>,
     settled: usize,
 ) -> Vec<OrchestrationV2ShellStreamItem> {
-    let thread = json!({"id":"t1","projectId":"project","title":"Fix the build","providerInstanceId":"codex","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":null,"activeProviderThreadId":null,"lineage":{"rootThreadId":"t1","parentThreadId":null,"relationshipToParent":null},"forkedFrom":null,"createdBy":"user","creationSource":"web","createdAt":NOW,"updatedAt":NOW,"archivedAt":null,"settledOverride":null,"settledAt":null,"lastVisitedAt":null,"deletedAt":null,"latestRunId":"run-1","activeRunId":null,"status":status,"latestRunCompletedAt":completed_at,"pendingRuntimeRequest":null,"latestVisibleMessage":null,"latestUserMessageAt":null,"hasActionableProposedPlan":false,"itemCount":1,"visibleItemCount":1});
-    let snapshot = json!({"kind":"snapshot","snapshot":{"schemaVersion":1,"snapshotSequence":1,"threads":std::iter::once(thread).chain((0..settled).map(settled_thread)).collect::<Vec<_>>(),"archivedThreads":[],"projects":[{"id":"project","title":"Project","workspaceRoot":"/workspace/project","repositoryIdentity":null,"defaultModelSelection":null,"scripts":[],"createdAt":NOW,"updatedAt":NOW}]}});
+    shell_items_of(
+        std::iter::once(thread_t1(status, completed_at))
+            .chain((0..settled).map(settled_thread))
+            .collect(),
+    )
+}
+
+/// Thread `t1` ("Fix the build") with `status`.
+fn thread_t1(status: &str, completed_at: Option<&str>) -> serde_json::Value {
+    json!({"id":"t1","projectId":"project","title":"Fix the build","providerInstanceId":"codex","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":null,"activeProviderThreadId":null,"lineage":{"rootThreadId":"t1","parentThreadId":null,"relationshipToParent":null},"forkedFrom":null,"createdBy":"user","creationSource":"web","createdAt":NOW,"updatedAt":NOW,"archivedAt":null,"settledOverride":null,"settledAt":null,"lastVisitedAt":null,"deletedAt":null,"latestRunId":"run-1","activeRunId":null,"status":status,"latestRunCompletedAt":completed_at,"pendingRuntimeRequest":null,"latestVisibleMessage":null,"latestUserMessageAt":null,"hasActionableProposedPlan":false,"itemCount":1,"visibleItemCount":1})
+}
+
+/// `thread`, snoozed until long after the test's clock.
+fn snoozed(mut thread: serde_json::Value) -> serde_json::Value {
+    thread["snoozedAt"] = json!(NOW);
+    thread["snoozedUntil"] = json!("2099-01-01T00:00:00.000Z");
+    thread
+}
+
+/// A task `t1` started (a subagent created through MCP), still running and asking for input.
+fn subagent_asking_for_input() -> serde_json::Value {
+    let mut child = thread_t1("running", None);
+    child["id"] = json!("sub-1");
+    child["title"] = json!("Run the tests");
+    child["creationSource"] = json!("mcp");
+    child["lineage"] = json!({"rootThreadId":"t1","parentThreadId":"t1","relationshipToParent":"subagent"});
+    child["pendingRuntimeRequest"] = json!({"id":"q","kind":"user_input","createdAt":NOW});
+    child
+}
+
+/// The shell stream items that list `threads` in the seeded project.
+fn shell_items_of(threads: Vec<serde_json::Value>) -> Vec<OrchestrationV2ShellStreamItem> {
+    let snapshot = json!({"kind":"snapshot","snapshot":{"schemaVersion":1,"snapshotSequence":1,"threads":threads,"archivedThreads":[],"projects":[{"id":"project","title":"Project","workspaceRoot":"/workspace/project","repositoryIdentity":null,"defaultModelSelection":null,"scripts":[],"createdAt":NOW,"updatedAt":NOW}]}});
     [snapshot, json!({"kind":"synchronized"})]
         .into_iter()
         .map(|item| {
@@ -408,6 +439,24 @@ fn AppTree(props: TreeProps) -> impl IntoElement {
                 })
                 .child(text("Complete the turn")),
         )
+        .child(shell_button(
+            "Subagent asks for input",
+            store.clone(),
+            session,
+            vec![thread_t1("running", None), subagent_asking_for_input()],
+        ))
+        .child(shell_button(
+            "Snooze the thread",
+            store.clone(),
+            session,
+            vec![snoozed(thread_t1("running", None))],
+        ))
+        .child(shell_button(
+            "Complete the snoozed turn",
+            store.clone(),
+            session,
+            vec![snoozed(thread_t1("completed", Some("2026-06-20T00:05:00.000Z")))],
+        ))
         .child(
             nsh_base::button()
                 .accessibility_label(Some(SharedString::from("Enable in-app notifications")))
@@ -425,6 +474,33 @@ fn AppTree(props: TreeProps) -> impl IntoElement {
         .child(t3_ui::app::app_tree(runtime, Route::parse(&props.route), move || {
             t3_ui::app::provide_client_services(&services)
         }))
+}
+
+/// A button that hands the environment the next shell snapshot listing `threads`.
+fn shell_button(
+    label: &'static str,
+    store: ClientStore,
+    session: t3_client::types::Generation,
+    threads: Vec<serde_json::Value>,
+) -> impl IntoElement {
+    nsh_base::button()
+        .accessibility_label(Some(SharedString::from(label)))
+        .on_press(move || {
+            store.apply_shell(&environment(), session, shell_items_of(threads.clone()));
+        })
+        .child(text(label))
+}
+
+/// What the app spoke through the screen reader (`announce_for_accessibility`).
+fn announced(app: &Headless) -> Vec<String> {
+    app.screen()
+        .commands()
+        .iter()
+        .filter_map(|(_, command)| match command {
+            nsh_core::Command::Announce(message) => Some(message.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn start_app_tree(window: (f32, f32), os: Option<Os>, route: Route, status: &str) -> Headless {
@@ -622,6 +698,52 @@ fn a_completed_background_turn_raises_a_toast_that_opens_the_thread() {
     app.press("role:button[Open thread]").expect("open");
     app.wait_for("role:button[Toggle right panel]")
         .expect("the thread opened");
+}
+
+/// The web's `pendingSubagentRequestsAtom`: a task's request is the parent's notification; the
+/// task, shown under its parent, has none of its own.
+#[test]
+fn a_subagent_asking_for_input_notifies_its_parent_once() {
+    let mut app = start_app_tree(DESKTOP, None, Route::Home, "running");
+    app.press("role:button[Enable in-app notifications]")
+        .expect("enable");
+    app.settle();
+    app.press("role:button[Subagent asks for input]")
+        .expect("the task asks");
+    app.wait_for("Input needed")
+        .expect("the parent's in-app notification");
+    app.settle();
+    let toasts = app
+        .screen()
+        .texts()
+        .into_iter()
+        .filter(|text| *text == "Input needed")
+        .count();
+    assert_eq!(toasts, 1, "one notification, the parent's");
+}
+
+/// BackgroundThreadAnnouncer's `effectiveSnoozed`: a snoozed thread finishing is not spoken.
+#[test]
+fn a_snoozed_thread_finishing_in_the_background_is_not_announced() {
+    let mut app = start_app_tree(DESKTOP, None, Route::Home, "running");
+    app.press("role:button[Complete the turn]").expect("complete");
+    app.settle();
+    assert!(
+        announced(&app).iter().any(|message| message.contains("Fix the build")),
+        "control: an unsnoozed thread's completion is spoken: {:?}",
+        announced(&app)
+    );
+    let mut app = start_app_tree(DESKTOP, None, Route::Home, "running");
+    app.press("role:button[Snooze the thread]").expect("snooze");
+    app.settle();
+    app.press("role:button[Complete the snoozed turn]")
+        .expect("complete while snoozed");
+    app.settle();
+    assert!(
+        !announced(&app).iter().any(|message| message.contains("Fix the build")),
+        "a snoozed thread stays quiet: {:?}",
+        announced(&app)
+    );
 }
 
 #[test]
