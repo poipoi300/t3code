@@ -105,7 +105,7 @@ impl PromptStashClient for FixtureClient {
     }
 }
 fn entry(id: &str, prompt: &str) -> Entry {
-    serde_json::from_value(serde_json::json!({"id":id,"prompt":prompt,"createdAt":"2026-11-14T00:00:00Z","attachments":[],"droppedImageNames":[]})).expect("entry")
+    serde_json::from_value(serde_json::json!({"id":id,"prompt":prompt,"createdAt":"1970-01-01T00:00:00Z","attachments":[],"droppedImageNames":[]})).expect("entry")
 }
 
 #[component]
@@ -292,5 +292,38 @@ fn denied_actions_are_inert_and_escape_and_prompt_edits_close_the_menu() {
         !app.screen()
             .matches("role:button[Close stash]")
             .expect("drawer state")
+    );
+}
+
+#[test]
+fn relative_times_tick_at_the_client_boundary_without_replacing_the_menu_rows() {
+    let mut app = start(DESKTOP);
+    open(&mut app, 2);
+    let before = app
+        .screen()
+        .id("role:button[Restore stashed prompt: Second prompt]")
+        .expect("second control");
+    app.press_key("down").expect("select second");
+    app.fast_forward(std::time::Duration::from_secs(60))
+        .expect("advance boundary");
+    assert_eq!(app.screen().count("text:1m ago"), Ok(2));
+    assert_eq!(
+        app.screen()
+            .id("role:button[Restore stashed prompt: Second prompt]")
+            .expect("same second control"),
+        before
+    );
+    app.press_key("enter").expect("restore selected after tick");
+    app.wait_for("role:button[Stashed prompts: 1. Open stash.]")
+        .expect("take reflected");
+    let restored = app
+        .screen()
+        .layout_nodes()
+        .into_iter()
+        .find(|n| n.test_id.as_deref() == Some("restored-prompt"))
+        .expect("restored");
+    assert_eq!(
+        restored.text.expect("text").text.visible_text(),
+        "Second prompt"
     );
 }

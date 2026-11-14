@@ -242,7 +242,7 @@ fn multiline_details_stay_above_the_trigger_and_cap_the_long_content() {
         .screen()
         .id("role:button[Show script details]")
         .expect("trigger");
-    let popup = app.screen().id("label:Notice details").expect("popup");
+    let popup = app.screen().id("role:dialog").expect("popup surface");
     let nodes = app.screen().layout_nodes();
     let trigger = nodes
         .iter()

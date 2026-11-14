@@ -173,7 +173,9 @@ fn RewindFixture() -> impl IntoElement {
         .child(text(move || {
             SharedString::from(format!("Payload: {:?}", calls.get()))
         }))
-        .child(text(move || SharedString::from(format!("Restored: {:?}", rewind.restored_prompt.get()))))
+        .child(text(move || {
+            SharedString::from(format!("Restored: {:?}", rewind.restored_prompt.get()))
+        }))
         .child(confirm_dialog_host())
 }
 
@@ -259,7 +261,8 @@ fn cancel_keeps_the_thread_and_confirm_forwards_the_exact_user_target_once() {
         app.press("role:button[Confirm]").expect("confirm");
         app.wait_for("Calls: 1").expect("client called");
         app.wait_for("Busy: false").expect("completed");
-        app.wait_for("Restored prompt from client").expect("client outcome reaches the editor binding");
+        app.wait_for("Restored prompt from client")
+            .expect("client outcome reaches the editor binding");
         assert!(app.screen().shows("(\"prompt\", 0, false)"));
     }
 }

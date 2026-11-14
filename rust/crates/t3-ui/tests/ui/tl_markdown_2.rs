@@ -97,7 +97,7 @@ fn file_options_copy_current_host_paths_with_positions_and_close_at_both_sizes()
         assert_eq!(app.screen().clipboard(), Some("C:\\repo\\main.rs:9:2"));
         app.press("role:link[exact.rs · L7]")
             .expect("known workspace path opens the client panel");
-        app.wait_for("panel:exact.rs;line:Some(7)")
+        app.wait_for("text:panel:exact.rs;line:Some(7)")
             .expect("path and reveal line in client-owned panel state");
         assert!(
             app.screen().opened_urls().is_empty(),
@@ -234,7 +234,7 @@ fn thread_chips_read_the_real_shell_navigate_to_the_decoded_id_and_refuse_unreac
         );
         app.press("role:link[Thread, Build the shared Rust UI slice]")
             .expect("open cached decoded thread");
-        app.wait_for("destination:thread-shared-ui;environment_matches:true")
+        app.wait_for("text:destination:thread-shared-ui;environment_matches:true")
             .expect("navigator destination uses decoded id");
         assert!(
             app.screen().opened_urls().is_empty(),

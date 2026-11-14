@@ -1,1 +1,248 @@
-//! SB-SELECT: headless tests of Multi-select (process-local). Start the app with `crate::support`.
+//! Port of apps/web/src/threadSelectionStore.test.ts against the shared reactive store.
+
+use nsh_core::prelude::*;
+use nsh_engine::{EngineConfig, Root};
+use nsh_testing::Headless;
+use t3_ui::screens::sidebar::selection::{
+    get_thread_keys_to_deselect_after_delete, use_thread_selection_store,
+};
+
+use crate::support::{DESKTOP, PHONE};
+
+fn ordered() -> Vec<String> {
+    ["a", "b", "c", "d", "e"].map(String::from).into()
+}
+
+#[component]
+fn SelectionReader() -> impl IntoElement {
+    let selection = use_thread_selection_store();
+    text(move || {
+        let state = selection.state();
+        SharedString::from(format!(
+            "selected={:?};anchor={:?}",
+            state.selected, state.anchor
+        ))
+    })
+}
+
+#[component]
+fn SelectionFixture() -> impl IntoElement {
+    let selection = use_thread_selection_store();
+    let show_reader = signal(true);
+    let captured = stored(Vec::<String>::new());
+    let publications = signal(0usize);
+    effect(move || {
+        selection.state();
+        publications.update(|count| *count += 1);
+    });
+    let mut controls = view().w_full().h_full();
+    for key in ordered() {
+        let toggle = key.clone();
+        let range = key.clone();
+        controls = controls
+            .child(
+                nsh_base::button()
+                    .accessibility_label(format!("Toggle {key}"))
+                    .child(text(format!("Toggle {key}")))
+                    .on_press(move || selection.toggle_thread(&toggle)),
+            )
+            .child(
+                nsh_base::button()
+                    .accessibility_label(format!("Range {key}"))
+                    .child(text(format!("Range {key}")))
+                    .on_press(move || selection.range_select_to(&range, &ordered())),
+            );
+    }
+    controls
+        .child(
+            nsh_base::button()
+                .accessibility_label("Anchor b")
+                .child(text("Anchor b"))
+                .on_press(move || selection.set_anchor("b")),
+        )
+        .child(
+            nsh_base::button()
+                .accessibility_label("Missing anchor range")
+                .child(text("Missing anchor range"))
+                .on_press(move || {
+                    selection.range_select_to("c", &["b".into(), "c".into(), "d".into()])
+                }),
+        )
+        .child(
+            nsh_base::button()
+                .accessibility_label("Capture deletion")
+                .child(text("Capture deletion"))
+                .on_press(move || {
+                    captured.replace(selection.selected_thread_keys());
+                }),
+        )
+        .child(
+            nsh_base::button()
+                .accessibility_label("Delete a and missing c")
+                .child(text("Delete a and missing c"))
+                .on_press(move || {
+                    let removed = get_thread_keys_to_deselect_after_delete(
+                        &captured.get(),
+                        &["a".into()].into(),
+                        |key| key == "a" || key == "b",
+                    );
+                    selection.remove_from_selection(&removed);
+                }),
+        )
+        .child(
+            nsh_base::button()
+                .accessibility_label("Delete only a")
+                .child(text("Delete only a"))
+                .on_press(move || {
+                    let removed = get_thread_keys_to_deselect_after_delete(
+                        &captured.get(),
+                        &["a".into()].into(),
+                        |_| true,
+                    );
+                    selection.remove_from_selection(&removed);
+                }),
+        )
+        .child(
+            nsh_base::button()
+                .accessibility_label("Clear")
+                .child(text("Clear"))
+                .on_press(move || selection.clear_selection()),
+        )
+        .child(
+            nsh_base::button()
+                .accessibility_label("Remove none")
+                .child(text("Remove none"))
+                .on_press(move || selection.remove_from_selection(&["missing".into()])),
+        )
+        .child(
+            nsh_base::button()
+                .accessibility_label("Remount reader")
+                .child(text("Remount reader"))
+                .on_press(move || show_reader.update(|show| *show = !*show)),
+        )
+        .child(when(move || show_reader.get(), selection_reader))
+        .child(text(move || {
+            SharedString::from(format!("has selection={}", selection.has_selection()))
+        }))
+        .child(text(move || {
+            SharedString::from(format!("publications={}", publications.get()))
+        }))
+}
+
+fn fixture(window: (f32, f32)) -> Headless {
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(window.0), px(window.1)),
+        ..EngineConfig::new(Root::of::<SelectionFixture>())
+    })
+    .expect("selection fixture starts");
+    app.wait_for("role:button[Toggle a]")
+        .expect("selection controls mount");
+    app
+}
+
+fn press(app: &mut Headless, actions: &[&str]) {
+    for action in actions {
+        app.press(&format!("role:button[{action}]"))
+            .expect("store action");
+    }
+}
+
+fn expect_state(app: &mut Headless, selected: &[&str], anchor: Option<&str>) {
+    app.wait_for(&format!("selected={selected:?};anchor={anchor:?}"))
+        .expect("client selection publishes");
+}
+
+#[test]
+fn bulk_delete_removes_completed_and_missing_rows_but_retains_a_failed_thread() {
+    let mut app = fixture(DESKTOP);
+    press(
+        &mut app,
+        &[
+            "Toggle a",
+            "Toggle b",
+            "Toggle c",
+            "Capture deletion",
+            "Delete a and missing c",
+        ],
+    );
+    expect_state(&mut app, &["b"], None);
+}
+
+#[test]
+fn bulk_delete_retains_unprocessed_hidden_live_rows_and_new_selections() {
+    let mut app = fixture(DESKTOP);
+    press(
+        &mut app,
+        &[
+            "Toggle a",
+            "Toggle b",
+            "Toggle c",
+            "Capture deletion",
+            "Toggle d",
+            "Delete only a",
+        ],
+    );
+    expect_state(&mut app, &["b", "c", "d"], Some("d"));
+}
+
+#[test]
+fn a_plain_click_anchor_enables_range_selection() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = fixture(window);
+        press(&mut app, &["Anchor b", "Range d"]);
+        expect_state(&mut app, &["b", "c", "d"], Some("b"));
+    }
+}
+
+#[test]
+fn successive_ranges_keep_the_original_anchor() {
+    let mut app = fixture(DESKTOP);
+    press(&mut app, &["Toggle b", "Range d", "Range e"]);
+    expect_state(&mut app, &["b", "c", "d", "e"], Some("b"));
+}
+
+#[test]
+fn an_anchor_outside_the_ordered_scope_falls_back_to_the_target() {
+    let mut app = fixture(DESKTOP);
+    press(&mut app, &["Toggle a", "Missing anchor range"]);
+    expect_state(&mut app, &["a", "c"], Some("c"));
+}
+
+#[test]
+fn ranges_preserve_previous_selections_outside_the_range() {
+    let mut app = fixture(DESKTOP);
+    press(&mut app, &["Toggle a", "Toggle b", "Range d"]);
+    expect_state(&mut app, &["a", "b", "c", "d"], Some("b"));
+}
+
+#[test]
+fn the_global_store_survives_reader_remount_and_clear_resets_the_anchor() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = fixture(window);
+        press(
+            &mut app,
+            &["Toggle a", "Remount reader", "Toggle b", "Remount reader"],
+        );
+        expect_state(&mut app, &["a", "b"], Some("b"));
+        press(&mut app, &["Toggle b"]);
+        expect_state(&mut app, &["a"], Some("b"));
+        press(&mut app, &["Clear"]);
+        expect_state(&mut app, &[], None);
+        app.wait_for("has selection=false")
+            .expect("reverse state publishes");
+    }
+}
+
+#[test]
+fn unchanged_clear_anchor_and_removal_do_not_publish() {
+    let mut app = fixture(DESKTOP);
+    app.wait_for("publications=1").expect("initial observation");
+    press(&mut app, &["Clear", "Remove none"]);
+    assert!(app.screen().shows("publications=1"));
+    press(&mut app, &["Anchor b"]);
+    app.wait_for("publications=2")
+        .expect("new anchor publishes");
+    press(&mut app, &["Anchor b", "Remove none"]);
+    assert!(app.screen().shows("publications=2"));
+}

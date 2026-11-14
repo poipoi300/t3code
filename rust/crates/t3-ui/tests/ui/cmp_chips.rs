@@ -16,7 +16,7 @@ use t3_ui::screens::composer::{
     editor::{ComposerEditor, ComposerPromptEditorProps, ComposerResolvers, EditorMode},
 };
 
-const SOURCE: &str = "@src/main.rs $browser [capture](t3-context://v1/terminal/term) [notes](t3-context://v1/file/file_local) /command ";
+const SOURCE: &str = "@\"src/main.rs\" $browser [capture](t3-context://v1/terminal/term) [notes](t3-context://v1/file/file_local) /command ";
 
 fn data() -> ChipData {
     let terminal = serde_json::from_value(json!({
@@ -49,13 +49,25 @@ fn data() -> ChipData {
     }
 }
 
+fn refresh_provider(data: &mut ChipData) {
+    data.skills[0].display_name = Some(Some(t3_contracts::base_schemas::TrimmedNonEmptyString(
+        "New provider label".into(),
+    )));
+    data.skills[0].description = None;
+}
+
 #[component]
 fn ChipsFixture() -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
     let catalogue = signal(data());
     let opens = signal(String::new());
     let mut context = ChipContext::new(computed(move || catalogue.get()));
-    context.open_mention = Some(Rc::new(move |path| opens.set(path.into())));
+    context.open_mention = Some(Rc::new(move |path| {
+        opens.set(path.into());
+        if path == "skills/browser/SKILL.md" {
+            catalogue.update(refresh_provider);
+        }
+    }));
     context.open_attachment = Some(Rc::new(move |id| opens.set(format!("attachment:{id}"))));
     let editor = ComposerEditor::new(
         SOURCE,
@@ -91,13 +103,13 @@ fn ChipsFixture() -> impl IntoElement {
             move |snapshot| source.set(snapshot.value),
             |_| {},
         ))
-        .child(text(move || format!("Source: {}", source.get())))
+        .child(text(move || format!("Source: {:?}", source.get())))
         .child(text(move || format!("Opened: {}", opens.get())))
         .child(
             nsh_base::button()
                 .on_press(move || {
                     replacement
-                        .sync("@docs/next.rs ", 0)
+                        .sync("@\"docs/next.rs\" ", 0)
                         .expect("controlled replacement");
                 })
                 .child(text("Replace document")),
@@ -111,15 +123,7 @@ fn ChipsFixture() -> impl IntoElement {
         )
         .child(
             nsh_base::button()
-                .on_press(move || {
-                    catalogue.update(|data| {
-                        data.skills[0].display_name =
-                            Some(Some(t3_contracts::base_schemas::TrimmedNonEmptyString(
-                                "New provider label".into(),
-                            )));
-                        data.skills[0].description = None;
-                    })
-                })
+                .on_press(move || catalogue.update(refresh_provider))
                 .child(text("Change provider label")),
         )
         .child(
@@ -188,10 +192,8 @@ fn client_atoms_render_without_changing_source_and_replaced_nodes_keep_current_a
         app.press("role:button[Preview src/main.rs]")
             .expect("mention action");
         app.wait_for("Opened: src/main.rs").expect("path action");
-        assert!(
-            app.screen().shows(&format!("Source: {SOURCE}")),
-            "display never rewrites source"
-        );
+        app.wait_for(&format!("Source: {SOURCE:?}"))
+            .expect("display never rewrites source");
         app.press("text:Replace document")
             .expect("controlled source change");
         app.press("role:button[Preview docs/next.rs]")
@@ -218,8 +220,14 @@ fn skill_details_use_live_catalogue_content_and_popovers_close_on_escape() {
             .expect("instructions action");
         app.wait_for("Opened: skills/browser/SKILL.md")
             .expect("instruction path");
+        app.wait_for("No description is available for this skill.")
+            .expect("open details survive a catalogue refresh and drop the stale description");
         app.press_key("escape").expect("dismiss");
-        assert!(!app.screen().shows("Read @src/main.rs literally."));
+        app.wait_for_gone(
+            "Read @src/main.rs literally.",
+            std::time::Duration::from_secs(5),
+        )
+        .expect("details dismissed");
         app.press("text:Change provider label")
             .expect("catalogue update");
         app.wait_for("New provider label")
@@ -267,7 +275,8 @@ fn a_pending_attachment_renders_from_the_client_item_and_reattach_removes_its_ac
                 .matches("role:button[File attachment, notes.txt, 1 KB, attach again]")
                 .expect("no preview action without local or uploaded bytes")
         );
-        assert!(app.screen().shows(&format!("Source: {SOURCE}")));
+        app.wait_for(&format!("Source: {SOURCE:?}"))
+            .expect("attachment state preserves source");
     }
 }
 
@@ -308,6 +317,8 @@ fn sent_context_uses_the_shared_details_and_kind_mismatch_cannot_open_terminal_d
         app.wait_for("first line\nsecond line")
             .expect("captured output");
         app.press_key("escape").expect("dismiss");
+        app.wait_for_gone("first line\nsecond line", std::time::Duration::from_secs(5))
+            .expect("terminal details dismissed");
         assert!(app.screen().shows("mismatch"));
         assert!(
             app.press(

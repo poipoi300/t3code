@@ -351,7 +351,11 @@ fn BlockListFixture() -> impl IntoElement {
                     })
                 }))
                 .child(control("Empty", move || visible.set(false)))
-                .child(control("Restore", move || visible.set(true))),
+                .child(control("Restore", move || visible.set(true)))
+                .child(control("Spacing", move || batch(|| {
+                    source.set(String::from("# Initial heading\n\nFirst paragraph\n\n## Next heading\n\nLast paragraph"));
+                    streaming.set(false);
+                }))),
         )
         .child(messages_timeline(rows, options))
 }
@@ -389,6 +393,35 @@ fn streaming_updates_the_tail_without_remounting_completed_prose_at_both_sizes()
                 .expect("completed prose"),
             stable
         );
+        app.press("role:button[Spacing]")
+            .expect("markdown block boundaries");
+        app.wait_for("Last paragraph").expect("all prose blocks");
+        let bounds = |label: &str| {
+            let id = app
+                .screen()
+                .id(&format!("text:{label}"))
+                .expect("text block");
+            app.screen()
+                .layout_nodes()
+                .into_iter()
+                .find(|node| node.id == id)
+                .expect("text layout")
+                .bounds
+        };
+        let paragraph = bounds("First paragraph");
+        let heading = bounds("Next heading");
+        let last = bounds("Last paragraph");
+        let rem = nsh_core::geometry::REM_SIZE.0;
+        assert!(
+            (heading.origin.y.0 - paragraph.origin.y.0 - paragraph.size.height.0 - 1.25 * rem)
+                .abs()
+                < 0.1,
+            "heading has the shared block gap plus heading margin: {paragraph:?}, {heading:?}"
+        );
+        assert!(
+            (last.origin.y.0 - heading.origin.y.0 - heading.size.height.0 - 0.65 * rem).abs() < 0.1,
+            "paragraph has the shared block gap: {heading:?}, {last:?}"
+        );
     }
 }
 
@@ -397,8 +430,6 @@ fn one_long_message_is_recycled_by_chunk_and_empty_has_a_reverse_state() {
     for size in [PHONE, DESKTOP] {
         let mut app = start(size);
         app.press("role:button[Long]").expect("long reply");
-        app.scroll("id:timeline", px(100_000.0))
-            .expect("scroll to end");
         app.wait_for("const end = 500;").expect("last code chunk");
         assert!(
             !app.screen().shows("const value0 = 0;"),
@@ -439,8 +470,7 @@ fn one_long_message_is_recycled_by_chunk_and_empty_has_a_reverse_state() {
         app.wait_for("Send a message to start the conversation.")
             .expect("empty state");
         app.press("role:button[Restore]").expect("restore");
-        app.scroll("id:timeline", px(-100_000.0))
-            .expect("read restored content");
-        app.wait_for("const value0 = 0;").expect("content returns");
+        app.wait_for("const end = 500;")
+            .expect("content returns at the live end");
     }
 }

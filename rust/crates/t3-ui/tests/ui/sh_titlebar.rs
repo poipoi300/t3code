@@ -6,6 +6,7 @@ use nsh_core::platform::Os;
 use nsh_core::prelude::*;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
+use t3_ui::host::desktop_title_bar_for;
 use t3_ui::i18n::Text;
 use t3_ui::screens::titlebar::{
     desktop_titlebar, install_window_titlebar, titlebar_controls, window_title_bar_options,
@@ -61,15 +62,13 @@ fn bounds(app: &Headless, id: &str) -> Bounds<Points> {
 
 #[test]
 fn native_controls_are_requested_only_for_desktop_with_the_webs_platform_geometry() {
-    for platform in [Os::Web, Os::Android, Os::Ios] {
-        assert!(window_title_bar_options(platform, false).is_none());
-    }
-    let mac = window_title_bar_options(Os::MacOs, true).expect("desktop chrome");
+    assert!(window_title_bar_options(false).is_none());
+    let mac = desktop_title_bar_for(Os::MacOs);
     assert_eq!(mac.style, TitleBarStyle::Hidden);
     assert_eq!(mac.height, Some(px(52.0)));
     assert_eq!(mac.controls_offset, Some(point(px(16.0), px(20.0))));
     for platform in [Os::Windows, Os::Linux] {
-        let options = window_title_bar_options(platform, true).expect("caption buttons");
+        let options = desktop_title_bar_for(platform);
         assert_eq!(options.style, TitleBarStyle::Hidden);
         assert_eq!(options.height, Some(px(40.0)));
         assert!(options.controls_offset.is_none());

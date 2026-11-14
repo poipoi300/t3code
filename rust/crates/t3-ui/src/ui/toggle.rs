@@ -70,6 +70,10 @@ impl From<super::button::ButtonContent> for Content {
             super::button::ButtonContent::IconLabel { icon, label } => {
                 Self::IconLabel { icon, label }
             }
+            super::button::ButtonContent::Custom { label, child } => Self::Slot {
+                label,
+                children: Box::new(child),
+            },
         }
     }
 }

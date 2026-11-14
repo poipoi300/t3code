@@ -161,6 +161,11 @@ fn source(app: &mut Headless, expected: &str) {
         .expect("source");
 }
 
+fn sent(app: &mut Headless, count: usize, value: &str) {
+    app.wait_for(&format!("Sent {count} {value:?}"))
+        .expect("submission count and source");
+}
+
 #[test]
 fn enter_submits_the_current_snapshot_and_shift_enter_inserts_a_newline() {
     for window in [DESKTOP, PHONE] {
@@ -190,7 +195,7 @@ fn modifier_preferences_and_software_keyboard_are_read_at_each_keypress() {
         app.press("text:Focus end").expect("focus");
         app.press_key("enter").expect("newline");
         source(&mut app, "draft\n");
-        assert!(app.screen().shows("Sent 0"));
+        sent(&mut app, 0, "");
         app.press_key("ctrl+enter").expect("modifier send");
         app.wait_for("Sent 1 \"draft\\n\"").expect("send");
 
@@ -203,7 +208,7 @@ fn modifier_preferences_and_software_keyboard_are_read_at_each_keypress() {
         app.press_key("shift+enter").expect("new line");
         app.press_key("enter").expect("multiline requires modifier");
         source(&mut app, "draft\n\n");
-        assert!(app.screen().shows("Sent 1"));
+        sent(&mut app, 1, "draft");
 
         let mut app = start(window, "draft", EditorMode::Plain);
         app.press("text:Software keyboard")
@@ -211,7 +216,7 @@ fn modifier_preferences_and_software_keyboard_are_read_at_each_keypress() {
         app.press("text:Focus end").expect("focus");
         app.press_key("enter").expect("software newline");
         source(&mut app, "draft\n");
-        assert!(app.screen().shows("Sent 0"));
+        sent(&mut app, 0, "");
         app.press_key("ctrl+enter").expect("hardware modifier send");
         app.wait_for("Sent 1 \"draft\\n\"")
             .expect("modifier remains available");
@@ -230,7 +235,7 @@ fn list_enter_and_tab_preserve_source_and_undo_as_one_edit() {
             let mut app = start(window, value, mode);
             app.press_key("shift+enter").expect("list split");
             source(&mut app, expected);
-            assert!(app.screen().shows("Sent 0"));
+            sent(&mut app, 0, "");
             app.press("text:Undo").expect("undo split");
             source(&mut app, value);
             app.press("text:Redo").expect("redo split");
@@ -249,17 +254,26 @@ fn list_enter_and_tab_preserve_source_and_undo_as_one_edit() {
 #[test]
 fn code_enter_indents_exits_and_modifier_enter_sends() {
     for window in [DESKTOP, PHONE] {
+        let mut app = start(window, "", EditorMode::Rich);
+        app.type_text("id:composer-editor", "```ts")
+            .expect("type opening fence");
+        source(&mut app, "```ts");
+        app.press_key("enter").expect("convert opening fence");
+        source(&mut app, "```ts\n```");
+        app.press_key("x").expect("type inside converted fence");
+        source(&mut app, "```ts\nx\n```");
+        sent(&mut app, 0, "");
+
         let mut app = start(window, "```ts\n  body()\n```", EditorMode::Rich);
         app.press_key("enter").expect("code newline");
         source(&mut app, "```ts\n  body()\n  \n```");
-        assert!(app.screen().shows("Sent 0"));
+        sent(&mut app, 0, "");
         app.press_key("tab").expect("indent code");
         source(&mut app, "```ts\n  body()\n    \n```");
         app.press_key("shift+tab").expect("outdent code");
         source(&mut app, "```ts\n  body()\n  \n```");
         app.press_key("ctrl+enter").expect("send code");
-        app.wait_for("Sent 1")
-            .expect("modifier bypasses code newline");
+        sent(&mut app, 1, "```ts\n  body()\n  \n```");
 
         let mut app = start(window, "```\nx\n```", EditorMode::Rich);
         for _ in 0..3 {
@@ -268,7 +282,7 @@ fn code_enter_indents_exits_and_modifier_enter_sends() {
         source(&mut app, "```\nx\n```\n");
         app.press_key("z").expect("outside fence");
         source(&mut app, "```\nx\n```\nz");
-        assert!(app.screen().shows("Sent 0"));
+        sent(&mut app, 0, "");
     }
 }
 
@@ -300,10 +314,10 @@ fn ime_confirmation_never_submits_and_read_only_keys_preserve_the_draft() {
         ime_text(&mut app, "日本");
         app.press_key("enter").expect("IME confirm key");
         source(&mut app, "");
-        assert!(app.screen().shows("Sent 0"));
+        sent(&mut app, 0, "");
         app.compose("id:composer-editor", "").expect("commit");
         source(&mut app, "日本");
-        assert!(app.screen().shows("Sent 0"));
+        sent(&mut app, 0, "");
         app.press_key("enter")
             .expect("deliberate send after commit");
         app.wait_for("Sent 1 \"日本\"").expect("committed snapshot");
@@ -312,7 +326,7 @@ fn ime_confirmation_never_submits_and_read_only_keys_preserve_the_draft() {
         app.press_key("enter").expect("disabled submit");
         app.press_key("shift+enter").expect("disabled split");
         source(&mut app, "日本");
-        assert!(app.screen().shows("Sent 1"));
+        sent(&mut app, 1, "日本");
     }
 }
 
@@ -327,7 +341,7 @@ fn commands_precede_send_and_code_precedes_the_command_callback() {
         app.wait_for("Command list true")
             .expect("list context forwarded");
         source(&mut app, "- item");
-        assert!(app.screen().shows("Sent 0"));
+        sent(&mut app, 0, "");
 
         let mut app = start(window, "```\nx\n```", EditorMode::Rich);
         app.press("text:Intercept Enter")
@@ -335,7 +349,7 @@ fn commands_precede_send_and_code_precedes_the_command_callback() {
         app.press("text:Focus end").expect("focus");
         app.press_key("enter").expect("code has priority");
         source(&mut app, "```\nx\n\n```");
-        assert!(app.screen().shows("Sent 0"));
+        sent(&mut app, 0, "");
     }
 }
 
@@ -347,13 +361,13 @@ fn a_refused_send_keeps_the_draft_and_literal_answers_keep_their_markers() {
         app.press("text:Focus end").expect("focus");
         app.press_key("enter").expect("attempt submit");
         source(&mut app, "unsent");
-        assert!(app.screen().shows("Sent 0"));
+        sent(&mut app, 0, "");
         app.press_key("shift+enter").expect("newline still works");
         source(&mut app, "unsent\n");
 
         let mut app = start(window, "- **literal** @README.md", EditorMode::Literal);
         app.press_key("shift+enter").expect("literal newline");
         source(&mut app, "- **literal** @README.md\n");
-        assert!(app.screen().shows("Sent 0"));
+        sent(&mut app, 0, "");
     }
 }

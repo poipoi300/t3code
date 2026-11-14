@@ -356,7 +356,7 @@ fn a_settled_edit_reuses_the_message_identity_and_switches_its_prose_leaf_to_cod
     app.press("role:button[Copy code]")
         .expect("copy actual code");
     app.wait_until("code is copied", Duration::from_secs(2), |screen| {
-        screen.clipboard() == Some("let code_transition = 7;")
+        screen.clipboard() == Some("let code_transition = 7;\n")
     })
     .expect("copy uses the code leaf source");
 }
@@ -376,7 +376,7 @@ fn the_demo_timeline_mounts_meta_and_copies_the_terminal_response_without_an_inj
     for window in [PHONE, DESKTOP] {
         let mut app = crate::support::start(window);
         crate::support::pair(&mut app);
-        app.press("role:button[Build the shared Rust UI slice]")
+        app.press("role:button[Build the shared Rust UI slice, t3code]")
             .expect("open the real thread page");
         app.wait_for("I added clamp next to sum and the tests pass.")
             .expect("real timeline body");
