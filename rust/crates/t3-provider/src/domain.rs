@@ -170,6 +170,8 @@ pub struct ProviderDomain {
     pub manifest: Arc<ModelManifest>,
     pub registry_catalog: Arc<RegistryAgentCatalog>,
     pub coordinator: Arc<AcpRuntimeCoordinator>,
+    /// Live ACP Registry instances, for the application's session host.
+    pub acp_instances: Arc<crate::acp_registry_factory::AcpRegistryInstances>,
     pub managed_codex: Arc<ManagedCodexFactory>,
     broker_listener: Arc<BrokerListener>,
     cancel: CancellationToken,
@@ -326,9 +328,52 @@ impl ProviderDomain {
             background: ports.background.clone(),
             managed: managed_codex.clone(),
         });
+        let registry_catalog = Arc::new(RegistryAgentCatalog::new(
+            RegistryCatalogOptions {
+                cache_dir: options.paths.cache.join("acp-registry"),
+                tools_dir: options.paths.base.join("tools/acp-registry"),
+                platform: options.context.platform,
+                architecture: options.architecture,
+                environment: options.context.environment.clone(),
+            },
+            Arc::new(match ports.registry_fetch {
+                Some(fetch) => RegistryCatalog::with_fetcher(fetch, None),
+                None => RegistryCatalog::new(client, None),
+            }),
+            ports.settings.clone(),
+            ports.registry_commands.unwrap_or_else(|| {
+                Arc::new(ProcessRegistryCommands {
+                    cwd: options.context.cwd.clone(),
+                })
+            }),
+            match ports.registry_downloads {
+                Some(downloads) => downloads,
+                None => Arc::new(ReqwestRegistryDownloads::new().map_err(
+                    crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Response,
+                    ),
+                )?),
+            },
+            ports.clock.clone(),
+        ));
+        let coordinator = Arc::new(AcpRuntimeCoordinator::new(ports.clock.clone()));
+        let acp_instances = Arc::new(crate::acp_registry_factory::AcpRegistryInstances::default());
         let mut factories = ports.factories;
         factories.entry("codex".into()).or_insert(native.clone());
         factories.entry("claudeAgent".into()).or_insert(native);
+        factories.entry("acpRegistry".into()).or_insert(Arc::new(
+            crate::acp_registry_factory::AcpRegistryFactory {
+                context: options.context.clone(),
+                cache: options.paths.cache.clone(),
+                settings: ports.settings.clone(),
+                catalog: registry_catalog.clone(),
+                coordinator: coordinator.clone(),
+                clock: ports.clock.clone(),
+                sessions: ports.sessions.clone(),
+                instances: acp_instances.clone(),
+            },
+        ));
         let cache = Arc::new(crate::status_cache::ProviderStatusCache::new(
             options.paths.cache.join("provider-status"),
         ));
@@ -362,36 +407,6 @@ impl ProviderDomain {
         for (driver, installation) in ports.installations {
             installations.register(&driver, installation).await;
         }
-        let registry_catalog = Arc::new(RegistryAgentCatalog::new(
-            RegistryCatalogOptions {
-                cache_dir: options.paths.cache.join("acp-registry"),
-                tools_dir: options.paths.base.join("tools/acp-registry"),
-                platform: options.context.platform,
-                architecture: options.architecture,
-                environment: options.context.environment.clone(),
-            },
-            Arc::new(match ports.registry_fetch {
-                Some(fetch) => RegistryCatalog::with_fetcher(fetch, None),
-                None => RegistryCatalog::new(client, None),
-            }),
-            ports.settings.clone(),
-            ports.registry_commands.unwrap_or_else(|| {
-                Arc::new(ProcessRegistryCommands {
-                    cwd: options.context.cwd.clone(),
-                })
-            }),
-            match ports.registry_downloads {
-                Some(downloads) => downloads,
-                None => Arc::new(ReqwestRegistryDownloads::new().map_err(
-                    crate::diagnostics::mapped(
-                        concat!(module_path!(), "::error"),
-                        ServiceError::Response,
-                    ),
-                )?),
-            },
-            ports.clock.clone(),
-        ));
-        let coordinator = Arc::new(AcpRuntimeCoordinator::new(ports.clock));
         let acp = Arc::new(AcpRegistryService::new(
             registry_catalog.clone(),
             ports.acp_host,
@@ -454,6 +469,7 @@ impl ProviderDomain {
             manifest,
             registry_catalog,
             coordinator,
+            acp_instances,
             managed_codex,
             broker_listener,
             cancel,

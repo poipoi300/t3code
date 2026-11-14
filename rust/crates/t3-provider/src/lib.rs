@@ -11,6 +11,7 @@ pub mod acp_connection;
 pub mod acp_coordinator;
 pub mod acp_probe;
 pub mod acp_provider;
+pub mod acp_registry_factory;
 pub mod acp_service;
 pub mod antigravity_auth;
 pub mod antigravity_callback;
