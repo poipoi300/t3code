@@ -16,6 +16,80 @@ use std::{
 };
 use t3_contracts::acp_registry::AcpRegistryOperationErrorReason as Reason;
 use tokio::io::AsyncWriteExt;
+const MAX_EXPANDED_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+fn archive_entry_count(listing: &str) -> usize {
+    listing
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+}
+fn validate_tar_metadata(listing: &str, count: usize) -> AcpResult<()> {
+    let mut total = 0u64;
+    let mut entries = 0usize;
+    for line in listing.lines().filter(|line| !line.trim().is_empty()) {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if !matches!(line.as_bytes().first(), Some(b'-' | b'd')) {
+            return Err(archive_error());
+        }
+        // GNU prints owner/group together; BSD prints link count, owner and group.
+        let size_index = if fields.get(1).is_some_and(|owner| owner.contains('/')) {
+            2
+        } else if fields
+            .get(1)
+            .is_some_and(|links| links.parse::<u64>().is_ok())
+        {
+            4
+        } else {
+            return Err(archive_error());
+        };
+        let size = fields
+            .get(size_index)
+            .and_then(|size| size.parse::<u64>().ok())
+            .ok_or_else(archive_error)?;
+        total = total
+            .checked_add(size)
+            .filter(|size| *size <= MAX_EXPANDED_BYTES)
+            .ok_or_else(archive_error)?;
+        entries += 1;
+    }
+    if entries != count {
+        return Err(archive_error());
+    }
+    Ok(())
+}
+fn archive_cause<E: 'static>(cause: E) -> AcpError {
+    crate::diagnostics::failure(
+        "RegistryBinaryInstaller.archive_metadata",
+        crate::sensitive::ServiceError::Maintenance,
+        cause,
+    );
+    archive_error()
+}
+fn validate_zip_metadata(path: &Path, count: usize) -> AcpResult<()> {
+    let file = fs::File::open(path).map_err(archive_cause)?;
+    let mut zip = zip::ZipArchive::new(file).map_err(archive_cause)?;
+    if zip.len() != count {
+        return Err(archive_error());
+    }
+    let mut total = 0u64;
+    for index in 0..zip.len() {
+        let entry = zip.by_index(index).map_err(archive_cause)?;
+        if entry.encrypted()
+            || !registry::validate_archive_entries(entry.name())
+            || entry
+                .unix_mode()
+                .is_some_and(|mode| !matches!(mode & 0o170000, 0 | 0o100000 | 0o040000))
+        {
+            return Err(archive_error());
+        }
+        total = total
+            .checked_add(entry.size())
+            .filter(|size| *size <= MAX_EXPANDED_BYTES)
+            .ok_or_else(archive_error)?;
+    }
+    Ok(())
+}
 fn install_error() -> AcpError {
     AcpError::new(
         Reason::InstallFailed,
@@ -383,8 +457,31 @@ impl RegistryBinaryInstaller {
                     64 * 1024 * 1024,
                 )
                 .await?;
-            if !registry::validate_archive_entries(listing.expose()) {
+            let count = archive_entry_count(listing.expose());
+            if count == 0
+                || count > MAX_ARCHIVE_ENTRIES
+                || !registry::validate_archive_entries(listing.expose())
+            {
                 return Err(archive_error());
+            }
+            if kind == "zip" {
+                validate_zip_metadata(&archive, count)?;
+            } else {
+                let metadata = self
+                    .commands
+                    .run(
+                        Path::new(tar),
+                        &[
+                            if kind == "gz" { "-tvzf" } else { "-tvjf" }.into(),
+                            archive_path.clone(),
+                            "--numeric-owner".into(),
+                        ],
+                        &self.environment,
+                        Duration::from_secs(1200),
+                        64 * 1024 * 1024,
+                    )
+                    .await?;
+                validate_tar_metadata(metadata.expose(), count)?;
             }
             let (tool, args) = if kind == "zip" && self.platform != Platform::Windows {
                 (

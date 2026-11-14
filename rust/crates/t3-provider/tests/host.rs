@@ -33,6 +33,12 @@ struct Effects {
     events: mpsc::UnboundedSender<String>,
     reject_retirement: AtomicBool,
     update_checks: Arc<AtomicBool>,
+    create_gate: tokio::sync::Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
 }
 #[async_trait]
 impl ProviderSessions for Effects {
@@ -84,6 +90,11 @@ impl ProviderInstanceService for Source {
 #[async_trait]
 impl ProviderFactory for Effects {
     async fn create(&self, spec: Arc<InstanceSpec>) -> ServiceResult<ProviderRuntime> {
+        if let Some((entered, release)) = self.create_gate.lock().await.take() {
+            entered.send(()).unwrap();
+            release.await.unwrap();
+        }
+
         self.events
             .send(format!(
                 "create:{}:{}",
@@ -112,6 +123,7 @@ async fn replacement_waits_for_retirement_retries_failures_and_parks_unavailable
     let effects = Arc::new(Effects {
         events,
         reject_retirement: AtomicBool::new(false),
+        create_gate: tokio::sync::Mutex::new(None),
         update_checks: Arc::new(AtomicBool::new(false)),
     });
     let service = ProviderService::new(
@@ -208,4 +220,118 @@ async fn replacement_waits_for_retirement_retries_failures_and_parks_unavailable
     host.close().await.unwrap();
     assert!(service.get_providers().await.0.is_empty());
     assert!(fixture.calls().is_empty());
+}
+
+struct LiveSettings {
+    current: tokio::sync::RwLock<ServerSettings>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+#[async_trait]
+impl t3_provider::text_generators::SettingsSource for LiveSettings {
+    async fn settings(&self) -> ServiceResult<ServerSettings> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Ok(self.current.read().await.clone())
+    }
+}
+#[tokio::test]
+async fn queued_reload_apply_and_settings_reconcile_read_settings_after_the_host_lock() {
+    for operation in ["reload", "apply", "reconcile"] {
+        let (events, _received) = mpsc::unbounded_channel();
+        let (entered, held) = tokio::sync::oneshot::channel();
+        let (release, waiting) = tokio::sync::oneshot::channel();
+        let effects = Arc::new(Effects {
+            events,
+            reject_retirement: AtomicBool::new(false),
+            update_checks: Arc::new(AtomicBool::new(false)),
+            create_gate: tokio::sync::Mutex::new(Some((entered, waiting))),
+        });
+        let registry = Arc::new(InstanceRegistry::new(core_driver_definitions()));
+        let service = ProviderService::new(
+            Arc::new(AuthService::default()),
+            effects.clone(),
+            effects.clone(),
+            Arc::new(Clock),
+            Arc::new(Manifest::bundled().unwrap()),
+            "0.1.0".into(),
+        );
+        let host = Arc::new(ProviderHost::new(
+            registry.clone(),
+            service.clone(),
+            BTreeMap::from([("codex".into(), effects.clone() as Arc<dyn ProviderFactory>)]),
+            effects,
+            Arc::new(SecretResolver::new(OnePassword::with_executable(
+                "must-not-run".into(),
+                Default::default(),
+            ))),
+            Arc::new(Clock),
+        ));
+        let old: ServerSettings = serde_json::from_value(
+            json!({"providerInstances":{"work":{"driver":"codex","enabled":true,"config":{}}}}),
+        )
+        .unwrap();
+        let source = LiveSettings {
+            current: tokio::sync::RwLock::new(old.clone()),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let first_host = host.clone();
+        let first = tokio::spawn(async move {
+            first_host
+                .reconcile(&old, &BTreeSet::new(), false, &BTreeMap::new())
+                .await
+        });
+        held.await.unwrap();
+        let reference=serde_json::from_value(json!({"provider":"onePassword","account":"fixture","reference":"op://vault/item/field"})).unwrap();
+        let blocked = BTreeMap::new();
+        let rebuild = BTreeSet::new();
+        let mut disabled = source.current.read().await.clone();
+        disabled
+            .provider_instances
+            .get_mut(&"work".into())
+            .unwrap()
+            .enabled = Some(false);
+        let worker = host.reconcile(&disabled, &rebuild, false, &blocked);
+        tokio::pin!(worker);
+        assert!(futures::poll!(&mut worker).is_pending());
+        let queued = async {
+            match operation {
+                "reload" => host.reload_secrets(&source, None, &blocked).await,
+                "apply" => {
+                    host.apply_secret(&source, &reference, "private-value", &blocked)
+                        .await
+                }
+                _ => host.reconcile(&source, &rebuild, false, &blocked).await,
+            }
+        };
+        tokio::pin!(queued);
+        assert!(futures::poll!(&mut queued).is_pending());
+        assert_eq!(
+            source.reads.load(Ordering::SeqCst),
+            0,
+            "{operation} read stale settings while queued"
+        );
+        source
+            .current
+            .write()
+            .await
+            .provider_instances
+            .get_mut(&"work".into())
+            .unwrap()
+            .enabled = Some(false);
+        release.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        let (worker_result, queued_result) = tokio::join!(worker, queued);
+        worker_result.unwrap();
+        queued_result.unwrap();
+        assert!(
+            !service
+                .get_providers()
+                .await
+                .0
+                .iter()
+                .find(|row| row.instance_id.0 == "work")
+                .unwrap()
+                .enabled
+        );
+        host.close().await.unwrap();
+    }
 }

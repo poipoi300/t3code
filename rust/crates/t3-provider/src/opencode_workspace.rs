@@ -47,7 +47,10 @@ impl HttpWorkspaceEvents {
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .map_err(|_| ServiceError::Network)?,
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Network,
+                ))?,
         })
     }
 }
@@ -58,7 +61,10 @@ impl WorkspaceEvents for HttpWorkspaceEvents {
         for (key, value) in request.headers {
             builder = builder.header(key, value.into_inner());
         }
-        let mut response = builder.send().await.map_err(|_| ServiceError::Network)?;
+        let mut response = builder.send().await.map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Network,
+        ))?;
         if !response.status().is_success()
             || !response
                 .headers()
@@ -187,5 +193,8 @@ pub async fn load(
     };
     tokio::time::timeout(timeout.saturating_mul(2), work)
         .await
-        .map_err(|_| OpenCodeError::Timeout)?
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            OpenCodeError::Timeout,
+        ))?
 }

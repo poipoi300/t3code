@@ -110,7 +110,10 @@ impl PiProvider {
         if let Some(color) = &self.spec.accent_color {
             value["accentColor"] = json!(color);
         }
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
     pub fn into_managed(
         self,
@@ -199,7 +202,10 @@ impl PiProvider {
         if !self.spec.enabled {
             return Ok(initial);
         }
-        let mut value = serde_json::to_value(initial).map_err(|_| ServiceError::Response)?;
+        let mut value = serde_json::to_value(initial).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         let environment = self.environment();
         let version = self
             .executables
@@ -215,7 +221,10 @@ impl PiProvider {
             Err(_) => {
                 value["status"] = json!("error");
                 value["message"] = json!("Failed to execute Pi CLI health check.");
-                return serde_json::from_value(value).map_err(|_| ServiceError::Response);
+                return serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ));
             }
         };
         value["installed"] = json!(version.installed);
@@ -235,7 +244,10 @@ impl PiProvider {
             } else {
                 "Pi CLI is installed but failed to run or is older than the required Pi 0.80.5."
             });
-            return serde_json::from_value(value).map_err(|_| ServiceError::Response);
+            return serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ));
         }
         let args = pi_launch::resolve_launch_args(
             self.spec.config["launchArgs"].as_str().unwrap_or_default(),
@@ -247,7 +259,10 @@ impl PiProvider {
                 value["message"] = json!(
                     "Pi launch arguments are invalid or override options controlled by T3 Code."
                 );
-                return serde_json::from_value(value).map_err(|_| ServiceError::Response);
+                return serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ));
             }
         };
         let timeout = Duration::from_millis(crate::versions::probe_timeout_ms(
@@ -268,7 +283,10 @@ impl PiProvider {
                 tokio::time::timeout(Duration::from_secs(5), text),
                 inventory
             );
-            let inventory = inventory.map_err(|_| ServiceError::Response)?;
+            let inventory = inventory.map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
             let inventory = inventory.expose();
             let mut models = pi_catalog::models(&inventory.models, &inventory.state)?;
             let text = match text {
@@ -369,7 +387,10 @@ impl PiProvider {
         ) {
             value["compatibilityAdvisory"] = json!(advisory);
         }
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
 }
 #[async_trait]
@@ -410,10 +431,16 @@ impl ProviderInstanceService for PiProvider {
                 ),
             )
             .await
-            .map_err(|_| ServiceError::Response)?
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
             let (commands, skills) = pi_catalog::commands(&inventory.expose().commands);
-            let workspace=serde_json::from_value(json!({"cwd":cwd,"models":snapshot.models,"slashCommands":pi_catalog::builtin_commands(commands),"skills":skills,"checkedAt":self.checked()?})).map_err(|_|ServiceError::Response)?;
+            let workspace=serde_json::from_value(json!({"cwd":cwd,"models":snapshot.models,"slashCommands":pi_catalog::builtin_commands(commands),"skills":skills,"checkedAt":self.checked()?})).map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response))?;
             let workspaces = snapshot.workspace_snapshots.get_or_insert_default();
             workspaces.retain(|workspace| workspace.cwd.0 != cwd);
             workspaces.insert(0, workspace);

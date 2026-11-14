@@ -18,7 +18,10 @@ pub trait SettingsSource: Send + Sync {
 #[async_trait]
 impl SettingsSource for t3_config::settings::SettingsService {
     async fn settings(&self) -> ServiceResult<ServerSettings> {
-        self.snapshot().await.map_err(|_| ServiceError::Storage)
+        self.snapshot().await.map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))
     }
 }
 struct Cached {
@@ -121,7 +124,10 @@ impl TextGenerators {
         for _ in 0..if anthropic { 10 } else { 1 } {
             let mut request = Self::request(config, key, "/models", None);
             if anthropic {
-                let mut url = url::Url::parse(&request.url).map_err(|_| ServiceError::Response)?;
+                let mut url = url::Url::parse(&request.url).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
                 url.query_pairs_mut().append_pair("limit", "1000");
                 if let Some(after) = after.as_ref() {
                     url.query_pairs_mut().append_pair("after_id", after);
@@ -189,6 +195,7 @@ impl TextGenerators {
         if matches!(&config.api_key,SettingsSecretValue::Literal(s) if s==t3_config::secrets::REDACTED)
         {
             config.api_key = saved
+                .filter(|saved| saved.kind == config.kind && saved.base_url == config.base_url)
                 .map(|s| s.api_key.clone())
                 .unwrap_or_else(|| SettingsSecretValue::Literal(String::new()));
         }
@@ -211,7 +218,10 @@ impl TextGenerators {
         let key = self.key(&config, &settings).await?;
         let models = tokio::time::timeout(Duration::from_secs(25), self.models(&config, &key))
             .await
-            .map_err(|_| ServiceError::Network)??;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Network,
+            ))??;
         if test {
             let explicit = input.model.flatten();
             let model = explicit
@@ -249,13 +259,19 @@ impl TextGenerators {
                         .ok_or(ServiceError::Response)?
                         .expose(),
                 )
-                .map_err(|_| ServiceError::Response)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
                 body["max_tokens"] = json!(8192);
                 request.body = Some(Sensitive::new(body.to_string()));
             }
             let response = tokio::time::timeout(Duration::from_secs(120), self.json(request))
                 .await
-                .map_err(|_| ServiceError::Network)??;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Network,
+                ))??;
             let valid = if config.kind == TextGeneratorKind::Anthropic {
                 response["stop_reason"].as_str() != Some("max_tokens")
                     && response["content"].as_array().is_some_and(|a| {

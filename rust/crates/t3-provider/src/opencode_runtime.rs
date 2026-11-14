@@ -138,7 +138,10 @@ impl OpenCodeRuntime {
             Some(&launch.directory),
         )
         .await
-        .map_err(|_| ServiceError::Response)?;
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         Ok(probe.version.as_deref().and_then(classify_opencode_version))
     }
     pub fn external(&self) -> bool {
@@ -177,7 +180,10 @@ impl OpenCodeRuntime {
         } else {
             self.installed_version()
                 .await
-                .map_err(|_| OpenCodeError::Process)?
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    OpenCodeError::Process,
+                ))?
                 .ok_or(OpenCodeError::Process)
         }
     }
@@ -216,7 +222,10 @@ impl OpenCodeRuntime {
                 let installed = self
                     .installed_version()
                     .await
-                    .map_err(|_| OpenCodeError::Process)?
+                    .map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        OpenCodeError::Process,
+                    ))?
                     .ok_or(OpenCodeError::Process)?;
                 if installed.generation == 1
                     && crate::versions::compare_versions(&installed.version, "1.14.19").is_lt()
@@ -295,18 +304,28 @@ async fn start_owned(
     installed: OpenCodeVersion,
     ledger: Option<&crate::opencode_ledger::OpenCodeLedger>,
 ) -> Result<Arc<Server>, OpenCodeError> {
-    let socket = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|_| OpenCodeError::Process)?;
+    let socket =
+        tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                OpenCodeError::Process,
+            ))?;
     let port = socket
         .local_addr()
-        .map_err(|_| OpenCodeError::Process)?
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            OpenCodeError::Process,
+        ))?
         .port();
     drop(socket);
     let mut environment = launch.environment.clone();
     let password = if installed.generation == 2 {
         let mut bytes = [0; 32];
-        getrandom::fill(&mut bytes).map_err(|_| OpenCodeError::Process)?;
+        getrandom::fill(&mut bytes).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            OpenCodeError::Process,
+        ))?;
         let password = Sensitive::new(URL_SAFE_NO_PAD.encode(bytes));
         environment.retain(|name, _| {
             !name.eq_ignore_ascii_case("OPENCODE_SERVER_PASSWORD")
@@ -340,9 +359,13 @@ async fn start_owned(
         &environment,
     );
     options.cwd = Some(launch.directory.clone());
-    let mut process = t3_process::spawn_non_blocking(&options)
-        .await
-        .map_err(|_| OpenCodeError::Process)?;
+    let mut process =
+        t3_process::spawn_non_blocking(&options)
+            .await
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                OpenCodeError::Process,
+            ))?;
     let lease = if let (Some(ledger), Some(pid)) = (ledger, process.id()) {
         ledger
             .track(
@@ -428,8 +451,11 @@ async fn start_owned(
         &launch.environment,
     ));
     let work = async {
-        let url = tokio::select! {biased;_=control.exited.cancelled()=>return Err(OpenCodeError::Process),result=started=>result.map_err(|_|OpenCodeError::Process)??};
-        let parsed = url::Url::parse(&url).map_err(|_| OpenCodeError::Identity)?;
+        let url = tokio::select! {biased;_=control.exited.cancelled()=>return Err(OpenCodeError::Process),result=started=>result.map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), OpenCodeError::Process))??};
+        let parsed = url::Url::parse(&url).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            OpenCodeError::Identity,
+        ))?;
         if parsed.scheme() != "http"
             || parsed.host_str() != Some("127.0.0.1")
             || parsed.port_or_known_default() != Some(port)
@@ -443,9 +469,21 @@ async fn start_owned(
         }
         Ok((http, version))
     };
-    let (http, version) = tokio::time::timeout(timeout, work)
+    let result = tokio::time::timeout(timeout, work)
         .await
-        .map_err(|_| OpenCodeError::Timeout)??;
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            OpenCodeError::Timeout,
+        ))
+        .and_then(|result| result);
+    let (http, version) = match result {
+        Ok(result) => result,
+        Err(error) => {
+            control.cancel.cancel();
+            control.exited.cancelled().await;
+            return Err(error);
+        }
+    };
     Ok(Arc::new(Server {
         http,
         version,

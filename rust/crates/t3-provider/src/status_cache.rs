@@ -123,7 +123,10 @@ impl ProviderStatusCache {
         let mut cached = provider.clone();
         cached.update_state = None;
         cached.workspace_snapshots = None;
-        let bytes = serde_json::to_vec_pretty(&cached).map_err(|_| ServiceError::Response)?;
+        let bytes = serde_json::to_vec_pretty(&cached).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         if bytes.len() as u64 >= MAX_BYTES {
             return Err(ServiceError::Response);
         }
@@ -131,16 +134,31 @@ impl ProviderStatusCache {
             use std::io::Write;
             let _guard = guard;
             let parent = path.parent().ok_or(ServiceError::Storage)?;
-            std::fs::create_dir_all(parent).map_err(|_| ServiceError::Storage)?;
+            std::fs::create_dir_all(parent).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
             let mut file =
-                tempfile::NamedTempFile::new_in(parent).map_err(|_| ServiceError::Storage)?;
+                tempfile::NamedTempFile::new_in(parent).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ))?;
             file.write_all(&bytes)
                 .and_then(|_| file.write_all(b"\n"))
-                .map_err(|_| ServiceError::Storage)?;
-            file.persist(path).map_err(|_| ServiceError::Storage)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ))?;
+            file.persist(path).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
             Ok(())
         })
         .await
-        .map_err(|_| ServiceError::Storage)?
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?
     }
 }

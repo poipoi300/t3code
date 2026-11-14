@@ -191,9 +191,9 @@ pub fn claude_credits(block: &Value, now: i64) -> Option<ServerProviderResetCred
 }
 fn json_file(path: &Path) -> Result<Value, ServiceError> {
     match std::fs::read(path) {
-        Ok(bytes) if bytes.len() <= 8 * 1024 * 1024 => {
-            serde_json::from_slice(&bytes).map_err(|_| ServiceError::Storage)
-        }
+        Ok(bytes) if bytes.len() <= 8 * 1024 * 1024 => serde_json::from_slice(&bytes).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Storage),
+        ),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
         _ => Err(ServiceError::Storage),
     }

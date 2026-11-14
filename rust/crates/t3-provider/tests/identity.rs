@@ -95,6 +95,8 @@ async fn verifies_real_signatures_required_claims_and_cached_keys_with_rotation_
         ("aud", json!("another-client")),
         ("exp", json!(94)),
         ("exp", json!(null)),
+        ("exp", json!("200")),
+        ("aud", json!(["another-client"])),
         ("nbf", json!(106)),
     ] {
         let mut claims = claims.clone();
@@ -112,6 +114,17 @@ async fn verifies_real_signatures_required_claims_and_cached_keys_with_rotation_
             ServiceError::Identity
         );
     }
+    let mut array_claims = claims.clone();
+    array_claims["aud"] = json!(["another-client", "oaiapp_test"]);
+    verifier
+        .verify(
+            &signed(&pair, "original", array_claims),
+            &metadata(),
+            "oaiapp_test",
+            100_000,
+        )
+        .await
+        .unwrap();
     let (impostor, _) = signing_key("original");
     assert_eq!(
         verifier
@@ -140,4 +153,44 @@ async fn verifies_real_signatures_required_claims_and_cached_keys_with_rotation_
         .await
         .unwrap();
     assert_eq!(http.calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn algorithm_confusion_and_ambiguous_key_ids_are_rejected() {
+    let http = Arc::new(Http {
+        keys: Mutex::new(
+            json!({"keys":[{"kty":"RSA","kid":"original","alg":"RS256","n":URL_SAFE_NO_PAD.encode([1u8;256]),"e":"AQAB"}]}),
+        ),
+        calls: AtomicUsize::new(0),
+    });
+    let verifier = JwksVerifier::new(http.clone(), Arc::new(Clock(AtomicI64::new(100_000))));
+    let claims =
+        json!({"iss":"https://auth.openai.com","aud":"oaiapp_test","exp":200,"sub":"subject"});
+    for algorithm in ["none", "HS256"] {
+        let token = SecretString::new(format!(
+            "{}.{}.{}",
+            URL_SAFE_NO_PAD.encode(json!({"alg":algorithm,"kid":"original"}).to_string()),
+            URL_SAFE_NO_PAD.encode(claims.to_string()),
+            URL_SAFE_NO_PAD.encode([0u8; 32])
+        ));
+        assert_eq!(
+            verifier
+                .verify(&token, &metadata(), "oaiapp_test", 100_000)
+                .await
+                .unwrap_err(),
+            ServiceError::Identity
+        );
+    }
+    assert_eq!(http.calls.load(Ordering::SeqCst), 0);
+    let (pair, jwk) = signing_key("original");
+    *http.keys.lock().await = json!({"keys":[jwk.clone(), jwk]});
+    let token = signed(&pair, "original", claims);
+    assert_eq!(
+        verifier
+            .verify(&token, &metadata(), "oaiapp_test", 100_000)
+            .await
+            .unwrap_err(),
+        ServiceError::Identity
+    );
+    assert_eq!(http.calls.load(Ordering::SeqCst), 1);
 }

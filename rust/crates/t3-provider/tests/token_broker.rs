@@ -148,3 +148,20 @@ async fn bounded_frames_require_a_newline_and_reject_trailing_and_oversize_input
     receiver.read_to_end(&mut bytes).await.unwrap();
     assert_eq!(bytes, b"valid\n");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn post_creation_owner_must_match_even_when_the_root_owned_parent_is_trusted() {
+    use std::os::unix::fs::MetadataExt;
+    let parent = std::fs::canonicalize("/tmp").unwrap();
+    let uid = std::fs::metadata(tempfile::tempdir().unwrap().path())
+        .unwrap()
+        .uid();
+    let metadata = std::fs::symlink_metadata(&parent).unwrap();
+    assert_eq!(metadata.uid(), 0);
+    assert!(metadata.mode() & 0o022 == 0 || metadata.mode() & 0o1000 != 0);
+    let result = ManagedTokenBroker::new("fixture".into())
+        .bind(&parent, Some(uid.wrapping_add(1)))
+        .await;
+    assert!(matches!(result, Err(ServiceError::Identity)));
+}

@@ -97,7 +97,7 @@ async fn openai_model_cache_is_bound_to_the_entire_config_and_redacted_drafts_re
             .0,
         "fresh"
     );
-    service.list_models(input(json!({"id":"generator","config":{"kind":"openaiCompatible","baseUrl":"https://draft.invalid/v1","apiKey":t3_config::secrets::REDACTED}}))).await.unwrap();
+    service.list_models(input(json!({"id":"generator","config":{"kind":"openaiCompatible","baseUrl":"https://other.invalid/v1","apiKey":t3_config::secrets::REDACTED}}))).await.unwrap();
     let calls = http.calls.lock().await;
     assert_eq!(calls[0].url, "https://provider.invalid/v1/models");
     assert_eq!(
@@ -145,4 +145,26 @@ async fn anthropic_pagination_deduplicates_records_and_a_test_probe_uses_the_sel
             .0,
         "fresh"
     );
+}
+
+#[tokio::test]
+async fn redacted_drafts_do_not_transfer_saved_keys_to_another_endpoint_or_kind() {
+    for (kind, base_url) in [
+        ("openaiCompatible", "https://attacker.invalid/v1/"),
+        ("anthropic", "https://provider.invalid/v1/"),
+    ] {
+        let (service, http, _) = setup(
+            "openaiCompatible",
+            vec![json!({"data":[],"has_more":false})],
+        );
+        service.list_models(input(json!({"id":"generator","config":{"kind":kind,"baseUrl":base_url,"apiKey":t3_config::secrets::REDACTED}}))).await.unwrap();
+        let calls = http.calls.lock().await;
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0]
+                .headers
+                .values()
+                .all(|value| !value.expose().contains("secret-never-log"))
+        );
+    }
 }

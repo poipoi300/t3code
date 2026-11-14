@@ -39,9 +39,12 @@ pub trait HttpTransport: Send + Sync {
         Ok(RawHttpResponse {
             status: response.status,
             content_type: Some("application/json".into()),
-            body: Sensitive::new(
-                serde_json::to_vec(response.body.expose()).map_err(|_| ServiceError::Response)?,
-            ),
+            body: Sensitive::new(serde_json::to_vec(response.body.expose()).map_err(
+                crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ),
+            )?),
         })
     }
     async fn text(&self, request: HttpRequest) -> ServiceResult<HttpTextResponse> {
@@ -67,12 +70,16 @@ impl ReqwestTransport {
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .map_err(|_| ServiceError::Network)?,
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Network,
+                ))?,
         })
     }
     async fn bytes(&self, request: HttpRequest) -> ServiceResult<RawHttpResponse> {
-        let method = reqwest::Method::from_bytes(request.method.as_bytes())
-            .map_err(|_| ServiceError::Response)?;
+        let method = reqwest::Method::from_bytes(request.method.as_bytes()).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+        )?;
         let mut builder = self.client.request(method, &request.url);
         for (key, value) in request.headers {
             builder = builder.header(key, value.into_inner());
@@ -80,7 +87,10 @@ impl ReqwestTransport {
         if let Some(body) = request.body {
             builder = builder.body(body.into_inner());
         }
-        let mut response = builder.send().await.map_err(|_| ServiceError::Network)?;
+        let mut response = builder.send().await.map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Network,
+        ))?;
         let status = response.status().as_u16();
         let content_type = response
             .headers()
@@ -88,7 +98,10 @@ impl ReqwestTransport {
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| ServiceError::Network)? {
+        while let Some(chunk) = response.chunk().await.map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Network,
+        ))? {
             if bytes.len().saturating_add(chunk.len()) > 8 * 1024 * 1024 {
                 return Err(ServiceError::Response);
             }
@@ -120,7 +133,10 @@ impl HttpTransport for ReqwestTransport {
         let body = if bytes.is_empty() {
             Value::Null
         } else {
-            serde_json::from_slice(&bytes).map_err(|_| ServiceError::Response)?
+            serde_json::from_slice(&bytes).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?
         };
         Ok(HttpResponse {
             status,

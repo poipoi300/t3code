@@ -56,7 +56,10 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
             let read = reader
                 .read(&mut chunk)
                 .await
-                .map_err(|_| ServiceError::Response)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
             if read == 0 || frame.len().saturating_add(read) > max {
                 return Err(ServiceError::Response);
             }
@@ -71,7 +74,10 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
         }
     })
     .await
-    .map_err(|_| ServiceError::Response)?
+    .map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Response,
+    ))?
 }
 pub async fn write_frame<W: AsyncWrite + Unpin>(
     writer: &mut W,
@@ -85,15 +91,27 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
         writer
             .write_all(frame)
             .await
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         writer
             .write_all(b"\n")
             .await
-            .map_err(|_| ServiceError::Response)?;
-        writer.shutdown().await.map_err(|_| ServiceError::Response)
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
+        writer.shutdown().await.map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     })
     .await
-    .map_err(|_| ServiceError::Response)?
+    .map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Response,
+    ))?
 }
 pub struct ManagedTokenBroker {
     environment_id: String,
@@ -117,11 +135,14 @@ impl ManagedTokenBroker {
         self.instances.write().await.remove(instance);
     }
     pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(&self, stream: S) -> ServiceResult<()> {
-        let connection = self
-            .connections
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ServiceError::Busy)?;
+        let connection =
+            self.connections
+                .clone()
+                .try_acquire_owned()
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Busy,
+                ))?;
         self.serve_admitted(stream, connection).await
     }
     async fn serve_admitted<S: AsyncRead + AsyncWrite + Unpin>(
@@ -131,8 +152,9 @@ impl ManagedTokenBroker {
     ) -> ServiceResult<()> {
         let (mut reader, mut writer) = tokio::io::split(stream);
         let frame = read_frame(&mut reader, REQUEST_BYTES, SOCKET_IDLE).await?;
-        let request: TokenRequest =
-            serde_json::from_slice(frame.expose()).map_err(|_| ServiceError::Response)?;
+        let request: TokenRequest = serde_json::from_slice(frame.expose()).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+        )?;
         request.validate()?;
         if request.environment_id != self.environment_id {
             return Err(ServiceError::Identity);
@@ -141,7 +163,10 @@ impl ManagedTokenBroker {
             .jobs
             .clone()
             .try_acquire_owned()
-            .map_err(|_| ServiceError::Busy)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Busy,
+            ))?;
         let auth = self
             .instances
             .read()
@@ -152,9 +177,15 @@ impl ManagedTokenBroker {
         let credentials =
             tokio::time::timeout(COMMAND_TIMEOUT, auth.access(Some(request.profile_key)))
                 .await
-                .map_err(|_| ServiceError::Refresh)??;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Refresh,
+                ))??;
         let frame = serde_json::to_vec(&serde_json::json!({"token":credentials.access_token}))
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         write_frame(&mut writer, &frame, RESPONSE_BYTES).await
     }
     pub async fn listen(
@@ -172,7 +203,10 @@ impl ManagedTokenBroker {
                 .first_pipe_instance(true)
                 .reject_remote_clients(true)
                 .create(&endpoint)
-                .map_err(|_| ServiceError::Response)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
             let broker = self.clone();
             let endpoint_task = endpoint.clone();
             let stop = cancel.clone();
@@ -206,9 +240,15 @@ impl ManagedTokenBroker {
         {
             use std::os::unix::fs::{MetadataExt, PermissionsExt};
             let uid = owner_uid.ok_or(ServiceError::Identity)?;
-            let parent = std::fs::canonicalize(parent).map_err(|_| ServiceError::Response)?;
+            let parent = std::fs::canonicalize(parent).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
             let metadata =
-                std::fs::symlink_metadata(&parent).map_err(|_| ServiceError::Response)?;
+                std::fs::symlink_metadata(&parent).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
             if !metadata.is_dir()
                 || !((metadata.uid() == uid && metadata.mode() & 0o022 == 0)
                     || metadata.uid() == 0
@@ -219,14 +259,31 @@ impl ManagedTokenBroker {
             let directory = tempfile::Builder::new()
                 .prefix("t3-token-")
                 .tempdir_in(parent)
-                .map_err(|_| ServiceError::Response)?
-                .keep();
-            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-                .map_err(|_| ServiceError::Response)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
             let created =
-                std::fs::symlink_metadata(&directory).map_err(|_| ServiceError::Response)?;
+                std::fs::symlink_metadata(directory.path()).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
+            if !private_directory(
+                created.is_dir(),
+                created.file_type().is_symlink(),
+                created.uid(),
+                uid,
+                created.mode(),
+            ) {
+                return Err(ServiceError::Identity);
+            }
             let directory = OwnedDirectory {
-                path: directory,
+                path: directory.keep(),
                 device: created.dev(),
                 inode: created.ino(),
             };
@@ -235,11 +292,21 @@ impl ManagedTokenBroker {
                 return Err(ServiceError::Response);
             }
             let listener =
-                tokio::net::UnixListener::bind(&path).map_err(|_| ServiceError::Response)?;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|_| ServiceError::Response)?;
+                tokio::net::UnixListener::bind(&path).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+                crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ),
+            )?;
             let socket_identity =
-                std::fs::symlink_metadata(&path).map_err(|_| ServiceError::Response)?;
+                std::fs::symlink_metadata(&path).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
             let endpoint = path.to_string_lossy().into_owned();
             let stop = cancel.clone();
             let broker = self.clone();
@@ -321,7 +388,10 @@ pub async fn request_token<S: AsyncRead + AsyncWrite + Unpin>(
     let (mut reader, mut writer) = tokio::io::split(stream);
     write_frame(
         &mut writer,
-        &serde_json::to_vec(request).map_err(|_| ServiceError::Response)?,
+        &serde_json::to_vec(request).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?,
         REQUEST_BYTES,
     )
     .await?;
@@ -330,8 +400,9 @@ pub async fn request_token<S: AsyncRead + AsyncWrite + Unpin>(
     struct Response {
         token: SecretString,
     }
-    let response: Response =
-        serde_json::from_slice(response.expose()).map_err(|_| ServiceError::Response)?;
+    let response: Response = serde_json::from_slice(response.expose()).map_err(
+        crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+    )?;
     if response.token.expose().is_empty() {
         return Err(ServiceError::Response);
     }
@@ -358,22 +429,51 @@ pub async fn request_endpoint_token(
                 }
             }
         };
-        let stream = tokio::time::timeout(SOCKET_IDLE, connect)
-            .await
-            .map_err(|_| ServiceError::Response)??;
+        let stream = tokio::time::timeout(SOCKET_IDLE, connect).await.map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+        )??;
         request_token(stream, request).await
     }
     #[cfg(unix)]
     {
         let stream = tokio::time::timeout(SOCKET_IDLE, tokio::net::UnixStream::connect(endpoint))
             .await
-            .map_err(|_| ServiceError::Response)?
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         request_token(stream, request).await
     }
     #[cfg(not(any(windows, unix)))]
     {
         let _ = (endpoint, request);
         Err(ServiceError::Unsupported)
+    }
+}
+
+#[cfg(any(unix, test))]
+fn private_directory(directory: bool, symlink: bool, owner: u32, uid: u32, mode: u32) -> bool {
+    directory && !symlink && owner == uid && mode & 0o777 == 0o700
+}
+#[cfg(test)]
+mod directory_tests {
+    #[test]
+    fn only_a_non_symlink_directory_owned_by_the_expected_uid_with_0700_is_private() {
+        assert!(super::private_directory(true, false, 7, 7, 0o40700));
+        for fields in [
+            (false, false, 7, 7, 0o100700),
+            (true, true, 7, 7, 0o40700),
+            (true, false, 8, 7, 0o40700),
+            (true, false, 7, 7, 0o40750),
+            (true, false, 7, 7, 0o40600),
+        ] {
+            assert!(!super::private_directory(
+                fields.0, fields.1, fields.2, fields.3, fields.4
+            ));
+        }
     }
 }

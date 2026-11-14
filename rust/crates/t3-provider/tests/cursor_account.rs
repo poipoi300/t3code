@@ -96,6 +96,13 @@ async fn personal_and_own_user_team_history_share_membership_but_keep_distinct_b
         )
     );
 
+    // accountUsage.ts billedEventIdentity + Node SHA-256, team 10 fixture.
+    assert_eq!(
+        first.records[1].dedupe_key.as_deref(),
+        Some(
+            "cursor-account:2188c26da759c4fae3aa0252fc6d725eff0922ef0b022551e6f0987d02bfab33:b8872dc79bdd1e6e6467685215ff995106cdb3b00c71e7a002befce2eccac786:0"
+        )
+    );
     assert_ne!(first.records[0].dedupe_key, first.records[1].dedupe_key);
     assert_ne!(first.records[1].dedupe_key, first.records[2].dedupe_key);
     reader.read(&key, 0., 10.).await;

@@ -821,3 +821,67 @@ async fn only_structured_plugin_unavailable_errors_are_retryable_and_error_paylo
         assert!(!format!("{error:?} {error}").contains("private payload"));
     }
 }
+
+#[tokio::test]
+async fn oversized_sse_events_end_the_subscription_before_publishing_scan_data() {
+    use t3_provider::opencode_workspace::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            socket.read_exact(&mut byte).await.unwrap();
+            request.push(byte[0]);
+        }
+        let body = format!(
+            "data: {}\n\n",
+            json!({"type":"command.updated","location":{"directory":"/fixture"},"padding":"x".repeat(1024*1024)})
+        );
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",body.len()).as_bytes()).await.unwrap();
+        let _ = socket.write_all(body.as_bytes()).await;
+    });
+    let http = OpenCodeHttp::new(
+        Arc::new(ReqwestTransport::new().unwrap()),
+        &format!("http://{address}"),
+        None,
+    )
+    .unwrap();
+    let mut subscription = HttpWorkspaceEvents::new()
+        .unwrap()
+        .subscribe(http.event_request())
+        .await
+        .unwrap();
+    assert!(subscription.events.recv().await.is_none());
+    server.await.unwrap();
+}
+#[tokio::test]
+async fn an_owned_server_rejects_more_than_64_kib_of_pre_ready_stdout() {
+    use t3_provider::opencode_runtime::*;
+    let fixture = common::Fixture::new(
+        json!({"protocol":"opencode","generation":2,"version":"2.0.28","startupStdoutBytes":64*1024+1}),
+    );
+    let runtime = OpenCodeRuntime::new(
+        OpenCodeLaunch {
+            binary: fixture.binary(),
+            directory: fixture.directory.path().into(),
+            environment: fixture.environment.clone(),
+            server_url: String::new(),
+            server_password: None,
+        },
+        Arc::new(ReqwestTransport::new().unwrap()),
+    );
+    assert!(matches!(
+        runtime.acquire().await,
+        Err(OpenCodeError::Process)
+    ));
+    assert!(
+        fixture
+            .calls()
+            .iter()
+            .any(|call| call.first().is_some_and(|value| value == "serve"))
+    );
+    runtime.close().await;
+}

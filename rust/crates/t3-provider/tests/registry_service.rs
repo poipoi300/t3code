@@ -111,6 +111,23 @@ async fn prepare_reservations_disabled_references_and_package_directories_guard_
         .await
         .unwrap();
     assert_eq!(download.0.load(Ordering::SeqCst), 1);
+    for invalid in [
+        "../escape",
+        "assistant/../../escape",
+        "",
+        " assistant ",
+        "C:/escape",
+    ] {
+        assert!(
+            catalog
+                .uninstall(AcpRegistryManagedBinaryUninstallInput {
+                    agent_id: invalid.into()
+                })
+                .await
+                .is_err()
+        );
+    }
+
     let uninstall = || AcpRegistryManagedBinaryUninstallInput {
         agent_id: "assistant".into(),
     };

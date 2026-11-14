@@ -454,11 +454,20 @@ impl RegistryFetch for ReqwestRegistryFetch {
             .timeout(Duration::from_secs(30))
             .send()
             .await
-            .map_err(|_| ServiceError::Network)?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Network,
+            ))?
             .error_for_status()
-            .map_err(|_| ServiceError::Network)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Network,
+            ))?;
         let mut bytes = vec![];
-        while let Some(chunk) = response.chunk().await.map_err(|_| ServiceError::Network)? {
+        while let Some(chunk) = response.chunk().await.map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Network,
+        ))? {
             if bytes.len().saturating_add(chunk.len()) > MAX_REGISTRY_BYTES {
                 return Err(ServiceError::Response);
             }

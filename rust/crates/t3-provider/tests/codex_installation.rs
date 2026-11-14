@@ -1,4 +1,5 @@
 #![allow(clippy::unwrap_used)]
+mod common;
 use async_trait::async_trait;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -393,5 +394,81 @@ async fn fresh_and_disappeared_local_installs_keep_the_build_pin_despite_newer_u
         installation.wait().await;
         assert_eq!(installation.state().phase, ProviderInstallPhase::Succeeded);
         assert_eq!(installation.resolve().await.unwrap().version, "0.166.0");
+        installation.check_for_update().await;
+        assert_eq!(
+            installation
+                .state()
+                .version
+                .as_ref()
+                .map(|version| version.0.as_str()),
+            Some("0.169.0")
+        );
     }
+}
+
+fn local_fixture(version: &str) -> common::Fixture {
+    let mut fixture = common::Fixture::new(json!({"version": version}));
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    for name in ["codex", "codex-code-mode-host"] {
+        std::fs::copy(
+            fixture.binary(),
+            fixture.directory.path().join(format!("{name}{suffix}")),
+        )
+        .unwrap();
+    }
+    fixture.environment.insert(
+        "PATH".into(),
+        fixture.directory.path().to_string_lossy().into_owned(),
+    );
+    fixture
+}
+#[tokio::test]
+async fn local_acquire_reuses_probe_until_the_executable_fingerprint_changes() {
+    let fixture = local_fixture("codex-cli 0.170.0");
+    let local = Arc::new(ProcessLocalCodex::new(
+        fixture.environment.clone(),
+        fixture.directory.path().join("managed"),
+    ));
+    let (_directory, installation, _) = setup_with_local(local).await;
+    let first = installation.acquire().await.unwrap();
+    assert_eq!(first.executable.version, "0.170.0");
+    drop(first);
+    drop(installation.acquire().await.unwrap());
+    assert_eq!(
+        fixture.calls(),
+        vec![vec!["--version"], vec!["app-server", "--help"]]
+    );
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(
+            fixture
+                .directory
+                .path()
+                .join(if cfg!(windows) { "codex.exe" } else { "codex" }),
+        )
+        .unwrap()
+        .write_all(b"changed-fingerprint")
+        .unwrap();
+    drop(installation.acquire().await.unwrap());
+    assert_eq!(fixture.calls().len(), 4);
+    std::fs::remove_file(fixture.directory.path().join(if cfg!(windows) {
+        "codex-code-mode-host.exe"
+    } else {
+        "codex-code-mode-host"
+    }))
+    .unwrap();
+    assert!(installation.acquire().await.is_err());
+    assert_eq!(fixture.calls().len(), 4);
+}
+#[tokio::test]
+async fn prerelease_local_cli_is_not_selected() {
+    let fixture = local_fixture("codex-cli 0.170.0-alpha.1");
+    let local = ProcessLocalCodex::new(
+        fixture.environment.clone(),
+        fixture.directory.path().join("managed"),
+    );
+    assert!(local.resolve().await.unwrap().is_none());
+    assert!(local.resolve().await.unwrap().is_none());
+    assert_eq!(fixture.calls(), vec![vec!["--version"]]);
 }

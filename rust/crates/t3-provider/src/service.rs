@@ -107,11 +107,18 @@ impl MaintenanceExecutor for ProcessMaintenanceExecutor {
         options.check_exit = false;
         let result = t3_process::run(options)
             .await
-            .map_err(|_| ServiceError::Maintenance)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Maintenance,
+            ))?;
         if result.code == Some(0) {
             Ok(())
         } else {
-            Err(ServiceError::Maintenance)
+            Err(crate::diagnostics::failure(
+                "provider.maintenance.exit",
+                ServiceError::Maintenance,
+                result,
+            ))
         }
     }
 }
@@ -541,7 +548,10 @@ impl ProviderService {
         });
         rx.wait_for(|v| v.is_some())
             .await
-            .map_err(|_| ServiceError::Maintenance)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Maintenance,
+            ))?;
 
         rx.borrow().clone().ok_or(ServiceError::Maintenance)?
     }
@@ -763,8 +773,9 @@ fn needs_opencode_restart(providers: &[ServerProvider]) -> bool {
 
 fn machine_catalog_digest(provider: &ServerProvider) -> ServiceResult<String> {
     use sha2::{Digest, Sha256};
-    let bytes = serde_json::to_vec(&(&provider.slash_commands, &provider.skills))
-        .map_err(|_| ServiceError::Response)?;
+    let bytes = serde_json::to_vec(&(&provider.slash_commands, &provider.skills)).map_err(
+        crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+    )?;
     Ok(format!("{:x}", Sha256::digest(bytes))[..16].to_owned())
 }
 fn machine_catalog_names(provider: &mut ServerProvider) -> ServiceResult<()> {
@@ -772,16 +783,26 @@ fn machine_catalog_names(provider: &mut ServerProvider) -> ServiceResult<()> {
         .slash_commands
         .iter()
         .map(|c| {
-            serde_json::from_value(serde_json::json!({"name":c.name}))
-                .map_err(|_| ServiceError::Response)
+            serde_json::from_value(serde_json::json!({"name":c.name})).map_err(
+                crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ),
+            )
         })
         .collect::<ServiceResult<_>>()?;
     for skill in &mut provider.skills {
-        let mut value = serde_json::to_value(&*skill).map_err(|_| ServiceError::Response)?;
+        let mut value = serde_json::to_value(&*skill).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         let map = value.as_object_mut().ok_or(ServiceError::Response)?;
         map.remove("description");
         map.remove("shortDescription");
-        *skill = serde_json::from_value(value).map_err(|_| ServiceError::Response)?;
+        *skill = serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
     }
     Ok(())
 }

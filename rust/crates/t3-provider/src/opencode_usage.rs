@@ -47,8 +47,9 @@ fn finish(checked: &str, mut windows: Vec<Value>) -> ServiceResult<ServerProvide
             .cmp(&rank(right))
             .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
     });
-    serde_json::from_value(json!({"checkedAt":checked,"windows":windows}))
-        .map_err(|_| ServiceError::Response)
+    serde_json::from_value(json!({"checkedAt":checked,"windows":windows})).map_err(
+        crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+    )
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -150,8 +151,9 @@ pub async fn server(
         if !(200..300).contains(&response.status) {
             return Err(ServiceError::Response);
         }
-        let value: Value =
-            serde_json::from_slice(response.body.expose()).map_err(|_| ServiceError::Response)?;
+        let value: Value = serde_json::from_slice(response.body.expose()).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+        )?;
         if !value["location"]["directory"].is_string() {
             return Err(ServiceError::Response);
         }
@@ -163,8 +165,9 @@ pub async fn server(
                 Some("No OpenCode Console workspace is signed in."),
             )));
         }
-        let data: Data =
-            serde_json::from_value(value.clone()).map_err(|_| ServiceError::Response)?;
+        let data: Data = serde_json::from_value(value.clone()).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+        )?;
         let mut windows = vec![];
         if let Some(go) = data.go {
             for (key, kind, label, duration, meter) in [
@@ -260,8 +263,9 @@ pub async fn server(
                 windows.push(window);
             }
         }
-        let mut limits =
-            serde_json::to_value(finish(checked, windows)?).map_err(|_| ServiceError::Response)?;
+        let mut limits = serde_json::to_value(finish(checked, windows)?).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+        )?;
         if let Ok(url) = url::Url::parse(&data.workspace.usage_url)
             && matches!(url.scheme(), "http" | "https")
         {
@@ -269,7 +273,10 @@ pub async fn server(
         }
         serde_json::from_value(limits)
             .map(Some)
-            .map_err(|_| ServiceError::Response)
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))
     };
     match tokio::time::timeout(Duration::from_secs(5), work).await {
         Ok(Ok(limits)) => limits,
@@ -331,7 +338,10 @@ pub async fn keys(environment: &Environment, home: &Path) -> ServiceResult<Vec<S
             Err(_) => return Err(ServiceError::Storage),
         }
     };
-    let value: Value = serde_json::from_str(&contents).map_err(|_| ServiceError::Response)?;
+    let value: Value = serde_json::from_str(&contents).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Response,
+    ))?;
     if !value.is_object() {
         return Err(ServiceError::Response);
     }
@@ -402,8 +412,9 @@ pub async fn legacy(
         if !(200..300).contains(&response.status) {
             return Err(ServiceError::Network);
         }
-        let body: Value =
-            serde_json::from_slice(response.body.expose()).map_err(|_| ServiceError::Response)?;
+        let body: Value = serde_json::from_slice(response.body.expose()).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+        )?;
         let usage = &body["usage"];
         let mut windows = vec![];
         for (key, kind, label, duration) in [

@@ -165,7 +165,7 @@ pub fn codex_capabilities(raw: &Value) -> ServiceResult<ModelCapabilities> {
             }
             choices.push(choice);
         }
-        options.push(serde_json::from_value(json!({"id":"serviceTier","label":"Service Tier","type":"select","options":choices,"currentValue":default})).map_err(|_|ServiceError::Response)?);
+        options.push(serde_json::from_value(json!({"id":"serviceTier","label":"Service Tier","type":"select","options":choices,"currentValue":default})).map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response))?);
     }
     if let Some(programs) = raw["availableAccessPrograms"]
         .get("cyber")
@@ -290,7 +290,12 @@ pub fn codex_skills(
             {
                 value["shortDescription"] = json!(description);
             }
-            output.push(serde_json::from_value(value).map_err(|_| ServiceError::Response)?);
+            output.push(
+                serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?,
+            );
         }
     }
     Ok(output)
@@ -393,7 +398,10 @@ pub fn codex_auth(
         "warning"
     };
     Ok((
-        serde_json::from_value(auth).map_err(|_| ServiceError::Response)?,
+        serde_json::from_value(auth).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?,
         status,
     ))
 }
@@ -482,7 +490,10 @@ pub fn claude_auth(
         }
     }
     Ok((
-        serde_json::from_value(auth).map_err(|_| ServiceError::Response)?,
+        serde_json::from_value(auth).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?,
         if authenticated { "ready" } else { "error" },
     ))
 }

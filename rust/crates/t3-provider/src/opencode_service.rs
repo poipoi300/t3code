@@ -178,7 +178,10 @@ impl OpenCodeServiceReplacement {
                 .await
         })
         .await
-        .map_err(|_| ServiceError::Maintenance)?
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Maintenance,
+        ))?
     }
 }
 async fn configured_environment(path: &Path) -> Option<Environment> {

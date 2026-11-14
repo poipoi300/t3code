@@ -45,7 +45,10 @@ impl OpenCodeProvider {
         if let Some(color) = &self.spec.accent_color {
             value["accentColor"] = json!(color);
         }
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
     pub fn into_managed(
         self,
@@ -392,7 +395,10 @@ impl OpenCodeProvider {
         ) {
             value["compatibilityAdvisory"] = json!(advisory);
         }
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
     async fn workspace(&self, base: &mut ServerProvider, cwd: &str) -> ServiceResult<()> {
         let connection = self.runtime.acquire().await.map_err(ServiceError::from)?;
@@ -481,7 +487,10 @@ impl OpenCodeProvider {
                 }
             }
         }
-        let snapshot = serde_json::from_value(snapshot).map_err(|_| ServiceError::Response)?;
+        let snapshot = serde_json::from_value(snapshot).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         let workspaces = base.workspace_snapshots.get_or_insert_with(Vec::new);
         workspaces.retain(|workspace| workspace.cwd.0 != cwd);
         workspaces.push(snapshot);

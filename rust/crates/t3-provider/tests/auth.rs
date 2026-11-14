@@ -509,3 +509,66 @@ async fn browser_interactions_validate_and_trim_provider_urls_before_publication
         controller.close();
     }
 }
+
+struct PendingCommit {
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+#[async_trait]
+impl AuthBackend for PendingCommit {
+    async fn methods(&self) -> ServiceResult<Vec<ProviderAuthMethod>> {
+        Ok(serde_json::from_value(
+            json!([{"id":"key","name":"Key","type":"credentials","description":null}]),
+        )
+        .unwrap())
+    }
+    async fn authenticate(&self, _: &str, context: AuthContext) -> ServiceResult<()> {
+        let entered = self.entered.lock().await.take().unwrap();
+        let release = self.release.lock().await.take().unwrap();
+        context
+            .commit(async move {
+                entered.send(()).unwrap();
+                release.await.map_err(|_| ServiceError::Cancelled)
+            })
+            .await
+    }
+    async fn logout(&self) -> ServiceResult<Option<String>> {
+        Ok(None)
+    }
+}
+#[tokio::test]
+async fn another_subscriber_observes_verifying_while_credential_commit_is_pending() {
+    let (entered, pending) = tokio::sync::oneshot::channel();
+    let (release, blocked) = tokio::sync::oneshot::channel();
+    let controller = AuthController::new(
+        "work".into(),
+        CredentialBinding {
+            key: "binding".into(),
+            owner: ProviderCredentialOwner::T3,
+        },
+        Arc::new(PendingCommit {
+            entered: Mutex::new(Some(entered)),
+            release: Mutex::new(Some(blocked)),
+        }),
+        Arc::new(NoSessions),
+        Duration::from_secs(300),
+    )
+    .await;
+    let mut other = controller.subscribe("other".into());
+    other.next().await.unwrap();
+    controller
+        .start("owner", None, None, None, 0)
+        .await
+        .unwrap();
+    pending.await.unwrap();
+    let next = other.next();
+    tokio::pin!(next);
+    let std::task::Poll::Ready(Some(state)) = futures::poll!(&mut next) else {
+        panic!("commit blocked the other subscriber");
+    };
+    assert_eq!(state.expose().phase, ProviderAuthPhase::Verifying);
+    assert!(state.expose().flow_id.is_none());
+    release.send(()).unwrap();
+    let mut completed = controller.subscribe("owner".into());
+    phase(&mut completed, ProviderAuthPhase::Succeeded).await;
+}

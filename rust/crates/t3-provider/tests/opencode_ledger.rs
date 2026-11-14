@@ -163,3 +163,64 @@ async fn leaderless_groups_record_matching_members_and_windows_does_not_observe_
         .unwrap();
     assert!(windows.track(42, 1234, vec![]).await.unwrap().is_none());
 }
+
+struct FailFirstObserve {
+    inner: Processes,
+    fail: std::sync::atomic::AtomicBool,
+    attempts: std::sync::atomic::AtomicUsize,
+}
+#[async_trait]
+impl LedgerProcesses for FailFirstObserve {
+    async fn observe(&self, pid: u32) -> ServiceResult<Option<ObservedProcess>> {
+        use std::sync::atomic::Ordering;
+        if self.fail.swap(false, Ordering::SeqCst) {
+            return Err(t3_provider::sensitive::ServiceError::Storage);
+        }
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        self.inner.observe(pid).await
+    }
+    async fn group(&self, pgid: u32) -> ServiceResult<Vec<ObservedProcess>> {
+        self.inner.group(pgid).await
+    }
+    async fn exists(&self, pgid: u32) -> ServiceResult<bool> {
+        self.inner.exists(pgid).await
+    }
+    async fn signal(&self, pgid: u32, signal: GroupSignal) -> ServiceResult<()> {
+        self.inner.signal(pgid, signal).await
+    }
+}
+#[tokio::test]
+async fn reaping_continues_after_a_bad_entry_independent_of_directory_order() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let processes = Arc::new(FailFirstObserve {
+        inner: Processes {
+            rows: Mutex::new(BTreeMap::from([
+                (1, process(1, 1, "host")),
+                (42, process(42, 42, "opencode serve")),
+                (43, process(43, 43, "opencode serve")),
+            ])),
+            signals: Mutex::new(vec![]),
+        },
+        fail: AtomicBool::new(false),
+        attempts: AtomicUsize::new(0),
+    });
+    let ledger = OpenCodeLedger::open(dir.path().into(), Platform::Linux, 1, processes.clone())
+        .await
+        .unwrap();
+    for pid in [42, 43] {
+        ledger.track(pid, 1234, vec!["serve".into()]).await.unwrap();
+    }
+    processes.inner.rows.lock().await.remove(&1);
+    processes.fail.store(true, Ordering::SeqCst);
+    processes.attempts.store(0, Ordering::SeqCst);
+    ledger.reap_orphans().await.unwrap();
+    assert_eq!(processes.attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(processes.inner.signals.lock().await.len(), 1);
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("opencode-servers"))
+            .unwrap()
+            .count(),
+        1
+    );
+}
