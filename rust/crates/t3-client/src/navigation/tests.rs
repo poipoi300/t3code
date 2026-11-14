@@ -125,6 +125,7 @@ fn redirects_match_the_captured_settings_aliases_and_preserve_legacy_thread_sear
         secrets_enabled: true,
         connect_cli_enabled: true,
         approve_agent_enabled: true,
+        first_run: false,
     };
     for path in ["/settings/secrets", "/connect", "/approve-agent"] {
         assert_eq!(Location::resolve(path, enabled).href(), path);
@@ -374,3 +375,31 @@ fn each_launch_address_lands_where_the_web_router_sends_it_in_each_state() {
         }
     }
 }
+
+#[test]
+fn the_first_run_wizard_takes_only_home_to_welcome() {
+    let wizard = RoutePolicy {
+        first_run: true,
+        ..RoutePolicy::for_client(true)
+    };
+    for (launch, landed) in [
+        ("/", "/welcome"),
+        ("/welcome", "/welcome"),
+        ("/new?prompt=hi", "/new?prompt=hi"),
+        ("/settings", "/settings/general"),
+        // Signed in, `/pair` goes to `/`, which the wizard takes on to `/welcome`.
+        ("/pair", "/welcome"),
+    ] {
+        let mut href = launch.to_owned();
+        for _ in 0..3 {
+            href = Location::resolve(&href, wizard).href();
+        }
+        assert_eq!(href, landed, "{launch}");
+    }
+    let signed_out = RoutePolicy {
+        first_run: true,
+        ..RoutePolicy::for_client(false)
+    };
+    assert_eq!(Location::resolve("/", signed_out).href(), "/pair");
+}
+

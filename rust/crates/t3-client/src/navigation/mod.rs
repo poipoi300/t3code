@@ -178,6 +178,10 @@ pub struct RoutePolicy {
     pub secrets_enabled: bool,
     pub connect_cli_enabled: bool,
     pub approve_agent_enabled: bool,
+    /// The first-run gate decided on the welcome wizard (`FirstRunGate.tsx`): `/` goes to
+    /// `/welcome`. False while it is pending, as for the app: no guard acts on a guess.
+    #[serde(default)]
+    pub first_run: bool,
 }
 
 impl RoutePolicy {
@@ -303,6 +307,8 @@ impl Location {
         Some(match &self.route {
             route if !signed_in && needs_sign_in(route) => "/pair".into(),
             Route::Pair if signed_in && !self.is_hosted_pairing_request() => "/".into(),
+            // From home only, as the web's gate redirects only `/`.
+            Route::Home if policy.first_run => "/welcome".into(),
             Route::Settings(SettingsPage::Secrets) if !policy.secrets_enabled => {
                 "/settings/general".into()
             }
