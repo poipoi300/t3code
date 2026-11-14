@@ -139,7 +139,7 @@ fn repository_identity_controls_pr_workspace_preservation_and_weaker_matches() {
         Some(&unknown)
     );
     assert_eq!(
-        new_task::environment_project_match(&[fork.clone()], Some(&selected)),
+        new_task::environment_project_match(std::slice::from_ref(&fork), Some(&selected)),
         Some(&fork)
     );
     same.project.repository_identity = None;

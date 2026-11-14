@@ -34,7 +34,8 @@ const MOVED: &[(&str, &str, Option<&str>)] = &[
     ("/settings/general", "language", None),
     ("/settings/threads", "text-generation", None),
 ];
-const SCOPES: &[(&str, Option<(&str, Option<&str>)>)] = &[
+type Scope = Option<(&'static str, Option<&'static str>)>;
+const SCOPES: &[(&str, Scope)] = &[
     ("storage-worktrees", Some(("Worktree cleanup", Some("project-defaults")))),
     ("language", Some(("Language", None))),
     ("authorized-clients", None),

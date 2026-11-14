@@ -1348,7 +1348,7 @@ fn an_import_drops_older_raw_backups_and_removal_purges_copies_of_a_token() {
             &storage,
             &env(),
             &["ssh:devbox".to_owned()],
-            &[token.clone()],
+            std::slice::from_ref(&token),
         )
         .await
         .unwrap();

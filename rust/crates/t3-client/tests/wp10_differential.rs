@@ -18,7 +18,7 @@ fn node(value: &Value) -> MarkdownNode {
         offset: value["offset"].as_u64().map(|v| v as usize),
     };
     MarkdownNode {
-        kind: value["type"].as_str().unwrap().into(),
+        kind: value["type"].as_str().expect("a markdown node type").into(),
         position: value.get("position").map(|p| MarkdownPosition {
             start: point(&p["start"]),
             end: point(&p["end"]),

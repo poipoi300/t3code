@@ -108,8 +108,10 @@ fn unresolved_theme_and_failed_single_appearance_wait_before_recording_adoption(
     futures::executor::block_on(async {
         let storage = FakePlatform::default();
         let environment = EnvironmentId("late".into());
-        let mut settings = ServerSettings::default();
-        settings.default_theme = serde_json::from_str("\"nightfall\"").unwrap();
+        let settings = ServerSettings {
+            default_theme: serde_json::from_str("\"nightfall\"").unwrap(),
+            ..ServerSettings::default()
+        };
         let called = RefCell::new(Vec::new());
         adopt_defaults(
             &storage,
