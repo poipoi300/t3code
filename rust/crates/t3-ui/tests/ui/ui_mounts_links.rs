@@ -390,6 +390,7 @@ fn ahead_snapshot() -> GitActionsSnapshot {
 struct Acting {
     resource: Resource<GitActionsSnapshot>,
     runs: Rc<RefCell<Vec<String>>>,
+    held: Rc<RefCell<Option<Vec<futures::channel::oneshot::Sender<()>>>>>,
 }
 
 impl GitActionsBackend for Acting {
@@ -405,8 +406,16 @@ impl GitActionsBackend for Acting {
     }
     fn run_action(&self, _: &GitActionsScope, request: GitActionRequest) -> LocalBoxFuture<'static, Result<GitRunStackedActionResult, ClientError>> {
         let runs = self.runs.clone();
+        let held = self.held.borrow_mut().as_mut().map(|held| {
+            let (sender, answered) = futures::channel::oneshot::channel();
+            held.push(sender);
+            answered
+        });
         async move {
             runs.borrow_mut().push(format!("{:?}", request.action));
+            if let Some(answered) = held {
+                let _ = answered.await;
+            }
             Ok(serde_json::from_value(json!({"action":request.action,"branch":{"status":"skipped_not_requested"},"commit":{"status":"skipped_not_requested"},"push":{"status":"pushed"},
                 "pr":{"status":"skipped_not_requested"},"toast":{"title":"Pushed","cta":{"kind":"none"}}})).expect("result"))
         }
@@ -438,10 +447,25 @@ fn ActingFixture() -> impl IntoElement {
     let token = resource.begin();
     resource.finish(token, ahead_snapshot(), 0, false);
     let runs = Rc::new(RefCell::new(Vec::new()));
+    let held: Rc<RefCell<Option<Vec<futures::channel::oneshot::Sender<()>>>>> = Rc::default();
     provide_context(GitActionsRuntime(Rc::new(Acting {
         resource,
         runs: runs.clone(),
+        held: held.clone(),
     })));
+    let (holding, releasing) = (held.clone(), held);
+    let hold = nsh_base::button()
+        .accessibility_label(Some(SharedString::from("Hold replies")))
+        .on_press(move || *holding.borrow_mut() = Some(Vec::new()))
+        .child(text("Hold replies"));
+    let release = nsh_base::button()
+        .accessibility_label(Some(SharedString::from("Release replies")))
+        .on_press(move || {
+            for sender in releasing.borrow_mut().take().unwrap_or_default() {
+                let _ = sender.send(());
+            }
+        })
+        .child(text("Release replies"));
     let shown = signal(String::from("runs: unread"));
     let probe = nsh_base::button()
         .accessibility_label(Some(SharedString::from("Read runs")))
@@ -453,6 +477,8 @@ fn ActingFixture() -> impl IntoElement {
         .h_full()
         .child(line)
         .child(probe)
+        .child(hold)
+        .child(release)
         .child(text(move || shown.get()))
         .child(view().w(px(280.0)).child(git_actions_control(props)))
 }
@@ -489,4 +515,35 @@ fn a_git_action_started_from_the_quick_button_or_the_menu_finishes() {
     app.wait_for("Pushed")
         .expect("the action finished although the menu that started it closed");
     assert_eq!(runs_after_settling(&mut app), "runs: [\"Push\"]");
+}
+
+// Rule 7 audit evidence: the menu's "Push" answered only after the menu has gone.
+#[test]
+fn a_git_action_from_the_menu_answered_after_the_menu_closed_still_finishes() {
+    let mut app = start(DESKTOP, Root::of::<ActingFixture>());
+    app.wait_for("role:button[Push & create PR]")
+        .expect("the service's first snapshot");
+    app.press("role:button[Hold replies]").expect("hold");
+    app.press("role:button[Git action options]").expect("menu");
+    app.press("role:menuitem[Push]").expect("menu item");
+    app.wait_for_gone("role:menuitem[Push]", nsh_testing::WAIT)
+        .expect("the menu closed");
+    app.press("role:button[Release replies]").expect("answer");
+    app.wait_for("Pushed")
+        .expect("the action's answer was handled after its menu closed");
+}
+
+// Rule 7 audit evidence: the quick button, answered after its first state change rendered.
+#[test]
+fn a_quick_git_action_answered_after_the_press_rendered_still_finishes() {
+    let mut app = start(DESKTOP, Root::of::<ActingFixture>());
+    app.wait_for("role:button[Push & create PR]")
+        .expect("the service's first snapshot");
+    app.press("role:button[Hold replies]").expect("hold");
+    app.press("role:button[Push & create PR]")
+        .expect("quick action");
+    app.settle();
+    app.press("role:button[Release replies]").expect("answer");
+    app.wait_for("Pushed")
+        .expect("the action's answer was handled");
 }

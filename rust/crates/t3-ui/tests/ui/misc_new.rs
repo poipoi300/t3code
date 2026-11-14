@@ -352,10 +352,10 @@ fn link_url(path: String) -> UrlSnapshot {
         entry_key: None,
         can_go_back: false,
         can_go_forward: false,
-        policy: RoutePolicy {
+        policy: Some(RoutePolicy {
             authenticated_or_hosted: true,
             ..Default::default()
-        },
+        }),
     }
 }
 impl UrlClient for LinkUrls {

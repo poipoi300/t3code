@@ -20,13 +20,13 @@ use futures::StreamExt;
 use nsh_core::notifications::Notification;
 use nsh_core::platform::Lifecycle;
 use nsh_core::prelude::*;
+use t3_client::services::models::PendingSubagentRequest;
 use t3_client::thread_views::threads::notification_center::{
     NotificationCenter, NotificationTone, Presentation, ThreadNotification, presentation,
 };
 use t3_client::thread_views::threads::notifications::{
     BackgroundMemory, BackgroundThread, next_background_announcement, resolve_background_request,
 };
-use t3_client::services::models::PendingSubagentRequest;
 use t3_client::thread_views::threads::shell::{PendingChildRequest, ThreadShellViews};
 use t3_client::types::{EnvironmentId, SyncStatus, ThreadId, ThreadKey};
 use t3_client::view_logic::session::text::thread_notification_tag;

@@ -77,7 +77,8 @@ fn subagent_asking_for_approval() -> serde_json::Value {
     child["id"] = json!("sub-1");
     child["title"] = json!("Run the tests");
     child["creationSource"] = json!("mcp");
-    child["lineage"] = json!({"rootThreadId":"t1","parentThreadId":"t1","relationshipToParent":"subagent"});
+    child["lineage"] =
+        json!({"rootThreadId":"t1","parentThreadId":"t1","relationshipToParent":"subagent"});
     child["pendingRuntimeRequest"] = json!({"id":"q","kind":"command","createdAt":NOW});
     child
 }
@@ -102,7 +103,11 @@ fn seeded_store(status: &str) -> (ClientStore, t3_client::types::Generation) {
 fn seeded_store_with(status: &str, settled: usize) -> (ClientStore, t3_client::types::Generation) {
     let store = ClientStore::default();
     let session = store.begin_session(environment());
-    store.apply_shell(&environment(), session, shell_items_with(status, None, settled));
+    store.apply_shell(
+        &environment(),
+        session,
+        shell_items_with(status, None, settled),
+    );
     let mut config: serde_json::Value = serde_json::from_str(
         include_str!("../../../../fixtures/samples/ServerConfig.jsonl")
             .lines()
@@ -207,14 +212,25 @@ struct WorkspaceProps {
 /// no live session, so the toggle would be disabled).
 struct Granted<T>(T);
 
-impl<T: t3_ui::runtime::services::terminal::TerminalClient> t3_ui::runtime::services::terminal::TerminalClient for Granted<T> {
+impl<T: t3_ui::runtime::services::terminal::TerminalClient>
+    t3_ui::runtime::services::terminal::TerminalClient for Granted<T>
+{
     fn load(&self) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
         self.0.load()
     }
-    fn drawer(&self, key: &ThreadKey, launch: Option<t3_client::services::terminal_sessions::LaunchLocation>) -> t3_client::services::terminal_sessions::TerminalDrawerLease {
+    fn drawer(
+        &self,
+        key: &ThreadKey,
+        launch: Option<t3_client::services::terminal_sessions::LaunchLocation>,
+    ) -> t3_client::services::terminal_sessions::TerminalDrawerLease {
         self.0.drawer(key, launch)
     }
-    fn session(&self, key: &ThreadKey, terminal: &str, launch: &t3_client::services::terminal_sessions::TerminalLaunch) -> t3_client::services::terminal_sessions::TerminalSessionLease {
+    fn session(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+        launch: &t3_client::services::terminal_sessions::TerminalLaunch,
+    ) -> t3_client::services::terminal_sessions::TerminalSessionLease {
         self.0.session(key, terminal, launch)
     }
     fn can_operate(&self, key: &ThreadKey) -> bool {
@@ -241,16 +257,38 @@ impl<T: t3_ui::runtime::services::terminal::TerminalClient> t3_ui::runtime::serv
     fn activate(&self, key: &ThreadKey, terminal: &str) {
         self.0.activate(key, terminal)
     }
-    fn launch(&self, key: &ThreadKey, placement: t3_client::services::terminal_sessions::Placement, location: Option<t3_client::services::terminal_sessions::LaunchLocation>) -> Option<(String, futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>>)> {
+    fn launch(
+        &self,
+        key: &ThreadKey,
+        placement: t3_client::services::terminal_sessions::Placement,
+        location: Option<t3_client::services::terminal_sessions::LaunchLocation>,
+    ) -> Option<(
+        String,
+        futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>>,
+    )> {
         self.0.launch(key, placement, location)
     }
-    fn close_terminal(&self, key: &ThreadKey, terminal: &str) -> Option<futures::future::LocalBoxFuture<'static, ()>> {
+    fn close_terminal(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+    ) -> Option<futures::future::LocalBoxFuture<'static, ()>> {
         self.0.close_terminal(key, terminal)
     }
-    fn write(&self, key: &ThreadKey, terminal: &str, data: String) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
+    fn write(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+        data: String,
+    ) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
         self.0.write(key, terminal, data)
     }
-    fn resize(&self, key: &ThreadKey, terminal: &str, grid: t3_client::services::terminal::TerminalGrid) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
+    fn resize(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+        grid: t3_client::services::terminal::TerminalGrid,
+    ) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
         self.0.resize(key, terminal, grid)
     }
 }
@@ -267,9 +305,9 @@ fn ClientWorkspace(props: WorkspaceProps) -> impl IntoElement {
     provide_context(Navigator::new(Route::Thread(key())));
     t3_ui::app::provide_client_services(&client);
     if props.terminal_granted {
-        provide_context(t3_ui::runtime::services::terminal::TerminalServices(Rc::new(Granted(
-            client.terminals(),
-        ))));
+        provide_context(t3_ui::runtime::services::terminal::TerminalServices(
+            Rc::new(Granted(client.terminals())),
+        ));
     }
     if props.terminal_open {
         client.terminals().set_open(&key(), true);
@@ -314,7 +352,10 @@ fn start_workspace(window: (f32, f32), terminal_open: bool, terminal_granted: bo
 #[test]
 fn the_launcher_opens_the_root_registered_diff_and_files_surfaces() {
     for window in [DESKTOP, PHONE] {
-        for (kind, surface) in [("Files", "id:file-preview-panel"), ("Diff", "id:panel-tab-diff")] {
+        for (kind, surface) in [
+            ("Files", "id:file-preview-panel"),
+            ("Diff", "id:panel-tab-diff"),
+        ] {
             let mut app = workspace(window, false);
             app.press("role:button[Toggle right panel]")
                 .expect("open workspace panel");
@@ -401,7 +442,12 @@ fn AppTree(props: TreeProps) -> impl IntoElement {
     let services = client.clone();
     let probe = client.clone();
     // What the client's records hold, so tests assert on them rather than only on the screen.
-    let rich_text = signal(probe.settings().client_settings().composer_rich_text_enabled);
+    let rich_text = signal(
+        probe
+            .settings()
+            .client_settings()
+            .composer_rich_text_enabled,
+    );
     let stored_width = signal(None::<f64>);
     let settings = probe.settings();
     spawn(async move {
@@ -416,7 +462,9 @@ fn AppTree(props: TreeProps) -> impl IntoElement {
         .w_full()
         .h_full()
         .child(text(move || format!("rich text {}", rich_text.get())))
-        .child(text(move || format!("stored width {:?}", stored_width.get())))
+        .child(text(move || {
+            format!("stored width {:?}", stored_width.get())
+        }))
         .child(
             nsh_base::button()
                 .accessibility_label(Some(SharedString::from("Read stored width")))
@@ -450,7 +498,10 @@ fn AppTree(props: TreeProps) -> impl IntoElement {
             "Complete the snoozed turn",
             store.clone(),
             session,
-            vec![snoozed(thread_t1("completed", Some("2026-06-20T00:05:00.000Z")))],
+            vec![snoozed(thread_t1(
+                "completed",
+                Some("2026-06-20T00:05:00.000Z"),
+            ))],
         ))
         .child(
             nsh_base::button()
@@ -466,9 +517,11 @@ fn AppTree(props: TreeProps) -> impl IntoElement {
                 })
                 .child(text("Enable in-app notifications")),
         )
-        .child(t3_ui::app::app_tree(runtime, Route::parse(&props.route), move || {
-            t3_ui::app::provide_client_services(&services)
-        }))
+        .child(t3_ui::app::app_tree(
+            runtime,
+            Route::parse(&props.route),
+            move || t3_ui::app::provide_client_services(&services),
+        ))
 }
 
 /// A button that hands the environment the next shell snapshot listing `threads`.
@@ -627,7 +680,10 @@ fn a_settings_page_not_built_yet_renders_inside_the_shell() {
     let mut app = start_host_tree(DESKTOP, SettingsPage::Voice);
     app.wait_for("This screen is not built yet in the Rust client.")
         .expect("the page's not-built body");
-    assert!(app.screen().shows("Appearance"), "inside the shell's navigation");
+    assert!(
+        app.screen().shows("Appearance"),
+        "inside the shell's navigation"
+    );
 }
 
 #[test]
@@ -688,7 +744,8 @@ fn a_completed_background_turn_raises_a_toast_that_opens_the_thread() {
     let mut app = start_app_tree(DESKTOP, None, Route::Home, "running");
     app.press("role:button[Enable in-app notifications]")
         .expect("enable");
-    app.press("role:button[Complete the turn]").expect("complete");
+    app.press("role:button[Complete the turn]")
+        .expect("complete");
     app.wait_for("Thread completed").expect("the in-app toast");
     app.press("role:button[Open thread]").expect("open");
     app.wait_for("role:button[Toggle right panel]")
@@ -777,8 +834,8 @@ fn PairedTree() -> impl IntoElement {
 /// task, shown under its parent, has none of its own.
 #[test]
 fn a_subagent_asking_for_approval_notifies_its_parent_once() {
-    let mut app = Headless::start(config(DESKTOP, None, Root::of::<PairedTree>()))
-        .expect("paired tree");
+    let mut app =
+        Headless::start(config(DESKTOP, None, Root::of::<PairedTree>())).expect("paired tree");
     app.wait_for("Working")
         .expect("paired: the running thread is shelved");
     app.press("role:button[Enable in-app notifications]")
@@ -802,10 +859,13 @@ fn a_subagent_asking_for_approval_notifies_its_parent_once() {
 #[test]
 fn a_snoozed_thread_finishing_in_the_background_is_not_announced() {
     let mut app = start_app_tree(DESKTOP, None, Route::Home, "running");
-    app.press("role:button[Complete the turn]").expect("complete");
+    app.press("role:button[Complete the turn]")
+        .expect("complete");
     app.settle();
     assert!(
-        announced(&app).iter().any(|message| message.contains("Fix the build")),
+        announced(&app)
+            .iter()
+            .any(|message| message.contains("Fix the build")),
         "control: an unsnoozed thread's completion is spoken: {:?}",
         announced(&app)
     );
@@ -816,7 +876,9 @@ fn a_snoozed_thread_finishing_in_the_background_is_not_announced() {
         .expect("complete while snoozed");
     app.settle();
     assert!(
-        !announced(&app).iter().any(|message| message.contains("Fix the build")),
+        !announced(&app)
+            .iter()
+            .any(|message| message.contains("Fix the build")),
         "a snoozed thread stays quiet: {:?}",
         announced(&app)
     );
@@ -825,8 +887,10 @@ fn a_snoozed_thread_finishing_in_the_background_is_not_announced() {
 #[test]
 fn the_sidebar_shelves_mount_their_markers_and_page_the_settled_tail() {
     let mut app = start_app_tree_with(DESKTOP, None, Route::Home, "idle", 40);
-    app.wait_for("role:button[Settled]").expect("the Settled shelf header");
-    app.wait_for("text:40").expect("its count includes the collapsed rows");
+    app.wait_for("role:button[Settled]")
+        .expect("the Settled shelf header");
+    app.wait_for("text:40")
+        .expect("its count includes the collapsed rows");
     let old_rows = |app: &Headless| {
         app.screen()
             .texts()
@@ -834,9 +898,14 @@ fn the_sidebar_shelves_mount_their_markers_and_page_the_settled_tail() {
             .filter(|text| text.starts_with("Old thread"))
             .count()
     };
-    assert_eq!(old_rows(&app), 0, "the shelf starts collapsed, as on the web");
+    assert_eq!(
+        old_rows(&app),
+        0,
+        "the shelf starts collapsed, as on the web"
+    );
     app.press("role:button[Settled]").expect("expand");
-    app.wait_for("Old thread 00").expect("the first page of the tail");
+    app.wait_for("Old thread 00")
+        .expect("the first page of the tail");
     app.press("label:Show 25 more").expect("show more");
     app.wheel("id:sidebar-threads", point(px(0.0), px(4000.0)))
         .expect("scroll to the end of the list");
@@ -851,22 +920,24 @@ fn the_sidebar_shelves_mount_their_markers_and_page_the_settled_tail() {
 fn PanelHeader() -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
     provide_context(t3_ui::state::panels::Panels::new());
-    let host = t3_ui::screens::panel::PanelHost::new(
-        t3_ui::screens::panel::PanelStore::default(),
-        |_| {},
-    );
-    view().w_full().h_full().child(t3_ui::screens::panel::right_panel_tabs(
-        host,
-        key(),
-        t3_ui::screens::panel::PanelRegistry::new(vec![]),
-        view()
-            .test_id("panel-layout-test")
-            .w(px(32.0))
-            .h(px(28.0)),
-    ))
+    let host =
+        t3_ui::screens::panel::PanelHost::new(t3_ui::screens::panel::PanelStore::default(), |_| {});
+    view()
+        .w_full()
+        .h_full()
+        .child(t3_ui::screens::panel::right_panel_tabs(
+            host,
+            key(),
+            t3_ui::screens::panel::PanelRegistry::new(vec![]),
+            view().test_id("panel-layout-test").w(px(32.0)).h(px(28.0)),
+        ))
 }
 
-fn start_panel_header(os: Os, window: (f32, f32), title_bar: nsh_core::geometry::Edges<nsh_core::geometry::Points>) -> Headless {
+fn start_panel_header(
+    os: Os,
+    window: (f32, f32),
+    title_bar: nsh_core::geometry::Edges<nsh_core::geometry::Points>,
+) -> Headless {
     let mut config = EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
@@ -932,8 +1003,16 @@ fn the_panel_header_leaves_the_native_window_controls_free() {
     // Web and mobile: no native controls, the source's pl-2 pr-3.
     for os in [Os::Web, Os::Android] {
         let app = start_panel_header(os, DESKTOP, nsh_core::geometry::Edges::default());
-        assert_eq!(node_bounds(&app, "panel-layout-test").right().0, DESKTOP.0 - 12.0, "{os:?}");
-        assert_eq!(node_bounds(&app, "panel-tabs-scroll").origin.x.0, 8.0, "{os:?}");
+        assert_eq!(
+            node_bounds(&app, "panel-layout-test").right().0,
+            DESKTOP.0 - 12.0,
+            "{os:?}"
+        );
+        assert_eq!(
+            node_bounds(&app, "panel-tabs-scroll").origin.x.0,
+            8.0,
+            "{os:?}"
+        );
     }
 }
 
@@ -949,5 +1028,6 @@ fn the_add_surface_menu_items_are_named_and_invocable() {
     app.press("role:button[Add panel surface]").expect("menu");
     app.press("role:menuitem[Diff]")
         .expect("the Diff item is a named, enabled menuitem");
-    app.wait_for("id:panel-tab-diff").expect("invoking it opens Diff");
+    app.wait_for("id:panel-tab-diff")
+        .expect("invoking it opens Diff");
 }

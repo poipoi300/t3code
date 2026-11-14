@@ -27,10 +27,10 @@ fn snapshot(path: &str, index: u64) -> UrlSnapshot {
         entry_key: None,
         can_go_back: index > 0,
         can_go_forward: false,
-        policy: RoutePolicy {
+        policy: Some(RoutePolicy {
             authenticated_or_hosted: true,
             ..Default::default()
-        },
+        }),
     }
 }
 
