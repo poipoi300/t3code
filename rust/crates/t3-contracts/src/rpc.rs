@@ -62,6 +62,12 @@ macro_rules! methods {
 mod methods;
 pub use methods::*;
 
+/// Methods with no TypeScript counterpart, so absent from the generated `fixtures/rpc.json`.
+/// `vcs.trustRepository`: the Rust server refuses a folder whose Git repository changed after it
+/// was bound (`checkpoint.git.repository-changed`, t3-git H-1), which TypeScript never does; this is
+/// the user's explicit way out of that refusal.
+pub const RUST_ONLY_METHODS: &[&str] = &["vcs.trustRepository"];
+
 pub struct WsRpcGroup;
 impl WsRpcGroup {
     pub const METHODS: &'static [WsMethodDescriptor] = WS_METHODS;

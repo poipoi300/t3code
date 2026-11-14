@@ -62,6 +62,7 @@ guarded_methods! {
     VcsCreateRef => ("vcs.createRef", SourceControlWrite),
     VcsSwitchRef => ("vcs.switchRef", SourceControlWrite),
     VcsInit => ("vcs.init", SourceControlWrite),
+    VcsTrustRepository => ("vcs.trustRepository", OrchestrationOperate),
     ServerPrepareTriage => ("server.prepareTriage", OrchestrationOperate),
     ScheduledTasksUpsert => ("scheduledTasks.upsert", OrchestrationOperate),
     ScheduledTasksSetEnabled => ("scheduledTasks.setEnabled", OrchestrationOperate),

@@ -1201,6 +1201,14 @@ methods! {
         false,
         Some(crate::client_rpc_permissions::ClientGuardedRpcTag::VcsInit.scope())
     ),
+    WsVcsTrustRepositoryRpc => (
+        "vcs.trustRepository",
+        crate::git::VcsTrustRepositoryInput,
+        crate::git::VcsTrustRepositoryResult,
+        WsVcsPullError,
+        false,
+        Some(crate::client_rpc_permissions::ClientGuardedRpcTag::VcsTrustRepository.scope())
+    ),
     WsReviewGetBranchCommitsRpc => (
         "review.getBranchCommits",
         crate::review::ReviewBranchCommitsInput,

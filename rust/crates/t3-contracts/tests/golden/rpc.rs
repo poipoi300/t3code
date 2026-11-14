@@ -1084,7 +1084,16 @@ fn method_table_matches_manifest() -> Result<(), Box<dyn std::error::Error>> {
             method.tag
         );
     }
-    assert_eq!(actual.len(), expected.len(), "WebSocket method count");
+    // TypeScript's methods exactly, plus the documented Rust-only ones.
+    for tag in t3_contracts::rpc::RUST_ONLY_METHODS {
+        assert!(actual.contains_key(tag), "Rust-only method {tag} is not in the table");
+        assert!(!expected.contains_key(*tag), "{tag} exists in TypeScript");
+    }
+    assert_eq!(
+        actual.len(),
+        expected.len() + t3_contracts::rpc::RUST_ONLY_METHODS.len(),
+        "WebSocket method count"
+    );
     for (tag, expected) in &expected {
         let actual = actual
             .get(tag.as_str())

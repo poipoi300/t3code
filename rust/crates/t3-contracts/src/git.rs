@@ -733,6 +733,27 @@ pub struct VcsCreateWorktreeResult {
     pub worktree: VcsWorktree,
 }
 
+/// `vcs.trustRepository` (Rust only): the folder is named by the project or thread that owns it,
+/// never by a path; exactly one of the two.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VcsTrustRepositoryInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<crate::base_schemas::ProjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<crate::base_schemas::ThreadId>,
+}
+
+/// The repository now trusted for the folder, for the user to see what they trusted.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VcsTrustRepositoryResult {
+    /// The repository's top-level folder.
+    pub top_level: String,
+    /// A linked worktree of the project's own repository.
+    pub worktree_of_project: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VcsInitInput {
