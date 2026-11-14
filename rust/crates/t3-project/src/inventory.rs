@@ -254,13 +254,17 @@ impl Identity {
     }
 }
 
+/// Opens `path` for reading.
+pub(crate) fn open_handle(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
 /// A regular file below a store root (never a link), opened with its identity.
 fn open_regular(path: &Path) -> Option<(std::fs::File, Identity)> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
     if !metadata.file_type().is_file() {
         return None;
     }
-    let file = std::fs::File::open(path).ok()?;
+    let file = open_handle(path).ok()?;
     let identity = file_identity(&path.to_string_lossy(), &file).ok()?;
     Some((file, identity))
 }
@@ -352,6 +356,27 @@ impl<R: BufRead> Read for Record<'_, R> {
         out[..count].copy_from_slice(&available[..count]);
         self.consume(count);
         Ok(count)
+    }
+}
+
+/// Splits bytes arriving in chunks into lines; `examined` counts the bytes searched for a newline.
+#[derive(Default)]
+pub(crate) struct LineSplitter {
+    pending: Vec<u8>,
+    pub(crate) examined: usize,
+}
+impl LineSplitter {
+    pub(crate) fn push(&mut self, bytes: &[u8]) {
+        self.pending.extend_from_slice(bytes);
+    }
+    pub(crate) fn next_line(&mut self) -> Option<Vec<u8>> {
+        let found = self.pending.iter().position(|b| *b == b'\n');
+        self.examined += found.map_or(self.pending.len(), |index| index + 1);
+        let index = found?;
+        Some(self.pending.drain(..=index).collect())
+    }
+    pub(crate) fn rest(&self) -> &[u8] {
+        &self.pending
     }
 }
 
@@ -1230,7 +1255,7 @@ impl NativeSessionInventory {
         let max = MAX_TRANSCRIPT_SCAN_BYTES.min(size);
         let mut read = 0u64;
         let mut records = 0usize;
-        let mut pending: Vec<u8> = vec![];
+        let mut pending = LineSplitter::default();
         let mut reserve = |budget: &mut Budget| {
             if records == MAX_METADATA_RECORDS_PER_TRANSCRIPT || budget.records == 0 {
                 budget.truncated = true;
@@ -1251,15 +1276,14 @@ impl NativeSessionInventory {
             budget.bytes -= size as u64;
             let count = reader.read(&mut chunk[..size]).ok()?;
             if count == 0 {
-                let last = String::from_utf8_lossy(&pending).into_owned();
+                let last = String::from_utf8_lossy(pending.rest()).into_owned();
                 return (!last.is_empty() && reserve(budget))
                     .then(|| extract_cwd(last.trim(), source).flatten())
                     .flatten();
             }
             read += count as u64;
-            pending.extend_from_slice(&chunk[..count]);
-            while let Some(index) = pending.iter().position(|b| *b == b'\n') {
-                let line: Vec<u8> = pending.drain(..=index).collect();
+            pending.push(&chunk[..count]);
+            while let Some(line) = pending.next_line() {
                 if !reserve(budget) {
                     return None;
                 }
@@ -1274,7 +1298,7 @@ impl NativeSessionInventory {
             budget.truncated = true;
             return None;
         }
-        let last = String::from_utf8_lossy(&pending).into_owned();
+        let last = String::from_utf8_lossy(pending.rest()).into_owned();
         (!last.is_empty() && reserve(budget))
             .then(|| extract_cwd(last.trim(), source).flatten())
             .flatten()
@@ -2296,6 +2320,68 @@ impl RecentState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A newline-free megabyte arriving in 8 KiB chunks is searched once, not once per chunk.
+    #[test]
+    fn the_cwd_reader_searches_only_new_bytes() {
+        let mut lines = LineSplitter::default();
+        let chunk = vec![b'x'; 8 * 1024];
+        for _ in 0..128 {
+            lines.push(&chunk);
+            assert!(lines.next_line().is_none());
+        }
+        lines.push(b"\n");
+        assert_eq!(lines.next_line().map(|l| l.len()), Some(128 * 8 * 1024 + 1));
+        assert!(lines.examined <= 128 * 8 * 1024 + 1, "examined {}", lines.examined);
+    }
+
+    /// A transcript is opened without following a link: the handle is the link itself, never
+    /// its target, so a file swapped for a link cannot be read through it.
+    #[test]
+    fn transcripts_are_opened_without_following_links() {
+        let temp = tempfile::tempdir().expect("temp");
+        let target = temp.path().join("target.jsonl");
+        std::fs::write(&target, "{}\n").expect("target");
+        let link = temp.path().join("link.jsonl");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &link).expect("symlink");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let opened = open_handle(&link);
+        assert!(
+            opened.is_err() || opened.is_ok_and(|f| !f.metadata().expect("metadata").is_file()),
+            "the link's target was opened"
+        );
+    }
+
+    /// A Pi import holds at most the selected-history budget, whatever its tool records carry.
+    #[test]
+    fn pi_tool_records_count_against_the_history_budget() {
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("pi.jsonl");
+        let payload = "x".repeat(12 * 1024 * 1024);
+        let mut text = String::new();
+        text.push_str(&format!("{}\n", json!({"type": "session", "id": "pi", "cwd": "/w"})));
+        text.push_str(&format!("{}\n", json!({"type": "message", "id": "u", "parentId": null, "message": {"role": "user", "content": "hi"}})));
+        for index in 0..3 {
+            text.push_str(&format!(
+                "{}\n",
+                json!({"type": "message", "id": format!("t{index}"), "parentId": "u", "message": {"role": "toolResult"}, "payload": {"content": [{"type": "text", "text": payload}]}})
+            ));
+        }
+        // An invalid record whose links are huge.
+        text.push_str(&format!("{}\n", json!({"type": "message", "id": payload, "parentId": "u", "message": {"role": 7}})));
+        std::fs::write(&path, text).expect("pi");
+        let (_, identity) = open_regular(&path).expect("regular");
+        let held = |snapshot: &Snapshot| serde_json::to_string(&snapshot.records).expect("json").len();
+        match read_transcript(&path.to_string_lossy(), &identity, &AgentSessionSource::Pi, None) {
+            None => {}
+            Some(snapshot) => {
+                assert!(held(&snapshot) <= MAX_IMPORT_HISTORY_BYTES, "held {}", held(&snapshot));
+                assert!(snapshot.history_bytes >= held(&snapshot) / 2);
+            }
+        }
+    }
 
     #[test]
     fn content_paths_must_be_local_disk_paths() {

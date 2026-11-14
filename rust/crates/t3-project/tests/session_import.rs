@@ -347,3 +347,34 @@ async fn scan_merges_known_project_and_marks_it_imported() {
     assert_eq!(result.candidates[0].thread_count, 1);
     f.shutdown().await;
 }
+
+/// Imports run in full access unless a policy ceiling exists; then in the project's default mode,
+/// lowered to the ceiling when it sits above it (`AgentSessionImporter.ts`).
+#[tokio::test]
+async fn imports_run_in_the_projects_default_mode_under_a_policy_ceiling() {
+    let fixture = Fixture::new();
+    let dir = tempfile::tempdir().unwrap();
+    let store = |name: &str, mode: &str, ceiling| {
+        let path = dir.path().join(format!("{name}.json"));
+        std::fs::write(&path, json!({"defaultRuntimeMode": mode}).to_string()).unwrap();
+        t3_project::import_store::RuntimeImportStore::new(
+            fixture.database.clone(),
+            t3_config::settings::SettingsService::new(path),
+            ceiling,
+        )
+    };
+    let project = ProjectId("project:ceiling".into());
+    let mode = |store: t3_project::import_store::RuntimeImportStore| {
+        let project = project.clone();
+        async move { store.policy_runtime_mode(&project).await.unwrap() }
+    };
+    assert_eq!(mode(store("none", "approval-required", None)).await, None);
+    assert_eq!(
+        mode(store("above", "full-access", Some(RuntimeMode::ApprovalRequired))).await,
+        Some(RuntimeMode::ApprovalRequired)
+    );
+    assert_eq!(
+        mode(store("below", "approval-required", Some(RuntimeMode::Auto))).await,
+        Some(RuntimeMode::ApprovalRequired)
+    );
+}

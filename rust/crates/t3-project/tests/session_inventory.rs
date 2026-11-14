@@ -96,6 +96,9 @@ impl Fixture {
         settings: Value,
         imported: Vec<(String, AgentSessionImportSource)>,
     ) -> Arc<NativeSessionInventory> {
+        self.inventory_with(Arc::new(Host { settings, imported }))
+    }
+    fn inventory_with(&self, host: Arc<dyn InventoryHost>) -> Arc<NativeSessionInventory> {
         Arc::new(NativeSessionInventory::new(
             InventoryPaths {
                 home: self.root.join("home"),
@@ -104,7 +107,7 @@ impl Fixture {
                 worktrees_dir: self.root.join("base").join("worktrees"),
             },
             Default::default(),
-            Arc::new(Host { settings, imported }),
+            host,
         ))
     }
 }
@@ -635,7 +638,12 @@ async fn links_out_of_the_store_are_not_followed() {
 #[tokio::test]
 async fn a_session_naming_a_network_cwd_is_never_resolved() {
     let f = Fixture::new();
+    let workspace = f.workspace("real");
+    // `\\?\<workspace>` names the real fixture folder: without the local-disk check it would
+    // resolve and be offered. The other spellings name a host.
+    let verbatim = format!(r"\\?\{}", workspace.display());
     for (index, cwd) in [
+        verbatim.as_str(),
         r"\\attacker.invalid\share\repo",
         "//attacker.invalid/share/repo",
         r"/\attacker.invalid\share",
@@ -652,8 +660,139 @@ async fn a_session_naming_a_network_cwd_is_never_resolved() {
             ms(NOW) - DAY,
         );
     }
+    write(
+        &f.claude.join("projects/n/plain.jsonl"),
+        claude_transcript(&workspace, "44444444-4444-4444-8444-444444444444"),
+        ms(NOW) - DAY,
+    );
     let inventory = f.inventory(f.settings(), vec![]);
-    assert!(inventory.candidates().await.unwrap().candidates.is_empty());
-    let outcomes = recent(&inventory, Path::new(r"\\attacker.invalid\share\repo"), &[]).await;
-    assert!(outcomes.is_empty());
+    let found = candidates(&inventory).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(same(&found[0].0, &workspace));
+    assert_eq!(found[0].2, 1, "only the plain session counts");
+    // The same verbatim spelling as an import root reads nothing.
+    assert!(recent(&inventory, Path::new(&verbatim), &[]).await.is_empty());
+    assert_eq!(importable(&recent(&inventory, &workspace, &[]).await).len(), 1);
+}
+
+/// Concurrent scans share one collection: a second caller waits for the first one's result.
+#[tokio::test]
+async fn concurrent_scans_share_one_collection() {
+    struct Gated {
+        settings: Value,
+        calls: std::sync::atomic::AtomicUsize,
+        release: tokio::sync::watch::Receiver<bool>,
+    }
+    #[async_trait]
+    impl InventoryHost for Gated {
+        async fn settings(&self) -> Result<Value> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut release = self.release.clone();
+            let _ = release.wait_for(|open| *open).await;
+            Ok(self.settings.clone())
+        }
+        async fn imported_transcripts(&self) -> Result<Vec<(String, AgentSessionImportSource)>> {
+            Ok(vec![])
+        }
+        fn now_ms(&self) -> i64 {
+            ms(NOW)
+        }
+    }
+    let f = Fixture::new();
+    let workspace = f.workspace("shared-scan");
+    write(&f.claude.join("projects/s/a.jsonl"), claude_line(&workspace), ms(NOW) - DAY);
+    let (release, gate) = tokio::sync::watch::channel(false);
+    let host = Arc::new(Gated {
+        settings: f.settings(),
+        calls: Default::default(),
+        release: gate,
+    });
+    let inventory = f.inventory_with(host.clone());
+    // `join!` polls in order: the first scan reaches the gate, the second queues, then the gate
+    // opens.
+    let (first, second, ()) = futures_util::join!(inventory.candidates(), inventory.candidates(), async {
+        release.send_replace(true);
+    });
+    assert_eq!(first.unwrap().candidates.len(), 1);
+    assert_eq!(second.unwrap().candidates.len(), 1);
+    assert_eq!(host.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// A Codex state database still names a scratch chat's project.
+#[tokio::test]
+async fn a_codex_state_database_names_the_project_of_a_scratch_chat() {
+    let f = Fixture::new();
+    let project = f.workspace("codex-project");
+    let id = "019a0000-0000-7000-8000-0000000000bb";
+    // The rollout's own cwd is the home, which is never offered: the database names the project.
+    write(
+        &rollout(&f.codex, "2026-08-24", &format!("rollout-2026-08-24T10-00-00-{id}.jsonl")),
+        codex_transcript(&f.root.join("home"), id),
+        ms(NOW) - DAY,
+    );
+    let db = t3_persistence::rusqlite::Connection::open(f.codex.join("state_5.sqlite")).unwrap();
+    db.execute_batch(&format!(
+        "CREATE TABLE threads(id TEXT, project_id INTEGER);
+         CREATE TABLE project_roots(project_id INTEGER, path TEXT, position INTEGER);
+         INSERT INTO threads VALUES ('{id}', 1);
+         INSERT INTO project_roots VALUES (1, '{}', 0);",
+        project.display().to_string().replace('\'', "''")
+    ))
+    .unwrap();
+    drop(db);
+    let found = candidates(&f.inventory(f.settings(), vec![])).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(same(&found[0].0, &project));
+}
+
+/// A hostile Codex state database whose join never ends cannot stall the scan.
+#[tokio::test]
+async fn a_hostile_codex_state_database_cannot_stall_the_scan() {
+    let f = Fixture::new();
+    let workspace = f.workspace("codex-hostile");
+    write(&rollout(&f.codex, "2026-08-24", "rollout-x.jsonl"), codex_line(&workspace), ms(NOW) - DAY);
+    let db = t3_persistence::rusqlite::Connection::open(f.codex.join("state_5.sqlite")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE threads(id TEXT, project_id INTEGER);
+         INSERT INTO threads VALUES ('t', 1);
+         CREATE VIEW project_roots AS
+           WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c)
+           SELECT 1 AS project_id, 'p' || x AS path, x AS position FROM c;",
+    )
+    .unwrap();
+    drop(db);
+    let found = candidates(&f.inventory(f.settings(), vec![])).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(same(&found[0].0, &workspace));
+}
+
+/// A link in a session's cwd is resolved by the hardened resolver before anything follows it:
+/// here a link to `real.`, which Windows would silently open as `real`.
+#[cfg(windows)]
+#[tokio::test]
+async fn links_in_a_session_cwd_are_resolved_before_they_are_followed() {
+    let f = Fixture::new();
+    let real = f.workspace("real");
+    let alias = f.root.join("work").join("alias");
+    std::os::windows::fs::symlink_dir(format!("{}.", real.display()), &alias).unwrap();
+    write(&f.claude.join("projects/l/a.jsonl"), claude_line(&alias), ms(NOW) - DAY);
+    assert!(candidates(&f.inventory(f.settings(), vec![])).await.is_empty());
+}
+
+/// zstd frames asking for a window above 2^27 are refused; a 2^27 window is read.
+#[tokio::test]
+async fn compressed_rollouts_with_oversized_windows_are_refused() {
+    let f = Fixture::new();
+    let compress = |window: u32, cwd: &Path| {
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+        encoder.window_log(window).unwrap();
+        std::io::Write::write_all(&mut encoder, codex_line(cwd).as_bytes()).unwrap();
+        encoder.finish().unwrap()
+    };
+    let (small, large) = (f.workspace("window-27"), f.workspace("window-28"));
+    write(&rollout(&f.codex, "2026-08-24", "rollout-27.jsonl.zst"), compress(27, &small), ms(NOW) - DAY);
+    write(&rollout(&f.codex, "2026-08-24", "rollout-28.jsonl.zst"), compress(28, &large), ms(NOW) - DAY);
+    let found = candidates(&f.inventory(f.settings(), vec![])).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(same(&found[0].0, &small));
 }
