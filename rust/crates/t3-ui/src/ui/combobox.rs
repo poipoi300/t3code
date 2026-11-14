@@ -487,14 +487,18 @@ fn input_impl(state: ComboboxState, options: InputOptions, search: bool) -> impl
                     (has_end && !small).then_some("pe-7"),
                     search.then_some("h-6.5 ps-5 font-sans leading-6.5 sm:h-6.5 sm:leading-6.5"),
                 ])))))
-        .child((options.show_trigger).then(|| dynamic(move || {
-            (!options.show_clear || (state.value.with(|v| v.is_empty()) && state.query.with(|q| q.is_empty())))
-                .then(|| end_button(state, small, false))
-        })))
-        .child(options.show_clear.then(|| dynamic(move || {
-            (!state.value.with(|v| v.is_empty()) || !state.query.with(|q| q.is_empty()))
-                .then(|| end_button(state, small, true))
-        })))
+        // Memos: the regions re-run only when an end button comes or goes, not on every keystroke;
+        // the buttons are built untracked so a read while building cannot rebuild a pressed one.
+        .child((options.show_trigger).then(|| {
+            let shown = computed(move || !options.show_clear
+                || (state.value.with(|v| v.is_empty()) && state.query.with(|q| q.is_empty())));
+            dynamic(move || shown.get().then(|| untracked(|| end_button(state, small, false))))
+        }))
+        .child(options.show_clear.then(|| {
+            let shown = computed(move || !state.value.with(|v| v.is_empty())
+                || !state.query.with(|q| q.is_empty()));
+            dynamic(move || shown.get().then(|| untracked(|| end_button(state, small, true))))
+        }))
 }
 
 /// Port of autocomplete.tsx AutocompleteInput; the web's default trigger is false.

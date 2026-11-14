@@ -92,7 +92,9 @@ impl<P: Platform + Clone + 'static> Backend for ClientRuntime<P> {
 
     fn client(&self) -> Option<HostClient> {
         // This runtime over the host's platform; a test runtime over another platform is not one.
-        (self as &dyn std::any::Any).downcast_ref::<HostClient>().cloned()
+        (self as &dyn std::any::Any)
+            .downcast_ref::<HostClient>()
+            .cloned()
     }
 }
 
@@ -143,7 +145,6 @@ impl Backend for Unavailable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::executor::block_on;
     use std::rc::Rc;
     use t3_client::ClientStore;
     use t3_client::connection::resolve_pairing_target;
@@ -151,18 +152,26 @@ mod tests {
     use t3_client::types::ThreadId;
     use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
 
-    fn client() -> Rc<dyn Backend> {
-        Rc::new(ClientRuntime::new(
+    /// The client over a local pool: its operations run on runtime-owned tasks, which the
+    /// spawner must run (a spawner that drops them answers "the client stopped").
+    fn client() -> (futures::executor::LocalPool, Rc<dyn Backend>) {
+        use futures::task::LocalSpawnExt;
+        let pool = futures::executor::LocalPool::new();
+        let spawner = pool.spawner();
+        let backend: Rc<dyn Backend> = Rc::new(ClientRuntime::new(
             FakePlatform::default(),
             ClientStore::default(),
             OrchestrationV2CreationSource::Web,
-            Rc::new(|_| {}),
-        ))
+            Rc::new(move |future| {
+                let _ = spawner.spawn_local(future);
+            }),
+        ));
+        (pool, backend)
     }
 
     #[test]
     fn the_adapter_answers_with_the_composition_roots_own_results() {
-        let backend = client();
+        let (mut pool, backend) = client();
         let input = PairingInput {
             pairing_url: Some("https://example.test/pair".into()),
             ..PairingInput::default()
@@ -170,7 +179,9 @@ mod tests {
         let Err(expected) = resolve_pairing_target(&input) else {
             panic!("a link without a token is invalid");
         };
-        let failure = block_on(backend.pair(input)).expect_err("the client's validation");
+        let failure = pool
+            .run_until(backend.pair(input))
+            .expect_err("the client's validation");
         assert_eq!(failure.detail, expected.detail);
         assert!(backend.environments().is_empty());
         let key = ThreadKey {
@@ -178,11 +189,11 @@ mod tests {
             thread: ThreadId("thread".into()),
         };
         assert_eq!(
-            block_on(backend.send_message(&key, "  ".into())),
+            pool.run_until(backend.send_message(&key, "  ".into())),
             Err(SendError::Rejected("Enter a message.".into()))
         );
         assert_eq!(
-            block_on(backend.send_message(&key, "hello".into())),
+            pool.run_until(backend.send_message(&key, "hello".into())),
             Err(SendError::Disconnected)
         );
         backend.open_thread(&key);

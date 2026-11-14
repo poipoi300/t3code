@@ -221,5 +221,5 @@ pub fn root_route_not_found_view() -> impl IntoElement {
             .child(text(move || t("Page not found")).role(AccessibilityRole::Header).app_class(tw("text-lg font-medium text-foreground")))
             .child(text(move || tr("This link doesn't point to a page in {appName}. Go home to choose a project or start a thread.", &[("appName", t3_i18n::Value::Text("T3 Code".into()))])).app_class(tw("text-sm text-muted-foreground")))
             // A closed URL service disables navigation; its client error is exposed on UrlState.
-            .child(dynamic(move || button(ButtonContent::Label(t("Go home")), ButtonVariant::Default, ButtonSize::Default, move || !urls.available.get(), move || urls.request(UrlRequest::Replace("/".into()))).into_element())))
+            .child(button(ButtonContent::Label(t("Go home")), ButtonVariant::Default, ButtonSize::Default, move || !urls.available.get(), move || urls.request(UrlRequest::Replace("/".into())))))
 }

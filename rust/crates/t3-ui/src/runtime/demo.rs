@@ -15,7 +15,7 @@ use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
-use nsh_core::prelude::{spawn, timer};
+use nsh_core::prelude::timer;
 use serde_json::{Value, json};
 use t3_client::ClientStore;
 use t3_client::connection::{

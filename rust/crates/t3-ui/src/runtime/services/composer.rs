@@ -58,7 +58,6 @@ pub fn composer_questions<P: Platform + Clone + 'static>(
     key: ThreadKey,
 ) -> crate::screens::composer::questions::ComposerQuestions {
     use futures::StreamExt;
-    use nsh_core::prelude::*;
     let source = runtime.pending_user_input(&key);
     let mut changes = source.changes();
     let questions = crate::screens::composer::questions::ComposerQuestions::attach(
