@@ -1,7 +1,11 @@
 //! Select's real NSH behavior; a local harness mounts the primitive before consuming screens land.
 
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
 use nsh_core::platform::{Idiom, Os};
 use nsh_core::prelude::*;
+use nsh_core::{MountItem, NodeId};
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
 use t3_ui::i18n::t;
@@ -131,6 +135,12 @@ fn start(window: (f32, f32), controlled: bool, follow: bool, initial: Option<&st
 }
 
 fn start_case(window: (f32, f32), props: HarnessProps) -> Headless {
+    start_case_observed(window, props).0
+}
+
+type AccessibleValues = Arc<Mutex<BTreeMap<NodeId, Option<String>>>>;
+
+fn start_case_observed(window: (f32, f32), props: HarnessProps) -> (Headless, AccessibleValues) {
     let mut config = EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
@@ -148,9 +158,46 @@ fn start_case(window: (f32, f32), props: HarnessProps) -> Headless {
         Idiom::Desktop
     };
     let mut app = Headless::start(config).expect("select harness starts");
+    let values = AccessibleValues::default();
+    let observed = values.clone();
+    app.observe(move |_, batch| {
+        let mut values = observed.lock().expect("accessible values");
+        for item in &batch.items {
+            if let MountItem::ViewProps { id, props } = item {
+                values.insert(
+                    *id,
+                    props
+                        .accessibility
+                        .value
+                        .as_ref()
+                        .and_then(|value| value.text.as_deref())
+                        .map(str::to_owned),
+                );
+            }
+        }
+    });
     app.wait_for("role:combobox[Choose a number]")
         .expect("trigger");
-    app
+    (app, values)
+}
+
+fn assert_accessible_value(app: &mut Headless, values: &AccessibleValues, expected: &str) {
+    app.wait_until(
+        "the selected label or real placeholder reaches accessibility",
+        std::time::Duration::from_secs(5),
+        |screen| {
+            let id = screen
+                .id("role:combobox[Choose a number]")
+                .expect("trigger");
+            values
+                .lock()
+                .expect("accessible values")
+                .get(&id)
+                .and_then(Option::as_deref)
+                == Some(expected)
+        },
+    )
+    .expect("accessible value");
 }
 
 fn open(app: &mut Headless) {
@@ -210,7 +257,20 @@ fn choosing_updates_the_value_closes_and_reopens_with_the_selection_on_both_layo
 #[test]
 fn controlled_value_can_decline_a_change_and_unknown_values_are_preserved() {
     for initial in ["one", "unknown", ""] {
-        let mut app = start(DESKTOP, true, false, Some(initial));
+        let (mut app, values) = start_case_observed(
+            DESKTOP,
+            HarnessProps {
+                controlled: true,
+                follow: false,
+                initial: Some(initial.to_owned()),
+                controlled_open: false,
+            },
+        );
+        assert_accessible_value(
+            &mut app,
+            &values,
+            if initial == "one" { "One" } else { "Choose" },
+        );
         if initial == "unknown" {
             app.wait_for("text:unknown")
                 .expect("unknown value is shown verbatim");
@@ -267,7 +327,15 @@ fn uncontrolled_default_value_follows_choices_without_parent_feedback() {
 
 #[test]
 fn disabled_trigger_is_inert_and_items_and_empty_state_update_reactively() {
-    let mut app = start(DESKTOP, true, true, None);
+    let (mut app, values) = start_case_observed(
+        DESKTOP,
+        HarnessProps {
+            controlled: true,
+            follow: true,
+            initial: None,
+            controlled_open: false,
+        },
+    );
     app.press("role:button[Standalone choice]")
         .expect("standalone button");
     app.wait_for("Button presses: 1").expect("button callback");
@@ -290,10 +358,12 @@ fn disabled_trigger_is_inert_and_items_and_empty_state_update_reactively() {
     assert_eq!(app.screen().matches("role:option[One]"), Ok(false));
     app.press("role:option[Four]").expect("choose new item");
     app.wait_for("Value: [four]").expect("new value");
+    assert_accessible_value(&mut app, &values, "Four");
     app.press("role:button[Empty options]")
         .expect("clear items");
     app.wait_for("text:four")
         .expect("missing item's value is shown like Base UI's fallback");
+    assert_accessible_value(&mut app, &values, "Choose");
     app.press("role:combobox[Choose a number]")
         .expect("open empty");
     app.wait_for("No options").expect("empty slot");

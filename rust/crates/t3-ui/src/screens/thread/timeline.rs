@@ -9,8 +9,10 @@ use std::rc::Rc;
 use nsh_base::text_view;
 use nsh_base::text_view::{MarkdownOptions, TextViewClasses};
 use nsh_core::prelude::*;
+use t3_client::state::selectors::thread_shell;
 use t3_client::types::ThreadKey;
 use t3_client::view_logic::session::{TimelineContent, TimelineEntry};
+use t3_contracts::orchestration_v2::OrchestrationV2ShellThreadStatus as Status;
 
 use crate::i18n::t;
 use crate::runtime::{Shared, rt};
@@ -56,6 +58,19 @@ fn is_streaming(entry: &TimelineEntry) -> bool {
 
 pub fn timeline(key: ThreadKey) -> impl IntoElement {
     let runtime = rt();
+    let thread_id = key.thread.clone();
+    let working = runtime
+        .store
+        .shell_state(key.environment.clone(), move |shell| {
+            shell
+                .and_then(|shell| thread_shell(shell, &thread_id))
+                .is_some_and(|thread| {
+                    matches!(
+                        thread.status,
+                        Status::Preparing | Status::Queued | Status::Starting | Status::Running
+                    )
+                })
+        });
     let timeline = runtime.store.timeline(key);
     let count = computed(move || timeline.with(|t| t.entries.len()));
     let keys = computed(move || Shared(timeline.with(|t| t.keys.clone())));
@@ -75,7 +90,12 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
     .content_padding_y(px(16.0))
     .flex_1()
     .test_id("timeline");
-    view().flex_1().min_h(px(0.0)).selectable(true).child(list)
+    view()
+        .flex_1()
+        .min_h(px(0.0))
+        .selectable(true)
+        .child(list)
+        .child(when(move || working.get(), working_row))
 }
 
 /// `MessagesTimeline.tsx`'s row frame: the lane inset (`[data-chat-canvas]
@@ -147,6 +167,28 @@ fn assistant_message(
             .text_size(px(14.0))
             .text_color(move || palette().foreground.opacity(0.9))
             .w_full(),
+    )
+}
+
+/// `TimelineWorkGroupRows.tsx` `WorkingTimelineRow`, its label without a run start ("Working..."),
+/// in the row frame: the timeline's last row while the thread's run is active.
+fn working_row() -> impl IntoElement {
+    let row = view().app_class(tw("border-b border-border/60 pb-2 pt-1")).child(
+        view()
+            .app_class(tw(
+                "flex h-6 min-w-0 items-baseline gap-2 px-1 text-sm leading-relaxed text-muted-foreground tabular-nums",
+            ))
+            .child(
+                text(t("Working..."))
+                    .app_class(tw("relative shrink-0 overflow-hidden whitespace-nowrap")),
+            ),
+    );
+    view().app_class(tw("w-full px-3 sm:px-12")).child(
+        view()
+            .app_class(tw(
+                "mx-auto w-full min-w-0 max-w-(--chat-content-max-width) pb-1.5",
+            ))
+            .child(row),
     )
 }
 

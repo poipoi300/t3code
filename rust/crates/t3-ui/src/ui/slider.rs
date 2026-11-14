@@ -18,8 +18,10 @@
 
 use nsh_core::{element::ImageSrc, prelude::*};
 
+use super::switch::transition_style;
 use crate::i18n::ts;
-use crate::theme::{cn, tw};
+use crate::theme::{cn, metrics, tw};
+use nsh_core::TransitionProps;
 
 pub use nsh_base::SliderValue;
 
@@ -111,9 +113,10 @@ pub fn number_field_group(state: NumberFieldState, children: impl IntoElement) -
         // ::before is the first child. bg-clip-padding and browser autofill's
         // five-million-second transition have no NSH native-input equivalent.
         .child(view().app_class(move || Some(tw(&cn([
-            Some("pointer-events-none absolute inset-0 rounded-[calc(var(--radius-lg)-1px)] group-focus-within:shadow-none"),
+            Some("pointer-events-none absolute inset-0 group-focus-within:shadow-none"),
             (!disabled.get() && !invalid.get()).then_some("shadow-[0_1px_rgb(0_0_0/4%)] dark:shadow-[0_-1px_rgb(255_255_255/6%)]"),
-        ])))))
+        ]))))
+        .rounded(move || px(inner_radius())))
         .child(children)
 }
 
@@ -138,23 +141,30 @@ pub fn number_field_input(state: NumberFieldState) -> impl IntoElement {
             (size == Size::Sm).then_some("h-7.5 px-[9px] leading-7.5 sm:h-6.5 sm:leading-8.5"),
             (size == Size::Lg).then_some("h-9.5 leading-9.5 sm:h-8.5 sm:leading-8.5"),
         ])))
-        .decrement_button_class(step_button_class(size, false))
-        .increment_button_class(step_button_class(size, true))
+        .decrement_button_class(step_button_class(size))
+        .decrement_button_style(move |s| s.rounded_s(move || px(inner_radius())))
+        .increment_button_class(step_button_class(size))
+        .increment_button_style(move |s| s.rounded_e(move || px(inner_radius())))
         .decrement_button(number_field_decrement())
         .increment_button(number_field_increment())
 }
 
-fn step_button_class(size: Size, increment: bool) -> SharedString {
+// index.css @theme aliases --radius-lg to --radius; resolve its inset because
+// NSH cannot parse calc(var(--radius-lg)-1px) in a radius class.
+fn inner_radius() -> f32 {
+    (tokens()
+        .number("radius")
+        .unwrap_or_else(|| metrics().radius)
+        - 1.0)
+        .max(0.0)
+}
+
+fn step_button_class(size: Size) -> SharedString {
     // Ancestor size selector resolves from Size; --spacing(n) is 4n px.
     tw(&cn([
         Some(
             "relative flex shrink-0 cursor-pointer items-center justify-center px-[11px] transition-colors hover:bg-accent",
         ),
-        Some(if increment {
-            "rounded-e-[calc(var(--radius-lg)-1px)]"
-        } else {
-            "rounded-s-[calc(var(--radius-lg)-1px)]"
-        }),
         (size == Size::Sm).then_some("px-[9px]"),
     ]))
 }
@@ -217,16 +227,30 @@ pub fn slider(
 ) -> impl IntoElement {
     let source = stored(props.label);
     let disabled = props.disabled;
-    nsh_base::slider().value(move || Some(SliderValue::Single(props.value.get())))
-        .min(props.min).max(props.max).step(props.step).disabled(disabled)
-        .accessibility_label(move || Some(source.with(|s| ts(s))))
-        .on_change(move |value: &SliderValue| { if !disabled.get_untracked() { on_change(value.end()); } })
-        .on_change_end(move |value: &SliderValue| { if !disabled.get_untracked() { on_change_end(value.end()); } })
-        .app_class(tw("min-w-0 flex-1 outline-none disabled:opacity-64"))
+    let native = nsh_base::SliderProps {
+        value: Prop::bind(move || Some(SliderValue::Single(props.value.get()))),
+        min: props.min, max: props.max, step: props.step, disabled,
+        accessibility_label: Prop::bind(move || Some(source.with(|s| ts(s)))),
         // index.css .settings-slider vendor pseudo-elements become NSH parts.
         // Native range fill replaces the browser gradient's half-thumb fill offset.
-        .track_class(tw("h-6 justify-center cursor-pointer"))
-        .indicator_class(tw("h-1.5 rounded-full bg-muted-foreground/22 ring-1 ring-inset ring-border/55"))
-        .range_class(tw("rounded-full bg-primary"))
-        .thumb_class(tw("size-4 border-2 border-primary rounded-full bg-background shadow-[0_1px_2px_rgb(0_0_0/12%)] shadow-foreground/12 group-hover:scale-[1.08] group-hover:shadow-[0_1px_3px_rgb(0_0_0/20%)] group-hover:shadow-foreground/20 active:scale-[0.94] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background transition-[transform,box-shadow] duration-120 motion-reduce:transition-none"))
+        // Browser forced-colors appearance:auto has no NSH capability; tokens carry
+        // the application's contrast setting instead.
+        track_class: tw("h-6 justify-center cursor-pointer").into(),
+        indicator_class: tw("h-1.5 rounded-full bg-muted-foreground/22 ring-1 ring-inset ring-border/55").into(),
+        range_class: tw("rounded-full bg-primary").into(),
+        thumb_style: Prop::bind(move || transition_style(TransitionProps::TRANSFORM | TransitionProps::SHADOW, Some([0.25, 0.1, 0.25, 1.0]))),
+        thumb_class: tw("size-4 border-2 border-primary rounded-full bg-background shadow-[0_1px_2px_rgb(0_0_0/12%)] shadow-foreground/12 group-hover:scale-[1.08] group-hover:shadow-[0_1px_3px_rgb(0_0_0/20%)] group-hover:shadow-foreground/20 active:scale-[0.94] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background duration-120 motion-reduce:transition-none").into(),
+        ..Props::initial()
+    };
+    nsh_base::Slider::element(native)
+        .on_event(move |event: &nsh_base::SliderEvent| {
+            if disabled.get_untracked() {
+                return;
+            }
+            match event {
+                nsh_base::SliderEvent::Change(value) => on_change(value.end()),
+                nsh_base::SliderEvent::ChangeEnd(value) => on_change_end(value.end()),
+            }
+        })
+        .app_class(tw("min-w-0 flex-1 outline-none disabled:opacity-64"))
 }

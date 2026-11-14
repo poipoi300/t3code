@@ -39,9 +39,27 @@ pub enum Size {
 /// Labels are translated. Custom children apply the TSX descendant icon classes at their source.
 pub enum Content {
     Label(String),
-    Icon { icon: Icon, label: String },
-    IconLabel { icon: Icon, label: String },
-    Slot { label: String, children: AnyElement },
+    Icon {
+        icon: Icon,
+        label: String,
+    },
+    IconLabel {
+        icon: Icon,
+        label: String,
+    },
+    Slot {
+        label: String,
+        children: Box<AnyElement>,
+    },
+}
+
+impl Content {
+    pub fn slot(label: String, children: impl IntoElement) -> Self {
+        Self::Slot {
+            label,
+            children: Box::new(children.into_element()),
+        }
+    }
 }
 
 impl From<super::button::ButtonContent> for Content {
@@ -155,7 +173,7 @@ fn toggle_inner(
         Content::Label(label) => (label, None, true, None),
         Content::Icon { icon, label } => (label, Some(icon), false, None),
         Content::IconLabel { icon, label } => (label, Some(icon), true, None),
-        Content::Slot { label, children } => (label, None, false, Some(children)),
+        Content::Slot { label, children } => (label, None, false, Some(*children)),
     };
     let pressed_prop = pressed.clone();
     let disabled_prop = disabled.clone();
@@ -361,8 +379,8 @@ fn before_classes(
     tw(&cn([
         Some("pointer-events-none absolute inset-0"),
         Some(&radius_class),
-        // --theme colour shadows are explicit CSS equivalents, with the same zero blur.
-        (variant == Variant::Outline && !pressed && !disabled).then_some("shadow-[0_1px_0_rgb(0_0_0/4%)] dark:shadow-[0_-1px_0_rgb(255_255_255/2%)] group-active/toggle:shadow-none dark:group-active/toggle:shadow-[0_-1px_0_rgb(255_255_255/2%)]"),
+        // The extra not-active selector makes the 6% dark shadow more specific at rest.
+        (variant == Variant::Outline && !pressed && !disabled).then_some("shadow-[0_1px_0_rgb(0_0_0/4%)] dark:shadow-[0_-1px_0_rgb(255_255_255/6%)] group-active/toggle:shadow-none dark:group-active/toggle:shadow-[0_-1px_0_rgb(255_255_255/2%)]"),
         joined_classes(position, true),
     ]))
 }
@@ -683,7 +701,10 @@ mod tests {
                 }
             }
         }
-        view().test_id("toggle-class-checks-passed")
+        view()
+            .w_full()
+            .h_full()
+            .test_id("toggle-class-checks-passed")
     }
 
     #[test]

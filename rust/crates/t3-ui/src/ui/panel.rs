@@ -7,9 +7,10 @@
 //! The inline pane's width and resize handle belong to its host (PNL-HOST / UI-RESIZE).
 //! Neither TSX component declares variants or sizes, so there are no `Variant` / `Size` enums.
 //!
-//! Keep edit state outside `children`: the pinned NSH modal cannot retain a mounted subtree
-//! after dismissal or reparent it across presentations. Children remain through the exit
-//! animation, but are constructed again on reopening or changing layout class.
+//! Children are constructed once and passed through a non-lazy NSH child slot. The slot owns
+//! their state while a closed surface leaves them detached; changing presentation reparents
+//! the same nodes. Keep this panel instance mounted in the host across layout changes. A host
+//! that changes its own wrappers can forward the panel through its own non-lazy child slot.
 
 use std::rc::Rc;
 
@@ -27,51 +28,12 @@ pub fn panel<E: IntoElement + 'static>(
     on_close: impl Fn() + 'static,
     children: impl Fn() -> E + 'static,
 ) -> impl IntoElement {
-    let open = computed(open);
-    let presentation = computed(layout_class);
-    let on_close = Rc::new(on_close);
-    let children = Rc::new(children);
-    dynamic(move || {
-        let presentation = presentation.get();
-        let on_close = on_close.clone();
-        let children = children.clone();
-        // Only the presentation changes this subtree; content bindings track their own data.
-        untracked(|| match presentation {
-            LayoutClass::Wide => when(open, move || {
-                view()
-                    .app_class(tw("flex min-h-0 min-w-0 h-full flex-col"))
-                    .child(untracked(&*children))
-            })
-            .into_element(),
-            LayoutClass::Medium => right_panel_sheet(
-                move || open.get(),
-                animation_duration_ms,
-                move || on_close(),
-                move || children(),
-            )
-            .into_element(),
-            // Adaptive departure: the outer navigation stack pushes this page over the thread.
-            LayoutClass::Compact => when(open, move || {
-                let on_dismiss = on_close.clone();
-                let on_back = on_close.clone();
-                nsh_base::nav_page()
-                    .title(move || SharedString::from(t("Workspace panel")))
-                    .pop_on_back(false)
-                    .on_back_press(move || on_back())
-                    .on_dismiss(move || {
-                        if open.get_untracked() {
-                            on_dismiss();
-                        }
-                    })
-                    .child(
-                        view()
-                            .app_class(tw("flex min-h-0 min-w-0 flex-1 flex-col"))
-                            .child(untracked(&*children)),
-                    )
-            })
-            .into_element(),
-        })
-    })
+    panel_root()
+        .open(open)
+        .animation_duration_ms(animation_duration_ms)
+        .adaptive(true)
+        .on_close(on_close)
+        .child(untracked(children))
 }
 
 /// `RightPanelSheet`: a named, controlled right sheet with no generated close button.
@@ -81,7 +43,89 @@ pub fn right_panel_sheet<E: IntoElement + 'static>(
     on_close: impl Fn() + 'static,
     children: impl Fn() -> E + 'static,
 ) -> impl IntoElement {
-    let open = computed(open);
+    panel_root()
+        .open(open)
+        .animation_duration_ms(animation_duration_ms)
+        .adaptive(false)
+        .on_close(on_close)
+        .child(untracked(children))
+}
+
+#[derive(Clone, PartialEq, Props)]
+struct PanelRootProps {
+    open: Prop<bool>,
+    animation_duration_ms: u32,
+    adaptive: bool,
+    children: Prop<Children>,
+}
+
+#[derive(Clone, Debug, PartialEq, Event)]
+enum PanelRootEvent {
+    Close,
+}
+
+// A non-lazy slot keeps the content owned here while surface wrappers come and go.
+#[component]
+fn PanelRoot(props: PanelRootProps, cx: Scope<PanelRootEvent>) -> impl IntoElement {
+    let presentation = computed(move || {
+        if props.adaptive {
+            layout_class()
+        } else {
+            LayoutClass::Medium
+        }
+    });
+    dynamic(move || {
+        let presentation = presentation.get();
+        // Only the presentation changes this subtree; content bindings track their own data.
+        untracked(|| match presentation {
+            LayoutClass::Wide => when(
+                move || props.open.get(),
+                move || {
+                    view()
+                        .app_class(tw("flex min-h-0 min-w-0 h-full flex-col"))
+                        .child(props.children)
+                },
+            )
+            .into_element(),
+            LayoutClass::Medium => sheet_surface(
+                props.open,
+                props.animation_duration_ms,
+                move || cx.emit(PanelRootEvent::Close),
+                props.children,
+            )
+            .into_element(),
+            // Adaptive departure: the outer navigation stack pushes this page over the thread.
+            LayoutClass::Compact => when(
+                move || props.open.get(),
+                move || {
+                    nsh_base::nav_page()
+                        .title(move || SharedString::from(t("Workspace panel")))
+                        .pop_on_back(false)
+                        .on_back_press(move || cx.emit(PanelRootEvent::Close))
+                        .on_dismiss(move || {
+                            if props.open.get_untracked() {
+                                cx.emit(PanelRootEvent::Close);
+                            }
+                        })
+                        .child(
+                            view()
+                                .app_class(tw("flex min-h-0 min-w-0 flex-1 flex-col"))
+                                .child(props.children),
+                        )
+                },
+            )
+            .into_element(),
+        })
+    })
+}
+
+fn sheet_surface(
+    open: Prop<bool>,
+    animation_duration_ms: u32,
+    on_close: impl Fn() + 'static,
+    children: Prop<Children>,
+) -> impl IntoElement {
+    let open = computed(move || open.get());
     let shown = signal(false);
     let progress = animated_value(0.0);
     let translate_x = progress.interpolate(&[0.0, 1.0], &[32.0, 0.0]);
@@ -169,7 +213,7 @@ pub fn right_panel_sheet<E: IntoElement + 'static>(
                         sheet_content()
                             .open(move || open.get())
                             .on_close(move || escape())
-                            .child(untracked(&children)),
+                            .child(children),
                     ),
             )
     })
@@ -178,7 +222,6 @@ pub fn right_panel_sheet<E: IntoElement + 'static>(
 #[derive(Clone, PartialEq, Props)]
 struct SheetContentProps {
     open: Prop<bool>,
-    #[prop(lazy)]
     children: Prop<Children>,
 }
 

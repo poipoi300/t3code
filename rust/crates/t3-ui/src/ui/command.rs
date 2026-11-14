@@ -17,17 +17,19 @@
 //! There are no Command `Variant` or `Size` enums in the TSX. Input is always `lg`; footer
 //! actions are `ghost-muted` / `xs`. Elements are opaque and cannot be restyled.
 //!
-//! [`command_dialog`] mounts a native modal while its open signal is true. Put
+//! [`command_dialog`] retains its native modal through the source's 200 ms exit. Put
 //! [`command_dialog_popup`] inside it. The modal traps/restores focus; input autofocus takes
 //! priority over a preceding Back addon. Input's cancel callback owns closing or going back.
+//! The backdrop dismisses the dialog itself; its callback only observes the outside press.
 //! NSH has no decomposed autocomplete, so slots share UI state over native controls.
 //! Item values must be unique within the catalogue; labels may repeat.
 
 use std::rc::Rc;
 
+use nsh_core::animation::{Easing, MotionChannel};
 use nsh_core::{
     AccessibilityState,
-    element::{IntoElements, desktop::title_bar},
+    element::{IntoElements, Timing, desktop::title_bar},
     keymap::When,
     prelude::*,
 };
@@ -111,6 +113,8 @@ pub struct CommandState {
     input: ElementRef,
     list: ElementRef,
     active_row: Signal<Option<(SharedString, ElementRef)>>,
+    dialog_open: Option<Signal<bool>>,
+    reveal_inset: Signal<f32>,
 }
 
 impl CommandState {
@@ -182,12 +186,14 @@ impl CommandState {
             input: element_ref(),
             list: element_ref(),
             active_row: signal(None),
+            dialog_open: use_context::<DialogScope>().map(|dialog| dialog.open),
+            reveal_inset: signal(0.0),
         }
     }
 
     /// Validate at activation, since a mounted row can become disabled or leave the results.
     pub fn choose(self, value: &str) {
-        if self.disabled.get_untracked()
+        if untracked(|| self.is_disabled())
             || !self
                 .items
                 .with_untracked(|items| items.iter().any(|i| i.value == value && !i.disabled))
@@ -205,7 +211,7 @@ impl CommandState {
     }
 
     pub fn highlight(self, value: Option<SharedString>) {
-        if self.disabled.get_untracked()
+        if untracked(|| self.is_disabled())
             || value.as_ref().is_some_and(|value| {
                 !self
                     .items
@@ -239,6 +245,10 @@ impl CommandState {
 
     pub fn focus(self) {
         self.input.focus();
+    }
+
+    fn is_disabled(self) -> bool {
+        self.disabled.get() || self.dialog_open.is_some_and(|open| !open.get())
     }
 }
 
@@ -329,48 +339,99 @@ pub fn command<E: IntoElements>(
 struct DialogScope {
     open: Signal<bool>,
     initial_focus: Signal<Option<ElementRef>>,
+    popup_motion: Motion,
+    backdrop_motion: Motion,
 }
 
-/// NSH owns the portal and focus scope; closing unmounts all command-owned work.
+fn dialog_transition(motion: Motion, open: bool, popup: bool) -> Animation {
+    let timing = Timing::new(
+        if reduce_motion() { 0.0 } else { 200.0 },
+        Easing::Bezier(0.4, 0.0, 0.2, 1.0),
+    );
+    let mut tracks = vec![Animation::timing(
+        &motion.value(MotionChannel::Opacity),
+        if open { 1.0 } else { 0.0 },
+        timing,
+    )];
+    if popup {
+        tracks.push(Animation::timing(
+            &motion.value(MotionChannel::Scale),
+            if open { 1.0 } else { 0.98 },
+            timing,
+        ));
+    }
+    Animation::parallel(tracks)
+}
+
+/// NSH owns the portal and focus scope; exit completion unmounts command-owned work.
 pub fn command_dialog<E: IntoElement>(
     open: Signal<bool>,
     label: impl Into<String>,
     children: impl Fn() -> E + 'static,
 ) -> impl IntoElement {
     let label = label.into();
-    when(
-        move || open.get(),
-        move || {
-            // Untracked: signals read while constructing slots must not remount the modal.
-            untracked(|| {
-                let initial_focus = signal(None::<ElementRef>);
-                provide_context(DialogScope {
-                    open,
-                    initial_focus,
+    let mounted = signal(false);
+    let generation = stored(0u64);
+    let popup_motion = motion();
+    let backdrop_motion = motion();
+    effect(move || {
+        let open_now = open.get();
+        generation.with(|generation| *generation += 1);
+        let current = generation.get();
+        if open_now {
+            if !mounted.get_untracked() {
+                popup_motion.value(MotionChannel::Opacity).set(0.0);
+                popup_motion.value(MotionChannel::Scale).set(0.98);
+                backdrop_motion.value(MotionChannel::Opacity).set(0.0);
+                mounted.set(true);
+            }
+            drop(dialog_transition(popup_motion, true, true).start());
+            drop(dialog_transition(backdrop_motion, true, false).start());
+        } else if mounted.get_untracked() {
+            if reduce_motion() {
+                mounted.set(false);
+            } else {
+                let ended = dialog_transition(popup_motion, false, true).start();
+                drop(dialog_transition(backdrop_motion, false, false).start());
+                spawn(async move {
+                    let _ = ended.await;
+                    if generation.get() == current && !open.get_untracked() {
+                        mounted.set(false);
+                    }
                 });
-                let label = label.clone();
-                nsh_base::dialog()
-                    .label(move || SharedString::from(t(&label)))
-                    .animation(move || {
-                        if reduce_motion() {
-                            ModalAnimation::None
-                        } else {
-                            ModalAnimation::Fade
-                        }
-                    })
-                    .on_cancel(move || open.set(false))
-                    // Native modal presentation focuses its first control after Input's autofocus.
-                    .on_open(move || {
-                        if let Some(input) = initial_focus.get_untracked() {
-                            input.focus();
-                        }
-                    })
-                    .w_full()
-                    .h_full()
-                    .child(children())
-            })
-        },
-    )
+            }
+        }
+    });
+    when(mounted, move || {
+        // Untracked: signals read while constructing slots must not remount the modal.
+        untracked(|| {
+            let initial_focus = signal(None::<ElementRef>);
+            provide_context(DialogScope {
+                open,
+                initial_focus,
+                popup_motion,
+                backdrop_motion,
+            });
+            let label = label.clone();
+            nsh_base::dialog()
+                .label(move || SharedString::from(t(&label)))
+                // Keep the native layer alive until both explicit CSS-equivalent tracks end.
+                .animation(ModalAnimation::None)
+                .close_on_escape(false)
+                .close_on_backdrop_press(false)
+                .close_on_swipe(false)
+                .on_cancel(move || open.set(false))
+                // Native modal presentation focuses its first control after Input's autofocus.
+                .on_open(move || {
+                    if let Some(input) = initial_focus.get_untracked() {
+                        input.focus();
+                    }
+                })
+                .w_full()
+                .h_full()
+                .child(children())
+        })
+    })
 }
 
 pub fn command_dialog_trigger(
@@ -386,12 +447,26 @@ pub fn command_dialog_trigger(
 }
 
 pub fn command_dialog_backdrop(on_pointer_down: impl Fn() + 'static) -> impl IntoElement {
-    // index.css `.dialog-backdrop`; unmounting needs no ending-style pointer guard.
+    // index.css `.dialog-backdrop`; explicit native tracks supply starting/ending opacity.
+    let dialog = use_context::<DialogScope>();
+    let backdrop_motion = dialog.map_or_else(motion, |dialog| dialog.backdrop_motion);
     view()
-        .app_class(tw(
-            "fixed inset-0 z-50 bg-background/60 dark:bg-background/64 backdrop-blur-[4px]",
-        ))
-        .on_press_down(on_pointer_down)
+        .test_id("command-dialog-backdrop")
+        .app_class(move || tw(&cn([
+            Some("fixed inset-0 z-50 transition-all duration-200 bg-background/60 dark:bg-background/64 backdrop-blur-[4px]"),
+            dialog.is_some_and(|dialog| !dialog.open.get()).then_some("pointer-events-none"),
+        ])))
+        .bind_motion(&backdrop_motion)
+        .on_press_down(move || {
+            if dialog.is_some_and(|dialog| !dialog.open.get_untracked()) {
+                return;
+            }
+            on_pointer_down();
+            if let Some(dialog) = dialog {
+                // The observer may remove the dialog's owner entirely.
+                let _ = dialog.open.try_set(false);
+            }
+        })
         .accessible(false)
 }
 
@@ -437,10 +512,14 @@ pub fn command_dialog_popup(
 ) -> impl IntoElement {
     // index.css `.dialog-glass`; NSH exposes no shared nested-dialog count.
     // Glass opacity/saturation use the stock values: theme only exports length/colour tokens.
-    // Native modal fade replaces CSS start/end transitions; app-region/will-change are omitted.
+    // Explicit motion tracks replace CSS start/end styles; app-region/will-change are omitted.
+    let dialog = use_context::<DialogScope>();
+    let popup_motion = dialog.map_or_else(motion, |dialog| dialog.popup_motion);
     view().w_full().h_full().child(command_dialog_backdrop(on_backdrop_pointer_down))
         .child(command_dialog_viewport(view()
             .app_class(tw("relative flex min-h-0 w-full min-w-0 flex-col outline-none rounded-2xl border border-contrast-foreground/10 dark:border-white/8 bg-background/80 backdrop-blur-[12px] dark:backdrop-blur-[16px] backdrop-saturate-[1.14] dark:backdrop-saturate-[1.08] shadow-[0_24px_64px_-24px_rgb(0_0_0/65%)] dark:inset-shadow-[0_1px_rgb(255_255_255/4%)] dark:shadow-[0_24px_72px_-20px_rgb(0_0_0/90%)] pointer-events-auto max-h-105 max-w-xl text-foreground"))
+            .bind_motion(&popup_motion)
+            .pointer_events(move || if dialog.is_some_and(|dialog| !dialog.open.get()) { PointerEvents::None } else { PointerEvents::Auto })
             .child(children)))
 }
 
@@ -482,7 +561,7 @@ pub fn command_input(state: CommandState, options: InputOptions) -> impl IntoEle
         .or_else(|| dialog.map(|dialog| Rc::new(move || dialog.open.set(false)) as Rc<dyn Fn()>));
     // NSH keys follow the focused input; their registration is disposed with its owner.
     effect(move || {
-        if !focused.get() || state.disabled.get() {
+        if !focused.get() || state.is_disabled() {
             return;
         }
         for (key, forward) in [("down", true), ("up", false)] {
@@ -543,18 +622,18 @@ pub fn command_input(state: CommandState, options: InputOptions) -> impl IntoEle
                         .role(AccessibilityRole::Combobox)
                         .accessibility_state(move || AccessibilityState {
                             expanded: Some(true), has_popup: true,
-                            disabled: state.disabled.get(), ..Default::default()
+                            disabled: state.is_disabled(), ..Default::default()
                         })
                         .accessibility_controls(Some(state.list))
                         .accessibility_active_descendant(move || state.active_row.get()
                             .filter(|(value, _)| state.highlighted.get().as_ref() == Some(value))
                             .map(|(_, row)| row))
                         .value(move || state.query.get())
-                        .on_change(move |value: &str| { if !state.disabled.get_untracked() { state.query.set(value.to_owned()); } })
-                        .disabled(move || state.disabled.get())
+                        .on_change(move |value: &str| { if !untracked(|| state.is_disabled()) { state.query.set(value.to_owned()); } })
+                        .disabled(move || state.is_disabled())
                         .on_focus(move || focused.set(true)).on_blur(move || focused.set(false))
                         .auto_focus(options.auto_focus).on_submit(move |_: &str| {
-                            if state.disabled.get_untracked() { return; }
+                            if untracked(|| state.is_disabled()) { return; }
                             if let Some(submit) = &submit { submit(); } else { state.accept(); }
                         })
                         .submit_behavior(SubmitBehavior::Submit)
@@ -591,7 +670,8 @@ pub fn command_list(
     children: impl IntoElement,
 ) -> impl IntoElement {
     let label = label.into();
-    // overflow-auto becomes scroll(); not-empty is derived from the catalogue.
+    state.reveal_inset.set(8.0);
+    // ScrollArea's size-full constrains native scrolling; not-empty follows the catalogue.
     scroll()
         .element_ref(&state.list)
         .role(AccessibilityRole::Listbox)
@@ -602,7 +682,7 @@ pub fn command_list(
         .label(move || SharedString::from(t(&label)))
         .app_class(move || {
             tw(&cn([
-                Some("min-h-0"),
+                Some("relative size-full min-h-0 outline-none transition-shadow focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"),
                 (!state.items.with(|i| i.is_empty())).then_some("p-2"),
             ]))
         })
@@ -620,6 +700,7 @@ pub fn command_list_virtualized<E: IntoElement>(
     render: impl Fn(Memo<Option<Item>>) -> E + 'static,
 ) -> impl IntoElement {
     let label = label.into();
+    state.reveal_inset.set(0.0);
     let list = state.list;
     // NSH's virtual list owns scrolling; no enclosing scroll view is needed.
     effect(move || {
@@ -750,8 +831,9 @@ pub fn command_item(
     children: impl IntoElement,
 ) -> impl IntoElement {
     let row = element_ref();
+    let reveal_area = element_ref();
     let disabled =
-        move || state.disabled.get() || item.with(|i| i.as_ref().is_none_or(|i| i.disabled));
+        move || state.is_disabled() || item.with(|i| i.as_ref().is_none_or(|i| i.disabled));
     let selected = move || {
         item.with(|i| {
             i.as_ref()
@@ -778,11 +860,17 @@ pub fn command_item(
                     state.active_row.set(None);
                 }
             });
-            row.reveal(RevealOptions::default());
+            // NSH has no scroll-padding: reveal an unpainted row rectangle extended by scroll-py-2.
+            reveal_area.reveal(
+                RevealOptions::default()
+                    .vertical(ScrollAlignment::Nearest)
+                    .animated(false),
+            );
         }
     });
     // Autocomplete.Item is a role=option div, outside the Tab order; input retains key focus.
     view()
+        .relative()
         .on_mouse_move(move |_: &MouseEvent| {
             if let Some(item) = item.get_untracked().filter(|i| !i.disabled) {
                 state.highlight(Some(item.value));
@@ -815,6 +903,14 @@ pub fn command_item(
             }))
         })
         .app_class(move || item_classes(selected(), highlighted.get(), disabled(), active()))
+        .child(
+            view()
+                .element_ref(&reveal_area)
+                .accessible(false)
+                .app_class(tw("absolute inset-x-0 pointer-events-none"))
+                .top(move || px(-state.reveal_inset.get()))
+                .bottom(move || px(-state.reveal_inset.get())),
+        )
         .child(children)
 }
 
@@ -863,11 +959,12 @@ pub fn command_footer_action(
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
     // Frozen Button API lacks the TSX's h-auto/px-2/transparent-hover override.
+    let dialog = use_context::<DialogScope>();
     button(
         ButtonContent::Label(t(&label.into())),
         ButtonVariant::GhostMuted,
         ButtonSize::Xs,
-        disabled,
+        move || dialog.is_some_and(|dialog| !dialog.open.get()) || disabled(),
         on_press,
     )
 }

@@ -5,7 +5,6 @@ use t3_auth::{Error, authorization::STANDARD_SCOPES, pairing::*, session::IssueS
 use t3_contracts::auth::*;
 
 #[tokio::test]
-#[cfg(any())]
 async fn connect_lifecycle_refusals_precede_approval_and_reconnection() {
     let h = Harness::new().await;
     let key = bootstrap_thumbprint();

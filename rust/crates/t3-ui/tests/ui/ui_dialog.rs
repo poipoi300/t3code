@@ -194,6 +194,73 @@ fn FocusOverride() -> impl IntoElement {
 }
 
 #[component]
+fn ReplacedAlert() -> impl IntoElement {
+    theme::install(&ThemeChoice::default());
+    let first = signal(false);
+    let next = signal(false);
+    let dismissed = signal(0);
+    let replacement_was_current = signal(false);
+    view()
+        .w_full()
+        .h_full()
+        .child(text(move || format!("dismissed {}", dismissed.get())))
+        .child(text(move || {
+            if replacement_was_current.get() {
+                t("replacement was current")
+            } else {
+                t("no replacement observed")
+            }
+        }))
+        .child(alert_dialog(first, move |state| {
+            state.on_replaced(move || {
+                replacement_was_current.set(next.get_untracked());
+                dismissed.update(|count| *count += 1);
+            });
+            view()
+                .child(dialog_trigger(state, "Open older alert"))
+                .child(alert_dialog_popup(
+                    state,
+                    AlertPopupOptions::default(),
+                    move || {
+                        view()
+                            .child(alert_dialog_title(state, || "Older alert".into()))
+                            .child(alert_dialog_close(
+                                state,
+                                ButtonContent::Label(t("Answer older")),
+                                ButtonVariant::Outline,
+                                ButtonSize::Default,
+                                || false,
+                            ))
+                            .child(
+                                nsh_base::button()
+                                    .accessibility_label(Some(SharedString::from(t(
+                                        "Replace alert",
+                                    ))))
+                                    .on_press(move || {
+                                        state.replace_with(|| next.set(true));
+                                        state.replace_with(|| next.set(true));
+                                    })
+                                    .child(text(t("Replace alert"))),
+                            )
+                    },
+                ))
+        }))
+        .child(alert_dialog(next, move |state| {
+            alert_dialog_popup(state, AlertPopupOptions::default(), move || {
+                view()
+                    .child(alert_dialog_title(state, || "Newer alert".into()))
+                    .child(alert_dialog_close(
+                        state,
+                        ButtonContent::Label(t("Answer newer")),
+                        ButtonVariant::Outline,
+                        ButtonSize::Default,
+                        || false,
+                    ))
+            })
+        }))
+}
+
+#[component]
 fn Nested() -> impl IntoElement {
     theme::install(&ThemeChoice::default());
     let open = signal(false);
@@ -237,11 +304,21 @@ fn Nested() -> impl IntoElement {
 
 #[component]
 fn ActionFocus() -> impl IntoElement {
+    action_focus_flow(false)
+}
+
+#[component]
+fn CancelFocus() -> impl IntoElement {
+    action_focus_flow(true)
+}
+
+fn action_focus_flow(cancel_initial_focus: bool) -> impl IntoElement {
     theme::install(&ThemeChoice::default());
     let open = signal(false);
     let disabled = signal(false);
     let accepted = signal(0);
     let replaced = signal(false);
+    let cancel = element_ref();
     on_key("ctrl+d", move |_| disabled.set(true));
     dialog(open, move |state| {
         view()
@@ -255,60 +332,67 @@ fn ActionFocus() -> impl IntoElement {
                     t("action closed")
                 }
             }))
-            .child(dialog_popup(state, PopupOptions::default(), move || {
-                let action = element_ref();
-                let cancel = element_ref();
-                state.register_action(action, move || disabled.get());
-                state.register_control(cancel, || false);
-                vec![
-                    dynamic(move || {
-                        let replaced = replaced.get();
-                        untracked(|| {
-                            if replaced {
-                                dialog_title(state, || "Import finished".into()).into_element()
-                            } else {
-                                dialog_title(state, || "Retry import?".into()).into_element()
-                            }
+            .child(dialog_popup(
+                state,
+                PopupOptions {
+                    initial_focus: cancel_initial_focus.then_some(cancel),
+                    ..PopupOptions::default()
+                },
+                move || {
+                    vec![
+                        dynamic(move || {
+                            let replaced = replaced.get();
+                            untracked(|| {
+                                if replaced {
+                                    dialog_title(state, || "Import finished".into()).into_element()
+                                } else {
+                                    dialog_title(state, || "Retry import?".into()).into_element()
+                                }
+                            })
                         })
-                    })
-                    .into_element(),
-                    dynamic(move || {
-                        let replaced = replaced.get();
-                        untracked(|| {
-                            if replaced {
-                                dialog_description(state, || "The project is ready.".into())
+                        .into_element(),
+                        dynamic(move || {
+                            let replaced = replaced.get();
+                            untracked(|| {
+                                if replaced {
+                                    dialog_description(state, || "The project is ready.".into())
+                                        .into_element()
+                                } else {
+                                    dialog_description(state, || {
+                                        "The project could not be imported.".into()
+                                    })
                                     .into_element()
-                            } else {
-                                dialog_description(state, || {
-                                    "The project could not be imported.".into()
-                                })
-                                .into_element()
-                            }
+                                }
+                            })
                         })
-                    })
-                    .into_element(),
-                    nsh_base::button()
-                        .element_ref(&cancel)
-                        .accessibility_label(Some(SharedString::from(t("Cancel"))))
-                        .on_press(move || state.close())
-                        .child(text(t("Cancel")))
                         .into_element(),
-                    // A caller's render override supplies the ref until the shared Button accepts one.
-                    nsh_base::button()
-                        .element_ref(&action)
-                        .accessibility_label(Some(SharedString::from(t("Retry"))))
-                        .disabled(move || disabled.get())
-                        .on_press(move || accepted.update(|n| *n += 1))
-                        .child(text(t("Retry")))
+                        dialog_close_with_ref(
+                            state,
+                            ButtonContent::Label(t("Cancel")),
+                            ButtonVariant::Outline,
+                            ButtonSize::Default,
+                            || false,
+                            cancel,
+                        )
                         .into_element(),
-                    text(move || format!("retries {}", accepted.get())).into_element(),
-                    nsh_base::button()
-                        .accessibility_label(Some(SharedString::from(t("Replace content"))))
-                        .on_press(move || replaced.set(true))
-                        .child(text(t("Replace content")))
+                        dialog_action(
+                            state,
+                            ButtonContent::Label(t("Retry")),
+                            ActionVariant::Default,
+                            ButtonSize::Default,
+                            move || disabled.get(),
+                            move || accepted.update(|n| *n += 1),
+                        )
                         .into_element(),
-                ]
-            }))
+                        text(move || format!("retries {}", accepted.get())).into_element(),
+                        nsh_base::button()
+                            .accessibility_label(Some(SharedString::from(t("Replace content"))))
+                            .on_press(move || replaced.set(true))
+                            .child(text(t("Replace content")))
+                            .into_element(),
+                    ]
+                },
+            ))
     })
 }
 
@@ -619,6 +703,38 @@ fn initial_focus_prefers_an_enabled_action_and_skips_a_disabled_one() {
     gone(&mut app, "role:dialog");
     app.wait_for("action closed")
         .expect("disabled action was skipped");
+    let mut app = start::<CancelFocus>(DESKTOP);
+    app.press("role:button[Open action]")
+        .expect("open with caller Cancel ref");
+    app.press_key("enter")
+        .expect("activate caller focus override");
+    gone(&mut app, "role:dialog");
+    app.wait_for("action closed")
+        .expect("caller Cancel overrides enabled action");
+}
+
+#[test]
+fn replacing_an_unanswered_alert_notifies_its_owner_once_after_presenting_the_next() {
+    let mut app = start::<ReplacedAlert>(DESKTOP);
+    app.press("role:button[Open older alert]")
+        .expect("open older");
+    app.press("role:button[Answer older]")
+        .expect("answer older");
+    gone(&mut app, "role:alertdialog");
+    app.wait_for("dismissed 0")
+        .expect("an answer is not replacement");
+    app.press("role:button[Open older alert]")
+        .expect("open again");
+    app.press("role:button[Replace alert]").expect("replace");
+    app.wait_for("Newer alert").expect("new alert is presented");
+    app.wait_for("dismissed 1")
+        .expect("replaced alert notified once");
+    app.wait_for("replacement was current")
+        .expect("callback follows replacement");
+    app.press("role:button[Answer newer]")
+        .expect("close replacement");
+    gone(&mut app, "role:alertdialog");
+    app.wait_for("dismissed 1").expect("no second notification");
 }
 
 #[test]

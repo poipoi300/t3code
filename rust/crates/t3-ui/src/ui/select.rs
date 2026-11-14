@@ -13,7 +13,9 @@
 //! their styles through NSH's part props instead of accepting separately mounted children.
 //! `SelectContent` is the web alias of `SelectPopup`: [`select_content`] is the same function.
 //! NSH uses a sheet on touch screens and its own placement/selected-item alignment policy.
+//! The ghost chevron inherits the trigger's text color, including hover/open state.
 //! Custom item/icon renderers own their children's size and tint (the TSX's SVG selectors).
+//! Raw `glass-opacity` uses percentage points (80); future typed `glass().opacity` is [0,1].
 
 use std::rc::Rc;
 
@@ -22,7 +24,7 @@ use nsh_core::prelude::*;
 
 use crate::i18n::t;
 use crate::theme::{self, Scope, cn, palette, tw, tw_with};
-use crate::ui::icon::{Icon, icon};
+use crate::ui::icon::Icon;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Variant {
@@ -47,8 +49,8 @@ pub type GroupSlot = Rc<dyn Fn(&SelectGroup) -> AnyElement>;
 pub type OpenChange = Rc<dyn Fn(bool, OpenChangeReason)>;
 pub use nsh_base::SelectValue as Value;
 
-/// Popup positioning exposed by NSH. Its list always matches at least the trigger width;
-/// NSH does not expose web's alternate anchor, align offset or `alignItemWithTrigger` override.
+/// NSH fixes desktop dropdown width to the trigger, rather than a content-sized minimum;
+/// touch sheets fill the viewport. Select has no custom-anchor or selected-item alignment prop.
 #[derive(Clone, Copy, Debug)]
 pub struct Popup {
     pub side: Placement,
@@ -123,8 +125,8 @@ pub fn select(
 
 pub use select_popup as select_content;
 
-/// NSH combines Portal/Positioner/Popup/List and scroll controls in one select component.
-/// Its native scrolling replaces the web's two gradient scroll arrows (no arrow slots in NSH).
+/// NSH combines Portal/Positioner/Popup/List. Its list refs and scroll/viewability callbacks are
+/// private and SelectProps has no arrow slots, so overflow-driven arrows cannot be wired here.
 pub fn select_popup(
     props: SelectProps,
     on_change: impl Fn(Option<SharedString>) + 'static,
@@ -194,19 +196,19 @@ pub fn select_popup(
         .default_open(default_open)
         .disabled(disabled)
         .accessibility_label(move || Some(SharedString::from(t(&label.get()))))
-        .placeholder(move || Some(SharedString::from(t(&current.get().filter(|value| !value.is_empty()).unwrap_or_else(|| placeholder.get())))))
+        .placeholder(move || Some(SharedString::from(t(&placeholder.get()))))
         .trigger(trigger)
         .placement(popup.side)
         .align(popup.align)
         .offset(px(popup.side_offset))
         // `dropdown-glass` (index.css): the 18% outer mix gives 83.6% opacity at 80% glass.
-        // NSH combines the glass wrapper with Popup; Electron no-drag and transform-origin
-        // have no meaning in this shared native/DOM tree and are omitted. NSH owns overlay z-order.
-        .popup_class(tw("relative rounded-lg text-foreground outline-none border border-foreground/10 backdrop-blur-(--glass-blur) dark:backdrop-blur-[16px] backdrop-saturate-[1.14] dark:backdrop-saturate-[1.08] shadow-[0_16px_40px_-18px_rgb(0_0_0/55%)] dark:shadow-[0_18px_44px_-18px_rgb(0_0_0/80%)]"))
-        .popup_style(|style| style.bg(move || {
-            let opacity = theme::current_tokens().number("glass-opacity").unwrap_or(80.0) / 100.0;
-            palette().popover.opacity(0.18 + 0.82 * opacity)
-        }))
+        // NSH combines the positioner, popup and glass wrapper. Its positioning exposes no
+        // --transform-origin CSS variable; Electron no-drag CSS has no native-shell equivalent.
+        .popup_class(tw("z-[130] select-none relative rounded-lg text-foreground outline-none border backdrop-blur-(--glass-blur) dark:backdrop-blur-[16px] backdrop-saturate-[1.14] dark:backdrop-saturate-[1.08] shadow-[0_16px_40px_-18px_rgb(0_0_0/55%)] dark:shadow-[0_18px_44px_-18px_rgb(0_0_0/80%)]"))
+        .popup_style(|style| style
+            .bg(move || palette().popover.opacity(glass_alpha(theme::current_tokens().number("glass-opacity"))))
+            .border_color(move || theme::current_tokens().color("contrast-foreground")
+                .unwrap_or(palette().foreground).opacity(0.1)))
         .list_class(tw("p-1"))
         // NSH projects data-selected/highlighted/disabled into selected:/focus:/disabled:.
         // `in-data-[side=none]` width is NSH's selected-item cover geometry, not a CSS token.
@@ -233,6 +235,11 @@ pub fn select_popup(
                 if let Some(callback) = &on_open_change { callback(*next, *reason); }
             }
         })
+}
+
+fn glass_alpha(raw_percentage: Option<f32>) -> f32 {
+    // Raw token units are percentage points; normalize once, as agreed with UI-MENU/UI-POPOVER.
+    0.18 + 0.82 * (raw_percentage.unwrap_or(80.0) / 100.0)
 }
 
 fn trigger_classes(
@@ -334,7 +341,7 @@ pub fn select_trigger(
             view()
                 .accessible(false)
                 .app_class(tw("shrink-0"))
-                .child(custom_icon.unwrap_or_else(|| default_icon().into_element())),
+                .child(custom_icon.unwrap_or_else(|| default_icon(variant).into_element())),
         )
 }
 
@@ -354,10 +361,13 @@ fn trigger_relief(
         .opacity(move || if disabled.get() || invalid.get() || pressed.get() { 0.0_f32 } else { 1.0_f32 })
 }
 
-fn default_icon() -> impl IntoElement {
-    view()
-        .app_class(tw("-me-1 size-3.5 opacity-70"))
-        .child(icon(Icon::ChevronDown, 14.0, move || palette().icon_muted))
+fn default_icon(variant: Variant) -> impl IntoElement {
+    svg(Icon::ChevronDown.asset())
+        .accessible(false)
+        .app_class(tw(&cn([
+            Some("-me-1 size-3.5 shrink-0 opacity-70 pointer-events-none"),
+            (variant == Variant::Default).then_some("text-icon-muted"),
+        ])))
 }
 
 fn trigger_height(size: Size, compact: bool) -> f32 {
@@ -411,7 +421,7 @@ pub fn select_button(
                 .app_class(tw("min-w-0 flex-1 truncate text-left"))
                 .child(children),
         )
-        .child(default_icon())
+        .child(default_icon(Variant::Default))
 }
 
 pub fn select_value(
@@ -463,4 +473,23 @@ pub fn select_group_label(label: impl Into<SharedString>) -> impl IntoElement {
 fn group_label(label: impl Into<Prop<SharedString>>) -> impl IntoElement {
     let label = label.into();
     text(move || label.get()).app_class(tw("px-2 py-1.5 font-medium text-muted-foreground text-xs"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::glass_alpha;
+
+    #[test]
+    fn raw_glass_opacity_uses_percentage_points_and_is_normalized_once() {
+        for (raw, expected) in [
+            (None, 0.836),
+            (Some(0.0), 0.18),
+            (Some(0.8), 0.18656),
+            (Some(50.0), 0.59),
+            (Some(80.0), 0.836),
+            (Some(100.0), 1.0),
+        ] {
+            assert!((glass_alpha(raw) - expected).abs() < 0.000001, "{raw:?}");
+        }
+    }
 }

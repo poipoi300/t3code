@@ -198,7 +198,6 @@ pub fn menu_trigger(
     nsh_base::button()
         .accessibility_label(Some(SharedString::from(label)))
         .disabled(disabled)
-        .app_class(tw("outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:opacity-64"))
         .child(children)
 }
 
@@ -216,8 +215,9 @@ fn popup_class(width: Width) -> SharedString {
 fn popup_style(style: StyleRefinement, width: Width) -> StyleRefinement {
     let room = (window().width.0 - 32.0).max(0.0);
     let tokens = tokens();
-    // The frozen token bridge omits percentages; 80% is index.css's --glass-opacity default.
-    let glass = tokens.number("glass-opacity").unwrap_or(0.8);
+    // Raw glass-opacity is percentage points (80 means 80%); normalize exactly once.
+    // The bridge omits percentages today; future theme::glass().opacity is already [0,1].
+    let glass = tokens.number("glass-opacity").unwrap_or(80.0) / 100.0;
     // `dropdown-glass`: 18% popover + 82% of the glass-opacity surface. The GPUI shell's
     // missing blur is the plan's NSH problem 7.
     style
@@ -794,11 +794,11 @@ fn row_class(options: ItemOptions, kind: RowKind, checkbox: CheckboxVariant) -> 
             CheckboxVariant::Icon => "grid-cols-[0.625rem_minmax(0,1fr)] pe-4",
             CheckboxVariant::Default => "grid-cols-[1rem_minmax(0,1fr)] pe-4",
         }),
-        // button.tsx's buttonVariants(ghost, compact): selectors become child icon styles,
-        // the coarse after hit area becomes row_hit_slop, and --spacing(2)-1px is 7px.
-        // Drop its will-change hint; native press feedback owns repaint scheduling. NSH's
-        // Typed transition_style replaces NSH's unsupported transition-[...] utility.
-        (options.variant == Variant::Ghost).then_some("relative inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-[var(--control-radius)] border font-medium text-base outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 sm:text-sm h-7 gap-1 rounded-md px-[7px] text-xs border-transparent text-foreground h-auto min-h-7 w-full sm:text-xs active:scale-[0.97] active:bg-accent"),
+        // button.tsx compact: selectors style child icons; the coarse after area is row_hit_slop.
+        // --spacing(2)-1px is 7px; drop will-change (native press feedback owns scheduling).
+        // transition_style replaces NSH's unsupported transition-[...] utility.
+        // [:hover,[data-pressed]] maps to NSH hover/active (a press in progress).
+        (options.variant == Variant::Ghost).then_some("relative inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-[var(--control-radius)] border font-medium text-base outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 sm:text-sm h-7 gap-1 rounded-md px-[7px] text-xs border-transparent text-foreground h-auto min-h-7 w-full sm:text-xs hover:bg-accent active:scale-[0.97] active:bg-accent"),
         (options.density == Density::Touch).then_some("min-h-10 sm:min-h-10"),
     ]);
     tw_with(ThemeScope::Root, &classes, &attrs)

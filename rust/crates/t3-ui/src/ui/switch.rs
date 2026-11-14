@@ -10,7 +10,11 @@
 //! RadioGroup accepts child elements; NSH builds them in its roving-focus context.
 //! Label takes child elements and an activation callback (NSH has no HTML `htmlFor`).
 
-use nsh_core::{element::ImageSrc, prelude::*};
+use nsh_core::{
+    PropertyValue, StyleDecl, StyleKey, TransitionProps,
+    element::{ImageSrc, IntoChild, Style},
+    prelude::*,
+};
 
 use crate::i18n::ts;
 use crate::theme::{Density, Scope, cn, metrics, palette, tw, tw_with};
@@ -85,6 +89,23 @@ pub(crate) fn control_hit_slop(width: f32, height: f32) -> EdgeInsets {
     }
 }
 
+// NSH's class parser lacks arbitrary transition-property lists; the native style
+// accepts the same property mask without widening it to layout changes.
+pub(crate) fn transition_style(properties: u8, ease: Option<[f32; 4]>) -> Style {
+    let properties = if reduce_motion() { 0 } else { properties };
+    let mut declarations = vec![StyleDecl::Set(
+        StyleKey::TransitionProperty,
+        PropertyValue::TransitionProps(TransitionProps(properties)),
+    )];
+    if let Some(ease) = ease {
+        declarations.push(StyleDecl::Set(
+            StyleKey::TransitionTimingFunction,
+            PropertyValue::Easing(ease.map(Into::into)),
+        ));
+    }
+    Style::from_decls(declarations)
+}
+
 pub fn switch(
     source: impl Into<SharedString>,
     state: ControlState,
@@ -94,25 +115,50 @@ pub fn switch(
     let source = stored(source.into());
     // NSH Switch has no mixed state; Checkbox supplies Mixed with a Switch role.
     // Its mandatory indicator is the track; next value still negates checked.
-    nsh_base::checkbox().role(Some(AccessibilityRole::Switch))
-        .checked(state.checked).indeterminate(state.mixed).disabled(state.disabled)
-        .accessibility_label(move || Some(source.with(|s| ts(s))))
-        .on_change(move |_: &bool| {
-            if !state.disabled.get_untracked() { on_change(!state.checked.get_untracked()); }
+    let props = nsh_base::CheckboxProps {
+        role: Some(AccessibilityRole::Switch).into(),
+        checked: state.checked,
+        indeterminate: state.mixed,
+        disabled: state.disabled,
+        accessibility_label: Prop::bind(move || Some(source.with(|s| ts(s)))),
+        hit_slop: Prop::bind(move || {
+            control_hit_slop(thumb_size(size) * 2.0 - 2.0, thumb_size(size) + 2.0)
+        }),
+        indicator_class: Prop::bind(move || {
+            Some(tw_with(
+                Scope::Root,
+                "inline-flex shrink-0 cursor-pointer items-center rounded-full p-[2px] outline-none duration-200 data-checked:bg-primary data-unchecked:bg-input data-disabled:cursor-not-allowed data-disabled:opacity-64 data-[mixed]:bg-input",
+                &state.attrs_with_checked(state.checked.get()),
+            ))
+        }),
+        // Subtree --thumb-size and calc lengths resolve at the web's sm breakpoint.
+        // Direct Props accept bound Style values, unlike NSH's part-style setters.
+        indicator_style: Prop::bind(move || {
+            Style::from(
+                nsh_core::element::StyleRefinement::default()
+                    .h(px(thumb_size(size) + 2.0))
+                    .w(px(thumb_size(size) * 2.0 - 2.0)),
+            )
+            .then(&transition_style(
+                TransitionProps::COLORS | TransitionProps::SHADOW,
+                None,
+            ))
+        }),
+        ..Props::initial()
+    };
+    nsh_base::Checkbox::element(props)
+        .on_event(move |event: &nsh_base::CheckboxEvent| {
+            if matches!(event, nsh_base::CheckboxEvent::Change(_)) && !state.disabled.get_untracked() {
+                on_change(!state.checked.get_untracked());
+            }
         })
         .app_class(tw("group inline-flex shrink-0 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"))
-        .hit_slop(move || control_hit_slop(thumb_size(size) * 2.0 - 2.0, thumb_size(size) + 2.0))
-        .indicator_class(move || Some(tw_with(Scope::Root,
-            "inline-flex shrink-0 cursor-pointer items-center rounded-full p-[2px] outline-none transition-[background-color,box-shadow] duration-200 data-checked:bg-primary data-unchecked:bg-input data-disabled:cursor-not-allowed data-disabled:opacity-64 data-[mixed]:bg-input",
-            &state.attrs_with_checked(state.checked.get()))))
-        // Subtree --thumb-size and calc lengths resolve at the web's sm breakpoint.
-        .indicator_style(move |s| s.h(px(thumb_size(size) + 2.0)).w(px(thumb_size(size) * 2.0 - 2.0)))
-        .indicator(view()
-            // Ancestor-active selectors become group-active; NSH has no elliptical
-            // border radius or per-property transform-origin transition.
+        .fill("indicator", view()
+            // NSH has no elliptical radius and uses one clock for translate/scale/origin:
+            // retain 150 ms transforms without the source's separate delayed scale clock.
             .app_class(move || Some(tw_with(Scope::Root,
                 &cn([Some("pointer-events-none block shrink-0 origin-left rounded-full bg-background shadow-sm/5 dark:data-unchecked:bg-muted-foreground data-checked:origin-right transition-transform duration-150 motion-reduce:transition-none"),
-                    (!state.disabled.get()).then_some("group-active:scale-x-110"),
+                    (!state.disabled.get()).then_some("group-active:scale-x-110 group-active/form-label:scale-x-110"),
                     state.mixed.get().then_some("opacity-70")]), &state.attrs_with_checked(state.checked.get()))))
             .size(move || px(thumb_size(size) - 2.0))
             .translate_x(move || {
@@ -163,13 +209,21 @@ fn choice_before(state: ControlState, round: bool) -> impl IntoElement {
     })
 }
 
+fn choice_focus_classes(state: ControlState) -> String {
+    // Resolve outline-inherit from the parent, and replace its token-valued inset
+    // shadow with the equivalent three-point inset ring (neither parses in NSH).
+    cn([
+        Some("group-focus-visible:ring-[3px] group-focus-visible:ring-inset group-focus-visible:ring-background group-focus-visible:outline-2 group-focus-visible:outline-solid group-focus-visible:-outline-offset-2 group-focus-visible:outline-ring"),
+        state.invalid.get().then_some("group-focus-visible:outline-destructive/48 dark:group-focus-visible:outline-destructive/24"),
+    ])
+}
+
 fn checkbox_indicator(state: ControlState) -> impl IntoElement {
     view().app_class(move || {
         let mut attrs = state.attrs();
         attrs.retain(|(key, _)| *key != "data-unchecked" || !state.mixed.get());
-        Some(tw_with(Scope::Root,
-        "-inset-px absolute flex items-center justify-center rounded-[.25rem] text-primary-foreground data-unchecked:hidden data-checked:bg-primary data-indeterminate:text-foreground group-focus-visible:inset-shadow-[0_0_0_3px_var(--background)] group-focus-visible:outline-2 group-focus-visible:outline-solid group-focus-visible:-outline-offset-2 group-focus-visible:outline-inherit",
-        &attrs))
+        let classes = cn([Some("-inset-px absolute flex items-center justify-center rounded-[.25rem] text-primary-foreground data-unchecked:hidden data-checked:bg-primary data-indeterminate:text-foreground"), Some(&choice_focus_classes(state))]);
+        Some(tw_with(Scope::Root, &classes, &attrs))
     })
         // The parent's focus selector becomes NSH's group-focus-visible.
         .child(svg(move || ImageSrc::svg_markup(if state.mixed.get() {
@@ -233,9 +287,9 @@ pub fn checkbox_mark(checked: impl Into<Prop<bool>>, variant: Variant) -> impl I
 }
 
 /// Port of apps/web/src/components/ui/radio-group.tsx RadioGroup.
-pub fn radio_group(
+pub fn radio_group<M>(
     source: impl Into<SharedString>,
-    children: impl IntoElement,
+    children: impl IntoChild<M>,
 ) -> impl IntoElement {
     let source = stored(source.into());
     nsh_base::radio_group()
@@ -261,8 +315,10 @@ pub fn radio(
         .app_class(move || Some(choice_root(state, Variant::Default, true)))
         .hit_slop(move || { let side = if metrics().control == 36.0 { 18.0 } else { 16.0 }; control_hit_slop(side, side) })
         .child(choice_before(state, true))
-        .child(view().app_class(move || Some(tw_with(Scope::Root,
-            "-inset-px absolute flex size-4.5 items-center justify-center rounded-full data-unchecked:hidden data-checked:bg-primary sm:size-4 group-focus-visible:inset-shadow-[0_0_0_3px_var(--background)] group-focus-visible:outline-2 group-focus-visible:outline-solid group-focus-visible:-outline-offset-2 group-focus-visible:outline-inherit", &state.attrs())))
+        .child(view().app_class(move || {
+            let classes = cn([Some("-inset-px absolute flex size-4.5 items-center justify-center rounded-full data-unchecked:hidden data-checked:bg-primary sm:size-4"), Some(&choice_focus_classes(state))]);
+            Some(tw_with(Scope::Root, &classes, &state.attrs()))
+        })
 
             // The indicator's ::before is a real first child.
             .child(view().app_class(tw("size-2 rounded-full bg-primary-foreground sm:size-1.5"))))
@@ -272,10 +328,10 @@ pub use radio as radio_group_item;
 
 /// Port of apps/web/src/components/ui/label.tsx Label. The callback activates its associated
 /// control; use its disabled guard too (NSH has no HTML label association).
-pub fn label(children: impl IntoElement, activate: impl Fn() + 'static) -> impl IntoElement {
+pub fn label<M>(children: impl IntoChild<M>, activate: impl Fn() + 'static) -> impl IntoElement {
     view()
         .app_class(tw(
-            "inline-flex items-center gap-2 text-base/4.5 sm:text-sm/4 font-medium text-foreground",
+            "group/form-label inline-flex items-center gap-2 text-base/4.5 sm:text-sm/4 font-medium text-foreground",
         ))
         .on_press(activate)
         .focusable(false)

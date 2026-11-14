@@ -14,7 +14,6 @@
 //! NSH exposes no focus-visible observer: unknown programmatic focus retains the hint on scroll.
 
 use nsh_core::element::IntoTooltip;
-use nsh_core::element::desktop::title_bar;
 use nsh_core::prelude::*;
 
 use super::popover::{
@@ -193,13 +192,13 @@ fn tooltip_positioner(
     options: TooltipOptions,
     tooltip: nsh_base::TooltipElement,
 ) -> nsh_base::TooltipElement {
-    // Portal/Positioner share NSH's hint overlay. Its margin is uniform: reserve the
-    // title-bar inset on every edge instead of Base UI's top-only collision padding.
+    // NSH only accepts a uniform margin beyond the native safe area. A top-only
+    // titlebar exclusion needs per-edge collision insets in TooltipProps/OverlayConfig.
     tooltip
         .placement(options.side)
         .align(options.align)
         .offset(px(options.side_offset))
-        .margin(move || px(5.0 + title_bar().top.0))
+        .margin(px(5.0))
         .app_class(tw("pointer-events-none z-[140] transition"))
 }
 
@@ -235,19 +234,17 @@ pub fn tooltip_trigger(
             nsh_base::button()
                 .accessibility_label(move || Some(t(&label).into()))
                 .disabled(disabled)
-                .app_class(tw(
-                    "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-                ))
                 .child(children),
         )
 }
 
 pub fn tooltip_popup(variant: Variant, children: impl IntoElement) -> impl IntoElement {
-    // CSS transform-origin/positioner interpolation and text-balance have no NSH counterpart;
-    // NSH text wraps natively, so wrap-anywhere and whitespace-normal are omitted.
+    // NSH parses text-balance as ordinary wrapping, without balanced line breaking.
+    // Transform-origin/positioner interpolation are unsupported; wrap-anywhere and
+    // whitespace-normal are omitted per the native wrapping rule in ui-package.md.
     view()
         .app_class(tw(&cn([
-            Some("relative flex rounded-md text-popover-foreground text-xs"),
+            Some("relative flex text-balance rounded-md text-popover-foreground text-xs"),
             Some(if variant == Variant::Glass {
                 "shadow-xl shadow-black/25 border backdrop-blur-(--glass-blur) dark:backdrop-blur-[16px] backdrop-saturate-[1.14] dark:backdrop-saturate-[1.08]"
             } else {

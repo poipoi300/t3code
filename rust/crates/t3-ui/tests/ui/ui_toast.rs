@@ -290,6 +290,51 @@ fn error_details_expand_and_collapse_without_dismissing_the_notification() {
 }
 
 #[test]
+fn the_next_toast_is_interactive_while_the_newest_one_is_still_leaving() {
+    let mut app = start(DESKTOP);
+    clear(&mut app);
+    app.press("role:button[Raise error]").expect("older toast");
+    app.wait_for("Request failed").expect("older toast mounted");
+    app.press("role:button[Raise action toast]")
+        .expect("newer toast");
+    app.wait_for("Thread archived")
+        .expect("newer toast mounted");
+    app.hover("Thread archived").expect("expand the stack");
+    app.press("role:button[Copy error]")
+        .expect("older toast expands with the stack");
+    app.press("role:button[Undo]").expect("close newest toast");
+    app.wait_for("Actions: 1").expect("action completed");
+    app.hover("role:button[Return to thread]")
+        .expect("collapse the stack during exit");
+    assert_eq!(
+        app.screen()
+            .layout_nodes()
+            .iter()
+            .filter(|node| node.test_id.as_deref() == Some("toast-title"))
+            .count(),
+        2,
+        "the departing toast is still mounted"
+    );
+    let copies = app
+        .screen()
+        .commands()
+        .iter()
+        .filter(|(_, command)| matches!(command, nsh_core::Command::SetClipboard(_)))
+        .count();
+    app.press("role:button[Copy error]")
+        .expect("remaining toast is frontmost before exit finishes");
+    assert_eq!(
+        app.screen()
+            .commands()
+            .iter()
+            .filter(|(_, command)| *command
+                == nsh_core::Command::SetClipboard("Permission denied".into()))
+            .count(),
+        copies + 1
+    );
+}
+
+#[test]
 fn same_thread_ids_in_other_environments_do_not_expose_scoped_notifications() {
     let mut app = start(DESKTOP);
     clear(&mut app);

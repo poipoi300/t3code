@@ -5,11 +5,11 @@
 //! text are already translated. `tabs` / `tab` supply NSH's tab-list focus and controlled
 //! selection behavior; there is no web ui/tabs.tsx or cva variant/size to invent. Their content
 //! slots carry the feature's layout, and `tab` establishes the web's `group/tab` for closing.
+//! Custom-trigger hover/scroll tracking needs UI-POPOVER's equivalent of TooltipTrigger `render`.
 
 use nsh_core::prelude::*;
 
-use crate::theme::{palette, tw};
-use crate::ui::icon::Icon;
+use crate::theme::tw;
 use crate::ui::tooltip::{tooltip as hint, tooltip_create_handle};
 
 /// A semantic tab list. The feature supplies its tab content, ordering and layout.
@@ -49,6 +49,9 @@ pub fn panel_tab_close_button(
     on_click: impl Fn() + 'static,
     tooltip: Option<String>,
 ) -> impl IntoElement {
+    // Bundled icons are black masks; inline SVG preserves Lucide's inherited currentColor.
+    let close_glyph = include_str!("../../assets/icons/x.svg")
+        .replace("stroke=\"black\"", "stroke=\"currentColor\"");
     let button = nsh_base::button()
         .accessibility_label(Some(SharedString::from(label)))
         .on_press(on_click)
@@ -56,13 +59,13 @@ pub fn panel_tab_close_button(
         .child(view()
             .app_class(tw("relative flex size-3 items-center justify-center group-hover/tab:hidden group-focus-visible/close:hidden"))
             .child(children))
-        .child(image(Icon::X.asset())
+        .child(svg(nsh_core::element::ImageSrc::svg_markup(&close_glyph))
             .app_class(tw("hidden size-3 group-hover/tab:block group-focus-visible/close:block"))
-            .tint_color(move || palette().foreground)
             .accessible(false));
     match tooltip.filter(|text| !text.is_empty()) {
         Some(tooltip) => button
             // NSH component builders attach the hint as a child; only host views expose tooltip.
+            // UI-POPOVER's trigger currently creates its own button and cannot track this one.
             .child(hint(
                 tooltip_create_handle(),
                 Default::default(),

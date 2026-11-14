@@ -12,21 +12,26 @@
 //! Text slots retain their last open value while the native layer animates out.
 //! `state.on_open_change(callback)` gives the caller control of open requests; the callback
 //! updates `open` itself and can reject a dismissal while a form has unsaved data.
+//! A presenter replacing an unanswered alert uses `state.on_replaced(on_dismiss)` and
+//! `state.replace_with(|| present_next())`; the old callback runs once, after the new request.
 //!
 //! `PopupOptions::initial_focus` overrides initial focus, and `popup_ref` preserves a caller ref.
-//! Coarse-pointer opens focus the popup to avoid the software keyboard. Automatic action focus
-//! needs the frozen button primitive to accept an ElementRef; until then NSH chooses the first
-//! enabled control. Custom rendered actions can use `state.register_action(ref, disabled)`.
+//! Coarse-pointer opens focus the popup to avoid the software keyboard. Button slots register
+//! their actual roots for action priority and fallback focus. Custom rendered actions can use
+//! `state.register_action(ref, disabled)`.
+//! `dialog_close_with_ref` lets a caller choose its Cancel button through `initial_focus`.
 //! Custom rendered controls use `state.register_control(ref, disabled)` for fallback focus.
 //! Modal focus trapping and restoration belong to NSH. Custom alert content
 //! uses `nsh_base::dialog().role(AlertDialog)`: NSH's `alert_dialog()` is a system alert with no
 //! element slots and cannot transcribe the web tree. Portals are NSH modal layers; arbitrary DOM
 //! portal containers and render-prop element replacement have no cross-platform equivalent.
 
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use nsh_core::animation::{Easing, MotionChannel};
-use nsh_core::element::{IntoChild, Timing, desktop::title_bar};
+use nsh_core::element::{
+    AnyValue, IntoChild, PropError, PropSpec, Slot, Timing, TsTypes, desktop::title_bar,
+};
 use nsh_core::prelude::*;
 
 use super::button::{ButtonContent, ButtonSize, ButtonVariant, button};
@@ -116,6 +121,7 @@ impl Default for PopupOptions {
 
 type TextSource = Rc<dyn Fn() -> String>;
 type OpenChange = Rc<dyn Fn(bool)>;
+type Replaced = Rc<dyn Fn()>;
 
 struct FocusAction {
     target: ElementRef,
@@ -141,6 +147,7 @@ pub struct DialogState {
     actions: Stored<Vec<FocusAction>>,
     controls: Stored<Vec<FocusAction>>,
     open_change: Stored<Option<OpenChange>>,
+    replaced: Stored<Option<Replaced>>,
 }
 
 impl DialogState {
@@ -159,6 +166,7 @@ impl DialogState {
             actions: stored(Vec::new()),
             controls: stored(Vec::new()),
             open_change: stored(None),
+            replaced: stored(None),
         }
     }
 
@@ -175,6 +183,27 @@ impl DialogState {
     pub fn on_open_change(self, callback: impl Fn(bool) + 'static) {
         self.open_change
             .with(|current| *current = Some(Rc::new(callback)));
+    }
+
+    /// Port of Dialog.android.tsx submitRequest: an unanswered replaced alert is dismissed.
+    pub fn on_replaced(self, on_dismiss: impl Fn() + 'static) {
+        self.replaced
+            .with(|callback| *callback = Some(Rc::new(on_dismiss)));
+    }
+
+    /// A presenter replaces the request independently of user-controlled dismissal guards.
+    pub fn replace_with(self, present_next: impl FnOnce()) {
+        let dismissed = if self.alert && self.open.get_untracked() {
+            self.replaced.get()
+        } else {
+            None
+        };
+        self.open.set(false);
+        // Capture first: presenting the replacement can dispose this root or reenter its owner.
+        present_next();
+        if let Some(dismissed) = dismissed {
+            dismissed();
+        }
     }
 
     fn request_open(self, open: bool) {
@@ -243,12 +272,28 @@ pub fn dialog_close(
     size: ButtonSize,
     disabled: impl Fn() -> bool + 'static,
 ) -> impl IntoElement {
-    button(
+    dialog_close_with_ref(state, content, variant, size, disabled, element_ref())
+}
+
+/// DialogClose's caller ref, forwarded to the shared Button's root.
+pub fn dialog_close_with_ref(
+    state: DialogState,
+    content: ButtonContent,
+    variant: ButtonVariant,
+    size: ButtonSize,
+    disabled: impl Fn() -> bool + 'static,
+    target: ElementRef,
+) -> impl IntoElement {
+    let disabled = Rc::new(disabled);
+    let for_focus = disabled.clone();
+    state.register_control(target, move || for_focus());
+    referenced_button(
         content,
         variant,
         size,
-        move || !state.open.get() || disabled(),
-        move || state.close(),
+        Rc::new(move || !state.open.get() || disabled()),
+        Rc::new(move || state.close()),
+        target,
     )
 }
 
@@ -262,21 +307,90 @@ pub fn dialog_action(
 ) -> impl IntoElement {
     let disabled = Rc::new(disabled);
     let for_press = disabled.clone();
-    button(
+    let for_focus = disabled.clone();
+    let target = element_ref();
+    state.register_action(target, move || for_focus());
+    referenced_button(
         content,
         variant.into(),
         size,
-        move || !state.open.get() || disabled(),
-        move || {
+        Rc::new(move || !state.open.get() || disabled()),
+        Rc::new(move || {
             if state.open.get_untracked() && !for_press() {
                 on_press();
             }
-        },
+        }),
+        target,
     )
+}
+
+#[derive(Clone, Default)]
+struct DialogButtonRootProps(Rc<RefCell<Option<AnyElement>>>);
+
+impl PartialEq for DialogButtonRootProps {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+// Rust-only props keep the opaque Button as the actual root, without a renderer's wrapper view.
+impl Props for DialogButtonRootProps {
+    fn spec(_: &mut TsTypes) -> Vec<PropSpec> {
+        Vec::new()
+    }
+    fn initial() -> Self {
+        Self::default()
+    }
+    fn set(&mut self, name: &str, value: Option<AnyValue>) -> Result<bool, PropError> {
+        ().set(name, value)
+    }
+    fn set_slot(&mut self, _: &str, _: Option<Slot>) -> bool {
+        false
+    }
+    fn set_children(&mut self, _: Children) -> bool {
+        false
+    }
+}
+
+struct DialogButtonRoot;
+
+impl Component for DialogButtonRoot {
+    type Props = DialogButtonRootProps;
+    type Event = NoEvent;
+
+    fn view(props: Self::Props, _: Scope<NoEvent>) -> impl IntoElement {
+        props
+            .0
+            .borrow_mut()
+            .take()
+            .unwrap_or_else(|| view().into_element())
+    }
+}
+
+fn referenced_button(
+    content: ButtonContent,
+    variant: ButtonVariant,
+    size: ButtonSize,
+    disabled: Rc<dyn Fn() -> bool>,
+    on_press: Rc<dyn Fn()>,
+    target: ElementRef,
+) -> impl IntoElement {
+    let root = button(
+        content,
+        variant,
+        size,
+        move || disabled(),
+        move || on_press(),
+    );
+    DialogButtonRoot::element(DialogButtonRootProps(Rc::new(RefCell::new(Some(
+        root.into_element(),
+    )))))
+    .element_ref(&target)
 }
 
 pub use dialog_action as alert_dialog_action;
 pub use dialog_close as alert_dialog_close;
+pub use dialog_close_with_ref as alert_dialog_close_with_ref;
 
 fn transition(motion: Motion, open: bool, offset: f32, backdrop: bool) -> Animation {
     let timing = Timing::new(if reduce_motion() { 0.0 } else { 200.0 }, Easing::EaseInOut);
@@ -519,6 +633,7 @@ fn backdrop_surface(state: DialogState, variant: Variant) -> nsh_core::element::
             "dialog-backdrop"
         })
         .accessible(false)
+        .window_drag(false)
         .on_press(move || {
             if !state.alert {
                 state.close();
@@ -526,7 +641,9 @@ fn backdrop_surface(state: DialogState, variant: Variant) -> nsh_core::element::
         })
         // index.css @utility dialog-backdrop, expanded at its use site.
         .app_class(tw(&cn([
-            Some("fixed inset-0 z-50 transition-all duration-200 bg-background/60 dark:bg-background/64 backdrop-blur-[4px]"),
+            Some("fixed inset-0 z-50 transition-all duration-200"),
+            (variant == Variant::Default)
+                .then_some("bg-background/60 dark:bg-background/64 backdrop-blur-[4px]"),
             (variant == Variant::Media).then_some("z-[60] bg-black/75 backdrop-blur-none"),
         ])))
 }
@@ -547,6 +664,7 @@ pub use alert_dialog_backdrop as alert_dialog_overlay;
 pub fn dialog_viewport<M>(options: PopupOptions, children: impl IntoChild<M>) -> impl IntoElement {
     view()
         .test_id("dialog-viewport")
+        .window_drag(false)
         .pointer_events(nsh_core::PointerEvents::BoxNone)
         .app_class(tw(&cn([
             Some("fixed inset-0 z-50 grid grid-rows-[1fr_auto_1fr] justify-items-center p-4"),
@@ -556,9 +674,17 @@ pub fn dialog_viewport<M>(options: PopupOptions, children: impl IntoChild<M>) ->
             (options.variant == Variant::Media)
                 .then_some("z-[60] grid-rows-1 place-items-center px-4 pb-6"),
         ])))
-        // title_bar().top is the shared native-titlebar-height equivalent; app-region drops.
+        // max-sm:pt-12 overrides media's titlebar + 1.5rem inset in the web cascade.
         .when(options.variant == Variant::Media, |v| {
-            v.pt(move || px(title_bar().top.0 + 24.0))
+            v.pt(move || {
+                px(
+                    if options.bottom_stick_on_mobile && layout_class().is_compact() {
+                        48.0
+                    } else {
+                        title_bar().top.0 + 24.0
+                    },
+                )
+            })
         })
         .child(children)
 }
@@ -570,10 +696,11 @@ fn popup_surface(
     options: PopupOptions,
     popup_ref: ElementRef,
 ) -> nsh_core::element::View {
-    // dialog-styles.ts: nested variables are reactive typed transforms; will-change and app-region drop.
+    // dialog-styles.ts: nested variables use typed transforms; will-change drops.
     view()
         .test_id(if state.alert { "alert-dialog-popup" } else { "dialog-popup" })
         .element_ref(&popup_ref)
+        .window_drag(false)
         .focusable(move || state.touch.get() || pointer() == Pointer::Coarse)
         .disabled(move || !state.open.get())
         .pointer_events(move || if state.open.get() { nsh_core::PointerEvents::Auto } else { nsh_core::PointerEvents::None })
@@ -767,9 +894,7 @@ pub fn alert_dialog_description(
         .test_id("alert-dialog-description")
         .app_class(tw("min-h-0"))
         // max-h-[min(24rem,60dvh)] is the lesser of 24 rem and 60% of the viewport.
-        .max_h(move || {
-            px((24.0 * tokens().number("text-base").unwrap_or(16.0)).min(window().height.0 * 0.6))
-        })
+        .max_h(move || px((24.0 * nsh_core::geometry::REM_SIZE.0).min(window().height.0 * 0.6)))
         .child(
             description_text(state, source)
                 .select_text()

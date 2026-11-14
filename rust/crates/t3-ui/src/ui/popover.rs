@@ -189,9 +189,6 @@ pub fn popover_trigger(
         .accessibility_label(move || Some(t(&label).into()))
         .disabled(disabled)
         .on_layout(move |bounds: &Bounds<Points>| handle.measure_anchor(*bounds))
-        .app_class(tw(
-            "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-        ))
         .child(children)
 }
 
@@ -204,9 +201,6 @@ pub fn popover_close(
     nsh_base::button()
         .accessibility_label(move || Some(t(&label).into()))
         .on_press(move || handle.set_open(false))
-        .app_class(tw(
-            "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-        ))
         .child(children)
 }
 
@@ -272,7 +266,8 @@ pub fn popover_popup(
             (!panel && !options.tooltip_style).then_some(
                 "shadow-[0_16px_40px_-18px_rgb(0_0_0/55%)] dark:shadow-[0_18px_44px_-18px_rgb(0_0_0/80%)]",
             ),
-            options.tooltip_style.then_some("w-fit rounded-md text-xs shadow-md/5"),
+            // NSH parses text-balance as ordinary wrapping, without balanced line breaking.
+            options.tooltip_style.then_some("w-fit text-balance rounded-md text-xs shadow-md/5"),
             Some(match options.width {
                 Size::Auto => "",
                 Size::Sm => "w-64",
@@ -297,7 +292,7 @@ pub fn popover_popup(
                 .border_color(move || tokens().color("contrast-foreground").unwrap_or_default().opacity(0.1))
         })
         // The `before:` inset highlight is a first child. Electron app-region CSS,
-        // Base UI's cross-viewport transitions and text-balance have no NSH equivalent.
+        // Base UI's cross-viewport transitions have no NSH equivalent.
         .child((!panel).then(|| inset_highlight(options.tooltip_style, options.calendar)))
         .child(viewport)
 }
@@ -307,7 +302,8 @@ pub use popover_popup as popover_content;
 /// `index.css`'s `dropdown-glass`: nested transparent color mixes combine their alpha.
 pub(crate) fn dropdown_glass_background() -> AdaptiveColor {
     let tokens = tokens();
-    // The frozen token adapter omits percentages: index.css's stock value is 80%.
+    // Raw tokens use percentage points; normalize once. Future theme::glass().opacity
+    // is already [0,1]. The frozen adapter omits percentages; index.css defaults to 80%.
     let opacity = tokens.number("glass-opacity").unwrap_or(80.0) / 100.0;
     tokens
         .color("popover")
@@ -571,9 +567,6 @@ pub fn preview_card_trigger(
         .open_with(open_with)
         .on_open(on_open)
         .accessibility_label(move || Some(t(&label).into()))
-        .app_class(tw(
-            "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-        ))
         .child(children)
 }
 

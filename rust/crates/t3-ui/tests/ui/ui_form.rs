@@ -177,12 +177,14 @@ fn FormControls() -> impl IntoElement {
 }
 
 fn start_form(viewport: (f32, f32)) -> Headless {
-    let mut app = Headless::start(EngineConfig {
+    let mut config = EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(viewport.0), px(viewport.1)),
         ..EngineConfig::new(Root::of::<FormControls>())
-    })
-    .expect("form engine");
+    };
+    // Match NSH's roving-focus tests: Tab stops on pressable views on this host.
+    config.environment.os = nsh_core::platform::Os::MacOs;
+    let mut app = Headless::start(config).expect("form engine");
     app.wait_for("Requests 0").expect("form is ready");
     app
 }
@@ -325,7 +327,9 @@ fn disabled_controls_are_inert_and_can_be_enabled_again() {
 #[test]
 fn radio_group_arrows_skip_disabled_options_and_checked_radio_stays_checked() {
     let mut app = start_form(DESKTOP);
-    app.press("label:First layout").expect("focus first radio");
+    for _ in 0..4 {
+        app.press_key("tab").expect("Tab to the selected radio");
+    }
     app.press_key("right").expect("next enabled radio");
     app.wait_for("Selection 2").expect("last selected");
     assert_eq!(
@@ -388,9 +392,9 @@ fn slider_reports_live_values_and_release_at_bounds_and_on_steps() {
             .expect("drag past minimum");
         app.wait_for("Contrast 20 released 20 ends 2")
             .expect("reverse drag and release");
-        app.drag("label:Contrast", point(px(34.0), px(0.0)))
+        app.drag("label:Contrast", point(px(46.0), px(0.0)))
             .expect("snap to step");
-        app.wait_for("Contrast 30 released 30 ends 3")
+        app.wait_for("Contrast 35 released 35 ends 3")
             .expect("snapped change");
     }
 }

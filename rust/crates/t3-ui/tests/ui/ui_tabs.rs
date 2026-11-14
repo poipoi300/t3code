@@ -81,14 +81,14 @@ fn controlled_toggle_only_displays_the_value_passed_back_and_disabled_is_inert()
         let mut app = start::<Controlled>(window);
         assert!(!pressed(&app, "Bold"));
         app.press("role:button[Bold]").expect("request on");
-        app.wait_for("changes:1;requested:true")
+        app.wait_for("text:changes:1;requested:true")
             .expect("requested value");
         assert!(!pressed(&app, "Bold"), "no uncontrolled local mutation");
         app.press("role:button[Accept value]")
             .expect("echo controlled value");
         assert!(pressed(&app, "Bold"));
         app.press("role:button[Bold]").expect("request off");
-        app.wait_for("changes:2;requested:false")
+        app.wait_for("text:changes:2;requested:false")
             .expect("off requested");
         assert!(pressed(&app, "Bold"));
         app.press("role:button[Disable]").expect("disable");
@@ -175,7 +175,7 @@ fn single_selection_replaces_and_clears_while_multiple_keeps_other_values() {
         app.press("role:button[Bold]").expect("remove one value");
         assert!(!pressed(&app, "Bold"));
         assert!(pressed(&app, "Italic"));
-        app.wait_for("single:;multiple:b;changes:2")
+        app.wait_for("text:single:;multiple:b;changes:2")
             .expect("selection stored by caller");
     }
 }
@@ -207,7 +207,7 @@ fn arrows_skip_disabled_items_without_selecting_and_space_activates() {
     app.press_key("enter").expect("activate first");
     assert!(pressed(&app, "First"));
     assert!(!pressed(&app, "Last"));
-    app.wait_for("single:a;multiple:a;changes:2")
+    app.wait_for("text:single:a;multiple:a;changes:2")
         .expect("only activation changed state");
 }
 
@@ -248,7 +248,7 @@ fn close_swaps_the_surface_slot_on_tab_hover_or_keyboard_focus_and_closes_once()
     assert!(!app.screen().shows("Surface icon"));
     app.wait_for("Close the preview").expect("focus tooltip");
     app.press_key("enter").expect("close");
-    app.wait_for("closed:1").expect("one close callback");
+    app.wait_for("text:closed:1").expect("one close callback");
 }
 
 #[component]
@@ -289,7 +289,8 @@ fn tab_keyboard_navigation_selects_automatically_and_skips_disabled_tabs() {
     let mut app = start::<TabList>(DESKTOP);
     app.press_key("tab").expect("enter tab list");
     app.press_key("right").expect("next enabled tab");
-    app.wait_for("section:2").expect("automatic tab activation");
+    app.wait_for("text:section:2")
+        .expect("automatic tab activation");
     assert!(
         app.screen()
             .accessibility_state("role:tab[Last tab]")
@@ -298,5 +299,6 @@ fn tab_keyboard_navigation_selects_automatically_and_skips_disabled_tabs() {
     );
     assert!(app.press("role:tab[Disabled tab]").is_err());
     app.press_key("home").expect("first tab");
-    app.wait_for("section:0").expect("home activates first tab");
+    app.wait_for("text:section:0")
+        .expect("home activates first tab");
 }

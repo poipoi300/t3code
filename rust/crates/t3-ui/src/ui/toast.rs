@@ -13,14 +13,27 @@
 //! `ToastOptions` to `update` replaces all options, including cleared actions.
 //! `toasts`/`anchored_toasts` also accept an active-thread selector, for resolved draft routes.
 //! An anchored toast needs a live `ElementRef`; copy helpers silently ignore a missing anchor.
+//!
+//! Native equivalents: stack CSS variables are measured values; a wrapper composes stack and
+//! native swipe transforms, and a final view replaces the hover-bridge pseudo-element.
+//! NSH has one swipe direction per toast, alert announcements for either priority, grouped
+//! transitions without height animation, unified overflow, and no balanced-text layout.
+//! Newlines/word wrapping are native; `h-lh` resolves to the source's 20px line height.
+//! Loader glyphs remain static under the shared animation contract. Inline source SVGs preserve
+//! missing icon shapes/stroke widths. Tooltips require a view around their button attachment.
+//! The frozen button primitive lacks IconMicro (20px), so CopyErrorButton uses its source button
+//! classes and a 12px glyph. Clipboard writes have no acknowledgement, so it cannot claim Copied.
+//! NSH Button also lacks an expanded accessibility prop; expansion labels name the reverse action.
+//! Custom glass percentages/adaptive numbers await theme registration; stock glass values match CSS.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use nsh_base::{Anchor, SwipeDirection, ToastMotion, ToastStackState};
-use nsh_core::{platform::Lifecycle, prelude::*};
+use nsh_base::SwipeDirection;
+use nsh_core::{TouchEvent, TouchPhase, platform::Lifecycle, prelude::*};
 use t3_client::types::{ThreadId, ThreadKey};
 
 use super::button::{ButtonContent, ButtonSize, ButtonVariant, button};
@@ -55,17 +68,6 @@ pub enum Position {
 }
 
 impl Position {
-    fn anchor(self) -> Anchor {
-        match self {
-            Self::TopLeft => Anchor::TopLeft,
-            Self::TopCenter => Anchor::TopCenter,
-            Self::TopRight => Anchor::TopRight,
-            Self::BottomLeft => Anchor::BottomLeft,
-            Self::BottomCenter => Anchor::BottomCenter,
-            Self::BottomRight => Anchor::BottomRight,
-        }
-    }
-
     fn swipe(self) -> SwipeDirection {
         match self {
             Self::TopLeft | Self::BottomLeft => SwipeDirection::Left,
@@ -232,12 +234,14 @@ struct Entry {
     options: Rc<ToastOptions>,
     remaining: Rc<RefCell<VisibleTimeout>>,
     ending: bool,
+    limited: bool,
 }
 
 impl PartialEq for Entry {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
             && self.ending == other.ending
+            && self.limited == other.limited
             && Rc::ptr_eq(&self.options, &other.options)
     }
 }
@@ -247,6 +251,9 @@ pub struct ToastManager(Rc<RefCell<ManagerState>>);
 
 impl ManagerState {
     fn notify(&mut self) {
+        for (index, entry) in self.entries.iter_mut().rev().enumerate() {
+            entry.limited = index >= 3;
+        }
         let entries = &self.entries;
         self.listeners
             .retain_mut(|listener| listener.unbounded_send(entries.clone()).is_ok());
@@ -279,12 +286,14 @@ impl ToastManager {
                 budget.timeout_remaining = timeout.filter(|value| !value.is_zero());
             }
             budget.set_visible(options.data.dismiss_after_visible);
+            budget.timeout_enabled = options.variant != Variant::Loading;
         }
         *current = Entry {
             id,
             options: Rc::new(options),
             remaining: current.remaining.clone(),
             ending: false,
+            limited: current.limited,
         };
         state.notify();
         true
@@ -325,12 +334,14 @@ impl ToastManager {
 }
 
 fn entry(id: ToastId, options: ToastOptions) -> Entry {
-    let remaining = VisibleTimeout::new(options.timeout, options.data.dismiss_after_visible);
+    let mut remaining = VisibleTimeout::new(options.timeout, options.data.dismiss_after_visible);
+    remaining.timeout_enabled = options.variant != Variant::Loading;
     Entry {
         id,
         options: Rc::new(options),
         remaining: Rc::new(RefCell::new(remaining)),
         ending: false,
+        limited: false,
     }
 }
 
@@ -409,7 +420,7 @@ pub struct LayoutInput {
     pub ending: bool,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VisibleToastLayout {
     pub frontmost_height: f32,
     pub items: Vec<(usize, f32)>,
@@ -454,6 +465,7 @@ pub fn build_visible_toast_layout(toasts: &[LayoutInput]) -> VisibleToastLayout 
 #[derive(Debug)]
 struct VisibleTimeout {
     timeout_remaining: Option<Duration>,
+    timeout_enabled: bool,
     visible_remaining: Option<Duration>,
     visible_enabled: bool,
     started: Option<nsh_core::time::Instant>,
@@ -465,6 +477,7 @@ impl VisibleTimeout {
         let visible = visible.filter(|value| !value.is_zero());
         Self {
             timeout_remaining: timeout,
+            timeout_enabled: true,
             visible_remaining: visible,
             visible_enabled: visible.is_some(),
             started: None,
@@ -476,7 +489,11 @@ impl VisibleTimeout {
             .visible_enabled
             .then_some(self.visible_remaining)
             .flatten();
-        match (self.timeout_remaining, visible) {
+        let timeout = self
+            .timeout_enabled
+            .then_some(self.timeout_remaining)
+            .flatten();
+        match (timeout, visible) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         }
@@ -494,7 +511,9 @@ impl VisibleTimeout {
     fn advance(&mut self, now: nsh_core::time::Instant) {
         if let Some(started) = self.started {
             let elapsed = now.saturating_duration_since(started);
-            if let Some(remaining) = &mut self.timeout_remaining {
+            if self.timeout_enabled
+                && let Some(remaining) = &mut self.timeout_remaining
+            {
                 *remaining = remaining.saturating_sub(elapsed);
             }
             if self.visible_enabled
@@ -583,12 +602,27 @@ pub fn toasts(
         entries
             .get()
             .into_iter()
+            .rev()
             .filter(|entry| should_render_thread_scoped_toast(&entry.options.data, active.as_ref()))
             .collect::<Vec<_>>()
     });
-    let stack = ToastStackState::new();
-    // NSH exposes pointer/touch expansion only; focus pauses timers but cannot drive its stack geometry.
+    let heights = signal(HashMap::<ToastId, f32>::new());
+    let layout = computed(move || {
+        build_visible_toast_layout(&visible.with(|entries| {
+            entries
+                .iter()
+                .map(|entry| LayoutInput {
+                    height: heights
+                        .with(|heights| heights.get(&entry.id).copied().unwrap_or_default()),
+                    ending: entry.ending,
+                })
+                .collect::<Vec<_>>()
+        }))
+    });
+    let hovered = signal(false);
+    let touched = signal(false);
     let focused = signal(false);
+    let expanded = move || hovered.get() || touched.get() || focused.get();
     let focus = element_ref();
     focus.on_focus_in(move || focused.set(true));
     focus.on_focus_out(move || focused.set(false));
@@ -600,19 +634,45 @@ pub fn toasts(
         .pointer_events(nsh_core::PointerEvents::BoxNone)
         .test_id("toast-portal")
         .child(
-            nsh_base::toast_stack()
-                .pointer_events(nsh_core::PointerEvents::Auto)
+            view()
+                .pointer_events(nsh_core::PointerEvents::BoxNone)
                 .element_ref(&focus)
-                .placement(position.anchor())
-                .state(stack)
-                // NSH measures and resolves the web's per-toast CSS variables in ToastStack.
-                .motion(ToastMotion {
-                    collapsed_peek: px(12.0),
-                    expanded_gap: px(12.0),
-                    collapsed_scale_step: 0.1,
-                    ..ToastMotion::sonner()
+                .test_id("toast-viewport")
+                .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
+                .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
+                .on_touch(move |event: &TouchEvent| match event.phase {
+                    TouchPhase::Start => touched.set(true),
+                    TouchPhase::End | TouchPhase::Cancel => touched.set(false),
+                    TouchPhase::Move => {}
                 })
                 .app_class(tw("absolute z-100 mx-auto max-w-90"))
+                // Native absolute children need a measured hit region; the DOM viewport can be height zero.
+                .h(move || {
+                    px(layout.with(|layout| {
+                        layout
+                            .items
+                            .iter()
+                            .enumerate()
+                            .map(|(index, &(rank, offset))| {
+                                let natural = visible.with(|entries| {
+                                    entries
+                                        .get(index)
+                                        .map(|entry| {
+                                            heights.with(|h| {
+                                                h.get(&entry.id).copied().unwrap_or_default()
+                                            })
+                                        })
+                                        .unwrap_or_default()
+                                });
+                                if expanded() {
+                                    offset + rank as f32 * 12.0 + natural + 13.0
+                                } else {
+                                    layout.frontmost_height + rank as f32 * 12.0 + 13.0
+                                }
+                            })
+                            .fold(0.0, f32::max)
+                    }))
+                })
                 .w(move || px((window().width.0 - inset() * 2.0).clamp(0.0, 360.0)))
                 .top(move || {
                     if is_top(position) {
@@ -634,24 +694,114 @@ pub fn toasts(
                 })
                 .left(move || edge(position, true))
                 .right(move || edge(position, false))
-                .on_cancel(move || {
-                    if let Some(entry) = visible.get_untracked().last() {
-                        cancel.close(entry.id);
-                    }
-                })
                 .child(each(
                     visible,
                     |entry| entry.id,
                     move |item, index| {
                         let manager = manager.clone();
-                        let expanded = move || stack.is_expanded() || focused.get();
-                        toast_root(item, manager, Some(position), expanded, move || {
-                            let count = visible.with(Vec::len);
-                            should_hide_collapsed_toast_content(
-                                count.saturating_sub(index.get() + 1),
-                                count,
-                            ) && !expanded()
+                        let id = item.get_untracked().id;
+                        cleanup(move || {
+                            if let Some(mut values) = heights.try_get() {
+                                values.remove(&id);
+                                heights.try_set(values);
+                            }
+                        });
+                        let row = move || {
+                            layout.with(|layout| {
+                                layout.items.get(index.get()).copied().unwrap_or_default()
+                            })
+                        };
+                        let scale = move || {
+                            if expanded() {
+                                1.0
+                            } else {
+                                (1.0 - row().0 as f32 * 0.1).max(0.0)
+                            }
+                        };
+                        let hidden = move || {
+                            should_hide_collapsed_toast_content(row().0, visible.with(Vec::len))
+                                && !expanded()
+                        };
+                        // NSH's Toast owns swipe transforms; this wrapper composes the TSX stack transform with them.
+                        view()
+                            .app_class(tw(if is_top(position) {
+                                "absolute top-0 left-0 right-0 origin-top"
+                            } else {
+                                "absolute bottom-0 left-0 right-0 origin-bottom"
+                            }))
+                            .app_class(move || {
+                                (!reduce_motion()).then(|| tw("transition-transform duration-500"))
+                            })
+                            .ease_bezier(0.22, 1.0, 0.36, 1.0)
+                            .z_index(move || 9999 - row().0 as i32)
+                            .pointer_events(move || {
+                                if item.get().limited || item.get().ending {
+                                    nsh_core::PointerEvents::None
+                                } else {
+                                    nsh_core::PointerEvents::BoxNone
+                                }
+                            })
+                            .opacity(move || if item.get().limited { 0.0_f32 } else { 1.0 })
+                            .translate_y(move || {
+                                let (rank, offset) = row();
+                                let distance = if expanded() {
+                                    offset + rank as f32 * 12.0
+                                } else {
+                                    rank as f32 * 12.0
+                                        + (1.0 - scale()) * layout.get().frontmost_height
+                                };
+                                px(if is_top(position) {
+                                    distance
+                                } else {
+                                    -distance
+                                })
+                            })
+                            .scale(scale)
+                            .child(toast_root(
+                                item,
+                                manager,
+                                Some(position),
+                                expanded,
+                                ToastFrame {
+                                    hidden: Rc::new(hidden),
+                                    height: Rc::new(move || {
+                                        (row().0 > 0 && !expanded())
+                                            .then(|| layout.get().frontmost_height)
+                                    }),
+                                    measure: Rc::new(move |height| {
+                                        if heights.with_untracked(|values| values.get(&id).copied())
+                                            != Some(height)
+                                        {
+                                            heights.update(|values| {
+                                                values.insert(id, height);
+                                            });
+                                        }
+                                    }),
+                                },
+                            ))
+                    },
+                ))
+                .child(when(
+                    move || {
+                        visible.with(|entries| {
+                            entries.iter().any(|entry| !entry.ending && !entry.limited)
                         })
+                    },
+                    move || {
+                        let cancel = cancel.clone();
+                        overlay()
+                            .size_0()
+                            .pointer_events(nsh_core::PointerEvents::None)
+                            .focusable(false)
+                            .on_cancel(move || {
+                                if let Some(entry) = visible
+                                    .get_untracked()
+                                    .iter()
+                                    .find(|entry| !entry.ending && !entry.limited)
+                                {
+                                    cancel.close(entry.id);
+                                }
+                            })
                     },
                 )),
         )
@@ -730,7 +880,7 @@ pub fn anchored_toasts(
                     manager.clone(),
                     None,
                     move || hovered.get() || focused.get(),
-                    || false,
+                    ToastFrame::default(),
                 ))
         },
     ))
@@ -774,17 +924,35 @@ fn thread_toast_visible_auto_dismiss(
     });
 }
 
+struct ToastFrame {
+    hidden: Rc<dyn Fn() -> bool>,
+    height: Rc<dyn Fn() -> Option<f32>>,
+    measure: Rc<dyn Fn(f32)>,
+}
+
+impl Default for ToastFrame {
+    fn default() -> Self {
+        Self {
+            hidden: Rc::new(|| false),
+            height: Rc::new(|| None),
+            measure: Rc::new(|_| {}),
+        }
+    }
+}
+
 fn toast_root(
     item: ReadSignal<Entry>,
     manager: ToastManager,
     position: Option<Position>,
     paused: impl Fn() -> bool + 'static,
-    hidden: impl Fn() -> bool + 'static,
+    frame: ToastFrame,
 ) -> impl IntoElement {
     thread_toast_visible_auto_dismiss(item, manager.clone(), paused);
     let dismiss = manager.clone();
     let tooltip = move || item.get().options.data.tooltip_style && position.is_none();
-    let hidden = Rc::new(hidden);
+    let hidden = frame.hidden;
+    let height = frame.height;
+    let measure = frame.measure;
     let swiped = signal(false);
     let measured = signal(size(px(0.0), px(0.0)));
     let body_state = BodyState {
@@ -802,7 +970,8 @@ fn toast_root(
         }
     });
     nsh_base::toast()
-        .pointer_events(move || if item.get().ending { nsh_core::PointerEvents::None } else { nsh_core::PointerEvents::Auto })
+        .pointer_events(move || if item.get().ending || item.get().limited { nsh_core::PointerEvents::None } else { nsh_core::PointerEvents::Auto })
+        .h(move || height().map(|height| Length::from(px(height))).unwrap_or_else(auto))
         .transition_status(move || if item.get().ending { nsh_base::ToastTransitionStatus::Ending } else { nsh_base::ToastTransitionStatus::Starting })
         .starting_class(move || toast_motion_class(position, false, measured.get()))
         // NSH owns the released swipe's translation; only fade that path instead of replacing its movement.
@@ -812,7 +981,7 @@ fn toast_root(
         .accessibility_label(move || Some(SharedString::from(announcement(&item.get().options))))
         .on_dismiss_request(move || { swiped.set(true); dismiss.close(item.get_untracked().id); })
         // index.css @utility dropdown-glass: color-mix with transparent reduces to alpha.
-        // NSH exposes transition groups, not arbitrary property lists; ToastStack owns height reflow.
+        // NSH exposes transition groups, not per-property easing or height transitions.
         .app_class(move || tw(&cn([
             Some("relative overflow-visible text-popover-foreground shadow-xl shadow-black/25 border border-contrast-foreground/10"),
             (!reduce_motion()).then_some(if position.is_some() { "transition duration-500" } else { "transition duration-150" }),
@@ -852,6 +1021,9 @@ fn toast_root(
                         Some("pointer-events-auto min-h-0 overflow-visible pl-3.5 text-sm"),
                         Some(if descriptor.stacked { "flex flex-col gap-2 py-2.5 pr-3.5" } else if descriptor.trailing { "py-3 flex items-center justify-between gap-1.5 pr-6" } else { "py-3 flex items-center justify-between gap-1.5 pr-3.5" }),
                     ])))
+                        .app_class(move || (position.is_some() && !reduce_motion()).then(|| tw("transition-opacity duration-250")))
+                        .flex_shrink_0()
+                        .on_layout({ let measure = measure.clone(); move |frame: &Bounds<Points>| measure(frame.size.height.0 + 2.0) })
                         .opacity(move || if hidden() { 0.0_f32 } else { 1.0 })
                         .pointer_events(move || if inert() { nsh_core::PointerEvents::None } else { nsh_core::PointerEvents::Auto })
                         .child(toast_body_content(options, descriptor, manager, id, body_state));
@@ -1180,6 +1352,7 @@ fn toast_description_and_expandable(
     fragment(vec![
         toast_tooltip(nsh_base::button()
             .accessibility_label(move || Some(SharedString::from(expand_label(&labels, open.get()))))
+            // NSH Button exposes no expanded accessibility state; the translated label names the reverse action.
             .app_class(tw("group flex min-w-0 w-full cursor-pointer select-none items-start gap-1.5 rounded-sm text-left outline-none ring-offset-background transition-colors hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"))
             .on_press(move || open.update(|value| *value = !*value))
             .child(view().app_class(tw("min-w-0 flex-1")).child(description(&options)))
@@ -1538,5 +1711,32 @@ mod tests {
         assert!(show_anchored_copy_success_toast(None).is_none());
         assert!(show_anchored_copy_error_toast(None, "Clipboard denied").is_none());
         assert!(anchored_toast_manager().subscribe().0.is_empty());
+    }
+
+    #[test]
+    fn loading_waits_for_resolution_and_oldest_limited_toasts_return_when_newer_ones_close() {
+        let manager = ToastManager::default();
+        let loading = manager.add(ToastOptions {
+            variant: Variant::Loading,
+            ..Default::default()
+        });
+        let budget = manager.subscribe().0[0].remaining.clone();
+        assert_eq!(budget.borrow().remaining(), None);
+        manager.update(
+            loading,
+            ToastUpdate {
+                variant: Some(Variant::Success),
+                ..Default::default()
+            },
+        );
+        assert_eq!(budget.borrow().remaining(), Some(Duration::from_secs(5)));
+        let ids = (0..3)
+            .map(|_| manager.add(ToastOptions::default()))
+            .collect::<Vec<_>>();
+        let rows = manager.subscribe().0;
+        assert!(rows[0].limited);
+        assert!(rows[1..].iter().all(|entry| !entry.limited));
+        manager.close(ids[2]);
+        assert!(manager.subscribe().0.iter().all(|entry| !entry.limited));
     }
 }

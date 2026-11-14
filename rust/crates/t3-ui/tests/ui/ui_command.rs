@@ -15,8 +15,11 @@ fn CommandFixture() -> impl IntoElement {
     let open = signal(false);
     let virtualized = signal(false);
     let grouped = signal(false);
+    let long_list = signal(false);
     let chosen = signal(String::from("<none>"));
     let generation = signal(0u32);
+    let outside_presses = signal(0u32);
+    on_key("ctrl+r", move |_| open.set(true));
     view()
         .w_full()
         .h_full()
@@ -45,6 +48,18 @@ fn CommandFixture() -> impl IntoElement {
                 .child(text(t("Open grouped"))),
         )
         .child(text(move || format!("mounts: {}", generation.get())))
+        .child(
+            nsh_base::button()
+                .accessibility_label(Some(SharedString::from(t("Open long list"))))
+                .on_press(move || {
+                    long_list.set(true);
+                    open.set(true);
+                })
+                .child(text(t("Open long list"))),
+        )
+        .child(text(move || {
+            format!("outside presses: {}", outside_presses.get())
+        }))
         .child(command_dialog(open, "Command palette", move || {
             generation.update(|n| *n += 1);
             let changed = signal(false);
@@ -53,7 +68,13 @@ fn CommandFixture() -> impl IntoElement {
                 move || {
                     let mut disabled = Item::new("disabled", "Unavailable");
                     disabled.disabled = true;
-                    let mut items = if changed.get() {
+                    let mut items = if long_list.get() {
+                        (0..50)
+                            .map(|index| {
+                                Item::new(format!("long-{index}"), format!("Command {index:02}"))
+                            })
+                            .collect()
+                    } else if changed.get() {
                         vec![Item::new("b", "Project B"), disabled]
                     } else {
                         vec![
@@ -188,7 +209,7 @@ fn CommandFixture() -> impl IntoElement {
                                 )),
                         ))
                 }),
-                move || open.set(false),
+                move || outside_presses.update(|count| *count += 1),
             )
         }))
 }
@@ -203,12 +224,21 @@ fn row(state: CommandState, item: Memo<Option<Item>>) -> impl IntoElement {
 }
 
 fn fixture(size: (f32, f32)) -> Headless {
+    fixture_with_motion(size, false)
+}
+
+fn fixture_with_motion(size: (f32, f32), reduce_motion: bool) -> Headless {
     // The application palette is a different work package; mount this primitive directly.
     let mut commands = Registry::new();
     commands.register::<CommandFixture>();
     let mut app = Headless::start(EngineConfig {
         ui_sets: vec![nsh_base::registry(), commands],
         viewport: nsh_core::geometry::size(px(size.0), px(size.1)),
+        clock: nsh_core::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH),
+        environment: nsh_core::platform::Environment {
+            reduce_motion,
+            ..Default::default()
+        },
         ..EngineConfig::new(Root::of::<CommandFixture>())
     })
     .expect("command fixture starts");
@@ -239,7 +269,7 @@ fn submenu_search_takes_focus_before_back_at_phone_and_desktop_sizes() {
         app.wait_for("text:chosen: b")
             .expect("correct stable value");
         app.press_key("escape").expect("close");
-        assert!(!app.screen().shows("Search projects"));
+        assert_eq!(app.screen().count("role:dialog"), Ok(0));
         app.press("role:button[Open palette]").expect("reopen");
         assert_eq!(
             app.screen()
@@ -253,7 +283,7 @@ fn submenu_search_takes_focus_before_back_at_phone_and_desktop_sizes() {
             .expect("selection closes its owner");
         app.wait_for("text:chosen: a")
             .expect("selection callback completed while unmounting");
-        assert!(!app.screen().shows("Search projects"));
+        assert_eq!(app.screen().count("role:dialog"), Ok(0));
     }
 }
 
@@ -352,4 +382,133 @@ fn filtering_hides_empty_groups_and_keeps_collections_in_their_group() {
         .expect("exactly one matching option");
     app.wait_for("text:chosen: a")
         .expect("group selection keeps stable value");
+}
+
+#[test]
+fn outside_press_dismisses_without_requiring_the_observer_to_close() {
+    for size in [PHONE, DESKTOP] {
+        let mut app = fixture(size);
+        app.press("role:button[Open palette]").expect("open");
+        let backdrop = app
+            .screen()
+            .id("id:command-dialog-backdrop")
+            .expect("backdrop");
+        app.engine()
+            .control()
+            .dispatch_event(backdrop, EventKind::PressDown, EventPayload::None);
+        app.wait_for("text:outside presses: 1")
+            .expect("observer runs");
+        app.fast_forward(std::time::Duration::from_millis(250))
+            .expect("finish exit");
+        assert_eq!(
+            app.screen().count("role:dialog"),
+            Ok(0),
+            "outside press closes palette"
+        );
+        app.press("role:button[Open palette]").expect("reopen");
+        app.wait_for("Search projects")
+            .expect("popup remains usable");
+    }
+}
+
+#[test]
+fn exit_retains_an_inert_popup_and_interrupted_exit_keeps_the_same_mount() {
+    let mut app = fixture(DESKTOP);
+    app.press("role:button[Open palette]").expect("open");
+    let popup = app.screen().id("role:dialog").expect("dialog");
+    let backdrop = app
+        .screen()
+        .id("id:command-dialog-backdrop")
+        .expect("backdrop");
+    // Dispatch before Headless::press settles animations, then advance only the app's clock.
+    app.engine()
+        .control()
+        .dispatch_event(backdrop, EventKind::PressDown, EventPayload::None);
+    app.wait_for("text:outside presses: 1")
+        .expect("exit begins");
+    assert_eq!(
+        app.screen().id("role:dialog"),
+        Ok(popup),
+        "retain exit content"
+    );
+    assert!(
+        !app.screen()
+            .enabled("role:option[Project A]")
+            .expect("closing row")
+    );
+    assert!(
+        !app.screen()
+            .enabled("role:button[Choose and close]")
+            .expect("closing footer")
+    );
+    app.press_key("ctrl+r").expect("reopen during exit");
+    app.fast_forward(std::time::Duration::from_millis(250))
+        .expect("past cancelled exit");
+    assert_eq!(
+        app.screen().id("role:dialog"),
+        Ok(popup),
+        "reuse interrupted popup"
+    );
+    assert!(app.screen().shows("mounts: 1"));
+    app.press_key("escape").expect("close again");
+    assert_eq!(
+        app.screen().count("role:dialog"),
+        Ok(0),
+        "unmount after exit"
+    );
+}
+
+#[test]
+fn reduced_motion_dismisses_without_retaining_exit_content() {
+    let mut app = fixture_with_motion(PHONE, true);
+    app.press("role:button[Open palette]").expect("open");
+    let backdrop = app
+        .screen()
+        .id("id:command-dialog-backdrop")
+        .expect("backdrop");
+    app.engine()
+        .control()
+        .dispatch_event(backdrop, EventKind::PressDown, EventPayload::None);
+    app.wait_for("text:outside presses: 1").expect("dismissed");
+    assert_eq!(
+        app.screen().count("role:dialog"),
+        Ok(0),
+        "instant reduced-motion exit"
+    );
+}
+
+#[test]
+fn keyboard_reveal_keeps_the_active_row_inside_the_lists_scroll_padding() {
+    for size in [PHONE, DESKTOP] {
+        let mut app = fixture(size);
+        app.press("role:button[Open long list]").expect("open");
+        for _ in 0..15 {
+            app.press_key("down").expect("navigate beyond viewport");
+        }
+        app.wait_for("text:highlight: long-15").expect("active row");
+        let list = app.screen().id("role:listbox[Projects]").expect("list");
+        let row = app.screen().id("role:option[Command 15]").expect("row");
+        let nodes = app.screen().layout_nodes();
+        let viewport = nodes
+            .iter()
+            .find(|node| node.id == list)
+            .expect("viewport")
+            .bounds;
+        let active = nodes
+            .iter()
+            .find(|node| node.id == row)
+            .expect("active bounds")
+            .bounds;
+        assert!(active.origin.y.0 >= viewport.origin.y.0 + 7.5);
+        assert!(
+            active.origin.y.0 + active.size.height.0
+                <= viewport.origin.y.0 + viewport.size.height.0 - 7.5
+        );
+        let bottom_gap =
+            viewport.origin.y.0 + viewport.size.height.0 - active.origin.y.0 - active.size.height.0;
+        assert!(
+            (bottom_gap - 8.0).abs() < 0.5,
+            "nearest reveal leaves 8px at the lower edge, got {bottom_gap}"
+        );
+    }
 }

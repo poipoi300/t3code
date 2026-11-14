@@ -248,3 +248,150 @@ fn animated_exit_finishes_without_a_timer_owned_by_the_screen() {
     app.wait_for_gone("Panel content", std::time::Duration::from_secs(2))
         .expect("animation completes");
 }
+
+#[derive(Clone, Copy)]
+struct RetentionOpen(Signal<bool>);
+
+#[derive(Clone, PartialEq, Props)]
+struct RetentionFrameProps {
+    children: Prop<Children>,
+}
+
+#[component]
+fn RetentionFrame(props: RetentionFrameProps) -> impl IntoElement {
+    let compact = computed(move || layout_class() == LayoutClass::Compact);
+    dynamic(move || {
+        if compact.get() {
+            nsh_base::nav_stack()
+                .flex_1()
+                .child(
+                    nsh_base::nav_page()
+                        .title(t("Thread"))
+                        .child(text(t("Thread content"))),
+                )
+                .child(props.children)
+                .into_element()
+        } else {
+            view()
+                .flex_1()
+                .flex_row()
+                .child(view().flex_1().child(text(t("Thread content"))))
+                .child(props.children)
+                .into_element()
+        }
+    })
+}
+
+#[component]
+fn RetentionContent() -> impl IntoElement {
+    let open = use_context::<RetentionOpen>().expect("retention host").0;
+    let expanded = signal(false);
+    view()
+        .flex_1()
+        .min_h(px(0.0))
+        .child(
+            nsh_base::button()
+                .accessibility_label(Some(SharedString::from(t("Expand file"))))
+                .on_press(move || expanded.set(true))
+                .child(text(t("Expand file"))),
+        )
+        .child(when(expanded, || text(t("Expanded file details"))))
+        .child(
+            nsh_base::button()
+                .accessibility_label(Some(SharedString::from(t("Hide panel"))))
+                .on_press(move || open.set(false))
+                .child(text(t("Hide panel"))),
+        )
+        .child(
+            scroll()
+                .flex_1()
+                .min_h(px(0.0))
+                .test_id("retention-scroll")
+                .child(view().child((0..80).map(|index| {
+                    view()
+                        .h(px(40.0))
+                        .test_id(&format!("retention-row-{index}"))
+                        .child(text(index.to_string()))
+                }))),
+        )
+}
+
+#[component]
+fn RetentionHost() -> impl IntoElement {
+    t3_ui::theme::install(&Default::default());
+    let open = signal(false);
+    provide_context(RetentionOpen(open));
+    view()
+        .w_full()
+        .h_full()
+        .child(
+            nsh_base::button()
+                .accessibility_label(Some(SharedString::from(t("Open retained panel"))))
+                .on_press(move || open.set(true))
+                .child(text(t("Open retained panel"))),
+        )
+        .child(retention_frame().child(panel(
+            move || open.get(),
+            0,
+            move || open.set(false),
+            retention_content,
+        )))
+}
+
+fn retained_scroll(app: &Headless) -> (nsh_core::NodeId, Points) {
+    let nodes = app.screen().layout_nodes();
+    let scroller = nodes
+        .iter()
+        .find(|node| node.test_id.as_deref() == Some("retention-scroll"))
+        .expect("retained scroll view");
+    let first = nodes
+        .iter()
+        .find(|node| node.test_id.as_deref() == Some("retention-row-0"))
+        .expect("first file row");
+    (
+        scroller.id,
+        scroller.bounds.origin.y - first.bounds.origin.y,
+    )
+}
+
+#[test]
+fn retains_native_scroll_and_child_local_expansion_across_close_and_layout_changes() {
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(800.0), px(800.0)),
+        ..EngineConfig::new(Root::of::<RetentionHost>())
+    })
+    .expect("retention host starts");
+    app.wait_for("Open retained panel").expect("closed panel");
+    app.press("role:button[Open retained panel]").expect("open");
+    app.wait_for("Expand file").expect("file view");
+    app.press("role:button[Expand file]").expect("expand");
+    app.scroll("id:retention-scroll", px(400.0))
+        .expect("scroll files");
+    let original = retained_scroll(&app);
+    assert_eq!(original.1, px(400.0));
+
+    for viewport in [(800.0, 800.0), DESKTOP, PHONE, (800.0, 800.0)] {
+        app.set_viewport(size(px(viewport.0), px(viewport.1)))
+            .expect("change layout");
+        app.wait_for("Expanded file details")
+            .expect("expansion survives layout change");
+        assert_eq!(
+            retained_scroll(&app),
+            original,
+            "layout retains native scroll node and offset"
+        );
+        app.press("role:button[Hide panel]").expect("close");
+        app.wait_for("Open retained panel").expect("closed");
+        assert!(!app.screen().shows("Expanded file details"));
+        app.press("role:button[Open retained panel]")
+            .expect("reopen");
+        app.wait_for("Expanded file details")
+            .expect("expansion survives reopening");
+        assert_eq!(
+            retained_scroll(&app),
+            original,
+            "reopen retains native scroll node and offset"
+        );
+    }
+}

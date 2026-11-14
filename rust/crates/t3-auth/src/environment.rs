@@ -15,7 +15,7 @@ use t3_contracts::{
     auth::{
         AuthAccessTokenResult, AuthAccessTokenType, AuthBrowserSessionResult, AuthClientMetadata,
         AuthClientMetadataDeviceType, AuthClientPresentationMetadata, AuthClientSession,
-        AuthCreatePairingCredentialInput, AuthEnvironmentScope, AuthGrantScope,
+        AuthConnectDevice, AuthCreatePairingCredentialInput, AuthEnvironmentScope, AuthGrantScope,
         AuthMcpClientAccess, AuthPairingCredentialResult, AuthPairingLink, AuthRuntimeModeCeiling,
         AuthSessionState, AuthTokenType, AuthWebSocketTicketResult, AuthWebSocketTicketUse,
         Authenticated, EncodedNumber, ServerAuthBootstrapMethod, ServerAuthDescriptor,
@@ -25,6 +25,19 @@ use t3_contracts::{
     managed_policy::{ManagedPolicyClient, ManagedPolicyDocument},
 };
 use t3_persistence::Database;
+use tokio::sync::Mutex;
+
+pub const CLOUD_CONNECT_SUBJECT: &str = "cloud-connect";
+fn normalize_verification_code(code: &str) -> String {
+    code.to_uppercase().chars().filter(char::is_ascii_alphanumeric).collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeConnectByCode {
+    Revoked,
+    NotFound,
+    Ambiguous,
+}
 
 #[derive(Clone, Default)]
 pub struct AuthConfig {
@@ -337,6 +350,7 @@ pub struct EnvironmentAuth {
     policy: Option<ManagedPolicyDocument>,
     initial_policy_revocations: PolicyRevocations,
     clock: Arc<dyn Clock>,
+    connect_trust_lock: Arc<Mutex<()>>,
 }
 impl EnvironmentAuth {
     pub async fn new(
@@ -365,6 +379,7 @@ impl EnvironmentAuth {
             initial_policy_revocations: PolicyRevocations::default(),
             policy,
             clock,
+            connect_trust_lock: Arc::new(Mutex::new(())),
         };
         auth.initial_policy_revocations = auth.enforce_policy().await?;
         Ok(auth)
@@ -618,6 +633,7 @@ impl EnvironmentAuth {
         &self,
         credential: &str,
         input: ConsumePairing,
+        request_metadata: Option<AuthClientMetadata>,
     ) -> Result<ResolvedBootstrap> {
         if let Some(dev) = self.sessions.dev_auth()
             && dev.matches(credential)
@@ -641,17 +657,25 @@ impl EnvironmentAuth {
                 source: GrantSource::Dev,
             });
         }
-        let grant = self
+        let grant = match self
             .pairing
             .consume(credential, input)
             .await
-            .map_err(|e| match e {
+        {
+            Err(Error::BootstrapConnectApprovalPending { pairing_link_id }) => {
+                if let Some(client) = request_metadata {
+                    self.pairing.record_connect_request_client(&pairing_link_id, client).await?;
+                }
+                return Err(Error::ConnectApprovalPending);
+            }
+            result => result.map_err(|e| match e {
                 Error::Credential {
                     kind: crate::error::CredentialFailure::BootstrapCredentialScopeNotGrantedError,
                     ..
                 } => Error::ScopeNotGranted,
                 e => e.invalid_session(),
-            })?;
+            })?,
+        };
         Ok(ResolvedBootstrap {
             scopes: grant.scopes,
             subject: grant.subject,
@@ -664,6 +688,21 @@ impl EnvironmentAuth {
         })
     }
     pub async fn exchange_bootstrap(
+        &self,
+        request: &Request,
+        credential: &str,
+        requested: Option<Vec<AuthEnvironmentScope>>,
+        metadata: AuthClientMetadata,
+    ) -> Result<AuthAccessTokenResult> {
+        let auth = self.clone();
+        let request = request.clone();
+        let credential = credential.to_owned();
+        crate::finish_mutation(async move {
+            let _guard = if request.header("dpop").is_some() { Some(auth.connect_trust_lock.lock().await) } else { None };
+            auth.exchange_bootstrap_inner(&request, &credential, requested, metadata).await
+        }).await
+    }
+    async fn exchange_bootstrap_inner(
         &self,
         request: &Request,
         credential: &str,
@@ -683,8 +722,12 @@ impl EnvironmentAuth {
                     requested_scopes: requested.clone(),
                     ..Default::default()
                 },
+                Some(metadata.clone()),
             )
             .await?;
+        if grant.subject == CLOUD_CONNECT_SUBJECT && let Some(key) = &proof_key {
+            self.pairing.trust_connect_device(key, metadata.clone()).await?;
+        }
         let ResolvedBootstrap {
             scopes,
             subject,
@@ -704,9 +747,6 @@ impl EnvironmentAuth {
         };
         if granted.is_empty() {
             return Err(Error::ScopeNotGranted);
-        }
-        if let Some(proof) = proof {
-            crate::dpop::record_request_proof(&self.secrets, &proof, self.now_ms()).await?;
         }
         let mut client = metadata;
         if let Some(label) = label.filter(|s| !s.is_empty()) {
@@ -794,7 +834,78 @@ impl EnvironmentAuth {
         if current == target {
             return Err(Error::SelfRevocation);
         }
+        if let Some(key) = self.sessions.proof_key_thumbprint_of(target).await?
+            && self.sessions.proof_key_thumbprint_of(current).await?.as_deref() != Some(&key)
+        {
+            return self.revoke_connect_device(&key).await;
+        }
         self.sessions.revoke(target).await
+    }
+    pub async fn revoke_other_client_sessions(&self, current: &AuthSessionId) -> Result<usize> {
+        let auth = self.clone();
+        let current = current.clone();
+        crate::finish_mutation(async move {
+            let key = auth.sessions.proof_key_thumbprint_of(&current).await?;
+            let _guard = auth.connect_trust_lock.lock().await;
+            auth.pairing.revoke_connect_devices_except(key.as_deref()).await?;
+            auth.sessions.revoke_all_except(&current).await
+        }).await
+    }
+    pub async fn issue_connect_credential(&self, proof_key: &str, require_approval: bool) -> Result<AuthPairingCredentialResult> {
+        let auth = self.clone();
+        let key = proof_key.to_owned();
+        crate::finish_mutation(async move {
+            let _guard = auth.connect_trust_lock.lock().await;
+            let must_wait = require_approval && !auth.pairing.is_connect_device_trusted(&key).await?;
+            if must_wait && let Some(pending) = auth.pairing.find_pending_connect(&key).await? {
+                return Ok(pending);
+            }
+            auth.create_pairing_link(STANDARD_SCOPES, IssuePairing {
+                ttl_ms: Some(if must_wait { 600_000 } else { 120_000 }),
+                scopes: STANDARD_SCOPES.to_vec(),
+                subject: Some(CLOUD_CONNECT_SUBJECT.into()),
+                label: Some("T3 Connect".into()),
+                proof_key_thumbprint: Some(key),
+                requires_connect_approval: must_wait,
+                ..Default::default()
+            }).await
+        }).await
+    }
+    pub async fn approve_connect_device(&self, id: &str) -> Result<bool> {
+        self.pairing.approve_connect_request(id).await
+    }
+    pub async fn approve_connect_device_by_code(&self, code: &str) -> Result<bool> {
+        let wanted = normalize_verification_code(code);
+        let matches: Vec<_> = self.pairing.list_active().await?.into_iter().filter(|link| {
+            link.connect_device_request.as_ref().is_some_and(|r| normalize_verification_code(&r.verification_code.0) == wanted)
+        }).collect();
+        if matches.len() != 1 { return Ok(false) }
+        self.approve_connect_device(&matches[0].id.0).await
+    }
+    pub async fn list_connect_devices(&self) -> Result<Vec<AuthConnectDevice>> {
+        self.pairing.list_connect_devices().await
+    }
+    pub async fn revoke_connect_device(&self, key: &str) -> Result<bool> {
+        let auth = self.clone();
+        let key = key.to_owned();
+        crate::finish_mutation(async move {
+            let _guard = auth.connect_trust_lock.lock().await;
+            let removed = auth.pairing.revoke_connect_device(&key).await?;
+            let sessions = auth.sessions.revoke_by_proof_key(&key).await?;
+            Ok(removed || sessions > 0)
+        }).await
+    }
+    pub async fn revoke_connect_device_by_code(&self, code: &str) -> Result<RevokeConnectByCode> {
+        let wanted = normalize_verification_code(code);
+        let matches: Vec<_> = self.list_connect_devices().await?.into_iter().filter(|device| normalize_verification_code(&device.verification_code.0) == wanted).collect();
+        match matches.as_slice() {
+            [] => Ok(RevokeConnectByCode::NotFound),
+            [device] => {
+                self.revoke_connect_device(&device.proof_key_thumbprint.0).await?;
+                Ok(RevokeConnectByCode::Revoked)
+            }
+            _ => Ok(RevokeConnectByCode::Ambiguous),
+        }
     }
     pub async fn authenticate_http(&self, request: &Request) -> Result<VerifiedSession> {
         let selected = select_request_credential(
@@ -1021,12 +1132,14 @@ impl EnvironmentAuth {
                     mcp_approval: Some(access),
                     ..Default::default()
                 },
+                None,
             )
             .await
             .map_err(|e| match e {
                 Error::ScopeNotGranted => Error::McpApprovalCode {
                     reason: McpApprovalReason::InsufficientScope,
                 },
+                Error::ConnectApprovalPending => Error::McpApprovalCode { reason: McpApprovalReason::UnknownOrUsed },
                 e if e.is_credential() => Error::McpApprovalCode {
                     reason: McpApprovalReason::UnknownOrUsed,
                 },

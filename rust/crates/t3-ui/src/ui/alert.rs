@@ -3,8 +3,9 @@
 //! `alert(Props, |Context| Slots)` renders icon, content and action groups in web order.
 //! `Variant::{Default, Sidebar, Error, Info, Success, Warning}`, `Surface::{Default, Glass}`
 //! and `ControlAlignment::{Center, FirstLine}` have the TSX names and defaults. There is no
-//! `Size` prop in the source. Content/action slots accept arbitrary elements; icon slots take
-//! Lucide `Icon`s. Text is translated by the caller.
+//! `Size` prop in the source. All slots accept arbitrary elements. SVG callers apply the
+//! supplied Context's icon size/tint; `alert_icon` does this for a Lucide icon.
+//! Text is translated by the caller.
 //! `alert_title`, `alert_description` and `alert_action` own their styling and return opaque
 //! elements. Pass the supplied `Context` to descriptions so parent variant selectors apply.
 //! `Props::scope` selects the sidebar's redeclared tokens when mounted there.
@@ -17,7 +18,7 @@
 use nsh_core::prelude::*;
 
 use crate::theme::{Scope, cn, palette, tw, tw_with};
-use crate::ui::icon::{Icon, icon};
+use crate::ui::icon::Icon;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Variant {
@@ -55,7 +56,7 @@ pub struct Props {
 /// Explicit groups replace React's child-type/data-slot introspection; order within each is kept.
 #[derive(Default)]
 pub struct Slots {
-    pub icons: Vec<Icon>,
+    pub icons: Vec<AnyElement>,
     pub content: Vec<AnyElement>,
     pub actions: Vec<AnyElement>,
 }
@@ -63,6 +64,21 @@ pub struct Slots {
 #[derive(Clone, Copy)]
 pub struct Context {
     props: Props,
+}
+
+impl Context {
+    pub fn icon_size(self) -> f32 {
+        16.0
+    }
+
+    pub fn icon_color(self) -> AdaptiveColor {
+        self.props.variant.icon_color()
+    }
+}
+
+/// Applies Alert's SVG descendant selectors at the icon call site.
+pub fn alert_icon(context: Context, glyph: Icon) -> impl IntoElement {
+    crate::ui::icon::icon(glyph, context.icon_size(), move || context.icon_color())
 }
 
 impl Variant {
@@ -99,11 +115,8 @@ pub fn alert(props: Props, build: impl FnOnce(Context) -> Slots) -> impl IntoEle
             } else {
                 16.0
             }))
-            .children(
-                icons
-                    .into_iter()
-                    .map(move |glyph| icon(glyph, 16.0, move || props.variant.icon_color())),
-            )
+            .text_color(move || props.variant.icon_color())
+            .children(icons)
     });
     let content_group = (!content.is_empty()).then(|| {
         view()
@@ -303,6 +316,24 @@ pub mod composer_banner {
         presence: Signal<RowPresence>,
     }
 
+    impl RowContext {
+        pub fn icon_size(self) -> f32 {
+            if self.layout == Layout::Approval {
+                16.0
+            } else {
+                12.0
+            }
+        }
+
+        pub fn icon_color(self) -> AdaptiveColor {
+            if self.layout == Layout::Approval {
+                palette().warning
+            } else {
+                palette().muted_foreground
+            }
+        }
+    }
+
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     struct RowPresence {
         icon: bool,
@@ -328,6 +359,95 @@ pub mod composer_banner {
         }
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct SurfaceColors {
+        background: AdaptiveColor,
+        outline: AdaptiveColor,
+    }
+
+    fn mix_srgb(left: Hsla, right: Hsla, weight: f32) -> Hsla {
+        let left = Rgba::from(left);
+        let right = Rgba::from(right);
+        let a = left.a * weight + right.a * (1.0 - weight);
+        let channel = |l: f32, r: f32| {
+            if a == 0.0 {
+                0.0
+            } else {
+                (l * left.a * weight + r * right.a * (1.0 - weight)) / a
+            }
+        };
+        Rgba {
+            r: channel(left.r, right.r),
+            g: channel(left.g, right.g),
+            b: channel(left.b, right.b),
+            a,
+        }
+        .into()
+    }
+
+    fn surface_colors(props: SurfaceProps, tokens: &Tokens) -> SurfaceColors {
+        let color = |name| tokens.color(name).unwrap_or(AdaptiveColor::TRANSPARENT);
+        let face = |dark: bool| {
+            let component = |c: AdaptiveColor| if dark { c.dark } else { c.light };
+            let catalogue = tokens.number(if dark {
+                "theme-catalogue-dark"
+            } else {
+                "theme-catalogue-light"
+            }) == Some(1.0);
+            let t3_chat = tokens.number(if dark {
+                "theme-t3-chat-dark"
+            } else {
+                "theme-t3-chat-light"
+            }) == Some(1.0);
+            let background = component(color(if catalogue {
+                "app-theme-surface-raised"
+            } else if dark {
+                "surface-raised"
+            } else {
+                "card"
+            }));
+            let outline = match props.variant {
+                Variant::Error => component(color("error")).opacity(0.32),
+                Variant::Warning => component(color("warning")).opacity(0.28),
+                _ if dark && t3_chat => rgb(0x241e28).into(),
+                _ => tokens
+                    .color("chat-composer-outline")
+                    .map(component)
+                    .unwrap_or_else(|| {
+                        if catalogue && dark {
+                            mix_srgb(
+                                component(color("app-theme-input")),
+                                component(color("background")),
+                                0.3,
+                            )
+                        } else if catalogue {
+                            component(color("app-theme-toolbar-border"))
+                        } else if dark {
+                            component(color("white")).opacity(0.05)
+                        } else {
+                            component(color("contrast-foreground")).opacity(0.08)
+                        }
+                    }),
+            };
+            (background, outline)
+        };
+        let light = face(false);
+        let dark = face(true);
+        SurfaceColors {
+            background: AdaptiveColor::new(light.0, dark.0),
+            outline: AdaptiveColor::new(light.1, dark.1),
+        }
+    }
+
+    fn seam_classes(props: SurfaceProps) -> &'static str {
+        // index.css --background-image-composer-seam-above, beneath the tint layer.
+        if props.detached {
+            ""
+        } else {
+            "dark:bg-[linear-gradient(to_top,transparent_0_17px,rgb(0_0_0/18%)_17px,transparent_27px)]"
+        }
+    }
+
     /// Surface from ComposerBanner.tsx. `content` is built once; theme colours stay reactive.
     pub fn surface(props: SurfaceProps, content: impl IntoElement) -> impl IntoElement {
         surface_frame(props, "").child(content)
@@ -340,15 +460,12 @@ pub mod composer_banner {
             .child(view()
                 .app_class(tw(&cn([
                     // index.css's glass defaults; NSH's alpha parser cannot resolve a variable.
-                    Some("pointer-events-none absolute inset-0 -z-1 border bg-card/80 dark:bg-surface-raised/80 backdrop-blur-(--glass-blur) dark:backdrop-blur-[16px] backdrop-saturate-[1.14] dark:backdrop-saturate-[1.08] shadow-[0_1px_2px_rgb(0_0_0/5%)] dark:shadow-[0_14px_32px_-18px_rgb(0_0_0/75%)]"),
+                    Some("pointer-events-none absolute inset-0 -z-1 border backdrop-blur-(--glass-blur) dark:backdrop-blur-[16px] backdrop-saturate-[1.14] dark:backdrop-saturate-[1.08] shadow-[0_1px_2px_rgb(0_0_0/5%)] dark:shadow-[0_14px_32px_-18px_rgb(0_0_0/75%)]"),
                     Some(if props.detached { "rounded-2xl" } else if props.joined { "rounded-none border-t-0" } else { "rounded-t-2xl" }),
-                    Some(match props.variant {
-                        Variant::Error => "border-error/32",
-                        Variant::Warning => "border-warning/28",
-                        // Composer-specific custom-theme outlines need the frozen theme bridge.
-                        _ => "border-contrast-foreground/8 dark:border-white/5",
-                    }),
+                    Some(seam_classes(props)),
                 ])))
+                .bg(move || surface_colors(props, &tokens()).background.opacity(0.8))
+                .border_color(move || surface_colors(props, &tokens()).outline)
                 .child(view().app_class(tw(&cn([
                     Some("absolute inset-0 pointer-events-none"),
                     Some(if props.detached { "rounded-2xl" } else if props.joined { "rounded-none" } else { "rounded-t-2xl" }),
@@ -522,17 +639,23 @@ pub mod composer_banner {
             .child(slots.icon).child(slots.content).child(slots.actions)
     }
 
-    /// Icon from ComposerBanner.tsx; selector sizes and tints are applied at the icon call.
-    pub fn icon(context: RowContext, glyph: Icon) -> impl IntoElement {
+    /// Icon from ComposerBanner.tsx; arbitrary children retain their own identity and state.
+    pub fn icon(context: RowContext, content: impl IntoElement) -> impl IntoElement {
         view().accessible(false)
             .app_class(tw(&cn([
                 Some("col-start-1 row-start-1 flex min-w-0 flex-none items-center justify-center text-muted-foreground"),
                 (context.layout == Layout::Approval).then_some("pt-0.5 text-warning"),
             ])))
             .w(move || px(icon_column()))
-            .child(crate::ui::icon::icon(glyph, if context.layout == Layout::Approval { 16.0 } else { 12.0 }, move || {
-                if context.layout == Layout::Approval { palette().warning } else { palette().muted_foreground }
-            }))
+            .child(content)
+    }
+
+    /// Applies Icon's SVG selectors at the Lucide call site.
+    pub fn lucide_icon(context: RowContext, glyph: Icon) -> impl IntoElement {
+        icon(
+            context,
+            crate::ui::icon::icon(glyph, context.icon_size(), move || context.icon_color()),
+        )
     }
 
     /// Content from ComposerBanner.tsx; the builder receives the same RowContext for Separator.
@@ -657,5 +780,205 @@ pub mod composer_banner {
             disabled,
             on_press,
         )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::theme::{ThemeChoice, tokens_for};
+        use t3_theme::color::{Color, MixSpace, color_mix};
+        use t3_theme::palette::{Appearance, ThemeCatalog, ThemeHalves};
+        use t3_theme::resolved::{ThemeInput, resolve_theme};
+
+        fn rgba(color: Hsla) -> [u8; 4] {
+            u32::from(Rgba::from(color)).to_be_bytes()
+        }
+
+        fn close(actual: Hsla, expected: Color) {
+            // NSH's token boundary quantizes each input to eight-bit sRGB before mixing.
+            for (actual, expected) in rgba(actual).into_iter().zip(expected.to_rgba8()) {
+                assert!(actual.abs_diff(expected) <= 1, "{actual} != {expected}");
+            }
+        }
+
+        #[test]
+        fn surfaces_and_outlines_follow_the_installed_theme_in_each_half() {
+            let catalog = ThemeCatalog {
+                custom: &[],
+                environment: &[],
+            };
+            for (light, dark) in [
+                ("", ""),
+                ("ocean", "ocean"),
+                ("t3-chat", "t3-chat"),
+                ("", "ocean"),
+                ("ocean", ""),
+                ("grove", "t3-chat"),
+            ] {
+                let choice = ThemeChoice {
+                    halves: Some(ThemeHalves {
+                        light: Some(light.into()),
+                        dark: Some(dark.into()),
+                    }),
+                    contrast: 160,
+                    ..Default::default()
+                };
+                let tokens = tokens_for(&choice);
+                for (id, appearance) in [(light, Appearance::Light), (dark, Appearance::Dark)] {
+                    let mut input = ThemeInput::new(catalog.get(id), appearance);
+                    input.contrast = choice.contrast;
+                    let resolved = resolve_theme(&input);
+                    let color = |key| resolved.color(key).expect("source token");
+                    let pick = |c: AdaptiveColor| {
+                        if appearance == Appearance::Dark {
+                            c.dark
+                        } else {
+                            c.light
+                        }
+                    };
+                    let neutral = surface_colors(SurfaceProps::default(), &tokens);
+                    close(
+                        pick(neutral.background),
+                        color(if id.is_empty() {
+                            if appearance == Appearance::Dark {
+                                "--surface-raised"
+                            } else {
+                                "--card"
+                            }
+                        } else {
+                            "--app-theme-surface-raised"
+                        }),
+                    );
+                    let outline = if appearance == Appearance::Dark && id == "t3-chat" {
+                        Color::parse("#241e28").expect("CSS color")
+                    } else if appearance == Appearance::Light && !id.is_empty() {
+                        color("--app-theme-toolbar-border")
+                    } else if appearance == Appearance::Dark && !id.is_empty() {
+                        color_mix(
+                            MixSpace::Srgb,
+                            color("--app-theme-input"),
+                            Some(30.0),
+                            color("--background"),
+                            Some(70.0),
+                        )
+                    } else {
+                        color_mix(
+                            MixSpace::Srgb,
+                            color(if appearance == Appearance::Dark {
+                                "--color-white"
+                            } else {
+                                "--contrast-foreground"
+                            }),
+                            Some(if appearance == Appearance::Dark {
+                                5.0
+                            } else {
+                                8.0
+                            }),
+                            Color::TRANSPARENT,
+                            None,
+                        )
+                    };
+                    close(pick(neutral.outline), outline);
+                    for (variant, key, percent) in [
+                        (Variant::Error, "--error", 32.0),
+                        (Variant::Warning, "--warning", 28.0),
+                    ] {
+                        let colors = surface_colors(
+                            SurfaceProps {
+                                variant,
+                                ..Default::default()
+                            },
+                            &tokens,
+                        );
+                        close(
+                            pick(colors.outline),
+                            color_mix(
+                                MixSpace::Srgb,
+                                color(key),
+                                Some(percent),
+                                Color::TRANSPARENT,
+                                None,
+                            ),
+                        );
+                    }
+                }
+            }
+            let mut tokens = tokens_for(&ThemeChoice {
+                theme: "ocean".into(),
+                ..Default::default()
+            });
+            let explicit = AdaptiveColor::rgb(0x123456, 0x654321);
+            tokens.set_color("chat-composer-outline", explicit);
+            assert_eq!(
+                surface_colors(SurfaceProps::default(), &tokens).outline,
+                explicit
+            );
+            let mut chat = tokens_for(&ThemeChoice {
+                theme: "t3-chat".into(),
+                ..Default::default()
+            });
+            chat.set_color("chat-composer-outline", explicit);
+            assert_eq!(
+                rgba(surface_colors(SurfaceProps::default(), &chat).outline.dark),
+                [0x24, 0x1e, 0x28, 255]
+            );
+        }
+
+        #[test]
+        fn seam_gradient_only_paints_dark_attached_surfaces_at_the_overlap_edge() {
+            use nsh_core::tailwind::{ClassEnvironment, ClassProps, Context, Theme, parse};
+            let theme = Theme::default();
+            for detached in [false, true] {
+                let classes = parse(
+                    &theme,
+                    seam_classes(SurfaceProps {
+                        detached,
+                        ..Default::default()
+                    }),
+                );
+                assert!(classes.unknown().is_empty(), "{:?}", classes.unknown());
+                for dark in [false, true] {
+                    let context = Context {
+                        env: ClassEnvironment {
+                            dark,
+                            ..Default::default()
+                        },
+                        window: size(px(1280.0), px(800.0)),
+                        rtl: false,
+                        states: 0,
+                        position: 0,
+                        group: &|_| 0,
+                    };
+                    let mut style = nsh_core::Style::default();
+                    classes.apply(
+                        &context,
+                        &theme,
+                        &mut style,
+                        &mut ClassProps::default(),
+                        |_| {},
+                    );
+                    let images = style
+                        .view
+                        .effects
+                        .as_ref()
+                        .map(|e| e.background_images.as_slice())
+                        .unwrap_or_default();
+                    assert_eq!(images.len(), usize::from(dark && !detached));
+                    if let Some(gradient) = images.first() {
+                        assert!(
+                            gradient
+                                .stops
+                                .iter()
+                                .any(|stop| stop.position == Some(px(17.0).into())
+                                    && stop.color.0.to_be_bytes()[3] == 46)
+                        );
+                        assert_eq!(
+                            gradient.stops.last().expect("fade stop").position,
+                            Some(px(27.0).into())
+                        );
+                    }
+                }
+            }
+        }
     }
 }

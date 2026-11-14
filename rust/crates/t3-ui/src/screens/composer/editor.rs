@@ -1,1 +1,1844 @@
-//! CMP-EDITOR-1: Rich editor: T3 schema and lossless serialisation (NSH problem 4). Not built yet; see ui-plan.md and ui-package.md.
+//! Port of apps/web/src/components/ComposerPromptEditorTiptap.tsx ComposerPromptEditorTiptap.
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use futures::StreamExt;
+use nsh_base::rich_editor::{
+    model::{Fragment, Node, ResolvedPos, Schema, SchemaError, SchemaSpec, Slice},
+    state::{
+        EditorState, EditorStateConfig, KeyEvent, Plugin, PluginSpec, Selection, StateError,
+        TextSelection, Transaction, TransactionOrigin,
+    },
+    view::{EditorSession, NodeViews, RichEditorClasses, RichEditorPastedFiles, rich_editor},
+};
+use nsh_core::prelude::*;
+use serde_json::{Value, json};
+use t3_client::thread_views::{
+    composer::{
+        code_pairs::CodePairs,
+        editor::{self as document, BuildOptions, RichDocMap},
+        input_rules,
+        markdown_source::{self, EditorSelection, SourceEditor},
+        policy::pasted_path_query_length,
+    },
+    document::{self as source, Selection as SourceSelection, utf16_len},
+    undo,
+};
+
+use crate::i18n::t;
+use crate::state::layout::{Pointer, layout_class, pointer};
+use crate::theme::{self, tw};
+
+pub type SkillResolver = Arc<dyn Fn(&str) -> Option<(String, Option<String>)> + Send + Sync>;
+pub type ModelResolver = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+
+/// Provider metadata is resolved by the owner; unknown skills and models remain editable text.
+#[derive(Clone)]
+pub struct ComposerResolvers {
+    pub skill: SkillResolver,
+    pub model: ModelResolver,
+}
+
+impl Default for ComposerResolvers {
+    fn default() -> Self {
+        Self {
+            skill: Arc::new(|_| None),
+            model: Arc::new(|_, _| false),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EditorMode {
+    Rich,
+    #[default]
+    Plain,
+    Literal,
+}
+
+impl EditorMode {
+    fn options(self) -> BuildOptions {
+        BuildOptions {
+            styling: self == Self::Rich,
+            literal: self == Self::Literal,
+            ..Default::default()
+        }
+    }
+}
+
+/// `createComposerExtensions`: only the serializable T3 nodes and marks, in schema order.
+pub fn composer_schema(mode: EditorMode) -> Result<Schema, SchemaError> {
+    let mut nodes = vec![
+        json!(["doc", {"content":"block+"}]),
+        json!(["paragraph", {"content":"inline*","group":"block","parseDOM":[{"tag":"p"}],"toDOM":["p",0]}]),
+        json!(["text", {"group":"inline"}]),
+        json!(["hardBreak", {"inline":true,"group":"inline","selectable":false,"linebreakReplacement":true,"leafText":"\n","toDOM":["br"]}]),
+    ];
+    if mode != EditorMode::Literal {
+        for (name, attrs, render_text) in [
+            (
+                "composer-mention",
+                json!({"path":{"default":""},"source":{"default":""}}),
+                "{source}",
+            ),
+            (
+                "composer-skill",
+                json!({"skillName":{"default":""},"skillLabel":{"default":""},"skillDescription":{"default":null}}),
+                "${skillName}",
+            ),
+            (
+                "composer-model",
+                json!({"instanceId":{"default":""},"model":{"default":""},"source":{"default":""}}),
+                "{source}",
+            ),
+            (
+                "composer-citation",
+                json!({"citation":{"default":null},"source":{"default":""},"citeKey":{"default":""}}),
+                "{source}",
+            ),
+            (
+                "composer-context-reference",
+                json!({"kind":{"default":""},"contextId":{"default":""},"label":{"default":""},"source":{"default":""}}),
+                "{source}",
+            ),
+        ] {
+            // CMP-CHIPS supplies NodeViews; source remains visible until those are installed.
+            nodes.push(json!([name, {"group":"inline","inline":true,"atom":true,"selectable":true,"attrs":attrs,"renderText":render_text}]));
+        }
+    }
+    let mut marks = Vec::new();
+    if mode == EditorMode::Rich {
+        nodes.extend([
+            json!(["bulletList", {"content":"listItem+","group":"block list","listMarker":"bullet","toDOM":["ul",0]}]),
+            json!(["orderedList", {"content":"listItem+","group":"block list","listMarker":"ordered","attrs":{"start":{"default":1}},"toDOM":["ol",0]}]),
+            json!(["listItem", {"content":"paragraph list*","defining":true,"attrs":{"indent":{"default":""},"marker":{"default":"-"},"space":{"default":" "}},"toDOM":["li",0]}]),
+            json!(["taskList", {"content":"taskItem+","group":"block list","toDOM":["ul",{"data-type":"taskList"},0]}]),
+            json!(["taskItem", {"content":"paragraph list*","defining":true,"render":"task","attrs":{"checked":{"default":false},"indent":{"default":""},"markerSpace":{"default":" "},"contentSpace":{"default":null}},"toDOM":["li",0]}]),
+            json!(["blockquote", {"content":"paragraph+","group":"block","defining":true,"attrs":{"prefix":{"default":"> "}},"toDOM":["blockquote",0]}]),
+            json!(["heading", {"content":"inline*","group":"block","defining":true,"attrs":{"level":{"default":1},"space":{"default":" "}},"toDOM":["h1",0]}]),
+            json!(["horizontalRule", {"group":"block","attrs":{"source":{"default":"---"}},"toDOM":["hr"]}]),
+            json!(["codeBlock", {"content":"text*","group":"block","marks":"","code":true,"defining":true,"attrs":{"language":{"default":""},"fence":{"default":"```"},"close":{"default":"\n```"}},"toDOM":["pre",["code",0]]}]),
+        ]);
+        marks.extend([
+            json!(["strike", {"toDOM":["s",0]}]),
+            json!(["bold", {"toDOM":["strong",0]}]),
+            json!(["italic", {"toDOM":["em",0]}]),
+            json!(["code", {"excludes":"code","exitable":false,"code":true,"toDOM":["code",{"dir":"ltr"},0]}]),
+            json!(["markdownSource", {"inclusive":false,"excludes":"","toDOM":["span",0]}]),
+        ]);
+    }
+    SchemaSpec::from_json(&json!({"nodes":nodes,"marks":marks}))
+}
+
+fn invalid(error: impl std::fmt::Display) -> StateError {
+    StateError::Invalid(error.to_string())
+}
+
+fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
+    value
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn tree(schema: &Schema, value: &Value) -> Result<Node, StateError> {
+    let node = schema.node_from_json(value).map_err(invalid)?;
+    node.check().map_err(invalid)?;
+    Ok(node)
+}
+
+fn selection(state: &EditorState) -> SourceSelection {
+    SourceSelection {
+        anchor: state.selection().anchor(),
+        head: state.selection().head(),
+    }
+}
+
+/// `composer-rich-text-doc.ts` caretTakesMarksBefore, excluding the editable source marker.
+fn caret_takes_marks_before(state: &EditorState) -> bool {
+    let at = state.selection().resolved_from();
+    if !state.selection().empty() || !at.parent().is_textblock() {
+        return false;
+    }
+    let styled = |marks: Vec<nsh_base::rich_editor::model::Mark>| {
+        marks
+            .into_iter()
+            .filter(|mark| mark.ty().name() != markdown_source::SOURCE_MARK)
+            .collect::<Vec<_>>()
+    };
+    let before = styled(
+        at.node_before()
+            .map_or_else(Vec::new, |node| node.marks().to_vec()),
+    );
+    let after = styled(
+        at.node_after()
+            .map_or_else(Vec::new, |node| node.marks().to_vec()),
+    );
+    let current = styled(
+        state
+            .stored_marks()
+            .map_or_else(|| at.marks(), |marks| marks.to_vec()),
+    );
+    before != after && current == before
+}
+
+fn replace_document(
+    state: &EditorState,
+    value: &Value,
+    range: SourceSelection,
+) -> Result<Transaction, StateError> {
+    let doc = tree(state.schema(), value)?;
+    if range.anchor > doc.content().size() || range.head > doc.content().size() {
+        return Err(invalid("Composer selection is outside the document."));
+    }
+    let mut tr = state.tr();
+    if !state.doc().eq(&doc) {
+        tr.replace_with(0, state.doc().content().size(), doc.content().clone())
+            .map_err(invalid)?;
+    }
+    tr.set_selection(TextSelection::create(
+        tr.doc(),
+        range.anchor,
+        Some(range.head),
+    ));
+    Ok(tr)
+}
+
+struct EditorData {
+    source: SourceEditor,
+    mode: EditorMode,
+    resolvers: ComposerResolvers,
+    pairs: Arc<Mutex<CodePairs>>,
+    path_query_active: bool,
+    disabled: bool,
+    error: Option<String>,
+    serialized: Option<(Node, Arc<RichDocMap>)>,
+    draft_key: Option<String>,
+    controlled_snapshot: Option<ComposerSnapshot>,
+}
+
+/// The shared seam for CMP-EDITOR-2, CMP-CHIPS, CMP-SUGGEST and the composer host.
+#[derive(Clone)]
+pub struct ComposerEditor {
+    session: EditorSession,
+    data: Arc<Mutex<EditorData>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComposerSnapshot {
+    pub value: String,
+    pub cursor: usize,
+    pub expanded_cursor: usize,
+    pub context_ids: Vec<String>,
+    pub cursor_adjacent_to_mention: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaretEdge {
+    Start,
+    End,
+}
+
+impl ComposerEditor {
+    pub fn new(
+        value: &str,
+        cursor: usize,
+        mode: EditorMode,
+        resolvers: ComposerResolvers,
+    ) -> Result<Self, StateError> {
+        let schema = composer_schema(mode).map_err(invalid)?;
+        let value = document::build_document(
+            value,
+            mode.options(),
+            |name| (resolvers.skill)(name),
+            |instance, model| (resolvers.model)(instance, model),
+        );
+        let doc = tree(&schema, &value)?;
+        let map = document::serialize_document(&value);
+        let expanded = source::expand_cursor(&map.value, cursor, mode == EditorMode::Literal);
+        let pos = map.flat_to_pm(map.markdown_to_flat(expanded));
+        let data = Arc::new(Mutex::new(EditorData {
+            source: SourceEditor::new(value, SourceSelection::caret(pos)),
+            mode,
+            resolvers,
+            pairs: Arc::new(Mutex::new(CodePairs::default())),
+            path_query_active: false,
+            disabled: false,
+            error: None,
+            serialized: None,
+            draft_key: None,
+            controlled_snapshot: None,
+        }));
+        let initial = lock(&data).source.view().clone();
+        let doc = if mode == EditorMode::Rich {
+            tree(&schema, &initial.document)?
+        } else {
+            doc
+        };
+        let plugin: Plugin = Arc::new(ComposerDocumentPlugin(data.clone()));
+        let state = EditorState::create(
+            EditorStateConfig::new(schema)
+                .doc(doc.clone())
+                .selection(TextSelection::create(
+                    &doc,
+                    initial.selection.anchor,
+                    Some(initial.selection.head),
+                ))
+                .plugins(vec![plugin]),
+        )?;
+        let session = EditorSession::new(state, NodeViews::new());
+        let shared = data.clone();
+        // SourceEditor owns canonical history; source-only rewrites never enter NSH's history.
+        session.set_dispatch_transaction(Some(Arc::new(move |session, tr| {
+            if let Err(error) = apply_transaction(session, &shared, tr) {
+                lock(&shared).error = Some(error.to_string());
+                session.set_editable(false);
+                session.update_state(session.state());
+            }
+        })));
+        Ok(Self { session, data })
+    }
+
+    pub fn session(&self) -> EditorSession {
+        self.session.clone()
+    }
+
+    /// Shared with Editor-2's caret and composition handlers; input rules use this same tracker.
+    pub fn code_pairs(&self) -> Arc<Mutex<CodePairs>> {
+        lock(&self.data).pairs.clone()
+    }
+
+    pub fn mode(&self) -> EditorMode {
+        lock(&self.data).mode
+    }
+
+    pub fn error(&self) -> Option<String> {
+        lock(&self.data).error.clone()
+    }
+
+    pub fn set_disabled(&self, disabled: bool) {
+        lock(&self.data).disabled = disabled;
+        self.session
+            .set_editable(!disabled && self.error().is_none());
+    }
+
+    pub fn set_path_query_active(&self, active: bool) {
+        lock(&self.data).path_query_active = active;
+    }
+
+    pub fn read_map(&self) -> Arc<RichDocMap> {
+        self.map_for(&self.session.state())
+    }
+
+    fn map_for(&self, state: &EditorState) -> Arc<RichDocMap> {
+        let mut data = lock(&self.data);
+        if let Some((doc, map)) = &data.serialized
+            && doc.ptr_eq(state.doc())
+        {
+            return map.clone();
+        }
+        let map = Arc::new(document::serialize_document(&state.doc().to_json()));
+        data.serialized = Some((state.doc().clone(), map.clone()));
+        map
+    }
+
+    pub fn read_snapshot(&self) -> ComposerSnapshot {
+        let state = self.session.state();
+        self.snapshot_for(&state)
+    }
+
+    fn snapshot_for(&self, state: &EditorState) -> ComposerSnapshot {
+        let map = self.map_for(state);
+        let expanded_cursor = map
+            .flat_to_markdown(map.pm_to_flat(state.selection().from()))
+            .min(utf16_len(&map.value));
+        let literal = self.mode() == EditorMode::Literal;
+        let at = state.selection().resolved_from();
+        let adjacent = [at.node_before(), at.node_after()]
+            .into_iter()
+            .flatten()
+            .any(|node| {
+                node.is_inline()
+                    && node.is_atom()
+                    && !node.is_text()
+                    && node.ty().name() != "hardBreak"
+            });
+        ComposerSnapshot {
+            cursor: source::collapse_cursor(&map.value, expanded_cursor, literal),
+            expanded_cursor,
+            context_ids: if literal {
+                vec![]
+            } else {
+                map.context_ids.clone()
+            },
+            cursor_adjacent_to_mention: literal || at.parent().ty().spec().code || adjacent,
+            value: map.value.clone(),
+        }
+    }
+
+    fn is_controlled_snapshot(&self, snapshot: &ComposerSnapshot) -> bool {
+        lock(&self.data).controlled_snapshot.take().as_ref() == Some(snapshot)
+    }
+
+    pub fn read_selection_range(&self) -> SourceSelection {
+        let state = self.session.state();
+        let map = self.read_map();
+        SourceSelection {
+            anchor: map.flat_to_markdown(map.pm_to_flat(state.selection().from())),
+            head: map.flat_to_markdown(map.pm_to_flat(state.selection().to())),
+        }
+    }
+
+    pub fn focus(&self) {
+        self.session.focus();
+    }
+
+    pub fn focus_at(&self, cursor: usize) -> Result<(), StateError> {
+        let snapshot = self.read_snapshot();
+        self.select_markdown_offset(source::expand_cursor(
+            &snapshot.value,
+            cursor,
+            self.mode() == EditorMode::Literal,
+        ))?;
+        self.focus();
+        Ok(())
+    }
+
+    pub fn focus_at_end(&self) -> Result<(), StateError> {
+        self.select_markdown_offset(utf16_len(&self.read_map().value))?;
+        self.focus();
+        Ok(())
+    }
+
+    pub fn is_caret_on_visual_edge(&self, edge: CaretEdge) -> bool {
+        let snapshot = self.read_snapshot();
+        if snapshot.value.is_empty() {
+            return true;
+        }
+        let state = self.session.state();
+        if !state.selection().empty() {
+            return false;
+        }
+        let Some(byte) = source::utf16_byte_offset(&snapshot.value, snapshot.expanded_cursor)
+        else {
+            return false;
+        };
+        let (before, after) = snapshot.value.split_at(byte);
+        if (if edge == CaretEdge::Start {
+            before
+        } else {
+            after
+        })
+        .contains('\n')
+        {
+            return false;
+        }
+        let block = match edge {
+            CaretEdge::Start => 0,
+            CaretEdge::End => state
+                .doc()
+                .content()
+                .size()
+                .saturating_sub(state.doc().last_child().map_or(0, Node::node_size)),
+        };
+        let Some(caret) = self.session.selection_rect() else {
+            return false;
+        };
+        let Some(bounds) = self.session.node_rect(block) else {
+            return false;
+        };
+        let threshold = caret.size.height.0 / 2.0;
+        match edge {
+            CaretEdge::Start => caret.origin.y.0 - bounds.origin.y.0 < threshold,
+            CaretEdge::End => {
+                bounds.origin.y.0 + bounds.size.height.0 - caret.origin.y.0 - caret.size.height.0
+                    < threshold
+            }
+        }
+    }
+
+    pub fn select_markdown_offset(&self, offset: usize) -> Result<(), StateError> {
+        // Revealing source moves the caret stops; the web places the same source offset twice.
+        for pass in 0..2 {
+            let map = self.read_map();
+            let pos = map.flat_to_pm(map.markdown_to_flat(offset));
+            let state = self.session.state();
+            if pass > 0 && state.selection().empty() && state.selection().from() == pos {
+                break;
+            }
+            let mut tr = state.tr();
+            tr.set_selection(TextSelection::create(state.doc(), pos, None))
+                .scroll_into_view();
+            self.dispatch(tr)?;
+        }
+        Ok(())
+    }
+
+    /// Controlled rewrites reset history, so undo cannot resurrect another draft or a sent prompt.
+    pub fn sync(&self, value: &str, cursor: usize) -> Result<bool, StateError> {
+        let snapshot = self.read_snapshot();
+        let literal = self.mode() == EditorMode::Literal;
+        let expanded = source::expand_cursor(value, cursor, literal);
+        let cursor = source::collapse_cursor(value, expanded, literal);
+        if snapshot.value == value && snapshot.cursor == cursor {
+            return Ok(false);
+        }
+        if snapshot.value == value {
+            if self.session.is_focused() {
+                self.select_markdown_offset(expanded)?;
+                let snapshot = self.read_snapshot();
+                lock(&self.data).controlled_snapshot = Some(snapshot);
+            }
+            return Ok(false);
+        }
+        let mode = self.mode();
+        self.reset(value, expanded, mode)?;
+        Ok(true)
+    }
+
+    pub fn sync_draft(
+        &self,
+        draft_key: &str,
+        value: &str,
+        cursor: usize,
+    ) -> Result<bool, StateError> {
+        if lock(&self.data).draft_key.as_deref() == Some(draft_key) {
+            return self.sync(value, cursor);
+        }
+        let mode = self.mode();
+        self.reset(
+            value,
+            source::expand_cursor(value, cursor, mode == EditorMode::Literal),
+            mode,
+        )?;
+        lock(&self.data).draft_key = Some(draft_key.into());
+        Ok(true)
+    }
+
+    pub fn set_mode(&self, mode: EditorMode) -> Result<bool, StateError> {
+        if self.mode() == mode {
+            return Ok(false);
+        }
+        let snapshot = self.read_snapshot();
+        self.reset(&snapshot.value, snapshot.expanded_cursor, mode)?;
+        Ok(true)
+    }
+
+    fn reset(&self, value: &str, expanded: usize, mode: EditorMode) -> Result<(), StateError> {
+        let schema = composer_schema(mode).map_err(invalid)?;
+        let resolvers = lock(&self.data).resolvers.clone();
+        let document = document::build_document(
+            value,
+            mode.options(),
+            |name| (resolvers.skill)(name),
+            |instance, model| (resolvers.model)(instance, model),
+        );
+        let map = document::serialize_document(&document);
+        let pos = map.flat_to_pm(map.markdown_to_flat(expanded));
+        let source = SourceEditor::new(document, SourceSelection::caret(pos));
+        let rewritten = source.view();
+        let doc = tree(&schema, &rewritten.document)?;
+        let state = EditorState::create(
+            EditorStateConfig::new(schema)
+                .doc(doc.clone())
+                .selection(TextSelection::create(
+                    &doc,
+                    rewritten.selection.anchor,
+                    Some(rewritten.selection.head),
+                ))
+                .plugins(self.session.state().plugins().to_vec()),
+        )?;
+        let mut data = lock(&self.data);
+        data.source = source;
+        data.mode = mode;
+        *lock(&data.pairs) = CodePairs::default();
+        data.error = None;
+        let disabled = data.disabled;
+        drop(data);
+        let controlled = self.snapshot_for(&state);
+        lock(&self.data).controlled_snapshot = Some(controlled);
+        self.session.update_state(state);
+        self.session.set_editable(!disabled);
+        Ok(())
+    }
+
+    pub fn set_resolvers(&self, resolvers: ComposerResolvers) -> Result<(), StateError> {
+        let state = self.session.state();
+        let map = self.read_map();
+        let range = self.read_selection_range();
+        let mut data = lock(&self.data);
+        if data.mode == EditorMode::Literal {
+            data.resolvers = resolvers;
+            return Ok(());
+        }
+        let doc = document::reconcile_chips(
+            &state.doc().to_json(),
+            |name| (resolvers.skill)(name),
+            |instance, model| (resolvers.model)(instance, model),
+        );
+        let next_map = document::serialize_document(&doc);
+        let next_range = SourceSelection {
+            anchor: next_map.flat_to_pm(next_map.markdown_to_flat(range.anchor)),
+            head: next_map.flat_to_pm(next_map.markdown_to_flat(range.head)),
+        };
+        let mut tr = replace_document(&state, &doc, next_range)?;
+        tr.set_add_to_history(false)
+            .set_meta("composerMetadata", json!(true));
+        data.resolvers = resolvers;
+        drop(data);
+        if *map != next_map || state.doc().to_json() != doc {
+            self.dispatch(tr)?;
+        }
+        Ok(())
+    }
+
+    pub fn copy_selection(&self) -> Result<String, StateError> {
+        let state = self.session.state();
+        document::serialize_selection(
+            &state.doc().to_json(),
+            state.selection().from(),
+            state.selection().to(),
+        )
+        .ok_or_else(|| invalid("Cannot serialize this composer selection."))
+    }
+
+    pub fn undo(&self) -> Result<bool, StateError> {
+        self.history(false)
+    }
+
+    /// Installs the key and suggestion plugins before the document adapter, preserving their state.
+    pub fn set_plugins(&self, mut plugins: Vec<Plugin>) -> Result<(), StateError> {
+        plugins.push(Arc::new(ComposerDocumentPlugin(self.data.clone())));
+        let state = self.session.state().reconfigure(plugins)?;
+        self.session.update_state(state);
+        Ok(())
+    }
+    pub fn redo(&self) -> Result<bool, StateError> {
+        self.history(true)
+    }
+
+    fn history(&self, redo: bool) -> Result<bool, StateError> {
+        if !self.session.is_editable() {
+            return Ok(false);
+        }
+        let state = self.session.state();
+        let Some(tr) = history_transaction(&state, &self.data, redo)? else {
+            return Ok(false);
+        };
+        self.dispatch(tr)?;
+        Ok(true)
+    }
+
+    /// Keys and suggestions dispatch through here to retain source normalization and undo grouping.
+    pub fn dispatch(&self, tr: Transaction) -> Result<(), StateError> {
+        self.session.dispatch(tr)?;
+        self.error().map_or(Ok(()), |error| Err(invalid(error)))
+    }
+}
+
+fn history_transaction(
+    state: &EditorState,
+    shared: &Mutex<EditorData>,
+    redo: bool,
+) -> Result<Option<Transaction>, StateError> {
+    let mut data = lock(shared);
+    if data.disabled || data.error.is_some() {
+        return Ok(None);
+    }
+    if !(if redo {
+        data.source.redo()
+    } else {
+        data.source.undo()
+    }) {
+        return Ok(None);
+    }
+    let rewrite = data.source.view();
+    let mut tr = replace_document(state, &rewrite.document, rewrite.selection)?;
+    tr.set_origin(TransactionOrigin::History).scroll_into_view();
+    Ok(Some(tr))
+}
+
+fn apply_transaction(
+    session: &EditorSession,
+    shared: &Mutex<EditorData>,
+    tr: Transaction,
+) -> Result<(), StateError> {
+    let old = session.state();
+    if let Some(error) = tr.get_meta("composerError").and_then(Value::as_str) {
+        return Err(invalid(error));
+    }
+    if tr.doc_changed()
+        && !session.is_editable()
+        && tr.get_meta("composerMetadata") != Some(&Value::Bool(true))
+    {
+        return Ok(());
+    }
+    let history = matches!(tr.origin(), Some(TransactionOrigin::History));
+    let clipboard = matches!(
+        tr.origin(),
+        Some(TransactionOrigin::Paste | TransactionOrigin::Drop)
+    ) || tr.get_meta("paste").is_some()
+        || tr.get_meta("cut").is_some();
+    let composing = tr.get_meta("composition").is_some();
+    let now = tr.time;
+    let changed = tr.doc_changed() && tr.add_to_history();
+    let steps = if let Some(input) = tr.get_meta("composerInput") {
+        vec![Some(undo::Replace {
+            deleted: input["deleted"].as_u64().unwrap_or(0) as usize,
+            inserted: input["inserted"].as_u64().unwrap_or(0) as usize,
+        })]
+    } else {
+        tr.steps
+            .iter()
+            .map(|step| {
+                let value = step.to_json();
+                if value["stepType"] != "replace" {
+                    return None;
+                }
+                let from = value["from"].as_u64()? as usize;
+                let to = value["to"].as_u64()? as usize;
+                Some(undo::Replace {
+                    deleted: to.saturating_sub(from),
+                    inserted: step
+                        .get_map()
+                        .ranges
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .map(|range| range[2])
+                        .sum(),
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let (mut state, mut applied) = old.apply_transaction(tr)?;
+    if applied.is_empty() {
+        return Ok(());
+    }
+    let mut data = lock(shared);
+    let mut doc = state.doc().to_json();
+    if history && data.mode != EditorMode::Literal {
+        doc = document::reconcile_chips(
+            &doc,
+            |name| (data.resolvers.skill)(name),
+            |instance, model| (data.resolvers.model)(instance, model),
+        );
+    }
+    let range = selection(&state);
+    let takes_before = caret_takes_marks_before(&state);
+    let rewrite = if history {
+        // Reconcile stale chips restored by undo before drawing them.
+        data.source.apply(
+            doc.clone(),
+            range,
+            undo::Transaction {
+                history: true,
+                ..Default::default()
+            },
+            now,
+            takes_before,
+        );
+        data.source.view().clone()
+    } else {
+        data.source.apply(
+            doc.clone(),
+            range,
+            undo::Transaction {
+                changed,
+                clipboard_or_drop: clipboard,
+                composition: composing,
+                history: false,
+                steps: &steps,
+            },
+            now,
+            takes_before,
+        );
+        if composing && !session.composing() {
+            data.source.finish_composition(takes_before);
+        }
+        data.source.view().clone()
+    };
+    let mode = data.mode;
+    data.error = None;
+    drop(data);
+    let rewrite = if state.selection().json_id() != "text" && mode == EditorMode::Rich {
+        let kind = if state.selection().json_id() == "node" {
+            EditorSelection::Node(state.selection().from())
+        } else {
+            EditorSelection::All
+        };
+        let selected = markdown_source::normalize_selection(&doc, kind, changed, takes_before);
+        let mut tr = replace_document(
+            &state,
+            &selected.document,
+            selected.selection.range(&selected.document),
+        )?;
+        let json = match selected.selection {
+            EditorSelection::Node(anchor) => json!({"type":"node","anchor":anchor}),
+            EditorSelection::All => json!({"type":"all"}),
+            EditorSelection::Text(range) => {
+                json!({"type":"text","anchor":range.anchor,"head":range.head})
+            }
+        };
+        tr.set_selection(Selection::from_json(tr.doc(), &json)?);
+        Some(tr)
+    } else if state.doc().to_json() != rewrite.document || selection(&state) != rewrite.selection {
+        Some(replace_document(
+            &state,
+            &rewrite.document,
+            rewrite.selection,
+        )?)
+    } else {
+        None
+    };
+    if let Some(mut tr) = rewrite {
+        tr.set_add_to_history(false);
+        if let Some(marks) = state.stored_marks() {
+            tr.set_stored_marks(Some(marks.to_vec()));
+        }
+        let (next, transactions) = state.apply_transaction(tr)?;
+        state = next;
+        applied.extend(transactions);
+    }
+    session.commit(state, &applied);
+    Ok(())
+}
+
+struct ComposerDocumentPlugin(Arc<Mutex<EditorData>>);
+
+fn surround_selection(
+    state: &EditorState,
+    from: usize,
+    to: usize,
+    text: &str,
+) -> Result<Option<Transaction>, StateError> {
+    if state.selection().json_id() != "text"
+        || from == to
+        || state.selection().from() != from
+        || state.selection().to() != to
+    {
+        return Ok(None);
+    }
+    let closer = match text {
+        "(" => ")",
+        "[" => "]",
+        "{" => "}",
+        "'" => "'",
+        "\"" => "\"",
+        "“" => "”",
+        "`" => "`",
+        "<" => ">",
+        "«" => "»",
+        "*" => "*",
+        "_" => "_",
+        _ => return Ok(None),
+    };
+    let mut special = false;
+    state.doc().nodes_between(from, to, &mut |node, _, _, _| {
+        special |= node.is_atom() && node.is_inline() && !node.is_text()
+            || node.is_text()
+                && node
+                    .marks()
+                    .iter()
+                    .any(|mark| mark.ty().name() != markdown_source::SOURCE_MARK);
+        !special
+    });
+    let map = document::serialize_document(&state.doc().to_json());
+    if special
+        || source::selection_touches_mention_boundary(
+            &map.value,
+            SourceSelection {
+                anchor: map.flat_to_markdown(map.pm_to_flat(from)),
+                head: map.flat_to_markdown(map.pm_to_flat(to)),
+            },
+        )
+    {
+        return Ok(None);
+    }
+    let mark = match text {
+        "`" => Some(t3_client::thread_views::rich_text::Mark::Code),
+        "*" | "_" => Some(t3_client::thread_views::rich_text::Mark::Italic),
+        _ => None,
+    };
+    if let Some(mark) = mark
+        && state
+            .schema()
+            .mark_type(if text == "`" { "code" } else { "italic" })
+            .is_some()
+        && let Some(document) = document::surround_selection(&state.doc().to_json(), from, to, mark)
+    {
+        return replace_document(
+            state,
+            &document,
+            SourceSelection {
+                anchor: from,
+                head: to,
+            },
+        )
+        .map(Some);
+    }
+    let mut tr = state.tr();
+    tr.insert_text(closer, Some(to), Some(to))
+        .insert_text(text, Some(from), Some(from));
+    tr.set_selection(TextSelection::create(
+        tr.doc(),
+        from + utf16_len(text),
+        Some(to + utf16_len(text)),
+    ));
+    Ok(Some(tr))
+}
+
+fn error_transaction(state: &EditorState, error: impl std::fmt::Display) -> Transaction {
+    let mut tr = state.tr();
+    tr.set_meta("composerError", json!(error.to_string()));
+    tr
+}
+
+impl PluginSpec for ComposerDocumentPlugin {
+    fn handle_key_down(
+        &self,
+        state: &EditorState,
+        event: &KeyEvent,
+        dispatch: &mut dyn FnMut(Transaction),
+    ) -> bool {
+        if !event.mod_key || event.alt {
+            return false;
+        }
+        let redo = event.key.eq_ignore_ascii_case("y")
+            || (event.key.eq_ignore_ascii_case("z") && event.shift);
+        if !redo && !event.key.eq_ignore_ascii_case("z") {
+            return false;
+        }
+        match history_transaction(state, &self.0, redo) {
+            Ok(Some(tr)) => dispatch(tr),
+            Ok(None) => {}
+            Err(error) => dispatch(error_transaction(state, error)),
+        }
+        true
+    }
+
+    fn handle_text_input(
+        &self,
+        state: &EditorState,
+        from: usize,
+        to: usize,
+        text: &str,
+        dispatch: &mut dyn FnMut(Transaction),
+    ) -> bool {
+        let data = lock(&self.0);
+        if data.mode != EditorMode::Literal {
+            let surrounded = surround_selection(state, from, to, text);
+            match surrounded {
+                Ok(Some(mut tr)) => {
+                    tr.set_origin(TransactionOrigin::Input).scroll_into_view();
+                    drop(data);
+                    dispatch(tr);
+                    return true;
+                }
+                Err(error) => {
+                    drop(data);
+                    dispatch(error_transaction(state, error));
+                    return true;
+                }
+                Ok(None) => {}
+            }
+        }
+        if data.mode != EditorMode::Rich {
+            return false;
+        }
+        let marks = state
+            .stored_marks()
+            .map(|marks| marks.to_vec())
+            .unwrap_or_else(|| state.selection().resolved_from().marks());
+        let marks = marks.iter().map(|mark| mark.to_json()).collect::<Vec<_>>();
+        let Some(rewrite) = input_rules::type_text(
+            &mut lock(&data.pairs),
+            &state.doc().to_json(),
+            SourceSelection {
+                anchor: from,
+                head: to,
+            },
+            text,
+            &marks,
+            false,
+        ) else {
+            return false;
+        };
+        let result =
+            replace_document(state, &rewrite.document, rewrite.selection).and_then(|mut tr| {
+                let marks = rewrite
+                    .stored_marks
+                    .iter()
+                    .map(|mark| state.schema().mark_from_json(mark).map_err(invalid))
+                    .collect::<Result<Vec<_>, _>>()?;
+                tr.set_stored_marks(Some(marks))
+                    .set_origin(TransactionOrigin::Input)
+                    .scroll_into_view();
+                // Whole-tree view replacements must retain the original edit's grouping kind.
+                tr.set_meta(
+                    "composerInput",
+                    json!({"deleted":to-from,"inserted":utf16_len(text)}),
+                );
+                Ok(tr)
+            });
+        drop(data);
+        match result {
+            Ok(tr) => dispatch(tr),
+            Err(error) => dispatch(error_transaction(state, error)),
+        }
+        true
+    }
+
+    fn transform_pasted_html(&self, _state: &EditorState, _html: String) -> String {
+        // The web composer deliberately imports the plain-text payload, never foreign HTML styles.
+        String::new()
+    }
+
+    fn clipboard_text_parser(
+        &self,
+        state: &EditorState,
+        text: &str,
+        context: &ResolvedPos,
+        _plain: bool,
+    ) -> Option<Slice> {
+        let data = lock(&self.0);
+        let mut text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let tokens = if data.mode == EditorMode::Literal {
+            vec![]
+        } else {
+            source::collect_atoms(&format!("{text}\n"))
+        };
+        let source_marks = context.marks();
+        if !text.contains('\n')
+            && tokens.is_empty()
+            && source_marks
+                .iter()
+                .any(|mark| mark.ty().name() == markdown_source::SOURCE_MARK)
+        {
+            return Some(Slice::new(
+                Fragment::from(vec![state.schema().text(&text, source_marks)]),
+                0,
+                0,
+            ));
+        }
+        let chip = |token: &source::Atom| match token.kind {
+            source::AtomKind::Mention => true,
+            source::AtomKind::Skill => (data.resolvers.skill)(&token.value).is_some(),
+            source::AtomKind::Model => token
+                .value
+                .split_once('/')
+                .is_some_and(|(instance, model)| (data.resolvers.model)(instance, model)),
+            _ => false,
+        };
+        let pasted_length = utf16_len(&text);
+        if tokens
+            .last()
+            .is_some_and(|token| chip(token) && token.range.end == pasted_length)
+        {
+            text.push(' ');
+        }
+        if tokens
+            .first()
+            .is_some_and(|token| chip(token) && token.range.start == 0)
+        {
+            let map = document::serialize_document(&state.doc().to_json());
+            let offset = map.flat_to_markdown(map.pm_to_flat(state.selection().from()));
+            if source::utf16_byte_offset(&map.value, offset)
+                .and_then(|byte| map.value[..byte].chars().next_back())
+                .is_some_and(|ch| !ch.is_whitespace() && ch != '\u{feff}')
+            {
+                text.insert(0, ' ');
+            }
+        }
+        let nested = (1..=context.depth).any(|depth| {
+            matches!(
+                context.node(depth).ty().name(),
+                "listItem" | "taskItem" | "blockquote"
+            )
+        });
+        let line_before =
+            context
+                .parent()
+                .text_between(0, context.parent_offset, None, Some("\u{fffc}"));
+        let mut options = data.mode.options();
+        options.blocks = !nested;
+        options.literal_length = if options.literal {
+            0
+        } else {
+            pasted_path_query_length(&line_before, &text, data.path_query_active)
+        };
+        let value = document::build_document(
+            &text,
+            options,
+            |name| (data.resolvers.skill)(name),
+            |instance, model| (data.resolvers.model)(instance, model),
+        );
+        match tree(state.schema(), &value) {
+            Ok(doc) => Some(Slice::max_open(doc.content().clone(), true)),
+            Err(error) => {
+                drop(data);
+                lock(&self.0).error = Some(error.to_string());
+                Some(Slice::empty())
+            }
+        }
+    }
+
+    fn handle_paste(
+        &self,
+        state: &EditorState,
+        slice: &Slice,
+        dispatch: &mut dyn FnMut(Transaction),
+    ) -> bool {
+        let error = lock(&self.0).error.clone();
+        if let Some(error) = error {
+            dispatch(error_transaction(state, error));
+            return true;
+        }
+        let source_text = slice.content.iter().all(|node| {
+            node.is_text()
+                && node
+                    .marks()
+                    .iter()
+                    .any(|mark| mark.ty().name() == markdown_source::SOURCE_MARK)
+        });
+        if source_text && slice.open_start == 0 && slice.open_end == 0 {
+            let mut tr = state.tr();
+            tr.replace_selection(slice.clone())
+                .set_origin(TransactionOrigin::Paste)
+                .scroll_into_view();
+            dispatch(tr);
+            return true;
+        }
+        let collapsed = markdown_source::collapse(&state.doc().to_json(), selection(state), false);
+        let result =
+            replace_document(state, &collapsed.document, collapsed.selection).map(|mut tr| {
+                tr.replace_selection(slice.clone())
+                    .set_origin(TransactionOrigin::Paste)
+                    .scroll_into_view();
+                tr
+            });
+        match result {
+            Ok(tr) => dispatch(tr),
+            Err(error) => dispatch(error_transaction(state, error)),
+        }
+        true
+    }
+
+    fn clipboard_text_serializer(&self, state: &EditorState, _slice: &Slice) -> Option<String> {
+        document::serialize_selection(
+            &state.doc().to_json(),
+            state.selection().from(),
+            state.selection().to(),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct ComposerPromptEditorProps {
+    pub disabled: Prop<bool>,
+    /// English source; translated in the reactive binding.
+    pub placeholder: Prop<SharedString>,
+    pub aria_label: Prop<SharedString>,
+    pub context_count: Prop<usize>,
+}
+
+pub fn composer_prompt_editor_tiptap(
+    editor: ComposerEditor,
+    props: ComposerPromptEditorProps,
+    on_change: impl Fn(ComposerSnapshot) + 'static,
+    on_paste_files: impl Fn(&RichEditorPastedFiles) + 'static,
+) -> impl IntoElement {
+    composer_prompt_editor_tiptap_inner(editor, props, on_change, on_paste_files)
+}
+
+fn composer_prompt_editor_tiptap_inner(
+    editor: ComposerEditor,
+    props: ComposerPromptEditorProps,
+    on_change: impl Fn(ComposerSnapshot) + 'static,
+    on_paste_files: impl Fn(&RichEditorPastedFiles) + 'static,
+) -> impl IntoElement {
+    let snapshot = signal(editor.read_snapshot());
+    let error = signal(editor.error());
+    let handle = editor.clone();
+    let session = handle.session();
+    // Synchronizes the controlled read-only state with the imperative editor session.
+    effect(move || handle.set_disabled(props.disabled.get()));
+    let (sender, mut changes) = futures::channel::mpsc::unbounded();
+    let subscription = session.subscribe(Arc::new(move |_| {
+        let _ = sender.unbounded_send(());
+    }));
+    let subscribed = session.clone();
+    cleanup(move || subscribed.unsubscribe(subscription));
+    spawn(async move {
+        while changes.next().await.is_some() {
+            let next = editor.read_snapshot();
+            error.set(editor.error());
+            if snapshot.get_untracked() != next {
+                snapshot.set(next.clone());
+                if !editor.is_controlled_snapshot(&next) {
+                    on_change(next);
+                }
+            }
+        }
+    });
+    let content = rich_editor()
+        .editor(session)
+        .editable(move || !props.disabled.get())
+        .accessibility_label(move || {
+            let label = props.aria_label.get();
+            (!label.is_empty()).then(|| SharedString::from(t(label.as_str())))
+        })
+        .test_id("composer-editor")
+        // `2lh + spacing(2)` follows prompt sizing; native scroll replaces overflow-y-auto.
+        .app_class(tw("relative -m-1 block max-h-52 p-1 bg-transparent leading-relaxed text-foreground focus:outline-none"))
+        .min_h(move || px(prompt_size() * 3.25 + 8.0))
+        .classes(composer_editor_classes())
+        // Native preedit is outside the document; its placeholder hides itself during IME.
+        .placeholder(move || {
+            let source = props.placeholder.get();
+            (snapshot.with(|value| value.value.is_empty()) && props.context_count.get() == 0 && !source.is_empty())
+                .then(|| SharedString::from(t(source.as_str())))
+        })
+        .show_only_when_editable(false)
+        .on_paste_files(on_paste_files);
+    // NSH owns scrolling/wrapping; flow-root has no native meaning. Font fallbacks use tokens.
+    view()
+        .app_class(tw("relative"))
+        .text_size(move || px(prompt_size()))
+        .font_family(move || {
+            let tokens = theme::current_tokens();
+            SharedString::from(
+                tokens
+                    .font("font-composer")
+                    .or_else(|| tokens.font(nsh_core::element::FONT_SANS))
+                    .map_or(theme::INTER.family.to_owned(), |font| font.to_string()),
+            )
+        })
+        .child(content)
+        .child(dynamic(move || {
+            error
+                .get()
+                .map(|message| text(t(&message)).app_class(tw("text-sm text-destructive")))
+        }))
+}
+
+fn prompt_size() -> f32 {
+    let size = theme::current_tokens()
+        .number("font-size-prompt")
+        .unwrap_or(14.0);
+    if layout_class().is_compact() && pointer() == Pointer::Coarse {
+        size.max(16.0)
+    } else {
+        size
+    }
+}
+
+fn composer_editor_classes() -> RichEditorClasses {
+    let mut classes = RichEditorClasses::default();
+    classes.caret = Some(tw("bg-foreground"));
+    classes.selection = Some(tw("bg-primary/20"));
+    classes.placeholder = Some(tw("leading-relaxed text-placeholder"));
+    classes.selected_node = Some(tw("rounded-md ring-2 ring-inset ring-ring"));
+    // `index.css`'s `.composer-tiptap` node and mark selectors, applied to their parts.
+    classes.nodes = Some(BTreeMap::from([
+        ("paragraph".into(), tw("m-0").to_string()),
+        ("bulletList".into(), tw("my-[10.4px] pl-5").to_string()),
+        ("orderedList".into(), tw("my-[10.4px] pl-5").to_string()),
+        ("taskList".into(), tw("m-0 p-0").to_string()),
+        ("taskItem".into(), tw("flex items-start gap-2 m-0 p-0").to_string()),
+        ("blockquote".into(), tw("my-[10.4px] border-l-2 border-foreground/35 pl-[12.8px]").to_string()),
+        ("horizontalRule".into(), tw("my-[10.4px] border-t border-border dark:border-contrast-muted-foreground").to_string()),
+        ("codeBlock".into(), tw("rounded-lg border border-border bg-code-background p-3 font-mono text-code-foreground").to_string()),
+        ("heading".into(), tw("mt-5 mb-2 font-semibold leading-[1.3] text-contrast-foreground").to_string()),
+        ("heading[level=1]".into(), tw("text-xl").to_string()),
+        ("heading[level=2]".into(), tw("text-lg").to_string()),
+        ("heading[level=3]".into(), tw("text-base").to_string()),
+        ("heading[level=4]".into(), tw("text-sm").to_string()),
+        ("heading[level=5]".into(), tw("text-sm").to_string()),
+        ("heading[level=6]".into(), tw("text-sm text-contrast-muted-foreground").to_string()),
+    ]));
+    classes.marks = Some(BTreeMap::from([
+        ("bold".into(), tw("font-bold").to_string()),
+        ("italic".into(), tw("italic").to_string()),
+        ("strike".into(), tw("line-through").to_string()),
+        ("code".into(), tw("font-mono bg-muted-foreground/12 rounded-[4.2px] px-[3.5px] py-[0.7px] text-[12.88px]").to_string()),
+    ]));
+    classes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolvers() -> ComposerResolvers {
+        ComposerResolvers {
+            skill: Arc::new(|name| Some((name.into(), None))),
+            model: Arc::new(|_, _| true),
+        }
+    }
+
+    fn editor(value: &str) -> ComposerEditor {
+        ComposerEditor::new(value, 0, EditorMode::Rich, resolvers()).expect("editor")
+    }
+
+    fn parse(value: &str, mode: EditorMode) -> Node {
+        let schema = composer_schema(mode).expect("T3 schema");
+        let value = document::build_document(
+            value,
+            mode.options(),
+            |name| Some((name.into(), None)),
+            |_, _| true,
+        );
+        tree(&schema, &value).expect("client document is valid against the native schema")
+    }
+
+    fn type_text(editor: &ComposerEditor, text: &str) {
+        for ch in text.chars() {
+            let state = editor.session.state();
+            let handled = state.plugins().iter().any(|plugin| {
+                plugin.handle_text_input(
+                    &state,
+                    state.selection().from(),
+                    state.selection().to(),
+                    &ch.to_string(),
+                    &mut |tr| editor.dispatch(tr).expect("type"),
+                )
+            });
+            if !handled {
+                let mut tr = state.tr();
+                tr.insert_text(&ch.to_string(), None, None)
+                    .set_origin(TransactionOrigin::Input);
+                editor.dispatch(tr).expect("insert text");
+            }
+        }
+    }
+
+    fn paste(editor: &ComposerEditor, text: &str) {
+        let state = editor.session.state();
+        let slice = state
+            .plugins()
+            .iter()
+            .find_map(|plugin| {
+                plugin.clipboard_text_parser(&state, text, state.selection().resolved_from(), false)
+            })
+            .expect("composer paste parser");
+        assert!(state.plugins().iter().any(|plugin| plugin.handle_paste(
+            &state,
+            &slice,
+            &mut |tr| editor.dispatch(tr).expect("paste")
+        )));
+    }
+
+    #[test]
+    fn ts_document_round_trips_validate_every_node_against_the_nsh_schema() {
+        // composer-rich-text-doc.test.ts: round trips, lists, quotes, headings, rules and fences.
+        for source in [
+            "",
+            "\n\n",
+            "plain text",
+            "hello **bold** world",
+            "a *italic* word and `code` here",
+            "struck ~~out~~ now",
+            "**`x`**",
+            "*`x`*",
+            "~~`x`~~",
+            "**a `code` c**",
+            "***bold italic*** keeps nesting",
+            "line one\nline two",
+            "trailing newline\n",
+            "1. foo\n2. asdf\n",
+            "- [ ] buy milk",
+            "-   [ ]  buy milk",
+            "\t-\t[x]\t\titem",
+            "- [ ]  ",
+            "- [ ]\n  - [ ] child",
+            "  - [ ] first\n - [ ] second\n  - [ ] child",
+            "**before @README.md after**",
+            "*a **b** c*",
+            "*a**b***",
+            "**a*b***",
+            "**a *b* c**",
+            "literal \u{fffc} **before @README.md after**",
+            "- [x] done\n- [ ] next",
+            "- [ ] parent\n  - [ ] child\n  - [ ] sibling\n- [ ] uncle",
+            "- [ ] empty task follows\n- [ ]",
+            "- [ ] **bold** task with @README.md",
+            "para\n- [ ] task\npara",
+            "- [ ]No space stays literal",
+            "-[ ] also literal",
+            "@README.md explain this",
+            "@\"docs/My File.md\" and $my-skill please",
+            "snake_case stays literal",
+            "unmatched ** stays literal",
+            "**bold** then @README.md then *italic*",
+            "- one\n- two",
+            "* star\n* star two",
+            "+ plus",
+            "* star\n+ plus",
+            "1. first\n2. second",
+            "1) paren\n2) paren",
+            "3. starts at three\n4. four",
+            "01. zero padded\n02. two",
+            "- parent\n  - child\n  - sibling\n- uncle",
+            "1. ordered\n   - bullet child\n2. next",
+            "- outer\n  1. inner ordered\n  2. more\n- outer again",
+            "-   wide space item",
+            "-",
+            "1.",
+            "- \n- second",
+            "- **bold** item with @README.md",
+            "- [ ] task\n- bullet after",
+            "- bullet\n- [x] task after",
+            "para\n- item\npara",
+            "\t- tab indented\n\t- again",
+            "  - leading indent only",
+            "- item\n\n- after a blank",
+            "- item one\n```ts\ncode\n```\n- item two",
+            "-no space stays literal",
+            "1.no space stays literal",
+            "10. ten\n11. eleven",
+            "> quoted",
+            "> line one\n> line two",
+            ">no space",
+            ">  two spaces",
+            "> a\n>b",
+            ">",
+            "> **bold** and @README.md inside",
+            "> - looks like a list but stays quote text",
+            "> > nested stays literal inside the quote",
+            "before\n> quoted",
+            "> quote\n\n> another",
+            "- item\n> quote after list",
+            "> quoted\n\ncomment",
+            "> line one\n> line two\n\ncomment",
+            "---",
+            "***",
+            "___",
+            "- - -",
+            "* * *",
+            "-----",
+            "---   ",
+            "text\n---\nmore",
+            "- item\n---\n- item two",
+            "```\n---\n```",
+            "--",
+            "-- -",
+            "---text",
+            "# Heading",
+            "## Two",
+            "###### Six",
+            "####### seven hashes stays a paragraph",
+            "#  two spaces",
+            "#\tTab",
+            "# Trailing hashes stay literal #",
+            "#1234",
+            "#1234 is a pull request, not a heading",
+            "# Heading with **bold** and @README.md",
+            "#",
+            "# ",
+            "text\n# Heading\ntext",
+            "# Heading\n- item\n> quote\n---",
+            "```\ncode\n```",
+            "```ts\nconst a = 1;\n```",
+            "```ts\nconst a = 1;\n```\n",
+            "before\n```ts\nconst a = 1;\n```\nafter",
+            "```\n```",
+            "```ts\nline one\nline two\nline three\n```",
+            "```ts\n  indented\n    deeper\n```",
+            "```js title=example\ncode\n```",
+            "~~~py\ncode\n~~~",
+            "````\n```\n````",
+            "```ts\ncode without a closing fence",
+            "```",
+            "```ts\n**not bold** and @README.md stay literal\n```",
+            "```ts\ncode\n````",
+            "- [ ] task\n```ts\ncode\n```\n- [ ] after",
+            "  ```ts\nindented fence stays a paragraph\n  ```",
+            "# Title\r\n> quote\r\n---\r\n```ts\r\nconst a = 1;\r\n```\r\nafter",
+            "before $x + @README.md$ after",
+            "before \\(x + @README.md\\) after",
+            "\\[x + @README.md\\] after",
+            "Area $x_i^2$ after",
+            "before \\(\\frac{1}{2}\\) after",
+            "before $$x^2$$ after",
+            "\\[\nx = 1\ny = 2\n\\]",
+            "- **use** $x_i$ then @README.md",
+        ] {
+            let doc = parse(source, EditorMode::Rich);
+            assert_eq!(
+                document::serialize_document(&doc.to_json()).value,
+                source,
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_and_literal_modes_keep_markers_and_literal_answers_keep_crlf_and_context_text() {
+        for mode in [EditorMode::Plain, EditorMode::Literal] {
+            for value in [
+                "",
+                "\n\n",
+                "hello **bold** stays literal",
+                "a *italic* stays literal",
+                "some `code` stays literal",
+                "- [ ] stays a paragraph",
+                "line one\nline two",
+                "@README.md explain this",
+            ] {
+                let doc = parse(value, mode);
+                assert_eq!(document::serialize_document(&doc.to_json()).value, value);
+                assert!(
+                    doc.content()
+                        .iter()
+                        .all(|node| node.ty().name() == "paragraph")
+                );
+            }
+        }
+        for value in [
+            "  - [X] done\n\n**keep** €my-skill @README.md  \n",
+            "line one\r\nline two\r\n",
+            "[file](t3-context://v1/file/ctx_1)",
+        ] {
+            let doc = parse(value, EditorMode::Literal);
+            let map = document::serialize_document(&doc.to_json());
+            assert_eq!(map.value, value);
+            let editor = ComposerEditor::new(value, 0, EditorMode::Literal, resolvers())
+                .expect("literal editor");
+            assert!(editor.read_snapshot().context_ids.is_empty());
+            assert_eq!(
+                document::serialize_selection(&doc.to_json(), 1, doc.content().size() - 1)
+                    .as_deref(),
+                Some(value)
+            );
+        }
+    }
+
+    #[test]
+    fn flat_markdown_and_native_positions_round_trip_utf16_and_atoms() {
+        for value in [
+            "",
+            "\n",
+            "text\n\n",
+            "😀 **café** @README.md after",
+            "- [ ] parent\n  - [ ] child\n- [ ]",
+            "**before @README.md after**",
+            "```ts\na😀b\n```",
+            "before\n```\n```",
+        ] {
+            let doc = parse(value, EditorMode::Rich);
+            let map = document::serialize_document(&doc.to_json());
+            for flat in 0..=map.doc_length {
+                let pos = map.flat_to_pm(flat);
+                assert!(
+                    doc.resolve(pos)
+                        .expect("native position")
+                        .parent()
+                        .is_textblock(),
+                    "{value:?} flat={flat}"
+                );
+                assert_eq!(map.pm_to_flat(pos), flat, "{value:?}");
+                assert_eq!(
+                    map.markdown_to_flat(map.flat_to_markdown(flat)),
+                    flat,
+                    "{value:?}"
+                );
+            }
+        }
+        let doc = parse("- item", EditorMode::Rich);
+        let map = document::serialize_document(&doc.to_json());
+        for offset in 0..=2 {
+            assert_eq!(map.markdown_to_flat(offset), 0);
+        }
+        assert_eq!(map.flat_to_markdown(0), 2);
+    }
+
+    #[test]
+    fn pasted_code_is_parsed_once_and_crlf_preserves_blank_lines() {
+        for text in ["see `**x**` now", "plain **bold** after"] {
+            let editor = editor("");
+            paste(&editor, text);
+            assert_eq!(editor.read_snapshot().value, text);
+            assert!(editor.undo().expect("undo paste"));
+            assert_eq!(editor.read_snapshot().value, "");
+            assert!(editor.redo().expect("redo paste"));
+            assert_eq!(editor.read_snapshot().value, text);
+        }
+        for text in ["x\r\n\r\ny", "x\r\ry"] {
+            let editor = editor("");
+            paste(&editor, text);
+            assert_eq!(editor.read_snapshot().value, "x\n\ny");
+            assert_eq!(editor.session.state().doc().child_count(), 3);
+        }
+    }
+
+    #[test]
+    fn pasted_urls_and_paths_keep_their_underscores() {
+        let editor = editor("");
+        let source = "Read https://example.com/_handle_/status/1 and open src/__test__.tsx";
+        paste(&editor, source);
+        assert_eq!(editor.read_snapshot().value, source);
+    }
+
+    #[test]
+    fn source_reveal_edits_markers_and_undo_does_not_record_selection_rewrites() {
+        let editor = editor("");
+        paste(&editor, "**bold** after");
+        editor.select_markdown_offset(4).expect("reveal bold");
+        assert_eq!(
+            editor.session.state().doc().text_content(),
+            "**bold** after"
+        );
+        editor.select_markdown_offset(0).expect("opening marker");
+        let state = editor.session.state();
+        let mut tr = state.tr();
+        tr.delete(state.selection().from(), state.selection().from() + 2)
+            .expect("delete markers");
+        editor.dispatch(tr).expect("marker edit");
+        editor.focus_at_end().expect("leave source");
+        assert_eq!(editor.read_snapshot().value, "bold** after");
+        assert!(editor.undo().expect("undo marker edit"));
+        assert_eq!(editor.read_snapshot().value, "**bold** after");
+        assert!(editor.undo().expect("undo paste"));
+        assert_eq!(editor.read_snapshot().value, "");
+        assert!(editor.redo().expect("redo paste"));
+        assert!(editor.redo().expect("redo marker edit"));
+        assert_eq!(editor.read_snapshot().value, "bold** after");
+    }
+
+    #[test]
+    fn typing_groups_by_the_actual_edit_and_read_only_history_cannot_consume_it() {
+        let editor = editor("");
+        type_text(&editor, "hello");
+        assert_eq!(editor.read_snapshot().value, "hello");
+        editor.set_disabled(true);
+        assert!(!editor.undo().expect("read only undo"));
+        let state = editor.session.state();
+        let mut tr = state.tr();
+        let attempted_edit = "discarded";
+        tr.insert_text(attempted_edit, None, None);
+        editor.dispatch(tr).expect("read only transaction");
+        assert_eq!(editor.read_snapshot().value, "hello");
+        editor.set_disabled(false);
+        assert!(editor.undo().expect("undo typing"));
+        assert_eq!(editor.read_snapshot().value, "");
+        assert!(editor.redo().expect("redo typing"));
+        assert_eq!(editor.read_snapshot().value, "hello");
+    }
+
+    #[test]
+    fn unknown_dollar_names_keep_the_exact_caret_through_mode_switches() {
+        let editor = ComposerEditor::new(
+            "echo $HOME now",
+            0,
+            EditorMode::Rich,
+            ComposerResolvers::default(),
+        )
+        .expect("unknown skill remains text");
+        editor
+            .select_markdown_offset(8)
+            .expect("caret inside unknown dollar text");
+        let initial = editor.read_snapshot();
+        assert_eq!(initial.expanded_cursor, 8);
+        for mode in [
+            EditorMode::Plain,
+            EditorMode::Rich,
+            EditorMode::Literal,
+            EditorMode::Rich,
+        ] {
+            editor.set_mode(mode).expect("mode switch");
+            assert_eq!(editor.read_snapshot().expanded_cursor, 8);
+        }
+        type_text(&editor, "X");
+        assert_eq!(editor.read_snapshot().value, "echo $HOXME now");
+        editor.sync("Draft B", 7).expect("switch drafts");
+        assert!(!editor.undo().expect("old draft cannot be restored"));
+        assert_eq!(editor.read_snapshot().value, "Draft B");
+    }
+
+    #[test]
+    fn schema_rejects_unsupported_nested_blocks_instead_of_silently_dropping_them() {
+        let schema = composer_schema(EditorMode::Rich).expect("schema");
+        for value in [
+            json!({"type":"doc","content":[{"type":"image","attrs":{"src":"secret"}}]}),
+            json!({"type":"doc","content":[{"type":"blockquote","content":[{"type":"heading","content":[{"type":"text","text":"keep me"}]}]}]}),
+            json!({"type":"doc","content":[{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph"},{"type":"paragraph"}]}]}]}),
+        ] {
+            assert!(tree(&schema, &value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn pasting_a_chip_adds_boundary_spaces_and_pasting_inside_shown_source_keeps_its_marks() {
+        let first = editor("hello");
+        first.focus_at_end().expect("end");
+        paste(&first, "@README.md");
+        assert_eq!(first.read_snapshot().value, "hello @README.md ");
+        let second = editor("**bold** after");
+        second.select_markdown_offset(4).expect("inside source");
+        paste(&second, "X");
+        second.focus_at_end().expect("leave source");
+        assert_eq!(second.read_snapshot().value, "**boXld** after");
+        let third = editor("before\n");
+        third.focus_at_end().expect("empty second line");
+        paste(&third, "---");
+        assert_eq!(third.read_snapshot().value, "before\n---");
+        assert!(
+            third
+                .session
+                .state()
+                .selection()
+                .resolved_from()
+                .parent()
+                .is_textblock()
+        );
+    }
+
+    #[test]
+    fn provider_refresh_keeps_source_caret_and_undo_never_restores_stale_chips() {
+        let editor = ComposerEditor::new(
+            "$browser after",
+            0,
+            EditorMode::Rich,
+            ComposerResolvers::default(),
+        )
+        .expect("unknown skill");
+        editor.focus_at_end().expect("caret");
+        editor.set_disabled(true);
+        editor.set_resolvers(resolvers()).expect("skills load");
+        assert!(
+            editor.session.state().doc().to_json()["content"][0]["content"]
+                .as_array()
+                .expect("inline content")
+                .iter()
+                .any(|node| node["type"] == "composer-skill")
+        );
+        editor.set_disabled(false);
+        type_text(&editor, "!");
+        editor
+            .set_resolvers(ComposerResolvers::default())
+            .expect("provider removed skill");
+        assert_eq!(editor.read_snapshot().value, "$browser after!");
+        assert!(editor.undo().expect("undo typed edit"));
+        assert_eq!(editor.read_snapshot().value, "$browser after");
+        assert!(
+            editor.session.state().doc().to_json()["content"][0]["content"]
+                .as_array()
+                .expect("inline content")
+                .iter()
+                .all(|node| node["type"] != "composer-skill")
+        );
+    }
+
+    #[test]
+    fn selected_styled_atoms_remain_node_selections_when_source_is_revealed() {
+        let editor = editor("$browser after");
+        let state = editor.session.state();
+        let mut tr = state.tr();
+        tr.add_mark(
+            1,
+            2,
+            state
+                .schema()
+                .mark_type("bold")
+                .expect("bold type")
+                .create(None)
+                .expect("bold mark"),
+        )
+        .expect("style chip");
+        editor.dispatch(tr).expect("apply bold");
+        let state = editor.session.state();
+        let doc = state.doc().to_json();
+        let pos = document::serialize_document(&doc)
+            .runs
+            .iter()
+            .find(|run| run.node_name.as_deref() == Some("composer-skill"))
+            .expect("skill run")
+            .pm_pos;
+        let mut tr = state.tr();
+        tr.set_selection(nsh_base::rich_editor::state::NodeSelection::create(
+            state.doc(),
+            pos,
+        ));
+        editor.dispatch(tr).expect("select chip");
+        assert_eq!(editor.session.state().selection().json_id(), "node");
+        let state = editor.session.state();
+        assert_eq!(
+            state
+                .doc()
+                .node_at(state.selection().from())
+                .expect("selected atom")
+                .ty()
+                .name(),
+            "composer-skill"
+        );
+        assert_eq!(editor.read_snapshot().value, "**$browser** after");
+    }
+
+    #[test]
+    fn typing_after_closed_inline_marks_uses_the_plain_caret_stop() {
+        for value in ["`Test`", "**Test**"] {
+            let editor = editor("");
+            type_text(&editor, value);
+            type_text(&editor, "f");
+            editor.focus_at_end().expect("leave source");
+            assert_eq!(editor.read_snapshot().value, format!("{value}f"));
+        }
+    }
+
+    #[test]
+    fn a_native_split_after_closed_code_or_bold_starts_a_plain_line() {
+        for value in ["`Test`", "**Test**"] {
+            let editor = editor("");
+            type_text(&editor, value);
+            assert!(
+                editor
+                    .session
+                    .run(&nsh_base::rich_editor::commands::command(
+                        nsh_base::rich_editor::commands::split_block_keep_marks
+                    ))
+            );
+            type_text(&editor, "f");
+            editor.focus_at_end().expect("leave source");
+            assert_eq!(editor.read_snapshot().value, format!("{value}\nf"));
+            let state = editor.session.state();
+            let last = state.doc().last_child().expect("second line");
+            assert!(last.content().iter().all(|node| node.marks().is_empty()));
+        }
+    }
+
+    #[test]
+    fn typing_delimiters_surrounds_plain_selections_without_replacing_their_text() {
+        for mode in [EditorMode::Rich, EditorMode::Plain] {
+            for (typed, expected) in [
+                ("(", "(word)"),
+                ("\"", "\"word\""),
+                ("*", "*word*"),
+                ("`", "`word`"),
+            ] {
+                let editor = ComposerEditor::new("word", 0, mode, ComposerResolvers::default())
+                    .expect("editor");
+                let state = editor.session.state();
+                let mut tr = state.tr();
+                tr.set_selection(TextSelection::create(state.doc(), 1, Some(5)));
+                editor.dispatch(tr).expect("select word");
+                type_text(&editor, typed);
+                editor.focus_at_end().expect("leave source");
+                assert_eq!(editor.read_snapshot().value, expected, "{mode:?} {typed}");
+            }
+        }
+    }
+
+    #[test]
+    fn switching_draft_keys_discards_history_even_when_the_text_is_identical() {
+        let editor = editor("");
+        editor.sync_draft("a", "", 0).expect("draft a");
+        type_text(&editor, "hello");
+        editor.sync_draft("b", "hello", 5).expect("draft b");
+        assert!(!editor.undo().expect("draft a is not in draft b's history"));
+        assert_eq!(editor.read_snapshot().value, "hello");
+        type_text(&editor, "!");
+        assert!(editor.undo().expect("draft b has its own history"));
+        assert_eq!(editor.read_snapshot().value, "hello");
+    }
+}
