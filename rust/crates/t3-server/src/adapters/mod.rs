@@ -1,3 +1,5 @@
+#[cfg(feature = "providers")]
+pub mod acp_registry;
 #[cfg(feature = "local-services")]
 pub mod auth;
 #[cfg(feature = "local-services")]

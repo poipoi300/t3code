@@ -64,10 +64,12 @@ impl ScriptedAdapter {
     fn new() -> Self {
         Self {
             instance: ProviderInstanceId("replay".into()),
-            capabilities: serde_json::from_value(
-                sample("OrchestrationV2ProviderSession")["capabilities"].clone(),
-            )
-            .expect("capabilities"),
+            capabilities: {
+                let mut capabilities = sample("OrchestrationV2ProviderSession")["capabilities"].clone();
+                // The conversation rewinds with the files (`rollback` below).
+                capabilities["threads"]["canRollbackThread"] = true.into();
+                serde_json::from_value(capabilities).expect("capabilities")
+            },
         }
     }
 }
@@ -244,8 +246,15 @@ impl SessionRuntime for ScriptedSession {
     ) -> ProviderResult<ThreadSnapshot> {
         Err(ProviderError::Unsupported("snapshot"))
     }
-    async fn rollback(&self, _input: RollbackInput) -> ProviderResult<ThreadSnapshot> {
-        Err(ProviderError::Unsupported("rollback"))
+    async fn rollback(&self, input: RollbackInput) -> ProviderResult<ThreadSnapshot> {
+        Ok(ThreadSnapshot {
+            provider_thread: input.provider_thread,
+            provider_turns: Vec::new(),
+            messages: Vec::new(),
+            reasoning_message_ids: None,
+            runtime_requests: Vec::new(),
+            provider_payload: None,
+        })
     }
     async fn fork(&self, _input: ForkInput) -> ProviderResult<OrchestrationV2ProviderThread> {
         Err(ProviderError::Unsupported("fork"))
@@ -1161,6 +1170,236 @@ async fn the_managed_policy_caps_thread_runtime_modes() {
     assert!(
         refused_text(&switched).contains("Acme limits threads to Auto-accept edits."),
         "{switched}"
+    );
+    server.shutdown().await.unwrap();
+}
+
+/// Waits on `subscribeThread` for the first chunk whose text contains one of `needles`, and
+/// returns that needle.
+async fn thread_outcome(
+    socket: &mut Socket,
+    client: &mut Client,
+    subscription: t3_rpc::RequestId,
+    needles: &[&'static str],
+) -> &'static str {
+    loop {
+        match event(socket, client).await {
+            CallEvent::Chunk { id, values } if id == subscription => {
+                client.acknowledge(id);
+                let text = Value::Array(values).to_string();
+                if let Some(needle) = needles.iter().find(|needle| text.contains(**needle)) {
+                    return needle;
+                }
+            }
+            CallEvent::Chunk { id, .. } => client.acknowledge(id),
+            CallEvent::Exit { id, exit } if id == subscription => {
+                panic!("subscription ended: {}", serde_json::to_value(exit).unwrap())
+            }
+            _ => {}
+        }
+    }
+}
+
+/// t3-git H-2 at the server: a file restore refuses while the thread has a live terminal,
+/// naming it, and goes ahead once the terminal is closed.
+#[tokio::test]
+async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    std::fs::create_dir_all(home.join("userdata")).unwrap();
+    std::fs::write(
+        home.join("userdata").join("settings.json"),
+        r#"{"providerInstances":{"replay":{"driver":"replay","enabled":true}}}"#,
+    )
+    .unwrap();
+    let workspace = home.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("tracked.txt"), "first\n").unwrap();
+    let gitconfig = home.join("gitconfig");
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=T3", "-c", "user.email=t3@example.invalid"])
+            .args(args)
+            .current_dir(&workspace)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "first"]);
+    // A shell for the terminal, and nothing of the developer's profile.
+    let mut env = std::collections::BTreeMap::new();
+    for key in ["PATH", "SystemRoot", "ComSpec", "WINDIR", "SHELL"] {
+        if let Ok(value) = std::env::var(key) {
+            env.insert(key.to_owned(), value);
+        }
+    }
+    for key in ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"] {
+        env.insert(key.to_owned(), home.to_string_lossy().into_owned());
+    }
+    env.insert(
+        "GIT_CONFIG_GLOBAL".into(),
+        gitconfig.to_string_lossy().into_owned(),
+    );
+    let server = t3_server::runtime::start_with(
+        ConfigInputs {
+            flags: ServerFlags {
+                base_dir: Some(home.to_string_lossy().into_owned()),
+                host: Some("127.0.0.1".into()),
+                port: Some(0),
+                ..Default::default()
+            },
+            env,
+            home: home.into(),
+            process_cwd: home.into(),
+            bootstrap: None,
+            headless: true,
+            force_auto_bootstrap: Some(false),
+            service_managed: false,
+            cli_log_level: None,
+            automatic_port: None,
+            persisted_observability: Default::default(),
+            static_dir: None,
+        },
+        StartOptions {
+            providers: vec![Arc::new(ScriptedAdapter::new())],
+            dev_replay: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let layout = t3_config::home::HomeLayout {
+        base_dir: home.into(),
+        state_dir: home.join("userdata"),
+    };
+    t3_persistence::rusqlite::Connection::open(layout.database())
+        .unwrap()
+        .execute(
+            "INSERT INTO projection_projects
+             (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+             VALUES ('project:restore', 'Restore', ?1, '[]', '2026-11-13T12:00:00.000Z', '2026-11-13T12:00:00.000Z')",
+            [workspace.to_string_lossy()],
+        )
+        .unwrap();
+    let (mut socket, mut client) = admin_socket(&server).await;
+    let thread = "thread:restore";
+    let folder = workspace.to_string_lossy().into_owned();
+    let created = call_exit(
+        &mut socket,
+        &mut client,
+        "orchestration.dispatchCommand",
+        json!({"type":"thread.create","commandId":"command:thread","threadId":thread,"projectId":"project:restore","title":"Restore","modelSelection":{"instanceId":"replay","model":"replay-model"},"runtimeMode":"full-access","interactionMode":"default","branch":"main","worktreePath":folder,"createdBy":"user","creationSource":"web"}),
+    )
+    .await;
+    assert_eq!(created["_tag"], "Success", "{created}");
+    let subscription = client
+        .start(
+            "orchestration.subscribeThread",
+            json!({"threadId": thread}),
+            CallKind::Stream,
+        )
+        .unwrap();
+    let sent = call_exit(
+        &mut socket,
+        &mut client,
+        "orchestration.dispatchCommand",
+        json!({"type":"message.dispatch","commandId":"command:message","threadId":thread,"messageId":"message:restore","text":"Hello","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"}),
+    )
+    .await;
+    assert_eq!(sent["_tag"], "Success", "{sent}");
+    thread_outcome(&mut socket, &mut client, subscription, &["\"completed\""]).await;
+
+    // The thread-start checkpoint, as the client's rewind picks it.
+    let origin = format!("http://{}", server.address);
+    let http = reqwest::Client::new();
+    let cookie = http
+        .post(format!("{origin}/api/auth/browser-session"))
+        .json(&json!({"credential": server.pairing_credential}))
+        .send()
+        .await
+        .unwrap()
+        .headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let snapshot: Value = http
+        .get(format!("{origin}/api/orchestration/threads/{thread}"))
+        .header("cookie", &cookie)
+        .header("x-t3-orchestration-protocol", "2")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let checkpoint = snapshot["checkpoints"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|checkpoint| checkpoint["ordinalWithinScope"] == 0 && checkpoint["status"] == "ready")
+        .unwrap_or_else(|| panic!("no thread-start checkpoint: {snapshot}"))
+        .clone();
+    let rollback = |id: &str| json!({"type":"checkpoint.rollback","commandId":id,"threadId":thread,"checkpointId":checkpoint["id"],"scopeId":checkpoint["scopeId"],"restoreFiles":true});
+
+    let opened = call_exit(
+        &mut socket,
+        &mut client,
+        "terminal.open",
+        json!({"threadId":thread,"terminalId":"writer","cwd":folder,"worktreePath":folder}),
+    )
+    .await;
+    assert_eq!(opened["_tag"], "Success", "{opened}");
+    let refused = call_exit(
+        &mut socket,
+        &mut client,
+        "orchestration.dispatchCommand",
+        rollback("command:rollback-refused"),
+    )
+    .await;
+    assert_eq!(refused["_tag"], "Success", "{refused}");
+    assert_eq!(
+        thread_outcome(
+            &mut socket,
+            &mut client,
+            subscription,
+            &["still writing to its folder: terminal `", "\"rolled_back\""],
+        )
+        .await,
+        "still writing to its folder: terminal `",
+    );
+
+    let closed = call_exit(
+        &mut socket,
+        &mut client,
+        "terminal.close",
+        json!({"threadId":thread,"terminalId":"writer","deleteHistory":true}),
+    )
+    .await;
+    assert_eq!(closed["_tag"], "Success", "{closed}");
+    let restored = call_exit(
+        &mut socket,
+        &mut client,
+        "orchestration.dispatchCommand",
+        rollback("command:rollback"),
+    )
+    .await;
+    assert_eq!(restored["_tag"], "Success", "{restored}");
+    assert_eq!(
+        thread_outcome(
+            &mut socket,
+            &mut client,
+            subscription,
+            &["\"rolled_back\"", "could not roll back", "Files can't be restored"],
+        )
+        .await,
+        "\"rolled_back\"",
     );
     server.shutdown().await.unwrap();
 }

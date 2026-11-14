@@ -3,17 +3,15 @@ use crate::services::{DomainContext, DomainRuntime, Domains};
 use futures::{StreamExt, future::BoxFuture};
 use std::{
     collections::BTreeMap,
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
 };
 use t3_contracts::{
-    base_schemas::{ProjectId, ThreadId},
     provider_instance::ProviderInstanceId,
     provider_setup::{ProviderSetupError, ProviderSetupErrorTag},
     server::*,
 };
 use t3_provider::{
-    acp_service::*,
     auth::{CredentialBinding, SessionStopper},
     domain::*,
     host::ProviderSessions,
@@ -139,6 +137,7 @@ impl ProvidersAdapter {
         let (_, mut lifecycle) = context.local.lifecycle.subscribe()?;
         let cancel = context.shutdown.clone();
         let sessions = Arc::new(Sessions(runtime.sessions.clone()));
+        let acp_host = crate::adapters::acp_registry::AcpHost::new(runtime.clone());
         #[cfg(unix)]
         let owner_uid = Some(rustix::process::getuid().as_raw());
         #[cfg(not(unix))]
@@ -172,7 +171,7 @@ impl ProvidersAdapter {
                 clock: effects.clock.clone(),
                 sessions: sessions.clone(),
                 stopper: sessions,
-                acp_host: Arc::new(UnboundAcpHost),
+                acp_host: acp_host.clone(),
                 background: receiver,
                 codex: CodexInstallEffects {
                     transport: effects.codex.transport.clone(),
@@ -193,6 +192,7 @@ impl ProvidersAdapter {
         )
         .await
         .map_err(start_error)?;
+        acp_host.bind(&domain);
         #[cfg(feature = "host")]
         let host = domains.get::<crate::adapters::host::HostAdapter>();
         #[cfg(feature = "host")]
@@ -618,37 +618,6 @@ impl SessionStopper for Sessions {
             return Err(ServiceError::StopSessions);
         }
         self.retire(id).await
-    }
-}
-struct UnboundAcpHost;
-fn acp_unbound() -> AcpError {
-    AcpError::new(
-        t3_contracts::acp_registry::AcpRegistryOperationErrorReason::InstanceNotFound,
-        "The native ACP session host is not assembled.",
-    )
-}
-#[async_trait::async_trait]
-impl AcpSessionHost for UnboundAcpHost {
-    async fn project_workspace(&self, _: &ProjectId) -> AcpResult<PathBuf> {
-        Err(acp_unbound())
-    }
-    async fn instance(&self, _: &ProviderInstanceId) -> AcpResult<AcpInstance> {
-        Err(acp_unbound())
-    }
-    async fn thread(&self, _: &ThreadId) -> AcpResult<Option<ImportedThread>> {
-        Err(acp_unbound())
-    }
-    async fn launch_import(&self, _: ImportLaunch) -> AcpResult<()> {
-        Err(acp_unbound())
-    }
-    async fn import_history(&self, _: &ThreadId, _: &Path) -> AcpResult<()> {
-        Err(acp_unbound())
-    }
-    async fn close_sessions(&self, _: &ProviderInstanceId) -> AcpResult<()> {
-        Err(acp_unbound())
-    }
-    async fn refresh(&self, _: &ProviderInstanceId) -> AcpResult<()> {
-        Err(acp_unbound())
     }
 }
 pub async fn config_for(

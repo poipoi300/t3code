@@ -130,7 +130,7 @@ impl GitAdapter {
         if !local_disk_path(Path::new(cwd)) {
             return Err(not_local());
         }
-        let cwd = tokio::fs::canonicalize(cwd).await.map_err(|_| denied())?;
+        let cwd = resolve(PathBuf::from(cwd)).await?;
         if !tokio::fs::metadata(&cwd).await.is_ok_and(|m| m.is_dir()) {
             return Err(denied());
         }
@@ -141,7 +141,7 @@ impl GitAdapter {
         let mut roots = Vec::new();
         for grant in grants {
             if grant.is_absolute()
-                && let Ok(root) = tokio::fs::canonicalize(grant).await
+                && let Ok(root) = resolve(grant).await
                 && cwd.starts_with(&root)
             {
                 roots.push(root);
@@ -174,9 +174,7 @@ impl GitAdapter {
             .await
             .map_err(|e| error(e, operation))?
         {
-            let repository_root = tokio::fs::canonicalize(repository.root)
-                .await
-                .map_err(|_| denied())?;
+            let repository_root = resolve(repository.root).await?;
             // Git discovers ancestors; a project subdirectory alone cannot authorize
             // repository-wide mutations or reads in its parent checkout.
             if !roots.iter().any(|root| repository_root.starts_with(root)) {
@@ -275,10 +273,7 @@ impl GitAdapter {
         // directory unrelated to this repository's registered linked worktrees.
         let mut linked = false;
         for tree in trees.into_iter().skip(1) {
-            if tokio::fs::canonicalize(tree.path)
-                .await
-                .is_ok_and(|p| p == target)
-            {
+            if resolve(tree.path).await.is_ok_and(|p| p == target) {
                 linked = true;
                 break;
             }
@@ -358,31 +353,36 @@ impl GitAdapter {
     }
 
     #[cfg(feature = "local-services")]
+    /// `socket` is the connection the subscription counts against (`None` outside a socket).
     pub async fn subscribe_vcs_branch(
         self: &Arc<Self>,
         session: &AuthSessionId,
+        socket: Option<u64>,
         input: VcsStatusInput,
     ) -> Result<Revocable<t3_git::VcsBranchSubscription>, Error> {
         const OPERATION: &str = "subscribeVcsBranch";
-        let subscription = self
+        let vcs = self
             .status_services(session, &input.cwd.0, OPERATION)
-            .await?
+            .await?;
+        let permit = vcs.subscriptions.acquire(socket, OPERATION, &input.cwd.0)?;
+        let subscription = vcs
             .application
             .subscribe_vcs_branch(&input)
             .await
             .map_err(|e| error(e, OPERATION))?;
-        Ok(self.revocable(subscription, session, input.cwd.0))
+        Ok(self.revocable(subscription, permit, session, input.cwd.0))
     }
 
     #[cfg(feature = "local-services")]
     fn revocable<S>(
         self: &Arc<Self>,
         subscription: S,
+        permit: SubscriptionPermit,
         session: &AuthSessionId,
         cwd: String,
     ) -> Revocable<S> {
         Revocable {
-            subscription: Some(subscription),
+            subscription: Some((subscription, permit)),
             adapter: self.clone(),
             session: session.clone(),
             cwd,
@@ -408,17 +408,20 @@ impl GitAdapter {
     pub async fn subscribe_vcs_status(
         self: &Arc<Self>,
         session: &AuthSessionId,
+        socket: Option<u64>,
         input: VcsStatusSubscriptionInput,
     ) -> Result<Revocable<t3_git::VcsStatusSubscription>, Error> {
         const OPERATION: &str = "subscribeVcsStatus";
-        let subscription = self
+        let vcs = self
             .status_services(session, &input.cwd.0, OPERATION)
-            .await?
+            .await?;
+        let permit = vcs.subscriptions.acquire(socket, OPERATION, &input.cwd.0)?;
+        let subscription = vcs
             .application
             .subscribe_vcs_status(&input)
             .await
             .map_err(|e| error(e, OPERATION))?;
-        Ok(self.revocable(subscription, session, input.cwd.0))
+        Ok(self.revocable(subscription, permit, session, input.cwd.0))
     }
 
     #[cfg(feature = "local-services")]
@@ -512,7 +515,8 @@ impl crate::services::DomainRuntime for GitAdapter {
 /// change signal, so an idle subscription ends at its next value.
 #[cfg(feature = "local-services")]
 pub struct Revocable<S> {
-    subscription: Option<S>,
+    /// The subscription and its slot under the subscription limits, released together.
+    subscription: Option<(S, SubscriptionPermit)>,
     adapter: Arc<GitAdapter>,
     session: AuthSessionId,
     cwd: String,
@@ -534,7 +538,7 @@ impl<S> Revocable<S> {
 #[cfg(feature = "local-services")]
 impl Revocable<t3_git::VcsBranchSubscription> {
     pub async fn recv(&mut self) -> Option<Result<VcsBranchStatus, Error>> {
-        let value = self.subscription.as_mut()?.recv().await?;
+        let value = self.subscription.as_mut()?.0.recv().await?;
         self.still_granted(value).await
     }
 }
@@ -542,8 +546,79 @@ impl Revocable<t3_git::VcsBranchSubscription> {
 #[cfg(feature = "local-services")]
 impl Revocable<t3_git::VcsStatusSubscription> {
     pub async fn recv(&mut self) -> Option<Result<VcsStatusStreamEvent, Error>> {
-        let value = self.subscription.as_mut()?.recv().await?;
+        let value = self.subscription.as_mut()?.0.recv().await?;
         self.still_granted(value).await
+    }
+}
+
+/// Live status and branch subscriptions allowed per connection and per server. TypeScript has
+/// no bound; each distinct checkout they name keeps a t3-git status worker (a HEAD watcher, and
+/// background fetch while a lease asks), so one client cannot open workers without limit.
+pub const STATUS_SUBSCRIPTIONS_PER_CONNECTION: usize = 128;
+pub const STATUS_SUBSCRIPTIONS_PER_SERVER: usize = 512;
+
+#[derive(Default)]
+pub(crate) struct SubscriptionLimits {
+    /// Live subscriptions in total and per connection (sockets with none are removed).
+    counts: std::sync::Mutex<(usize, std::collections::HashMap<u64, usize>)>,
+}
+
+impl SubscriptionLimits {
+    pub(crate) fn acquire(
+        self: &Arc<Self>,
+        socket: Option<u64>,
+        operation: &str,
+        cwd: &str,
+    ) -> Result<SubscriptionPermit, Error> {
+        let refused = |scope: &str, limit: usize| {
+            Error::Git(Box::new(GitCommandError {
+                operation: operation.into(),
+                cwd: cwd.into(),
+                detail: format!(
+                    "Too many VCS status subscriptions on this {scope} (limit {limit}); close some before opening more."
+                ),
+                ..command_error(operation)
+            }))
+        };
+        let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        let (total, sockets) = &mut *counts;
+        if let Some(socket) = socket
+            && sockets.get(&socket).copied().unwrap_or(0) >= STATUS_SUBSCRIPTIONS_PER_CONNECTION
+        {
+            return Err(refused("connection", STATUS_SUBSCRIPTIONS_PER_CONNECTION));
+        }
+        if *total >= STATUS_SUBSCRIPTIONS_PER_SERVER {
+            return Err(refused("server", STATUS_SUBSCRIPTIONS_PER_SERVER));
+        }
+        *total += 1;
+        if let Some(socket) = socket {
+            *sockets.entry(socket).or_default() += 1;
+        }
+        Ok(SubscriptionPermit {
+            limits: self.clone(),
+            socket,
+        })
+    }
+}
+
+pub(crate) struct SubscriptionPermit {
+    limits: Arc<SubscriptionLimits>,
+    socket: Option<u64>,
+}
+
+impl Drop for SubscriptionPermit {
+    fn drop(&mut self) {
+        let mut counts = self.limits.counts.lock().unwrap_or_else(|e| e.into_inner());
+        let (total, sockets) = &mut *counts;
+        *total = total.saturating_sub(1);
+        if let Some(socket) = self.socket
+            && let Some(count) = sockets.get_mut(&socket)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                sockets.remove(&socket);
+            }
+        }
     }
 }
 
@@ -563,6 +638,22 @@ pub(crate) fn local_disk_path(path: &Path) -> bool {
         }
         Some(Component::RootDir) => !cfg!(windows),
         _ => false,
+    }
+}
+
+/// The workspace resolver (`t3_workspace::paths::canonicalize`): it refuses a network drive,
+/// and a link to a network target before following it, then resolves. Its own refusals carry
+/// no OS error code; an OS failure (missing, unreadable) is the ordinary denial.
+async fn resolve(path: PathBuf) -> Result<PathBuf, Error> {
+    match tokio::task::spawn_blocking(move || t3_workspace::paths::canonicalize(path)).await {
+        Ok(Ok(real)) => Ok(real),
+        Ok(Err(error))
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                && error.raw_os_error().is_none() =>
+        {
+            Err(not_local())
+        }
+        _ => Err(denied()),
     }
 }
 
@@ -645,6 +736,7 @@ pub mod vcs {
         broadcaster: VcsStatusBroadcaster,
         setup: WorktreeSetupTracker,
         pub(super) worktrees: Arc<Worktrees>,
+        pub(super) subscriptions: Arc<SubscriptionLimits>,
         stop: CancellationToken,
         follower: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     }
@@ -696,6 +788,7 @@ pub mod vcs {
                 broadcaster,
                 setup,
                 worktrees,
+                subscriptions: Arc::default(),
                 stop,
                 follower: std::sync::Mutex::new(Some(follower)),
             }

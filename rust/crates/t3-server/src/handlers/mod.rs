@@ -1,3 +1,4 @@
+pub mod acp_registry;
 pub mod cloud;
 pub mod core;
 pub mod device;
@@ -49,6 +50,7 @@ pub fn registry_with(domains: &Domains) -> crate::Result<HandlerRegistry> {
     projects::register_with(&mut registry, domains)?;
     project_clone::register_with(&mut registry, domains)?;
     providers::register_with(&mut registry, domains)?;
+    acp_registry::register_with(&mut registry, domains)?;
     vcs::register_with(&mut registry, domains)?;
     pull_requests::register_with(&mut registry, domains)?;
     mcp_apps::register_with(&mut registry, domains)?;

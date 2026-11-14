@@ -11,6 +11,21 @@ use t3_workspace::scripts::{RunScriptResult, ScriptRunner, ScriptTrigger};
 
 pub struct ProjectSetupAdapter {
     runner: ProjectSetupScriptRunner,
+    /// The terminal adapter's admission: a script waits while a file restore holds its thread.
+    gate: Arc<crate::adapters::terminal::ThreadGate>,
+}
+
+/// The setup runner behind the terminal adapter's admission.
+pub struct GatedRunner<'a>(&'a ProjectSetupAdapter);
+
+impl GatedRunner<'_> {
+    pub async fn run_for_thread(
+        &self,
+        input: SetupScriptInput<'_>,
+    ) -> Result<RunScriptResult, t3_project::Error> {
+        let _admitted = self.0.gate.enter(&input.thread_id.0).await;
+        self.0.runner.run_for_thread(input).await
+    }
 }
 
 impl ProjectSetupAdapter {
@@ -29,13 +44,14 @@ impl ProjectSetupAdapter {
                 settings: context.local.settings.clone(),
                 runner: ScriptRunner::new(terminal.manager.clone()),
             },
+            gate: terminal.gate.clone(),
         }))
     }
 
     /// The runner thread launch uses (`ThreadLaunchService`: observed completion, trigger
     /// `setup` or `settle`).
-    pub fn runner(&self) -> &ProjectSetupScriptRunner {
-        &self.runner
+    pub fn runner(&self) -> GatedRunner<'_> {
+        GatedRunner(self)
     }
 
     /// `GitManager.preparePullRequestThread`'s `maybeRunSetupScript`: starts the project's setup
@@ -51,7 +67,7 @@ impl ProjectSetupAdapter {
         let project_cwd = project_cwd.to_string_lossy();
         let worktree = worktree.to_string_lossy();
         let result = self
-            .runner
+            .runner()
             .run_for_thread(SetupScriptInput {
                 thread_id: &thread_id,
                 project: None,

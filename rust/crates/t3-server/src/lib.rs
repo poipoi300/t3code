@@ -29,5 +29,9 @@ pub enum Error {
     /// Another server owns this T3 home. Supervisors must not restart (TypeScript exit 78).
     #[error("{0}")]
     StateDirOwned(String),
+    /// The organisation's policy cannot be used. Supervisors must not restart (TypeScript
+    /// `ManagedPolicyFileError`, exit 77).
+    #[error("{0}")]
+    ManagedPolicy(String),
 }
 pub type Result<T> = std::result::Result<T, Error>;

@@ -57,7 +57,7 @@ mod live {
             let a = a.clone();
             async move {
                 let mut branches = a
-                    .subscribe_vcs_branch(&ctx.session_id, input)
+                    .subscribe_vcs_branch(&ctx.session_id, ctx.call.socket_id(), input)
                     .await
                     .map_err(status_error(WsSubscribeVcsBranchRpc::TAG))?;
                 Ok(async_stream::stream! {
@@ -81,7 +81,7 @@ mod live {
             let a = a.clone();
             async move {
                 let mut statuses = a
-                    .subscribe_vcs_status(&ctx.session_id, input)
+                    .subscribe_vcs_status(&ctx.session_id, ctx.call.socket_id(), input)
                     .await
                     .map_err(status_error(WsSubscribeVcsStatusRpc::TAG))?;
                 Ok(async_stream::stream! {

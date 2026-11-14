@@ -7,6 +7,8 @@ use std::{collections::BTreeMap, ffi::OsString, io::Write, path::PathBuf};
 pub const UNAVAILABLE: u8 = 69;
 /// `SERVER_EXIT_CODE_STATE_DIR_OWNED` in contracts' desktopBootstrap.ts.
 pub const STATE_DIR_OWNED: u8 = 78;
+/// `SERVER_EXIT_CODE_MANAGED_POLICY`: the desktop shell reports it at once instead of retrying.
+pub const MANAGED_POLICY: u8 = 77;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
@@ -24,6 +26,7 @@ impl CliError {
         match self {
             Self::Unavailable(_) => UNAVAILABLE,
             Self::Server(crate::Error::StateDirOwned(_)) => STATE_DIR_OWNED,
+            Self::Server(crate::Error::ManagedPolicy(_)) => MANAGED_POLICY,
             _ => 1,
         }
     }

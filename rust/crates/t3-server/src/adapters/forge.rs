@@ -5,11 +5,11 @@
 //! [`ForgeAdapter::registry`] and never builds a second adapter set.
 //!
 //! A client never chooses where a credential goes. GitLab sends glab only to its default host and
-//! the server's `GITLAB_HOST` (or an authorised checkout's remote); GitHub requests a client
-//! addresses by host (app access, stars) go only to hosts the server is configured for. Paths a
-//! client names are authorised here before the forge sees them: a cwd through the workspace
-//! authority, a clone destination by resolving links and refusing network, device and internal
-//! T3 paths.
+//! the server's `GITLAB_HOST` (or an authorised checkout's remote). GitHub's environment token goes
+//! only to configured hosts, whatever named the host ([`ConfiguredHostCredentials`]), and requests
+//! a client addresses by host (app access, stars) go only to configured hosts. Paths a client names
+//! are authorised here before the forge sees them: a cwd through the workspace authority, a clone
+//! destination by [`ForgeAdapter::authorize_destination`].
 use crate::adapters::git::{Error as GitAdapterError, GitAdapter};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -27,7 +27,7 @@ use t3_contracts::{
     source_control::*,
 };
 use t3_forge::{
-    Forge, ForgeError,
+    FailureReason, Forge, ForgeError,
     azure_devops::AzureDevOps,
     bitbucket::Bitbucket,
     cursor_origin::{CursorOrigin, CursorOriginConfig},
@@ -44,7 +44,7 @@ use t3_forge::{
         GitHub,
         app::AppSignIn,
         session_store::SettingsAppSessions,
-        transport::{CredentialSettings, GitHubCredentials, GitHubHttp, valid_host},
+        transport::{Credential, CredentialSettings, GitHubCredentials, GitHubHttp, valid_host},
     },
     gitlab::GitLab,
     http::{ApiCredential, ApiHttp},
@@ -52,6 +52,8 @@ use t3_forge::{
     review_host::{ForgeReviewHost, ReviewSetup},
     services::{CloneOptions, SourceControlRepositoryService, SourceControlSignIn},
 };
+
+use t3_workspace::paths::{validate_host_path, within};
 
 pub use t3_forge::registry::ForgeRegistry;
 
@@ -78,7 +80,7 @@ pub struct ForgeAdapter {
     cwd: PathBuf,
     home: PathBuf,
     destinations: Destinations,
-    github_hosts: RwLock<BTreeSet<String>>,
+    github_hosts: Arc<RwLock<BTreeSet<String>>>,
     credentials: Credentials,
     stop: tokio_util::sync::CancellationToken,
     follower: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -335,6 +337,7 @@ impl ForgeAdapter {
             .update_settings(probe.gitcafe(host_settings(&hosts, "gitcafe")))
             .await;
         let credentials = probe;
+        let github_hosts = Arc::new(RwLock::new(github_hosts(hosts.get("github"), &environment)));
 
         let sessions = Arc::new(SettingsAppSessions::new(
             settings.clone(),
@@ -345,8 +348,14 @@ impl ForgeAdapter {
             .unwrap_or_default()
             .to_owned();
         let mut app = AppSignIn::new(client_id, sessions).map_err(service)?;
-        let mut http =
-            GitHubHttp::new(credentials.github.clone(), limits.clone()).map_err(service)?;
+        let mut http = GitHubHttp::new(
+            Arc::new(ConfiguredHostCredentials {
+                inner: credentials.github.clone(),
+                hosts: github_hosts.clone(),
+            }),
+            limits.clone(),
+        )
+        .map_err(service)?;
         // Debug builds only: a loopback stand-in for github.com, for recorded-response tests.
         #[cfg(debug_assertions)]
         if let Some(endpoint) = variable(&environment, "T3CODE_DEV_GITHUB_ENDPOINT") {
@@ -418,26 +427,15 @@ impl ForgeAdapter {
             workflows: t3_git::GitWorkflowService::new(git.clone()),
             git,
             workspaces,
-            destinations: Destinations {
-                base: resolved_or_lexical(&paths.base_dir),
-                managed: [
-                    paths.projects(),
-                    paths.source(),
-                    paths.worktrees(),
-                    paths.scratch(),
-                ]
-                .iter()
-                .map(|path| resolved_or_lexical(path))
-                .collect(),
-                home: resolved_or_lexical(&home),
-                internal: [paths.state_dir.clone(), paths.secrets()]
-                    .iter()
-                    .map(|path| resolved_or_lexical(path))
-                    .collect(),
-            },
+            destinations: Destinations::new(
+                paths,
+                &home,
+                &environment,
+                domains.get::<crate::workspaces::EnvironmentWorkspaces>(),
+            ),
             cwd,
             home,
-            github_hosts: RwLock::new(github_hosts(hosts.get("github"), &environment)),
+            github_hosts,
             credentials,
             stop: context.shutdown.child_token(),
             follower: Default::default(),
@@ -513,37 +511,6 @@ impl ForgeAdapter {
                 .contains(&host.trim().to_ascii_lowercase())
     }
 
-    /// GitHub takes the host from a repository URL and gh sends its environment token to any
-    /// `*.ghe.com`, so a URL may name only a configured host. Other text resolves to a host the
-    /// server knows (the cwd's remote or the default host).
-    fn repository_host(
-        &self,
-        provider: Option<&SourceControlProviderKind>,
-        repository: Option<&str>,
-        operation: &str,
-    ) -> Result<(), Refusal> {
-        let (Some(provider), Some(repository)) = (provider, repository) else {
-            return Ok(());
-        };
-        match url::Url::parse(repository.trim()) {
-            Ok(url)
-                if matches!(url.scheme(), "http" | "https")
-                    && !self.configured_host(provider, url.authority()) =>
-            {
-                Err(Refusal::Repository(Box::new(
-                    SourceControlRepositoryError {
-                        _tag: SourceControlRepositoryErrorTag::SourceControlRepositoryError,
-                        provider: provider.clone(),
-                        operation: operation.into(),
-                        detail: "This source control host is not configured on this server.".into(),
-                        cause: None,
-                    },
-                )))
-            }
-            _ => Ok(()),
-        }
-    }
-
     /// `sourceControl.lookupRepository`; a cwd, when given, must be an authorised workspace.
     pub async fn lookup_repository(
         &self,
@@ -558,11 +525,6 @@ impl ForgeAdapter {
                 .map_err(|_| denied("The requested directory is outside this session's authorized project workspaces."))?;
             input.cwd = Some(Some(text(&cwd)));
         }
-        self.repository_host(
-            Some(&input.provider),
-            Some(&input.repository.0),
-            "lookupRepository",
-        )?;
         self.repositories
             .lookup_repository(input)
             .await
@@ -575,23 +537,24 @@ impl ForgeAdapter {
         mut input: SourceControlCloneRepositoryInput,
     ) -> Result<SourceControlCloneRepositoryResult, Refusal> {
         let provider = input.provider.clone().flatten();
-        let repository = input.repository.clone().flatten();
-        self.repository_host(
-            provider.as_ref(),
-            repository.as_ref().map(|r| r.0.as_str()),
-            "cloneRepository",
-        )?;
         let destination = self
             .authorize_destination(provider.as_ref(), &input.destination_path.0)
             .await?;
-        input.destination_path = text(&destination);
-        let cloned = self
+        input.destination_path = text(&destination.path);
+        match self
             .repositories
             .clone_repository(input, CloneOptions::default())
             .await
-            .map_err(|error| Refusal::Repository(error.wire))?;
-        self.git.at(&destination).invalidate_caches().await;
-        Ok(cloned)
+        {
+            Ok(cloned) => {
+                self.git.at(&destination.path).invalidate_caches().await;
+                Ok(cloned)
+            }
+            Err(error) => {
+                destination.discard().await;
+                Err(Refusal::Repository(error.wire))
+            }
+        }
     }
 
     /// `sourceControl.publishRepository` from an authorised checkout.
@@ -736,15 +699,18 @@ impl ForgeAdapter {
         })
     }
 
-    /// Clone destinations: `~` and relative paths as the repository service reads them, then the
-    /// nearest existing ancestor resolved through links, then [`Destinations`]. Network shares
-    /// and device paths are refused (a UNC destination would make a Windows server authenticate
-    /// over SMB); the forge clones into the resolved path.
+    /// Clone destinations. `~` and relative paths are read as the repository service reads them;
+    /// the text must name a local disk path without device names, `:` or trailing dots or spaces
+    /// (Windows would create another name). The nearest existing ancestor is resolved by the
+    /// workspace resolver, which refuses remote drives and links to network paths before it
+    /// follows them; then [`Destinations`] decides. The folder is created here and resolved again,
+    /// so a link planted after the check (a concurrent clone can check one out) cannot redirect
+    /// it; Git then clones into that existing empty folder.
     pub async fn authorize_destination(
         &self,
         provider: Option<&SourceControlProviderKind>,
         raw: &str,
-    ) -> Result<PathBuf, Refusal> {
+    ) -> Result<Destination, Refusal> {
         let refused = || {
             Refusal::Repository(Box::new(SourceControlRepositoryError {
                 _tag: SourceControlRepositoryErrorTag::SourceControlRepositoryError,
@@ -752,7 +718,7 @@ impl ForgeAdapter {
                     .cloned()
                     .unwrap_or_else(|| SourceControlProviderKind("unknown".into())),
                 operation: "cloneRepository".into(),
-                detail: "This folder cannot be a clone destination. Choose a folder on a local disk, outside hidden or application data folders and T3 Code's own folders.".into(),
+                detail: "This folder cannot be a clone destination. Choose a folder on a local disk, outside hidden or application data folders, existing projects, configuration and program folders, and T3 Code's own folders.".into(),
                 cause: None,
             }))
         };
@@ -777,30 +743,51 @@ impl ForgeAdapter {
                 other => lexical.push(other),
             }
         }
-        if !lexical.is_absolute() || lexical.file_name().is_none() || !local_disk(&lexical) {
-            return Err(refused());
-        }
-        let mut existing = lexical.as_path();
-        let mut missing = Vec::new();
-        while tokio::fs::symlink_metadata(existing).await.is_err() {
-            let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
-                return Err(refused());
-            };
-            missing.push(name.to_owned());
-            existing = parent;
-        }
-        let mut resolved = tokio::fs::canonicalize(existing)
-            .await
-            .map(|real| plain(&real))
-            .map_err(|_| refused())?;
-        resolved.extend(missing.iter().rev());
-        if !local_disk(&resolved)
-            || resolved.file_name().is_none()
-            || self.destinations.refuses(&resolved)
+        if !lexical.is_absolute()
+            || lexical.file_name().is_none()
+            || !local_disk(&lexical)
+            || validate_host_path(&lexical).is_err()
         {
             return Err(refused());
         }
-        Ok(resolved)
+        let walked = tokio::task::spawn_blocking(move || {
+            let mut existing = lexical;
+            let mut missing = Vec::new();
+            loop {
+                match t3_workspace::paths::canonicalize(&existing) {
+                    Ok(real) => return Some((real, missing)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        missing.push(existing.file_name()?.to_owned());
+                        existing = existing.parent()?.to_path_buf();
+                    }
+                    Err(_) => return None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some((real, missing)) = walked else {
+            return Err(refused());
+        };
+        let mut resolved = plain(&real);
+        resolved.extend(missing.iter().rev());
+        if !local_disk(&resolved)
+            || resolved.file_name().is_none()
+            || self.destinations.refuses(&resolved).await
+        {
+            return Err(refused());
+        }
+        let target = resolved.clone();
+        let created = tokio::task::spawn_blocking(move || create_verified(&target))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .ok_or_else(refused)?;
+        Ok(Destination {
+            path: resolved,
+            created,
+        })
     }
 
     /// The project clone backend over this registry and shared Git handle.
@@ -826,67 +813,240 @@ impl ForgeAdapter {
         mut input: t3_contracts::project_clone::ProjectCloneStartInput,
     ) -> Result<t3_contracts::project_clone::ProjectCloneStartResult, ProjectCloneRefusal> {
         let requested = input.provider.clone().flatten();
-        let repository = input.repository.clone().flatten();
-        self.repository_host(
-            requested.as_ref(),
-            repository.as_ref().map(|r| r.0.as_str()),
-            "cloneRepository",
-        )
-        .map_err(ProjectCloneRefusal::Refused)?;
         let destination = self
             .authorize_destination(requested.as_ref(), &input.destination_path.0)
             .await
             .map_err(ProjectCloneRefusal::Refused)?;
-        input.destination_path = text(&destination);
+        input.destination_path = text(&destination.path);
         let provider = requested.unwrap_or_else(|| SourceControlProviderKind("unknown".into()));
-        projects
-            .start_clone(input)
-            .await
-            .map_err(|error| ProjectCloneRefusal::Project(provider, Box::new(error)))
+        match projects.start_clone(input).await {
+            Ok(started) => Ok(started),
+            Err(error) => {
+                destination.discard().await;
+                Err(ProjectCloneRefusal::Project(provider, Box::new(error)))
+            }
+        }
     }
 }
 
-/// Folders a clone must never create (review M1). A repository there would be trusted as
-/// configuration or code: `~/.config/git/config` is Git's global configuration (its
-/// `core.fsmonitor` runs at the next status), `~/.ssh` is SSH's, and under the T3 base the
-/// service launcher trusts `runtime/versions/<v>` with its install marker and the ACP registry
-/// trusts an executable already under `tools`.
+/// T3's own entries at the top of its base directory. The base may be a user's work folder, so
+/// only these (and dot entries) are refused there; the managed `projects`, `source` and `scratch`
+/// folders and any other folder take clones, and managed worktrees are workspaces.
+const T3_BASE_ENTRIES: &[&str] = &[
+    "userdata",
+    "dev",
+    "caches",
+    "runtime",
+    "tools",
+    "service.env",
+    "usage-host-id",
+    "source-staging",
+];
+
+/// A destination the rules accepted, created by the server.
+pub struct Destination {
+    pub path: PathBuf,
+    created: bool,
+}
+impl Destination {
+    /// After a failed clone: removes the folder if this request created it and it is still empty.
+    async fn discard(&self) {
+        if self.created {
+            let _ = tokio::fs::remove_dir(&self.path).await;
+        }
+    }
+}
+
+/// Folders a clone must never create, because something later runs or trusts what is in them.
+/// A deny rule: TypeScript accepts any folder. Every path here is resolved; comparisons ignore
+/// case on Windows.
 struct Destinations {
-    /// The T3 base; only its managed project folders take clones.
+    /// The T3 base: [`T3_BASE_ENTRIES`] and dot entries at its top are refused.
     base: PathBuf,
-    managed: Vec<PathBuf>,
-    /// The account home; its hidden folders and `AppData` (Windows) or `Library` (macOS) are
-    /// configuration, not projects.
-    home: PathBuf,
-    /// The state directory and secrets, which may live outside the base.
+    /// The account home, `HOME` (Git for Windows reads it when it differs) and `USERPROFILE`: the
+    /// first folder below each may not start with `.`, nor be `AppData` (Windows) or `Library`
+    /// (macOS). Deeper dot folders are left to the workspace rule.
+    homes: Vec<PathBuf>,
+    /// The state directory and secrets, wherever they live.
     internal: Vec<PathBuf>,
+    /// Refused themselves, inside, and as an ancestor the clone would create: PowerShell profile
+    /// folders, Git configuration folders, application data, autostart and shell start-up
+    /// folders, `~/bin` and `~/.local/bin`.
+    trees: Vec<PathBuf>,
+    /// Refused themselves and as an ancestor the clone would create: PATH folders (existing or
+    /// not), the folders of `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM`, the homes.
+    entries: Vec<PathBuf>,
+    /// Any known workspace (project roots, thread worktrees, managed worktree folders): a clone
+    /// into an existing project's tree would plant its `.claude`, `.git/hooks`, `.husky` or
+    /// `.vscode`.
+    workspaces: Option<Arc<crate::workspaces::EnvironmentWorkspaces>>,
 }
 impl Destinations {
+    fn new(
+        paths: &t3_config::home::HomeLayout,
+        home: &Path,
+        environment: &BTreeMap<String, String>,
+        workspaces: Option<Arc<crate::workspaces::EnvironmentWorkspaces>>,
+    ) -> Self {
+        let absolute = |key: &str| {
+            variable(environment, key)
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+        };
+        let mut homes = vec![home.to_owned()];
+        homes.extend(absolute("HOME"));
+        homes.extend(absolute("USERPROFILE"));
+        let mut trees: Vec<PathBuf> = absolute("XDG_CONFIG_HOME").into_iter().collect();
+        let mut entries = homes.clone();
+        for home in &homes {
+            trees.push(home.join(".config").join("git"));
+            if cfg!(windows) {
+                let documents = home.join("Documents");
+                trees.push(documents.join("PowerShell"));
+                trees.push(documents.join("WindowsPowerShell"));
+            } else {
+                trees.push(home.join("bin"));
+                trees.push(home.join(".local").join("bin"));
+            }
+        }
+        #[cfg(windows)]
+        {
+            // The Documents known folder, which OneDrive or policy may redirect.
+            if let Some(documents) = dirs::document_dir() {
+                trees.push(documents.join("PowerShell"));
+                trees.push(documents.join("WindowsPowerShell"));
+            }
+            trees.extend(absolute("APPDATA"));
+            trees.extend(absolute("LOCALAPPDATA"));
+            trees.extend(dirs::data_dir());
+            trees.extend(dirs::data_local_dir());
+            let program_data = absolute("PROGRAMDATA")
+                .or_else(|| absolute("ALLUSERSPROFILE"))
+                .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+            trees.push(program_data.join("Git"));
+            trees.push(
+                program_data
+                    .join("Microsoft")
+                    .join("Windows")
+                    .join("Start Menu"),
+            );
+        }
+        #[cfg(unix)]
+        trees.extend(["/etc/profile.d", "/etc/xdg/autostart"].map(PathBuf::from));
+        for key in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
+            if let Some(file) = absolute(key) {
+                entries.extend(file.parent().map(Path::to_path_buf));
+            }
+        }
+        if let Some(path) = variable(environment, "PATH") {
+            entries.extend(std::env::split_paths(path).filter(|entry| entry.is_absolute()));
+        }
+        let resolve = |paths: Vec<PathBuf>| -> Vec<PathBuf> {
+            paths.iter().map(|path| resolved_or_lexical(path)).collect()
+        };
+        Self {
+            base: resolved_or_lexical(&paths.base_dir),
+            homes: resolve(homes),
+            internal: resolve(vec![paths.state_dir.clone(), paths.secrets()]),
+            trees: resolve(trees),
+            entries: resolve(entries),
+            workspaces,
+        }
+    }
+
     /// `path` is resolved: its existing part canonical, the rest as the client wrote it.
-    fn refuses(&self, path: &Path) -> bool {
-        if self
-            .internal
-            .iter()
-            .any(|internal| path.starts_with(internal))
+    async fn refuses(&self, path: &Path) -> bool {
+        if self.internal.iter().any(|internal| within(path, internal))
+            || self
+                .trees
+                .iter()
+                .any(|tree| within(path, tree) || within(tree, path))
+            || self.entries.iter().any(|entry| within(entry, path))
         {
             return true;
         }
-        if path.starts_with(&self.base) {
-            return !self
-                .managed
-                .iter()
-                .any(|managed| path.starts_with(managed) && path != managed);
+        let first_below = |root: &Path| {
+            within(path, root).then(|| {
+                path.components()
+                    .nth(root.components().count())
+                    .map(|first| first.as_os_str().to_string_lossy().into_owned())
+            })
+        };
+        if let Some(first) = first_below(&self.base) {
+            let Some(first) = first else {
+                return true;
+            };
+            if first.starts_with('.')
+                || T3_BASE_ENTRIES.iter().any(|entry| same_name(entry, &first))
+            {
+                return true;
+            }
+        } else if let Some(first) = self.homes.iter().find_map(|home| first_below(home)) {
+            let Some(first) = first else {
+                return true;
+            };
+            if first.starts_with('.')
+                || (cfg!(windows) && first.eq_ignore_ascii_case("AppData"))
+                || (cfg!(target_os = "macos") && first == "Library")
+            {
+                return true;
+            }
         }
-        let Ok(rest) = path.strip_prefix(&self.home) else {
-            return false;
-        };
-        let Some(Component::Normal(first)) = rest.components().next() else {
-            return true;
-        };
-        let first = first.to_string_lossy();
-        first.starts_with('.')
-            || (cfg!(windows) && first.eq_ignore_ascii_case("AppData"))
-            || (cfg!(target_os = "macos") && first == "Library")
+        match &self.workspaces {
+            Some(workspaces) => !workspaces.roots_for(Some(path)).await.is_empty(),
+            None => true,
+        }
+    }
+}
+
+/// File names compare without case where the file system does (Windows, macOS by default).
+fn same_name(a: &str, b: &str) -> bool {
+    if cfg!(any(windows, target_os = "macos")) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
+/// Every GitHub request takes its credential here, whatever named the host: a URL,
+/// `host/owner/repo`, a remote or a pull-request link. gh's rule sends `GH_TOKEN`/`GITHUB_TOKEN`
+/// to github.com and every `*.ghe.com`; from the server's environment they go only to configured
+/// hosts. Credentials bound to the host itself (its settings token, gh's login for it, the app's
+/// session) are unchanged.
+struct ConfiguredHostCredentials {
+    inner: Arc<GitHubCredentials>,
+    hosts: Arc<RwLock<BTreeSet<String>>>,
+}
+#[async_trait::async_trait]
+impl t3_forge::github::transport::Credentials for ConfiguredHostCredentials {
+    fn revision(&self) -> u64 {
+        self.inner.revision()
+    }
+    async fn get(&self, host: &str, cwd: &Path) -> t3_forge::Result<Credential> {
+        let credential = self.inner.get(host, cwd).await?;
+        let configured = self
+            .hosts
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&host.trim().to_ascii_lowercase());
+        if credential.source == "env" && !configured {
+            return Err(ForgeError::provider(
+                "github",
+                "credential",
+                FailureReason::Unauthenticated,
+                "This GitHub host is not configured on this server.",
+            ));
+        }
+        Ok(credential)
+    }
+    async fn saved(&self, host: &str) -> t3_forge::Result<Option<Credential>> {
+        self.inner.saved(host).await
+    }
+    async fn invalidate(&self, host: &str) {
+        self.inner.invalidate(host).await;
+    }
+    async fn settings(&self) -> Option<CredentialSettings> {
+        self.inner.settings().await
     }
 }
 
@@ -1029,6 +1189,9 @@ fn plain(path: &Path) -> PathBuf {
 
 /// The nearest existing ancestor resolved, with the missing rest appended.
 fn resolved_or_lexical(path: &Path) -> PathBuf {
+    if !local_disk(path) {
+        return path.to_owned();
+    }
     let mut existing = path;
     let mut missing = Vec::new();
     while std::fs::symlink_metadata(existing).is_err() {
@@ -1048,12 +1211,23 @@ fn resolved_or_lexical(path: &Path) -> PathBuf {
     resolved
 }
 
-/// Creates `resolved`, the destination the rules accepted, before Git runs. Answers whether
-/// this call created it.
+/// Creates `resolved`, the destination the rules accepted, then resolves it again: a link that
+/// appeared inside it after the check makes it another folder, which is refused (and removed if
+/// this call created it, while empty). Answers whether this call created it.
 fn create_verified(resolved: &Path) -> std::io::Result<bool> {
-    let existed = resolved.exists();
+    let existed = std::fs::symlink_metadata(resolved).is_ok();
     std::fs::create_dir_all(resolved)?;
-    Ok(!existed)
+    let again = t3_workspace::paths::canonicalize(resolved)?;
+    if within(&again, resolved) && within(resolved, &again) {
+        return Ok(!existed);
+    }
+    if !existed {
+        let _ = std::fs::remove_dir(&again);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "the destination changed while it was created",
+    ))
 }
 
 #[cfg(test)]

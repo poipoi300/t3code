@@ -185,6 +185,7 @@ async fn editor_links_open_only_local_targets_inside_server_workspaces() {
     let elsewhere = tempfile::tempdir().unwrap();
     std::fs::write(elsewhere.path().join("notes.md"), "notes\n").unwrap();
     let editor = home.join("bin").join("fake-code");
+    let file_manager = home.join("bin").join("explorer.exe");
     let (sender, mut launches) = mpsc::unbounded_channel();
     let server = start(
         home,
@@ -192,12 +193,20 @@ async fn editor_links_open_only_local_targets_inside_server_workspaces() {
         StartOptions {
             host_leftovers: HostLeftoversOptions {
                 editors: Some(EditorEdge {
-                    editors: vec![DiscoveredEditor {
-                        id: EditorId::Vscode,
-                        command: editor.clone(),
-                        base_args: vec![],
-                        style: EditorLaunchStyle::Goto,
-                    }],
+                    editors: vec![
+                        DiscoveredEditor {
+                            id: EditorId::Vscode,
+                            command: editor.clone(),
+                            base_args: vec![],
+                            style: EditorLaunchStyle::Goto,
+                        },
+                        DiscoveredEditor {
+                            id: EditorId::FileManager,
+                            command: file_manager.clone(),
+                            base_args: vec![],
+                            style: EditorLaunchStyle::DirectPath,
+                        },
+                    ],
                     launch: Arc::new(Recorder(sender)),
                 }),
                 started: None,
@@ -293,6 +302,73 @@ async fn editor_links_open_only_local_targets_inside_server_workspaces() {
     .await;
     missing_scope(exit, "orchestration:operate");
     assert!(launches.try_recv().is_err());
+
+    // Reveal: a file name PowerShell would read as code reaches the file manager as data.
+    let (mut socket, mut client) = server.socket(&server.admin).await;
+    let mut names = vec![
+        "single'quote.txt",
+        "left\u{2018}quote.txt",
+        "x\u{2019}; Start-Process calc; \u{2019}y.txt",
+        "low\u{201A}quote.txt",
+        "reversed\u{201B}quote.txt",
+        "semi;colon & amp.txt",
+        "back`tick $(whoami).txt",
+        "-leading-dash.txt",
+        "comma,name.txt",
+    ];
+    if cfg!(unix) {
+        names.push("pipe|bar.txt");
+    }
+    for name in names {
+        let file = scratch.join(name);
+        std::fs::write(&file, "x").unwrap();
+        ok(unary(
+            &mut socket,
+            &mut client,
+            "shell.openInEditor",
+            json!({"cwd": file.display().to_string(), "editor": "file-manager", "reveal": true}),
+        )
+        .await);
+        if cfg!(target_os = "linux") {
+            // Linux asks the desktop over D-Bus first; the fallback opens the folder.
+            while launches.try_recv().is_ok() {}
+            continue;
+        }
+        let launched = launches.try_recv().expect("revealed");
+        assert_eq!(launched.command, file_manager, "{name}");
+        let last = launched.args.last().unwrap();
+        if cfg!(windows) {
+            assert_eq!(launched.args.len(), 1, "{name}");
+            assert!(launched.verbatim);
+            assert!(
+                last.starts_with("/select,\"") && last.ends_with(&format!("{name}\"")),
+                "{last}"
+            );
+        } else {
+            assert_eq!(launched.args[0], "-R");
+            assert!(last.ends_with(name), "{last}");
+        }
+        assert!(launches.try_recv().is_err(), "{name} started a second process");
+    }
+
+    // A link inside a workspace to a network share is refused before it is followed.
+    let link = scratch.join("share");
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(r"\\nonexistent.invalid\share", &link)
+        .expect("directory symlinks need Developer Mode or the symlink privilege");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("//nonexistent.invalid/share", &link).unwrap();
+    for editor in ["vscode", "file-manager"] {
+        let exit = unary(
+            &mut socket,
+            &mut client,
+            "shell.openInEditor",
+            json!({"cwd": link.join("notes.md").display().to_string(), "editor": editor, "reveal": true}),
+        )
+        .await;
+        assert_eq!(failure(exit)["_tag"], "ExternalLauncherUnsupportedTargetError");
+        assert!(launches.try_recv().is_err());
+    }
     server.runtime.shutdown().await.unwrap();
 }
 

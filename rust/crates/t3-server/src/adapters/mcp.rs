@@ -107,6 +107,12 @@ impl McpSessions {
     pub fn read(&self, thread: &ThreadId) -> Option<ProviderSessionConfig> {
         self.bound().ok()?.credentials.read(thread).ok().flatten()
     }
+    /// `touchActiveMcpThread`: a provider turn starting is a sign the session is alive, so its
+    /// thread's credential stays valid however long the agent goes between tool calls. For the
+    /// run host's `touch_mcp_credential` (request: `RuntimePorts::run_host`).
+    pub fn touch(&self, thread: &ThreadId) -> Result<(), McpError> {
+        self.bound()?.credentials.touch(thread)
+    }
     /// Revokes every credential of a thread (thread deleted or its provider disabled).
     pub async fn revoke_thread(&self, thread: &ThreadId) -> Result<(), McpError> {
         self.bound()?.credentials.disable(thread).await
@@ -324,6 +330,15 @@ impl McpAdapter {
         }
         let mut services = Services::default();
         Arc::new(adapters).install(&mut services);
+        {
+            services.orchestrator = Arc::new(Orchestrator {
+                reads: Arc::new(t3_mcp::adapters::threads::ThreadReadAdapter {
+                    threads: runtime.threads.clone(),
+                    database: t3_orchestration::stores::StoreDatabase(context.database.clone()),
+                }),
+                rest: services.orchestrator.clone(),
+            });
+        }
         #[cfg(feature = "preview")]
         if let Some(preview) = domains.get::<crate::adapters::preview::PreviewAdapter>() {
             let bound = Arc::new(t3_preview::mcp::McpAdapter {
@@ -657,4 +672,153 @@ impl t3_mcp::apps::AppSession for LiveAppSession {
         Ok(t3_contracts::mcp_apps::McpAppReadResourceResult { contents })
     }
 }
+/// The orchestrator toolkit: thread reads from the projections, everything else from the
+/// concrete sibling bindings (scheduler) or their typed `available: false`.
+struct Orchestrator {
+    reads: Arc<t3_mcp::adapters::threads::ThreadReadAdapter>,
+    rest: Arc<dyn t3_mcp::services::OrchestratorService>,
+}
 
+#[async_trait::async_trait]
+impl t3_mcp::services::OrchestratorService for Orchestrator {
+    async fn orchestrator_capabilities(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::orchestrator_mcp::OrchestratorMcpCapabilitiesInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpCapabilitiesResult> {
+        t3_mcp::services::OrchestratorService::orchestrator_capabilities(self.rest.as_ref(), context, input).await
+    }
+    async fn delegate_task(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::orchestrator_mcp::OrchestratorMcpDelegateTaskInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpDelegateTaskResult> {
+        t3_mcp::services::OrchestratorService::delegate_task(self.rest.as_ref(), context, input).await
+    }
+    async fn task_status(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::orchestrator_mcp::OrchestratorMcpTaskStatusInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpDelegateTaskResult> {
+        t3_mcp::services::OrchestratorService::task_status(self.rest.as_ref(), context, input).await
+    }
+    async fn task_cancel(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::orchestrator_mcp::OrchestratorMcpTaskCancelInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpTaskCancelResult> {
+        t3_mcp::services::OrchestratorService::task_cancel(self.rest.as_ref(), context, input).await
+    }
+    async fn t3_workflow_stop(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_mcp::DecodedInput,
+    ) -> t3_mcp::Result<serde_json::Value> {
+        t3_mcp::services::OrchestratorService::t3_workflow_stop(self.rest.as_ref(), context, input).await
+    }
+    async fn t3_background_wait(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_mcp::DecodedInput,
+    ) -> t3_mcp::Result<serde_json::Value> {
+        t3_mcp::services::OrchestratorService::t3_background_wait(self.rest.as_ref(), context, input).await
+    }
+    async fn schedule_task(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::orchestrator_mcp::OrchestratorMcpSaveScheduledTaskInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpScheduleTaskResult> {
+        t3_mcp::services::OrchestratorService::schedule_task(self.rest.as_ref(), context, input).await
+    }
+    async fn list_scheduled_tasks(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::orchestrator_mcp::OrchestratorMcpListScheduledTasksInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpListScheduledTasksResult> {
+        t3_mcp::services::OrchestratorService::list_scheduled_tasks(self.rest.as_ref(), context, input).await
+    }
+    async fn delete_scheduled_task(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::orchestrator_mcp::OrchestratorMcpDeleteScheduledTaskInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpDeleteScheduledTaskResult> {
+        t3_mcp::services::OrchestratorService::delete_scheduled_task(self.rest.as_ref(), context, input).await
+    }
+    async fn request_secret(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::orchestrator_mcp::OrchestratorMcpRequestSecretInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpRequestSecretResult> {
+        t3_mcp::services::OrchestratorService::request_secret(self.rest.as_ref(), context, input).await
+    }
+    async fn create_threads(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::orchestrator_mcp::OrchestratorMcpCreateThreadsInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpCreateThreadsResult> {
+        t3_mcp::services::OrchestratorService::create_threads(self.rest.as_ref(), context, input).await
+    }
+    async fn t3_thread_list(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::orchestrator_mcp::OrchestratorMcpThreadListInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpThreadListResult> {
+        t3_mcp::services::OrchestratorService::t3_thread_list(self.reads.as_ref(), context, input).await
+    }
+    async fn t3_thread_read(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::orchestrator_mcp::OrchestratorMcpThreadReadInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpThreadReadResult> {
+        t3_mcp::services::OrchestratorService::t3_thread_read(self.reads.as_ref(), context, input).await
+    }
+    async fn t3_thread_update(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_mcp::DecodedInput,
+    ) -> t3_mcp::Result<t3_contracts::thread_metadata_mcp::ThreadMetadataMcpUpdateResult> {
+        t3_mcp::services::OrchestratorService::t3_thread_update(self.rest.as_ref(), context, input).await
+    }
+    async fn t3_thread_send(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::orchestrator_mcp::OrchestratorMcpThreadSendInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpThreadSendResult> {
+        t3_mcp::services::OrchestratorService::t3_thread_send(self.rest.as_ref(), context, input).await
+    }
+    async fn t3_thread_wait(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::orchestrator_mcp::OrchestratorMcpThreadWaitInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpThreadWaitResult> {
+        t3_mcp::services::OrchestratorService::t3_thread_wait(self.rest.as_ref(), context, input).await
+    }
+    async fn t3_thread_interrupt(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::orchestrator_mcp::OrchestratorMcpThreadInterruptInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpThreadInterruptResult> {
+        t3_mcp::services::OrchestratorService::t3_thread_interrupt(self.rest.as_ref(), context, input).await
+    }
+    async fn t3_environment_links(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_mcp::DecodedInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpEnvironmentLinksResult> {
+        t3_mcp::services::OrchestratorService::t3_environment_links(self.rest.as_ref(), context, input).await
+    }
+    async fn t3_environment_link(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::orchestrator_mcp::OrchestratorMcpEnvironmentLinkInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpEnvironmentLinkResult> {
+        t3_mcp::services::OrchestratorService::t3_environment_link(self.rest.as_ref(), context, input).await
+    }
+    async fn t3_environment_unlink(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::orchestrator_mcp::OrchestratorMcpEnvironmentUnlinkInput,
+    ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpEnvironmentUnlinkResult> {
+        t3_mcp::services::OrchestratorService::t3_environment_unlink(self.rest.as_ref(), context, input).await
+    }
+}

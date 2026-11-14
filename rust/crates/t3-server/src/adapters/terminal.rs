@@ -49,6 +49,32 @@ mod enabled {
         }
     }
 
+    /// Admission for everything that starts or feeds a thread's terminals, setup scripts
+    /// included: a file restore holds its thread, and the rest wait until it returns
+    /// (t3-git H-2, `ThreadWriters`).
+    #[derive(Default)]
+    pub struct ThreadGate {
+        threads: Mutex<std::collections::HashMap<String, Arc<tokio::sync::RwLock<()>>>>,
+    }
+    impl ThreadGate {
+        fn lock(&self, thread: &str) -> Arc<tokio::sync::RwLock<()>> {
+            let mut threads = self
+                .threads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Only threads with a live guard are kept.
+            threads.retain(|_, lock| Arc::strong_count(lock) > 1);
+            threads.entry(thread.to_owned()).or_default().clone()
+        }
+        /// Waits while a restore holds `thread`; the restore waits for those already admitted.
+        pub async fn enter(&self, thread: &str) -> tokio::sync::OwnedRwLockReadGuard<()> {
+            self.lock(thread).read_owned().await
+        }
+        pub async fn hold(&self, thread: &str) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+            self.lock(thread).write_owned().await
+        }
+    }
+
     pub type TerminalResult<T> = std::result::Result<T, Failure<WsTerminalOpenError>>;
     /// The application owns cwd/worktree recovery and provider launch preparation.
     pub trait TerminalLaunchPreparation: Send + Sync {
@@ -62,8 +88,11 @@ mod enabled {
         ) -> BoxFuture<'_, TerminalResult<TerminalAttachInput>>;
     }
     pub struct TerminalAdapter {
+        /// Starting a process through it directly bypasses `gate`; setup scripts go through
+        /// `ProjectSetupAdapter`, which enters it.
         pub manager: TerminalManager,
         pub launch: Arc<dyn TerminalLaunchPreparation>,
+        pub gate: Arc<ThreadGate>,
     }
     impl TerminalAdapter {
         pub fn new(
@@ -73,12 +102,17 @@ mod enabled {
             options.max_queued_output = options.max_queued_output.min(64 * 1024);
             let manager =
                 TerminalManager::new(options).map_err(|e| crate::Error::Service(e.to_string()))?;
-            Ok(Self { manager, launch })
+            Ok(Self {
+                manager,
+                launch,
+                gate: Arc::default(),
+            })
         }
         pub async fn open(
             &self,
             input: TerminalOpenInput,
         ) -> TerminalResult<TerminalSessionSnapshot> {
+            let _admitted = self.gate.enter(&input.thread_id.0).await;
             let input = self.launch.open(input).await?;
             self.manager
                 .open(input.clone())
@@ -90,6 +124,8 @@ mod enabled {
             input: TerminalAttachInput,
             viewer_id: String,
         ) -> TerminalResult<AttachStream> {
+            // An attach may restart an exited terminal.
+            let _admitted = self.gate.enter(&input.thread_id.0).await;
             let input = self.launch.attach(input).await?;
             self.manager
                 .attach(input.clone(), Some(viewer_id))
@@ -103,6 +139,7 @@ mod enabled {
                 .map_err(|e| failure(e, &input.thread_id.0, &input.terminal_id.0))
         }
         pub async fn write(&self, input: TerminalWriteInput) -> TerminalResult<()> {
+            let _admitted = self.gate.enter(&input.thread_id.0).await;
             self.manager
                 .write(input.clone())
                 .await
@@ -179,6 +216,67 @@ mod enabled {
             options.env = context.environment.clone();
             options.app_version = env!("CARGO_PKG_VERSION").into();
             Ok(Arc::new(Self::new(options, Arc::new(PassThroughLaunch))?))
+        }
+    }
+    /// The restore's writer port (t3-git H-2). Terminals are the host's only processes that
+    /// write in a thread's folder: setup and settle scripts run in them and preview servers
+    /// are discovered from them. A live shell cannot be paused, so each one is named and the
+    /// restore refuses; new ones wait for the hold. TypeScript restores under live writers.
+    #[cfg(all(feature = "orchestration", feature = "workspace"))]
+    pub struct TerminalWriters(pub Arc<TerminalAdapter>);
+    #[cfg(all(feature = "orchestration", feature = "workspace"))]
+    #[async_trait::async_trait]
+    impl t3_orchestration::api::ThreadWriters for TerminalWriters {
+        async fn hold(
+            &self,
+            thread_id: t3_contracts::base_schemas::ThreadId,
+            cwd: std::path::PathBuf,
+        ) -> t3_orchestration::error::Result<t3_orchestration::api::WriterHold> {
+            let guard = self.0.gate.hold(&thread_id.0).await;
+            let mut metadata = self.0.manager.subscribe_metadata();
+            let terminals = match metadata.recv().await {
+                Some(TerminalMetadataStreamEvent::TerminalMetadataSnapshotEvent(snapshot)) => {
+                    snapshot.terminals
+                }
+                // The manager stopped: no terminal can be running.
+                _ => Vec::new(),
+            };
+            let cwd = plain(&cwd);
+            let running = terminals
+                .into_iter()
+                .filter(|terminal| {
+                    matches!(
+                        terminal.status,
+                        TerminalSessionStatus::Starting | TerminalSessionStatus::Running
+                    ) && (terminal.thread_id == thread_id.0
+                        || t3_workspace::paths::within(
+                            &plain(std::path::Path::new(&terminal.cwd)),
+                            &cwd,
+                        ))
+                })
+                .map(|terminal| {
+                    let name = if terminal.label.trim().is_empty() {
+                        terminal.terminal_id
+                    } else {
+                        terminal.label
+                    };
+                    format!("terminal `{name}`")
+                })
+                .collect();
+            Ok(t3_orchestration::api::WriterHold {
+                running,
+                guard: Box::new(guard),
+            })
+        }
+    }
+    /// Without the drive verbatim prefix a canonical restore scope carries, so it compares with
+    /// the folders terminals were opened in.
+    #[cfg(all(feature = "orchestration", feature = "workspace"))]
+    fn plain(path: &std::path::Path) -> std::path::PathBuf {
+        let text = path.to_string_lossy();
+        match text.strip_prefix(r"\\?\") {
+            Some(rest) if !rest.starts_with("UNC\\") => rest.into(),
+            _ => path.to_path_buf(),
         }
     }
     impl crate::services::DomainRuntime for TerminalAdapter {

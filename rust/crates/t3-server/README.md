@@ -58,6 +58,23 @@ authority (`workspaces.rs`, port of `KnownWorkspaces.ts`: managed worktree folde
 roots, live thread worktrees under a managed folder or listed by `git worktree list`). Device
 `open` takes the thread's workspace from the authority, never from the client.
 
+Clone destinations (`sourceControl.cloneRepository`, `projectClone.start`; `adapters/forge.rs`)
+cannot be workspaces yet, so a deny rule applies (TypeScript accepts any folder). Refused: text
+that is not a local-disk path, or has a device name, `:` or a trailing dot or space; remote drives
+and links to network paths (`t3_workspace::paths::canonicalize`); anything inside a known
+workspace (project roots, thread worktrees, managed worktree folders); the state directory and
+secrets; at the top of the T3 base, T3's own entries (`userdata`, `dev`, `caches`, `runtime`,
+`tools`, `service.env`, `usage-host-id`, `source-staging`) and dot entries; directly below the
+account home, `HOME` and `USERPROFILE`, a first folder starting with `.`, `AppData` (Windows) or
+`Library` (macOS); PowerShell profile folders (`Documents\PowerShell`, `WindowsPowerShell`, also
+under the Documents known folder), Git configuration folders (`XDG_CONFIG_HOME`, `~/.config/git`,
+`%PROGRAMDATA%\Git`), application data, autostart and shell start-up folders, `~/bin` and
+`~/.local/bin`, inside or as an ancestor; every PATH folder (existing or not), the folders of
+`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` and the homes, themselves or as an ancestor. The server
+then creates the folder, resolves it again and requires the same path before Git clones into it,
+so a link planted after the check cannot redirect it. A source folder below a home dot folder
+(`~/.local/src/x`) stays refused, because the rule looks only at the first level below the home.
+
 ## Transport
 
 `ws.rs` upgrades `GET /ws`: the `orchestrationProtocol=2` check (426) runs before any credential

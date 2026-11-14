@@ -103,6 +103,15 @@ async fn the_managed_policy_decides_where_the_server_may_listen() {
         unreadable.to_string().contains("managed policy"),
         "{unreadable}"
     );
+    // The binary exits 77 for it, which the desktop shell reports at once instead of retrying.
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let refused = binary(&home)
+        .env("T3CODE_DEV_MANAGED_POLICY_PATH", &policy)
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(77), "{refused:?}");
 }
 
 /// Review M2: a client that stops reading a large download cannot hold shutdown, the database
@@ -180,6 +189,10 @@ fn success(event: CallEvent) -> Value {
 /// Spawns the binary with nothing from this process's environment but what Windows needs to
 /// start a process, so neither a developer `T3CODE_*` variable nor the real home can leak in.
 fn spawn_binary(home: &Path) -> tokio::process::Child {
+    binary(home).spawn().unwrap()
+}
+
+fn binary(home: &Path) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_t3"));
     command
         .args(["serve", "--base-dir"])
@@ -200,7 +213,7 @@ fn spawn_binary(home: &Path) -> tokio::process::Child {
             command.env(name, value);
         }
     }
-    command.spawn().unwrap()
+    command
 }
 
 /// Stops the binary the way its operator would. POSIX sends SIGTERM and expects the full
