@@ -123,3 +123,18 @@ cargo check -p t3-contracts --target wasm32-unknown-unknown.
 Scope every Cargo command with -p t3-contracts; the build lock is shared.
 Do not touch other crates, workspace Cargo.toml, fixtures, tools, live T3 state,
 or another engineer's modules. Do not commit or push from an implementation task.
+
+## Rust-only methods
+
+`rpc::RUST_ONLY_METHODS` lists the WebSocket methods with no TypeScript counterpart, so absent from
+the generated `fixtures/rpc.json` and its samples. The parity tests (`tests/golden/rpc.rs`, t3-auth's
+`authorization.rs`, t3-server's `coverage.rs` and `scope_sweep.rs`) pin TypeScript's table exactly
+and require each listed method to be declared, scoped and served or unimplemented; the scope sweep
+takes its sample from its own `RUST_ONLY_SAMPLES`.
+
+- `vcs.trustRepository` (`git::VcsTrustRepositoryInput`/`VcsTrustRepositoryResult`, scope
+  `orchestration:operate`): the Rust server refuses a folder whose Git repository changed after it
+  was bound (`checkpoint.git.repository-changed`, t3-git H-1), which TypeScript never does. This is
+  the user's explicit way out. The folder is named by its project or thread, never by a path.
+  Agents cannot call it.
+
