@@ -11,6 +11,7 @@ pub mod terminal_output;
 pub mod text_generators;
 pub mod thread_search;
 pub mod tool_output;
+pub mod usage_limits;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
