@@ -16,7 +16,7 @@ pub use native::KeychainStore;
 pub use native::{AndroidKeystoreStore, set_android_vm};
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{
-    EphemeralSecretStore, NativeConfig, NativePlatform, OpenError, SecretKeyStore,
+    EphemeralSecretStore, FileDialog, NativeConfig, NativePlatform, OpenError, SecretKeyStore,
     SecretStoreError, Timeouts,
 };
 

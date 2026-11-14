@@ -1569,3 +1569,79 @@ async fn https_trusts_a_deployment_ca_only_when_it_is_configured() {
     assert_eq!(response.body, b"trusted");
     serve.abort();
 }
+
+/// A file dialog that answers from a queue: a selection, or `None` for a cancel.
+struct ScriptedDialog(std::sync::Mutex<std::collections::VecDeque<Option<Vec<std::path::PathBuf>>>>);
+impl t3_platform::FileDialog for ScriptedDialog {
+    fn pick_files(
+        &self,
+        _multiple: bool,
+    ) -> futures::future::BoxFuture<'static, Option<Vec<std::path::PathBuf>>> {
+        let next = self.0.lock().unwrap().pop_front().flatten();
+        Box::pin(async move { next })
+    }
+}
+
+#[tokio::test]
+async fn picked_files_are_readable_resources_and_a_cancel_is_an_empty_selection() {
+    // Integration 4: "Attach files" answered "unsupported host capability" on desktop.
+    let files = tempfile::tempdir().unwrap();
+    let image = files.path().join("Screenshot.PNG");
+    let notes = files.path().join("notes.txt");
+    std::fs::write(&image, [0x89, b'P', b'N', b'G']).unwrap();
+    std::fs::write(&notes, b"hello notes").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(EphemeralSecretStore::default());
+    let mut config = config(dir.path(), &secrets);
+    config.file_dialog = Some(Box::new(ScriptedDialog(std::sync::Mutex::new(
+        [Some(vec![image.clone(), notes.clone()]), None].into(),
+    ))));
+    let platform = NativePlatform::open(config).await.unwrap();
+    assert!(platform.can_pick_resources());
+
+    let picked = platform.pick_resources(Vec::new(), true).await.unwrap();
+    let described: Vec<_> = picked
+        .iter()
+        .map(|resource| (resource.name.as_str(), resource.mime.as_str()))
+        .collect();
+    assert_eq!(
+        described,
+        [("Screenshot.PNG", "image/png"), ("notes.txt", "text/plain")]
+    );
+    assert_ne!(picked[0].handle, picked[1].handle);
+    assert_eq!(
+        platform
+            .read_resource(picked[0].handle.clone(), 1024)
+            .await
+            .unwrap(),
+        [0x89, b'P', b'N', b'G']
+    );
+    // Over the caller's limit: refused before reading.
+    assert_eq!(
+        platform.read_resource(picked[1].handle.clone(), 4).await,
+        Err(PlatformError::TooLarge)
+    );
+    // Gone since it was picked.
+    std::fs::remove_file(&notes).unwrap();
+    assert!(matches!(
+        platform.read_resource(picked[1].handle.clone(), 1024).await,
+        Err(PlatformError::Storage(_))
+    ));
+    // A handle this host never gave out.
+    assert!(matches!(
+        platform.read_resource("picked-unknown".into(), 1024).await,
+        Err(PlatformError::Unsupported(_))
+    ));
+    // Cancelled: nothing picked, and no error.
+    assert_eq!(platform.pick_resources(Vec::new(), true).await.unwrap(), []);
+}
+
+#[tokio::test]
+async fn a_host_without_a_file_dialog_says_so_before_and_when_asked() {
+    let (platform, _dir, _) = platform().await;
+    assert!(!platform.can_pick_resources());
+    assert!(matches!(
+        platform.pick_resources(Vec::new(), true).await,
+        Err(PlatformError::Unsupported(_))
+    ));
+}

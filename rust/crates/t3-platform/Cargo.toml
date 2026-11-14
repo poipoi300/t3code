@@ -38,6 +38,8 @@ open = "5"
 # The OS trust store and system proxy settings, as the TypeScript desktop app uses them.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider", "system-proxy"] }
 rustls-platform-verifier = "0.7.1"
+# The OS file dialog for attachments (Windows IFileOpenDialog, macOS NSOpenPanel, the XDG portal).
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-registry = "0.6"
