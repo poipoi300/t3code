@@ -1306,7 +1306,7 @@ mod tests {
     }
 
     #[test]
-    fn host_timezone_is_forwarded_and_renders_its_offset_when_supported() {
+    fn host_timezone_is_forwarded_and_renders_its_non_utc_offset() {
         use nsh_engine::{EngineConfig, Root};
         use nsh_testing::Headless;
         use std::time::SystemTime;
@@ -1324,17 +1324,17 @@ mod tests {
         };
         config.environment.locale_settings.time_zone =
             nsh_core::platform::TimeZone::parse("America/New_York").expect("host IANA name");
-        let expected = if TimeZone::Iana("America/New_York".into()).is_known() {
-            "07:34"
-        } else {
-            "12:34"
-        };
+        assert!(
+            TimeZone::Iana("America/New_York".into()).is_known(),
+            "the UI enables platform timezone data"
+        );
+        let expected = "07:34";
         eprintln!("host America/New_York: expected rendered time {expected}");
         let mut app = Headless::start(config).expect("host timezone fixture");
         app.wait_for("Host timezone answer")
             .expect("actual assistant row");
         app.wait_for(expected)
-            .expect("host zone conversion or declared UTC fallback");
+            .expect("the actual row converts UTC to the host's New York zone");
     }
 
     #[test]

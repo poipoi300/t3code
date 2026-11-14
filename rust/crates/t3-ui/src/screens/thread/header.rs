@@ -14,6 +14,7 @@ use crate::i18n::{Text as I18nText, Value, t, tr};
 use crate::runtime::{Shared, rt};
 use crate::screens::panel::{Action, PanelHost};
 use crate::screens::sidebar::actions::{self, ThreadActionMenu};
+use crate::screens::titlebar::{titlebar_controls, workspace_page_header_with_reservation};
 use crate::state::layout::layout_class;
 use crate::state::nav::{Route, navigator};
 use crate::theme::tw;
@@ -246,12 +247,13 @@ fn report_header_error(error: HeaderError, title: Option<&str>) {
         detail,
     } = error
     {
+        let detail = detail.unwrap_or_else(|| "An error occurred.".into());
         toast::toast_manager().add(ToastOptions {
             variant: toast::Variant::Error,
             title: title.unwrap_or(&failure_title).to_owned(),
-            description_content: detail.map(|detail| {
+            description_content: Some(
                 Rc::new(move || text(detail.resolve()).into_element()) as toast::Slot
-            }),
+            ),
             ..Default::default()
         });
     }
@@ -327,6 +329,10 @@ pub fn thread_header(key: ThreadKey) -> impl IntoElement {
     let has_project =
         computed(move || breadcrumb.with(|b| b.as_ref().is_some_and(|b| b.project.is_some())));
     let workspace_panel = use_context::<PanelHost>().map(|host| host.panel(key.clone()));
+    let reserve_controls = computed(move || {
+        !(layout_class() == crate::state::layout::LayoutClass::Wide
+            && workspace_panel.is_some_and(|panel| panel.with(|panel| panel.is_open)))
+    });
     let controller = HeaderController::new(key.clone());
     let projection = runtime.store.thread(key.clone());
     let guest = computed(move || {
@@ -346,23 +352,39 @@ pub fn thread_header(key: ThreadKey) -> impl IntoElement {
                 })
         })
     });
-    view()
-        // Electron drag/window reservations belong to the shell; no native overflow-clip-margin.
-        .app_class(tw("relative bg-background flex h-[var(--workspace-topbar-height)] min-h-[var(--workspace-topbar-height)] shrink-0 items-center px-3 sm:px-5"))
+    let content = view()
+        .app_class(tw("flex min-w-0 flex-1 items-center"))
         .child(when(
             move || layout_class().is_compact() || has_thread_below(&nav.stack.get()),
-            move || button(
-                ButtonContent::Icon { icon: Icon::ArrowLeft, label: t("Back") },
-                ButtonVariant::Ghost, ButtonSize::Icon, || false, move || nav.back(),
-            ),
+            move || {
+                titlebar_controls(button(
+                    ButtonContent::Icon {
+                        icon: Icon::ArrowLeft,
+                        label: t("Back"),
+                    },
+                    ButtonVariant::Ghost,
+                    ButtonSize::Icon,
+                    || false,
+                    move || nav.back(),
+                ))
+            },
         ))
         // ContextMenu adds a native wrapper; reserve the breadcrumb's share on that wrapper.
-        .child(view().app_class(tw("min-w-0 flex-1")).child(chat_header(breadcrumb, key.environment.clone(), controller, guest)))
+        .child(view().app_class(tw("min-w-0 flex-1")).child(chat_header(
+            breadcrumb,
+            key.environment.clone(),
+            controller,
+            guest,
+        )))
         // The web fixes this group to window chrome; the shared header is its native anchor.
-        .child(when(
-            move || !(layout_class() == crate::state::layout::LayoutClass::Wide
-                && workspace_panel.is_some_and(|panel| panel.with(|panel| panel.is_open))),
-            move || panel_layout_controls(key.clone(), has_project),
+        .child(when(reserve_controls, move || {
+            titlebar_controls(panel_layout_controls(key.clone(), has_project))
+        }));
+    view()
+        .app_class(tw("relative bg-background shrink-0"))
+        .child(workspace_page_header_with_reservation(
+            Prop::bind(move || reserve_controls.get()),
+            content,
         ))
 }
 
@@ -448,7 +470,7 @@ fn chat_header(
                     let environment = environment.clone();
                     project.map(|project| untracked(|| {
                         vec![
-                            project_breadcrumb(project.0, environment, controller).into_element(),
+                            titlebar_controls(project_breadcrumb(project.0, environment, controller)).into_element(),
                             workspace_breadcrumb_separator().into_element(),
                         ]
                     })).unwrap_or_default()
@@ -459,20 +481,20 @@ fn chat_header(
                         view()
                             .app_class(tw("flex min-w-0 items-center font-medium shrink-0 text-muted-foreground"))
                             .tooltip(tooltip(tooltip_create_handle(), TooltipOptions::default(), text(SharedString::from(title.clone()))))
-                            .child(nsh_base::button()
+                            .child(titlebar_controls(nsh_base::button()
                                 .accessibility_label(Some(SharedString::from(tr("Open parent thread: {title}", &[("title", Value::Text(title.clone()))]))))
                                 .on_press_down(move || controller.renaming.set(None))
                                 .on_press(move || nav.open(Route::Thread(key.clone())))
                                 .app_class(tw("inline-flex min-w-0 max-w-full cursor-pointer items-center rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
                                 .child(text(SharedString::from(title)).accessible(false).app_class(move || tw(if collapse_parent.get() { "block min-w-0 truncate w-0" } else { "block min-w-0 truncate" })))
-                                .child(when(move || collapse_parent.get(), || text(SharedString::from("...")).accessible(false).test_id("parent-breadcrumb-ellipsis"))))
+                                .child(when(move || collapse_parent.get(), || text(SharedString::from("...")).accessible(false).test_id("parent-breadcrumb-ellipsis")))))
                             .into_element(),
                         workspace_breadcrumb_separator().into_element(),
                     ])).unwrap_or_default()
                 }))
                 .child(view()
                     .app_class(tw("flex min-w-0 items-center font-medium text-foreground min-w-10 flex-1"))
-                    .child(thread_title(breadcrumb, controller))
+                    .child(titlebar_controls(thread_title(breadcrumb, controller)))
                     .child(dynamic(move || origin.get().map(|origin| untracked(|| {
                         let description = origin.clone();
                         view().app_class(tw("flex shrink-0"))
@@ -481,7 +503,10 @@ fn chat_header(
                     }))))),
             ),
         )
-        .child(guest_share_indicator(guest, controller));
+        .child(when(move || guest.with(Option::is_some), move || {
+            view().app_class(tw("min-w-0 max-w-full shrink items-stretch"))
+                .child(titlebar_controls(guest_share_indicator(guest, controller)))
+        }));
     menu::context_menu(
         content.on_context_menu(move |_: &ContextMenuEvent| controller.menu_open.set(false)),
         MenuOptions {
@@ -590,7 +615,16 @@ fn project_breadcrumb(
         environment: environment.clone(),
         project: project.id.clone(),
     });
-    let navigation = use_context::<ThreadHeaderNavigation>().map(|service| stored(service.0));
+    let navigation = use_context::<ThreadHeaderNavigation>()
+        .or_else(|| {
+            rt().backend().client().map(|client| {
+                crate::runtime::services::thread_ops::thread_header_navigation(
+                    &client,
+                    controller.key.get(),
+                )
+            })
+        })
+        .map(|service| stored(service.0));
     let unavailable = signal(Some(I18nText::from(
         "This connection cannot change threads.",
     )));
@@ -645,7 +679,7 @@ fn guest_share_indicator(
     share: Memo<Option<GuestShare>>,
     controller: HeaderController,
 ) -> impl IntoElement {
-    view().child(dynamic(move || {
+    view().w_full().child(dynamic(move || {
         share.get().map(|_| {
             untracked(|| {
                 let status = move || {
@@ -667,14 +701,14 @@ fn guest_share_indicator(
                         }
                     })
                 };
-                view()
+                view().w_full()
                     .app_class(tw(
-                        "flex shrink-0 items-center gap-1 text-muted-foreground text-xs",
+                        "flex min-w-0 items-center gap-1 text-muted-foreground text-xs",
                     ))
-                    .child(icon_with_class(Icon::User, "size-3.5"))
-                    .child(text(status))
+                    .child(icon_with_class(Icon::User, "size-3.5 shrink-0"))
+                    .child(text(status).app_class(tw("min-w-0 shrink truncate")))
                     .child(
-                        view()
+                        view().app_class(tw("shrink-0"))
                             .tooltip(tooltip(
                                 tooltip_create_handle(),
                                 TooltipOptions::default(),
@@ -744,6 +778,7 @@ pub fn panel_layout_controls(key: ThreadKey, has_project: Memo<bool>) -> impl In
     let key = stored(key);
     let panel = host.map(|host| host.panel(key.get()));
     view()
+        .test_id("thread-panel-layout-controls")
         .app_class(tw("flex h-full shrink-0 items-center gap-1"))
         .child(panel_toggle(
             Icon::SquareMenu,

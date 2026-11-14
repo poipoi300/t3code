@@ -186,9 +186,34 @@ pub struct AddProjectView {
 }
 
 /// Adapter for client-owned creation, path resolution, permissions, projection waits and drafts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PublishChoice {
+    pub kind: String,
+    pub label: Text,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct PublishingView {
+    pub title: Text,
+    pub description: Text,
+    pub selected: String,
+    pub targets: Vec<PublishChoice>,
+    pub publishes: bool,
+    pub can_change: bool,
+}
 pub trait AddProjectClient {
     /// Emits current state first; dropping the stream releases this flow's demand.
     fn watch(&self) -> LocalBoxStream<'static, Rc<AddProjectView>>;
+    fn completed(&self) -> LocalBoxStream<'static, ()> {
+        futures::stream::pending().boxed_local()
+    }
+    fn publishing(&self) -> LocalBoxStream<'static, Option<Rc<PublishingView>>> {
+        futures::stream::pending().boxed_local()
+    }
+    fn set_publishing(&self, _publishes: bool, _kind: Option<String>) -> Result<(), Text> {
+        Err(Text::client_key(
+            t3_client::ClientError::Unsupported("new-project publication").to_string(),
+        ))
+    }
     fn set_query(&self, query: String) -> Result<(), Text>;
     fn select_item(&self, id: &str) -> LocalBoxFuture<'static, Result<Option<Destination>, Text>>;
     fn back(&self) -> Result<(), Text>;
@@ -210,8 +235,112 @@ pub fn screen() -> AnyElement {
     command_palette_add_project(client.0)
 }
 
+fn new_project_publication(
+    current: Signal<Option<Rc<PublishingView>>>,
+    client: Stored<Rc<dyn AddProjectClient>>,
+    busy: Signal<bool>,
+    error: Signal<Option<Text>>,
+) -> AnyElement {
+    use crate::ui::select::{self, SelectItem, SelectProps};
+    let mut row = view()
+        .app_class(tw("flex items-center gap-2 px-4 py-3"))
+        .child(
+            view()
+                .app_class(tw("min-w-0 flex-1 flex-col"))
+                .child(text(move || {
+                    current
+                        .get()
+                        .map_or_else(String::new, |value| value.title.resolve().to_string())
+                }))
+                .child(
+                    text(move || {
+                        current.get().map_or_else(String::new, |value| {
+                            value.description.resolve().to_string()
+                        })
+                    })
+                    .app_class(tw("text-muted-foreground text-xs")),
+                ),
+        );
+    if current
+        .get_untracked()
+        .is_some_and(|value| value.targets.len() > 1)
+    {
+        let mut props = SelectProps::new(t("Host for the new repository"));
+        props.size = select::Size::Xs;
+        props.variant = select::Variant::Ghost;
+        props.items = computed(move || {
+            current.get().map_or_else(Vec::new, |value| {
+                value
+                    .targets
+                    .iter()
+                    .map(|target| SelectItem::new(target.kind.clone(), target.label.resolve()))
+                    .collect()
+            })
+        })
+        .into();
+        props.value = computed(move || {
+            select::Value::Controlled(current.get().map(|value| value.selected.clone().into()))
+        })
+        .into();
+        props.disabled =
+            computed(move || busy.get() || current.get().is_none_or(|value| !value.can_change))
+                .into();
+        row = row.child(select::select(props, move |kind| {
+            let Some(value) = current
+                .get_untracked()
+                .filter(|value| value.can_change && !busy.get_untracked())
+            else {
+                return;
+            };
+            let Some(kind) = kind.filter(|kind| {
+                value
+                    .targets
+                    .iter()
+                    .any(|target| target.kind == kind.as_str())
+            }) else {
+                return;
+            };
+            if let Err(message) = client
+                .get()
+                .set_publishing(value.publishes, Some(kind.to_string()))
+            {
+                error.set(Some(message));
+            }
+        }));
+    }
+    row.child(
+        nsh_base::checkbox()
+            .accessibility_label(Some(t("Create private repository").into()))
+            .checked(move || current.get().is_some_and(|value| value.publishes))
+            .disabled(move || busy.get() || current.get().is_none_or(|value| !value.can_change))
+            .on_change(move |checked: &bool| {
+                let Some(value) = current
+                    .get_untracked()
+                    .filter(|value| value.can_change && !busy.get_untracked())
+                else {
+                    return;
+                };
+                if let Err(message) = client
+                    .get()
+                    .set_publishing(*checked, Some(value.selected.clone()))
+                {
+                    error.set(Some(message));
+                }
+            }),
+    )
+    .into_element()
+}
+
 pub fn command_palette_add_project(client: Rc<dyn AddProjectClient>) -> AnyElement {
     let mut changes = client.watch();
+    let mut completed = client.completed();
+    let mut publishing = client.publishing();
+    let publication = signal(None::<Rc<PublishingView>>);
+    spawn(async move {
+        while let Some(value) = publishing.next().await {
+            publication.set(value);
+        }
+    });
     let current = signal(None::<Rc<AddProjectView>>);
     spawn(async move {
         while let Some(next) = changes.next().await {
@@ -224,6 +353,15 @@ pub fn command_palette_add_project(client: Rc<dyn AddProjectClient>) -> AnyEleme
     let open = signal(true);
     let nav = navigator();
     let origin = nav.top();
+    let completion_origin = origin.clone();
+    spawn(async move {
+        if completed.next().await.is_some() {
+            open.set(false);
+            if nav.top() == completion_origin && completion_origin == Route::AddProject {
+                nav.back();
+            }
+        }
+    });
     let complete = Rc::new(move |result: Result<Option<Destination>, Text>| {
         busy.set(false);
         match result {
@@ -294,6 +432,7 @@ pub fn command_palette_add_project(client: Rc<dyn AddProjectClient>) -> AnyEleme
                     Summary::New { name, path, root, environment } => new_project_summary(&name, &path, &root, environment.as_deref()),
                     Summary::Repository { title, url, icon } => remote_repository_summary(&title, &url, icon),
                 })))
+                .child(dynamic(move || publication.get().map(|_| new_project_publication(publication,client,busy,error))))
                 .child(dynamic(move || {
                     let value = current.get();
                     let message = error.get().or_else(|| value.as_ref().and_then(|value| value.error.clone()));

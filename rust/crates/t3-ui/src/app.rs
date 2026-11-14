@@ -51,6 +51,14 @@ fn root(address: Option<&str>, store: ClientStore, started: Started) -> AnyEleme
     crate::i18n::set_language("system", &[locale().to_string()]);
     let paired = started.paired;
     let runtime = Rt::boot(store, started);
+    // Client services bound once above the routes (runtime/services). Approvals, plans, the
+    // thread header, Markdown links and rewind reach the client themselves.
+    if let Some(client) = runtime.backend().client() {
+        use crate::runtime::services::{git_panel, thread_ops};
+        thread_ops::bind_confirmation(&client);
+        provide_context(git_panel::git_actions(client.git_panel()));
+        provide_context(git_panel::git_actions_registration(client.git_panel()));
+    }
     let nav = Navigator::new(initial_route(
         address,
         paired || !runtime.environments().is_empty(),
@@ -59,6 +67,9 @@ fn root(address: Option<&str>, store: ClientStore, started: Started) -> AnyEleme
     let panels = Panels::new();
     provide_context(panels);
     clock::start();
+    // SH-TITLEBAR: the hidden native bar (NSH draws the traffic lights or caption buttons); the
+    // headers reserve their space through screens::titlebar.
+    crate::screens::titlebar::install_window_titlebar(crate::i18n::Text::content("T3 Code"));
     // The client exposes no designated primary yet (request in client-seam-requests.md): unscoped.
     let keys = crate::keys::install(panels, signal(None));
     let command_palette = crate::screens::palette::palette_controller();
@@ -76,6 +87,9 @@ fn root(address: Option<&str>, store: ClientStore, started: Started) -> AnyEleme
         .bg(move || palette().background)
         .text_color(move || palette().foreground)
         .pt(move || safe_area().top)
+        .app_class(theme::tw("relative"))
+        // Absolute drag background behind the routes; desktop windows only.
+        .child(crate::screens::titlebar::desktop_titlebar())
         .child(dynamic(move || {
             if standalone.get() {
                 router::screen(&top.get())

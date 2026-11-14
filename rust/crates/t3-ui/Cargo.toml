@@ -11,15 +11,17 @@ publish = false
 # The authoritative NSH pin. The installer reads nsh-core; keep all NSH crates identical.
 [dependencies]
 nsh-core = { git = "https://github.com/longbridge/nsh", rev = "d6f549d5a85b6b23714249ddd572f922db961254" }
-nsh-base = { git = "https://github.com/longbridge/nsh", rev = "d6f549d5a85b6b23714249ddd572f922db961254", default-features = false, features = ["highlight", "rich-editor"] }
+nsh-base = { git = "https://github.com/longbridge/nsh", rev = "d6f549d5a85b6b23714249ddd572f922db961254", default-features = false, features = ["highlight", "rich-editor", "editor", "term"] }
 t3-client = { path = "../t3-client" }
 t3-contracts = { path = "../t3-contracts" }
 t3-theme = { path = "../t3-theme" }
-t3-i18n = { path = "../t3-i18n", default-features = false }
+t3-i18n = { path = "../t3-i18n", default-features = false, features = ["iana"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 # raw_value: SH-ROUTES validates project keys as JSON without rejecting overflowing numbers.
 serde_json = { version = "1", features = ["raw_value"] }
 percent-encoding = "2"
+# UI-QR: Project Nayuki's encoder, the library apps/web vendors as packages/shared/src/qrCode.ts.
+qrcodegen = "1.8"
 t3-platform = { path = "../t3-platform" }
 log = "0.4"
 # TL-BLOCKS-2's code tokenizer: the versions and features nsh-base's `highlight` already builds.

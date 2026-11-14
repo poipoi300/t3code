@@ -160,6 +160,7 @@ pub fn command_palette_virtualized_results(
     options: ResultsOptions,
 ) -> impl IntoElement {
     let list = element_ref();
+    let viewport = element_ref();
     effect(move || {
         let value = state.highlighted.get();
         let index = results.with(|results| {
@@ -173,7 +174,7 @@ pub fn command_palette_virtualized_results(
                 .with(|items| items.first().map(|item| item.value.clone()))
                 == value
             {
-                list.scroll_to_offset(px(0.0), false);
+                viewport.scroll_to_offset(px(0.0), false);
             } else {
                 // NSH has no scrollIndexIntoView viewportMargin; this pin exposes index alignment.
                 list.scroll_to_index(index as u32, Percentage(0.5), px(0.0), false);
@@ -188,18 +189,8 @@ pub fn command_palette_virtualized_results(
         }
         let options = options.clone();
         untracked(|| {
-            let content_height = signal(px(0.0));
-            // NSH's own-viewport list has no intrinsic height; LegendList sizes from its content.
-            watch_scroll(
-                move || list.node(),
-                move |event| {
-                    if content_height.get_untracked() != event.content_size.height {
-                        content_height.set(event.content_size.height);
-                    }
-                },
-            );
-            // NSH's virtual list owns scrolling; overscroll/scrollbar-track hints have no native meaning.
-            virtual_list(
+            // Parent mode gives the bounded scroll surface LegendList's intrinsic content extent.
+            let rows = virtual_list(
                 move || results.with(|results| results.rows.len()),
                 move |at| {
                     let row = computed(move || {
@@ -211,20 +202,26 @@ pub fn command_palette_virtualized_results(
             .keys(move || {
                 results.with(|results| results.rows.iter().map(Row::key).collect::<Vec<_>>())
             })
+            .viewport(nsh_core::ListViewport::Parent)
             .element_ref(&list)
-            .role(AccessibilityRole::Listbox)
-            .label(move || SharedString::from(t("Command palette")))
-            .accessibility_state(move || nsh_core::AccessibilityState {
-                busy: state.loading.get(),
-                ..Default::default()
-            })
             .estimated_item_size(px(40.0))
-            // CommandListVirtualized's size-full wrapper is inherited by the native scroll surface.
-            .app_class(tw(
-                "size-full min-w-0 flex min-h-0 flex-col overflow-x-hidden px-2 py-2",
-            ))
-            .h(move || content_height.get())
-            .into_element()
+            .content_padding(px(8.0))
+            .w_full();
+            scroll()
+                .element_ref(&viewport)
+                .role(AccessibilityRole::Listbox)
+                .label(move || SharedString::from(t("Command palette")))
+                .accessibility_state(move || nsh_core::AccessibilityState {
+                    busy: state.loading.get(),
+                    ..Default::default()
+                })
+                // Panel allocation supplies max-h-[inherit]; native scrolling replaces scroll-py/track hints.
+                .app_class(tw(
+                    "size-full min-w-0 flex min-h-0 flex-col overflow-x-hidden",
+                ))
+                .flex_shrink(1.0)
+                .child(rows)
+                .into_element()
         })
     })
 }

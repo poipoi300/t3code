@@ -417,23 +417,45 @@ fn open_content_search_dialog(
         .child(search_option_button("Match case".into(), "Aa", options, current, 0))
         .child(search_option_button("Match whole word".into(), "ab", options, current, 1))
         .child(search_option_button("Use regular expression".into(), ".*", options, current, 2));
-    command_palette_content(state, ContentOptions {
-        // Interpolated input labels await UI-COMMAND's Text slots; no content is used as a key.
-        input: input("Search project contents", "Search project contents…"), escape_label: "Back".into(),
-        footer_action_label: Some("Open file".into()), panel_size: PanelSize::Fill,
-        input_accessory: Some(accessory.into_element()), ..Default::default()
-    }, view().app_class(tw("flex min-h-0 flex-1 flex-col"))
-        .child(when(move || current.with(|view| view.can_read_files && (view.has_query || view.pending || view.error.is_some() || view.invalid_regex)), move || {
-            view().app_class(tw("flex h-9 shrink-0 items-center border-b px-3 text-xs text-muted-foreground"))
+    command_palette_content(
+        state,
+        ContentOptions {
+            // Interpolated input labels await UI-COMMAND's Text slots; no content is used as a key.
+            input: input("Search project contents", "Search project contents…"),
+            escape_label: "Back".into(),
+            footer_action_label: Some("Open file".into()),
+            panel_size: PanelSize::Fill,
+            input_accessory: Some(accessory.into_element()),
+            ..Default::default()
+        },
+        dynamic(move || {
+            untracked(|| {
+                let status = when(
+                    move || {
+                        current.with(|view| {
+                            view.can_read_files
+                                && (view.has_query
+                                    || view.pending
+                                    || view.error.is_some()
+                                    || view.invalid_regex)
+                        })
+                    },
+                    move || {
+                        view().app_class(tw("flex h-9 shrink-0 items-center border-b px-3 text-xs text-muted-foreground"))
                 .child(text(move || current.with(content_status)).app_class(move || tw(&cn([current.with(|view| view.error.is_some() || view.invalid_regex).then_some("text-destructive")]))))
-        }))
-        .child(dynamic(move || {
-            if current.with(|view| view.matches.is_empty()) {
-                return view().app_class(tw("flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground"))
+                    },
+                );
+                let results = dynamic(move || {
+                    if current.with(|view| view.matches.is_empty()) {
+                        return view().app_class(tw("flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground"))
                     .child(text(move || current.with(content_empty_state).resolve())).into_element();
-            }
-            untracked(|| content_results(state, current).into_element())
-        })))
+                    }
+                    untracked(|| content_results(state, current).into_element())
+                });
+                vec![status.into_element(), results.into_element()]
+            })
+        }),
+    )
 }
 
 fn search_option_button(
@@ -551,8 +573,8 @@ fn content_results(state: CommandState, current: Signal<ContentSearchView>) -> i
             list.scroll_to_index(at as u32, Percentage(0.5), px(0.0), false);
         }
     });
-    // Native recycling replaces the DOM sentinel's growing window; each file retains its group.
-    virtual_list(move || rows.with(Vec::len), move |at| {
+    // Parent mode preserves ScrollArea's content extent while recycling the source's grouped rows.
+    let results = virtual_list(move || rows.with(Vec::len), move |at| {
         let row = computed(move || rows.with(|rows| rows.get(at.index()).cloned()));
         let is_header = computed(move || row.with(|row| matches!(row, Some(ContentRow::File { .. }))));
         let matched = computed(move || row.with(|row| match row {
@@ -576,5 +598,11 @@ fn content_results(state: CommandState, current: Signal<ContentSearchView>) -> i
                 .child(view().app_class(tw("min-w-0 flex-1 truncate"))
                     .child(highlighted_search_line(computed(move || matched.with(|item| item.as_ref().map(|item| client::text_parts(&item.line_content, &item.match_ranges.iter().map(|range| (range.start as usize,range.end as usize)).collect::<Vec<_>>())).unwrap_or_default()))))).into_element())
         })
-    }).element_ref(&list).estimated_item_size(px(28.0)).app_class(tw("min-h-0 flex-1 py-2"))
+    }).viewport(nsh_core::ListViewport::Parent).element_ref(&list)
+        .estimated_item_size(px(28.0)).content_padding_y(px(8.0)).w_full();
+    // Match the browser's flex-1 percentage basis, rather than NSH's zero-point basis.
+    scroll()
+        .app_class(tw("min-h-0 flex-1"))
+        .basis(Percentage(0.0))
+        .child(results)
 }

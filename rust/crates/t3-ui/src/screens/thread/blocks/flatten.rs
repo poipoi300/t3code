@@ -1438,7 +1438,14 @@ fn split_structural_blocks(text: &str) -> Vec<&str> {
     let mut after_blank = false;
     let mut insight_indent = None;
     let mut compound: Option<CompoundBlock> = None;
-    for line in text.split('\n') {
+    let mut lines = text.split_inclusive(['\r', '\n']).peekable();
+    while let Some(raw) = lines.next() {
+        let line = raw.strip_suffix(['\r', '\n']).unwrap_or(raw);
+        let mut line_bytes = raw.len();
+        if raw.ends_with('\r') && lines.peek() == Some(&"\n") {
+            lines.next();
+            line_bytes += 1;
+        }
         let opener = fence(line);
         if let Some(current) = &mut compound {
             if current.closes(line) {
@@ -1482,7 +1489,7 @@ fn split_structural_blocks(text: &str) -> Vec<&str> {
                 compound = CompoundBlock::open(line);
             }
         }
-        line_start += line.len() + 1;
+        line_start += line_bytes;
     }
     blocks.push(&text[block_start..]);
     blocks

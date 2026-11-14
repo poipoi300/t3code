@@ -7,7 +7,8 @@ use std::rc::Rc;
 use super::code::{CodeHighlightState, HighlightQueueWork, code_chunk_row, highlighted_chunk};
 use super::flatten::{Block, BlockId, BlockKind, FlattenWork, MessageFlattener, StreamBlocks};
 use crate::i18n::t;
-use crate::runtime::Shared;
+use crate::runtime::{Shared, rt};
+use crate::screens::composer::send::{ComposerSendClient, PendingMessages, pending_messages};
 use crate::screens::thread::markdown::base::{
     chat_markdown, chat_markdown_blocks, chat_markdown_leaf, starts_with_heading,
 };
@@ -15,20 +16,28 @@ use crate::screens::thread::markdown::code_block::{
     CodeBlockOptions, CodeBlockProps, CodeBlockState, extract_fence_title,
     markdown_code_block_header, markdown_code_chunk_frame,
 };
+use crate::screens::thread::rows::approval::{
+    ApprovalContext, approval_timeline_row, unmatched_pending_approval_rows,
+};
 use crate::screens::thread::rows::assistant::{
     AssistantRowContext, AssistantRowsState, assistant_changed_files_section,
     assistant_message_meta, assistant_meta_timeline_row, assistant_row, assistant_status_badge,
-    should_preserve_assistant_line_breaks,
+    assistant_timeline_row, sent_message_timeline_row, should_preserve_assistant_line_breaks,
 };
+use crate::screens::thread::rows::events::{EventRowContext, v2_event_timeline_row};
 use crate::screens::thread::rows::groups::{
     WorkGroupsContext, WorkGroupsState, work_group_timeline_row,
 };
+use crate::screens::thread::rows::plan::{PlanContext, proposed_plan_timeline_row};
 use crate::screens::thread::rows::user::{UserRowContext, UserRowState, user_message_row};
 use crate::screens::thread::rows::work::working_row;
+use crate::screens::thread::viewport::{TimelineViewport, timeline_row_keys};
 use crate::theme::{cn, tw};
+use crate::ui::surface::empty_state;
 use futures::FutureExt;
 use nsh_core::prelude::*;
 use t3_client::thread_views::messages_timeline::{MessagesTimelineRow, MessagesTimelineRowContent};
+use t3_client::types::ThreadKey;
 
 pub type TimelineRows = Memo<Shared<Vec<Rc<MessagesTimelineRow>>>>;
 
@@ -238,6 +247,7 @@ fn semantic_block(kind: &BlockKind) -> bool {
 struct Entry {
     row: Rc<MessagesTimelineRow>,
     message: Option<MessageDocument>,
+    start: usize,
 }
 
 fn source(row: &MessagesTimelineRow) -> Option<(&str, bool)> {
@@ -301,6 +311,7 @@ impl BlockListModel {
             let mut entry = removed.remove(&row.id).unwrap_or_else(|| Entry {
                 row: row.clone(),
                 message: None,
+                start: self.count,
             });
             if entry.message.is_none() || !Rc::ptr_eq(&entry.row, row) {
                 if let Some((text, streaming)) = source(row) {
@@ -351,6 +362,7 @@ impl BlockListModel {
                 }
                 entry.row = row.clone();
             }
+            entry.start = self.count;
             self.order.push((self.count, row.id.clone()));
             self.count += entry
                 .message
@@ -376,6 +388,40 @@ impl BlockListModel {
     }
     pub fn is_empty(&self) -> bool {
         self.count == 0
+    }
+
+    pub fn key_at(&self, index: usize) -> Option<SharedString> {
+        let cell = self.cell(index)?;
+        let key = match &cell.id {
+            CellId::Row(id) => ("row", id.as_str(), 0),
+            CellId::Block(id) => ("block", id.message_id.as_str(), id.index),
+            CellId::Footer(id) => ("footer", id.as_str(), 0),
+        };
+        Some(
+            serde_json::to_string(&key)
+                .expect("timeline identity")
+                .into(),
+        )
+    }
+
+    pub fn index_for_key(&self, key: &str) -> Option<usize> {
+        let Ok((kind, id, index)) = serde_json::from_str::<(String, String, usize)>(key) else {
+            return self.entries.get(key).map(|entry| entry.start);
+        };
+        let entry = self.entries.get(&id)?;
+        match kind.as_str() {
+            "row" if entry.message.is_none() => Some(entry.start),
+            "block" => entry
+                .message
+                .as_ref()
+                .filter(|message| index < message.document.block_count())
+                .map(|_| entry.start + index),
+            "footer" => entry
+                .message
+                .as_ref()
+                .map(|message| entry.start + message.document.block_count()),
+            _ => None,
+        }
     }
 
     pub fn cell(&self, index: usize) -> Option<BlockCell> {
@@ -508,6 +554,16 @@ pub struct BlockListOptions {
     pub work: WorkGroupsContext,
     pub wrapped: Memo<bool>,
     pub themed: Memo<bool>,
+    pub thread: Option<BlockListThreadContext>,
+}
+
+#[derive(Clone)]
+pub struct BlockListThreadContext {
+    pub key: ThreadKey,
+    pub events: EventRowContext,
+    pub approvals: ApprovalContext,
+    pub plans: PlanContext,
+    pub pending: Option<(PendingMessages, Rc<dyn ComposerSendClient>)>,
 }
 
 impl Default for BlockListOptions {
@@ -519,12 +575,40 @@ impl Default for BlockListOptions {
             work: WorkGroupsContext::new(WorkGroupsState::default()),
             wrapped: computed(|| true),
             themed: computed(crate::theme::has_theme_id),
+            thread: None,
         }
+    }
+}
+
+impl BlockListOptions {
+    pub fn for_thread(
+        key: ThreadKey,
+        groups: WorkGroupsState,
+        approvals: ApprovalContext,
+        plans: PlanContext,
+        working: Memo<bool>,
+    ) -> Self {
+        let mut options = Self::default();
+        options.user.working = working;
+        options.work = WorkGroupsContext::new(groups);
+        let pending = rt().backend().client().map(|client| {
+            let client: Rc<dyn ComposerSendClient> = Rc::new(client);
+            (PendingMessages::attach(client.clone(), key.clone()), client)
+        });
+        options.thread = Some(BlockListThreadContext {
+            events: EventRowContext::new(key.clone(), groups.entries),
+            key,
+            approvals,
+            plans,
+            pending,
+        });
+        options
     }
 }
 
 pub fn messages_timeline(rows: TimelineRows, options: BlockListOptions) -> impl IntoElement {
     let state = options.state;
+    let thread = options.thread.clone();
     let revision = computed(move || {
         let retired = rows.with(|rows| untracked(|| state.model.with(|model| model.update(rows))));
         state.highlights.with(|documents| {
@@ -565,6 +649,30 @@ pub fn messages_timeline(rows: TimelineRows, options: BlockListOptions) -> impl 
         revision.with(|_| ());
         state.len()
     });
+    let viewport = thread.as_ref().map(|context| {
+        TimelineViewport::new(context.key.clone(), timeline_row_keys(rows)).with_indexed_rows(
+            count,
+            move |index| state.model.with(|model| model.key_at(index)),
+            move |key| state.model.with(|model| model.index_for_key(key)),
+        )
+    });
+    let pending = thread
+        .as_ref()
+        .and_then(|context| context.pending.as_ref().map(|(messages, _)| *messages));
+    let footer = thread.map(|context| {
+        view().app_class(tw("w-full px-3 sm:px-12")).child(
+            view()
+                .app_class(tw(
+                    "mx-auto w-full min-w-0 max-w-(--chat-content-max-width)",
+                ))
+                .child(unmatched_pending_approval_rows(rows, context.approvals))
+                .child(
+                    context
+                        .pending
+                        .map(|(messages, client)| pending_messages(client, context.key, messages)),
+                ),
+        )
+    });
     let list = virtual_list(count, move |at| {
         let cell = computed(move || {
             revision.with(|_| ());
@@ -578,35 +686,87 @@ pub fn messages_timeline(rows: TimelineRows, options: BlockListOptions) -> impl 
         ))
     })
     // NSH keys() re-hashes the entire reply on a new tail block; key only mounted cells above.
-    .initial_scroll_at_end()
     .follow_end(px(1.0))
-    .estimated_item_size(px(90.0))
-    .header(view().app_class(tw("h-3 sm:h-4")))
-    .footer(view().app_class(tw("h-3 sm:h-4")))
-    .empty(
-        view()
-            .app_class(tw("flex h-full items-center justify-center"))
-            .child(
-                text(move || SharedString::from(t("Send a message to start the conversation.")))
-                    .app_class(tw("text-sm text-muted-foreground")),
-            ),
-    )
+    .estimated_item_size(px(120.0))
+    .content_padding_y(px(16.0))
+    .footer(view().child(footer))
+    .empty(dynamic(move || {
+        pending
+            .is_none_or(|pending| pending.messages.with(|messages| messages.is_empty()))
+            .then(|| {
+                empty_state(
+                    t("No messages yet"),
+                    t("Send a message to start this thread."),
+                )
+            })
+    }))
     .flex_1()
     .test_id("timeline");
+    let list = match viewport {
+        Some(viewport) => viewport.attach(list),
+        None => list.initial_scroll_at_end(),
+    };
     view().flex_1().min_h(px(0.0)).selectable(true).child(list)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowKind {
+    User,
+    Assistant,
+    AssistantMeta,
+    SentMessage,
+    Event,
+    Plan,
+    Work,
+    Working,
+    WorktreeSetup,
+    ViewedImages,
+    ContextCompaction,
+    HtmlRender,
+    McpApp,
+}
+
+fn kind_of(row: &MessagesTimelineRow) -> RowKind {
+    use MessagesTimelineRowContent as C;
+    match &row.content {
+        C::Message { message, .. } if message.role == "user" => RowKind::User,
+        C::Message { .. } => RowKind::Assistant,
+        C::AssistantMeta { .. } => RowKind::AssistantMeta,
+        C::SentMessage { .. } => RowKind::SentMessage,
+        C::Event { .. } => RowKind::Event,
+        C::ProposedPlan { .. } => RowKind::Plan,
+        C::Working { .. } => RowKind::Working,
+        C::Work { .. }
+        | C::WorkLive { .. }
+        | C::Thinking { .. }
+        | C::WorkToggle { .. }
+        | C::TurnFold { .. }
+        | C::AttemptFold { .. } => RowKind::Work,
+        C::WorktreeSetup { .. } => RowKind::WorktreeSetup,
+        C::ViewedImages { .. } => RowKind::ViewedImages,
+        C::ContextCompaction { .. } => RowKind::ContextCompaction,
+        C::HtmlRender { .. } => RowKind::HtmlRender,
+        C::McpApp { .. } => RowKind::McpApp,
+    }
+}
+
+fn unrendered(kind: RowKind) -> bool {
+    matches!(
+        kind,
+        RowKind::WorktreeSetup
+            | RowKind::ViewedImages
+            | RowKind::ContextCompaction
+            | RowKind::HtmlRender
+            | RowKind::McpApp
+    )
 }
 
 fn timeline_row_content(
     cell: ReadSignal<BlockCell>,
     options: BlockListOptions,
 ) -> impl IntoElement {
-    if matches!(
-        cell.get_untracked().row.content,
-        MessagesTimelineRowContent::Working { .. }
-    ) {
-        return working_row().into_element();
-    }
     let row = computed(move || Some(cell.with(|cell| cell.row.clone())));
+    let row_kind = computed(move || row.with(|row| row.as_ref().map(|row| kind_of(row))));
     let leaf = computed(move || cell.with(|cell| cell.leaf.clone()));
     let kind = computed(move || {
         leaf.with(|leaf| {
@@ -632,57 +792,93 @@ fn timeline_row_content(
             })
         })
     });
-    view()
-        // index.css .messages-timeline-scroll and .chat-content-lane; no nested scroller.
-        .app_class(tw("w-full px-3 sm:px-12"))
-        .child(view().app_class(tw("mx-auto w-full min-w-0 max-w-(--chat-content-max-width) overflow-x-clip"))
-            .child(view().app_class(move || Some(tw(&cn([
-                cell.with(|cell| cell.last).then_some(padding_of(&cell.with(|cell| cell.row.clone()))),
-                row.with(|row| row.as_ref().is_some_and(|row| matches!(&row.content,
-                    MessagesTimelineRowContent::Message { message, .. } if message.role == "assistant")
-                    || matches!(row.content, MessagesTimelineRowContent::AssistantMeta { .. })))
-                    .then_some("group/assistant"),
-            ]))))
-                .child(dynamic(move || {
-                    let kind = kind.get();
-                    let footer = footer.get();
-                    fence.with(|_| ());
-                    let spacing = spacing.get();
-                    untracked(|| {
-                        let body = match kind {
-                        Some(0) => empty_response(row).into_element(),
-                        Some(1) => code_cell(cell, leaf, options.clone()),
-                        Some(2) => text(move || leaf.with(|leaf| leaf.as_ref().and_then(|leaf| leaf.block.text.as_ref()).map_or_else(String::new, |text| text.to_string())))
-                            .select_text().app_class(tw("font-mono")).into_element(),
-                        Some(4) => {
-                            let Some(table_leaf) = leaf.get_untracked() else { return view().into_element(); };
-                            let id = table_leaf.block.id.clone();
-                            let source = computed(move || leaf.with(|leaf| leaf.as_ref()
-                                .and_then(|leaf| leaf.block.text.clone()).unwrap_or_else(|| Rc::from(""))));
-                            crate::screens::thread::markdown::links::markdown_table_leaf(source, id, options.state.tables).into_element()
-                        }
-                        Some(5) => view().into_element(),
-                        Some(_) => prose_cell(leaf).into_element(),
-                        None if footer => assistant_footer(row, options.assistant.clone()).into_element(),
-                        None => standalone_row(row, options.clone()),
-                        };
-                        if !matches!(kind, Some(1..=4)) { return body; }
-                        let (gap, heading) = spacing.unwrap_or_default();
-                        // Virtual cells have separate parents; a zero-height sibling preserves the shared gap and first: rules.
-                        let blocks = chat_markdown_blocks();
-                        let blocks = if gap { blocks.child(view().h(px(0.0))) } else { blocks };
-                        view().app_class(tw("min-w-0 px-1"))
-                            .child(blocks
-                                .child(chat_markdown_leaf(heading, body)))
-                            .into_element()
+    dynamic(move || {
+        let row_kind = row_kind.get()?;
+        if unrendered(row_kind) {
+            return None;
+        }
+        let kind = kind.get();
+        let footer = footer.get();
+        fence.with(|_| ());
+        let spacing = spacing.get();
+        Some(untracked(|| {
+            if row_kind == RowKind::Working {
+                return working_row().into_element();
+            }
+            let body = match kind {
+                Some(0) => empty_response(row).into_element(),
+                Some(1) => code_cell(cell, leaf, options.clone()),
+                Some(2) => text(move || {
+                    leaf.with(|leaf| {
+                        leaf.as_ref()
+                            .and_then(|leaf| leaf.block.text.as_ref())
+                            .map_or_else(String::new, |text| text.to_string())
                     })
-                })))).into_element()
+                })
+                .select_text()
+                .app_class(tw("font-mono"))
+                .into_element(),
+                Some(4) => {
+                    let source = computed(move || {
+                        leaf.with(|leaf| {
+                            leaf.as_ref()
+                                .and_then(|leaf| leaf.block.text.clone())
+                                .unwrap_or_else(|| Rc::from(""))
+                        })
+                    });
+                    let id = leaf
+                        .with_untracked(|leaf| leaf.as_ref().expect("table leaf").block.id.clone());
+                    crate::screens::thread::markdown::links::markdown_table_leaf(
+                        source,
+                        id,
+                        options.state.tables,
+                    )
+                    .into_element()
+                }
+                Some(5) => view().into_element(),
+                Some(_) => prose_cell(leaf).into_element(),
+                None if footer => assistant_footer(row, options.assistant.clone()).into_element(),
+                None => standalone_row(row, row_kind, options.clone()),
+            };
+            let body = if matches!(kind, Some(1..=4)) {
+                let (gap, heading) = spacing.unwrap_or_default();
+                // Virtual cells have separate parents; the preceding sibling preserves gap/first: rules.
+                let blocks = chat_markdown_blocks();
+                let blocks = if gap {
+                    blocks.child(view().h(px(0.0)))
+                } else {
+                    blocks
+                };
+                view()
+                    .app_class(tw("min-w-0 px-1"))
+                    .child(blocks.child(chat_markdown_leaf(heading, body)))
+                    .into_element()
+            } else {
+                body
+            };
+            view().app_class(tw("w-full px-3 sm:px-12"))
+                .child(view().app_class(tw("mx-auto w-full min-w-0 max-w-(--chat-content-max-width) overflow-x-clip"))
+                    .child(view().app_class(move || Some(tw(&cn([
+                        cell.with(|cell| cell.last).then_some(padding_of(&cell.with(|cell| cell.row.clone()))),
+                        matches!(row_kind, RowKind::Assistant | RowKind::AssistantMeta).then_some("group/assistant"),
+                    ])))).child(body)))
+                .into_element()
+        }))
+    })
 }
 
 fn padding_of(row: &MessagesTimelineRow) -> &'static str {
     use MessagesTimelineRowContent as C;
     match &row.content {
         C::Work { .. } | C::WorkLive { .. } | C::WorkToggle { .. } | C::Thinking { .. } => "",
+        C::Event { projected_item, .. }
+            if matches!(
+                projected_item.item,
+                t3_contracts::orchestration_v2::OrchestrationV2TurnItem::Subagent(_)
+            ) =>
+        {
+            ""
+        }
         C::TurnFold { .. } | C::Working { .. } => "pb-1.5",
         C::Message {
             grouped_with_next: Some(true),
@@ -750,29 +946,58 @@ fn empty_response(row: Memo<Option<Shared<MessagesTimelineRow>>>) -> impl IntoEl
 
 fn standalone_row(
     row: Memo<Option<Shared<MessagesTimelineRow>>>,
+    kind: RowKind,
     options: BlockListOptions,
 ) -> AnyElement {
-    row.with(|value| match value.as_ref().map(|row| &row.content) {
-        Some(MessagesTimelineRowContent::Message { message, .. }) if message.role == "user" => {
+    match kind {
+        RowKind::User => {
             let projection =
                 computed(move || row.with(|row| row.as_ref().map(|row| row.0.clone())));
             user_message_row(projection, options.user).into_element()
         }
-        Some(MessagesTimelineRowContent::AssistantMeta { .. }) => {
+        RowKind::Assistant => {
+            assistant_timeline_row(assistant_row(row), options.assistant).into_element()
+        }
+        RowKind::AssistantMeta => {
             assistant_meta_timeline_row(assistant_row(row), options.assistant).into_element()
         }
-        Some(
-            MessagesTimelineRowContent::Work { .. }
-            | MessagesTimelineRowContent::WorkLive { .. }
-            | MessagesTimelineRowContent::Thinking { .. }
-            | MessagesTimelineRowContent::WorkToggle { .. }
-            | MessagesTimelineRowContent::TurnFold { .. }
-            | MessagesTimelineRowContent::AttemptFold { .. },
-        ) => work_group_timeline_row(row, options.work).into_element(),
-        Some(MessagesTimelineRowContent::Working { .. }) => working_row().into_element(),
-        // TL-EVENTS, TL-EMBED, TL-PLAN and TL-MARKDOWN-3 own the remaining standalone bodies.
-        _ => view().into_element(),
-    })
+        RowKind::SentMessage => {
+            let text = computed(move || {
+                row.with(|row| {
+                    if let Some(MessagesTimelineRowContent::SentMessage { text }) =
+                        row.as_ref().map(|row| &row.content)
+                    {
+                        text.clone()
+                    } else {
+                        String::new()
+                    }
+                })
+            });
+            sent_message_timeline_row(text, options.assistant).into_element()
+        }
+        RowKind::Event => options.thread.map_or_else(
+            || view().into_element(),
+            |context| v2_event_timeline_row(row, context.events).into_element(),
+        ),
+        RowKind::Plan => options.thread.map_or_else(
+            || view().into_element(),
+            |context| proposed_plan_timeline_row(row, context.plans).into_element(),
+        ),
+        RowKind::Work => view()
+            .child(work_group_timeline_row(row, options.work))
+            .child(
+                options
+                    .thread
+                    .map(|context| approval_timeline_row(row, context.approvals)),
+            )
+            .into_element(),
+        RowKind::Working => working_row().into_element(),
+        RowKind::WorktreeSetup => view().into_element(),
+        RowKind::ViewedImages => view().into_element(),
+        RowKind::ContextCompaction => view().into_element(),
+        RowKind::HtmlRender => view().into_element(),
+        RowKind::McpApp => view().into_element(),
+    }
 }
 
 struct PreserveLineBreaks(bool);

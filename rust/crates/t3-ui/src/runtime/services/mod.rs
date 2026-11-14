@@ -3,7 +3,11 @@
 //! delegates; rules belong in the client.
 
 pub mod composer;
+pub mod connection;
+pub mod diff;
+pub mod files;
 pub mod git_panel;
 pub mod navigation;
 pub mod terminal;
 pub mod thread_ops;
+pub mod shell;

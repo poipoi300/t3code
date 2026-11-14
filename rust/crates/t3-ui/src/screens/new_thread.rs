@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use futures::{StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
+use futures::{FutureExt, StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
 use nsh_core::prelude::*;
 use t3_client::operations::ComposerDispatchMode;
 use t3_client::thread_views::composer::attachment_intake::AttachmentSession;
@@ -84,8 +84,27 @@ pub enum NewThreadView {
         title: Text,
         message: Text,
     },
+    LinkChoice {
+        title: Text,
+        message: Text,
+        choices: Vec<LinkChoice>,
+    },
     Draft(Rc<DraftView>),
     Navigate(Destination),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkAction {
+    CloneRepository,
+    UseWithoutProject,
+    CheckoutPullRequest,
+    ReplaceDraft,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkChoice {
+    pub action: LinkAction,
+    pub label: Text,
+    pub disabled_reason: Option<Text>,
 }
 
 /// Adapter for the client-owned draft service requested in client-seam-requests.md MISC-NEW.
@@ -108,6 +127,16 @@ pub trait NewThreadClient {
     ) -> LocalBoxFuture<'static, Result<ThreadKey, Text>>;
     fn attachments(&self, draft: &str) -> Option<AttachmentSession>;
     fn model_picker(&self, draft: &str) -> Option<PickerProps>;
+    fn link_action(
+        &self,
+        _raw_search: String,
+        _action: LinkAction,
+    ) -> LocalBoxFuture<'static, Result<Option<Destination>, Text>> {
+        futures::future::ready(Err(Text::client_key(
+            t3_client::ClientError::Unsupported("new-thread link choices").to_string(),
+        )))
+        .boxed_local()
+    }
 }
 
 #[derive(Clone)]
@@ -130,6 +159,8 @@ pub fn index_draft_landing(target: Target) -> AnyElement {
     let mut changes = client.0.watch(target.clone());
     let current = signal(Rc::new(NewThreadView::Loading));
     let error = signal(None::<Text>);
+    let link_busy = signal(false);
+    let owner = Owner::current();
     let nav = navigator();
     let origin = nav.top();
     spawn(async move {
@@ -152,6 +183,7 @@ pub fn index_draft_landing(target: Target) -> AnyElement {
         NewThreadView::StartFailed => (2, None),
         NewThreadView::LinkFailed { .. } => (3, None),
         NewThreadView::Draft(draft) => (4, Some(draft.id.clone())),
+        NewThreadView::LinkChoice { .. } => (5, None),
     });
     view()
         .app_class(tw(
@@ -174,6 +206,7 @@ pub fn index_draft_landing(target: Target) -> AnyElement {
                     }))
                     .into_element(),
                 4 => draft_chat_view(current, client, error),
+                5 => link_choices(current, client, target, error, link_busy, owner),
                 _ => view().into_element(),
             })
         }))
@@ -185,6 +218,43 @@ pub fn index_draft_landing(target: Target) -> AnyElement {
             })
         }))
         .into_element()
+}
+
+fn link_choices(
+    current: Signal<Rc<NewThreadView>>,
+    client: Stored<Rc<dyn NewThreadClient>>,
+    target: Stored<Target>,
+    error: Signal<Option<Text>>,
+    busy: Signal<bool>,
+    owner: Owner,
+) -> AnyElement {
+    let nav = navigator();
+    let origin = nav.top();
+    view().flex_1().child(dynamic(move|| {
+        let value=current.get();let NewThreadView::LinkChoice{title,message,choices}=value.as_ref() else{return view().into_element();};
+        let mut buttons=view().app_class(tw("mt-5 flex justify-center gap-2"));
+        for choice in choices {
+            let action=choice.action;
+            let origin=origin.clone();
+            buttons=buttons.child(button(ButtonContent::Label(choice.label.resolve().to_string()),if action==LinkAction::UseWithoutProject{ButtonVariant::Outline}else{ButtonVariant::Default},ButtonSize::Sm,
+                move||busy.get()||!matches!(current.get().as_ref(),NewThreadView::LinkChoice{choices,..} if choices.iter().any(|c|c.action==action&&c.disabled_reason.is_none())),
+                move|| {
+                    if busy.get_untracked()||!matches!(current.get_untracked().as_ref(),NewThreadView::LinkChoice{choices,..} if choices.iter().any(|c|c.action==action&&c.disabled_reason.is_none())) {return;}
+                    let Target::Link(search)=target.get() else{return;};
+                    busy.set(true);error.set(None);let operation=client.get().link_action(search,action);
+                    let origin=origin.clone();
+                    owner.run(move||spawn(async move {
+                        let result=operation.await;busy.set(false);
+                        match result {Ok(Some(destination)) if nav.top()==origin=>nav.open(destination.route()),Ok(_)=>{},Err(message)=>error.set(Some(message))}
+                    }));
+                }));
+        }
+        view().app_class(tw("flex min-w-0 flex-1 flex-col items-center justify-center text-center gap-6 p-6 md:p-12"))
+            .child(view().app_class(tw("flex max-w-md flex-col items-center text-center"))
+                .child(text(title.resolve()).app_class(tw("font-semibold text-xl")))
+                .child(text(message.resolve()).app_class(tw("mt-1 text-muted-foreground text-sm")))
+                .child(buttons)).into_element()
+    })).into_element()
 }
 
 fn empty(title: Text, message: Text) -> AnyElement {

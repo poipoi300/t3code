@@ -34,3 +34,20 @@ pub fn desktop_title_bar_for(platform: Os) -> TitleBarOptions {
 pub fn reserved_stroke(stroke: &Keystroke) -> bool {
     stroke.reserved(os()).is_some()
 }
+
+/// `isMacPlatform(navigator.platform)`: settings search lists Mac-only rows here.
+pub fn is_mac() -> bool {
+    os() == Os::MacOs
+}
+
+/// `isWindowsPlatform(navigator.platform)`: settings search lists Windows-only rows here.
+pub fn is_windows() -> bool {
+    os() == Os::Windows
+}
+
+/// HistorySwipeNavigation's gate (`isElectron` and `isMacPlatform`): only the macOS desktop app
+/// turns two-finger trackpad swipes into wheel events a mouse's tilt wheel cannot be mistaken
+/// for. The web app, Windows, Linux and mobile answer false.
+pub fn trackpad_history_swipe() -> bool {
+    os() == Os::MacOs
+}

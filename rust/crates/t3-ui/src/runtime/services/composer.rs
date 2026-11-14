@@ -38,11 +38,43 @@ pub fn chip_data(
     }
 }
 
-struct QuestionsBinding<P: Platform + Clone + 'static>(ClientRuntime<P>);
+type QuestionViews = BTreeMap<
+    ThreadKey,
+    (
+        Rc<t3_client::thread_views::composer::questions_service::PendingUserInputView>,
+        Rc<crate::screens::composer::questions::PendingUserInputView>,
+    ),
+>;
+struct QuestionsBinding<P: Platform + Clone + 'static>(ClientRuntime<P>, RefCell<QuestionViews>);
 pub fn pending_user_input<P: Platform + Clone + 'static>(
     runtime: &ClientRuntime<P>,
 ) -> Rc<dyn crate::screens::composer::questions::PendingUserInputClient> {
-    Rc::new(QuestionsBinding(runtime.clone()))
+    Rc::new(QuestionsBinding(runtime.clone(), RefCell::default()))
+}
+pub fn composer_questions<P: Platform + Clone + 'static>(
+    runtime: &ClientRuntime<P>,
+    key: ThreadKey,
+) -> crate::screens::composer::questions::ComposerQuestions {
+    use futures::StreamExt;
+    use nsh_core::prelude::*;
+    let source = runtime.pending_user_input(&key);
+    let mut changes = source.changes();
+    let questions = crate::screens::composer::questions::ComposerQuestions::attach(
+        pending_user_input(runtime),
+        key,
+    );
+    let error = questions.error;
+    spawn(async move {
+        while changes.next().await.is_some() {
+            error.set(
+                source
+                    .view()
+                    .and_then(|view| view.error.clone())
+                    .map(crate::i18n::Text::content),
+            );
+        }
+    });
+    questions
 }
 impl<P: Platform + Clone + 'static> crate::screens::composer::questions::PendingUserInputClient
     for QuestionsBinding<P>
@@ -55,7 +87,13 @@ impl<P: Platform + Clone + 'static> crate::screens::composer::questions::Pending
         key: &ThreadKey,
     ) -> Option<Rc<crate::screens::composer::questions::PendingUserInputView>> {
         self.0.pending_user_input(key).view().map(|view| {
-            Rc::new(crate::screens::composer::questions::PendingUserInputView {
+            let mut cache = self.1.borrow_mut();
+            if let Some((source, mapped)) = cache.get(key)
+                && Rc::ptr_eq(source, &view)
+            {
+                return mapped.clone();
+            }
+            let mapped = Rc::new(crate::screens::composer::questions::PendingUserInputView {
                 request_id: view.request_id.clone(),
                 questions: view.questions.clone(),
                 question_index: view.question_index,
@@ -65,7 +103,9 @@ impl<P: Platform + Clone + 'static> crate::screens::composer::questions::Pending
                 response_disabled: view.response_disabled,
                 is_responding: view.is_responding,
                 dismissible: view.dismissible,
-            })
+            });
+            cache.insert(key.clone(), (view, mapped.clone()));
+            mapped
         })
     }
     fn toggle_option(
@@ -125,6 +165,7 @@ pub fn suggestion_results(
                 label: Text::content(item.label.clone()),
                 description: Text::content(item.description.clone()),
                 kind: match &item.kind {
+                    SuggestionKind::Thread { .. } => ComposerCommandItemKind::Thread,
                     SuggestionKind::Path { directory } => ComposerCommandItemKind::Path {
                         directory: *directory,
                     },
@@ -253,6 +294,59 @@ impl<P: Platform + Clone + 'static> crate::screens::composer::stash::PromptStash
     }
 }
 
+type BannerViews = Vec<(
+    Rc<t3_client::thread_views::composer::banners::ComposerNotice>,
+    Rc<crate::screens::composer::banners::ComposerBannerStackItem>,
+)>;
+pub struct ComposerBannerBinding {
+    invoke: Rc<dyn Fn(String, String)>,
+    views: RefCell<BannerViews>,
+}
+impl ComposerBannerBinding {
+    pub fn new(invoke: Rc<dyn Fn(String, String)>) -> Self {
+        Self {
+            invoke,
+            views: RefCell::default(),
+        }
+    }
+    pub fn snapshot(
+        &self,
+        notices: &[Rc<t3_client::thread_views::composer::banners::ComposerNotice>],
+    ) -> Vec<Rc<crate::screens::composer::banners::ComposerBannerStackItem>> {
+        let mut views = self.views.borrow_mut();
+        let mapped = notices
+            .iter()
+            .map(|notice| {
+                let title = crate::i18n::tr(
+                    notice.title_template,
+                    &notice
+                        .title_arguments
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), crate::i18n::Value::from(value.clone())))
+                        .collect::<Vec<_>>(),
+                );
+                let rendered = views
+                    .iter()
+                    .find(|(source, rendered)| {
+                        Rc::ptr_eq(source, notice)
+                            && rendered.title.text.resolve().to_string() == title
+                    })
+                    .map(|(_, rendered)| rendered.clone())
+                    .unwrap_or_else(|| {
+                        composer_banner_items(std::slice::from_ref(notice), self.invoke.clone())
+                            .remove(0)
+                    });
+                (notice.clone(), rendered)
+            })
+            .collect::<Vec<_>>();
+        let result = mapped
+            .iter()
+            .map(|(_, rendered)| rendered.clone())
+            .collect();
+        *views = mapped;
+        result
+    }
+}
 pub fn composer_banner_items(
     notices: &[Rc<t3_client::thread_views::composer::banners::ComposerNotice>],
     invoke: Rc<dyn Fn(String, String)>,
@@ -282,13 +376,37 @@ pub fn composer_banner_items(
                     BannerVariant::Error => Variant::Error,
                 },
                 group: ComposerBannerGroup::Environment,
-                icon: Icon::WifiOff,
+                icon: match notice.icon {
+                    t3_client::thread_views::composer::banners::BannerIcon::Disconnected => {
+                        Icon::WifiOff
+                    }
+                    t3_client::thread_views::composer::banners::BannerIcon::UpdateRunning => {
+                        Icon::Download
+                    }
+                    t3_client::thread_views::composer::banners::BannerIcon::UpdateFailed => {
+                        Icon::CircleAlert
+                    }
+                },
                 custom_icon: None,
-                title: Text::client_key(notice.title.clone()).into(),
+                title: Text::content(crate::i18n::tr(
+                    notice.title_template,
+                    &notice
+                        .title_arguments
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), crate::i18n::Value::from(value.clone())))
+                        .collect::<Vec<_>>(),
+                ))
+                .into(),
                 description: notice
                     .description
                     .clone()
-                    .map(Text::content)
+                    .map(|text| {
+                        if notice.description_is_key {
+                            Text::client_key(text)
+                        } else {
+                            Text::content(text)
+                        }
+                    })
                     .map(Into::into),
                 children: None,
                 actions: Some(Rc::new(move || {

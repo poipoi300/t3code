@@ -2,14 +2,14 @@
 //! `apps/web/src/terminal/ghostty/surface.ts` (`GhosttyTerminalSurface`): output in
 //! (`write`, `resetAndWrite`), selection, focus, and input and grid changes out.
 //!
-//! The emulator behind it is not in the workspace yet. `t3-ui` builds `nsh-base` without its
-//! `term` feature, so `nsh_base::Terminal` and `TerminalEmulatorFactory` are not compiled, and
-//! `alacritty_terminal` (with the wasm cfg patch) is not a dependency. Until both land
-//! (`reports/ui-term-3.md` has the manifest change and the element body), the surface keeps
-//! the web's pane and drops output: it never accumulates the stream, so nothing grows with
-//! the scrollback.
+//! The emulator is NSH's `Terminal` (its own `VtEmulator` until `alacritty_terminal` lands behind
+//! `TerminalEmulatorFactory`; `reports/ui-term-3.md`). It draws the grid with each platform's text
+//! engine and owns the keyboard, input method and soft keyboard, so one surface serves desktop,
+//! web and mobile. Selection is the platform's own over its rows, so the drawer's selection
+//! comparison sees none (TERM-4).
 use nsh_core::prelude::*;
 use std::{cell::RefCell, rc::Rc};
+use nsh_base::{Terminal, TerminalApi, TerminalEvent};
 use t3_client::{
     services::terminal::TerminalGrid,
     view_logic::session::terminal_drawer::TerminalSurfaceSink,
@@ -27,6 +27,8 @@ struct SurfaceInner {
     on_data: Option<DataListener>,
     on_resize: Option<GridListener>,
     read_only: bool,
+    /// The emulator, once its element is made.
+    terminal: Option<ComponentRef<Terminal>>,
 }
 
 /// One pane's emulator surface, shared by the pane's view and its session.
@@ -85,9 +87,30 @@ impl TerminalSurface {
     }
 }
 
+impl TerminalSurface {
+    fn api(&self) -> Option<Rc<TerminalApi>> {
+        self.0.borrow().terminal.as_ref().and_then(|terminal| terminal.api::<TerminalApi>())
+    }
+    /// Takes the keyboard focus (showing the software keyboard).
+    pub fn focus(&self) {
+        if let Some(api) = self.api() {
+            api.focus();
+        }
+    }
+}
+
 impl TerminalSurfaceSink for TerminalSurface {
-    fn reset_and_write(&mut self, _data: &str) {}
-    fn write(&mut self, _data: &str) {}
+    fn reset_and_write(&mut self, data: &str) {
+        if let Some(api) = self.api() {
+            api.reset();
+            api.write(data.to_owned());
+        }
+    }
+    fn write(&mut self, data: &str) {
+        if let Some(api) = self.api() {
+            api.write(data.to_owned());
+        }
+    }
     fn selection_cell_count(&self) -> usize {
         0
     }
@@ -98,13 +121,30 @@ impl TerminalSurfaceSink for TerminalSurface {
 }
 
 /// The pane the emulator draws in: the web's viewport container
-/// (`relative h-full w-full overflow-hidden bg-(--terminal-background)`).
-pub fn terminal_surface(_surface: TerminalSurface, label: String) -> impl IntoElement {
+/// (`relative h-full w-full overflow-hidden bg-(--terminal-background)`) holding the terminal.
+pub fn terminal_surface(surface: TerminalSurface, label: String) -> impl IntoElement {
+    let terminal = component_ref::<Terminal>();
+    surface.0.borrow_mut().terminal = Some(terminal);
+    let (input, grid) = (surface.clone(), surface);
     view()
         .app_class(tw(
             "relative h-full w-full overflow-hidden bg-(--terminal-background)",
         ))
-        .accessibility_label(Some(SharedString::from(label)))
+        .child(
+            nsh_base::terminal()
+                .component_ref(&terminal)
+                .accessibility_label(Some(SharedString::from(label)))
+                .on_data(move |data: &SharedString| input.send(data.to_string()))
+                .on_resize(move |event: &TerminalEvent| {
+                    if let TerminalEvent::Resize(cols, rows) = event {
+                        grid.report_grid(TerminalGrid {
+                            cols: u64::from(*cols),
+                            rows: u64::from(*rows),
+                        });
+                    }
+                })
+                .size_full(),
+        )
 }
 
 #[cfg(test)]

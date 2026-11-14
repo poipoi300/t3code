@@ -364,6 +364,18 @@ pub fn sidebar_thread_row(
     nav: Navigator,
 ) -> impl IntoElement {
     let key = computed(move || item.with(|i| i.as_ref().map(|i| i.key.clone())));
+    // SB-ACTIONS-1's thread menu over the client's operations (thread_ops binding). The menu's
+    // availability follows the thread's shell (pin, settle, unread), which this memo reads.
+    let client = rt().backend().client();
+    let menu_client = client.clone();
+    let menu = computed(move || {
+        thread.with(|_| ());
+        let client = menu_client.as_ref()?;
+        key.get()
+            .map(|key| crate::runtime::services::thread_ops::thread_action_menu(client, &key))
+    });
+    let renaming = signal(false);
+    let rename_draft = signal(String::new());
     let config = environment_config(key);
     let providers = computed(move || {
         config.with(|config| row_providers(config.as_ref().map(|config| config.0.as_ref())))
@@ -438,7 +450,45 @@ pub fn sidebar_thread_row(
         (!card()).then_some("flex h-9 items-center gap-2.5 px-2.5"),
     ])))
     };
-    let title_element = move || {
+    let failed = |action: &str, error: t3_client::ClientError| {
+        crate::ui::toast::toast_manager().add(crate::ui::toast::ToastOptions {
+            variant: crate::ui::toast::Variant::Error,
+            title: t(t3_client::thread_views::thread_ops::header::action_failure_title(action)),
+            description: Some(error.to_string()),
+            ..Default::default()
+        });
+    };
+    let action_client = client.clone();
+    let on_action = move |id: String| {
+        let (Some(client), Some(key)) = (action_client.clone(), key.get_untracked()) else {
+            return;
+        };
+        if id == "rename" {
+            rename_draft.set(title());
+            renaming.set(true);
+            return;
+        }
+        spawn(async move {
+            if let Err(error) = client.thread_actions().perform_action(key, id.clone()).await {
+                failed(&id, error);
+            }
+        });
+    };
+    let rename_client = client.clone();
+    // Stored, so the title closure stays Copy for both row layouts.
+    let commit_rename: Stored<std::rc::Rc<dyn Fn()>> = stored(std::rc::Rc::new(move || {
+        renaming.set(false);
+        let (Some(client), Some(key)) = (rename_client.clone(), key.get_untracked()) else {
+            return;
+        };
+        let title = rename_draft.get_untracked();
+        spawn(async move {
+            if let Err(error) = client.thread_actions().rename_thread(key, title).await {
+                failed("rename", error);
+            }
+        });
+    }));
+    let title_text = move || {
         text(move || SharedString::from(title())).app_class(move || {
         let p = presented.get();
         let receded = p.as_ref().is_some_and(|p| p.receded);
@@ -456,6 +506,24 @@ pub fn sidebar_thread_row(
             thread.with(|thread| thread.as_ref().is_some_and(|thread| thread.title_regeneration.as_ref().is_some_and(Option::is_some))).then_some("opacity-55"),
         ])))
     })
+    };
+    // SidebarThreadRow.tsx: the title becomes ThreadRenameInput for one rename session.
+    let title_element = move || {
+        dynamic(move || {
+            let commit_rename = commit_rename.with(|commit| commit.clone());
+            Some(if renaming.get() {
+                untracked(|| {
+                    super::actions::thread_rename_input(
+                        rename_draft,
+                        move || commit_rename(),
+                        move || renaming.set(false),
+                    )
+                    .into_element()
+                })
+            } else {
+                untracked(|| title_text().into_element())
+            })
+        })
     };
     let meta_empty = move || {
         thread.with(|thread| {
@@ -548,7 +616,7 @@ pub fn sidebar_thread_row(
             },
             sidebar_thread_tooltip(model, project_name, extras, providers),
         ))
-        .child(
+        .child(super::actions::sidebar_thread_context_menu(
             nsh_base::button()
                 .test_id(if untracked(card) {
                     "sidebar-row-card"
@@ -580,7 +648,9 @@ pub fn sidebar_thread_row(
                 })
                 .app_class(surface)
                 .child(when(card, card_body).otherwise(slim_body)),
-        )
+            menu,
+            on_action,
+        ))
 }
 
 fn pin_indicator(thread: Thread) -> impl IntoElement {

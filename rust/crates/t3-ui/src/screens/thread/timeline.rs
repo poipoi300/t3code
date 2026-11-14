@@ -15,6 +15,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use futures::StreamExt;
 use nsh_core::prelude::*;
 use t3_client::services::models::{present_thread_shell, thread_runtime_is_active};
 use t3_client::state::selectors::thread_shell;
@@ -159,7 +160,7 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
         users: UserRowState::new(),
         events: EventRowContext::new(key.clone(), groups.entries),
         approvals: approvals.clone(),
-        plans: PlanContext::new(key.clone(), PlanRowsState::default()),
+        plans: plan_context(&key),
         groups,
         working,
     };
@@ -329,4 +330,20 @@ fn sent_text(row: Memo<Option<Shared<MessagesTimelineRow>>>) -> Memo<String> {
             _ => String::new(),
         })
     })
+}
+
+/// TL-PLAN's context, with the plan's workspace root followed from the client (thread_ops).
+fn plan_context(key: &ThreadKey) -> PlanContext {
+    let mut context = PlanContext::new(key.clone(), PlanRowsState::default());
+    if let Some(client) = rt().backend().client() {
+        let root = signal(client.plan_services().plan_workspace_root(key));
+        let mut roots = client.plan_services().watch_plan_workspace(key.clone());
+        spawn(async move {
+            while let Some(value) = roots.next().await {
+                root.set(value);
+            }
+        });
+        context.workspace_root = computed(move || root.get());
+    }
+    context
 }

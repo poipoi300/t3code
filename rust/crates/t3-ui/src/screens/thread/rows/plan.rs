@@ -436,11 +436,11 @@ fn proposed_plan_card(
                 }))
                 .child(dynamic(move || (state.collapsible.get() && !state.expanded.get()).then(|| view().accessible(false).app_class(tw("absolute inset-x-0 bottom-0 h-24 bg-linear-to-t from-card/95 via-card/80 to-transparent"))))))
             // Retain both buttons: NSH's OnceInstance holds button props through press commit.
-            .child(dynamic(move || state.collapsible.get().then(|| view().app_class(tw("mt-4 flex justify-center"))
+            .child(dynamic(move || state.collapsible.get().then(|| untracked(|| view().app_class(tw("mt-4 flex justify-center"))
                 .child(view().app_class(move || tw(if state.expanded.get() { "hidden" } else { "flex" }))
                     .child(button(ButtonContent::Label(t("Expand plan")), ButtonVariant::Outline, ButtonSize::Sm, || false, move || state.expanded.set(true))))
                 .child(view().app_class(move || tw(if state.expanded.get() { "flex" } else { "hidden" }))
-                    .child(button(ButtonContent::Label(t("Collapse plan")), ButtonVariant::Outline, ButtonSize::Sm, || false, move || state.expanded.set(false))))))))
+                    .child(button(ButtonContent::Label(t("Collapse plan")), ButtonVariant::Outline, ButtonSize::Sm, || false, move || state.expanded.set(false)))))))))
         .child(dialog::dialog(state.open, move |dialog| {
             dialog.on_open_change(move |open| if !state.saving.get_untracked() { state.open.set(open); });
             dialog::dialog_popup(dialog, Default::default(), move || untracked(|| save_plan_to_workspace_form(row, state, dialog, saving_context.clone())))

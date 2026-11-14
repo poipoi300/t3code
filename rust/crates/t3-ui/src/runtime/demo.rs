@@ -211,6 +211,7 @@ impl Backend for DemoBackend {
                     id: environment.clone(),
                     label,
                     state: ConnectionState::default(),
+                    damaged: false,
                     // The demo saves no route to reach it.
                     routes: Vec::new(),
                 });

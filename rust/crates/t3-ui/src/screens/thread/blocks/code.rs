@@ -465,15 +465,7 @@ impl CodeHighlightDocument {
             })
         };
         let Some(entry) = entry else {
-            if let Some((&prior, record)) = self.chunks.range(..at).next_back()
-                && record.chunk.value_bytes.end == at
-                && record.exit.is_none()
-                && record.failure.is_none()
-                && !record.unknown
-            {
-                self.pending.insert(prior);
-                self.pending.insert(at);
-            }
+            // A newly ingested prefix queues its successor when it publishes an exit state.
             return true;
         };
         let record = self.chunks.get_mut(&at).expect("queued chunk exists");
@@ -1562,8 +1554,10 @@ mod tests {
         let cache = Rc::new(RefCell::new(HighlightCache::default()));
         let jobs: Vec<_> = (0..512)
             .map(|index| {
-                let mut document = CodeHighlightDocument::default();
-                document.cache = cache.clone();
+                let mut document = CodeHighlightDocument {
+                    cache: cache.clone(),
+                    ..Default::default()
+                };
                 document.upsert(
                     &chunk(&format!("let fence_{index} = {index};\n").repeat(CODE_CHUNK_LINES)),
                     false,
