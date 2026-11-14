@@ -5,10 +5,6 @@ edition = "2024"
 license = "MIT"
 publish = false
 
-[features]
-# The CLIProxyAPI hub client (`hub`), off until it is assembled; see the module.
-hub-client = []
-
 [dependencies]
 t3-contracts = { path = "../t3-contracts" }
 serde = { version = "1", features = ["derive"] }
