@@ -60,6 +60,8 @@ const MAX_BLOCKED_GIT_FILE_PATHS: usize = 1024;
 const ZSTD_WINDOW_LOG_MAX: u32 = 27;
 const COMPRESSED_SUFFIX: &str = ".jsonl.zst";
 const CODEX_STATE_DATABASE: &str = "state_5.sqlite";
+const MAX_CODEX_STATE_BYTES: u64 = 256 * 1024 * 1024;
+const CODEX_STATE_QUERY_DEADLINE: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------------------------
 // Paths
@@ -254,16 +256,27 @@ impl Identity {
     }
 }
 
-/// Opens `path` for reading.
+/// Opens `path` for reading without following a final link: on Windows a reparse point is
+/// opened as itself (so the handle is not a regular file), on Unix the open fails.
 pub(crate) fn open_handle(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::File::open(path)
-}
-/// A regular file below a store root (never a link), opened with its identity.
-fn open_regular(path: &Path) -> Option<(std::fs::File, Identity)> {
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !metadata.file_type().is_file() {
-        return None;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT.
+        options.custom_flags(0x0020_0000);
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+/// A regular file below a store root (never a link): opened first, then its type and identity
+/// are read from the handle, so a link swapped in before the open is never read.
+fn open_regular(path: &Path) -> Option<(std::fs::File, Identity)> {
     let file = open_handle(path).ok()?;
     let identity = file_identity(&path.to_string_lossy(), &file).ok()?;
     Some((file, identity))
@@ -363,6 +376,8 @@ impl<R: BufRead> Read for Record<'_, R> {
 #[derive(Default)]
 pub(crate) struct LineSplitter {
     pending: Vec<u8>,
+    /// Bytes at the front of `pending` already known to hold no newline.
+    searched: usize,
     pub(crate) examined: usize,
 }
 impl LineSplitter {
@@ -370,10 +385,16 @@ impl LineSplitter {
         self.pending.extend_from_slice(bytes);
     }
     pub(crate) fn next_line(&mut self) -> Option<Vec<u8>> {
-        let found = self.pending.iter().position(|b| *b == b'\n');
-        self.examined += found.map_or(self.pending.len(), |index| index + 1);
-        let index = found?;
-        Some(self.pending.drain(..=index).collect())
+        let start = self.searched;
+        let found = self.pending[start..].iter().position(|b| *b == b'\n');
+        self.examined += found.map_or(self.pending.len() - start, |index| index + 1);
+        let Some(index) = found else {
+            self.searched = self.pending.len();
+            return None;
+        };
+        // What follows the line has not been searched yet.
+        self.searched = 0;
+        Some(self.pending.drain(..=start + index).collect())
     }
     pub(crate) fn rest(&self) -> &[u8] {
         &self.pending
@@ -866,6 +887,9 @@ pub struct NativeSessionInventory {
     exclusions: Exclusions,
     host: Arc<dyn InventoryHost>,
     cache: Mutex<Option<Collected>>,
+    /// One collection at a time; a caller that waited behind another reuses its result.
+    collecting: tokio::sync::Mutex<()>,
+    collections: std::sync::atomic::AtomicU64,
     /// Concurrent client imports must not hold several selected-history budgets.
     import_lock: Arc<tokio::sync::Mutex<()>>,
     blocked_git_files: Arc<Mutex<HashMap<PathBuf, i64>>>,
@@ -912,6 +936,8 @@ impl NativeSessionInventory {
             environment,
             host,
             cache: Mutex::new(None),
+            collecting: tokio::sync::Mutex::new(()),
+            collections: std::sync::atomic::AtomicU64::new(0),
             import_lock: Arc::new(tokio::sync::Mutex::new(())),
             blocked_git_files: Arc::default(),
         }
@@ -1195,16 +1221,46 @@ impl NativeSessionInventory {
         use t3_persistence::rusqlite::{Connection, OpenFlags};
         let path = root.join(CODEX_STATE_DATABASE);
         let mut roots: HashMap<String, Vec<String>> = HashMap::new();
-        if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) {
+        // A regular file of bounded size, checked on a no-follow handle before SQLite opens it.
+        if open_regular(&path).is_none_or(|(_, identity)| identity.size > MAX_CODEX_STATE_BYTES) {
             return roots;
         }
         let mut read = || -> t3_persistence::rusqlite::Result<()> {
             let connection = Connection::open_with_flags(
                 &path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | OpenFlags::SQLITE_OPEN_NOFOLLOW,
             )?;
             connection.busy_timeout(Duration::from_millis(100))?;
             connection.pragma_update(None, "query_only", true)?;
+            connection.pragma_update(None, "trusted_schema", false)?;
+            let pages: i64 = connection.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+            let page_size: i64 = connection.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+            if pages.saturating_mul(page_size) > MAX_CODEX_STATE_BYTES as i64 {
+                return Ok(());
+            }
+            // Views (or anything else a hostile file could name) never run: both must be tables.
+            let tables: i64 = connection.query_row(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type = 'table' AND name IN ('threads', 'project_roots')",
+                [],
+                |r| r.get(0),
+            )?;
+            if tables != 2 {
+                return Ok(());
+            }
+            // The query is interrupted at the deadline; the watcher ends when the query does.
+            let interrupt = connection.get_interrupt_handle();
+            let (finished, watched) = std::sync::mpsc::channel::<()>();
+            std::thread::spawn(move || {
+                if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                    watched.recv_timeout(CODEX_STATE_QUERY_DEADLINE)
+                {
+                    interrupt.interrupt();
+                }
+            });
+            let _finished = finished;
             let mut statement = connection.prepare(
                 "SELECT threads.id AS id, project_roots.path AS path
                  FROM threads JOIN project_roots ON project_roots.project_id = threads.project_id
@@ -1448,7 +1504,17 @@ impl NativeSessionInventory {
         }
     }
 
+    /// TypeScript runs a full collection per call; any `orchestration:read` session can call
+    /// scan in a loop, so concurrent calls share one in-flight collection instead.
     async fn collect(self: &Arc<Self>) -> Result<Collected> {
+        use std::sync::atomic::Ordering;
+        let seen = self.collections.load(Ordering::SeqCst);
+        let _single = self.collecting.lock().await;
+        if self.collections.load(Ordering::SeqCst) != seen
+            && let Some(collected) = self.cache.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        {
+            return Ok(collected);
+        }
         let settings = self
             .host
             .settings()
@@ -1465,6 +1531,7 @@ impl NativeSessionInventory {
                 .await
                 .map_err(|_| Error::Unavailable("session inventory"))?;
         *self.cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(collected.clone());
+        self.collections.fetch_add(1, Ordering::SeqCst);
         Ok(collected)
     }
 
@@ -1479,12 +1546,7 @@ impl NativeSessionInventory {
 
     /// `projectDirectoryStats`: an existing, non-excluded directory whose real path is not excluded.
     fn project_directory(&self, directory: &Path) -> bool {
-        if self.excluded(directory) || !std::fs::metadata(directory).is_ok_and(|m| m.is_dir()) {
-            return false;
-        }
-        let real =
-            t3_workspace::paths::canonicalize(directory).unwrap_or_else(|_| directory.to_owned());
-        local_absolute(&real.to_string_lossy()) && !self.excluded(&real)
+        real_project_directory(&self.exclusions, directory).is_some()
     }
 
     /// `directoryIdentity`: the real path, compared as TypeScript compares project paths.
@@ -1545,8 +1607,13 @@ impl NativeSessionInventory {
             .await
     }
 
-    /// A path a `.git` pointer or `commondir` names, resolved against its directory.
+    /// A path a `.git` pointer or `commondir` names, resolved against its directory and then by
+    /// the hardened resolver, so a link inside it to a share is refused before it is followed.
     fn pointed(base: &Path, target: &str) -> Option<PathBuf> {
+        let lexical = Self::pointed_lexical(base, target)?;
+        t3_workspace::paths::canonicalize(&lexical).ok()
+    }
+    fn pointed_lexical(base: &Path, target: &str) -> Option<PathBuf> {
         let target = target.trim();
         if target.is_empty() {
             return None;
@@ -1678,33 +1745,25 @@ impl NativeSessionInventory {
             .collect();
         let this_paths = unique.clone();
         let exclusions = self.exclusions.clone();
-        let existing: Vec<(PathBuf, bool)> = tokio::task::spawn_blocking(move || {
-            let check = |d: &Path| {
-                if exclusions.excluded(d) || !std::fs::metadata(d).is_ok_and(|m| m.is_dir()) {
-                    return false;
-                }
-                let real = t3_workspace::paths::canonicalize(d).unwrap_or_else(|_| d.to_owned());
-                local_absolute(&real.to_string_lossy()) && !exclusions.excluded(&real)
-            };
+        let existing: Vec<(PathBuf, Option<PathBuf>)> = tokio::task::spawn_blocking(move || {
             this_paths
                 .into_iter()
                 .map(|d| {
-                    let ok = check(&d);
-                    (d, ok)
+                    let real = real_project_directory(&exclusions, &d);
+                    (d, real)
                 })
                 .collect()
         })
         .await
         .unwrap_or_default();
-        let present: Vec<PathBuf> = existing
-            .iter()
-            .filter(|(_, ok)| *ok)
-            .map(|(d, _)| d.clone())
-            .collect();
+        // Git identities are read below the resolved directory, never through a link.
+        let present: Vec<PathBuf> = existing.iter().filter_map(|(_, real)| real.clone()).collect();
         let identities = self.git_identities(&present).await;
         let mut projects = HashMap::new();
-        for (directory, ok) in existing {
-            let project = match (ok, identities.get(&directory)) {
+        for (directory, real) in existing {
+            let ok = real.is_some();
+            let identity = real.as_ref().and_then(|real| identities.get(real));
+            let project = match (ok, identity) {
                 (
                     true,
                     Some(GitIdentity::Worktree {
@@ -1765,12 +1824,41 @@ impl NativeSessionInventory {
     }
 }
 
+/// A Pi entry's tree links: `type`, `id` and `parentId` only.
+fn pi_links(value: &Value) -> Value {
+    let mut kept = serde_json::Map::new();
+    for key in ["type", "id", "parentId"] {
+        if let Some(v) = value.get(key) {
+            kept.insert(key.into(), v.clone());
+        }
+    }
+    Value::Object(kept)
+}
+/// What a retained value costs the history budget: its encoded size.
+fn retained_bytes(value: &Value) -> usize {
+    serde_json::to_string(value).map_or(usize::MAX, |text| text.len())
+}
+
 /// `readTranscript`'s result.
 struct Snapshot {
     records: Vec<Value>,
     dropped: usize,
     cwd: Option<String>,
     history_bytes: usize,
+}
+
+/// `projectDirectoryStats`: the real path of a directory a session names, from the hardened
+/// resolver first (it refuses links to shares, device names and the like before following
+/// them), then checked to be a directory that is neither excluded nor reached from one.
+fn real_project_directory(exclusions: &Exclusions, directory: &Path) -> Option<PathBuf> {
+    if exclusions.excluded(directory) {
+        return None;
+    }
+    let real = t3_workspace::paths::canonicalize(directory).ok()?;
+    (std::fs::metadata(&real).is_ok_and(|m| m.is_dir())
+        && local_absolute(&real.to_string_lossy())
+        && !exclusions.excluded(&real))
+    .then_some(real)
 }
 
 /// `readTranscript`: the selected records within the byte, record and history budgets, from a
@@ -1852,7 +1940,12 @@ fn read_transcript(
                             kept.insert(key.into(), v.clone());
                         }
                     }
-                    records.push(Value::Object(kept));
+                    let kept = Value::Object(kept);
+                    history += retained_bytes(&kept);
+                    if history > MAX_IMPORT_HISTORY_BYTES {
+                        return None;
+                    }
+                    records.push(kept);
                 }
             }
             continue;
@@ -1872,9 +1965,10 @@ fn read_transcript(
                     if value["type"] == "message" && !pi_conversation(&value) =>
                 {
                     // Tool output can dwarf the conversation; keep only the tree links.
-                    let mut links = value;
-                    if let Some(object) = links.as_object_mut() {
-                        object.remove("message");
+                    let links = pi_links(&value);
+                    history += retained_bytes(&links);
+                    if history > MAX_IMPORT_HISTORY_BYTES {
+                        return None;
                     }
                     records.push(links);
                 }
