@@ -906,7 +906,8 @@ async fn a_client_launch_creates_the_thread_and_runs_its_first_turn() -> Result<
         }
         assert!(
             !SETTLED.contains(&statuses[0]["status"].as_str().unwrap_or_default()),
-            "{statuses}"
+            "{}",
+            serde_json::to_value(&projection.turn_items)?
         );
         committed.recv().await.map_err(|error| Error::Service {
             operation: "launch test",

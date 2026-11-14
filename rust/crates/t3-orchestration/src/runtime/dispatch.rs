@@ -402,6 +402,7 @@ impl CommandInputs for RuntimeCommandInputs {
                         })
                         .map(|run| run.model_selection.clone())
                         .unwrap_or_else(|| current.thread.model_selection.clone());
+                    eprintln!("DEBUG {kind} original={:?} target={:?} sessions={:?}", original, target, current.provider_sessions.iter().map(|s| s.provider_instance_id.clone()).collect::<Vec<_>>());
                     if original.instance_id == target.instance_id
                         && !crate::ports::decisions::model_switch::model_selections_equal(
                             &original, &target,
