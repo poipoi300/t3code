@@ -481,8 +481,7 @@ fn wsl_paths_explorer_could_split_or_misread_are_refused() {
     }
     // Everything else Explorer reads as one location: the exact argument vector.
     let name = "/home/me/my project/a\u{2019}b;c&d$(x)`y%PATH%.md";
-    let target =
-        "\\\\wsl.localhost\\Ubuntu\\home\\me\\my project\\a\u{2019}b;c&d$(x)`y%PATH%.md";
+    let target = "\\\\wsl.localhost\\Ubuntu\\home\\me\\my project\\a\u{2019}b;c&d$(x)`y%PATH%.md";
     assert_eq!(
         wsl_explorer_arguments("Ubuntu", name, false),
         Some((target.to_owned(), vec![target.to_owned()]))
