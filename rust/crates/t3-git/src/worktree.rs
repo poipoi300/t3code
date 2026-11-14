@@ -443,7 +443,8 @@ impl Git {
                         "status.showUntrackedFiles=normal",
                         "status",
                         "--porcelain",
-                        "--ignore-submodules=none",
+                        // Re-review 4 F5: changed commits still count; nothing runs inside.
+                        "--ignore-submodules=dirty",
                     ],
                     ExecuteOptions {
                         env: bound_env,

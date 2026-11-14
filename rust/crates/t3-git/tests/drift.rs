@@ -158,6 +158,15 @@ async fn clone_invalidation_discards_missing_and_unborn_ref_caches() -> TestResu
         ])
         .await?;
         git.invalidate_caches().await;
+        if unborn {
+            // The clone replaced the `.git` this scope was bound to (re-review 4 F4): refused
+            // until the server trusts the repository it just created there.
+            assert!(matches!(
+                git.list_branches(&input).await,
+                Err(t3_git::GitError::RepositoryChanged { .. })
+            ));
+            git.rebind_repository().await?;
+        }
         assert!(
             git.list_branches(&input)
                 .await?

@@ -829,7 +829,15 @@ impl Git {
         let Some(paths) = paths else {
             return Ok(GitStatusDetails::default());
         };
-        let mut args = vec!["status", "--porcelain=2", "--branch", "-z"];
+        // Re-review 4 F5: `dirty` reports a changed submodule commit without running Git (and so
+        // a planted repository's configuration) inside the submodule.
+        let mut args = vec![
+            "status",
+            "--porcelain=2",
+            "--branch",
+            "-z",
+            "--ignore-submodules=dirty",
+        ];
         if !options.include_divergence {
             args.push("--no-ahead-behind");
         }
@@ -881,6 +889,7 @@ impl Git {
                 "GitVcsDriver.statusDetails.numstat",
                 &[
                     "diff-index",
+                    "--ignore-submodules=dirty",
                     "--no-ext-diff",
                     "--no-textconv",
                     "-M",
@@ -921,6 +930,7 @@ impl Git {
                         "GitVcsDriver.statusDetails.numstat.unborn",
                         &[
                             "diff-files",
+                            "--ignore-submodules=dirty",
                             "--no-ext-diff",
                             "--no-textconv",
                             "--numstat",
@@ -937,6 +947,7 @@ impl Git {
                 reader.cwd(),
                 &[
                     "diff-index",
+                    "--ignore-submodules=dirty",
                     "--no-ext-diff",
                     "--no-textconv",
                     "-M",

@@ -6,18 +6,77 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+/// The saved shape of [`RepositoryBinding`]. Version 2 added the file ids; a record of any other
+/// version is refused (re-review 4 F4), never rebound.
+pub const REPOSITORY_BINDING_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RepositoryBinding {
+    /// Absent (0) in records saved before file ids were recorded.
+    #[serde(default)]
+    pub version: u32,
     pub top_level: PathBuf,
     pub git_dir: PathBuf,
     pub common_dir: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ids: Option<RepositoryIds>,
+}
+
+/// The file ids of the `.git` entry at the top-level, the Git directory and the common
+/// directory, so a `.git` replaced at the same path no longer matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RepositoryIds {
+    pub git_entry: FileId,
+    pub git_dir: FileId,
+    pub common_dir: FileId,
+}
+
+/// A file's volume and file id (Windows: volume serial number and file index, from a handle
+/// opened on the entry itself; POSIX: device and inode). A replacement at the same path changes
+/// it; an in-place edit keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FileId {
+    pub device: u64,
+    pub inode: u64,
+}
+
+fn file_id(path: &Path) -> std::io::Result<FileId> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(path)?;
+        Ok(FileId {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        use cap_fs_ext::MetadataExt;
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        };
+        // The entry itself (not a link's target), attribute access only, any sharing.
+        let file = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .share_mode(7)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)?;
+        // Built from the handle, so the volume serial number and file index are present.
+        let metadata = cap_std::fs::Metadata::from_file(&file)?;
+        Ok(FileId {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Marker {
     Missing,
-    Directory(PathBuf),
-    File(Vec<u8>, PathBuf),
+    Directory(PathBuf, FileId),
+    File(Vec<u8>, PathBuf, FileId),
 }
 
 pub(crate) struct BoundRepository {
@@ -35,7 +94,10 @@ fn changed(path: &Path, detail: &'static str) -> GitError {
 
 fn marker(path: &Path) -> Result<Marker, GitError> {
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() => Ok(Marker::Directory(std::fs::canonicalize(path)?)),
+        Ok(metadata) if metadata.is_dir() => Ok(Marker::Directory(
+            std::fs::canonicalize(path)?,
+            file_id(path)?,
+        )),
         Ok(metadata) if metadata.len() <= 16_384 && std::fs::metadata(path)?.is_file() => {
             let mut bytes = Vec::new();
             std::fs::File::open(path)?
@@ -44,7 +106,11 @@ fn marker(path: &Path) -> Result<Marker, GitError> {
             if bytes.len() > 16_384 {
                 return Err(changed(path, "Repository pointer exceeds the size limit."));
             }
-            Ok(Marker::File(bytes, std::fs::canonicalize(path)?))
+            Ok(Marker::File(
+                bytes,
+                std::fs::canonicalize(path)?,
+                file_id(path)?,
+            ))
         }
         Ok(_) => Err(changed(
             path,
@@ -98,6 +164,21 @@ impl BoundRepository {
                 return Err(changed(path, "Recorded directory now resolves elsewhere."));
             }
         }
+        if let Some(ids) = &self.identity.ids {
+            for (path, expected) in [
+                (&self.identity.git_dir, ids.git_dir),
+                (&self.identity.common_dir, ids.common_dir),
+            ] {
+                if file_id(path).map_err(|_| changed(path, "Recorded directory is unavailable."))?
+                    != expected
+                {
+                    return Err(changed(
+                        path,
+                        "Recorded Git directory was replaced at the same path.",
+                    ));
+                }
+            }
+        }
         for (path, expected) in &self.markers {
             if marker(path).map_err(|_| changed(path, "Repository metadata cannot be checked."))?
                 != *expected
@@ -137,10 +218,37 @@ impl Git {
             .map(|bound| bound.identity.clone()))
     }
 
+    /// Trusts the repository now at this scope: forgets the in-process identity recorded for the
+    /// scope (and for the same repository at other scopes), then binds what is there. Only for
+    /// the user's explicit trust or a repository the server itself just created in the folder
+    /// (a clone, a recreated worktree); everything else keeps refusing a changed repository.
+    pub async fn rebind_repository(&self) -> Result<Option<RepositoryBinding>, GitError> {
+        let key = crate::safety::lexical_absolute(self.cwd())?;
+        let resolved = crate::safety::resolve(self.cwd())?;
+        {
+            let mut bindings = bindings().lock().await;
+            let forgotten: Vec<_> = [&key, &resolved]
+                .into_iter()
+                .filter_map(|path| bindings.remove(path))
+                .map(|bound| bound.identity.clone())
+                .collect();
+            bindings.retain(|_, bound| !forgotten.contains(&bound.identity));
+        }
+        let mut fresh = self.clone();
+        fresh.bound_repository = None;
+        fresh.bind_repository().await
+    }
+
     pub async fn with_repository_binding(
         mut self,
         identity: RepositoryBinding,
     ) -> Result<Self, GitError> {
+        if identity.version != REPOSITORY_BINDING_VERSION || identity.ids.is_none() {
+            return Err(changed(
+                self.cwd(),
+                "The saved binding was recorded by an earlier version and cannot prove this is the same repository; trust the repository again to continue.",
+            ));
+        }
         self.bound_repository = None;
         self.fsmonitor_disabled = true;
         self.bound_repository = self.resolve_repository_binding(Some(&identity)).await?;
@@ -240,10 +348,20 @@ impl Git {
         let ["true", git_dir, common_dir, top_level] = lines.as_slice() else {
             return Err(GitError::InvalidOutput("repository identity".into()));
         };
+        let top_level = std::fs::canonicalize(top_level)?;
+        let git_dir = std::fs::canonicalize(git_dir)?;
+        let common_dir = std::fs::canonicalize(common_dir)?;
+        let ids = RepositoryIds {
+            git_entry: file_id(&top_level.join(".git"))?,
+            git_dir: file_id(&git_dir)?,
+            common_dir: file_id(&common_dir)?,
+        };
         let identity = RepositoryBinding {
-            top_level: std::fs::canonicalize(top_level)?,
-            git_dir: std::fs::canonicalize(git_dir)?,
-            common_dir: std::fs::canonicalize(common_dir)?,
+            version: REPOSITORY_BINDING_VERSION,
+            top_level,
+            git_dir,
+            common_dir,
+            ids: Some(ids),
         };
         if expected.is_some_and(|expected| *expected != identity)
             || cached
