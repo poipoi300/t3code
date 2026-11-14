@@ -152,6 +152,11 @@ mod fake {
             "codexHome": std::env::var("CODEX_HOME").ok(),
             "secret": std::env::var("T3_FAKE_SECRET").ok(),
             "forkSettings": cwd.join(".claude").join("settings.json").exists(),
+            "modelBin": std::fs::read_to_string(cwd.join("model.bin")).ok(),
+            "serverOnly": ["T3CODE_DEV_AUTH_TOKEN", "TUNNEL_TOKEN", "T3_MCP_BEARER_TOKEN"]
+                .iter()
+                .filter(|name| std::env::var(name).is_ok())
+                .collect::<Vec<_>>(),
             "mode": mode,
         }));
         match mode.as_str() {
@@ -324,6 +329,10 @@ mod harness {
                 ("GIT_AUTHOR_EMAIL".into(), "t3@example.invalid".into()),
                 ("GIT_COMMITTER_NAME".into(), "t3".into()),
                 ("GIT_COMMITTER_EMAIL".into(), "t3@example.invalid".into()),
+                // T3's own variables: provider children never see them (review M2).
+                ("T3CODE_DEV_AUTH_TOKEN".into(), "server-only-token".into()),
+                ("TUNNEL_TOKEN".into(), "server-only-tunnel".into()),
+                ("T3_MCP_BEARER_TOKEN".into(), "server-only-bearer".into()),
             ])
             .collect();
             let (cleanups_sender, cleanups) = tokio::sync::mpsc::unbounded_channel();
@@ -689,6 +698,7 @@ async fn codex_by_default() {
     assert_eq!(codex_home.file_name().unwrap(), "codex-home");
     assert_eq!(canonical(codex_home.parent().unwrap()), canonical(s.home()));
     assert_eq!(report["secret"], "textgen-secret-1b2c");
+    assert_eq!(report["serverOnly"], json!([]), "T3's own variables reached codex");
 
     // The commit writer (no writer model set) is the same Codex instance, in the checkout.
     std::fs::write(repo.join("greeting.txt"), "hi\n").unwrap();
@@ -800,6 +810,7 @@ async fn claude_titles_and_commits() {
         canonical(Path::new(report["cwd"].as_str().unwrap())),
         canonical(&repo)
     );
+    assert_eq!(report["serverOnly"], json!([]), "T3's own variables reached claude");
     // The checkout may be a clone of a hostile repository: its `.claude` settings never load.
     let argv = args(&report);
     assert!(
@@ -922,6 +933,30 @@ mod review {
         }
         fn public_host(&self) -> Option<Arc<dyn Host>> {
             None
+        }
+    }
+
+    /// A loopback "internal service" that counts the connections it accepts.
+    pub struct Listener {
+        pub address: String,
+        count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl Listener {
+        pub async fn start() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap().to_string();
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen = count.clone();
+            tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    drop(stream);
+                }
+            });
+            Self { address, count }
+        }
+        pub fn count(&self) -> usize {
+            self.count.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
@@ -1065,6 +1100,27 @@ async fn review_guides_with(driver: &'static str) {
         r#"{"permissions":{"allow":["Bash"]},"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:9"}}"#,
     )
     .unwrap();
+    // The fork selects the user's git-lfs filter and points it at a loopback "internal
+    // service" (review M1): a checkout that runs the filter POSTs there.
+    let lfs = review::Listener::start().await;
+    std::fs::write(
+        seed.join(".gitattributes"),
+        "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+    )
+    .unwrap();
+    std::fs::write(
+        seed.join(".lfsconfig"),
+        format!("[lfs]\n\turl = http://{}/internal-service\n", lfs.address),
+    )
+    .unwrap();
+    std::fs::write(
+        seed.join("model.bin"),
+        format!(
+            "version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize 12\n",
+            "a".repeat(64)
+        ),
+    )
+    .unwrap();
     git(&seed, &["add", "."]);
     git(&seed, &["commit", "-q", "-am", "Rename the greeting"]);
     git(&seed, &["push", "-q", &bare.to_string_lossy(), "topic"]);
@@ -1103,6 +1159,42 @@ async fn review_guides_with(driver: &'static str) {
         &["worktree", "remove", "--force", &control.to_string_lossy()],
     );
     std::fs::remove_file(&marker).unwrap();
+    let lfs_config = temp.path().join(".no-global-config");
+    std::fs::write(
+        &lfs_config,
+        "[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n\tsmudge = git-lfs smudge -- %f\n\tprocess = git-lfs filter-process\n\trequired = true\n",
+    )
+    .unwrap();
+    let control_clone = temp.path().join("control-clone");
+    git(
+        temp.path(),
+        &["clone", "-q", &remote, &control_clone.to_string_lossy()],
+    );
+    git(&control_clone, &["fetch", "-q", "origin", "topic"]);
+    let empty_hooks = temp.path().join("empty-hooks");
+    std::fs::create_dir_all(&empty_hooks).unwrap();
+    let control_checkout = temp.path().join("control-lfs");
+    let control = std::process::Command::new("git")
+        .args([
+            "-c",
+            &format!("core.hooksPath={}", empty_hooks.display()),
+            "worktree",
+            "add",
+            "--detach",
+            "--quiet",
+            &control_checkout.to_string_lossy(),
+            &head,
+        ])
+        .current_dir(&control_clone)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &lfs_config)
+        .output()
+        .unwrap();
+    let reached = lfs.count();
+    assert!(
+        reached > 0,
+        "the control checkout must reach the fork's LFS endpoint: {control:?}"
+    );
 
     let host = FakeHost::new(head.clone());
     let mut settings = json!({
@@ -1156,6 +1248,16 @@ async fn review_guides_with(driver: &'static str) {
     assert_eq!(guide["guide"]["stops"][0]["title"], "Overview", "{guide}");
     assert!(guide["run"].is_null(), "{guide}");
     nothing_left(&repo, &worktrees, &marker);
+    assert_eq!(
+        lfs.count(),
+        reached,
+        "the guide checkout ran a filter the fork selected"
+    );
+    let checked_out = report["modelBin"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        checked_out.starts_with("version https://git-lfs.github.com/spec/v1"),
+        "the pointer file checks out as committed: {checked_out:?}"
+    );
     if driver != "codex" {
         s.shutdown().await;
         drop(daemon);

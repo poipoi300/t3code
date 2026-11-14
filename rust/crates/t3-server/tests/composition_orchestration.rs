@@ -1231,7 +1231,20 @@ fn git_in(dir: &Path, gitconfig: &Path, args: &[&str]) {
 
 /// The scripted provider's server on `home`, with a shell for terminals and nothing of the
 /// developer's profile.
-async fn restore_server(home: &Path) -> t3_server::runtime::RunningServer {
+/// The MCP sessions a restore server issues agents' thread credentials from.
+#[cfg(feature = "mcp")]
+type AgentCredentials = Arc<t3_server::adapters::mcp::McpSessions>;
+#[cfg(not(feature = "mcp"))]
+type AgentCredentials = ();
+
+fn agent_credentials() -> AgentCredentials {
+    AgentCredentials::default()
+}
+
+async fn restore_server(
+    home: &Path,
+    credentials: &AgentCredentials,
+) -> t3_server::runtime::RunningServer {
     let mut env = std::collections::BTreeMap::new();
     for key in ["PATH", "SystemRoot", "ComSpec", "WINDIR", "SHELL"] {
         if let Ok(value) = std::env::var(key) {
@@ -1268,6 +1281,8 @@ async fn restore_server(home: &Path) -> t3_server::runtime::RunningServer {
         StartOptions {
             providers: vec![Arc::new(ScriptedAdapter::new())],
             dev_replay: false,
+            #[cfg(feature = "mcp")]
+            mcp_sessions: Some(credentials.clone()),
             ..Default::default()
         },
     )
@@ -1283,6 +1298,9 @@ struct RestoreFixture {
     repository: std::path::PathBuf,
     folder: std::path::PathBuf,
     server: t3_server::runtime::RunningServer,
+    /// The admin client's session cookie.
+    cookie: String,
+    credentials: AgentCredentials,
     socket: Socket,
     client: Client,
     subscription: t3_rpc::RequestId,
@@ -1308,7 +1326,8 @@ impl RestoreFixture {
         git_in(&repository, &gitconfig, &["init", "-q", "-b", "main"]);
         git_in(&repository, &gitconfig, &["add", "."]);
         git_in(&repository, &gitconfig, &["commit", "-q", "-m", "first"]);
-        let server = restore_server(&home).await;
+        let credentials = agent_credentials();
+        let server = restore_server(&home, &credentials).await;
         let layout = t3_config::home::HomeLayout {
             base_dir: home.clone(),
             state_dir: home.join("userdata"),
@@ -1389,6 +1408,8 @@ impl RestoreFixture {
             repository,
             folder,
             server,
+            cookie,
+            credentials,
             socket,
             client,
             subscription,
@@ -1436,14 +1457,15 @@ impl RestoreFixture {
             server,
             socket,
             client,
-            subscription: _,
             checkpoint,
+            ..
         } = self;
         drop((socket, client));
         server.shutdown().await.unwrap();
         between(&home, &folder);
-        let server = restore_server(&home).await;
-        let (_, socket, mut client) = admin_session(&server).await;
+        let credentials = agent_credentials();
+        let server = restore_server(&home, &credentials).await;
+        let (cookie, socket, mut client) = admin_session(&server).await;
         let subscription = client
             .start(
                 "orchestration.subscribeThread",
@@ -1457,6 +1479,8 @@ impl RestoreFixture {
             repository,
             folder,
             server,
+            cookie,
+            credentials,
             socket,
             client,
             subscription,
@@ -1522,5 +1546,172 @@ async fn a_repository_planted_in_a_bound_folder_refuses_the_restore_after_a_rest
         ),
         "{refused:?}"
     );
+    fixture.server.shutdown().await.unwrap();
+}
+
+/// Copies a directory tree: a `.git` replaced by an identical copy, as re-cloning in place
+/// leaves it.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// A client session paired with exactly `scopes`.
+async fn scoped_socket(
+    server: &t3_server::runtime::RunningServer,
+    admin_cookie: &str,
+    scopes: &[&str],
+) -> (Socket, Client) {
+    let origin = format!("http://{}", server.address);
+    let http = reqwest::Client::new();
+    let grant: Value = http
+        .post(format!("{origin}/api/auth/pairing-token"))
+        .header("cookie", admin_cookie)
+        .json(&json!({ "scopes": scopes }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let cookie = http
+        .post(format!("{origin}/api/auth/browser-session"))
+        .json(&json!({"credential": grant["credential"]}))
+        .send()
+        .await
+        .unwrap()
+        .headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let ticket: Value = http
+        .post(format!("{origin}/api/auth/websocket-ticket/rpc"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (socket, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{}/ws?orchestrationProtocol=2&wsTicket={}",
+        server.address,
+        ticket["ticket"].as_str().unwrap()
+    ))
+    .await
+    .unwrap();
+    (socket, Client::new(0, Default::default()))
+}
+
+/// The agent's own thread credential (its MCP bearer) cannot trust a repository: it is not an
+/// RPC session, so the socket refuses it, and no MCP tool trusts.
+#[cfg(feature = "mcp")]
+async fn agent_cannot_trust(
+    server: &t3_server::runtime::RunningServer,
+    credentials: &AgentCredentials,
+) {
+    use tokio_tungstenite::tungstenite::{Error, client::IntoClientRequest};
+    let header = credentials
+        .read(&t3_contracts::base_schemas::ThreadId(RESTORE_THREAD.into()))
+        .expect("the thread's provider session has an MCP credential")
+        .authorization_header;
+    assert!(header.starts_with("Bearer "));
+    let mut request = format!("ws://{}/ws?orchestrationProtocol=2", server.address)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", header.parse().unwrap());
+    match tokio_tungstenite::connect_async(request).await {
+        Err(Error::Http(response)) => assert_eq!(response.status(), 401),
+        Err(other) => panic!("unexpected upgrade failure: {other}"),
+        Ok((mut socket, _)) => {
+            let mut client = Client::new(0, Default::default());
+            let exit = call_exit(
+                &mut socket,
+                &mut client,
+                "vcs.trustRepository",
+                json!({"threadId": RESTORE_THREAD}),
+            )
+            .await;
+            assert_eq!(
+                exit["_tag"], "Failure",
+                "an agent trusted a repository: {exit}"
+            );
+        }
+    }
+}
+
+/// `vcs.trustRepository` (Rust only): a folder whose repository was replaced (here by an
+/// identical copy, as re-cloning in place does) refuses the restore; a client with the restore's
+/// scope trusts it, and the restore goes ahead. A client without the scope and the agent's own
+/// thread credential cannot trust.
+#[tokio::test]
+async fn a_trusted_repository_restores_after_its_folder_was_recloned_in_place() {
+    let fixture = RestoreFixture::start(None).await;
+    #[cfg(feature = "mcp")]
+    agent_cannot_trust(&fixture.server, &fixture.credentials).await;
+    let mut fixture = fixture
+        .restart(|_, folder| {
+            let (git, aside) = (folder.join(".git"), folder.join(".git-aside"));
+            std::fs::rename(&git, &aside).unwrap();
+            copy_tree(&aside, &git);
+            std::fs::remove_dir_all(&aside).unwrap();
+        })
+        .await;
+    let refused = fixture.restore("command:rollback-changed").await;
+    assert!(
+        refused.as_deref().is_some_and(
+            |text| text.contains("no longer belongs to the repository this thread started in")
+        ),
+        "{refused:?}"
+    );
+
+    let (mut socket, mut client) = scoped_socket(
+        &fixture.server,
+        &fixture.cookie,
+        &[
+            "orchestration:read",
+            "source-control:write",
+            "filesystem:write",
+        ],
+    )
+    .await;
+    let denied = call_exit(
+        &mut socket,
+        &mut client,
+        "vcs.trustRepository",
+        json!({"threadId": RESTORE_THREAD}),
+    )
+    .await;
+    assert_eq!(
+        denied["cause"][0]["error"]["requiredPermission"], "orchestration:operate",
+        "{denied}"
+    );
+
+    let trusted = fixture
+        .call("vcs.trustRepository", json!({"threadId": RESTORE_THREAD}))
+        .await;
+    assert_eq!(trusted["_tag"], "Success", "{trusted}");
+    let top_level = trusted["value"]["topLevel"].as_str().unwrap_or_default();
+    assert!(
+        top_level
+            .trim_end_matches(['\\', '/'])
+            .ends_with("repository"),
+        "{trusted}"
+    );
+    assert_eq!(trusted["value"]["worktreeOfProject"], false, "{trusted}");
+    assert_eq!(fixture.restore("command:rollback-trusted").await, None);
     fixture.server.shutdown().await.unwrap();
 }

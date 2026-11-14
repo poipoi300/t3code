@@ -125,15 +125,10 @@ impl ReviewGuideGenerator {
             .git
             .at(&run.workspace_root)
             .with_cancellation(CancellationToken::new());
-        if let Some(worktree) = &run.worktree {
-            let path = worktree.to_string_lossy().into_owned();
-            if git
-                .execute(&["worktree", "remove", "--force", "--", &path], options(60))
-                .await
-                .is_err()
-            {
-                tracing::debug!("review guide worktree removal failed; pruning");
-            }
+        if let Some(worktree) = &run.worktree
+            && !force_remove_worktree(&git, worktree).await
+        {
+            tracing::debug!("review guide worktree removal failed; pruning");
         }
         // Removes the folder even when Git never registered the worktree.
         if let Some(directory) = &run.directory {
@@ -315,6 +310,14 @@ impl ReviewGuideGenerator {
             cleanup_id: id.to_owned(),
         })
     }
+}
+
+/// Removes a review worktree's registration and files.
+async fn force_remove_worktree(git: &Git, worktree: &std::path::Path) -> bool {
+    let path = worktree.to_string_lossy().into_owned();
+    git.execute(&["worktree", "remove", "--force", "--", &path], options(60))
+        .await
+        .is_ok()
 }
 
 fn options(seconds: u64) -> ExecuteOptions {
@@ -698,5 +701,59 @@ mod tests {
         assert!(lines[1].starts_with("- b.rs (outdated, ghost): xxx"));
         assert!(lines[1].ends_with('…'));
         assert_eq!(lines.len(), 2);
+    }
+
+    fn git(cwd: &std::path::Path, home: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=t3", "-c", "user.email=t3@example.invalid"])
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", home.join("empty-config"))
+            .output()
+            .expect("git");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// A `worktree add` killed by its timeout or a shutdown leaves its registration locked as
+    /// "initializing", which a single `--force` refuses (review L1). The lock written here is the
+    /// one the killed add leaves.
+    #[tokio::test]
+    async fn a_worktree_left_locked_by_a_killed_add_is_still_removed() {
+        let temp = tempfile::tempdir().expect("temp");
+        std::fs::write(temp.path().join("empty-config"), "").expect("config");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        git(&repo, temp.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "a\n").expect("file");
+        git(&repo, temp.path(), &["add", "."]);
+        git(&repo, temp.path(), &["commit", "-q", "-m", "init"]);
+        let checkout = temp.path().join("rg-1").join("checkout");
+        git(
+            &repo,
+            temp.path(),
+            &["worktree", "add", "-q", "--detach", &checkout.to_string_lossy(), "HEAD"],
+        );
+        git(
+            &repo,
+            temp.path(),
+            &["worktree", "lock", "--reason", "initializing", &checkout.to_string_lossy()],
+        );
+        let handle = Git::new(&repo).with_environment(
+            [
+                ("GIT_CONFIG_NOSYSTEM".into(), Some("1".into())),
+                (
+                    "GIT_CONFIG_GLOBAL".into(),
+                    Some(temp.path().join("empty-config").into_os_string()),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert!(force_remove_worktree(&handle, &checkout).await);
+        let listed = git(&repo, temp.path(), &["worktree", "list", "--porcelain"]);
+        assert_eq!(listed.matches("worktree ").count(), 1, "{listed}");
+        assert!(!checkout.exists());
     }
 }

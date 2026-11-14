@@ -205,9 +205,7 @@ impl AcpSessionHost for AcpHost {
 /// provider domain's runtime coordinator.
 mod turns {
     use std::{path::PathBuf, sync::Arc};
-    use t3_contracts::{
-        acp_registry::AcpRegistryUrlAuthAction, provider_instance::ProviderInstanceId,
-    };
+    use t3_contracts::provider_instance::ProviderInstanceId;
     use t3_orchestration::{
         adapters::acp::{
             AcpRegistryAgent, AcpRuntimeHooks, AcpTransport, AcpTransportFactory,
@@ -287,27 +285,13 @@ mod turns {
         startup_key: String,
     }
 
-    fn utf16_prefix(text: &str, limit: usize) -> String {
-        String::from_utf16_lossy(&text.encode_utf16().take(limit).collect::<Vec<_>>())
-    }
-
     #[async_trait::async_trait]
     impl AcpRuntimeHooks for CoordinatorHooks {
-        async fn url_consent(&self, elicitation_id: &str, url: &str, message: &str) -> bool {
-            // `normalizeAcpRegistryWebUrl` and the trimmed, bounded id and message.
-            let Some(url) = acp_catalog::web_url(url) else {
+        async fn url_consent(&self, _: &str, url: &str, message: &str) -> bool {
+            // The one consent rule (`acp_catalog::consent_action`): web address without
+            // credentials, cleaned message, an id the server mints.
+            let Some(action) = acp_catalog::consent_action(url, message) else {
                 return false;
-            };
-            let id = utf16_prefix(t3_contracts::wire::trim_js(elicitation_id), 256);
-            let Ok(elicitation_id) = serde_json::from_value(serde_json::json!(id)) else {
-                return false;
-            };
-            let action = AcpRegistryUrlAuthAction {
-                elicitation_id,
-                url,
-                message: utf16_prefix(t3_contracts::wire::trim_js(message), 1_024),
-                created_at: None,
-                expires_at: None,
             };
             self.coordinator
                 .request_url_auth(self.instance.clone(), Sensitive::new(action))

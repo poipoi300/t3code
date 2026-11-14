@@ -15,8 +15,11 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Payloads for `RUST_ONLY_METHODS`, which have no generated samples: (tag, payload, streams).
-const RUST_ONLY_SAMPLES: &[(&str, &str, bool)] =
-    &[("vcs.trustRepository", r#"{"threadId":"thread:sweep"}"#, false)];
+const RUST_ONLY_SAMPLES: &[(&str, &str, bool)] = &[(
+    "vcs.trustRepository",
+    r#"{"threadId":"thread:sweep"}"#,
+    false,
+)];
 
 /// A payload the guard accepts, from the method's schema samples.
 fn sample(tag: &str, schema: &str) -> Option<(Value, Vec<AuthEnvironmentScope>)> {
@@ -166,7 +169,8 @@ async fn every_optional_group_is_swept_when_its_runtime_is_present() {
     };
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../t3-preview/driver/tests/worker-fixture.cjs");
-    let module = std::env::temp_dir().join(format!("t3-sweep-playwright-{}.cjs", std::process::id()));
+    let module =
+        std::env::temp_dir().join(format!("t3-sweep-playwright-{}.cjs", std::process::id()));
     // `composition_preview`'s fake Playwright edge: launches resolve, a CDP screencast answers.
     let edge = r#"
 const launch=chromium.launch;
@@ -195,11 +199,10 @@ exports.chromium=chromium;
         ),
     )
     .unwrap();
-    let mut env: std::collections::BTreeMap<String, String> =
-        ["SystemRoot", "ComSpec", "WINDIR"]
-            .into_iter()
-            .filter_map(|key| std::env::var(key).ok().map(|value| (key.into(), value)))
-            .collect();
+    let mut env: std::collections::BTreeMap<String, String> = ["SystemRoot", "ComSpec", "WINDIR"]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok().map(|value| (key.into(), value)))
+        .collect();
     let homes = tempfile::tempdir().unwrap();
     for name in ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"] {
         env.insert(name.into(), homes.path().to_string_lossy().into_owned());
@@ -305,7 +308,13 @@ async fn sweep(env: std::collections::BTreeMap<String, String>, expected_unserve
             continue;
         };
         by_scope
-            .entry(serde_json::to_value(scope).unwrap().as_str().unwrap().to_owned())
+            .entry(
+                serde_json::to_value(scope)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            )
             .or_default()
             .push((tag, payload, *streams));
     }

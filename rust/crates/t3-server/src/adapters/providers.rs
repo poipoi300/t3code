@@ -1,11 +1,7 @@
 //! Provider composition and authority at the server boundary.
 use crate::services::{DomainContext, DomainRuntime, Domains};
 use futures::{StreamExt, future::BoxFuture};
-use std::{
-    collections::BTreeMap,
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 use t3_contracts::{
     provider_instance::ProviderInstanceId,
     provider_setup::{ProviderSetupError, ProviderSetupErrorTag},
@@ -78,7 +74,9 @@ impl ProvidersAdapter {
             tokio::fs::try_exists(path).await.unwrap_or(false)
         };
         let native = NativeProviderContext {
-            environment: context.environment.clone(),
+            environment: t3_process::provider_environment::provider_base_environment(
+                &context.environment,
+            ),
             home: context.account_home.clone(),
             cwd: context.local.config.cwd.clone(),
             platform: t3_provider::environment::Platform::current(),
