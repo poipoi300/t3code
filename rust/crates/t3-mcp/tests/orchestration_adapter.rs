@@ -299,7 +299,7 @@ async fn a_typed_refusal_under_the_command_lock_keeps_its_code() {
             &self,
             caller: CommandCaller,
         ) -> t3_orchestration::ports::thread_project::thread_management_service::ThreadManagementService
-        {
+{
             self.0.threads(caller)
         }
         fn dispatcher(&self, _: CommandCaller) -> Arc<dyn CommandDispatcher> {
@@ -308,14 +308,16 @@ async fn a_typed_refusal_under_the_command_lock_keeps_its_code() {
         fn intake(
             &self,
             caller: CommandCaller,
-        ) -> Option<t3_orchestration::ports::runs_ingestion::thread_message_intake::ThreadMessageIntake>
-        {
+        ) -> Option<
+            t3_orchestration::ports::runs_ingestion::thread_message_intake::ThreadMessageIntake,
+        > {
             self.0.intake(caller)
         }
         fn stop(
             &self,
-        ) -> Option<&t3_orchestration::ports::thread_project::thread_management_service::ThreadStopService>
-        {
+        ) -> Option<
+            &t3_orchestration::ports::thread_project::thread_management_service::ThreadStopService,
+        > {
             None
         }
     }

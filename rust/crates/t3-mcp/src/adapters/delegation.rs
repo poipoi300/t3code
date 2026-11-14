@@ -21,7 +21,9 @@ use serde_json::{Value, json};
 use std::{collections::BTreeSet, sync::Arc};
 use t3_contracts::{
     base_schemas::{NodeId, ProjectId, ThreadId},
-    orchestration_v2::{OrchestrationV2Run, OrchestrationV2RunStatus, OrchestrationV2ThreadProjection},
+    orchestration_v2::{
+        OrchestrationV2Run, OrchestrationV2RunStatus, OrchestrationV2ThreadProjection,
+    },
     orchestrator_mcp::*,
 };
 use t3_orchestration::{
@@ -115,7 +117,11 @@ pub fn resolve_runtime_mode(
     target: Option<(&str, &[String])>,
 ) -> Result<String> {
     let inherited = requested.is_none_or(|mode| mode == "inherit");
-    let resolved = if inherited { parent } else { requested.unwrap_or(parent) };
+    let resolved = if inherited {
+        parent
+    } else {
+        requested.unwrap_or(parent)
+    };
     if runtime_rank(resolved) > runtime_rank(parent) {
         return Err(failure(
             "runtime_mode_escalation_denied",
@@ -227,10 +233,15 @@ fn advertised_model<'a>(provider: &'a Value, model: &str) -> Option<&'a Value> {
 fn with_legacy_ultracode(descriptors: Option<&Value>, selections: Option<Value>) -> Option<Value> {
     let selections = selections?;
     let list = selections.as_array()?;
-    let value_of = |id: &str| list.iter().find(|s| s["id"] == id).map(|s| s["value"].clone());
-    let has_ultracode = descriptors
-        .and_then(Value::as_array)
-        .is_some_and(|d| d.iter().any(|d| d["id"] == "ultracode" && d["type"] == "boolean"));
+    let value_of = |id: &str| {
+        list.iter()
+            .find(|s| s["id"] == id)
+            .map(|s| s["value"].clone())
+    };
+    let has_ultracode = descriptors.and_then(Value::as_array).is_some_and(|d| {
+        d.iter()
+            .any(|d| d["id"] == "ultracode" && d["type"] == "boolean")
+    });
     if value_of("effort") != Some(json!("ultracode")) || !has_ultracode {
         return Some(selections);
     }
@@ -351,7 +362,10 @@ fn delegated_task_run<'a>(
     match spawn {
         None => child.runs.first(),
         Some(spawn) if spawn["targetRunId"].is_null() => None,
-        Some(spawn) => child.runs.iter().find(|run| id_value(&run.id) == spawn["targetRunId"]),
+        Some(spawn) => child
+            .runs
+            .iter()
+            .find(|run| id_value(&run.id) == spawn["targetRunId"]),
     }
 }
 
@@ -376,10 +390,13 @@ fn latest_terminal_result_run<'a>(
                 && run.status != OrchestrationV2RunStatus::RolledBack
                 && (delegated.is_some_and(|d| d.id == run.id) || run.started_at.is_some())
         })
-        .fold(None, |latest: Option<&OrchestrationV2Run>, run| match latest {
-            Some(latest) if !run_ran_after(run, latest) => Some(latest),
-            _ => Some(run),
-        })
+        .fold(
+            None,
+            |latest: Option<&OrchestrationV2Run>, run| match latest {
+                Some(latest) if !run_ran_after(run, latest) => Some(latest),
+                _ => Some(run),
+            },
+        )
 }
 
 fn can_expose(run: Option<&OrchestrationV2Run>) -> bool {
@@ -390,7 +407,10 @@ fn can_expose(run: Option<&OrchestrationV2Run>) -> bool {
 }
 
 /// `subagentResultForRun(...).text`.
-fn subagent_result_text(child: &OrchestrationV2ThreadProjection, run: &OrchestrationV2Run) -> String {
+fn subagent_result_text(
+    child: &OrchestrationV2ThreadProjection,
+    run: &OrchestrationV2Run,
+) -> String {
     let run_id = id_value(&run.id);
     let items: Vec<Value> = child.turn_items.iter().map(id_value).collect();
     let turn_item = items
@@ -448,7 +468,11 @@ fn subagent_result_text(child: &OrchestrationV2ThreadProjection, run: &Orchestra
             }
         })
         .or_else(|| message.and_then(|m| m["text"].as_str()).map(str::to_owned))
-        .or_else(|| turn_item.and_then(|i| i["text"].as_str()).map(str::to_owned))
+        .or_else(|| {
+            turn_item
+                .and_then(|i| i["text"].as_str())
+                .map(str::to_owned)
+        })
         .unwrap_or_else(|| {
             if run.status == OrchestrationV2RunStatus::Completed {
                 "Child task completed without an assistant result.".into()
@@ -463,7 +487,10 @@ fn subagent_result_text(child: &OrchestrationV2ThreadProjection, run: &Orchestra
         .provider_turns
         .iter()
         .map(id_value)
-        .filter(|t| !id_value(&run.active_attempt_id).is_null() && t["runAttemptId"] == id_value(&run.active_attempt_id))
+        .filter(|t| {
+            !id_value(&run.active_attempt_id).is_null()
+                && t["runAttemptId"] == id_value(&run.active_attempt_id)
+        })
         .max_by_key(|t| t["ordinal"].as_u64())
         .and_then(|t| t["model"].as_str().map(str::to_owned));
     match executed {
@@ -477,14 +504,24 @@ fn subagent_result_text(child: &OrchestrationV2ThreadProjection, run: &Orchestra
 }
 
 impl DelegationAdapter {
-    fn threads(&self, context: &CallContext) -> Result<t3_orchestration::ports::thread_project::thread_management_service::ThreadManagementService> {
+    fn threads(
+        &self,
+        context: &CallContext,
+    ) -> Result<
+        t3_orchestration::ports::thread_project::thread_management_service::ThreadManagementService,
+    > {
         Ok(self
             .orchestration
             .commands
             .threads(super::orchestration::command_caller(context)?))
     }
 
-    async fn task_record(&self, context: &CallContext, parent: &ThreadId, task: &NodeId) -> Result<Option<Value>> {
+    async fn task_record(
+        &self,
+        context: &CallContext,
+        parent: &ThreadId,
+        task: &NodeId,
+    ) -> Result<Option<Value>> {
         let records = self
             .threads(context)?
             .records(
@@ -502,11 +539,11 @@ impl DelegationAdapter {
                     format!("Unable to read thread {}: {error}", parent.0),
                 )
             })?;
-        Ok(records
-            .subagents
-            .iter()
-            .map(id_value)
-            .find(|t| t["id"] == id_value(task) && t["origin"] == "app_owned" && t["threadId"] == id_value(parent)))
+        Ok(records.subagents.iter().map(id_value).find(|t| {
+            t["id"] == id_value(task)
+                && t["origin"] == "app_owned"
+                && t["threadId"] == id_value(parent)
+        }))
     }
 
     /// `readTask`.
@@ -522,7 +559,9 @@ impl DelegationAdapter {
         let task = self
             .task_record(context, &parent, task_id)
             .await?
-            .filter(|t| !t["childThreadId"].is_null() || t.get("remoteChild").is_some_and(|r| !r.is_null()))
+            .filter(|t| {
+                !t["childThreadId"].is_null() || t.get("remoteChild").is_some_and(|r| !r.is_null())
+            })
             .ok_or_else(|| {
                 failure(
                     "task_not_found",
@@ -586,7 +625,11 @@ impl DelegationAdapter {
             Some(runs) => {
                 if !is_terminal_status(task_status_for_run(task_result_run.as_ref())) {
                     "working"
-                } else if delegated_task_awaits_work(runs, &controls.subagents, &controls.provider_threads) {
+                } else if delegated_task_awaits_work(
+                    runs,
+                    &controls.subagents,
+                    &controls.provider_threads,
+                ) {
                     "waiting_for_children"
                 } else {
                     "result_available"
@@ -594,7 +637,10 @@ impl DelegationAdapter {
             }
         };
         let mut result_run_ids: Vec<t3_contracts::base_schemas::RunId> = Vec::new();
-        for run in [task_result_run.as_ref(), terminal_run.as_ref()].into_iter().flatten() {
+        for run in [task_result_run.as_ref(), terminal_run.as_ref()]
+            .into_iter()
+            .flatten()
+        {
             let id = decoded(id_value(&run.id))?;
             if !result_run_ids.contains(&id) {
                 result_run_ids.push(id);
@@ -721,7 +767,9 @@ impl DelegationAdapter {
                         && original_run.is_none_or(|o| id_value(&o.delegated_task_id).is_null()))
             })
             .map_or(Value::Null, |t| t["id"].clone());
-        let terminal_status = terminal_run.as_ref().map(|run| task_status_for_run(Some(run)));
+        let terminal_status = terminal_run
+            .as_ref()
+            .map(|run| task_status_for_run(Some(run)));
         let latest_terminal_summary = if can_expose(terminal_run.as_ref()) {
             let run = terminal_run.as_ref().expect("exposable run");
             if child_run.as_ref().is_some_and(|c| c.id == run.id) {
@@ -741,9 +789,10 @@ impl DelegationAdapter {
                 .iter()
                 .find(|run| {
                     !result_transfer.is_null()
-                        && result_transfers
-                            .iter()
-                            .any(|t| t["id"] == result_transfer && t["sourcePoint"]["runId"] == id_value(&run.id))
+                        && result_transfers.iter().any(|t| {
+                            t["id"] == result_transfer
+                                && t["sourcePoint"]["runId"] == id_value(&run.id)
+                        })
                 })
                 .or(child_run.as_ref())
         };
@@ -811,21 +860,34 @@ impl DelegationAdapter {
             "pendingApproval": pending_approval,
             "waitTimedOut": wait_timed_out,
         });
-        let ends_wait = has_pending_question || !result["pendingApproval"].is_null() || is_terminal_status(status);
+        let ends_wait = has_pending_question
+            || !result["pendingApproval"].is_null()
+            || is_terminal_status(status);
         if !ends_wait && !disposed {
             result["next"] = json!(ORCHESTRATOR_MCP_RUNNING_TASK_NEXT);
         }
-        let delivered = matches!(task["completionDelivery"]["state"].as_str(), Some("acknowledged" | "disposed"));
+        let delivered = matches!(
+            task["completionDelivery"]["state"].as_str(),
+            Some("acknowledged" | "disposed")
+        );
         if acknowledge_terminal && is_terminal_status(status) && !delivered {
             // The parent's active run owned by this provider observed the result.
             let runs = threads
-                .records(parent.clone(), vec![RecordKind::Runs], RecordFilter::default())
+                .records(
+                    parent.clone(),
+                    vec![RecordKind::Runs],
+                    RecordFilter::default(),
+                )
                 .await
                 .map_err(management_failure)?
                 .runs;
             let observing = runs
                 .iter()
-                .filter(|run| is_active_run(run) && id_value(&run.provider_instance_id) == id_value(&caller.provider_instance_id))
+                .filter(|run| {
+                    is_active_run(run)
+                        && id_value(&run.provider_instance_id)
+                            == id_value(&caller.provider_instance_id)
+                })
                 .max_by_key(|run| run.ordinal)
                 .map_or(Value::Null, |run| id_value(&run.id));
             let command = json!({
@@ -835,15 +897,15 @@ impl DelegationAdapter {
                 "taskId": task["id"],
                 "observedByRunId": observing,
             });
-            threads
-                .dispatch(decoded(command)?)
-                .await
-                .map_err(|error| {
-                    failure(
-                        "orchestration_error",
-                        format!("Unable to acknowledge delegated task {}: {error}", task_id.0),
-                    )
-                })?;
+            threads.dispatch(decoded(command)?).await.map_err(|error| {
+                failure(
+                    "orchestration_error",
+                    format!(
+                        "Unable to acknowledge delegated task {}: {error}",
+                        task_id.0
+                    ),
+                )
+            })?;
         }
         Ok(result)
     }
@@ -860,17 +922,39 @@ impl DelegationAdapter {
         let inherited = &parent["modelSelection"];
         let requested_driver = target["driverKind"].as_str();
         let mut instance = target["providerInstanceId"].as_str().map(str::to_owned);
-        if instance.is_none() && let Some(driver) = requested_driver {
+        if instance.is_none()
+            && let Some(driver) = requested_driver
+        {
             let candidates: Vec<&Value> = providers
                 .iter()
-                .filter(|p| p["driver"] == driver && p["instanceId"].as_str().is_some_and(|id| capable.contains(id)))
+                .filter(|p| {
+                    p["driver"] == driver
+                        && p["instanceId"]
+                            .as_str()
+                            .is_some_and(|id| capable.contains(id))
+                })
                 .collect();
             if candidates.is_empty() {
-                return Err(failure("provider_unavailable", format!("No V2 provider adapter is registered for driver {driver}.")));
+                return Err(failure(
+                    "provider_unavailable",
+                    format!("No V2 provider adapter is registered for driver {driver}."),
+                ));
             }
-            let healthy: Vec<&Value> = candidates.into_iter().filter(|c| provider_constraints(Some(c), true).is_empty()).collect();
-            let mut ordered: Vec<&Value> = healthy.iter().copied().filter(|c| c["instanceId"] == inherited["instanceId"]).collect();
-            ordered.extend(healthy.iter().copied().filter(|c| c["instanceId"] != inherited["instanceId"]));
+            let healthy: Vec<&Value> = candidates
+                .into_iter()
+                .filter(|c| provider_constraints(Some(c), true).is_empty())
+                .collect();
+            let mut ordered: Vec<&Value> = healthy
+                .iter()
+                .copied()
+                .filter(|c| c["instanceId"] == inherited["instanceId"])
+                .collect();
+            ordered.extend(
+                healthy
+                    .iter()
+                    .copied()
+                    .filter(|c| c["instanceId"] != inherited["instanceId"]),
+            );
             let project = ProjectId(parent["projectId"].as_str().unwrap_or_default().into());
             for candidate in ordered {
                 let id = candidate["instanceId"].as_str().unwrap_or_default();
@@ -890,11 +974,17 @@ impl DelegationAdapter {
                 ));
             }
         }
-        let instance = instance.unwrap_or_else(|| inherited["instanceId"].as_str().unwrap_or_default().into());
+        let instance =
+            instance.unwrap_or_else(|| inherited["instanceId"].as_str().unwrap_or_default().into());
         let provider = providers
             .iter()
             .find(|p| p["instanceId"] == instance.as_str())
-            .ok_or_else(|| failure("provider_unavailable", format!("Provider instance {instance} is not registered.")))?;
+            .ok_or_else(|| {
+                failure(
+                    "provider_unavailable",
+                    format!("Provider instance {instance} is not registered."),
+                )
+            })?;
         if let Some(driver) = requested_driver
             && provider["driver"] != driver
         {
@@ -908,7 +998,13 @@ impl DelegationAdapter {
         }
         let constraints = provider_constraints(Some(provider), capable.contains(&instance));
         if !constraints.is_empty() {
-            return Err(failure("provider_unavailable", format!("Provider {instance} cannot run a child task: {}", constraints.join(" "))));
+            return Err(failure(
+                "provider_unavailable",
+                format!(
+                    "Provider {instance} cannot run a child task: {}",
+                    constraints.join(" ")
+                ),
+            ));
         }
         let requested_model = target["model"].as_str();
         let model = requested_model.map(str::to_owned).or_else(|| {
@@ -919,40 +1015,69 @@ impl DelegationAdapter {
             }
         });
         let Some(model) = model else {
-            return Err(failure("model_unavailable", format!("Provider {instance} has no model available for inheritance.")));
+            return Err(failure(
+                "model_unavailable",
+                format!("Provider {instance} has no model available for inheritance."),
+            ));
         };
         if let Some(requested) = requested_model
             && provider["models"].as_array().is_some_and(|m| !m.is_empty())
             && advertised_model(provider, requested).is_none()
         {
-            return Err(failure("model_unavailable", format!("Model {requested} is not advertised by provider {instance}.")));
+            return Err(failure(
+                "model_unavailable",
+                format!("Model {requested} is not advertised by provider {instance}."),
+            ));
         }
         let advertised = advertised_model(provider, &model);
-        let descriptors = advertised.map(|a| &a["capabilities"]["optionDescriptors"]).filter(|d| d.is_array());
-        let requested_options = with_legacy_ultracode(descriptors, target.get("options").filter(|o| !o.is_null()).cloned());
+        let descriptors = advertised
+            .map(|a| &a["capabilities"]["optionDescriptors"])
+            .filter(|d| d.is_array());
+        let requested_options = with_legacy_ultracode(
+            descriptors,
+            target.get("options").filter(|o| !o.is_null()).cloned(),
+        );
         if let Some(options) = &requested_options {
             let invalid = invalid_options(options, descriptors);
             if !invalid.is_empty() {
-                return Err(failure("invalid_request", format!("Model {model} on provider {instance} rejected options: {}", invalid.join(" "))));
+                return Err(failure(
+                    "invalid_request",
+                    format!(
+                        "Model {model} on provider {instance} rejected options: {}",
+                        invalid.join(" ")
+                    ),
+                ));
             }
         }
         let inherits = inherited["instanceId"] == instance.as_str()
-            && advertised.and_then(|a| a["slug"].as_str()).unwrap_or(&model)
+            && advertised
+                .and_then(|a| a["slug"].as_str())
+                .unwrap_or(&model)
                 == advertised_model(provider, inherited["model"].as_str().unwrap_or_default())
                     .and_then(|a| a["slug"].as_str())
                     .unwrap_or(inherited["model"].as_str().unwrap_or_default());
         let mut options: Option<Vec<Value>> = if inherits {
-            with_legacy_ultracode(descriptors, inherited.get("options").filter(|o| !o.is_null()).cloned())
-                .and_then(|o| o.as_array().cloned())
-                .map(|o| match descriptors.and_then(Value::as_array) {
-                    None => o,
-                    Some(d) => o.into_iter().filter(|s| d.iter().any(|d| d["id"] == s["id"])).collect(),
-                })
+            with_legacy_ultracode(
+                descriptors,
+                inherited.get("options").filter(|o| !o.is_null()).cloned(),
+            )
+            .and_then(|o| o.as_array().cloned())
+            .map(|o| match descriptors.and_then(Value::as_array) {
+                None => o,
+                Some(d) => o
+                    .into_iter()
+                    .filter(|s| d.iter().any(|d| d["id"] == s["id"]))
+                    .collect(),
+            })
         } else {
             None
         };
         if let Some(requested) = requested_options.as_ref().and_then(Value::as_array) {
-            let mut merged: Vec<Value> = if requested.is_empty() { Vec::new() } else { options.clone().unwrap_or_default() };
+            let mut merged: Vec<Value> = if requested.is_empty() {
+                Vec::new()
+            } else {
+                options.clone().unwrap_or_default()
+            };
             for selection in requested {
                 merged.retain(|s| s["id"] != selection["id"]);
                 merged.push(selection.clone());
@@ -976,14 +1101,19 @@ impl DelegationAdapter {
 }
 
 /// `pendingTaskApproval`: the oldest live approval request in the task's own runs.
-fn pending_task_approval(child: &OrchestrationV2ThreadProjection, task_id: &Value, original: Option<&OrchestrationV2Run>) -> Value {
+fn pending_task_approval(
+    child: &OrchestrationV2ThreadProjection,
+    task_id: &Value,
+    original: Option<&OrchestrationV2Run>,
+) -> Value {
     let task_runs: Vec<Value> = child
         .runs
         .iter()
         .filter(|run| {
             !is_terminal_run(run)
                 && (id_value(&run.delegated_task_id) == *task_id
-                    || (id_value(&run.delegated_task_id).is_null() && original.is_some_and(|o| o.id == run.id)))
+                    || (id_value(&run.delegated_task_id).is_null()
+                        && original.is_some_and(|o| o.id == run.id)))
         })
         .map(|run| id_value(&run.id))
         .collect();
@@ -995,10 +1125,17 @@ fn pending_task_approval(child: &OrchestrationV2ThreadProjection, task_id: &Valu
             request["kind"].as_str(),
             Some("command" | "file-read" | "file-change" | "permission" | "mcp-elicitation")
         );
-        if request["status"] != "pending" || request["responseCapability"]["type"] != "live" || !approval_kind {
+        if request["status"] != "pending"
+            || request["responseCapability"]["type"] != "live"
+            || !approval_kind
+        {
             continue;
         }
-        let Some(run_id) = nodes.iter().find(|n| n["id"] == request["nodeId"]).map(|n| n["runId"].clone()) else {
+        let Some(run_id) = nodes
+            .iter()
+            .find(|n| n["id"] == request["nodeId"])
+            .map(|n| n["runId"].clone())
+        else {
             continue;
         };
         if run_id.is_null() || !task_runs.contains(&run_id) {
@@ -1007,7 +1144,8 @@ fn pending_task_approval(child: &OrchestrationV2ThreadProjection, task_id: &Valu
         let created = request["createdAt"].as_str().unwrap_or_default().to_owned();
         if oldest.as_ref().is_none_or(|o| created < *o) {
             oldest = Some(created);
-            approval = json!({"requestId": request["id"], "kind": request["kind"], "runId": run_id});
+            approval =
+                json!({"requestId": request["id"], "kind": request["kind"], "runId": run_id});
         }
     }
     approval
@@ -1035,14 +1173,26 @@ impl OrchestratorService for DelegationAdapter {
             ));
         }
         if input["isolation"] == "worktree" {
-            return Err(not_available("delegate_task", "ThreadLaunchService::prepare_run"));
+            return Err(not_available(
+                "delegate_task",
+                "ThreadLaunchService::prepare_run",
+            ));
         }
         let caller = context.scope.require_thread("delegate_task")?.clone();
         let threads = self.threads(&context)?;
         let parent = threads
-            .records(caller.thread_id.clone(), vec![RecordKind::Runs], RecordFilter::default())
+            .records(
+                caller.thread_id.clone(),
+                vec![RecordKind::Runs],
+                RecordFilter::default(),
+            )
             .await
-            .map_err(|error| failure("orchestration_error", format!("Unable to read thread {}: {error}", caller.thread_id.0)))?;
+            .map_err(|error| {
+                failure(
+                    "orchestration_error",
+                    format!("Unable to read thread {}: {error}", caller.thread_id.0),
+                )
+            })?;
         let parent_thread = id_value(&parent.thread);
         if let Some(project) = target["projectId"].as_str()
             && parent_thread["projectId"] != project
@@ -1074,15 +1224,21 @@ impl OrchestratorService for DelegationAdapter {
             .await;
         let resolved = self.resolve_target(&parent_thread, &target, retry).await?;
         let runtime_mode = resolve_runtime_mode(
-            parent_thread["runtimeMode"].as_str().unwrap_or("approval-required"),
+            parent_thread["runtimeMode"]
+                .as_str()
+                .unwrap_or("approval-required"),
             input["runtimeMode"].as_str(),
             Some((
-                resolved.model_selection["instanceId"].as_str().unwrap_or_default(),
+                resolved.model_selection["instanceId"]
+                    .as_str()
+                    .unwrap_or_default(),
                 &resolved.supported_runtime_modes,
             )),
         )?;
         let interaction_mode = resolve_interaction_mode(
-            parent_thread["interactionMode"].as_str().unwrap_or("default"),
+            parent_thread["interactionMode"]
+                .as_str()
+                .unwrap_or("default"),
             input["interactionMode"].as_str(),
         )?;
         let mut command = json!({
@@ -1106,8 +1262,13 @@ impl OrchestratorService for DelegationAdapter {
             .dispatch(decoded(command)?)
             .await
             .map_err(|error| match error {
-                t3_orchestration::error::Error::CallerRefused { refusal, .. } => failure(refusal.code(), refusal.to_string()),
-                error => failure("orchestration_error", format!("Unable to create delegated task: {error}")),
+                t3_orchestration::error::Error::CallerRefused { refusal, .. } => {
+                    failure(refusal.code(), refusal.to_string())
+                }
+                error => failure(
+                    "orchestration_error",
+                    format!("Unable to create delegated task: {error}"),
+                ),
             })?;
         // The engine names the task after the command (`derived_id`); the projection confirms it.
         let task_id = NodeId(derived_id("node", &["delegated-task", &command_id]));
