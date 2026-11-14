@@ -132,7 +132,7 @@ pub(crate) fn system() -> Option<SystemProxy> {
 #[cfg(target_os = "macos")]
 pub(crate) fn system() -> Option<SystemProxy> {
     use system_configuration::{
-        core_foundation::{array::CFArray, base::CFType, number::CFNumber, string::CFString},
+        core_foundation::{array::CFArray, number::CFNumber, string::CFString},
         dynamic_store::SCDynamicStoreBuilder,
     };
     let store = SCDynamicStoreBuilder::new("t3-platform").build()?;
@@ -167,15 +167,28 @@ pub(crate) fn system() -> Option<SystemProxy> {
     };
     if let Some(exceptions) = proxies
         .find(&CFString::from_static_string("ExceptionsList"))
-        .and_then(|value| value.downcast::<CFArray<CFType>>())
+        .and_then(|value| value.downcast::<CFArray>())
     {
-        for exception in exceptions.iter() {
-            if let Some(exception) = exception.downcast::<CFString>() {
+        for item in exceptions.get_all_values() {
+            let item = exception_item(item);
+            if let Some(exception) = item.downcast::<CFString>() {
                 proxy.add_bypass(&exception.to_string());
             }
         }
     }
     (proxy.http.is_some() || proxy.https.is_some()).then_some(proxy)
+}
+
+/// One value of the dynamic store's exception list, as a `CFType` to downcast safely.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn exception_item(
+    item: *const std::ffi::c_void,
+) -> system_configuration::core_foundation::base::CFType {
+    use system_configuration::core_foundation::base::{CFType, TCFType};
+    // SAFETY: every value of a CFArray the dynamic store returns is a CoreFoundation object,
+    // alive while the array is; the get rule retains it for the returned wrapper.
+    unsafe { CFType::wrap_under_get_rule(item) }
 }
 
 #[cfg(test)]
