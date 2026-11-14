@@ -252,10 +252,7 @@ impl Server {
             match self.next(id).await {
                 Ok(value) if done(&value) => return value,
                 Ok(_) => {}
-                Err(exit) => panic!(
-                    "stream ended: {}",
-                    serde_json::to_value(exit).unwrap()
-                ),
+                Err(exit) => panic!("stream ended: {}", serde_json::to_value(exit).unwrap()),
             }
         }
     }
@@ -346,7 +343,10 @@ async fn first_turn_completes(s: &mut Server, thread: &str) {
     let (mut reply, mut settled) = (false, false);
     while !(reply && settled) {
         let value = s.next(&stream).await.unwrap_or_else(|exit| {
-            panic!("thread stream ended: {}", serde_json::to_value(exit).unwrap())
+            panic!(
+                "thread stream ended: {}",
+                serde_json::to_value(exit).unwrap()
+            )
         });
         let text = value.to_string();
         reply |= text.contains("\"assistant\"");
@@ -381,7 +381,12 @@ async fn launches_into_the_project_root_and_a_new_worktree_run_their_first_turn(
     let launched = ok(s
         .call(
             "orchestration.launchThread",
-            launch("thread:root", "project-1", json!({"type": "root"}), "auto-accept-edits"),
+            launch(
+                "thread:root",
+                "project-1",
+                json!({"type": "root"}),
+                "auto-accept-edits",
+            ),
         )
         .await);
     assert_eq!(launched["threadId"], "thread:root");
@@ -438,7 +443,12 @@ async fn launches_refuse_unknown_projects_bad_refs_client_paths_ceilings_and_mis
     launch_refused(
         s.call(
             "orchestration.launchThread",
-            launch("thread:a", "project-missing", root.clone(), "auto-accept-edits"),
+            launch(
+                "thread:a",
+                "project-missing",
+                root.clone(),
+                "auto-accept-edits",
+            ),
         )
         .await,
         "Failed to launch thread",
@@ -553,7 +563,10 @@ async fn launches_refuse_unknown_projects_bad_refs_client_paths_ceilings_and_mis
         .await,
     );
     assert_eq!(error["_tag"], "EnvironmentAuthorizationError", "{error}");
-    assert_eq!(error["requiredPermission"], "orchestration:operate", "{error}");
+    assert_eq!(
+        error["requiredPermission"], "orchestration:operate",
+        "{error}"
+    );
     assert_eq!(s.thread_count(), 0);
     s.runtime.take().unwrap().shutdown().await.unwrap();
 }
@@ -577,7 +590,10 @@ async fn cancelled_and_shutdown_launches_remove_their_worktrees() {
                 .iter()
                 .any(|stage| stage["id"] == "setup-script" && stage["status"] == "running")
     };
-    let setup = s.subscribe("subscribeWorktreeSetup", json!({"threadId": "thread:cancel"}));
+    let setup = s.subscribe(
+        "subscribeWorktreeSetup",
+        json!({"threadId": "thread:cancel"}),
+    );
     ok(s.call(
         "orchestration.launchThread",
         launch(
@@ -607,7 +623,10 @@ async fn cancelled_and_shutdown_launches_remove_their_worktrees() {
     assert_eq!(ended["phase"], "cancelled", "{ended}");
 
     // Shut down while the next launch waits on its script.
-    let setup = s.subscribe("subscribeWorktreeSetup", json!({"threadId": "thread:shutdown"}));
+    let setup = s.subscribe(
+        "subscribeWorktreeSetup",
+        json!({"threadId": "thread:shutdown"}),
+    );
     ok(s.call(
         "orchestration.launchThread",
         launch(
@@ -632,4 +651,74 @@ async fn cancelled_and_shutdown_launches_remove_their_worktrees() {
             Some(_) => {}
         }
     }
+}
+
+/// `orchestration.getWorkflowScript`: TypeScript's `readWorkflowScript` over the server's
+/// contained reader, rooted at `<home>/.claude/projects` (here a temporary home).
+#[tokio::test]
+async fn workflow_scripts_are_read_only_inside_the_claude_projects_folder() {
+    let mut s = Server::start().await;
+    assert!(
+        !s.runtime()
+            .unserved_methods
+            .contains(&"orchestration.getWorkflowScript")
+    );
+    let root = s.home().join(".claude").join("projects");
+    let session = root.join("session");
+    std::fs::create_dir_all(&session).unwrap();
+    std::fs::write(session.join("flow.js"), "export default 1;\n").unwrap();
+    std::fs::write(session.join("big.js"), "x".repeat(300 * 1024)).unwrap();
+    std::fs::create_dir(session.join("dir.js")).unwrap();
+    std::fs::write(session.join("notes.txt"), "text").unwrap();
+    let elsewhere = s.home().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("secret.js"), "outside").unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(elsewhere.join("secret.js"), session.join("link.js"))
+        .unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(elsewhere.join("secret.js"), session.join("link.js")).unwrap();
+    let read = |path: &Path| json!({"threadId": "thread:any", "scriptPath": path.to_string_lossy()});
+
+    let script = ok(s
+        .call("orchestration.getWorkflowScript", read(&session.join("flow.js")))
+        .await);
+    assert_eq!(script["contents"], "export default 1;\n");
+    assert_eq!(script["truncated"], false);
+    assert_eq!(
+        canonical(Path::new(script["scriptPath"].as_str().unwrap())),
+        canonical(&session.join("flow.js"))
+    );
+    // TypeScript's 256 KiB cap.
+    let big = ok(s
+        .call("orchestration.getWorkflowScript", read(&session.join("big.js")))
+        .await);
+    assert_eq!(big["truncated"], true);
+    assert_eq!(big["contents"].as_str().unwrap().len(), 256 * 1024);
+
+    for (path, reason) in [
+        (session.join("notes.txt"), "invalid-path"),
+        (session.join("dir.js"), "not-regular-file"),
+        (session.join("absent.js"), "not-found"),
+        (elsewhere.join("secret.js"), "outside-root"),
+        // A link inside the folder resolves to its target, which is outside.
+        (session.join("link.js"), "outside-root"),
+    ] {
+        let error = failure(
+            s.call("orchestration.getWorkflowScript", read(&path))
+                .await,
+        );
+        assert_eq!(error["_tag"], "OrchestrationGetWorkflowScriptError", "{error}");
+        assert_eq!(error["reason"], reason, "{}: {error}", path.display());
+        assert!(!error.to_string().contains("outside\""), "{error}");
+    }
+
+    s.reconnect_with(&["filesystem:read"]).await;
+    let error = failure(
+        s.call("orchestration.getWorkflowScript", read(&session.join("flow.js")))
+            .await,
+    );
+    assert_eq!(error["_tag"], "EnvironmentAuthorizationError", "{error}");
+    assert_eq!(error["requiredPermission"], "orchestration:read", "{error}");
+    s.runtime.take().unwrap().shutdown().await.unwrap();
 }

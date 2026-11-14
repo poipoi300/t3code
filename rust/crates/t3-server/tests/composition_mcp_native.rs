@@ -32,12 +32,14 @@ fn main() -> ExitCode {
     }
     type Case = fn() -> Pin<Box<dyn Future<Output = ()>>>;
     let cases: &[(&str, Case)] = &[
-        ("codex_session_gets_this_threads_t3_mcp_server_and_its_token_works", || {
-            Box::pin(token_hand_over(Provider::Codex))
-        }),
-        ("claude_session_gets_this_threads_t3_mcp_server_and_its_token_works", || {
-            Box::pin(token_hand_over(Provider::Claude))
-        }),
+        (
+            "codex_session_gets_this_threads_t3_mcp_server_and_its_token_works",
+            || Box::pin(token_hand_over(Provider::Codex)),
+        ),
+        (
+            "claude_session_gets_this_threads_t3_mcp_server_and_its_token_works",
+            || Box::pin(token_hand_over(Provider::Claude)),
+        ),
     ];
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.iter().any(|argument| argument == "--list") {
@@ -607,7 +609,6 @@ mod harness {
     }
 }
 
-
 use harness::{Server, objects, run_status};
 
 fn settings_with(instances: Value) -> Value {
@@ -690,10 +691,16 @@ async fn token_hand_over(provider: Provider) {
         Provider::Claude => assert!(names.contains(&"t3-code"), "{servers:?}"),
     }
     let endpoint = format!("{}/mcp", server.origin);
-    assert!(servers.iter().all(|(_, url, _)| *url == endpoint), "{servers:?}");
+    assert!(
+        servers.iter().all(|(_, url, _)| *url == endpoint),
+        "{servers:?}"
+    );
     let token = servers[0].2.clone();
     assert!(token.starts_with("Bearer "), "{servers:?}");
-    assert!(servers.iter().all(|(_, _, auth)| *auth == token), "{servers:?}");
+    assert!(
+        servers.iter().all(|(_, _, auth)| *auth == token),
+        "{servers:?}"
+    );
 
     // A tool call with that token acts as this thread.
     let response = reqwest::Client::new()
@@ -711,7 +718,10 @@ async fn token_hand_over(provider: Provider) {
     assert_eq!(response.status(), 200);
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["result"]["isError"], false, "{body}");
-    assert_eq!(body["result"]["structuredContent"]["currentThreadId"], THREAD, "{body}");
+    assert_eq!(
+        body["result"]["structuredContent"]["currentThreadId"], THREAD,
+        "{body}"
+    );
 
     server
         .dispatch(json!({"type":"runtime-request.respond","commandId":"command:approve","threadId":THREAD,"requestId":request,"decision":"accept"}))

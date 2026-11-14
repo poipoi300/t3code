@@ -81,6 +81,8 @@ fn main() -> ExitCode {
             }
         }
     }
+    // A failed case can leave its server's tasks running; do not wait for them.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(5));
     println!(
         "test result: {}. {} passed; {failed} failed",
         if failed == 0 { "ok" } else { "FAILED" },
@@ -673,10 +675,10 @@ async fn codex_by_default() {
             .unwrap()
             .contains("Fix pairing expiry and preserve remote access.")
     );
-    assert_eq!(
-        canonical(Path::new(report["codexHome"].as_str().unwrap())),
-        canonical(&s.home().join("codex-home"))
-    );
+    // The instance's home, as configured (the fake never creates it).
+    let codex_home = PathBuf::from(report["codexHome"].as_str().unwrap());
+    assert_eq!(codex_home.file_name().unwrap(), "codex-home");
+    assert_eq!(canonical(codex_home.parent().unwrap()), canonical(s.home()));
     assert_eq!(report["secret"], "textgen-secret-1b2c");
 
     // The commit writer (no writer model set) is the same Codex instance, in the checkout.
@@ -817,7 +819,7 @@ mod review {
             Arc::new(Self {
                 head: std::sync::Mutex::new(head),
                 caps: decode(
-                    json!({"diff": true, "comment": false, "actions": [], "mergeMethods": [], "search": false}),
+                    json!({"diff": true, "comment": false, "actions": [], "mergeMethods": [], "search": false, "review": {"inlineComment": false, "reply": false, "resolve": false, "verdicts": []}, "reviewers": {"request": false, "listCandidates": false}}),
                 ),
             })
         }

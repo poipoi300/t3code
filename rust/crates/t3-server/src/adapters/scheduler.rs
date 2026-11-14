@@ -464,10 +464,17 @@ impl SchedulerAdapter {
             .and_then(|adapter| adapter.composed().cloned())
         {
             let intake = Arc::new(runtime_intake::RuntimeIntake {
-                runtime,
+                runtime: runtime.clone(),
                 shutdown: context.shutdown.clone(),
             });
             let backend = Arc::new(t3_scheduler::intake::IntakeDispatchBackend::new(intake));
+            // Unbound tasks launch their thread (`adapters/scheduled_launch.rs`).
+            #[cfg(feature = "local-services")]
+            let backend = crate::adapters::scheduled_launch::LaunchingBackend::wrap(
+                backend,
+                runtime,
+                context.local.managed_policy.as_ref(),
+            );
             return Self::build(context, backend, SchedulerOptions::default(), None, clock)
                 .await
                 .map(Arc::new);

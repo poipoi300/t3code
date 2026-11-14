@@ -274,6 +274,11 @@ impl Server {
                     .extend(values.into_iter().map(|value| (id.clone(), value)));
             }
             CallEvent::Exit { id, exit } => self.exits.push((id, exit)),
+            // The client's own record of a call this test interrupted.
+            CallEvent::Failed {
+                error: t3_rpc::ClientError::Interrupted,
+                ..
+            } => {}
             other => panic!("unexpected {other:?}"),
         }
     }

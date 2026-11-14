@@ -166,10 +166,11 @@ impl LaunchAdapter {
 /// A revision a client names reaches Git after `--end-of-options` or as a ref argument; it may
 /// never start with `-` (Git's previous-branch `-` excepted) or carry control characters.
 fn check_revision(reference: &str) -> std::result::Result<(), String> {
-    if (reference.starts_with('-') && reference != "-")
-        || reference.chars().any(|c| c.is_control())
+    if (reference.starts_with('-') && reference != "-") || reference.chars().any(|c| c.is_control())
     {
-        return Err(format!("Base ref \"{reference}\" is not a valid Git revision."));
+        return Err(format!(
+            "Base ref \"{reference}\" is not a valid Git revision."
+        ));
     }
     Ok(())
 }
@@ -186,7 +187,9 @@ fn check_branch(branch: Option<&TrimmedNonEmptyString>) -> std::result::Result<(
         || name.ends_with('/')
         || name.ends_with('.')
         || name.starts_with('/')
-        || name.split('/').any(|part| part.starts_with('.') || part.ends_with(".lock"))
+        || name
+            .split('/')
+            .any(|part| part.starts_with('.') || part.ends_with(".lock"))
         || name
             .chars()
             .any(|c| c.is_control() || c.is_whitespace() || "~^:?*[\\".contains(c));
@@ -246,7 +249,10 @@ impl Inner {
             return Err(REFUSED.into());
         };
         for tree in trees {
-            if local_real_path(tree.path).await.is_some_and(|tree| tree == target) {
+            if local_real_path(tree.path)
+                .await
+                .is_some_and(|tree| tree == target)
+            {
                 return Ok(());
             }
         }
@@ -331,14 +337,17 @@ impl Inner {
                 }
             }
         });
-        self.setups.lock().unwrap_or_else(|e| e.into_inner()).insert(
-            thread.0.clone(),
-            Active {
-                worktree: None,
-                preparation,
-                ended,
-            },
-        );
+        self.setups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                thread.0.clone(),
+                Active {
+                    worktree: None,
+                    preparation,
+                    ended,
+                },
+            );
         tracker.begin(
             thread.clone(),
             branch,
@@ -428,15 +437,18 @@ impl Inner {
             .map_err(git_failure("provision-worktree"))?;
         let path = PathBuf::from(&created.worktree.path.0);
         let branch = created.worktree.ref_name.0;
-        self.created.lock().unwrap_or_else(|e| e.into_inner()).insert(
-            path.clone(),
-            Created {
-                thread: thread.clone(),
-                project_root: root.to_owned(),
-                branch: branch.clone(),
-                ended: None,
-            },
-        );
+        self.created
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                path.clone(),
+                Created {
+                    thread: thread.clone(),
+                    project_root: root.to_owned(),
+                    branch: branch.clone(),
+                    ended: None,
+                },
+            );
         if let Some(active) = self
             .setups
             .lock()
@@ -478,7 +490,9 @@ impl Inner {
         };
         let id = selection.instance_id.0.as_str();
         let providers = self.textgen.providers().await;
-        let usable = settings.text_generators.contains_key(&selection.instance_id)
+        let usable = settings
+            .text_generators
+            .contains_key(&selection.instance_id)
             || providers.iter().any(|provider| {
                 let snapshot = serde_json::to_value(provider).unwrap_or_default();
                 snapshot["instanceId"] == id
@@ -688,7 +702,11 @@ impl LaunchHost for Inner {
             Ok(result) => result,
             Err(error) => {
                 if tracked {
-                    self.finish(&thread, WorktreeSetupPhase::Failed, Some(&error.to_string()));
+                    self.finish(
+                        &thread,
+                        WorktreeSetupPhase::Failed,
+                        Some(&error.to_string()),
+                    );
                 }
                 return Err(failure("run-setup-script", error));
             }
@@ -761,7 +779,11 @@ impl LaunchHost for Inner {
             inner.stage(
                 &thread,
                 Stage::SetupScript,
-                if succeeded { Status::Done } else { Status::Failed },
+                if succeeded {
+                    Status::Done
+                } else {
+                    Status::Failed
+                },
                 Some(format!("exited with {code}")),
             );
             if succeeded || asynchronous {

@@ -26,6 +26,8 @@ mod authority {
         /// The environment's one Git root (shared caches, locks and internal-path protection),
         /// handed over once the git adapter has built it. Unset, no worktree listing grants.
         git: std::sync::OnceLock<t3_git::Git>,
+        /// Bumped whenever a grant may have narrowed (`changes`).
+        changes: tokio::sync::watch::Sender<u64>,
     }
 
     struct Project {
@@ -71,7 +73,75 @@ mod authority {
                 default_worktrees: context.local.config.paths.worktrees(),
                 home: context.account_home.clone(),
                 git: std::sync::OnceLock::new(),
+                changes: tokio::sync::watch::channel(0).0,
             })
+        }
+
+        /// Changes when a grant may have narrowed: a project deleted or re-rooted, a thread
+        /// deleted or its worktree changed, the managed worktree folders changed. Streams that
+        /// re-check the authority per value re-check on it, so an idle one ends at once.
+        pub fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+            self.changes.subscribe()
+        }
+
+        /// Follows the environment's committed events and settings until shutdown.
+        #[cfg(feature = "orchestration")]
+        pub fn follow(
+            self: &Arc<Self>,
+            mut events: tokio::sync::broadcast::Receiver<
+                Arc<t3_contracts::application_event::ApplicationStoredEvent>,
+            >,
+            shutdown: tokio_util::sync::CancellationToken,
+        ) {
+            use t3_contracts::{
+                application_event::{ApplicationProjectEvent, ApplicationStoredEvent},
+                orchestration_v2::OrchestrationV2DomainEvent as Event,
+            };
+            use tokio::sync::broadcast::error::RecvError;
+            let this = Arc::downgrade(self);
+            let mut settings = self.settings.subscribe_changes();
+            tokio::spawn(async move {
+                let mut folders = None;
+                let mut settings_open = true;
+                loop {
+                    let narrowed = tokio::select! {
+                        () = shutdown.cancelled() => return,
+                        event = events.recv() => match event {
+                            Ok(event) => match event.as_ref() {
+                                ApplicationStoredEvent::Project(event) => matches!(
+                                    **event,
+                                    ApplicationProjectEvent::Deleted(_)
+                                        | ApplicationProjectEvent::MetaUpdated(_)
+                                ),
+                                ApplicationStoredEvent::Orchestration(event) => matches!(
+                                    event.event,
+                                    Event::ThreadDeleted(_) | Event::ThreadMetadataUpdated(_)
+                                ),
+                            },
+                            // Missed events may have narrowed a grant.
+                            Err(RecvError::Lagged(_)) => true,
+                            Err(RecvError::Closed) => return,
+                        },
+                        changed = settings.recv(), if settings_open => match changed {
+                            Some(settings) => {
+                                let current = Some((
+                                    settings.worktrees_directory,
+                                    settings.previous_worktrees_directories,
+                                ));
+                                std::mem::replace(&mut folders, current) != folders
+                            }
+                            None => {
+                                settings_open = false;
+                                false
+                            }
+                        },
+                    };
+                    if narrowed {
+                        let Some(this) = this.upgrade() else { return };
+                        this.changes.send_modify(|revision| *revision += 1);
+                    }
+                }
+            });
         }
 
         /// Takes the environment's Git root; checkout handles come from `root.at(cwd)`.
@@ -303,6 +373,9 @@ mod authority {
 
     #[cfg(feature = "git")]
     impl crate::adapters::git::WorkspaceAuthority for EnvironmentWorkspaces {
+        fn changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+            Some(EnvironmentWorkspaces::changes(self))
+        }
         fn roots<'a>(
             &'a self,
             _session: &'a t3_contracts::base_schemas::AuthSessionId,

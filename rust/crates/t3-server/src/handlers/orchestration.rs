@@ -10,8 +10,7 @@ use t3_contracts::rpc::*;
 /// Methods no orchestration service serves yet, with the service method each waits for.
 fn register_pending(registry: &mut HandlerRegistry) -> crate::Result<()> {
     // ThreadMessageIntake::launch_thread (ThreadLaunchService::launch exists, its intake wrapper does not).
-    // workflow_script_query::read_workflow_script, native_child_work_query::get_native_child_work.
-    registry.unimplemented::<WsOrchestrationV2GetWorkflowScriptRpc>()?;
+    // native_child_work_query::get_native_child_work.
     registry.unimplemented::<WsOrchestrationV2GetNativeChildWorkRpc>()?;
     // AgentSessionScanner::scan, AgentSessionImporter::import_recent_agent_threads.
     registry.unimplemented::<WsAgentSessionsScanRpc>()?;
@@ -47,6 +46,7 @@ fn register_commands_unavailable(registry: &mut HandlerRegistry) -> crate::Resul
     registry.unimplemented::<WsOrchestrationV2DispatchCommandRpc>()?;
     registry.unimplemented::<WsOrchestrationV2StopWorkflowRpc>()?;
     registry.unimplemented::<WsOrchestrationV2ForceStopThreadRpc>()?;
+    registry.unimplemented::<WsOrchestrationV2GetWorkflowScriptRpc>()?;
     Ok(())
 }
 
@@ -175,6 +175,29 @@ mod live {
                     .map_err(|error| internal(&error))
             }
         })?;
+        // Contained reads under `<home>/.claude/projects` (`adapters/workflow_files.rs`).
+        match adapter.composed().cloned() {
+            #[cfg(all(feature = "workspace", feature = "local-services"))]
+            Some(runtime) => {
+                registry.register::<WsOrchestrationV2GetWorkflowScriptRpc, _, _>(
+                    move |_, input| {
+                        let runtime = runtime.clone();
+                        async move {
+                            match runtime.workflow_script(input).await {
+                                Ok(Ok(script)) => Ok(script),
+                                Ok(Err(error)) => Err(Failure::Typed(
+                                    WsOrchestrationV2GetWorkflowScriptError::OrchestrationGetWorkflowScriptError(
+                                        Box::new(error),
+                                    ),
+                                )),
+                                Err(error) => Err(internal(&error)),
+                            }
+                        }
+                    },
+                )?;
+            }
+            _ => registry.unimplemented::<WsOrchestrationV2GetWorkflowScriptRpc>()?,
+        }
         Ok(())
     }
     pub fn register_with(

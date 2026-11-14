@@ -228,6 +228,12 @@ impl OrchestrationAdapter {
         ports.managed_policy = context.local.managed_policy.clone();
         // `thread-title.generate` effects (textgen adapter); `None` keeps the typed refusal.
         ports.titles = titles;
+        // `orchestration.getWorkflowScript`: contained reads under `<home>/.claude/projects`.
+        #[cfg(feature = "workspace")]
+        {
+            ports.workflow_files =
+                Some(crate::adapters::workflow_files::workflow_files(&context.account_home));
+        }
         // Each provider session opens with its thread's MCP credential (`adapters/mcp.rs`).
         ports.credentials = credentials;
         // A file restore holds the thread's terminals and setup scripts (t3-git H-2).
@@ -263,6 +269,15 @@ impl OrchestrationAdapter {
             provider_source: Some(provider_source),
             stopped: Default::default(),
         }))
+    }
+
+    /// Every committed project and orchestration event, shared rather than cloned per receiver.
+    pub fn subscribe_events(
+        &self,
+    ) -> Option<
+        tokio::sync::broadcast::Receiver<Arc<t3_contracts::application_event::ApplicationStoredEvent>>,
+    > {
+        t3_orchestration::api::EventCommitter::subscribe_shared(self.events.as_ref()).ok()
     }
 
     /// The registry's instance source, which the provider domain's instances are bound into.

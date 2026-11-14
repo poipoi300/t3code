@@ -859,19 +859,29 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
     );
     assert_eq!(caller_item["runtimeMode"], "approval-required");
     let filtered = mcp
-        .call(&token, "t3_thread_list", json!({"titleContains":"FULL-ACCESS","limit":1}))
+        .call(
+            &token,
+            "t3_thread_list",
+            json!({"titleContains":"FULL-ACCESS","limit":1}),
+        )
         .await;
     let filtered = &filtered["result"]["structuredContent"];
     assert_eq!(filtered["total"], 1, "{filtered}");
     assert_eq!(filtered["threads"][0]["threadId"], OTHER, "{filtered}");
     assert_eq!(filtered["nextCursor"], Value::Null, "{filtered}");
     let absent = mcp
-        .call(&token, "t3_thread_list", json!({"projectId":"project:absent"}))
+        .call(
+            &token,
+            "t3_thread_list",
+            json!({"projectId":"project:absent"}),
+        )
         .await;
     assert!(is_error(&absent), "{absent}");
     assert!(
         absent.to_string().contains("invalid_request")
-            && absent.to_string().contains("Project project:absent was not found."),
+            && absent
+                .to_string()
+                .contains("Project project:absent was not found."),
         "{absent}"
     );
 
@@ -892,7 +902,11 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
         "{read}"
     );
     let missing = mcp
-        .call(&token, "t3_thread_read", json!({"threadId":"thread:absent"}))
+        .call(
+            &token,
+            "t3_thread_read",
+            json!({"threadId":"thread:absent"}),
+        )
         .await;
     assert!(is_error(&missing), "{missing}");
     assert!(

@@ -918,8 +918,6 @@ impl Destinations {
             }
             trees.extend(absolute("APPDATA"));
             trees.extend(absolute("LOCALAPPDATA"));
-            trees.extend(dirs::data_dir());
-            trees.extend(dirs::data_local_dir());
             let program_data = absolute("PROGRAMDATA")
                 .or_else(|| absolute("ALLUSERSPROFILE"))
                 .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));

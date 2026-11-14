@@ -144,6 +144,10 @@ mod native {
         ids: Arc<dyn IdGenerator>,
         /// Each thread's T3 MCP server (`McpProviderSessions`), read when a session configures it.
         t3_mcp: Option<Arc<dyn t3_orchestration::provider::T3McpSessions>>,
+        /// The live model manifest (`ModelCatalog.current`), read on each model compile.
+        manifest: t3_provider::catalog::ManifestSource,
+        /// Preview port discovery's running-agent lease (`PortDiscovery.trackAgent`).
+        track_agent: Option<t3_orchestration::adapters::codex::CodexAgentTracker>,
     }
 
     /// The provider domain's prepared Codex and Claude instances as adapter registrations.
@@ -163,7 +167,9 @@ mod native {
             clock: Arc<dyn Clock>,
             ids: Arc<dyn IdGenerator>,
             t3_mcp: Option<Arc<dyn t3_orchestration::provider::T3McpSessions>>,
+            track_agent: Option<t3_orchestration::adapters::codex::CodexAgentTracker>,
         ) -> Arc<Self> {
+            let manifest = domain.manifest.source();
             Arc::new(Self {
                 domain,
                 host: Host {
@@ -175,6 +181,8 @@ mod native {
                     clock,
                     ids,
                     t3_mcp,
+                    manifest,
+                    track_agent,
                 },
                 built: Mutex::new(BTreeMap::new()),
             })
@@ -259,6 +267,11 @@ mod native {
         );
         let options = CodexAdapterOptions {
             t3_mcp: host.t3_mcp.clone(),
+            version_gate: Some(codex_version_gate(
+                host.manifest.clone(),
+                spec.instance_id.clone(),
+            )),
+            track_agent: host.track_agent.clone(),
             ..CodexAdapterOptions::new(
                 spec.instance_id.clone(),
                 host.clock.clone(),
@@ -355,10 +368,25 @@ mod native {
             &spec.variables,
             &host.home,
             host.platform,
-            config["entrypoint"].as_str(),
+            None,
         );
         let home_path = text(config, "homePath");
         let claude_home = claude_home(home_path, &environment, &host.home, &host.cwd);
+        // `mergeClaudeProcessEnvironment`: Claude Code reads its entrypoint from the process
+        // environment, so `env.CLAUDE_CODE_ENTRYPOINT` in the instance's Claude settings (then
+        // managed settings) overrides T3's. The files are untrusted: the reader caps their size,
+        // ignores a file whose value is not a string, and the value is only an environment value.
+        if let Some(entrypoint) = t3_provider::claude_skills::settings_environment(
+            &claude_home,
+            host.platform,
+            &environment,
+        )
+        .get("CLAUDE_CODE_ENTRYPOINT")
+        .and_then(serde_json::Value::as_str)
+        .filter(|entrypoint| !entrypoint.is_empty())
+        {
+            environment.insert("CLAUDE_CODE_ENTRYPOINT".into(), entrypoint.to_owned());
+        }
         if !t3_contracts::wire::trim_js(home_path).is_empty() {
             environment.insert(
                 "CLAUDE_CONFIG_DIR".into(),
@@ -390,6 +418,13 @@ mod native {
                 settings_directory: Some(claude_home.clone()),
                 attachment_directory: Some(host.attachments.clone()),
                 t3_mcp: host.t3_mcp.clone(),
+                compile_model: Some(claude_model_compiler(
+                    host.manifest.clone(),
+                    config["customModels"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
+                )),
                 ..Default::default()
             },
         };
@@ -484,6 +519,74 @@ mod native {
                 image_data_url,
             }))
         }
+    }
+
+    /// `CodexInstallation.compatibility` as the adapter's initialize check: the live manifest's
+    /// policy for this server's version, else the bundled one; a `broken` native version
+    /// refuses the session with TypeScript's setup error.
+    fn codex_version_gate(
+        manifest: t3_provider::catalog::ManifestSource,
+        instance: ProviderInstanceId,
+    ) -> t3_orchestration::adapters::codex::VersionGate {
+        use t3_contracts::server::ServerProviderCompatibilityStatus;
+        use t3_provider::versions::resolve_compatibility;
+        Arc::new(move |version| {
+            let server = env!("CARGO_PKG_VERSION");
+            let current = manifest.current();
+            let advisory = resolve_compatibility(
+                current.compatibility.as_deref().unwrap_or_default(),
+                "codex",
+                Some(version),
+                server,
+            )
+            .or_else(|| {
+                let bundled = t3_provider::catalog::Manifest::bundled().ok()?;
+                resolve_compatibility(
+                    bundled.compatibility.as_deref().unwrap_or_default(),
+                    "codex",
+                    Some(version),
+                    server,
+                )
+            });
+            let Some(advisory) =
+                advisory.filter(|a| a.status == ServerProviderCompatibilityStatus::Broken)
+            else {
+                return Ok(());
+            };
+            let target = advisory
+                .recommended_version
+                .or(advisory.recommended_range)
+                .map_or_else(|| "a newer version".to_owned(), |target| target.0);
+            Err(ProviderError::Setup(Box::new(ProviderSetupError {
+                _tag: ProviderSetupErrorTag::Error,
+                instance_id: instance.clone(),
+                operation: "runtime".into(),
+                detail: format!(
+                    "Codex {version} does not work with this T3 Code release. Update Codex to {target}, then retry."
+                ),
+                cause: None,
+            })))
+        })
+    }
+
+    /// `ClaudeDriver`'s `modelCatalog` (the live manifest, scoped to the instance's custom
+    /// models) feeding `compileClaudeModelSelection` on every compile.
+    fn claude_model_compiler(
+        manifest: t3_provider::catalog::ManifestSource,
+        custom_models: Vec<serde_json::Value>,
+    ) -> Arc<t3_orchestration::adapters::claude::ClaudeModelCompiler> {
+        Arc::new(move |selection| {
+            let catalog = super::claude_models::scoped_catalog(
+                super::claude_models::claude_catalog(&manifest.current()),
+                &custom_models,
+            );
+            let compiled = super::claude_models::compile(&catalog, selection);
+            Ok(t3_orchestration::adapters::claude::ClaudeCompiledModel {
+                model: compiled.api_model_id,
+                effort: compiled.effort,
+                settings: serde_json::Value::Object(compiled.settings),
+            })
+        })
     }
 
     fn setup_error(instance: &ProviderInstanceId, detail: &str) -> ProviderError {
@@ -612,6 +715,193 @@ mod native {
             cancellation: CancellationToken,
         ) -> ProviderResult<Arc<dyn SessionRuntime>> {
             self.open(input, Some(options), cancellation).await
+        }
+    }
+}
+
+/// `compileClaudeModelSelection` (`claudeModelOptions.ts`) and `scopeClaudeModelCatalog`
+/// (`ClaudeModelCatalog.ts`) over `t3-provider`'s catalogue helpers.
+#[cfg(feature = "providers")]
+pub mod claude_models {
+    use serde_json::{Map, Value, json};
+    use t3_contracts::{
+        model::{ProviderOptionDescriptor, ProviderOptionSelection, ProviderOptionSelectionValue},
+        model_selection::ModelSelection,
+    };
+    use t3_provider::{
+        catalog::{self, Catalog, CatalogModel, Manifest, ModelStatus},
+        claude_catalog,
+    };
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct CompiledClaudeModel {
+        pub api_model_id: String,
+        pub effort: Option<String>,
+        /// The prompt-injected effort (`ultrathink`): TypeScript prefixes the prompt with it.
+        pub prompt_effort: Option<String>,
+        pub settings: Map<String, Value>,
+    }
+
+    /// `resolveClaudeModelCatalog`: the manifest's Claude catalogue, else the bundled one.
+    pub fn claude_catalog(manifest: &Manifest) -> Catalog {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+        manifest
+            .catalog("claudeAgent", now)
+            .or_else(|| Manifest::bundled().ok()?.catalog("claudeAgent", now))
+            .unwrap_or(Catalog {
+                models: Vec::new(),
+                default_chat_model: None,
+            })
+    }
+
+    /// `scopeClaudeModelCatalog`: custom models with capabilities join the catalogue, and a
+    /// built-in alias that a custom slug claims stops resolving to the built-in model.
+    pub fn scoped_catalog(mut catalog: Catalog, custom_models: &[Value]) -> Catalog {
+        let mut entries: Vec<(String, String, Option<Value>)> = Vec::new();
+        for raw in custom_models {
+            let (slug, name, capabilities) = match raw {
+                Value::String(slug) => (Some(slug.as_str()), None, None),
+                Value::Object(record) => (
+                    record.get("slug").and_then(Value::as_str),
+                    record.get("name").and_then(Value::as_str),
+                    record.get("capabilities").filter(|value| !value.is_null()),
+                ),
+                _ => continue,
+            };
+            let Some(slug) = slug.map(str::trim).filter(|slug| !slug.is_empty()) else {
+                continue;
+            };
+            if entries.iter().any(|(seen, _, _)| seen == slug) {
+                continue;
+            }
+            let name = name
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(slug);
+            entries.push((slug.to_owned(), name.to_owned(), capabilities.cloned()));
+        }
+        if entries.is_empty() {
+            return catalog;
+        }
+        let claimed: Vec<String> = entries
+            .iter()
+            .map(|(slug, _, _)| slug.to_lowercase())
+            .collect();
+        for entry in &mut catalog.models {
+            if let Some(Some(aliases)) = &mut entry.model.aliases {
+                aliases.retain(|alias| !claimed.contains(&alias.0.to_lowercase()));
+            }
+        }
+        for (slug, name, capabilities) in entries {
+            // `decodeCustomModelCapabilities`: an undecodable value means no capabilities.
+            let Some(capabilities) = capabilities.and_then(|value| {
+                serde_json::from_value::<t3_contracts::model::ModelCapabilities>(value).ok()
+            }) else {
+                continue;
+            };
+            if catalog
+                .models
+                .iter()
+                .any(|entry| entry.model.slug.0 == slug)
+            {
+                continue;
+            }
+            let mut model = catalog::model(
+                &slug,
+                &name,
+                Some(catalog::capabilities(
+                    catalog::descriptors(&capabilities).to_vec(),
+                )),
+            );
+            model.is_custom = true;
+            catalog.models.push(CatalogModel {
+                model,
+                status: ModelStatus::Current,
+                adapter: None,
+                profile_adapter: None,
+            });
+        }
+        catalog
+    }
+
+    fn selection_value<'a>(
+        options: &'a [ProviderOptionSelection],
+        id: &str,
+    ) -> Option<&'a ProviderOptionSelectionValue> {
+        options
+            .iter()
+            .find(|option| option.id == id)
+            .map(|option| &option.value)
+    }
+
+    /// `compileClaudeModelSelection`.
+    pub fn compile(catalog: &Catalog, selection: &ModelSelection) -> CompiledClaudeModel {
+        let options = selection
+            .options
+            .as_ref()
+            .map(|options| options.0.as_slice())
+            .unwrap_or_default();
+        let capabilities = claude_catalog::resolve(catalog, &selection.model)
+            .and_then(|entry| claude_catalog::ultracode(entry.model.capabilities.clone()))
+            .unwrap_or_else(|| catalog::capabilities(Vec::new()));
+        let descriptors = catalog::option_descriptors(&capabilities, options);
+        let supports_boolean = |id: &str| {
+            descriptors.iter().any(|descriptor| {
+                matches!(descriptor, ProviderOptionDescriptor::Boolean(d) if d.id == id)
+            })
+        };
+        let raw_effort = match selection_value(options, "effort") {
+            Some(ProviderOptionSelectionValue::String(value)) => Some(value.as_str()),
+            _ => None,
+        };
+        let boolean = |id: &str| match selection_value(options, id) {
+            Some(ProviderOptionSelectionValue::Boolean(value)) => Some(*value),
+            _ => None,
+        };
+        let resolved = claude_catalog::resolve_effort(catalog, Some(&selection.model), raw_effort);
+        let effort =
+            claude_catalog::normalize_effort(catalog, &selection.model, resolved.as_deref());
+        let mut settings = Map::new();
+        if supports_boolean("thinking")
+            && let Some(thinking) = boolean("thinking")
+        {
+            settings.insert("alwaysThinkingEnabled".into(), json!(thinking));
+        }
+        if supports_boolean("fastMode") {
+            settings.insert(
+                "fastMode".into(),
+                json!(boolean("fastMode").unwrap_or(false)),
+            );
+        }
+        if let Some(ultracode) = descriptors.iter().find_map(|descriptor| match descriptor {
+            ProviderOptionDescriptor::Boolean(d) if d.id == "ultracode" => {
+                d.current_value.flatten()
+            }
+            _ => None,
+        }) {
+            settings.insert("ultracode".into(), json!(ultracode));
+        }
+        // `resolvePromptInjectedEffort`.
+        let prompt_effort = raw_effort
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+            .filter(|effort| {
+                catalog::option_descriptors(&capabilities, &[])
+                    .iter()
+                    .any(|descriptor| {
+                        matches!(descriptor, ProviderOptionDescriptor::Select(d)
+                        if d.prompt_injected_values.as_ref().and_then(Option::as_ref)
+                            .is_some_and(|values| values.iter().any(|value| value == effort)))
+                    })
+            })
+            .map(str::to_owned);
+        CompiledClaudeModel {
+            api_model_id: claude_catalog::api_model_id(catalog, selection),
+            effort,
+            prompt_effort,
+            settings,
         }
     }
 }

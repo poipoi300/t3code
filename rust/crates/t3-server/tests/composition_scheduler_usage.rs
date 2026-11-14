@@ -44,8 +44,13 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 const T0: &str = "2026-11-14T10:00:00.000Z";
-const LAUNCH_UNAVAILABLE: &str =
-    "Unbound scheduled tasks require a launch environment, which is not assembled.";
+/// TypeScript's `ThreadLaunchError` message, which a failed launch records as the run's error.
+fn launch_failed(error: &Value, task: &str, operation: &str) -> bool {
+    error.as_str().is_some_and(|error| {
+        error.starts_with(&format!("Thread launch scheduled-task:{task}:"))
+            && error.ends_with(&format!(" failed during {operation}."))
+    })
+}
 const SCHEDULER_COMMANDS: [&str; 3] = [
     "scheduledTasks.upsert",
     "scheduledTasks.setEnabled",
@@ -531,6 +536,31 @@ fn upsert(id: &str, project: &str, thread: Option<&str>, enabled: bool, schedule
 }
 const EVERY_MINUTE: fn() -> Value = || json!({"type":"interval","everyMs":60_000});
 
+/// An unbound task: its stored model and modes seed the thread its run launches.
+fn launch_task(id: &str, project: &str, schedule: Value, thread_mode: &str) -> Value {
+    let mut input = upsert(id, project, None, true, schedule);
+    input["modelSelection"] = json!({"instanceId":"devReplay","model":"multi-turn"});
+    input["threadMode"] = json!(thread_mode);
+    input
+}
+
+/// Threads in the orchestration projection, all or those titled `title`.
+fn thread_count(home: &Path, title: Option<&str>) -> i64 {
+    let layout = t3_config::home::HomeLayout {
+        base_dir: home.into(),
+        state_dir: home.join("userdata"),
+    };
+    t3_persistence::rusqlite::Connection::open(layout.database())
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM orchestration_v2_projection_threads
+             WHERE ?1 IS NULL OR title = ?1",
+            [title],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 #[tokio::test]
 async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
     let temp = tempfile::tempdir().unwrap();
@@ -581,17 +611,14 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
             ),
             "That thread belongs to a different project.",
         ),
-        (
-            upsert("task:x", &project, None, true, EVERY_MINUTE()),
-            LAUNCH_UNAVAILABLE,
-        ),
     ] {
         let exit = admin.call("scheduledTasks.upsert", input).await;
         assert_eq!(scheduled_task_error(&exit), message);
     }
 
-    // As in TypeScript, a disabled unbound draft saves, even for a project this server does not
-    // know. It cannot be enabled, and running it records a failed run without launching.
+    // As in TypeScript, an unbound draft saves and enables even for a project this server does
+    // not know; running it fails at launch ("Project not found." is the launch error's cause)
+    // and creates nothing.
     let draft = admin
         .call(
             "scheduledTasks.upsert",
@@ -607,21 +634,44 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
             json!({"id":"task:draft","enabled":true}),
         )
         .await;
-    assert_eq!(scheduled_task_error(&enable), LAUNCH_UNAVAILABLE);
+    assert_eq!(value(&enable)["task"]["enabled"], true, "{enable}");
+    let threads_before = thread_count(&home, None);
     let draft_run = admin
         .call("scheduledTasks.runNow", json!({"id":"task:draft"}))
         .await;
     let draft_task = &value(&draft_run)["task"];
-    assert_eq!(draft_task["enabled"], false, "{draft_run}");
     assert_eq!(draft_task["lastRunStatus"], "failed", "{draft_run}");
-    assert_eq!(
-        draft_task["lastRunError"], LAUNCH_UNAVAILABLE,
+    assert!(
+        launch_failed(&draft_task["lastRunError"], "task:draft", "resolve-project"),
         "{draft_run}"
     );
     assert!(
         draft_task.get("threadId").is_none_or(Value::is_null),
         "{draft_run}"
     );
+    assert_eq!(thread_count(&home, None), threads_before);
+    let disabled = admin
+        .call(
+            "scheduledTasks.setEnabled",
+            json!({"id":"task:draft","enabled":false}),
+        )
+        .await;
+    assert_eq!(value(&disabled)["task"]["enabled"], false, "{disabled}");
+
+    // Unbound tasks that launch their own thread: one continuing in the thread its first run
+    // creates, and one (saved before the organisation's ceiling exists) that fires after the
+    // restart below.
+    for input in [
+        launch_task("task:launch", &project, EVERY_MINUTE(), "continue"),
+        launch_task(
+            "task:fresh",
+            &project,
+            json!({"type":"once","runAt":at(90)}),
+            "new_thread",
+        ),
+    ] {
+        value(&admin.call("scheduledTasks.upsert", input).await);
+    }
 
     // Success: bound tasks queue in their thread.
     let interval = admin
@@ -714,6 +764,28 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
             has_run(chunk, "scheduled-task-message:task:interval:", "completed")
         })
         .await;
+    // The unbound task launched its thread in the same pass, bound it, and its first turn ran.
+    let launched = admin
+        .until(&tasks, |list| {
+            task(list, "task:launch")["lastRunStatus"] == "succeeded"
+                && task(list, "task:launch")["threadId"].is_string()
+        })
+        .await;
+    let launched_thread = task(&launched, "task:launch")["threadId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(task(&launched, "task:launch")["runCount"], 1, "{launched}");
+    let first = admin.stream(
+        "orchestration.subscribeThread",
+        json!({"threadId": launched_thread}),
+    );
+    admin
+        .until(&first, |chunk| {
+            has_run(chunk, "scheduled-task-message:task:launch:", "completed")
+        })
+        .await;
+    assert_eq!(thread_count(&home, Some("task:launch")), 1);
 
     // A session without orchestration:operate cannot create, toggle or run tasks.
     let mut reader = Session::without(
@@ -799,7 +871,43 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
     assert_eq!(off["lastRunStatus"], "never", "{after}");
     let draft = task(&after, "task:draft");
     assert_eq!(draft["runCount"], 1, "{after}");
-    assert_eq!(draft["lastRunError"], LAUNCH_UNAVAILABLE, "{after}");
+    assert!(
+        launch_failed(&draft["lastRunError"], "task:draft", "resolve-project"),
+        "{after}"
+    );
+    // The unbound task saved above the new ceiling fires and is refused at thread creation, as
+    // a client's create is: nothing is launched or bound.
+    let fresh = admin
+        .until(&tasks, |list| {
+            task(list, "task:fresh")["lastRunStatus"] == "failed"
+        })
+        .await;
+    let fresh = task(&fresh, "task:fresh");
+    assert!(
+        launch_failed(&fresh["lastRunError"], "task:fresh", "create-thread"),
+        "{fresh}"
+    );
+    assert!(fresh.get("threadId").is_none_or(Value::is_null), "{fresh}");
+    assert_eq!(thread_count(&home, Some("task:fresh")), 0);
+    // No double launch: the restart neither relaunched nor re-ran the launched task.
+    let launch = task(&after, "task:launch");
+    assert_eq!(launch["runCount"], 1, "{after}");
+    assert_eq!(launch["threadId"], launched_thread.as_str(), "{after}");
+    assert_eq!(thread_count(&home, Some("task:launch")), 1);
+    // Saving an unbound task above the ceiling is refused; within it, it saves.
+    let above = admin
+        .call(
+            "scheduledTasks.upsert",
+            launch_task("task:above", &project, EVERY_MINUTE(), "continue"),
+        )
+        .await;
+    assert_eq!(
+        scheduled_task_error(&above),
+        "Acme limits threads to Auto-accept edits."
+    );
+    let mut within = launch_task("task:within", &project, EVERY_MINUTE(), "continue");
+    within["runtimeMode"] = json!("auto-accept-edits");
+    value(&admin.call("scheduledTasks.upsert", within).await);
     drop(admin);
     server.shutdown().await.unwrap();
 }

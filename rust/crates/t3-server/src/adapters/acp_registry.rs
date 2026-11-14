@@ -152,7 +152,8 @@ impl AcpSessionHost for AcpHost {
     /// `providerRegistry.refreshInstance`: a fresh status check; it never fails the operation.
     async fn refresh(&self, instance: &ProviderInstanceId) -> AcpResult<()> {
         let domain = self.domain()?;
-        let Ok(input) = serde_json::from_value(serde_json::json!({"instanceId": instance, "fresh": true}))
+        let Ok(input) =
+            serde_json::from_value(serde_json::json!({"instanceId": instance, "fresh": true}))
         else {
             return Ok(());
         };

@@ -413,6 +413,9 @@ async fn start_domains(
     // Device hosts resolve a thread's workspace through the same authority.
     #[cfg(feature = "device")]
     let device_workspaces = workspaces.clone();
+    // Follows deletions and settings once orchestration has started (below).
+    #[cfg(all(feature = "workspace", feature = "orchestration"))]
+    let authority = workspaces.clone();
     #[cfg(feature = "workspace")]
     domains.insert(crate::workspaces::workspace_adapter(&context, workspaces).await?)?;
     #[cfg(feature = "terminal")]
@@ -486,6 +489,13 @@ async fn start_domains(
         )
         .await?,
     )?;
+    #[cfg(all(feature = "workspace", feature = "orchestration"))]
+    if let Some(events) = domains
+        .get::<crate::adapters::orchestration::OrchestrationAdapter>()
+        .and_then(|orchestration| orchestration.subscribe_events())
+    {
+        authority.follow(events, context.shutdown.clone());
+    }
     #[cfg(feature = "providers")]
     {
         let providers = crate::adapters::providers::ProvidersAdapter::start(
@@ -522,12 +532,26 @@ async fn start_domains(
                 .map(|sessions| sessions as Arc<dyn t3_orchestration::provider::T3McpSessions>);
             #[cfg(not(feature = "mcp"))]
             let t3_mcp = None;
+            // Each native session holds preview port discovery's running-agent lease.
+            #[cfg(feature = "preview")]
+            let track_agent = domains
+                .get::<crate::adapters::preview::PreviewAdapter>()
+                .map(|preview| {
+                    let discovery = preview.discovery.clone();
+                    Arc::new(move || {
+                        let lease = discovery.track_agent();
+                        Box::new(move || drop(lease)) as Box<dyn FnOnce() + Send>
+                    }) as t3_orchestration::adapters::codex::CodexAgentTracker
+                });
+            #[cfg(not(feature = "preview"))]
+            let track_agent = None;
             source.bind(crate::adapters::native_providers::NativeProviders::new(
                 providers.clone(),
                 &context,
                 Arc::new(crate::adapters::orchestration::SystemClock),
                 Arc::new(t3_orchestration::composition::RandomIds),
                 t3_mcp,
+                track_agent,
             ));
             // Shuts down before the providers: sessions stop while the domain is alive.
             domains.insert_runtime(Arc::new(

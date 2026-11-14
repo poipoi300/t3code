@@ -24,6 +24,10 @@ pub trait WorkspaceAuthority: Send + Sync {
     ) -> BoxFuture<'a, Result<Vec<PathBuf>, EnvironmentAuthorizationError>> {
         self.roots(session)
     }
+    /// Changes when a grant may have narrowed; `None` when the authority has no signal.
+    fn changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        None
+    }
 }
 
 pub struct GitAdapter {

@@ -46,6 +46,8 @@ pub mod pull_requests;
 pub mod review_guide;
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
+#[cfg(all(feature = "scheduler", feature = "orchestration", feature = "local-services"))]
+pub mod scheduled_launch;
 #[cfg(feature = "local-services")]
 pub mod telemetry;
 #[cfg(feature = "terminal")]
@@ -60,3 +62,5 @@ pub mod title_links;
 pub mod usage;
 #[cfg(feature = "workspace")]
 pub mod workspace;
+#[cfg(all(feature = "orchestration", feature = "workspace", feature = "local-services"))]
+pub mod workflow_files;

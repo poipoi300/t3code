@@ -1061,6 +1061,12 @@ async fn a_start_from_a_folder_bootstraps_its_project_once() {
 
 /// An admin socket on a started server: browser session, RPC ticket, upgrade.
 async fn admin_socket(server: &t3_server::runtime::RunningServer) -> (Socket, Client) {
+    let (_, socket, client) = admin_session(server).await;
+    (socket, client)
+}
+
+/// Pairs once (the credential is single-use): the session cookie and a socket on it.
+async fn admin_session(server: &t3_server::runtime::RunningServer) -> (String, Socket, Client) {
     let origin = format!("http://{}", server.address);
     let http = reqwest::Client::new();
     let cookie = http
@@ -1092,7 +1098,7 @@ async fn admin_socket(server: &t3_server::runtime::RunningServer) -> (Socket, Cl
     ))
     .await
     .unwrap();
-    (socket, Client::new(0, Default::default()))
+    (cookie, socket, Client::new(0, Default::default()))
 }
 
 async fn call_exit(socket: &mut Socket, client: &mut Client, tag: &str, payload: Value) -> Value {
@@ -1179,12 +1185,12 @@ async fn the_managed_policy_caps_thread_runtime_modes() {
 async fn thread_outcome(
     socket: &mut Socket,
     client: &mut Client,
-    subscription: t3_rpc::RequestId,
+    subscription: &t3_rpc::RequestId,
     needles: &[&'static str],
 ) -> &'static str {
     loop {
         match event(socket, client).await {
-            CallEvent::Chunk { id, values } if id == subscription => {
+            CallEvent::Chunk { id, values } if id == *subscription => {
                 client.acknowledge(id);
                 let text = Value::Array(values).to_string();
                 if let Some(needle) = needles.iter().find(|needle| text.contains(**needle)) {
@@ -1192,7 +1198,7 @@ async fn thread_outcome(
                 }
             }
             CallEvent::Chunk { id, .. } => client.acknowledge(id),
-            CallEvent::Exit { id, exit } if id == subscription => {
+            CallEvent::Exit { id, exit } if id == *subscription => {
                 panic!("subscription ended: {}", serde_json::to_value(exit).unwrap())
             }
             _ => {}
@@ -1285,7 +1291,7 @@ async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
             [workspace.to_string_lossy()],
         )
         .unwrap();
-    let (mut socket, mut client) = admin_socket(&server).await;
+    let (cookie, mut socket, mut client) = admin_session(&server).await;
     let thread = "thread:restore";
     let folder = workspace.to_string_lossy().into_owned();
     let created = call_exit(
@@ -1311,25 +1317,11 @@ async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
     )
     .await;
     assert_eq!(sent["_tag"], "Success", "{sent}");
-    thread_outcome(&mut socket, &mut client, subscription, &["\"completed\""]).await;
+    thread_outcome(&mut socket, &mut client, &subscription, &["\"completed\""]).await;
 
     // The thread-start checkpoint, as the client's rewind picks it.
     let origin = format!("http://{}", server.address);
-    let http = reqwest::Client::new();
-    let cookie = http
-        .post(format!("{origin}/api/auth/browser-session"))
-        .json(&json!({"credential": server.pairing_credential}))
-        .send()
-        .await
-        .unwrap()
-        .headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
-    let snapshot: Value = http
+    let snapshot: Value = reqwest::Client::new()
         .get(format!("{origin}/api/orchestration/threads/{thread}"))
         .header("cookie", &cookie)
         .header("x-t3-orchestration-protocol", "2")
@@ -1368,7 +1360,7 @@ async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
         thread_outcome(
             &mut socket,
             &mut client,
-            subscription,
+            &subscription,
             &["still writing to its folder: terminal `", "\"rolled_back\""],
         )
         .await,
@@ -1395,7 +1387,7 @@ async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
         thread_outcome(
             &mut socket,
             &mut client,
-            subscription,
+            &subscription,
             &["\"rolled_back\"", "could not roll back", "Files can't be restored"],
         )
         .await,

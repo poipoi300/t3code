@@ -50,9 +50,10 @@ fn main() -> ExitCode {
             "registry_agent_model_providers_are_listed_set_and_disabled",
             || Box::pin(providers()),
         ),
-        ("registry_agent_url_sign_in_is_accepted_then_signed_out", || {
-            Box::pin(url_sign_in_and_logout())
-        }),
+        (
+            "registry_agent_url_sign_in_is_accepted_then_signed_out",
+            || Box::pin(url_sign_in_and_logout()),
+        ),
         ("every_method_refuses_a_session_missing_its_scope", || {
             Box::pin(scope_refusals())
         }),
@@ -621,7 +622,10 @@ async fn sessions() {
         .into_iter()
         .find(|call| call["method"] == "session/list")
         .unwrap();
-    assert_eq!(list_call["params"]["cwd"], workspace, "the project's root, not a client path");
+    assert_eq!(
+        list_call["params"]["cwd"], workspace,
+        "the project's root, not a client path"
+    );
 
     let deleted = server
         .call(
@@ -651,7 +655,10 @@ async fn sessions() {
         )
         .await
         .unwrap_err();
-    assert_eq!(reason(&missing_project).as_deref(), Some("project_not_found"));
+    assert_eq!(
+        reason(&missing_project).as_deref(),
+        Some("project_not_found")
+    );
     let missing_instance = server
         .call(
             "server.deleteAcpRegistrySession",
@@ -659,7 +666,10 @@ async fn sessions() {
         )
         .await
         .unwrap_err();
-    assert_eq!(reason(&missing_instance).as_deref(), Some("instance_not_found"));
+    assert_eq!(
+        reason(&missing_instance).as_deref(),
+        Some("instance_not_found")
+    );
     let not_registry = server
         .call(
             "server.listAcpRegistrySessions",
@@ -667,8 +677,15 @@ async fn sessions() {
         )
         .await
         .unwrap_err();
-    assert_eq!(reason(&not_registry).as_deref(), Some("session_list_unsupported"));
-    assert_eq!(calls(&state).len(), before, "no agent ran for a refused call");
+    assert_eq!(
+        reason(&not_registry).as_deref(),
+        Some("session_list_unsupported")
+    );
+    assert_eq!(
+        calls(&state).len(),
+        before,
+        "no agent ran for a refused call"
+    );
     server.stop().await;
 }
 
@@ -836,10 +853,7 @@ async fn url_sign_in_and_logout() {
     assert_eq!(again, json!({"accepted": false}), "a consent is used once");
 
     let logged_out = server
-        .call(
-            "server.logoutAcpRegistry",
-            json!({"instanceId": INSTANCE}),
-        )
+        .call("server.logoutAcpRegistry", json!({"instanceId": INSTANCE}))
         .await
         .unwrap();
     assert_eq!(logged_out, json!({"loggedOut": true}));
@@ -894,7 +908,9 @@ async fn scope_refusals() {
         ("server.listAcpRegistryProviders", scope(json!({}))),
         (
             "server.setAcpRegistryProvider",
-            scope(json!({"providerId":"openai","apiType":"openai","baseUrl":"https://api.example.invalid"})),
+            scope(
+                json!({"providerId":"openai","apiType":"openai","baseUrl":"https://api.example.invalid"}),
+            ),
         ),
         (
             "server.disableAcpRegistryProvider",
@@ -910,9 +926,7 @@ async fn scope_refusals() {
             .map(|scope| serde_json::to_value(scope).unwrap())
             .find(|scope| server.held.contains(scope))
             .unwrap();
-        server
-            .reconnect_without(required.as_str().unwrap())
-            .await;
+        server.reconnect_without(required.as_str().unwrap()).await;
         let refused = server.call(method, payload).await.unwrap_err();
         assert_eq!(
             refused_scope(&refused).as_deref(),
@@ -920,7 +934,11 @@ async fn scope_refusals() {
             "{method}"
         );
     }
-    assert_eq!(calls(&state).len(), before, "no agent ran for a refused call");
+    assert_eq!(
+        calls(&state).len(),
+        before,
+        "no agent ran for a refused call"
+    );
     server.stop().await;
 }
 
@@ -982,7 +1000,9 @@ mod fake {
                         &mut output,
                         json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"probe","update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}}),
                     );
-                    Ok(json!({"sessionId":"probe","models":{"currentModelId":"model","availableModels":[{"modelId":"model","name":"Model"}]},"configOptions":[]}))
+                    Ok(
+                        json!({"sessionId":"probe","models":{"currentModelId":"model","availableModels":[{"modelId":"model","name":"Model"}]},"configOptions":[]}),
+                    )
                 }
                 "session/delete" => {
                     let id = params["sessionId"].as_str().unwrap_or_default();
@@ -1044,7 +1064,8 @@ mod fake {
                 "providers/set" => {
                     std::fs::write(
                         state.join("provider"),
-                        json!({"apiType":params["apiType"],"baseUrl":params["baseUrl"]}).to_string(),
+                        json!({"apiType":params["apiType"],"baseUrl":params["baseUrl"]})
+                            .to_string(),
                     )
                     .unwrap();
                     Ok(json!({}))
