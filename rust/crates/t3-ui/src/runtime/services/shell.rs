@@ -117,8 +117,10 @@ pub fn reset_thread_sidebar_width(width: Signal<f32>, store: Option<SidebarWidth
 #[derive(Clone)]
 pub struct SidebarShelvesStore {
     load: Rc<dyn Fn() -> LocalBoxFuture<'static, ShelfExpansion>>,
-    save: Rc<dyn Fn(Marker, bool) -> LocalBoxFuture<'static, Result<(), PlatformError>>>,
+    save: Rc<SaveShelf>,
 }
+
+type SaveShelf = dyn Fn(Marker, bool) -> LocalBoxFuture<'static, Result<(), PlatformError>>;
 
 pub fn sidebar_shelves_store<P: Platform + Clone + 'static>(
     client: &ClientRuntime<P>,

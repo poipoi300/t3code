@@ -682,18 +682,14 @@ pub fn dialog_portal(
             }
         })
         .label(move || {
-            SharedString::from(
-                state
-                    .title
-                    .with(|source| source.as_ref().map(|f| f().resolve()).unwrap_or_default()),
-            )
+            state
+                .title
+                .with(|source| source.as_ref().map(|f| f().resolve()).unwrap_or_default())
         })
         .accessibility_description(move || {
-            SharedString::from(
-                state
-                    .description
-                    .with(|source| source.as_ref().map(|f| f().resolve()).unwrap_or_default()),
-            )
+            state
+                .description
+                .with(|source| source.as_ref().map(|f| f().resolve()).unwrap_or_default())
         })
         .app_class(tw("w-full h-full"))
         .child(backdrop)

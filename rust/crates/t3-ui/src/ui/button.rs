@@ -162,6 +162,8 @@ pub fn variant_colors(variant: ButtonVariant, p: &Palette) -> VariantColors {
 }
 
 /// What a button shows: a label, an icon, or both. The label is already translated.
+// A builder argument moved once into `button`; boxing `Custom` would change twelve call sites.
+#[allow(clippy::large_enum_variant)]
 pub enum ButtonContent {
     Label(String),
     Icon { icon: Icon, label: String },
