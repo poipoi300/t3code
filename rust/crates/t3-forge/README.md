@@ -77,7 +77,8 @@ repositories. These behaviors are covered by the current upstream drift fixture.
 
 ## Credential storage and sign-in
 
-`github::session_store::SettingsAppSessions` is the production `AppSessionStore`.
+`github::session_store::SettingsAppSessions` adapts `AppSessionStore` to server
+settings and secrets; atomic marker mutation still needs the config seam below.
 Construct it from the SAME environment-owned `Arc<t3_config::SettingsService>`
 and its matching `SecretStore` at the explicitly supplied `HomeLayout::secrets()`.
 It uses the existing `sourceControlHosts.github.signIns[host]` setting: settings
@@ -89,9 +90,10 @@ The existing secret store applies POSIX 0700/0600. Its non-Unix permission helpe
 is a no-op: Windows protection depends on the directory ACL provisioned by the
 host and was not verified here. This crate adds no encryption or new token database. `MemoryAppSessions` is ephemeral/test storage.
 
-Refresh compare-and-replace holds the same settings write lock as user updates
-and sign-out, compares the actual stored access token, then reloads/publishes the
-settings snapshot. A deleted secret never falls back to a cached plaintext value.
+Refresh secret compare-and-replace holds the same settings write lock as user
+updates and sign-out, compares the actual stored access token, then reloads the
+snapshot. Marker removal and write/merge atomicity remain blocked on the config
+mutation seam described in the security follow-up below. A deleted secret never falls back to a cached plaintext value.
 Reopen, stale refresh, settings sign-out and concurrent refresh/sign-out fixtures
 cover this boundary. Store writes advance the adapter revision. The host must
 also update its live credential handles/invalidate PR caches on settings changes.
@@ -397,7 +399,7 @@ This crate does not remove registrations from `t3-server/handlers/unsupported.rs
 | `subscribeWorktreeSetup` | No forge I/O | `WorktreeSetupTracker::stream` |
 | `worktreeSetup.cancel` | No forge I/O | `WorktreeSetupTracker::cancel` |
 | `git.resolvePullRequest` | `ForgeReviewHost` implements `ReviewHost::get` | Existing `GitWorkflowService::resolve_pull_request` |
-| `git.preparePullRequestThread` | `ForgeReviewHost` implements get/checkout/clone URLs/default branch and explicit setup | Existing Git workflow plus authorized project/setup context |
+| `git.preparePullRequestThread` | `Arc<ForgeReviewHost>::prepare_pull_request_thread(workflow, &input)` | Pass the configured workflow for the same authorized cwd; wrapper preflights before Git cache invalidation |
 | `git.runStackedAction` | `ForgeReviewHost` implements list/create/targets-remote; `Forge::run_action` handles GitHub/GitCafe stack actions | Commit/PR content generation, link-created/refresh-pushed and status postconditions |
 | `vcs.createWorktree` | No forge I/O | Trusted worktree settings/destination, submodules, branch-base persistence and setup |
 
@@ -460,20 +462,23 @@ GitLab destinations are now bound before glab request construction: the default
 or configured server `GITLAB_HOST`, `with_configured_hosts` authorities, and the
 remote in an authorized `CheckoutContext`. Ports are part of the authority.
 Repository/PR URLs, explicit request hosts, `requested_host` and provider base URLs
-do not create trusted hosts. Checkout trust is scoped to the call. Hosts used by
+do not create trusted hosts. Thread preparation must use
+`Arc<ForgeReviewHost>::prepare_pull_request_thread` to preflight before the Git
+workflow's error-path cache invalidation; the raw workflow starts local Git even
+when its review host refuses the URL. Checkout trust is scoped to the call. Hosts used by
 PR API bindings must be configured by the server. The server must authorize cwd
 and construct checkout contexts from its project records; see the seam requests.
 
 | Finding | Disposition and evidence |
 | --- | --- |
-| GitLab client-selected credential destination | Fixed. `tests/gitlab_hosts.rs` refuses lookup, clone, thread preparation and review clone-URL overrides before any fake CLI request; configured/authorized remote acceptance and scope isolation are covered. All four refusal cases reproduced before the guard. |
+| GitLab client-selected credential destination | Fixed. `tests/gitlab_hosts.rs` refuses lookup, clone, thread preparation and review clone-URL overrides before any fake CLI request or Git spawn marker; thread preparation uses the preflight wrapper; configured/authorized remote acceptance and scope isolation are covered. All four refusal cases reproduced before the guard. |
 | Cancel after success overwrites completion | Fixed. Completion is changed only while pending, including cancellation, replacement and shutdown. The persistent sign-in service test waits successfully again after cancel; it failed with Cancelled before the fix. |
 | Clone URL and snapshot reserialization | Fixed. Git receives the original operand except TypeScript's pathless-query slash insertion. Snapshot redaction serializes only when removing userinfo or a nonempty query. Unit cases cover drive paths, spaces, dot segments, encoded dot segments and fragments; real clones cover option-like names and spaces. |
 | Fresh app token reads wait on refresh gate | Fixed. Fresh reads bypass the refresh gate; refresh re-reads after acquiring it. A test holds the gate while a fresh read completes. |
 | Coverage cache locked during installation HTTP | Fixed. Separate gates serialize each credential's population; the global map lock covers cache operations only. A stalled loopback request leaves that lock available. |
 | Session marker removal and write snapshot/update race | Confirmed, blocked on an atomic conditional mutation API in `t3-config`. `with_snapshot` holds its write lock but cannot update settings; `update` reacquires it. The precise request is in `server-seam-requests.md`. No claim of completion for this finding. |
 | Tests that never exercise Git operands | Fixed. Real repositories named `--bare` and `--upload-pack=remote-secret` are cloned and checked for contents and normal `.git` layout. Fixed-text error assertions now pin the public error contract instead of presenting secret absence as operand-injection proof. |
-| Missing sign-in/refusal coverage | Added foreign-host refusals, cancel after success, concurrent starts, slow_down continuation, and `SettingsAppSessions` through `SourceControlSignIn`, including persistence/reopen and actual stored-token secrecy. A Forgejo HTTP-refusal assertion is rejected because it contradicts inherited TypeScript behavior; HTTP policy is recorded below. |
+| Missing sign-in/refusal coverage | Added foreign-host refusals, cancel after success, concurrent starts, slow_down continuation/interval rules, and `SettingsAppSessions` through `SourceControlSignIn`, including persistence/reopen and actual stored-token secrecy. A Forgejo HTTP-refusal assertion is rejected because Rust `src/forgejo/transport.rs:354` preserves TypeScript `packages/source-control-forgejo/src/server/ForgejoCli.ts:310-315`; HTTP policy is recorded below. |
 | Windows ACL claim | Corrected. POSIX permissions are applied; Windows protection depends on host-provisioned ACLs and is unverified. |
 
 The repository does not pin a glab binary version; discovery fixtures use
@@ -499,3 +504,14 @@ sets no `GIT_ALLOW_PROTOCOL`. Local/file clones and credentialed URLs persisted 
 `.git/config` therefore need explicit host policy. Pending app sign-ins remain
 shared by host among settings-write clients. These decisions and the atomic
 settings blocker are recorded for the server integrator in the seam file.
+
+Security follow-up verification (Windows): **163 tests across 17 suites** pass via
+`cargo test -p t3-forge --all-targets --all-features`; the complete transcript is
+`C:\Users\Administrator\t3code-rust-notes\reviews\t3-forge-security-tests.log`.
+Strict all-target/all-feature Clippy, crate formatting, and the dependent
+`t3-pull-request` all-target check with `forge,orchestration,sqlite` pass.
+All output stayed on D: with the unchanged two-job configuration. No sccache
+retry/override or machine-memory retry was required. No commits were made.
+The session-marker/write atomicity finding is still blocked on the config seam;
+all other accepted findings in this round are fixed and tested. Server wiring
+must call the new preflight thread-preparation wrapper.

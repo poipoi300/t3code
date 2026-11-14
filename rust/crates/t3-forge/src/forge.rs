@@ -298,6 +298,14 @@ pub type ChangeRequestEvents = std::pin::Pin<Box<dyn futures_util::Stream<Item =
 #[async_trait]
 pub trait Forge: Send + Sync {
     async fn shutdown(&self) {}
+    /// Pure preflight for workflows which otherwise invalidate Git caches even on refusal.
+    fn validate_checkout_reference(
+        &self,
+        _checkout: &CheckoutInput,
+        _reference: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
     fn settings_revision(&self) -> u64 {
         0
     }

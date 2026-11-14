@@ -50,14 +50,14 @@ fn urls(raw: &Value) -> Result<SourceControlRepositoryCloneUrls> {
     )
 }
 impl GitLab {
-    fn for_checkout(&self, checkout: &CheckoutInput) -> Self {
+    pub(super) fn for_checkout(&self, checkout: &CheckoutInput) -> Self {
         let mut scoped = self.clone();
         if let Some(host) = host(checkout) {
             scoped.configured_hosts.insert(host);
         }
         scoped
     }
-    fn check_reference(&self, reference: &str, operation: &str) -> Result<()> {
+    pub(super) fn check_reference(&self, reference: &str, operation: &str) -> Result<()> {
         if let Ok(url) = url::Url::parse(reference) {
             self.check_host(url.authority(), operation)?;
         }

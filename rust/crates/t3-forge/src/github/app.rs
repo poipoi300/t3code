@@ -123,6 +123,11 @@ fn failure(host: &str, reason: SignInFailure, detail: &str) -> ForgeError {
 fn normalized(host: &str) -> String {
     host.trim().to_lowercase()
 }
+fn slowed_interval(current: u64, response: &Value) -> u64 {
+    response["interval"]
+        .as_u64()
+        .unwrap_or_else(|| current.saturating_add(5))
+}
 impl AppSignIn {
     pub fn revision(&self) -> u64 {
         self.store.revision()
@@ -434,11 +439,7 @@ impl AppSignIn {
                 }
                 match value["error"].as_str() {
                     Some("authorization_pending") => {}
-                    Some("slow_down") => {
-                        interval = value["interval"]
-                            .as_u64()
-                            .unwrap_or(interval.saturating_add(5))
-                    }
+                    Some("slow_down") => interval = slowed_interval(interval, &value),
                     Some("expired_token") => {
                         break Err(failure(
                             &task_host,
@@ -715,6 +716,18 @@ impl GitHub {
 mod lock_tests {
     use super::*;
     use futures_util::FutureExt;
+    #[test]
+    fn slowdown_uses_the_server_interval_or_adds_five_seconds_without_overflow() {
+        assert_eq!(slowed_interval(2, &json!({"error":"slow_down"})), 7);
+        assert_eq!(
+            slowed_interval(2, &json!({"error":"slow_down", "interval":12})),
+            12
+        );
+        assert_eq!(
+            slowed_interval(u64::MAX, &json!({"error":"slow_down"})),
+            u64::MAX
+        );
+    }
     fn session() -> AppSession {
         AppSession {
             access_token: "fixture-app-token".into(),

@@ -15,8 +15,18 @@ struct Recorder(Mutex<Vec<CliRequest>>);
 #[async_trait]
 impl ForgeCli for Recorder {
     async fn run(&self, request: CliRequest) -> t3_forge::Result<CliResponse> {
+        let body = if request.operation == "getMergeRequest" {
+            json!({"iid":1,"title":"Fixture","web_url":"https://gitlab.com/a/b/-/merge_requests/1","source_branch":"feature","target_branch":"main","state":"opened"})
+        } else {
+            json!({"path_with_namespace":"a/b", "web_url":"https://gitlab.com/a/b", "ssh_url_to_repo":"git@gitlab.com:a/b.git"})
+        };
         self.0.lock().unwrap().push(request);
-        Ok(CliResponse { code: 0, stdout: json!({"path_with_namespace":"a/b", "web_url":"https://gitlab.com/a/b", "ssh_url_to_repo":"git@gitlab.com:a/b.git"}).to_string().into_bytes(), stderr: vec![], truncated: false })
+        Ok(CliResponse {
+            code: 0,
+            stdout: body.to_string().into_bytes(),
+            stderr: vec![],
+            truncated: false,
+        })
     }
 }
 struct Setup;
@@ -124,10 +134,39 @@ async fn prepare_thread_refuses_foreign_authority_before_building_a_cli_request(
         },
         Arc::new(Setup),
     );
-    let service =
-        t3_git::GitWorkflowService::new(git(root.path())).with_review_host(Arc::new(host));
-    assert!(service.prepare_pull_request_thread(&serde_json::from_value(json!({"cwd":root.path(), "reference":"https://attacker.example/a/b/-/merge_requests/1", "mode":"local"})).unwrap()).await.is_err());
+    let service = t3_git::GitWorkflowService::new(git(root.path()));
+    assert!(Arc::new(host).prepare_pull_request_thread(service, &serde_json::from_value(json!({"cwd":root.path(), "reference":"https://attacker.example/a/b/-/merge_requests/1", "mode":"local"})).unwrap()).await.is_err());
     assert_no_process(&cli, root.path());
+}
+#[tokio::test]
+async fn trusted_thread_preflight_enters_the_configured_git_workflow() {
+    let root = tempfile::tempdir().unwrap();
+    let cli = Arc::new(Recorder::default());
+    let host = Arc::new(ForgeReviewHost::new(
+        ForgeHandle {
+            forge: forge(cli.clone(), root.path()),
+            context: None,
+        },
+        Arc::new(Setup),
+    ));
+    let workflow = t3_git::GitWorkflowService::new(git(root.path()));
+    let input = serde_json::from_value(json!({"cwd":root.path(),"reference":"https://gitlab.com/a/b/-/merge_requests/1","mode":"local"})).unwrap();
+    assert!(
+        host.prepare_pull_request_thread(workflow, &input)
+            .await
+            .is_err()
+    );
+    let requests = cli.0.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].operation, "getMergeRequest");
+    assert_eq!(
+        requests[0].environment[std::ffi::OsStr::new("GITLAB_HOST")],
+        Some("gitlab.com".into())
+    );
+    assert!(
+        root.path().join("git-spawned").exists(),
+        "trusted preflight did not reach the rejecting Git fixture"
+    );
 }
 #[tokio::test]
 async fn review_clone_urls_refuse_foreign_host_overrides() {

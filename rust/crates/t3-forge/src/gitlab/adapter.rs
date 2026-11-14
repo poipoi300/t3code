@@ -4,6 +4,10 @@ use async_trait::async_trait;
 use std::collections::BTreeMap;
 #[async_trait]
 impl Forge for GitLab {
+    fn validate_checkout_reference(&self, checkout: &CheckoutInput, reference: &str) -> Result<()> {
+        self.for_checkout(checkout)
+            .check_reference(reference, "getMergeRequest")
+    }
     async fn shutdown(&self) {
         self.stop.cancel();
         self.tasks.wait().await;

@@ -23,6 +23,20 @@ pub struct ForgeReviewHost {
     setup: Arc<dyn ReviewSetup>,
 }
 impl ForgeReviewHost {
+    pub async fn prepare_pull_request_thread(
+        self: &Arc<Self>,
+        workflow: t3_git::GitWorkflowService,
+        input: &t3_contracts::git::GitPreparePullRequestThreadInput,
+    ) -> std::result::Result<t3_contracts::git::GitPreparePullRequestThreadResult, GitError> {
+        let cwd = Path::new(&input.cwd.0);
+        self.forge
+            .validate_checkout_reference(&self.checkout(cwd), &input.reference.0)
+            .map_err(|e| self.error("preparePullRequestThread", cwd, e))?;
+        workflow
+            .with_review_host(self.clone())
+            .prepare_pull_request_thread(input)
+            .await
+    }
     pub fn new(handle: ForgeHandle, setup: Arc<dyn ReviewSetup>) -> Self {
         Self {
             forge: handle.forge,
