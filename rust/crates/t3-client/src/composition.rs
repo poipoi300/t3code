@@ -310,6 +310,15 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         }
     }
 
+    /// The agent sign-in consent of the environment that serves the page at `origin`
+    /// (`/connect-agent`), with the browser's own session.
+    pub fn agent_consent(
+        &self,
+        origin: &str,
+    ) -> crate::connection::agent_consent::AgentConsent<P> {
+        crate::connection::agent_consent::AgentConsent::new(self.inner.platform.clone(), origin)
+    }
+
     pub fn navigation(&self) -> crate::navigation::UrlClient<P> {
         self.inner.navigation.clone()
     }

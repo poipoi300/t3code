@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 use url::{Host, Url};
 
+pub mod agent_consent;
 pub mod pairing_link;
 pub mod presentation;
 pub mod runtime;
