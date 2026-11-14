@@ -10,10 +10,19 @@ jobs = 2
 # proc macro miss on Windows). It never caches the workspace's own edited crates.
 #
 # rustc-gate (source in the coordinator's notes, tools\rustc-gate\gate.rs) runs
-# sccache after two bounded waits: at most five compiles of the heaviest crates
+# sccache after two bounded waits: a limited number of compiles of local (workspace) crates
 # machine-wide, and no new compile while free commit memory is under a floor.
 # Machine-specific, like the paths below: replace before this branch is shared.
-rustc-wrapper = "D:\\t3code-tools\\rustc-gate.exe"
+rustc-wrapper = "D:\\t3code-tools\\rustc-gate5.exe"
+
+# Full debug information made each build directory 15 to 45 GB (PDBs for every
+# test binary, type records in every rlib) and filled the build disk within
+# hours. Line tables keep backtraces readable; dependencies carry none.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [env]
 SCCACHE_DIR = "D:\\sccache"
