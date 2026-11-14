@@ -459,13 +459,22 @@ mod tests {
         let coordinator = ConfirmDialogCoordinator::default();
         assert!(
             coordinator
-                .request_confirm_dialog("Continue?", None)
+                .request_confirm_dialog("Before mount?", None)
                 .is_none()
         );
+        assert_eq!(
+            coordinator.read_confirm_dialog_state(),
+            ConfirmDialogState::Idle
+        );
+        assert!(!coordinator.is_confirm_dialog_active());
         let host = coordinator.subscribe_confirm_dialog_host(|| {});
         let answer = coordinator
             .request_confirm_dialog("Continue?", None)
             .expect("host");
+        assert_eq!(
+            coordinator.read_confirm_dialog_state(),
+            ConfirmDialogState::Confirming(request("Continue?", None))
+        );
         drop(host);
         assert!(!block_on(answer));
         assert!(

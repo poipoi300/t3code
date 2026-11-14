@@ -105,6 +105,49 @@ pub(super) fn tool_action(entry: &WorkLogEntry) -> &'static str {
     }
 }
 
+pub(super) fn summary_entries(entries: &[&WorkLogEntry]) -> Vec<WorkLogEntry> {
+    entries
+        .iter()
+        .map(|entry| {
+            let mut next = (*entry).clone();
+            let action = tool_action(entry);
+            if action == tool_group_action(entry) {
+                return next;
+            }
+            // The older shared classifier falls back to labels; this selector uses the web's tool metadata.
+            let name = match action {
+                "read" => "Read",
+                "command" => "shell",
+                "code-search" => "grep",
+                _ => "timeline-unclassified",
+            };
+            let mut data = next
+                .tool_data
+                .clone()
+                .filter(Value::is_object)
+                .unwrap_or_else(|| json!({}));
+            data["toolName"] = json!(name);
+            if action == "edit" {
+                data["kind"] = json!("edit");
+            }
+            next.tool_data = Some(data);
+            if let Some(payload) = next.structured_payload.as_ref().filter(|p| {
+                matches!(
+                    p.as_ref(),
+                    t3_contracts::orchestration_v2::OrchestrationV2TurnItem::DynamicTool(_)
+                )
+            }) {
+                let mut payload = value(payload);
+                payload["toolName"] = json!(name);
+                next.structured_payload = Some(Rc::new(
+                    serde_json::from_value(payload).expect("canonical tool name"),
+                ));
+            }
+            next
+        })
+        .collect()
+}
+
 fn compact(text: &str) -> String {
     text.split(crate::view_logic::is_js_whitespace)
         .filter(|s| !s.is_empty())

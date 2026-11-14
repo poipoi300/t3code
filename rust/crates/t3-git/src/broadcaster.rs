@@ -586,7 +586,7 @@ pub(crate) fn merge_status(
         has_upstream: remote.as_ref().is_some_and(|r| r.has_upstream),
         ahead_count: remote.as_ref().map_or(0, |r| r.ahead_count),
         behind_count: remote.as_ref().map_or(0, |r| r.behind_count),
-        ahead_of_default_count: remote.as_ref().and_then(|r| r.ahead_of_default_count),
+        ahead_of_default_count: remote.as_ref().map_or(Some(Some(0)), |r| r.ahead_of_default_count),
         pr: remote.and_then(|r| r.pr),
     }
 }

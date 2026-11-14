@@ -272,7 +272,6 @@ impl Git {
                         args.push("--recursive");
                     }
                     if progress.is_some() { args.push("--progress"); }
-                    let on_line = progress.clone().map(|reporter| crate::worktree_progress::lines(reporter, false));
                     git
                         .execute(
                             &args,
@@ -280,7 +279,8 @@ impl Git {
                                 timeout: None,
                                 append_truncation_marker: true,
                                 env: crate::env(&[("LANGUAGE", "C")]),
-                                on_stdout_chunk: on_line.clone(), on_stderr_chunk: on_line,
+                                on_stdout_chunk: progress.clone().map(|reporter| crate::worktree_progress::lines(reporter, false)),
+                                on_stderr_chunk: progress.clone().map(|reporter| crate::worktree_progress::lines(reporter, false)),
                                 ..Default::default()
                             },
                         )

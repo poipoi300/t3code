@@ -13,7 +13,7 @@ pub fn required_scopes(name: &str, input: &Value) -> Result<Vec<Scope>> {
     ) {
         scopes.push(Scope::OrchestrationOperate);
     }
-    if name == "t3_environment_preferences_update"
+    if matches!(name, "t3_environment_preferences_update" | "t3_theme_set")
         || matches!(name, "t3_project_create" | "t3_project_update")
             && input.get("scripts").is_some()
     {

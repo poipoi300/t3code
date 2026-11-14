@@ -93,6 +93,14 @@
     "serviceMethods": [],
     "status": "host-trait"
   },
+  "send_to_user": {
+    "toolkit": "message",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-mcp::message::send_to_user",
+    "serviceMethods": [],
+    "status": "built-in"
+  },
   "orchestrator_capabilities": {
     "toolkit": "orchestrator",
     "feature": null,
@@ -519,6 +527,22 @@
     "feature": null,
     "adapter": null,
     "expectedServiceMethod": "t3-orchestration::ThreadPullRequestService::read_pull_request_guide",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "t3_theme_read": {
+    "toolkit": "theme",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-server::EnvironmentThemeService::t3_theme_read",
+    "serviceMethods": [],
+    "status": "missing-service-method"
+  },
+  "t3_theme_set": {
+    "toolkit": "theme",
+    "feature": null,
+    "adapter": null,
+    "expectedServiceMethod": "t3-server::EnvironmentThemeService::t3_theme_set",
     "serviceMethods": [],
     "status": "missing-service-method"
   },

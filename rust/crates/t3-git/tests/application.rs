@@ -147,3 +147,26 @@ async fn closing_a_stacked_action_cancels_and_reaps_its_commit_process() -> Test
     broadcaster.shutdown().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn worktree_creation_reports_checkout_and_discovers_project_submodule_policy() -> TestResult {
+    use t3_contracts::{base_schemas::ThreadId, worktree_setup::*};
+    let repo = Repository::new().await?;
+    repo.write(".gitmodules", "")?;
+    repo.write("t3.json", r#"{"worktreeSubmodules":"none"}"#)?;
+    for n in 0..100 { repo.write(&format!("files/{n}"), "content\n")?; }
+    repo.commit("initial").await?;
+    let workflow = GitWorkflowService::new(repo.git.clone()).with_worktrees_directory(repo.temp.path().join("trees"));
+    let tracker = WorktreeSetupTracker::new();
+    let thread = ThreadId("thread".into());
+    tracker.begin(thread.clone(), Some("feature".into()), Some("main".into()), &[WorktreeSetupStageId::Checkout, WorktreeSetupStageId::Submodules], None);
+    let input = serde_json::from_value(json!({"cwd":repo.root(),"refName":"main","newRefName":"feature","baseRefName":"main","path":null}))?;
+    let result = workflow.create_worktree_with_options(&input, t3_git::WorktreeCreationOptions { progress: Some(tracker.worktree_reporter(thread.clone())), ..Default::default() }).await?;
+    let snapshot = tracker.get(&thread).expect("setup");
+    assert_eq!(snapshot.stages[0].status, WorktreeSetupStageStatus::Done);
+    assert_eq!(snapshot.stages[0].percent, Some(100));
+    assert_eq!(snapshot.stages[1].status, WorktreeSetupStageStatus::Skipped);
+    assert_eq!(snapshot.stages[1].detail.as_deref(), Some("Disabled in t3.json"));
+    repo.git.remove_worktree(std::path::Path::new(&result.worktree.path.0), true).await?;
+    Ok(())
+}

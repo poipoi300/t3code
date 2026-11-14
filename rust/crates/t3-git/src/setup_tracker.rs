@@ -126,6 +126,23 @@ impl WorktreeSetupTracker {
     pub fn new() -> Self {
         Self::default()
     }
+    pub fn worktree_reporter(&self, thread_id: ThreadId) -> crate::WorktreeReporter {
+        let tracker = self.clone();
+        Arc::new(move |event| {
+            use crate::WorktreeProgress;
+            use WorktreeSetupStageId::{Checkout, Submodules};
+            use WorktreeSetupStageStatus::{Done, Running, Skipped, Warning};
+            match event {
+                WorktreeProgress::CheckoutStarted => tracker.stage_status(&thread_id, Checkout, Running, None),
+                WorktreeProgress::CheckoutFiles { percent, completed, total } => tracker.stage(&thread_id, Checkout, |stage| { stage.percent = Some(percent); stage.detail = Some(format!("{completed} / {total} files")); }),
+                WorktreeProgress::CheckoutFinished => { tracker.stage_status(&thread_id, Checkout, Done, None); tracker.stage(&thread_id, Checkout, |stage| stage.percent = Some(100)); }
+                WorktreeProgress::SubmodulesDisabled { source } => tracker.stage_status(&thread_id, Submodules, Skipped, Some(Some(format!("Disabled in {source}")))),
+                WorktreeProgress::SubmodulesStarted => tracker.stage_status(&thread_id, Submodules, Running, None),
+                WorktreeProgress::SubmoduleLine(line) => tracker.append_tail(&thread_id, Submodules, &line),
+                WorktreeProgress::SubmodulesFinished { ok } => tracker.stage_status(&thread_id, Submodules, if ok { Done } else { Warning }, None),
+            }
+        })
+    }
     pub fn begin(
         &self,
         thread_id: ThreadId,
@@ -190,11 +207,14 @@ impl WorktreeSetupTracker {
         let Some(tracked) = setups.get(&thread_id.0) else {
             return;
         };
-        tracked.sender.send_modify(|snapshot| {
+        tracked.sender.send_if_modified(|snapshot| {
             if let Some(snapshot) = snapshot {
                 let sequence = snapshot.sequence;
                 mutate(snapshot);
                 snapshot.sequence = sequence + 1;
+                true
+            } else {
+                false
             }
         });
     }
@@ -251,6 +271,7 @@ impl WorktreeSetupTracker {
         phase: WorktreeSetupPhase,
         error: Option<&str>,
     ) -> Option<WorktreeSetupSnapshot> {
+        if phase == WorktreeSetupPhase::Running { return None; }
         let mut setups = self.setups.lock().unwrap_or_else(|e| e.into_inner());
         let tracked = setups.get_mut(&thread_id.0)?;
         let mut snapshot = tracked.sender.borrow().clone()?;

@@ -61,6 +61,16 @@ const copyProbes = [
   '\\'+template, '`unclosed '+citation,
 ];
 for(const [i,text] of copyProbes.entries()) {globalThis.__timelineTitle=`copy adapter differential probe ${i+1}`;globalThis.__timelineTitles.push(globalThis.__timelineTitle);copy({text,showCopyButton:true,streaming:false});}
+const derive = (await import(pathToFileURL(resolve(root,source)).href)).deriveMessagesTimelineRows;
+for(const [i,fields] of [
+  {label:'Read'}, {label:'Read file',toolTitle:'Read'},
+  {label:'Search',toolData:{kind:'search'}}, {label:'Read a file',toolData:{kind:'read'}},
+  {label:'Run command',toolData:{kind:'execute'}},
+].entries()) {
+  globalThis.__timelineTitle=`tool metadata classifier differential probe ${i+1}`;globalThis.__timelineTitles.push(globalThis.__timelineTitle);
+  const timelineEntries=[0,1].map(index=>({kind:'work',id:`classifier-${index}`,createdAt:'2026-01-01T00:00:00Z',entry:{id:`classifier-${index}`,createdAt:'2026-01-01T00:00:00Z',runId:null,tone:'tool',toolLifecycleStatus:'completed',...fields}}));
+  derive({timelineEntries,isWorking:false,turnDiffSummaries:[],supportsConversationRollback:false});
+}
 const destination = resolve(dirname(fileURLToPath(import.meta.url)), 'typescript-cases.json');
 const hashes = Object.fromEntries([source,tests,activeTests].map(path=>[path,createHash('sha256').update(readFileSync(resolve(root,path))).digest('hex')]));
 const corpus = {source,tests,activeTests,hashes,titles:globalThis.__timelineTitles,cases:globalThis.__timelineCases};

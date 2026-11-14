@@ -525,7 +525,7 @@ pub(super) fn derive(input: &MessagesTimelineRowsInput, raw: &[Entry]) -> Vec<Va
                 continue;
             }
             let work: Vec<_> = visible.iter().filter_map(|e| e.work.as_ref()).collect();
-            let owned: Vec<_> = work.iter().map(|w| (*w).clone()).collect();
+            let owned = helpers::summary_entries(&work);
             let latest_active = visible
                 .iter()
                 .rev()

@@ -19,7 +19,7 @@ and tool-specific operate/settings/source-control grants.
 modes; all tools require orchestration read, mutations also require operate,
 settings mutations require settings write, and worktree handoff/PR guide writes
 require source-control write. No tool call trusts a token's claimed scope list
-over the live session row. OAuth verification tests cover all 72 tool admissions.
+over the live session row. OAuth verification tests cover every tool admission.
 
 `McpServer` combines `Services` (one async trait per toolkit) with `AccessStore`.
 `transport::router` serves `/mcp`; `SessionRegistry` issues process-local hashed
@@ -31,8 +31,8 @@ linked environments and saved screenshots. Service implementations must call
 environment writes recheck with `recheck_environment` after waiting for a lock.
 
 The catalog includes every toolkit: attachment 3, device 4, environment 2, HTML 2,
-orchestrator 20, preview 12, preview controls 2, project 7, pull requests 9, thread
-7, tool search 1, worktree 3 (72 total). Normal listing omits `tool_search`;
+message 1, orchestrator 20, preview 12, preview controls 2, project 7, pull requests 9,
+theme 2, thread 7, tool search 1, worktree 3 (75 total across 14 toolkits). Normal listing omits `tool_search`;
 deferred provider listing starts with four discovery tools. Capability checks,
 read-only clients, caller liveness, linked-origin boundaries and dispatch mode
 escalation refusal are implemented separately from discovery.
@@ -78,14 +78,35 @@ from `apps/server/src/mcpApps/`. It uses `t3-persistence` for SQLite access.
 
 `adapters::ServiceAdapters` composes concrete sibling bindings without replacing
 one toolkit's other bindings. Enable `orchestration`, `workspace`, `scheduler`,
-`git`, or `forge` independently; none is a default feature. The complete 72-tool
+`git`, or `forge` independently; none is a default feature. The complete 75-tool
 binding inventory is [fixtures/bindings.json](fixtures/bindings.json).
 There are 21 optional concrete routes (some with unavailable branches), 20
-preview/device/HTML host-trait routes, 30 missing sibling-service routes, and
-one built-in discovery route. Each inventory entry lists its actual native
+preview/device/HTML host-trait routes, 32 missing sibling-service routes, and
+two built-in routes (message and discovery). Each inventory entry lists its actual native
 service calls or the missing method returned by the fallback.
 An absent adapter or unavailable branch returns `isError: true` with
 `structuredContent: {available: false, tool, missingServiceMethod, error}`.
+
+`services::MessageService::send_to_user` uses `message::send_to_user` by default.
+It returns the exact Markdown and whitespace as `sentMessage`, plus the acknowledgement
+extracted from the TypeScript handler, without creating an orchestration command
+or a separate conversation-message row. Caller liveness is required; approval-required
+and plan-mode provider callers are allowed. Input length is 1..4,000 UTF-16 units.
+Provider ingestion persists the existing `dynamic_tool` item and its compact
+`sentMessage` output; the client presents it as assistant-authored text.
+
+The merged TypeScript also includes the theme supplement. Theme read/set declarations
+and their service trait are generated; set requires environment-write authority and
+valid theme/appearance input. `t3-server::EnvironmentThemeService` is not yet a native
+service available to this crate, so publication/selection returns the named unavailable
+result until a host implements `services::ThemeService`. Such implementations must
+hold the caller's thread lock and call `CallContext::recheck_environment` before apply.
+
+The exporter checks the current source context budgets: Claude 5,930 bytes, Codex
+7,324 bytes, and MCP list 49,806 bytes (48,566 before the two-tool theme supplement).
+Only `request_secret` and `send_to_user` have Anthropic always-load metadata.
+Remote-machine instructions and running-task guidance come from the current source;
+the shared `next` contract also accepts guidance from other server versions.
 
 Available native calls:
 
@@ -159,18 +180,15 @@ t3-mcp`, `cargo clippy -p t3-mcp --all-targets -- -D warnings`, `cargo test -p
 t3-mcp`. Tests use fixtures, service fakes, isolated SQLite, and ephemeral HTTP;
 they never access provider stores or live T3 state. Windows is the verified host.
 
-Verified on Windows, 2026-11-13: fixture regeneration check, formatting,
-Clippy with warnings denied for all targets/all features, and all 35 tests with
-`--all-features`. The isolated workspace/scheduler configuration also passes
-all 33 applicable tests and Clippy; the final default build passes all 31 tests
-and Clippy with warnings denied. SQLite integration tests cover metadata/stop
-replay, a mode change between admission and dispatch, and public project result
-mapping; upload and schedule adapters use real temporary files and SQLite.
-The final rerun after preferring the last stored duplicate attachment reference
-was blocked by newer sibling edits in `t3-orchestration/src/ports/acp_replay/
-adapters/pi_adapter_v2_testkit.rs:53,74` (`get` called on `Option<BTreeMap<...>>`).
-Those files are outside this crate's ownership and were not changed here.
-Regression witnesses
-were first observed failing for proxy HTTPS origins, Effect input transforms,
-and image failure-message filtering. Paid model evals were not run: production
-instruction text and advertised tool contracts are extracted unchanged.
+Current specification: TypeScript merged at `817a9186f9`, including the theme
+supplement. Fixture regeneration check, formatting, default Clippy with warnings
+denied, and all 36 default Rust tests pass. TypeScript's AgentContextBudget test
+also passes (two cases). New witnesses cover verbatim message output, UTF-16
+boundaries, plan/caller liveness, theme authority and rechecking, mixed-version
+`next`, always-load metadata, budgets and exact modern/legacy HTTP tool lists.
+The current `cargo check --all-features` also passes. The earlier optional-adapter
+run passed 35 tests before this catalog refresh;
+SQLite integration covers metadata/stop replay, mode changes under dispatch,
+public project mapping, uploads and schedules. Paid model evals were not
+run: descriptions, model instructions and acknowledgement text are extracted
+from the current production source without authored wording changes.

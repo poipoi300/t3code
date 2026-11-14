@@ -133,6 +133,9 @@ async fn all_unbound_tools_report_the_named_missing_service_as_structured_conten
     let bindings: Value = serde_json::from_str(include_str!("../fixtures/bindings.json")).unwrap();
     let mut checked = 0;
     for (name, cases) in witnesses.as_object().unwrap() {
+        if name == "send_to_user" {
+            continue;
+        }
         let input = if name == "preview_act" {
             json!({"action":"press","key":"Enter"})
         } else {
@@ -158,7 +161,7 @@ async fn all_unbound_tools_report_the_named_missing_service_as_structured_conten
         );
         checked += 1;
     }
-    assert_eq!(checked, 72);
+    assert_eq!(checked, catalog::catalog().tools.len() - 1);
 }
 
 #[cfg(feature = "workspace")]

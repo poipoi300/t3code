@@ -58,6 +58,7 @@ pub fn tool_rule(name: &str, input: &Value) -> AccessRule {
         | "t3_background_wait"
         | "request_secret"
         | "create_threads"
+        | "send_to_user"
         | "t3_worktree_handoff"
         | "html_render"
         | "t3_preview_close"
@@ -72,6 +73,7 @@ pub fn tool_rule(name: &str, input: &Value) -> AccessRule {
         | "run_scheduled_task_now"
         | "t3_environment_link"
         | "t3_environment_unlink" => WritesEnvironment,
+        "t3_theme_set" => WritesEnvironment,
         "t3_thread_launch" => StartsThreads,
         "schedule_task" if input.get("scheduledTaskId").is_none_or(Value::is_null) => StartsThreads,
         "schedule_task"

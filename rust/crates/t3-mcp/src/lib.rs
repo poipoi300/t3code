@@ -10,6 +10,7 @@ pub mod decode;
 pub mod error;
 pub mod exposure;
 pub mod instructions;
+pub mod message;
 #[cfg(feature = "auth")]
 pub mod oauth;
 pub mod output;

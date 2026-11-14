@@ -124,7 +124,6 @@ pub struct AssistantMarkdown {
     pub item_key: String,
 }
 
-pub type MarkdownRenderer = Rc<dyn Fn(Memo<AssistantMarkdown>) -> AnyElement>;
 pub type RowSlot = Rc<dyn Fn(Memo<Option<AssistantRow>>) -> AnyElement>;
 pub type DirectoryLookup = Rc<dyn Fn(&OrchestrationV2ProjectedTurnItem) -> Vec<String>>;
 
@@ -251,7 +250,6 @@ impl AssistantRowsState {
 pub struct AssistantRowContext {
     pub thread_ref: Option<ThreadKey>,
     pub markdown_cwd: Option<String>,
-    markdown: MarkdownRenderer,
     pub agent_directories: Option<DirectoryLookup>,
     pub timestamp_format: TimestampFormat,
     pub provider_capabilities: Option<CapabilityLookup>,
@@ -262,11 +260,10 @@ pub struct AssistantRowContext {
 }
 
 impl AssistantRowContext {
-    pub fn for_timeline(state: AssistantRowsState) -> Self {
+    pub fn new(state: AssistantRowsState) -> Self {
         Self {
             thread_ref: None,
             markdown_cwd: None,
-            markdown: Rc::new(|markdown| assistant_markdown(markdown).into_element()),
             agent_directories: None,
             timestamp_format: TimestampFormat::Locale,
             provider_capabilities: None,
@@ -274,14 +271,6 @@ impl AssistantRowContext {
             on_reply_to_response: None,
             changed_files: None,
             state,
-        }
-    }
-
-    /// Retains the integrator's Markdown/code-block root while TL-MARKDOWN-BASE is in flight.
-    pub fn new(markdown: MarkdownRenderer, state: AssistantRowsState) -> Self {
-        Self {
-            markdown,
-            ..Self::for_timeline(state)
         }
     }
 }
@@ -328,7 +317,7 @@ pub fn assistant_timeline_row(
         .label(SharedString::from(t("T3 Code")))
         .app_class(tw("relative min-w-0 px-1 py-0.5"))
         // NSH find/citation owners receive the item/message IDs instead of DOM data attributes.
-        .child(view().child((context.markdown)(markdown)))
+        .child(view().child(assistant_markdown(markdown)))
         .child(changed_files.map(|render| assistant_changed_files_section(row, render)))
         .child(dynamic(move || {
             show_interrupted.get().then(|| {
@@ -415,7 +404,7 @@ pub fn sent_message_timeline_row(
     view()
         .label(SharedString::from(t("T3 Code")))
         .app_class(tw("min-w-0 px-1 py-0.5"))
-        .child((context.markdown)(markdown))
+        .child(assistant_markdown(markdown))
 }
 
 pub fn assistant_meta_timeline_row(

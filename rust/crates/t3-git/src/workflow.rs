@@ -399,18 +399,22 @@ impl GitWorkflowService {
         &self,
         input: &VcsCreateWorktreeInput,
     ) -> Result<VcsCreateWorktreeResult, GitError> {
+        self.create_worktree_with_options(input, crate::WorktreeCreationOptions::default()).await
+    }
+    pub async fn create_worktree_with_options(&self, input: &VcsCreateWorktreeInput, options: crate::WorktreeCreationOptions) -> Result<VcsCreateWorktreeResult, GitError> {
         let mut workflow = self.clone();
         let input = input.clone();
         self.git
             .owned_operation(move |git| async move {
                 workflow.git = git;
-                workflow.create_worktree_inner(&input).await
+                workflow.create_worktree_inner(&input, options).await
             })
             .await
     }
     async fn create_worktree_inner(
         &self,
         input: &VcsCreateWorktreeInput,
+        options: crate::WorktreeCreationOptions,
     ) -> Result<VcsCreateWorktreeResult, GitError> {
         let git = self.git.at(&input.cwd.0);
         let settings = match &self.worktree_host {
@@ -455,15 +459,14 @@ impl GitWorkflowService {
             None
         };
         let path = git
-            .add_worktree(WorktreeOptions {
+            .add_worktree_with_progress(WorktreeOptions {
                 reference: input.ref_name.0.clone(),
                 new_branch: branch.map(|name| name.0.clone()),
                 path: input.path.as_ref().map(|path| PathBuf::from(&path.0)),
                 directory: settings.directory.or_else(|| self.worktrees_dir.clone()),
-                submodules: settings
-                    .submodules
+                submodules: options.submodules.or(settings.submodules)
                     .unwrap_or(crate::WorktreeSubmodules::Auto),
-            })
+            }, options.progress)
             .await?;
         if let (Some(branch), Some((name, reference))) = (branch, base) {
             let _ = git

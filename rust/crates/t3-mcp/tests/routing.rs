@@ -107,6 +107,13 @@ impl HtmlService for Recorder {
     }
 }
 #[async_trait]
+impl MessageService for Recorder {
+    async fn send_to_user(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        self.0.lock().unwrap().push("send_to_user".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+}
+#[async_trait]
 impl OrchestratorService for Recorder {
     async fn orchestrator_capabilities(
         &self,
@@ -513,6 +520,17 @@ impl PullRequestsService for Recorder {
     }
 }
 #[async_trait]
+impl ThemeService for Recorder {
+    async fn t3_theme_read(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_theme_read".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+    async fn t3_theme_set(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_theme_set".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+}
+#[async_trait]
 impl ThreadService for Recorder {
     async fn run_scheduled_task_now(
         &self,
@@ -615,11 +633,13 @@ async fn every_tool_decodes_and_dispatches_to_its_own_service_method_once() {
         device: Arc::new(Recorder(calls.clone())),
         environment: Arc::new(Recorder(calls.clone())),
         html: Arc::new(Recorder(calls.clone())),
+        message: Arc::new(Recorder(calls.clone())),
         orchestrator: Arc::new(Recorder(calls.clone())),
         preview: Arc::new(Recorder(calls.clone())),
         preview_controls: Arc::new(Recorder(calls.clone())),
         project: Arc::new(Recorder(calls.clone())),
         pull_requests: Arc::new(Recorder(calls.clone())),
+        theme: Arc::new(Recorder(calls.clone())),
         thread: Arc::new(Recorder(calls.clone())),
         tool_search: Arc::new(Recorder(calls.clone())),
         worktree: Arc::new(Recorder(calls.clone())),

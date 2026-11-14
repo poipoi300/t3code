@@ -40,7 +40,7 @@ fn scope(subagent: bool, links: bool, external: bool) -> InvocationScope {
 
 #[test]
 fn tool_list_matches_real_typescript_http_in_every_access_mode() {
-    assert_eq!(catalog().tools.len(), 72);
+    assert_eq!(catalog().tools.len(), 75);
     for (key, expected) in &catalog().modes {
         let parts = key.split('/').collect::<Vec<_>>();
         let scope = scope(
@@ -357,7 +357,10 @@ async fn real_sdk_http_lists_the_exact_fixture_and_negotiates_both_revisions() {
     )
     .await;
     assert_eq!(status, http::StatusCode::OK, "{body}");
-    assert_eq!(body["result"]["tools"].as_array().unwrap().len(), 71);
+    assert_eq!(
+        body["result"]["tools"].as_array().unwrap().len(),
+        catalog().tools.len() - 1
+    );
     assert!(
         body["result"] == catalog().legacy_modes["thread/links/full"],
         "legacy tools/list differs"

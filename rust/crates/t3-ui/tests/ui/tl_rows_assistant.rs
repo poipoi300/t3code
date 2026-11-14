@@ -95,7 +95,7 @@ fn AssistantFixture() -> impl IntoElement {
     let (release, waiting) = oneshot::channel::<()>();
     let release = stored(Some(release));
     let waiting = stored(Some(waiting));
-    let mut context = AssistantRowContext::for_timeline(state);
+    let mut context = AssistantRowContext::new(state);
     context.timestamp_format = t3_contracts::settings::TimestampFormat::V24Hour;
     context.thread_ref = Some(ThreadKey {
         environment: EnvironmentId("environment".into()),

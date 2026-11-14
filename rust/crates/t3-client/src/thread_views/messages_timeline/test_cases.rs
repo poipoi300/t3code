@@ -272,3 +272,13 @@ fn ts_case_135() { check_test(134); } // copy adapter differential probe 18
 fn ts_case_136() { check_test(135); } // copy adapter differential probe 19
 #[test]
 fn ts_case_137() { check_test(136); } // copy adapter differential probe 20
+#[test]
+fn ts_case_138() { check_test(137); } // tool metadata classifier differential probe 1
+#[test]
+fn ts_case_139() { check_test(138); } // tool metadata classifier differential probe 2
+#[test]
+fn ts_case_140() { check_test(139); } // tool metadata classifier differential probe 3
+#[test]
+fn ts_case_141() { check_test(140); } // tool metadata classifier differential probe 4
+#[test]
+fn ts_case_142() { check_test(141); } // tool metadata classifier differential probe 5

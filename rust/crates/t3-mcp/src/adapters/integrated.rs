@@ -20,11 +20,13 @@ impl ServiceAdapters {
         services.device = self.clone();
         services.environment = self.clone();
         services.html = self.clone();
+        services.message = self.clone();
         services.orchestrator = self.clone();
         services.preview = self.clone();
         services.preview_controls = self.clone();
         services.project = self.clone();
         services.pull_requests = self.clone();
+        services.theme = self.clone();
         services.thread = self.clone();
         services.tool_search = self.clone();
         services.worktree = self.clone();
@@ -92,6 +94,8 @@ impl DeviceService for ServiceAdapters {}
 impl EnvironmentService for ServiceAdapters {}
 #[async_trait]
 impl HtmlService for ServiceAdapters {}
+#[async_trait]
+impl MessageService for ServiceAdapters {}
 #[async_trait]
 impl OrchestratorService for ServiceAdapters {
     async fn t3_workflow_stop(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
@@ -250,6 +254,8 @@ impl ProjectService for ServiceAdapters {
 }
 #[async_trait]
 impl PullRequestsService for ServiceAdapters {}
+#[async_trait]
+impl ThemeService for ServiceAdapters {}
 #[async_trait]
 impl ThreadService for ServiceAdapters {
     async fn run_scheduled_task_now(

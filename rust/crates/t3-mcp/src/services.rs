@@ -123,6 +123,13 @@ pub trait HtmlService: Send + Sync {
 }
 
 #[async_trait]
+pub trait MessageService: Send + Sync {
+    async fn send_to_user(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        crate::message::send_to_user(_input)
+    }
+}
+
+#[async_trait]
 pub trait OrchestratorService: Send + Sync {
     async fn orchestrator_capabilities(
         &self,
@@ -619,6 +626,22 @@ pub trait PullRequestsService: Send + Sync {
 }
 
 #[async_trait]
+pub trait ThemeService: Send + Sync {
+    async fn t3_theme_read(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_theme_read",
+            "t3-server::EnvironmentThemeService::t3_theme_read",
+        ))
+    }
+    async fn t3_theme_set(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_theme_set",
+            "t3-server::EnvironmentThemeService::t3_theme_set",
+        ))
+    }
+}
+
+#[async_trait]
 pub trait ThreadService: Send + Sync {
     async fn run_scheduled_task_now(
         &self,
@@ -733,11 +756,13 @@ impl AttachmentService for Unavailable {}
 impl DeviceService for Unavailable {}
 impl EnvironmentService for Unavailable {}
 impl HtmlService for Unavailable {}
+impl MessageService for Unavailable {}
 impl OrchestratorService for Unavailable {}
 impl PreviewService for Unavailable {}
 impl PreviewControlsService for Unavailable {}
 impl ProjectService for Unavailable {}
 impl PullRequestsService for Unavailable {}
+impl ThemeService for Unavailable {}
 impl ThreadService for Unavailable {}
 impl ToolSearchService for Unavailable {}
 impl WorktreeService for Unavailable {}
@@ -748,11 +773,13 @@ pub struct Services {
     pub device: Arc<dyn DeviceService>,
     pub environment: Arc<dyn EnvironmentService>,
     pub html: Arc<dyn HtmlService>,
+    pub message: Arc<dyn MessageService>,
     pub orchestrator: Arc<dyn OrchestratorService>,
     pub preview: Arc<dyn PreviewService>,
     pub preview_controls: Arc<dyn PreviewControlsService>,
     pub project: Arc<dyn ProjectService>,
     pub pull_requests: Arc<dyn PullRequestsService>,
+    pub theme: Arc<dyn ThemeService>,
     pub thread: Arc<dyn ThreadService>,
     pub tool_search: Arc<dyn ToolSearchService>,
     pub worktree: Arc<dyn WorktreeService>,
@@ -764,11 +791,13 @@ impl Default for Services {
             device: Arc::new(Unavailable),
             environment: Arc::new(Unavailable),
             html: Arc::new(Unavailable),
+            message: Arc::new(Unavailable),
             orchestrator: Arc::new(Unavailable),
             preview: Arc::new(Unavailable),
             preview_controls: Arc::new(Unavailable),
             project: Arc::new(Unavailable),
             pull_requests: Arc::new(Unavailable),
+            theme: Arc::new(Unavailable),
             thread: Arc::new(Unavailable),
             tool_search: Arc::new(Unavailable),
             worktree: Arc::new(Unavailable),
@@ -831,6 +860,10 @@ impl Services {
                 .map_err(|_| McpError::Internal),
             "html_render" => serde_json::to_value(self.html.html_render(context, input).await?)
                 .map_err(|_| McpError::Internal),
+            "send_to_user" => {
+                serde_json::to_value(self.message.send_to_user(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
             "orchestrator_capabilities" => serde_json::to_value(
                 self.orchestrator
                     .orchestrator_capabilities(context, input.decode()?)
@@ -1103,6 +1136,12 @@ impl Services {
                     .await?,
             )
             .map_err(|_| McpError::Internal),
+            "t3_theme_read" => {
+                serde_json::to_value(self.theme.t3_theme_read(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
+            "t3_theme_set" => serde_json::to_value(self.theme.t3_theme_set(context, input).await?)
+                .map_err(|_| McpError::Internal),
             "run_scheduled_task_now" => {
                 serde_json::to_value(self.thread.run_scheduled_task_now(context, input).await?)
                     .map_err(|_| McpError::Internal)

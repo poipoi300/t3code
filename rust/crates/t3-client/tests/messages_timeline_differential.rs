@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::{path::Path, process::Command};
 
 #[test]
-fn current_typescript_timeline_matches_the_ported_corpus() {
+fn messages_timeline_matches_current_typescript() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(3)

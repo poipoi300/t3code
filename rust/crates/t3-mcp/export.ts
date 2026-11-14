@@ -38,7 +38,7 @@ imports.NodeServices = await load("@effect/platform-node/NodeServices");
 imports.NodeCrypto = await load("@effect/platform-node/NodeCrypto");
 const services = Function(...Object.keys(imports), `${declarations}; return toolHandlerServices;`)(...Object.values(imports));
 const toolkits: Record<string, any> = {};
-for (const name of ["attachment", "device", "environment", "html", "orchestrator", "preview", "previewControls", "project", "pullRequests", "thread", "toolSearch", "worktree"]) {
+for (const name of ["attachment", "device", "environment", "html", "message", "orchestrator", "preview", "previewControls", "project", "pullRequests", "theme", "thread", "toolSearch", "worktree"]) {
   const module = await server(`mcp/toolkits/${name}/tools.ts`);
   const key = name === "toolSearch" ? "ToolSearchToolkit" : name[0].toUpperCase() + name.slice(1) + "Toolkit";
   toolkits[name] = module[key];
@@ -123,6 +123,7 @@ const boundaryInputs: Record<string, unknown[]> = {
   schedule_task:[{prompt:" Prompt ",schedule:'{"type":"interval","everyMs":60000}'},{prompt:"Prompt",schedule:'{"type":"interval","everyMs":1}'},{prompt:"Prompt",schedule:"invalid-json"}],
   t3_thread_update:[{threadId:" thread ",action:"rename",title:" Title "},{action:"rename"},{action:"regenerate_title",title:"invalid"}],
   request_secret:[{label:" Label ",reason:" Reason ",value:"  secret  "},{label:"Label",reason:"Reason",value:""},{label:"Label",reason:"Reason",url:"file:///private"}],
+  send_to_user:[{message:""},{message:" "},{message:"😀".repeat(2000)},{message:"😀".repeat(2000)+"x"}],
 };
 for (const toolkit of Object.values(toolkits)) for (const tool of Object.values(toolkit.tools) as any[]) {
   let values;
@@ -194,6 +195,17 @@ const instructions: Record<string, unknown> = {
   runtime: runtime.buildRuntimeInstructions({harness: "__HARNESS__", model: "__MODEL__", modelName: "__MODEL_NAME__", reasoningEffort: "__EFFORT__"}),
   runtimeWithoutLinking: runtime.buildRuntimeInstructions({harness: "__HARNESS__", model: "__MODEL__", modelName: "__MODEL_NAME__", reasoningEffort: "__EFFORT__", pullRequestLinking: false}),
 };
+const messageSource=await readFile(resolve(root,"apps/server/src/mcp/toolkits/message/handlers.ts"),"utf8");
+const acknowledgement=messageSource.match(/\bmessage:\s*("(?:[^"\\]|\\.)*")/u);
+if(!acknowledgement) throw new Error("send_to_user acknowledgement not found in production handler");
+instructions.sendToUserAcknowledgement=JSON.parse(acknowledgement[1]);
+const themeSource=await readFile(resolve(root,"apps/server/src/mcp/toolkits/theme/handlers.ts"),"utf8");
+const themeInvalid=themeSource.match(/\bmessage:\s*("(?:[^"\\]|\\.)*")/u);
+if(!themeInvalid) throw new Error("Theme validation message not found in production handler");
+instructions.themeSetInvalidRequest=JSON.parse(themeInvalid[1]);
+instructions.runningTaskNext=contracts.ORCHESTRATOR_MCP_RUNNING_TASK_NEXT;
+const contextBudget=JSON.parse(await readFile(resolve(root,"apps/server/src/provider/agentContextBudget.json"),"utf8"));
+instructions.contextBudget=contextBudget;
 for (const model of [false, true]) for (const name of [false, true]) for (const effort of [false, true]) for (const linking of [false, true]) {
   instructions[`runtime/${model}/${name}/${effort}/${linking}`] = runtime.buildRuntimeInstructions({harness:"__HARNESS__", ...(model ? {model:"__MODEL__"} : {}), ...(name ? {modelName:"__MODEL_NAME__"} : {}), ...(effort ? {reasoningEffort:"__EFFORT__"} : {}), pullRequestLinking: linking});
 }
@@ -213,6 +225,12 @@ for (const mcp of [false, true]) for (const device of [false, true]) {
     instructions[`prompt/${mcp}/${device}/${delivered}/${deviceDelivered}`] = core.t3OrchestrationPrompt({prompt: "__PROMPT__", hasT3Mcp: mcp, hasDeviceTools: device, orchestrationDelivered: delivered, deviceInstructionsDelivered: deviceDelivered});
   }
 }
+const budgetClaude=claude.makeClaudeQueryOptions({modelSelection:{instanceId:"claudeAgent",model:"claude-opus-5-5"},nativeThreadId:"context-budget",resume:false,cwd:null,mcpServers:{"t3-code":{type:"http",url:"http://127.0.0.1/mcp"}}}).systemPrompt.append;
+const budgetCodex=Object.values(codex.buildCodexAdditionalContext({model:"gpt-6.1-sol",modelName:"GPT-6.1 Sol",reasoningEffort:"high"},{browser:true,device:true})).map((entry:any)=>entry.value).join("");
+instructions.budgetContexts={claude:budgetClaude,codex:budgetCodex};
+const budgetTools=fixture.tools.filter((tool:any)=>tool.name!=="tool_search");
+const measured={claudeSystemAppendBytes:Buffer.byteLength(budgetClaude),codexAdditionalContextBytes:Buffer.byteLength(budgetCodex),mcpToolListJsonBytes:Buffer.byteLength(JSON.stringify(budgetTools.map(({name,description,inputSchema}:any)=>({name,description,inputSchema}))))};
+if(JSON.stringify(measured)!==JSON.stringify(contextBudget)) throw new Error(`Context budget differs: ${JSON.stringify(measured)} versus ${JSON.stringify(contextBudget)}`);
 const files = {"tools.json": fixture, "instructions.json": instructions, "decoders.json": decoderCases};
 await mkdir(dest, {recursive: true});
 for (const [name, value] of Object.entries(files)) {
@@ -253,10 +271,10 @@ for (const [kit, toolkit] of Object.entries(toolkits)) {
   });
 }
 let generated = `// Generated by export.ts from the toolkit declarations and available contract types.\nuse crate::{CallContext, DecodedInput, McpError, Result};\nuse async_trait::async_trait;\nuse serde_json::Value;\nuse std::sync::Arc;\n\n`;
-const serviceOwner:Record<string,string> = {attachment:"t3-workspace::AttachmentStore",device:"t3-device::DeviceService",environment:"t3-config::EnvironmentMcpService",html:"t3-preview::HtmlService",orchestrator:"t3-orchestration::OrchestratorMcpService",preview:"t3-preview::PreviewService",previewControls:"t3-preview::PreviewControlsService",project:"t3-orchestration::ProjectService",pullRequests:"t3-orchestration::ThreadPullRequestService",thread:"t3-orchestration::ThreadManagementService",toolSearch:"t3-mcp::ToolExposure",worktree:"t3-git::WorktreeMcpService"};
+const serviceOwner:Record<string,string> = {attachment:"t3-workspace::AttachmentStore",device:"t3-device::DeviceService",environment:"t3-config::EnvironmentMcpService",html:"t3-preview::HtmlService",message:"t3-mcp::message",orchestrator:"t3-orchestration::OrchestratorMcpService",preview:"t3-preview::PreviewService",previewControls:"t3-preview::PreviewControlsService",project:"t3-orchestration::ProjectService",pullRequests:"t3-orchestration::ThreadPullRequestService",theme:"t3-server::EnvironmentThemeService",thread:"t3-orchestration::ThreadManagementService",toolSearch:"t3-mcp::ToolExposure",worktree:"t3-git::WorktreeMcpService"};
 for (const [kit, tools] of Object.entries(methods)) {
   generated += `#[async_trait]\npub trait ${traitName(kit)}: Send + Sync {\n`;
-  for (const tool of tools) generated += `    async fn ${tool.name}(&self, _context: CallContext, _input: ${tool.input}) -> Result<${tool.output}> { Err(crate::adapters::not_available("${tool.name}", "${serviceOwner[kit]}::${tool.name}")) }\n`;
+  for (const tool of tools) generated += `    async fn ${tool.name}(&self, _context: CallContext, _input: ${tool.input}) -> Result<${tool.output}> { ${tool.name==="send_to_user"?"crate::message::send_to_user(_input)":`Err(crate::adapters::not_available("${tool.name}", "${serviceOwner[kit]}::${tool.name}"))`} }\n`;
   generated += `}\n\n`;
 }
 generated += `pub struct Unavailable;\n`;
@@ -355,7 +373,7 @@ const bindings=Object.fromEntries(Object.entries(methods).flatMap(([kit,tools])=
   const route=Object.entries(adapters).find(([_,adapter])=>adapter.tools.includes(tool.name));
   return [tool.name,{toolkit:kit,feature:route?.[1].feature ?? null,adapter:route ? `adapters::${route[1].type}::${tool.name}` : null,
     expectedServiceMethod:`${serviceOwner[kit]}::${tool.name}`, serviceMethods:nativeMethods[tool.name] ?? [],
-    status:tool.name==="tool_search"?"built-in":route?"adapter": ["preview","previewControls","device","html"].includes(kit)?"host-trait":"missing-service-method"}];
+    status:["tool_search","send_to_user"].includes(tool.name)?"built-in":route?"adapter": ["preview","previewControls","device","html"].includes(kit)?"host-trait":"missing-service-method"}];
 })));
 const bindingsPath=resolve(dest,"bindings.json");
 const bindingsText=JSON.stringify(bindings,null,2)+"\n";

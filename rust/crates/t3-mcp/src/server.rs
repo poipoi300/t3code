@@ -179,7 +179,8 @@ impl McpServer {
             }
             "worktree" => scope.require_capability(Capability::Worktree)?,
             "pullRequests" => scope.require_capability(Capability::PullRequests)?,
-            "orchestrator" | "project" | "environment" | "thread" | "attachment"
+            "orchestrator" | "project" | "environment" | "thread" | "attachment" | "message"
+            | "theme"
                 if !scope.capabilities.contains(&Capability::Orchestration) =>
             {
                 return Err(McpError::failure(
@@ -193,6 +194,17 @@ impl McpServer {
             return Ok(self.exposure.search(
                 &scope.require_thread("tool_search")?.provider_session_id,
                 input["query"].as_str().unwrap_or_default(),
+            ));
+        }
+        if name == "t3_theme_set"
+            && (input.get("theme").is_some() && input.get("themeId").is_none()
+                || input.get("themeId").is_none() && input.get("appearance").is_none())
+        {
+            return Err(McpError::failure(
+                "invalid_request",
+                crate::instructions::fixture()["themeSetInvalidRequest"]
+                    .as_str()
+                    .ok_or(McpError::Internal)?,
             ));
         }
         if kit == "html" {
