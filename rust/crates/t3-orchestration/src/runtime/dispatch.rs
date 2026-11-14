@@ -89,10 +89,21 @@ impl CommandInputs for ContextCommandInputs {
         let mut prepared = self.base.prepare(command).await?;
         let continuation =
             crate::ports::decisions::orchestrator::metadata_update_continuation(command)?;
-        let context = self
-            .preparer
-            .prepare(&prepared.context, continuation.as_ref().unwrap_or(command))
-            .await?;
+        let context = if let Some(continuation) = &continuation {
+            let mut updated = prepared.context.clone();
+            if let Some(projection) = updated.context.projection.as_mut() {
+                let metadata = crate::decision::engine::stored_value(command)?;
+                if let Some(path) = metadata.get("worktreePath") {
+                    projection.thread.worktree_path = serde_json::from_value(path.clone())?;
+                }
+                if let Some(branch) = metadata.get("branch") {
+                    projection.thread.branch = serde_json::from_value(branch.clone())?;
+                }
+            }
+            self.preparer.prepare(&updated, continuation).await?
+        } else {
+            self.preparer.prepare(&prepared.context, command).await?
+        };
         prepared.context.inputs.message_context = context;
         Ok(prepared)
     }
@@ -843,7 +854,7 @@ impl CommandInputs for ProjectionCommandInputs {
                     .await?,
             );
             current.turn_items.extend(evidence.turn_items);
-            current.provider_sessions.extend(evidence.provider_sessions);
+            current.provider_sessions = evidence.provider_sessions;
         }
         if matches!(
             kind.as_str(),
@@ -1431,6 +1442,67 @@ impl Dispatcher {
                 ..Default::default()
             },
         }
+    }
+
+    pub async fn list_active_threads(
+        &self,
+        project: Option<ProjectId>,
+    ) -> Result<Vec<crate::ports::decisions::orchestrator::ActiveThreadListEntry>> {
+        let reader = self
+            .0
+            .services
+            .inputs
+            .reader()
+            .ok_or(Error::Unsupported("active list requires reader"))?;
+        read_active_thread_metadata(reader, project).await
+    }
+
+    pub async fn delegated_task_result_pending(
+        &self,
+        thread: ThreadId,
+        task: Option<NodeId>,
+    ) -> Result<bool> {
+        let reader = self
+            .0
+            .services
+            .inputs
+            .reader()
+            .ok_or(Error::Unsupported("delegated pending requires reader"))?;
+        let child = projection_from_records(
+            reader
+                .query_records(ProjectionRecordQuery {
+                    thread_id: thread.clone(),
+                    fields: vec![
+                        RecordKind::Runs,
+                        RecordKind::Messages,
+                        RecordKind::Subagents,
+                        RecordKind::ProviderThreads,
+                        RecordKind::ProviderTurns,
+                        RecordKind::Attempts,
+                    ],
+                    filter: RecordFilter::default(),
+                    messages: MessageFilter {
+                        roles: Some(vec![ConversationMessageRole::User]),
+                        ..Default::default()
+                    },
+                    run_statuses: None,
+                    include_latest_run: false,
+                })
+                .await?,
+        );
+        let pending =
+            load_restart_continuations(&self.0.services.database, std::slice::from_ref(&child))
+                .await?;
+        let restarts = pending
+            .iter()
+            .find(|(id, _)| *id == thread)
+            .map(|(_, ids)| ids.as_slice())
+            .ok_or(Error::Stale)?;
+        crate::ports::decisions::orchestrator::delegated_result_pending(
+            &child,
+            task.as_ref(),
+            restarts,
+        )
     }
 
     pub fn new(services: DispatchServices, ceiling: Option<RuntimeModeCeiling>) -> Self {
@@ -2999,4 +3071,12 @@ fn allows_empty_decision(
     ) || (command_type == "thread.delete" && value["onlyIfUnused"] == true)
         || (command_type == "delegated_task.completion-delivery.acknowledge"
             && value["observedByRunId"].is_null()))
+}
+
+// Local shim until ProjectionReader exposes 02's lightweight active-thread metadata method.
+async fn read_active_thread_metadata(
+    _reader: &dyn ProjectionReader,
+    _project: Option<ProjectId>,
+) -> Result<Vec<crate::ports::decisions::orchestrator::ActiveThreadListEntry>> {
+    Err(Error::Unsupported("ProjectionReader.list_active_threads"))
 }

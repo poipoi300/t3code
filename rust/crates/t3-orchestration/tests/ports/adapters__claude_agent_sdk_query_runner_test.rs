@@ -256,6 +256,96 @@ async fn process_connector_enters_cwd_in_the_child_and_missing_cwd_exits_125() {
 }
 
 #[tokio::test]
+async fn failed_parallel_preparation_keeps_the_query_alive_and_compiles_selection_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let directory = tempfile::tempdir().unwrap();
+    let append = directory.path().join("append.txt");
+    std::fs::write(&append, "File instructions\n").unwrap();
+    let compiled = Arc::new(AtomicUsize::new(0));
+    let calls = compiled.clone();
+    let host = ClaudeHostOptions {
+        compile_model: Some(Arc::new(move |selection| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ClaudeCompiledModel {
+                model: selection.model.clone(),
+                effort: None,
+                settings: json!({}),
+            })
+        })),
+        ..Default::default()
+    };
+    let mut input = fixture_turn_input().unwrap();
+    input.runtime_policy.cwd = Some(directory.path().to_owned());
+    let launch = LaunchOptions {
+        cli_path: Some("fixture-claude".into()),
+        extra_args: vec![(
+            "append-system-prompt-file".into(),
+            Some("append.txt".into()),
+        )],
+        ..Default::default()
+    };
+    let (runtime, mut events, mut peer) = running_with_input(host, launch, input.clone()).await;
+    let result = |id| json!({"type":"result","subtype":"success","uuid":id,"result":"Done","is_error":false,"num_turns":1,"duration_ms":1,"duration_api_ms":1,"total_cost_usd":0,"usage":{"input_tokens":1,"output_tokens":1}});
+    peer.send(result("first")).await;
+    loop {
+        if matches!(
+            events.events.recv().await.unwrap().unwrap().kind,
+            ProviderEventKind::Terminal { .. }
+        ) {
+            break;
+        }
+    }
+    std::fs::remove_file(&append).unwrap();
+    input.run_id = RunId("second-run".into());
+    input.attempt_id = RunAttemptId("second-attempt".into());
+    input.root_node_id = NodeId("second-root".into());
+    input.run_ordinal = 2;
+    input.provider_turn_ordinal = 2;
+    input.message.message_id = MessageId("00000000-0000-4000-8000-000000000010".into());
+    assert!(matches!(
+        runtime.start_turn(input.clone()).await,
+        Err(ProviderError::Operation {
+            operation: ProviderOperation::Open,
+            ..
+        })
+    ));
+    peer.send(control(
+        "query-still-live",
+        "Bash",
+        json!({"command":"pwd"}),
+    ))
+    .await;
+    assert_eq!(
+        peer.read().await["response"]["request_id"],
+        "query-still-live"
+    );
+    std::fs::write(append, "File instructions\n").unwrap();
+    let handle = runtime.clone();
+    let mut start = tokio::spawn(async move { handle.start_turn(input).await });
+    let prompt = tokio::select! {result=&mut start=>panic!("start ended before a prompt: {result:?}"),frame=peer.read()=>frame};
+    assert_eq!(
+        prompt["type"], "user",
+        "valid retry must reuse the old initialized native query"
+    );
+    start.await.unwrap().unwrap();
+    peer.send(result("second")).await;
+    loop {
+        if let ProviderEventKind::Terminal { run_ordinal, .. } =
+            events.events.recv().await.unwrap().unwrap().kind
+        {
+            assert_eq!(run_ordinal, 2);
+            break;
+        }
+    }
+    assert_eq!(
+        compiled.load(Ordering::SeqCst),
+        3,
+        "one catalog/policy preparation per attempted turn"
+    );
+    runtime.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn native_background_wake_waits_for_an_app_run_and_never_offers_a_second_prompt() {
     use t3_contracts::orchestration_v2::{OrchestrationV2Actor, OrchestrationV2CreationSource};
     let (send, mut requests) = tokio::sync::mpsc::channel(4);

@@ -89,4 +89,6 @@ pub const MANIFEST: &[(u32, &str)] = &[
     (87, "ProjectionProjectsCustomTitle"),
     (88, "TurnItemTypeStatusIndex"),
     (89, "ShellThreadReadIndexes"),
+    (90, "AuthConnectDevices"),
+    (91, "AuthConnectDeniedRequests"),
 ];

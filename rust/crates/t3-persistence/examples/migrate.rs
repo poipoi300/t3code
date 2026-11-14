@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Rust applied {} migrations through {head}", applied.len());
     } else {
         drop(Database::open(path)?);
-        println!("Rust opened database at head 89");
+        println!("Rust opened database at head {}", migrations::LATEST_HEAD);
     }
     Ok(())
 }

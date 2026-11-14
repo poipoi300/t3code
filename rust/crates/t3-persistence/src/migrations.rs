@@ -4,7 +4,7 @@ pub use crate::manifest::MANIFEST;
 use crate::{Error, Result, citations::readable_search_text};
 
 pub const MINIMUM_SUPPORTED_HEAD: u32 = 69;
-pub const LATEST_HEAD: u32 = 89;
+pub const LATEST_HEAD: u32 = 91;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Migration {
@@ -212,6 +212,30 @@ fn apply(connection: &Connection, id: u32) -> Result<()> {
         }
         88 => include_str!("../sql/088.sql"),
         89 => include_str!("../sql/089.sql"),
+        90 => {
+            if !has_column(
+                connection,
+                "auth_pairing_links",
+                "requires_connect_approval",
+            )? {
+                connection.execute_batch("ALTER TABLE auth_pairing_links ADD COLUMN requires_connect_approval INTEGER NOT NULL DEFAULT 0;")?;
+            }
+            if !has_column(connection, "auth_pairing_links", "requested_client_json")? {
+                connection.execute_batch(
+                    "ALTER TABLE auth_pairing_links ADD COLUMN requested_client_json TEXT;",
+                )?;
+            }
+            if !has_column(connection, "auth_sessions", "proof_key_thumbprint")? {
+                connection.execute_batch(
+                    "ALTER TABLE auth_sessions ADD COLUMN proof_key_thumbprint TEXT;",
+                )?;
+            }
+            include_str!("../sql/090.sql")
+        }
+        91 if !has_column(connection, "auth_pairing_links", "connect_denied")? => {
+            "ALTER TABLE auth_pairing_links ADD COLUMN connect_denied INTEGER NOT NULL DEFAULT 0;"
+        }
+        91 => "",
         _ => unreachable!("manifest migration must have an implementation"),
     };
     connection.execute_batch(sql)?;

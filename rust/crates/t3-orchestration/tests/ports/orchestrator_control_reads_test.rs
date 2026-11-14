@@ -4218,75 +4218,187 @@ fn drift_compact_visit_keeps_a_forward_watermark_when_opening_with_an_older_cloc
 
 #[tokio::test]
 async fn drift_scheduled_queue_resolution_reaches_sqlite_execution_without_losing_pins() {
-    for pinned in [false,true] {
-        let harness=message_harness().await;
+    for pinned in [false, true] {
+        let harness = message_harness().await;
         harness.dispatch(json!({"type":"message.dispatch","commandId":"schedule-first","threadId":"thread","messageId":"schedule-first-input","text":"Busy","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"})).await.unwrap();
-        let mut send=json!({"type":"message.dispatch","commandId":"scheduled-send","threadId":"thread","messageId":"scheduled-input","scheduledTaskId":"scheduled-task","text":"Scheduled","attachments":[],"dispatchMode":{"type":"queue_after_active"},"createdBy":"user","creationSource":"web"});
-        let pin=json!({"instanceId":"codex","model":"pinned","options":[{"id":"reasoningEffort","value":"low"}]});
-        if pinned {send["modelSelection"]=pin.clone();}
+        let mut send = json!({"type":"message.dispatch","commandId":"scheduled-send","threadId":"thread","messageId":"scheduled-input","scheduledTaskId":"scheduled-task","text":"Scheduled","attachments":[],"dispatchMode":{"type":"queue_after_active"},"createdBy":"user","creationSource":"web"});
+        let pin = json!({"instanceId":"codex","model":"pinned","options":[{"id":"reasoningEffort","value":"low"}]});
+        if pinned {
+            send["modelSelection"] = pin.clone();
+        }
         harness.dispatch(send).await.unwrap();
-        let newer=json!({"instanceId":"codex","model":"new","options":[{"id":"reasoningEffort","value":"high"}]});
+        let newer = json!({"instanceId":"codex","model":"new","options":[{"id":"reasoningEffort","value":"high"}]});
         harness.dispatch(json!({"type":"thread.model-selection.set","commandId":"schedule-new-selection","threadId":"thread","modelSelection":newer})).await.unwrap();
-        let before=harness.reader.projection(ThreadId("thread".into())).await.unwrap().unwrap();
-        let run=change(&before.runs[0],json!({"status":"completed","completedAt":TEST_TIME}));
+        let before = harness
+            .reader
+            .projection(ThreadId("thread".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        let run = change(
+            &before.runs[0],
+            json!({"status":"completed","completedAt":TEST_TIME}),
+        );
         let event:OrchestrationV2DomainEvent=serde_json::from_value(json!({"id":"scheduled-first-ended","threadId":"thread","type":"run.updated","runId":run.id,"occurredAt":TEST_TIME,"payload":t3_contracts::stored::to_value(&run).unwrap()})).unwrap();
-        harness.sink.commit(CommitRequest{receipt:None,guard:CommitGuard::None,decision:Decision{events:vec![event.clone()],..Default::default()}}).await.unwrap();
-        harness.dispatcher.handle_run_update(&OrchestrationV2StoredEvent{sequence:1,command_id:Some(CommandId("scheduled-provider-end".into())),event}).await.unwrap();
-        let after=harness.reader.projection(ThreadId("thread".into())).await.unwrap().unwrap();
-        let delivered=after.runs.iter().find(|run|t3_contracts::stored::to_value(&run.user_message_id).unwrap()=="scheduled-input").unwrap();
-        assert_eq!(delivered.status,OrchestrationV2RunStatus::Starting);
-        assert_eq!(t3_contracts::stored::to_value(&delivered.model_selection).unwrap(),if pinned {pin}else{newer});
-        assert_eq!(after.thread.model_selection,delivered.model_selection);
+        harness
+            .sink
+            .commit(CommitRequest {
+                receipt: None,
+                guard: CommitGuard::None,
+                decision: Decision {
+                    events: vec![event.clone()],
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+        harness
+            .dispatcher
+            .handle_run_update(&OrchestrationV2StoredEvent {
+                sequence: 1,
+                command_id: Some(CommandId("scheduled-provider-end".into())),
+                event,
+            })
+            .await
+            .unwrap();
+        let after = harness
+            .reader
+            .projection(ThreadId("thread".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        let delivered = after
+            .runs
+            .iter()
+            .find(|run| {
+                t3_contracts::stored::to_value(&run.user_message_id).unwrap() == "scheduled-input"
+            })
+            .unwrap();
+        assert_eq!(delivered.status, OrchestrationV2RunStatus::Starting);
+        assert_eq!(
+            t3_contracts::stored::to_value(&delivered.model_selection).unwrap(),
+            if pinned { pin } else { newer }
+        );
+        assert_eq!(after.thread.model_selection, delivered.model_selection);
     }
 }
 
 #[test]
 fn drift_promoted_schedule_steers_with_current_model_options() {
-    let mut projection=running_projection();
-    let selected=json!({"instanceId":"codex","model":"next","options":[{"id":"reasoningEffort","value":"high"}]});
-    projection.thread=change(&projection.thread,json!({"modelSelection":selected}));
-    projection.runs.push(change(&run("queued",2,"queued"),json!({"rootNodeId":"queued-node","activeAttemptId":"queued-attempt"})));
-    projection.messages.push(change(&super::command_policy_test::message("queued"),json!({"scheduledTaskId":"scheduled-task","followsThreadSelection":true})));
-    projection.nodes.push(change(&projection.nodes[0],json!({"id":"queued-node","rootNodeId":"queued-node","runId":"queued","status":"pending"})));
+    let mut projection = running_projection();
+    let selected = json!({"instanceId":"codex","model":"next","options":[{"id":"reasoningEffort","value":"high"}]});
+    projection.thread = change(&projection.thread, json!({"modelSelection":selected}));
+    projection.runs.push(change(
+        &run("queued", 2, "queued"),
+        json!({"rootNodeId":"queued-node","activeAttemptId":"queued-attempt"}),
+    ));
+    projection.messages.push(change(
+        &super::command_policy_test::message("queued"),
+        json!({"scheduledTaskId":"scheduled-task","followsThreadSelection":true}),
+    ));
+    projection.nodes.push(change(
+        &projection.nodes[0],
+        json!({"id":"queued-node","rootNodeId":"queued-node","runId":"queued","status":"pending"}),
+    ));
     projection.attempts.push(change(&projection.attempts[0],json!({"id":"queued-attempt","runId":"queued","rootNodeId":"queued-node","status":"pending"})));
-    let prepared=prepared_with_adapter(projection,"codex");
+    let mut prepared = prepared_with_adapter(projection, "codex");
+    prepared.inputs.selection_transition =
+        Some(t3_orchestration::provider::SelectionTransitionPlan::ApplyOnNextTurn);
     let result=PureDecisionEngine.decide_prepared(&prepared,&command(json!({"type":"queued-message.promote-to-steer","commandId":"scheduled-promote","threadId":"thread","queuedRunId":"queued","targetRunId":"prepared"}))).unwrap();
-    let selection=result.effects.iter().find_map(|effect| match &effect.request {t3_orchestration::effects::EffectRequest::Steer{model_selection,..}=>model_selection.as_ref(), _=>None}).unwrap();
-    assert_eq!(t3_contracts::stored::to_value(selection).unwrap(),selected);
+    let selection = result
+        .effects
+        .iter()
+        .find_map(|effect| match &effect.request {
+            t3_orchestration::effects::EffectRequest::Steer {
+                model_selection, ..
+            } => model_selection.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(t3_contracts::stored::to_value(selection).unwrap(), selected);
 }
 
 #[tokio::test]
 async fn drift_usage_limited_snooze_loads_only_the_failed_runs_error_evidence() {
-    let harness=message_harness().await;
-    for index in [0,1] {
+    let harness = message_harness().await;
+    for index in [0, 1] {
         harness.dispatch(json!({"type":"message.dispatch","commandId":format!("limit-send-{index}"),"threadId":"thread","messageId":format!("limit-input-{index}"),"text":"Work","attachments":[],"dispatchMode":{"type":if index==0 {"start_immediately"}else{"queue_after_active"}},"createdBy":"user","creationSource":"web"})).await.unwrap();
     }
-    let before=harness.reader.projection(ThreadId("thread".into())).await.unwrap().unwrap();
-    let run=change(&before.runs[0],json!({"status":"failed","completedAt":TEST_TIME}));
-    let error=json!({"id":"limited-error","threadId":"thread","runId":run.id,"nodeId":run.root_node_id,"providerThreadId":run.provider_thread_id,"providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":50,"status":"failed","title":"Usage limit","startedAt":TEST_TIME,"completedAt":TEST_TIME,"updatedAt":TEST_TIME,"type":"error","failure":{"class":"usage_limit","message":"Limit","code":"api_error_429","retryable":true,"resetAt":null}});
+    let before = harness
+        .reader
+        .projection(ThreadId("thread".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    let run = change(
+        &before.runs[0],
+        json!({"status":"failed","completedAt":TEST_TIME}),
+    );
+    let error = json!({"id":"limited-error","threadId":"thread","runId":run.id,"nodeId":run.root_node_id,"providerThreadId":run.provider_thread_id,"providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":50,"status":"failed","title":"Usage limit","startedAt":TEST_TIME,"completedAt":TEST_TIME,"updatedAt":TEST_TIME,"type":"error","failure":{"class":"usage_limit","message":"Limit","code":"api_error_429","retryable":true,"resetAt":null}});
     harness.sink.commit(CommitRequest{receipt:None,guard:CommitGuard::None,decision:Decision{events:vec![serde_json::from_value(json!({"id":"limited-run","threadId":"thread","type":"run.updated","runId":run.id,"occurredAt":TEST_TIME,"payload":t3_contracts::stored::to_value(&run).unwrap()})).unwrap(),serde_json::from_value(json!({"id":"limited-item","threadId":"thread","type":"turn-item.updated","runId":run.id,"occurredAt":TEST_TIME,"payload":error})).unwrap()],..Default::default()}}).await.unwrap();
     harness.database.stores.transaction(|db| {db.execute("INSERT INTO orchestration_v2_projection_turn_items(turn_item_id,thread_id,run_id,ordinal,type,status,updated_at,payload_json) VALUES('old-invalid-error','thread','old-run',99,'error','failed',?1,'{}')",[TEST_TIME])?;Ok(())}).await.unwrap();
     harness.dispatch(json!({"type":"thread.snooze","commandId":"snooze-limited-sql","threadId":"thread","snoozedUntil":"2026-09-07T00:00:00.000Z"})).await.unwrap();
-    assert_eq!(harness.reader.thread(ThreadId("thread".into())).await.unwrap().unwrap().snoozed_until.flatten().unwrap().0,"2026-09-07T00:00:00.000Z");
+    assert_eq!(
+        harness
+            .reader
+            .thread(ThreadId("thread".into()))
+            .await
+            .unwrap()
+            .unwrap()
+            .snoozed_until
+            .flatten()
+            .unwrap()
+            .0,
+        "2026-09-07T00:00:00.000Z"
+    );
 }
 
 #[test]
 fn drift_cancellation_marks_completed_followup_when_awaited_work_keeps_it_open() {
     use t3_orchestration::ports::decisions::orchestrator::delegated_cancellation_marker;
-    let (parent,mut child)=recovery_pair();
-    child.thread=change(&child.thread,json!({"forkedFrom":{"type":"node","threadId":"thread","nodeId":"original"}}));
-    child.runs[0]=change(&child.runs[0],json!({"delegatedTaskId":"task"}));
-    child.provider_threads=vec![change(&prepared_projection().provider_threads[0],json!({"appThreadId":"child","pendingBackgroundTasks":[{"kind":"command","taskId":"check","awaited":true}]}))];
-    let task=&parent.context.projection.as_ref().unwrap().subagents[0];
-    let marker=delegated_cancellation_marker(&child,&child,task,&parent.context.now).unwrap().unwrap();
-    assert_eq!(t3_contracts::stored::to_value(&marker).unwrap()["cancelledRunId"],"child-run");
-    let stop=command(json!({"type":"thread.stop","commandId":"cancel-held-followup","threadId":"child","stopDelegatedTasks":false}));
-    let child_context=context(Some(child.clone())).with_inputs(DecisionInputs::default());
-    let decision=PureDecisionEngine.decide_cancelled_delegated_stop(&child_context,&stop,Some(&marker)).unwrap();
-    let events:Vec<_>=decision.events.iter().map(|event|t3_contracts::stored::to_value(event).unwrap()).collect();
-    assert_eq!(events[0]["threadId"],"thread");
-    assert_eq!(events[0]["payload"]["cancelledRunId"],"child-run");
-    assert!(events.iter().any(|event|event["threadId"]=="child"&&event["payload"]["type"]=="run_interrupt_request"));
-    child.provider_threads[0]=change(&child.provider_threads[0],json!({"pendingBackgroundTasks":[]}));
-    assert!(delegated_cancellation_marker(&child,&child,task,&parent.context.now).unwrap().is_none());
+    let (parent, mut child) = recovery_pair();
+    child.thread = change(
+        &child.thread,
+        json!({"forkedFrom":{"type":"node","threadId":"thread","nodeId":"original"}}),
+    );
+    child.runs[0] = change(&child.runs[0], json!({"delegatedTaskId":"task"}));
+    child.provider_threads = vec![change(
+        &prepared_projection().provider_threads[0],
+        json!({"appThreadId":"child","pendingBackgroundTasks":[{"kind":"command","taskId":"check","awaited":true}]}),
+    )];
+    let task = &parent.context.projection.as_ref().unwrap().subagents[0];
+    let marker = delegated_cancellation_marker(&child, &child, task, &parent.context.now)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        t3_contracts::stored::to_value(&marker).unwrap()["cancelledRunId"],
+        "child-run"
+    );
+    let stop = command(
+        json!({"type":"thread.stop","commandId":"cancel-held-followup","threadId":"child","stopDelegatedTasks":false}),
+    );
+    let child_context = context(Some(child.clone())).with_inputs(DecisionInputs::default());
+    let decision = PureDecisionEngine
+        .decide_cancelled_delegated_stop(&child_context, &stop, Some(&marker))
+        .unwrap();
+    let events: Vec<_> = decision
+        .events
+        .iter()
+        .map(|event| t3_contracts::stored::to_value(event).unwrap())
+        .collect();
+    assert_eq!(events[0]["threadId"], "thread");
+    assert_eq!(events[0]["payload"]["cancelledRunId"], "child-run");
+    assert!(
+        events.iter().any(|event| event["threadId"] == "child"
+            && event["payload"]["type"] == "run_interrupt_request")
+    );
+    child.provider_threads[0] = change(
+        &child.provider_threads[0],
+        json!({"pendingBackgroundTasks":[]}),
+    );
+    assert!(
+        delegated_cancellation_marker(&child, &child, task, &parent.context.now)
+            .unwrap()
+            .is_none()
+    );
 }

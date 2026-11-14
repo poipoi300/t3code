@@ -108,10 +108,10 @@ fn fresh_database_matches_typescript_schema_ledger_and_pragmas() {
 
 #[test]
 fn every_supported_head_resumes_to_identical_schema() {
-    for head in 69..=89 {
+    for head in 69..=migrations::LATEST_HEAD {
         let mut connection = database_at(head);
         let executed = migrations::run_migrations(&mut connection, None).unwrap();
-        assert_eq!(executed.len(), (89 - head) as usize);
+        assert_eq!(executed.len(), (migrations::LATEST_HEAD - head) as usize);
         assert_head_schema(&connection);
         assert!(!migrations::has_pending_migrations(&connection).unwrap());
     }
@@ -145,11 +145,123 @@ fn auth_connect_migrations_preserve_head89_data_and_defaults() {
         [(91, "AuthConnectDeniedRequests")]
     );
     assert_eq!(connection.query_row("SELECT connect_denied,requires_connect_approval,requested_client_json FROM auth_pairing_links", [], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?))).unwrap(), (0,1,"{\"label\":\"Device\"}".into()));
-    assert_eq!(connection.query_row("SELECT proof_key_thumbprint FROM auth_sessions", [], |row| row.get::<_,String>(0)).unwrap(), "key");
-    assert_eq!(connection.query_row("SELECT approved_at FROM auth_connect_devices WHERE proof_key_thumbprint='key'", [], |row| row.get::<_,String>(0)).unwrap(), "2026-10-03");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT proof_key_thumbprint FROM auth_sessions",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "key"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT approved_at FROM auth_connect_devices WHERE proof_key_thumbprint='key'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "2026-10-03"
+    );
     assert_eq!(connection.query_row("SELECT COUNT(*) FROM effect_sql_migrations WHERE migration_id<=89 AND created_at='2026-10-01 01:02:03'", [], |row| row.get::<_,i64>(0)).unwrap(),89);
     assert_head_schema(&connection);
-    assert!(migrations::run_migrations(&mut connection, None).unwrap().is_empty());
+    assert!(
+        migrations::run_migrations(&mut connection, None)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn auth_connect_migrations_repair_each_partial_schema_and_preserve_trust() {
+    for present in 0..16 {
+        let mut connection = database_at(89);
+        if present & 1 != 0 {
+            connection.execute_batch("ALTER TABLE auth_pairing_links ADD COLUMN requires_connect_approval INTEGER NOT NULL DEFAULT 0;").unwrap();
+        }
+        if present & 2 != 0 {
+            connection
+                .execute_batch(
+                    "ALTER TABLE auth_pairing_links ADD COLUMN requested_client_json TEXT;",
+                )
+                .unwrap();
+        }
+        if present & 4 != 0 {
+            connection
+                .execute_batch("ALTER TABLE auth_sessions ADD COLUMN proof_key_thumbprint TEXT;")
+                .unwrap();
+        }
+        if present & 8 != 0 {
+            connection.execute_batch("CREATE TABLE auth_connect_devices(proof_key_thumbprint TEXT PRIMARY KEY,client_json TEXT,approved_at TEXT NOT NULL);
+                INSERT INTO auth_connect_devices VALUES ('trusted',NULL,'2026-10-01');").unwrap();
+        }
+        connection.execute_batch("ALTER TABLE auth_pairing_links ADD COLUMN connect_denied INTEGER NOT NULL DEFAULT 0;
+            INSERT INTO auth_pairing_links(id,credential,method,scopes,subject,created_at,expires_at,connect_denied) VALUES ('denied','credential','one-time-token','[]','device','2026-10-01','2027-10-01',1);").unwrap();
+        assert_eq!(
+            migrations::run_migrations(&mut connection, None)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(connection.query_row("SELECT requires_connect_approval,requested_client_json,connect_denied FROM auth_pairing_links", [], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,i64>(2)?))).unwrap(),(0,None,1));
+        let devices = connection.query_row("SELECT count(*) FROM auth_connect_devices WHERE proof_key_thumbprint='trusted' AND approved_at='2026-10-01' AND client_json IS NULL", [], |row| row.get::<_,i64>(0)).unwrap();
+        assert_eq!(devices, i64::from(present & 8 != 0));
+        let before = schema(&connection);
+        connection
+            .execute_batch("DELETE FROM effect_sql_migrations WHERE migration_id>=90;")
+            .unwrap();
+        assert_eq!(
+            migrations::run_migrations(&mut connection, None)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(schema(&connection), before);
+        assert_eq!(
+            connection
+                .query_row("SELECT connect_denied FROM auth_pairing_links", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+    }
+}
+
+#[test]
+fn auth_connect_migrations_roll_back_schema_and_ledger_and_retry() {
+    for (id, missing) in [(90, "auth_sessions"), (91, "auth_pairing_links")] {
+        let mut connection = database_at(id - 1);
+        let restore = schema(&connection)
+            .into_iter()
+            .filter(|object| object.2 == missing)
+            .map(|object| String::from_utf8(object.3).unwrap() + ";")
+            .collect::<Vec<_>>();
+        connection
+            .execute_batch(&format!("DROP TABLE {missing};"))
+            .unwrap();
+        let before = schema(&connection);
+        let ledger = migrations::history(&connection).unwrap();
+        assert!(
+            matches!(migrations::run_migrations(&mut connection, None), Err(Error::Migration { id: failed, .. }) if failed == id)
+        );
+        assert_eq!(schema(&connection), before);
+        assert_eq!(migrations::history(&connection).unwrap(), ledger);
+        for sql in restore.iter().rev() {
+            connection.execute_batch(sql).unwrap();
+        }
+        assert_eq!(
+            migrations::run_migrations(&mut connection, None)
+                .unwrap()
+                .first()
+                .unwrap()
+                .id,
+            id
+        );
+        assert_head_schema(&connection);
+    }
 }
 
 fn insert_message(connection: &Connection, id: &str, text: serde_json::Value) {
@@ -327,8 +439,8 @@ fn ledger_validates_v2_names_gaps_limits_and_accepts_later_builds() {
                 .is_empty()
         );
     }
-    let mut connection = database_at(89);
-    connection.execute_batch("UPDATE effect_sql_migrations SET name='SiteLocalMigration' WHERE migration_id IN (30,54); INSERT INTO effect_sql_migrations(migration_id,name) VALUES (90,'NewerV2Migration');").unwrap();
+    let mut connection = database_at(migrations::LATEST_HEAD);
+    connection.execute_batch("UPDATE effect_sql_migrations SET name='SiteLocalMigration' WHERE migration_id IN (30,54); INSERT INTO effect_sql_migrations(migration_id,name) VALUES (92,'NewerV2Migration');").unwrap();
     assert!(
         migrations::run_migrations(&mut connection, None)
             .unwrap()
@@ -367,7 +479,7 @@ fn empty_ledger_left_by_an_interrupted_bootstrap_can_start_fresh() {
         migrations::run_migrations(&mut connection, None)
             .unwrap()
             .len(),
-        89
+        migrations::LATEST_HEAD as usize
     );
     assert_head_schema(&connection);
 }
@@ -399,7 +511,7 @@ fn concurrent_migration_runners_resume_after_the_winner() {
             .map(|handle| handle.join().unwrap())
             .sum::<usize>()
     });
-    assert_eq!(applied, 9);
+    assert_eq!(applied, (migrations::LATEST_HEAD - 80) as usize);
     assert_head_schema(&Connection::open(path).unwrap());
 }
 
@@ -1323,7 +1435,10 @@ fn open_v2_imports_supported_sources_and_preserves_existing_destinations() {
                     .get::<_, String>(0))?,
                 "from source"
             );
-            assert_eq!(migrations::history(connection)?.last().unwrap().id, 89);
+            assert_eq!(
+                migrations::history(connection)?.last().unwrap().id,
+                migrations::LATEST_HEAD
+            );
             Ok(())
         })
         .unwrap();
@@ -1340,7 +1455,7 @@ fn open_v2_imports_supported_sources_and_preserves_existing_destinations() {
 fn fresh_schema_preserves_typescript_creation_order() {
     let expected = Connection::open_in_memory().unwrap();
     expected
-        .execute_batch(include_str!("../sql/head-89.sql"))
+        .execute_batch(include_str!("../sql/head-91.sql"))
         .unwrap();
     let names = |connection: &Connection| {
         connection.prepare("SELECT name FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name NOT IN (SELECT name FROM pragma_table_list WHERE type='shadow') ORDER BY rowid").unwrap()

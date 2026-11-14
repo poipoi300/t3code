@@ -171,6 +171,57 @@ impl DecisionEngine for PureDecisionEngine {
 }
 
 impl PureDecisionEngine {
+    pub fn decide_cancelled_delegated_stop(
+        &self,
+        context: &PreparedDecisionContext,
+        command: &OrchestrationV2ServerCommand,
+        marker: Option<&OrchestrationV2Subagent>,
+    ) -> Result<Decision> {
+        let value = stored_value(command)?;
+        if !matches!(
+            value["type"].as_str(),
+            Some("thread.stop" | "run.interrupt")
+        ) {
+            return Err(Error::Unsupported(
+                "delegated cancellation requires a Stop command",
+            ));
+        }
+        if let Some(marker) = marker {
+            let marker = stored_value(marker)?;
+            let child = context.context.projection.as_ref().ok_or(Error::Stale)?;
+            if marker["origin"] != "app_owned"
+                || marker["childThreadId"] != value["threadId"]
+                || marker["threadId"] != stored_value(&child.thread.lineage.parent_thread_id)?
+            {
+                return Err(rejection(
+                    &value,
+                    "Cancellation marker does not belong to this child.",
+                ));
+            }
+        }
+        let mut decision = self.decide_prepared(context, command)?;
+        if let Some(marker) = marker {
+            // Stop consumes one event ID per emitted event, leaving the next ID for the marker.
+            let id = context
+                .context
+                .ids
+                .iter()
+                .filter(|(kind, _)| *kind == IdKind::Event)
+                .nth(decision.events.len())
+                .map(|(_, id)| id)
+                .ok_or(Error::Unsupported(
+                    "cancellation marker requires an event id",
+                ))?;
+            let marker = stored_value(marker)?;
+            let mut event = json!({"id":id,"type":"subagent.updated","threadId":marker["threadId"],"nodeId":marker["id"],"driver":marker["driver"],"providerInstanceId":marker["providerInstanceId"],"occurredAt":context.context.now,"payload":marker});
+            if !marker["runId"].is_null() {
+                event["runId"] = marker["runId"].clone();
+            }
+            decision.events.insert(0, serde_json::from_value(event)?);
+        }
+        Ok(decision)
+    }
+
     pub fn decide_delegated_recovery(
         &self,
         context: &PreparedDecisionContext,

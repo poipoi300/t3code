@@ -1136,3 +1136,153 @@ pub fn queue_tail_model_selection(
     }
     Ok(projection.thread.model_selection.clone())
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActiveThreadListEntry {
+    pub id: ThreadId,
+    pub project_id: ProjectId,
+    pub title: t3_contracts::base_schemas::TrimmedNonEmptyString,
+    pub lineage: OrchestrationV2AppThreadLineage,
+    pub settled_override: Option<AppThreadSettledOverride>,
+    pub settled_at: Option<IsoDateTime>,
+    pub snoozed_until: Option<Option<IsoDateTime>>,
+    pub updated_at: IsoDateTime,
+}
+
+fn terminal_task_run(status: &OrchestrationV2RunStatus) -> bool {
+    matches!(
+        status,
+        OrchestrationV2RunStatus::Completed
+            | OrchestrationV2RunStatus::Failed
+            | OrchestrationV2RunStatus::Interrupted
+            | OrchestrationV2RunStatus::Cancelled
+            | OrchestrationV2RunStatus::RolledBack
+    )
+}
+
+pub fn delegated_result_pending(
+    child: &OrchestrationV2ThreadProjection,
+    task: Option<&NodeId>,
+    restarts: &[RunId],
+) -> Result<bool> {
+    use crate::ports::runs_ingestion::restart_background_note::{
+        delegated_task_awaits_work, delegated_task_result_run_from, delegated_task_runs,
+    };
+    let pending_after =
+        |runs: &[OrchestrationV2Run], result: &OrchestrationV2Run| -> Result<bool> {
+            for run in runs {
+                if (run.id == result.id || super::model_switch::run_ran_after(run, result))
+                    && restarts.contains(
+                        &crate::ports::checkpoints_forks::checkpoint_restore_safety::expanded_id(
+                            &run.id,
+                        )?,
+                    )
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+    if let Some(task) = task {
+        let runs = delegated_task_runs(&child.runs, &child.messages, task)?;
+        let Some(run) = delegated_task_result_run_from(&runs) else {
+            return Ok(true);
+        };
+        if !terminal_task_run(&run.status)
+            || delegated_task_awaits_work(&runs, &child.subagents, &child.provider_threads)
+        {
+            return Ok(true);
+        }
+        return pending_after(&runs, run);
+    }
+    let progress = delegated_task_progress(child)?;
+    if progress.state != "result_available" {
+        return Ok(true);
+    }
+    progress
+        .result_run
+        .map_or(Ok(false), |run| pending_after(&child.runs, run))
+}
+
+pub fn delegated_cancellation_marker(
+    before: &OrchestrationV2ThreadProjection,
+    after: &OrchestrationV2ThreadProjection,
+    task: &OrchestrationV2Subagent,
+    now: &IsoDateTime,
+) -> Result<Option<OrchestrationV2Subagent>> {
+    use crate::ports::runs_ingestion::restart_background_note::{
+        delegated_task_awaits_work, delegated_task_runs, run_outcome,
+    };
+    let value = t3_contracts::stored::to_value(task)?;
+    if value["origin"] != "app_owned"
+        || value["childThreadId"] != t3_contracts::stored::to_value(&after.thread.id)?
+        || !matches!(
+            value["status"].as_str(),
+            Some("pending" | "running" | "waiting")
+        )
+    {
+        return Ok(None);
+    }
+    let id = crate::ports::checkpoints_forks::checkpoint_restore_safety::expanded_id(&task.id)?;
+    let latest = |child: &OrchestrationV2ThreadProjection| -> Result<Option<OrchestrationV2Run>> {
+        Ok(delegated_task_runs(&child.runs, &[], &id)?
+            .into_iter()
+            .max_by_key(|run| run.ordinal))
+    };
+    let after_turn = |child: &OrchestrationV2ThreadProjection| {
+        let mut child = child.clone();
+        for run in &mut child.runs {
+            if run.status == OrchestrationV2RunStatus::Waiting {
+                run.status = OrchestrationV2RunStatus::Completed;
+            }
+        }
+        child
+    };
+    let unsettled = if let Some(run) = latest(before)? {
+        !terminal_task_run(&run_outcome(&run))
+            || delegated_task_awaits_work(
+                &delegated_task_runs(&before.runs, &before.messages, &id)?,
+                &before.subagents,
+                &before.provider_threads,
+            )
+    } else {
+        let thread = t3_contracts::stored::to_value(&before.thread)?;
+        thread["forkedFrom"]["type"] == "node"
+            && thread["forkedFrom"]["nodeId"] == value["id"]
+            && delegated_task_progress(&after_turn(before))?.state != "result_available"
+    };
+    if !unsettled {
+        return Ok(None);
+    }
+    let messages = t3_contracts::stored::to_value(&after.messages)?;
+    let monitors: Vec<_> = messages
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|message| message["notification"]["source"]["kind"] == "monitor")
+        .map(|message| message["runId"].clone())
+        .collect();
+    let mut selected = latest(after)?;
+    if selected.is_none() {
+        for run in &after.runs {
+            if super::command_policy::is_active_run(run)
+                && !monitors.contains(&t3_contracts::stored::to_value(&run.id)?)
+                && selected
+                    .as_ref()
+                    .is_none_or(|current| run.ordinal > current.ordinal)
+            {
+                selected = Some(run.clone());
+            }
+        }
+    }
+    if selected.is_none() {
+        selected = delegated_task_progress(&after_turn(after))?
+            .result_run
+            .cloned();
+    }
+    let Some(run) = selected else { return Ok(None) };
+    let mut marker = value;
+    marker["cancelledRunId"] = t3_contracts::stored::to_value(&run.id)?;
+    marker["updatedAt"] = serde_json::json!(now);
+    Ok(Some(serde_json::from_value(marker)?))
+}
