@@ -373,6 +373,10 @@ impl GitWorkflowService {
             requests: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
+    pub(crate) fn without_fsmonitor(mut self) -> Self {
+        self.git = self.git.without_fsmonitor();
+        self
+    }
     pub fn with_review_host(mut self, host: Arc<dyn ReviewHost>) -> Self {
         self.host = Some(host);
         self
@@ -564,11 +568,11 @@ impl GitWorkflowService {
             .map(|paths| paths.repository.root))
     }
     pub async fn current_branch(&self) -> Result<Option<String>, GitError> {
-        if self.repository_root().await?.is_none() {
+        let reader = self.git.without_fsmonitor();
+        if reader.repository_paths_uncached().await?.is_none() {
             return Ok(None);
         }
-        let output = self
-            .git
+        let output = reader
             .execute_command(
                 "GitWorkflowService.currentBranch",
                 &["symbolic-ref", "--quiet", "HEAD"],
@@ -582,7 +586,7 @@ impl GitWorkflowService {
         match output.code {
             Some(0) => Ok(branch_from_ref(&output.stdout_text())),
             Some(1) => Ok(None),
-            _ => Err(self.git.command_error(
+            _ => Err(reader.command_error(
                 "GitWorkflowService.currentBranch",
                 "Failed to read the checked-out branch.",
             )),

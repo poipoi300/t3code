@@ -462,7 +462,8 @@ impl Git {
     pub(crate) async fn repository_paths_uncached(
         &self,
     ) -> Result<Option<RepositoryPaths>, GitError> {
-        let output = self
+        let reader = self.without_fsmonitor();
+        let output = reader
             .execute_command(
                 "GitVcsDriver.resolveRepositoryPaths.commonDir",
                 &["rev-parse", "--git-common-dir"],
@@ -474,21 +475,21 @@ impl Git {
             )
             .await?;
         if output.code != Some(0) {
-            if is_non_repository(&output.stderr_text()) || !self.cwd().is_dir() {
+            if is_non_repository(&output.stderr_text()) || !reader.cwd().is_dir() {
                 return Ok(None);
             }
             return Err(CommandError::exit(
                 "GitVcsDriver.resolveRepositoryPaths.commonDir",
-                self.cwd(),
+                reader.cwd(),
                 &["rev-parse", "--git-common-dir"],
                 &output,
                 Some("Failed to resolve the Git common directory."),
             )
             .into());
         }
-        let common = self.absolute_git_path(output.stdout_text().trim())?;
+        let common = reader.absolute_git_path(output.stdout_text().trim())?;
         let common_dir = physical_path(&common);
-        let root = self
+        let root = reader
             .core_text(
                 "GitVcsDriver.resolveRepositoryPaths.worktreeRoot",
                 &["rev-parse", "--show-toplevel"],
@@ -499,7 +500,7 @@ impl Git {
         if root.is_empty() {
             return Ok(None);
         }
-        let branch = self
+        let branch = reader
             .core_text(
                 "GitVcsDriver.resolveRepositoryPaths.currentBranch",
                 &["symbolic-ref", "--quiet", "HEAD"],
@@ -508,9 +509,9 @@ impl Git {
             .await?;
         let root = PathBuf::from(root);
         Ok(Some(RepositoryPaths {
-            at_root: std::fs::canonicalize(self.cwd())
+            at_root: std::fs::canonicalize(reader.cwd())
                 .ok()
-                .map(|_| physical_path(self.cwd()) == root),
+                .map(|_| physical_path(reader.cwd()) == root),
             repository: Repository { root, common_dir },
             current_branch: branch_from_ref(&branch),
         }))
@@ -820,7 +821,8 @@ impl Git {
         &self,
         options: LocalStatusOptions,
     ) -> Result<GitStatusDetails, GitError> {
-        let paths = self.repository_paths(false).await?;
+        let reader = self.without_fsmonitor();
+        let paths = reader.repository_paths(false).await?;
         let Some(paths) = paths else {
             return Ok(GitStatusDetails::default());
         };
@@ -828,7 +830,7 @@ impl Git {
         if !options.include_divergence {
             args.push("--no-ahead-behind");
         }
-        let index = self
+        let index = reader
             .core_text(
                 "GitVcsDriver.statusDetails.indexPath",
                 &["rev-parse", "--git-path", "index"],
@@ -836,17 +838,17 @@ impl Git {
             )
             .await?;
         if !index.trim().is_empty()
-            && self
+            && reader
                 .cwd()
                 .join(format!("{}.lock", index.trim()))
                 .try_exists()?
         {
-            return Err(self.command_error(
+            return Err(reader.command_error(
                 "GitVcsDriver.statusDetails.indexPath",
                 "Git index is locked. Status will resume when the index lock is removed.",
             ));
         }
-        let status = self
+        let status = reader
             .execute_command(
                 "GitVcsDriver.statusDetails.status",
                 &args,
@@ -858,12 +860,12 @@ impl Git {
             )
             .await?;
         if status.code != Some(0) {
-            if is_non_repository(&status.stderr_text()) || !self.cwd().is_dir() {
+            if is_non_repository(&status.stderr_text()) || !reader.cwd().is_dir() {
                 return Ok(GitStatusDetails::default());
             }
             return Err(CommandError::exit(
                 "GitVcsDriver.statusDetails.status",
-                self.cwd(),
+                reader.cwd(),
                 &args,
                 &status,
                 Some("Git status failed."),
@@ -871,10 +873,19 @@ impl Git {
             .into());
         }
         let parsed = crate::parse_status(&status.stdout_text())?;
-        let numstat = self
+        let numstat = reader
             .execute_command(
                 "GitVcsDriver.statusDetails.numstat",
-                &["diff-index", "-M", "--numstat", "-z", "HEAD", "--"],
+                &[
+                    "diff-index",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "-M",
+                    "--numstat",
+                    "-z",
+                    "HEAD",
+                    "--",
+                ],
                 ExecuteOptions {
                     allow_nonzero: true,
                     max_output_bytes: METADATA_LIMIT,
@@ -886,19 +897,32 @@ impl Git {
             parse_numstat(&numstat.stdout_text())
         } else if unborn(&numstat.stderr_text()) {
             let mut entries = parse_numstat(
-                &self
+                &reader
                     .core_text(
                         "GitVcsDriver.statusDetails.numstat.unborn.staged",
-                        &["diff", "--cached", "--numstat", "-z"],
+                        &[
+                            "diff",
+                            "--no-ext-diff",
+                            "--no-textconv",
+                            "--cached",
+                            "--numstat",
+                            "-z",
+                        ],
                         false,
                     )
                     .await?,
             );
             entries.extend(parse_numstat(
-                &self
+                &reader
                     .core_text(
                         "GitVcsDriver.statusDetails.numstat.unborn",
-                        &["diff-files", "--numstat", "-z"],
+                        &[
+                            "diff-files",
+                            "--no-ext-diff",
+                            "--no-textconv",
+                            "--numstat",
+                            "-z",
+                        ],
                         false,
                     )
                     .await?,
@@ -907,15 +931,24 @@ impl Git {
         } else {
             return Err(CommandError::exit(
                 "GitVcsDriver.statusDetails.numstat",
-                self.cwd(),
-                &["diff-index", "-M", "--numstat", "-z", "HEAD", "--"],
+                reader.cwd(),
+                &[
+                    "diff-index",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "-M",
+                    "--numstat",
+                    "-z",
+                    "HEAD",
+                    "--",
+                ],
                 &numstat,
                 Some("git diff-index HEAD --numstat failed."),
             )
             .into());
         };
         let common = path_key(&paths.repository.common_dir);
-        let common_git = self
+        let common_git = reader
             .at(
                 if paths
                     .repository
@@ -923,13 +956,13 @@ impl Git {
                     .file_name()
                     .is_some_and(|name| name == ".git")
                 {
-                    paths.repository.common_dir.parent().unwrap_or(self.cwd())
+                    paths.repository.common_dir.parent().unwrap_or(reader.cwd())
                 } else {
                     &paths.repository.common_dir
                 },
             )
             .with_git_dir(paths.repository.common_dir.clone());
-        let default = self
+        let default = reader
             .core
             .defaults
             .get(&common, Duration::from_secs(300), Duration::ZERO, || {
@@ -938,7 +971,7 @@ impl Git {
             .await
             .ok()
             .flatten();
-        let has_remote = self
+        let has_remote = reader
             .core
             .remotes
             .get(
@@ -957,7 +990,8 @@ impl Git {
             && let Some(branch) = parsed.branch.as_deref()
             && (parsed.upstream.is_none() || !is_default)
         {
-            self.ahead_of_base(branch, default.as_deref())
+            reader
+                .ahead_of_base(branch, default.as_deref())
                 .await
                 .unwrap_or(0)
         } else {
@@ -993,7 +1027,8 @@ impl Git {
             files,
         };
         let branch_changes = if options.include_branch_changes {
-            self.at(&paths.repository.root)
+            reader
+                .at(&paths.repository.root)
                 .branch_change_totals(
                     parsed.branch.as_deref(),
                     default.as_deref(),
@@ -1049,14 +1084,15 @@ impl Git {
         &self,
         refresh_upstream: bool,
     ) -> Result<RemoteStatusDetails, GitError> {
+        let reader = self.without_fsmonitor();
         if refresh_upstream {
-            let _ = self.refresh_status_upstream().await;
+            let _ = reader.refresh_status_upstream().await;
         }
-        if self.repository_paths_uncached().await?.is_none() {
+        if reader.repository_paths_uncached().await?.is_none() {
             return Ok(RemoteStatusDetails::default());
         }
         let branch = branch_from_ref(
-            &self
+            &reader
                 .core_text(
                     "GitVcsDriver.statusDetailsRemote.branch",
                     &["symbolic-ref", "--quiet", "HEAD"],
@@ -1064,9 +1100,9 @@ impl Git {
                 )
                 .await?,
         );
-        let upstream = self.current_upstream().await?;
+        let upstream = reader.current_upstream().await?;
         let (ahead, behind) = if upstream.is_some() {
-            let divergence = self
+            let divergence = reader
                 .core_text(
                     "GitVcsDriver.statusDetailsRemote.divergence",
                     &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
@@ -1080,13 +1116,13 @@ impl Git {
         } else {
             (
                 match &branch {
-                    Some(branch) => self.ahead_of_base(branch, None).await.unwrap_or(0),
+                    Some(branch) => reader.ahead_of_base(branch, None).await.unwrap_or(0),
                     None => 0,
                 },
                 0,
             )
         };
-        let default = self.primary_default_branch().await?;
+        let default = reader.primary_default_branch().await?;
         let is_default = branch.as_deref().is_some_and(|branch| {
             Some(branch) == default.as_deref()
                 || default.is_none() && ["main", "master"].contains(&branch)
@@ -1097,7 +1133,8 @@ impl Git {
             if upstream.is_none() {
                 ahead
             } else {
-                self.ahead_of_base(branch, default.as_deref())
+                reader
+                    .ahead_of_base(branch, default.as_deref())
                     .await
                     .unwrap_or(0)
             }
@@ -1117,7 +1154,8 @@ impl Git {
         })
     }
     pub async fn refresh_status_upstream(&self) -> Result<(), GitError> {
-        let head = self
+        let reader = self.without_fsmonitor();
+        let head = reader
             .core_text(
                 "GitVcsDriver.refreshStatusUpstreamIfStale.headRef",
                 &["symbolic-ref", "--quiet", "HEAD"],
@@ -1127,7 +1165,7 @@ impl Git {
         if head.trim().is_empty() {
             return Ok(());
         }
-        let remote = self
+        let remote = reader
             .core_text(
                 "GitVcsDriver.refreshStatusUpstreamIfStale.upstreamRemote",
                 &[
@@ -1142,13 +1180,13 @@ impl Git {
         if remote.is_empty() || remote == "." {
             return Ok(());
         }
-        let Some(paths) = self.repository_paths(false).await? else {
+        let Some(paths) = reader.repository_paths(false).await? else {
             return Ok(());
         };
         let common = path_key(&paths.repository.common_dir);
         let key = format!("{common}\0{remote}");
         let state = {
-            let mut entries = self.core.refreshes.lock().await;
+            let mut entries = reader.core.refreshes.lock().await;
             if entries.len() >= 2048 && !entries.contains_key(&key) {
                 entries.retain(|_, state| Arc::strong_count(state) > 1);
                 if entries.len() >= 2048 {
@@ -1176,27 +1214,29 @@ impl Git {
                 .file_name()
                 .is_some_and(|name| name == ".git")
             {
-                paths.repository.common_dir.parent().unwrap_or(self.cwd())
+                paths.repository.common_dir.parent().unwrap_or(reader.cwd())
             } else {
                 &paths.repository.common_dir
             };
-            let mut git = self.at(fetch_cwd).with_cancellation(
-                self.status_fetch_scope
+            let mut git = reader.at(fetch_cwd).with_cancellation(
+                reader
+                    .status_fetch_scope
                     .as_ref()
-                    .unwrap_or(&self.core.background_shutdown)
+                    .unwrap_or(&reader.core.background_shutdown)
                     .child_token(),
             );
             // The fetch must not keep its owning service alive after the last handle is dropped.
             git.core = Arc::new(CoreState::default());
             let remote = remote.to_owned();
-            let permits = self.core.fetch_permits.clone();
-            let operation = self.status_fetch_scope.as_ref().map(|_| {
-                self.core
+            let permits = reader.core.fetch_permits.clone();
+            let operation = reader.status_fetch_scope.as_ref().map(|_| {
+                reader
+                    .core
                     .operations
                     .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                crate::actions::OperationGuard(self.core.clone())
+                crate::actions::OperationGuard(reader.core.clone())
             });
-            let scope = self.operation_scope.as_ref().map(|scope| scope.start());
+            let scope = reader.operation_scope.as_ref().map(|scope| scope.start());
             tokio::spawn(async move {
                 let _operation = operation;
                 let _scope = scope;
@@ -1246,7 +1286,7 @@ impl Git {
         };
         drop(locked);
         tokio::select! {
-            _ = self.cancellation.cancelled() => {},
+            _ = reader.cancellation.cancelled() => {},
             _ = tokio::time::timeout(Duration::from_secs(5), receiver.wait_for(|value| value.is_some())) => {},
         }
         let mut locked = state.lock().await;
@@ -1362,7 +1402,8 @@ impl Git {
         &self,
         input: &VcsListRefsInput,
     ) -> Result<VcsListRefsResult, GitError> {
-        let git = self.at(&input.cwd.0);
+        let reader = self.without_fsmonitor();
+        let git = reader.at(&input.cwd.0);
         let refresh = input.refresh.flatten() == Some(true);
         let Some(paths) = git.repository_paths(refresh).await? else {
             return Ok(VcsListRefsResult {
@@ -1375,16 +1416,18 @@ impl Git {
             });
         };
         let common = path_key(&paths.repository.common_dir);
-        let snapshot = if refresh || !self.core.refs.contains_key(&common).await {
-            self.core
+        let snapshot = if refresh || !reader.core.refs.contains_key(&common).await {
+            reader
+                .core
                 .refs_refresh
                 .get(
                     &common,
                     Duration::from_secs(5),
                     Duration::from_secs(30),
                     || async {
-                        self.core.refs.invalidate(&common).await;
-                        self.core
+                        reader.core.refs.invalidate(&common).await;
+                        reader
+                            .core
                             .refs
                             .get(&common, Duration::from_secs(120), Duration::ZERO, || {
                                 git.read_refs_snapshot(&paths)
@@ -1394,7 +1437,8 @@ impl Git {
                 )
                 .await?
         } else {
-            self.core
+            reader
+                .core
                 .refs
                 .get(&common, Duration::from_secs(120), Duration::ZERO, || {
                     git.read_refs_snapshot(&paths)

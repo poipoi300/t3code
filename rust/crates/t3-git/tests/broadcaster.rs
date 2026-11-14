@@ -212,3 +212,89 @@ async fn watcher_that_ended_before_repository_creation_restarts_for_existing_sub
     service.shutdown().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn status_and_branch_reads_never_run_configured_read_helpers() -> TestResult {
+    for unborn in [false, true] {
+        for global in [false, true] {
+            let repo = Repository::new().await?;
+            repo.write("tracked.txt", "before\n")?;
+            repo.write(".gitattributes", "*.txt diff=read-marker\n")?;
+            repo.command(&["add", "."]).await?;
+            if !unborn {
+                repo.command(&["commit", "-m", "fixture"]).await?;
+            }
+            repo.write("tracked.txt", "after\n")?;
+            repo.write("untracked.txt", "new\n")?;
+            let config = repo.temp.path().join("private-global-config");
+            let mut markers = Vec::new();
+            for (key, name) in [
+                ("core.fsmonitor", "fsmonitor"),
+                ("core.pager", "pager"),
+                ("diff.external", "external"),
+                ("diff.read-marker.command", "driver"),
+                ("diff.read-marker.textconv", "textconv"),
+            ] {
+                let marker = repo.temp.path().join(name);
+                let quoted = marker
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .replace('\'', "'\"'\"'");
+                let command = format!("printf invoked >> '{quoted}'; printf 'token\\0'");
+                let mut args = vec!["config"];
+                let config_text = config.to_string_lossy();
+                if global {
+                    args.extend(["--file", &config_text]);
+                }
+                args.extend([key, &command]);
+                repo.command(&args).await?;
+                markers.push(marker);
+            }
+            let git = if global {
+                repo.git.clone().with_environment(
+                    [("GIT_CONFIG_GLOBAL".into(), Some(config.into_os_string()))].into(),
+                )
+            } else {
+                repo.git.clone()
+            };
+            git.execute(&["status", "--porcelain=2"], Default::default())
+                .await?;
+            assert!(
+                markers[0].exists(),
+                "positive control: configured fsmonitor executes"
+            );
+            for marker in &markers {
+                if marker.exists() {
+                    std::fs::remove_file(marker)?;
+                }
+            }
+            let service = VcsStatusBroadcaster::new(GitWorkflowService::new(git.clone()))
+                .with_policy(Arc::new(t3_git::DisabledVcsPolling));
+            let branch = service.refresh_branch_status(repo.root()).await?;
+            assert_eq!(branch.ref_name.as_deref(), Some("main"));
+            assert!(
+                service
+                    .refresh_status(repo.root(), false)
+                    .await?
+                    .has_working_tree_changes
+            );
+            let mut branch = service.stream_branch_status(repo.root()).await?;
+            branch.recv().await.expect("initial branch");
+            branch.close().await;
+            let mut status = service.stream_status(repo.root(), false).await?;
+            status.recv().await.expect("initial status");
+            status.close().await;
+            git.status().await?;
+            git.status_details_local(Default::default()).await?;
+            git.status_details_remote(false).await?;
+            git.current_branch().await?;
+            service.shutdown().await;
+            let invoked: Vec<_> = markers.iter().filter(|path| path.exists()).collect();
+            assert!(
+                invoked.is_empty(),
+                "unborn={unborn}, global={global}: {invoked:?}"
+            );
+        }
+    }
+    Ok(())
+}

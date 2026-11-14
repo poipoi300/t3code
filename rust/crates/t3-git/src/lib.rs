@@ -176,6 +176,7 @@ pub struct Git {
     core: Arc<core::CoreState>,
     internal_paths: Option<(PathBuf, PathBuf)>,
     git_dir: Option<PathBuf>,
+    fsmonitor_disabled: bool,
 }
 
 impl Git {
@@ -192,6 +193,7 @@ impl Git {
             core: Arc::new(core::CoreState::default()),
             internal_paths: None,
             git_dir: None,
+            fsmonitor_disabled: false,
         }
     }
     pub fn cwd(&self) -> &Path {
@@ -267,6 +269,12 @@ impl Git {
         }
     }
 
+    pub(crate) fn without_fsmonitor(&self) -> Self {
+        let mut reader = self.clone();
+        reader.fsmonitor_disabled = true;
+        reader
+    }
+
     pub async fn execute(
         &self,
         args: &[impl AsRef<std::ffi::OsStr>],
@@ -302,6 +310,11 @@ impl Git {
                 process
                     .args
                     .extend(["--git-dir".into(), directory.as_os_str().to_owned()]);
+            }
+            if self.fsmonitor_disabled {
+                process
+                    .args
+                    .extend(["-c".into(), "core.fsmonitor=false".into()]);
             }
             process.args.extend(args.iter().cloned());
             // -C lets Git diagnose a deleted workspace without a spawn-cwd failure.
@@ -393,7 +406,8 @@ impl Git {
     }
 
     pub async fn detect_repository(&self) -> Result<Option<Repository>, GitError> {
-        let result = match self
+        let reader = self.without_fsmonitor();
+        let result = match reader
             .execute(
                 &[
                     "rev-parse",
@@ -421,11 +435,11 @@ impl Git {
                     line.starts_with("fatal: not a git repository")
                         || line.starts_with("fatal: cannot use bare repository")
                 })
-                || !self.cwd.exists()
+                || !reader.cwd.exists()
             {
                 return Ok(None);
             }
-            return Err(self.vcs_exit("GitVcsDriver.detectRepository", 4, &result));
+            return Err(reader.vcs_exit("GitVcsDriver.detectRepository", 4, &result));
         }
         let lines: Vec<_> = stdout.trim_end_matches(['\r', '\n']).split('\n').collect();
         if lines.first().map(|line| line.trim()) != Some("true") {
@@ -435,11 +449,13 @@ impl Git {
             (lines[1].trim().to_owned(), lines[2].trim().to_owned())
         } else {
             (
-                self.text(&["rev-parse", "--show-toplevel"])
+                reader
+                    .text(&["rev-parse", "--show-toplevel"])
                     .await?
                     .trim_end_matches('\n')
                     .to_owned(),
-                self.text(&["rev-parse", "--git-common-dir"])
+                reader
+                    .text(&["rev-parse", "--git-common-dir"])
                     .await?
                     .trim_end_matches('\n')
                     .to_owned(),
@@ -447,7 +463,7 @@ impl Git {
         };
         Ok(Some(Repository {
             root: root.into(),
-            common_dir: self.absolute_git_path(&common)?,
+            common_dir: reader.absolute_git_path(&common)?,
         }))
     }
     pub async fn is_repository(&self) -> Result<bool, GitError> {
@@ -463,11 +479,12 @@ impl Git {
     }
 
     pub async fn status(&self) -> Result<Status, GitError> {
-        if !self.is_repository().await? {
+        let reader = self.without_fsmonitor();
+        if !reader.is_repository().await? {
             return Ok(Status::default());
         }
-        let index = self.text(&["rev-parse", "--git-path", "index"]).await?;
-        let index = self.absolute_git_path(index.trim())?;
+        let index = reader.text(&["rev-parse", "--git-path", "index"]).await?;
+        let index = reader.absolute_git_path(index.trim())?;
         let mut lock = index.into_os_string();
         lock.push(".lock");
         if Path::new(&lock).try_exists()? {
@@ -475,7 +492,7 @@ impl Git {
                 "Git index is locked. Status will resume when the index lock is removed.".into(),
             ));
         }
-        let output = self
+        let output = reader
             .execute(
                 &["status", "--porcelain=2", "--branch", "-z"],
                 ExecuteOptions {
@@ -488,7 +505,8 @@ impl Git {
         parse_status(&output.stdout_text())
     }
     pub async fn current_branch(&self) -> Result<Option<String>, GitError> {
-        let result = self
+        let reader = self.without_fsmonitor();
+        let result = reader
             .execute(
                 &["symbolic-ref", "--quiet", "HEAD"],
                 ExecuteOptions {
@@ -500,17 +518,18 @@ impl Git {
         match result.code {
             Some(0) => Ok(core::branch_from_ref(&result.stdout_text())),
             Some(1) => Ok(None),
-            _ => Err(self.vcs_exit("GitWorkflowService.currentBranch", 3, &result)),
+            _ => Err(reader.vcs_exit("GitWorkflowService.currentBranch", 3, &result)),
         }
     }
     pub async fn list_refs(&self, prefixes: &[&str]) -> Result<Vec<GitRef>, GitError> {
+        let reader = self.without_fsmonitor();
         let mut args = vec![
             "for-each-ref",
             "--format=%(refname)%00%(objectname)%00%(upstream)%00%(HEAD)",
             "--",
         ];
         args.extend_from_slice(prefixes);
-        let output = self
+        let output = reader
             .execute(
                 &args,
                 ExecuteOptions {

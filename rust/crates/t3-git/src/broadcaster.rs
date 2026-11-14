@@ -802,7 +802,8 @@ impl VcsStatusBroadcaster {
         let workflow = match &self.inner.factory {
             Some(factory) => factory.for_checkout(&path).await?,
             None => self.inner.workflow.at(&path),
-        };
+        }
+        .without_fsmonitor();
         Ok(self
             .inner
             .checkouts

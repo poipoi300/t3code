@@ -253,6 +253,8 @@ impl Git {
                 "GitVcsDriver.readUnifiedWorkingTreeReviewDiff.stagedDeletions",
                 &[
                     "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
                     "--cached",
                     "--no-renames",
                     "--name-only",
@@ -474,7 +476,16 @@ impl Git {
         let mut result = self
             .execute_command(
                 "GitVcsDriver.readBranchChangeTotals",
-                &["diff-index", "-M", "--numstat", "-z", &merge, "--"],
+                &[
+                    "diff-index",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "-M",
+                    "--numstat",
+                    "-z",
+                    &merge,
+                    "--",
+                ],
                 options.clone(),
             )
             .await?;
@@ -483,7 +494,16 @@ impl Git {
             result = self
                 .execute_command(
                     "GitVcsDriver.readBranchChangeTotals",
-                    &["diff-index", "-M", "--numstat", "-z", &merge, "--"],
+                    &[
+                        "diff-index",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "-M",
+                        "--numstat",
+                        "-z",
+                        &merge,
+                        "--",
+                    ],
                     options,
                 )
                 .await?;

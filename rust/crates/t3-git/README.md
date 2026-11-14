@@ -193,3 +193,10 @@ reparse tags directly through
 `FSCTL_GET_REPARSE_POINT`. Action subscriptions retain at most 128 events, evicting
 old hook output first while preserving terminal events; this bound is stricter
 than TypeScript's currently unbounded callback stream.
+
+Automatic status and branch reads pass `-c core.fsmonitor=false`, including
+repository metadata, background fetches and scratch-index reads for untracked
+change totals. This is deliberate hardening beyond TypeScript. Their diff and
+numstat commands also pass `--no-ext-diff --no-textconv`; piped noninteractive
+reads do not start `core.pager`. Git clean/process filters retain the existing
+Git/LFS behavior, including when status compares file contents.
