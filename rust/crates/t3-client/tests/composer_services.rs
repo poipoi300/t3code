@@ -69,7 +69,7 @@ fn composed_send_restores_a_refusal_beside_a_newer_draft_and_preserves_the_reaso
     let runtime = ClientRuntime::new(h.platform.clone(), ClientStore::default(), OrchestrationV2CreationSource::Web, h.spawner());
     h.run(runtime.pair(PairingInput { pairing_url: Some(format!("{}/pair#token=pairing-token", fake_server::ORIGIN)), ..Default::default() })).unwrap();
     h.settle();
-    let target = ThreadKey { thread: ThreadId("first".into()), ..key() };
+    let target = ThreadKey { thread: ThreadId("t1".into()), ..key() };
     runtime.open_thread(&target);
     h.settle();
     let drafts = runtime.composer_drafts();
@@ -83,4 +83,43 @@ fn composed_send_restores_a_refusal_beside_a_newer_draft_and_preserves_the_reaso
     assert_eq!(&*drafts.view(&target).prompt, "typed meanwhile");
     drop(runtime);
     h.settle();
+}
+
+#[test]
+fn draft_subscription_delivers_an_edit_then_ends_with_its_authority() {
+    let h = Harness::new("env");
+    let drafts = ComposerDraftService::new(Rc::new(h.platform.clone()));
+    let mut changes = drafts.changes();
+    assert_eq!(changes.next().now_or_never(), Some(Some(())));
+    drafts.set_prompt(&key(), "edit".into(), 4).unwrap();
+    assert_eq!(changes.next().now_or_never(), Some(Some(())));
+    drop(drafts);
+    assert_eq!(changes.next().now_or_never(), Some(None));
+}
+
+#[test]
+fn primary_actions_and_interrupt_recheck_destination_permission_and_preserve_rejection_detail() {
+    use t3_client::{ClientStore, ClientError, composition::ClientRuntime, connection::PairingInput, permissions::SessionGrants};
+    use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+    let mut h = Harness::new("env");
+    let runtime = ClientRuntime::new(h.platform.clone(), ClientStore::default(), OrchestrationV2CreationSource::Web, h.spawner());
+    let target = ThreadKey { thread: ThreadId("t1".into()), ..key() };
+    let actions = runtime.composer_primary_actions(&target);
+    assert!(actions.snapshot().is_environment_unavailable);
+    assert!(!actions.snapshot().can_operate_thread);
+    h.run(runtime.pair(PairingInput { pairing_url: Some(format!("{}/pair#token=pairing-token", fake_server::ORIGIN)), ..Default::default() })).unwrap();
+    runtime.open_thread(&target); h.settle();
+    let drafts = runtime.composer_drafts();
+    drafts.set_prompt(&target, "hello".into(), 5).unwrap();
+    assert!(actions.snapshot().has_sendable_content);
+    assert!(actions.snapshot().can_operate_thread);
+    let endpoint = runtime.client(&target.environment).unwrap().session().unwrap();
+    let platform = h.platform.clone(); let store = runtime.store().clone(); let key = target.clone(); let session = endpoint.clone();
+    let error = h.run(async move { t3_client::thread_views::composer::interrupt::interrupt_thread(&platform, &store, session, &key, true).await }).unwrap_err();
+    assert!(matches!(error, ClientError::Rejected { .. }));
+    assert!(error.to_string().contains("No orchestration provider adapter is registered for codex."));
+    endpoint.update_grants(SessionGrants { valid: true, scopes: Default::default() });
+    assert!(!actions.snapshot().can_operate_thread);
+    assert_eq!(actions.snapshot().send_disabled_reason.as_deref(), Some("This connection cannot change threads."));
+    assert!(matches!(h.run(runtime.interrupt_thread(&target)), Err(ClientError::PermissionDenied { .. })));
 }

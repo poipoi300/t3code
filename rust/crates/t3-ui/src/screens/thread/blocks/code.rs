@@ -219,7 +219,8 @@ fn canonical_scope(scope: &str, content: &str) -> Option<&'static str> {
     };
     Some(if is("comment") || is("punctuation.definition.comment") {
         "comment"
-    } else if is("punctuation.definition.string") { "string"
+    } else if is("punctuation.definition.string") {
+        "string"
     } else if is("constant.character.escape") {
         "string.escape"
     } else if is("string.regexp") || is("string.regex") {
@@ -463,18 +464,40 @@ impl CodeHighlightDocument {
             };
         }
         record.entry = Some(entry.clone());
-        let key = CacheKey { language: language.clone(), text_hash: text_hash(&record.chunk.text),
-            theme: syntax.name.clone(), context: record.context.clone() };
-        let cached = (!record.streaming || !record.chunk.last).then(|| self.cache.borrow_mut().get_parsed(&key, &record.chunk.text)).flatten();
-        let (value, exit) = if let Some(cached) = cached { cached } else {
-            let tokenizer = record.tokenizer.get_or_insert_with(|| ChunkTokenizer::new(entry));
+        let key = CacheKey {
+            language: language.clone(),
+            text_hash: text_hash(&record.chunk.text),
+            theme: syntax.name.clone(),
+            context: record.context.clone(),
+        };
+        let cached = (!record.streaming || !record.chunk.last)
+            .then(|| self.cache.borrow_mut().get_parsed(&key, &record.chunk.text))
+            .flatten();
+        let (value, exit) = if let Some(cached) = cached {
+            cached
+        } else {
+            let tokenizer = record
+                .tokenizer
+                .get_or_insert_with(|| ChunkTokenizer::new(entry));
             let (spans, exit) = match tokenizer.update(&record.chunk.text, set, &mut self.work) {
                 Ok(result) => result,
-                Err(error) => { record.failure = Some(error); record.tokenizer = None; return true; }
+                Err(error) => {
+                    record.failure = Some(error);
+                    record.tokenizer = None;
+                    return true;
+                }
             };
             let provider: HighlightCode = Rc::new(move |_, _, _| Ok(spans.clone()));
-            let value = self.cache.borrow_mut().highlight(&record.chunk, syntax, &record.context, record.streaming, Some(&provider));
-            self.cache.borrow_mut().remember_exit(&key, &record.chunk.text, exit.clone());
+            let value = self.cache.borrow_mut().highlight(
+                &record.chunk,
+                syntax,
+                &record.context,
+                record.streaming,
+                Some(&provider),
+            );
+            self.cache
+                .borrow_mut()
+                .remember_exit(&key, &record.chunk.text, exit.clone());
             (value, exit)
         };
         let changed_exit = record.exit.as_ref() != Some(&exit);
@@ -798,13 +821,21 @@ impl HighlightCache {
         Some(value)
     }
 
-    fn get_parsed(&mut self, key: &CacheKey, text: &str) -> Option<(Rc<HighlightedCode>, Checkpoint)> {
+    fn get_parsed(
+        &mut self,
+        key: &CacheKey,
+        text: &str,
+    ) -> Option<(Rc<HighlightedCode>, Checkpoint)> {
         let value = self.get(key, text)?;
         Some((value, self.entries.back()?.exit.clone()?))
     }
 
     fn remember_exit(&mut self, key: &CacheKey, text: &str, exit: Checkpoint) {
-        if let Some(entry) = self.entries.iter_mut().find(|e| e.key == *key && e.value.text.as_ref() == text) {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.key == *key && e.value.text.as_ref() == text)
+        {
             entry.exit = Some(exit);
         }
     }
@@ -828,7 +859,12 @@ impl HighlightCache {
             };
             self.bytes -= entry.bytes;
         }
-        self.entries.push_back(CacheEntry { key, value, bytes, exit: None });
+        self.entries.push_back(CacheEntry {
+            key,
+            value,
+            bytes,
+            exit: None,
+        });
         self.bytes += bytes;
     }
 }

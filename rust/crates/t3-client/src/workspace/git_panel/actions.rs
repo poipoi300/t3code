@@ -1,7 +1,7 @@
 use super::*;
 use crate::{rpc::{RpcEndpoint, RpcCallError}, workspace::{git_actions, project_ops::actions::VcsActionOperation}};
 use futures::{future::LocalBoxFuture, stream::{self, SelectAll}};
-use t3_contracts::{base_schemas::TrimmedNonEmptyString, rpc::*, source_control::*};
+use t3_contracts::{base_schemas::TrimmedNonEmptyString, rpc::*, source_control::*, review::*};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitActionsScope { pub thread: ThreadKey, pub cwd: String, pub draft_id: Option<String> }
@@ -22,6 +22,27 @@ pub struct GitActionsSnapshot {
     pub presentation: Option<providers::SourceControlPresentation>, pub announce_status_changes: bool,
 }
 
+struct Observation<P: Platform + Clone + 'static> {
+    first: bool,
+    changes: SelectAll<LocalBoxStream<'static, ()>>,
+    checkout: Rc<Checkout>,
+    discovery: Option<crate::composition::QueryLease<SourceControlDiscoveryResult>>,
+    clones: crate::composition::QueryLease<Vec<t3_contracts::project_clone::ProjectCloneSnapshot>>,
+    preview: Option<crate::composition::QueryLease<ReviewDiffPreviewResult>>,
+    preview_changes: Option<crate::services::resources::ResourceSubscription<ReviewDiffPreviewResult>>,
+    revision: String,
+    service: GitPanel<P>,
+    scope: GitActionsScope,
+    target: CheckoutKey,
+    watch: GitActionsWatch,
+}
+
+fn preview_totals(preview: &ReviewDiffPreviewResult) -> Option<git_actions::ChangesTotals> {
+    let source = preview.sources.iter().find(|s| s.kind == ReviewDiffPreviewSourceKind::BranchRange)?;
+    let count = |n: &t3_contracts::vcs::EncodedNumber| serde_json::to_value(n).ok().and_then(|v| v.as_f64()).unwrap_or(0.0) as u64;
+    Some(git_actions::ChangesTotals { insertions: source.files.as_ref().into_iter().flatten().map(|f| count(&f.additions)).sum(), deletions: source.files.as_ref().into_iter().flatten().map(|f| count(&f.deletions)).sum(), base_ref: source.base_ref.as_ref().map(|b| b.0.clone()) })
+}
+
 impl<P: Platform + Clone + 'static> GitPanel<P> {
     pub fn watch_actions(&self, scope: &GitActionsScope, watch: GitActionsWatch) -> LocalBoxStream<'static, GitActionsSnapshot> {
         let target = CheckoutKey { environment: scope.thread.environment.clone(), cwd: scope.cwd.clone() };
@@ -31,30 +52,62 @@ impl<P: Platform + Clone + 'static> GitPanel<P> {
         changes.push(checkout.status.observe(self.platform.monotonic_ms()).map(|_| ()).boxed_local());
         changes.push(self.state.actions.observe(&target).map(|_| ()).boxed_local());
         changes.push(self.changes());
+        changes.push(self.runtime.composer_drafts().changes());
         if let Some(query) = discovery.as_ref() { changes.push(query.resource().observe(self.platform.monotonic_ms()).map(|_| ()).boxed_local()); }
-        let service = self.clone();
-        let scope = scope.clone();
-        stream::unfold((true, changes, checkout, discovery, service, scope, target), |(first, mut changes, checkout, discovery, service, scope, target)| async move {
-            if !first { changes.next().await?; }
-            let status = checkout.status.snapshot();
+        let clones = self.runtime.query::<WsSubscribeProjectClonesRpc>(&target.environment, t3_contracts::project_clone::ProjectCloneSubscribeInput {}, ResourcePolicy::default());
+        changes.push(clones.resource().observe(self.platform.monotonic_ms()).map(|_| ()).boxed_local());
+        let state = Observation { first: true, changes, checkout, discovery, clones, preview: None, preview_changes: None, revision: String::new(), service: self.clone(), scope: scope.clone(), target, watch };
+        stream::unfold(state, |mut o| async move {
+            if !o.first {
+                if let Some(preview) = &mut o.preview_changes {
+                    futures::select! { _ = o.changes.next().fuse() => (), _ = preview.next().fuse() => () }
+                } else { o.changes.next().await?; }
+            }
+            o.first = false;
+            let service = &o.service; let scope = &o.scope; let target = &o.target;
+            let status = o.checkout.status.snapshot();
             let thread = service.thread(&scope.thread);
+            let context = service.workspace_context(&scope.thread, scope.draft_id.as_deref());
+            let project_cloning = context.as_ref().is_some_and(|c| o.clones.resource().snapshot().value.is_some_and(|clones| clones.iter().any(|clone| clone.project_id == c.project.id && clone.phase != t3_contracts::project_clone::ProjectClonePhase::Done)));
+            let selecting_worktree_base = context.as_ref().is_some_and(|c| c.thread.is_none() && c.env_mode == super::super::super::branch::EnvMode::Worktree && c.worktree_path.is_none());
             let endpoint = service.session(&target.environment).ok();
             let pull = VcsPullInput { cwd: TrimmedNonEmptyString(scope.cwd.clone()) };
             let can_write = endpoint.as_ref().is_some_and(|e| e.available::<WsVcsPullRpc>(&pull));
             let metadata = serde_json::from_value::<t3_contracts::orchestration_v2::OrchestrationV2Command>(serde_json::json!({"type":"thread.metadata.update","commandId":"availability","threadId":scope.thread.thread,"branch":null}));
             let can_operate = metadata.ok().is_some_and(|m| endpoint.as_ref().is_some_and(|e| e.available::<WsOrchestrationV2DispatchCommandRpc>(&m)));
+            if o.watch.show_changes && let Some(status) = status.value.as_ref().filter(|s| s.is_repo) {
+                let base = service.state.diff.borrow().branch_base.get(&scope.thread).cloned().flatten();
+                let ignore = service.state.diff.borrow().ignore_whitespace.unwrap_or(false);
+                let input = ReviewDiffPreviewInput { cwd: TrimmedNonEmptyString(scope.cwd.clone()), base_ref: base.map(|b| Some(TrimmedNonEmptyString(b))), commit_sha: None, ignore_whitespace: Some(ignore), source_kind: Some(ReviewDiffPreviewInputSourceKind::BranchRange), tracked_only: None, metadata_only: Some(true), file: None };
+                if endpoint.as_ref().is_some_and(|e| e.available::<WsReviewGetDiffPreviewRpc>(&input)) {
+                    let revision = serde_json::to_string(&(status.ref_name.clone(), &status.working_tree, &status.branch_changes, &input)).unwrap_or_default();
+                    if revision != o.revision {
+                        let query = service.runtime.query::<WsReviewGetDiffPreviewRpc>(&target.environment, input, ResourcePolicy::default());
+                        if !o.revision.is_empty() { query.resource().invalidate(); }
+                        o.preview_changes = Some(query.resource().observe(service.platform.monotonic_ms()));
+                        o.preview = Some(query); o.revision = revision;
+                    }
+                } else { o.preview = None; o.preview_changes = None; }
+            }
+            let action = service.state.actions.state(Some(target));
+            if let Some(context) = &context && context.thread.is_none() && !selecting_worktree_base && !project_cloning && !action.is_running
+                && let Some(branch) = git_actions::live_thread_branch_update(context.branch.as_deref(), status.value.as_deref()) {
+                let _ = service.sync_branch(scope, branch, context.branch.clone(), false).await;
+            }
             let value = GitActionsSnapshot {
                 status: status.value.clone(), status_error: status.error,
-                action: service.state.actions.state(Some(&target)), can_write, can_operate,
+                branch_preview: o.preview.as_ref().and_then(|p| p.resource().snapshot().value).and_then(|p| preview_totals(&p)),
+                action, can_write, can_operate, project_cloning, selecting_worktree_base,
                 is_local_draft: scope.draft_id.is_some() && thread.is_none(), has_server_thread: thread.is_some(),
                 latest_run_is_null: thread.as_ref().is_some_and(|t| t.latest_run_id.is_none()),
-                thread_branch: thread.as_ref().and_then(|t| t.branch.as_ref().map(|b| b.0.clone())),
-                discovery: discovery.as_ref().and_then(|q| q.resource().snapshot().value),
+                thread_branch: context.as_ref().and_then(|c| c.branch.clone()),
+                discovery: o.discovery.as_ref().and_then(|q| q.resource().snapshot().value),
+                offered_providers: service.runtime.store().snapshot().environments.get(&target.environment).and_then(|e| e.config.as_ref()).map(|c| c.settings.offered_source_control_providers.clone()),
                 publish_providers: providers::publish_providers(),
                 presentation: Some(providers::presentation(status.value.as_ref().and_then(|s| s.source_control_provider.as_ref().and_then(Option::as_ref)).map(|p| p.kind.0.as_str()))),
                 ..GitActionsSnapshot::default()
             };
-            Some((value, (false, changes, checkout, discovery, service, scope, target)))
+            Some((value, o))
         }).boxed_local()
     }
     pub fn refresh_actions(&self, scope: &GitActionsScope) -> LocalBoxFuture<'static, Result<(), ClientError>> {

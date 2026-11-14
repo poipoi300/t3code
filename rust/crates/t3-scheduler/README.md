@@ -15,7 +15,23 @@ type; `run_now` also returns its dispatched thread and dispatch-failure flag.
 `subscribe_list` reads after subscribing, emits an initial list, and coalesces
 dirty notifications. `subscribe_changes` exposes the lower-level watch receiver.
 
-Implement `Orchestration::dispatch(DispatchRequest)` with the real orchestrator.
+Use `intake::IntakeDispatchBackend::new(Arc<dyn RuntimeTaskIntake>)` for the bound
+thread path. Its host port calls the shared runtime's message intake, checks
+policy, reads thread shells/queued runs, follows provider failures and resolves
+single-use secrets. The backend queues with stable command/message IDs, task
+identity and original creation provenance; it follows at most two project moves
+on typed missing-thread errors and omits the stored provider selection.
+`ScheduledTaskService::run_modes(id)` returns stored modes plus current nondeleted
+bound-thread modes, including archived threads. Lookup errors propagate. MCP
+callers must check their liveness and coverage of every pair before disclosing
+webhook credentials; the mode lookup itself does not authorize disclosure.
+
+Until a launch environment is assembled this backend accepts disabled unbound
+drafts but rejects enabling/saving enabled unbound tasks with `LAUNCH_UNAVAILABLE`.
+Manual/due/webhook dispatch of existing unbound rows records a failed run with
+that message; manual dispatch returns its normal result with `dispatch_failed`.
+
+For a future launch-capable backend, implement `Orchestration::dispatch(DispatchRequest)`.
 Requests carry the complete task, trigger, rendered prompt, stable command/message
 IDs and fresh-context flag. An unbound task launches a thread with its stored
 selection/workspace/modes; a bound task queues in its existing thread using that

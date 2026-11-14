@@ -47,6 +47,14 @@ pub struct DispatchReceipt {
 /// The future orchestration adapter owns thread validation, policy and provider execution.
 #[async_trait]
 pub trait Orchestration: Send + Sync + 'static {
+    async fn bound_thread_modes(
+        &self,
+        _thread: &ThreadId,
+    ) -> Result<Option<crate::intake::TaskRunMode>> {
+        Err(Error::Invalid(
+            "Bound task run modes require an orchestration lookup.".into(),
+        ))
+    }
     /// Enforce current policy, destination existence/project/archive and scratch-workspace rules.
     async fn validate(&self, _task: &ScheduledTask, _destination_changed: bool) -> Result<()> {
         Ok(())
@@ -239,6 +247,20 @@ impl ScheduledTaskService {
             .read(move |c| store::load(c, &id))
             .await
             .map(|t| Self::present(&self.inner, t))
+    }
+    pub async fn run_modes(&self, id: &ScheduledTaskId) -> Result<Vec<crate::intake::TaskRunMode>> {
+        let task = self.get(id).await?;
+        let mut modes = vec![crate::intake::TaskRunMode {
+            runtime_mode: task.runtime_mode,
+            interaction_mode: task.interaction_mode,
+        }];
+        if let Some(thread) = task.thread_id
+            && let Some(mode) = self.inner.backend.bound_thread_modes(&thread).await?
+            && !modes.contains(&mode)
+        {
+            modes.push(mode);
+        }
+        Ok(modes)
     }
     pub async fn upsert(&self, input: ScheduledTaskUpsertInput) -> Result<ScheduledTask> {
         crate::validation::validate(&input)?;

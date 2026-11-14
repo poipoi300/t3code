@@ -3,6 +3,7 @@
 
 mod clock;
 mod engine;
+pub mod intake;
 mod relay;
 pub mod schedule;
 mod service;

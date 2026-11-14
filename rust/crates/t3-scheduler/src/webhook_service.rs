@@ -1026,8 +1026,9 @@ mod log_tests {
     use super::*;
     #[tokio::test]
     async fn delivery_upserts_preserve_request_and_require_a_live_task() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = t3_persistence::Database::open(dir.path().join("test.sqlite")).unwrap();
+        let dir = tempfile::tempdir().expect("create webhook fixture directory");
+        let db = t3_persistence::Database::open(dir.path().join("test.sqlite"))
+            .expect("open webhook fixture database");
         let request = WebhookRequest {
             method: "POST".into(),
             path: "/api/hooks/test/token".into(),
@@ -1035,7 +1036,7 @@ mod log_tests {
             headers: Default::default(),
             body_text: "first".into(),
         };
-        let now = parse_date("2026-07-01T08:00:00Z").unwrap();
+        let now = parse_date("2026-07-01T08:00:00Z").expect("parse webhook fixture time");
         store::Store(db)
             .write(move |c| {
                 // A real schema row, isolated from application state.
@@ -1069,6 +1070,6 @@ mod log_tests {
                 Ok(())
             })
             .await
-            .unwrap();
+            .expect("verify persisted webhook delivery updates");
     }
 }
