@@ -156,6 +156,22 @@ impl RuntimeLayer {
     }
 }
 
+impl RuntimeLayer {
+    /// Runs `work` behind the same admission gate as client commands: only once provider
+    /// recovery has completed and before shutdown begins.
+    pub async fn admit<T>(&self, work: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+        let phase = self.phase.read().await;
+        if *phase != Phase::Ready {
+            return Err(Error::Service {
+                operation: "runtime admission",
+                detail: "provider recovery has not completed or the runtime is shutting down"
+                    .into(),
+            });
+        }
+        work.await
+    }
+}
+
 #[async_trait]
 impl CommandDispatcher for RuntimeLayer {
     fn command_lanes(

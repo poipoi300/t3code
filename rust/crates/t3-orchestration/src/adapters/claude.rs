@@ -700,6 +700,9 @@ pub struct ClaudeHostOptions {
     pub auto_compact_window: Option<String>,
     pub compile_model: Option<Arc<ClaudeModelCompiler>>,
     pub mcp_server_factory: Option<Arc<dyn ClaudeMcpServerFactory>>,
+    /// The thread's T3 MCP server, added as the `t3-code` HTTP server of each query
+    /// (`claudeMcpQueryOverrides`).
+    pub t3_mcp: Option<Arc<dyn crate::provider::T3McpSessions>>,
     pub continuation_requests: Option<mpsc::Sender<ContinuationRequest>>,
 }
 pub struct PreparedClaudeLaunch {
@@ -2372,6 +2375,19 @@ impl ClaudeSessionRuntime {
         mut prepared: PreparedClaudeLaunch,
     ) -> ProviderResult<Client> {
         lock(&self.inner.projection).auto_compact_window = prepared.auto_compact_window;
+        // `CLAUDE_T3_MCP_TOOL_TIMEOUT_MS`: T3 waits can block for an hour.
+        if let Some(session) = self
+            .options
+            .host
+            .t3_mcp
+            .as_ref()
+            .and_then(|sessions| sessions.read(&input.thread_id))
+        {
+            prepared.options.mcp_servers.insert(
+                "t3-code".into(),
+                json!({"type":"http","url":session.endpoint,"headers":{"Authorization":session.authorization_header},"timeout":3_900_000}),
+            );
+        }
         if self.mcp_servers.contains_key("t3-code")
             || prepared.options.mcp_servers.contains_key("t3-code")
         {

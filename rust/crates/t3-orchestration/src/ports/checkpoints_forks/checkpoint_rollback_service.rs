@@ -9,7 +9,9 @@ use super::{
 use crate::{
     api::*,
     error::{Error, Result},
-    provider::{OpenSession, RollbackInput, RollbackTarget, RuntimePolicy, TurnMessage},
+    provider::{
+        OpenSession, RollbackInput, RollbackTarget, RuntimePolicy, SessionRuntime, TurnMessage,
+    },
     stores::StoreDatabase,
 };
 use async_trait::async_trait;
@@ -23,13 +25,15 @@ use tokio_util::sync::CancellationToken;
 pub const ROLLBACK_FAILED_MESSAGE: &str = "The provider could not roll back this conversation. Try again; if it keeps failing, check the provider and server logs.";
 pub const INDEX_LOCKED_OPERATION: &str = "checkpoint.git.index-locked";
 pub const POLICY_CEILING_OPERATION: &str = "runtime-policy.above-ceiling";
+/// A file restore refused because the thread still has writers; the detail names them.
+pub const WRITERS_RUNNING_OPERATION: &str = "checkpoint.rollback.writers-running";
 
 pub fn rollback_failure_client_message(error: &Error) -> &str {
     match error {
         Error::Service { operation, detail }
             if matches!(
                 *operation,
-                INDEX_LOCKED_OPERATION | POLICY_CEILING_OPERATION
+                INDEX_LOCKED_OPERATION | POLICY_CEILING_OPERATION | WRITERS_RUNNING_OPERATION
             ) =>
         {
             detail
@@ -100,6 +104,8 @@ pub struct CheckpointRollbackService {
     pub database: StoreDatabase,
     pub ids: Arc<dyn IdGenerator>,
     pub clock: Arc<dyn Clock>,
+    /// The host's terminals, dev servers and scripts for the thread, held through a restore.
+    pub writers: Arc<dyn ThreadWriters>,
 }
 
 #[async_trait]
@@ -140,6 +146,76 @@ pub fn latest_provider_turn_for_attempt<'a>(
 }
 
 impl CheckpointRollbackService {
+    /// Refuses a file restore while anything of this thread can write to its workspace, naming
+    /// each writer, and otherwise holds the host's writers until the returned hold drops.
+    /// TypeScript restores under live writers; refusing is the Rust hardening (t3-git H-2).
+    async fn quiesce(
+        &self,
+        thread_id: &ThreadId,
+        cwd: &str,
+        session: &dyn SessionRuntime,
+        provider: &OrchestrationV2ProviderThread,
+    ) -> Result<WriterHold> {
+        let active = |status: &OrchestrationV2TurnItemStatus| {
+            matches!(
+                status,
+                OrchestrationV2TurnItemStatus::Pending
+                    | OrchestrationV2TurnItemStatus::Running
+                    | OrchestrationV2TurnItemStatus::Waiting
+            )
+        };
+        let projection = self
+            .projections
+            .projection(thread_id.clone())
+            .await?
+            .ok_or_else(|| Error::ThreadNotFound(thread_id.clone()))?;
+        let mut running = Vec::new();
+        if projection.runs.iter().any(|run| {
+            matches!(
+                run.status,
+                OrchestrationV2RunStatus::Preparing
+                    | OrchestrationV2RunStatus::Starting
+                    | OrchestrationV2RunStatus::Running
+                    | OrchestrationV2RunStatus::Waiting
+            )
+        }) {
+            running.push("a running turn".to_owned());
+        }
+        for item in &projection.turn_items {
+            if let OrchestrationV2TurnItem::CommandExecution(item) = item
+                && active(&item.status)
+            {
+                running.push(match item.title.as_deref() {
+                    Some(title) if !title.is_empty() => format!("command `{title}`"),
+                    _ => "a command".to_owned(),
+                });
+            }
+        }
+        if let Some(extensions) = session.extensions()
+            && extensions
+                .pending_background_work(Some(provider.clone()), true)
+                .await
+                .unwrap_or(true)
+        {
+            running.push("background work its provider started".to_owned());
+        }
+        let hold = self
+            .writers
+            .hold(thread_id.clone(), PathBuf::from(cwd))
+            .await?;
+        running.extend(hold.running.iter().cloned());
+        if !running.is_empty() {
+            return Err(Error::Service {
+                operation: WRITERS_RUNNING_OPERATION,
+                detail: format!(
+                    "Files can't be restored while this thread is still writing to its folder: {}. Stop them, then try again.",
+                    running.join(", ")
+                ),
+            });
+        }
+        Ok(hold)
+    }
+
     pub async fn execute(
         &self,
         input: RollbackRequest,
@@ -369,6 +445,11 @@ impl CheckpointRollbackService {
         if cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
+        // The thread's lane keeps new turns, sends and queue starts out until the rollback commits.
+        let lane = self
+            .command_lanes
+            .acquire([input.thread_id.0.clone()])
+            .await;
         // Re-read ownership after a slow provider operation, while still holding the reservation.
         if input.restore_files {
             let current = self
@@ -392,6 +473,10 @@ impl CheckpointRollbackService {
             {
                 return Err(reject(SHARED_WORKSPACE_RESTORE_MESSAGE));
             }
+            // Held until Git returns: nothing of this thread may write while restore runs.
+            let _writers = self
+                .quiesce(&input.thread_id, &scope.cwd.0, session.as_ref(), &provider)
+                .await?;
             self.checkpoints
                 .restore(scope.clone(), checkpoint, cancellation)
                 .await?;
@@ -402,10 +487,7 @@ impl CheckpointRollbackService {
                 .await?;
         }
         // Share the dispatcher's lane through the final full-row writes and their commit.
-        let _lane = self
-            .command_lanes
-            .acquire([input.thread_id.0.clone()])
-            .await;
+        let _lane = lane;
         let now = self.clock.now();
         restored_provider.last_run_ordinal = (target_ordinal > 0).then_some(target_ordinal);
         restored_provider.updated_at = now.clone();

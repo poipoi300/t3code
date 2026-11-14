@@ -350,6 +350,9 @@ pub struct CodexAdapterOptions {
     pub usage_policy: Option<Arc<dyn CodexUsagePolicy>>,
     pub generated_image_markdown: Option<GeneratedImageMarkdown>,
     pub mcp_apps: Option<Arc<dyn CodexMcpAppHost>>,
+    /// The thread's T3 MCP server, read at thread start, resume and fork; `mcp` is the static
+    /// fallback.
+    pub t3_mcp: Option<Arc<dyn crate::provider::T3McpSessions>>,
 }
 
 impl CodexAdapterOptions {
@@ -384,6 +387,7 @@ impl CodexAdapterOptions {
             usage_policy: None,
             generated_image_markdown: None,
             mcp_apps: None,
+            t3_mcp: None,
         }
     }
 }
@@ -703,7 +707,16 @@ impl CodexSessionRuntime {
         }});
         if let Some(thread) = thread {
             params["config"]["shell_environment_policy.set.T3CODE_THREAD_ID"] = json!(thread);
-            if let Some(mcp) = self.options.mcp.get(&thread.0) {
+            let live = self
+                .options
+                .t3_mcp
+                .as_ref()
+                .and_then(|sessions| sessions.read(thread))
+                .map(|session| McpServerInjection {
+                    endpoint: session.endpoint,
+                    authorization_header: session.authorization_header,
+                });
+            if let Some(mcp) = live.as_ref().or_else(|| self.options.mcp.get(&thread.0)) {
                 let mut server = json!({"url":mcp.endpoint,"http_headers":{"Authorization":mcp.authorization_header},"tool_timeout_sec":3900});
                 server["disabled_tools"] = json!(["t3_thread_wait"]);
                 params["config"]["mcp_servers.t3-code"] = server.clone();

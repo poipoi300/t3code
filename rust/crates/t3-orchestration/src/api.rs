@@ -1260,6 +1260,24 @@ pub trait ThreadWorktreeRestore: Send + Sync {
     async fn restore(&self, thread: OrchestrationV2AppThread) -> Result<()>;
 }
 
+/// Processes the host started for a thread that can write to its workspace: terminals, dev
+/// servers, preview and setup scripts. A file restore holds them for its whole run, because Git
+/// checks paths before it writes and a live writer can change them in between (t3-git H-2).
+#[async_trait]
+pub trait ThreadWriters: Send + Sync {
+    /// Stops new writers for `thread_id` from starting until the returned hold drops, and names
+    /// those still running.
+    async fn hold(&self, thread_id: ThreadId, cwd: PathBuf) -> Result<WriterHold>;
+}
+
+/// The writers a host still runs for a thread, and the hold that keeps new ones from starting.
+pub struct WriterHold {
+    /// As a user would name each, such as "terminal `npm run dev`".
+    pub running: Vec<String>,
+    /// Released when dropped.
+    pub guard: Box<dyn std::any::Any + Send + Sync>,
+}
+
 #[async_trait]
 pub trait AgentScope: Send + Sync {
     async fn kill(&self, _thread_id: ThreadId) -> Result<bool> {

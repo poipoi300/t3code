@@ -14,9 +14,65 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
+/// A host-side caller's authority, checked under the command lock: TS `DispatchModeLimit`, plus
+/// the caller's thread and link fence (`composition::CommandCaller`).
+#[derive(Debug, Clone, Default)]
+pub struct CallerAuthority {
+    pub thread_id: Option<t3_contracts::base_schemas::ThreadId>,
+    pub limit: Option<DispatchModes>,
+    pub link_fence: Option<t3_contracts::orchestration_v2::OrchestrationV2LinkOrigin>,
+}
+
 // The host preserves provider-core failure curation, redaction, bounds and capability classification.
 pub trait QueueStartFailureFormatter: Send + Sync {
     fn failure(&self, cause: &Error) -> Result<OrchestrationV2ProviderFailure>;
+}
+
+fn mode_text<T: serde::Serialize>(mode: T) -> Result<String> {
+    Ok(serde_json::to_value(mode)?
+        .as_str()
+        .ok_or(Error::Stale)?
+        .to_owned())
+}
+
+/// TS `resolveRuntimeMode` / `resolveInteractionMode` as a backstop: a caller's command may not
+/// create or set a thread broader than the caller.
+fn caller_escalation(
+    limit: DispatchModes,
+    events: &[t3_contracts::orchestration_v2::OrchestrationV2DomainEvent],
+) -> Result<Option<crate::error::CallerRefusal>> {
+    use t3_contracts::orchestration_v2::OrchestrationV2DomainEvent as Event;
+    for event in events {
+        let (Event::ThreadCreated(event)
+        | Event::ThreadRuntimeModeUpdated(event)
+        | Event::ThreadInteractionModeUpdated(event)) = event
+        else {
+            continue;
+        };
+        let modes = DispatchModes {
+            runtime_mode: event.payload.runtime_mode,
+            interaction_mode: event.payload.interaction_mode,
+        };
+        let Some(mode) = exceeded_dispatch_mode_limit(limit, modes) else {
+            continue;
+        };
+        let (requested, limit) = match mode {
+            crate::ports::decisions::dispatch_mode_limit::ModeLimit::Runtime => (
+                mode_text(modes.runtime_mode)?,
+                mode_text(limit.runtime_mode)?,
+            ),
+            crate::ports::decisions::dispatch_mode_limit::ModeLimit::Interaction => (
+                mode_text(modes.interaction_mode)?,
+                mode_text(limit.interaction_mode)?,
+            ),
+        };
+        return Ok(Some(crate::error::CallerRefusal::Escalation {
+            mode,
+            requested,
+            limit,
+        }));
+    }
+    Ok(None)
 }
 
 /// TS `failQueuedStart`'s `makeProviderFailure({cause, code: "queued_start_failed", class:
@@ -1773,6 +1829,22 @@ impl Dispatcher {
         command: OrchestrationV2ServerCommand,
         limit: Option<DispatchModes>,
     ) -> Result<CommandReceipt> {
+        self.dispatch_as(
+            command,
+            CallerAuthority {
+                limit,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    /// `dispatch_with_limit` for a caller that also has a thread and a link fence.
+    pub async fn dispatch_as(
+        &self,
+        command: OrchestrationV2ServerCommand,
+        authority: CallerAuthority,
+    ) -> Result<CommandReceipt> {
         let inner = self.0.clone();
         let (_, command_type, thread_id) = command_identity(&command)?;
         let intake = if command_type == "message.dispatch"
@@ -1786,7 +1858,7 @@ impl Dispatcher {
         // A caller dropping its future must not release the lane before a blocking commit finishes.
         tokio::spawn(async move {
             let _intake = intake;
-            inner.dispatch(command, limit).await
+            inner.dispatch(command, authority).await
         })
         .await
         .map_err(|error| Error::Service {
@@ -2815,8 +2887,9 @@ impl Inner {
     async fn dispatch(
         &self,
         command: OrchestrationV2ServerCommand,
-        limit: Option<DispatchModes>,
+        authority: CallerAuthority,
     ) -> Result<CommandReceipt> {
+        let limit = authority.limit;
         self.admit().await?;
         let (command_id, command_type, thread_id) = command_identity(&command)?;
         let aggregate = AggregateId::Thread(thread_id.clone());
@@ -2930,21 +3003,40 @@ impl Inner {
             {
                 continue;
             }
-            let runtime_mode =
-                crate::decision::engine::stored_value(projection.thread.runtime_mode)?;
-            let interaction_mode =
-                crate::decision::engine::stored_value(projection.thread.interaction_mode)?;
-            return Err(Error::Rejected {
+            let modes = DispatchModes {
+                runtime_mode: projection.thread.runtime_mode,
+                interaction_mode: projection.thread.interaction_mode,
+            };
+            return Err(Error::CallerRefused {
                 command_id,
-                reason: format!(
-                    "Thread {} now runs in {}/{} mode, above what this caller may change.",
-                    crate::ports::checkpoints_forks::checkpoint_restore_safety::expanded_id(
-                        &projection.thread.id
-                    )?
-                    .0,
-                    runtime_mode.as_str().ok_or(Error::Stale)?,
-                    interaction_mode.as_str().ok_or(Error::Stale)?,
-                ),
+                refusal: crate::error::CallerRefusal::AboveModeLimit {
+                    thread_id:
+                        crate::ports::checkpoints_forks::checkpoint_restore_safety::expanded_id(
+                            &projection.thread.id,
+                        )?,
+                    mode: exceeded_dispatch_mode_limit(limit, modes).ok_or(Error::Stale)?,
+                    runtime_mode: mode_text(modes.runtime_mode)?,
+                    interaction_mode: mode_text(modes.interaction_mode)?,
+                },
+            });
+        }
+        // TS `assertSameLink`: a fenced caller changes only threads its link started; its own
+        // thread is exempt, as in TS.
+        if let Some(fence) = &authority.link_fence
+            && let Some(projection) = &prepared.context.context.projection
+            && authority.thread_id.as_ref() != Some(&thread_id)
+            && projection
+                .thread
+                .link_origin
+                .clone()
+                .flatten()
+                .is_none_or(|origin| origin.session_id != fence.session_id)
+        {
+            return Err(Error::CallerRefused {
+                command_id,
+                refusal: crate::error::CallerRefusal::OutsideLink {
+                    label: fence.label.clone(),
+                },
             });
         }
         let planned = self
@@ -2960,6 +3052,14 @@ impl Inner {
             }
             Err(error) => return Err(error),
         };
+        if let Some(limit) = limit
+            && let Some(refusal) = caller_escalation(limit, &decision.events)?
+        {
+            return Err(Error::CallerRefused {
+                command_id,
+                refusal,
+            });
+        }
         if let Some(ceiling) = &self.ceiling {
             let mut modes = std::collections::HashMap::new();
             if let Some(projection) = &prepared.context.context.projection {

@@ -114,6 +114,26 @@ impl RuntimePolicy {
         }
     }
 }
+/// T3's own MCP server for one thread's provider session (TypeScript `McpProviderSessions.read`):
+/// the endpoint and bearer header the session was prepared with. The header is a credential and
+/// stays out of `Debug`, logs and events.
+#[derive(Clone)]
+pub struct T3McpSession {
+    pub endpoint: String,
+    pub authorization_header: String,
+}
+impl std::fmt::Debug for T3McpSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("T3McpSession")
+            .field("endpoint", &self.endpoint)
+            .finish_non_exhaustive()
+    }
+}
+/// Supplied by the host; adapters read it each time they configure a native thread or query.
+pub trait T3McpSessions: Send + Sync {
+    fn read(&self, thread: &ThreadId) -> Option<T3McpSession>;
+}
+
 #[derive(Clone)]
 pub struct OpenSession {
     pub thread_id: ThreadId,

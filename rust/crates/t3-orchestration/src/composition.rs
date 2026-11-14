@@ -115,6 +115,9 @@ pub struct RuntimePorts {
     pub workspaces: Arc<dyn WorkspaceBackend>,
     /// Thread-owned agent processes (kill, OOM detection). Without it force-stop cannot kill.
     pub agent_scope: Option<Arc<dyn AgentScope>>,
+    /// The host's terminals, dev servers and scripts per thread, held through a file restore.
+    /// Without it a restore sees only the thread's turns, commands and provider background work.
+    pub thread_writers: Option<Arc<dyn ThreadWriters>>,
     /// Recreates a thread's missing worktree before a send (TS `restoreMissingWorktree`);
     /// without it a send to a thread whose worktree was deleted fails at turn start.
     pub worktree_restore: Option<Arc<dyn ThreadWorktreeRestore>>,
@@ -188,6 +191,7 @@ impl RuntimePorts {
             cleanup: Arc::new(Unbound),
             workspaces: Arc::new(Unbound),
             agent_scope: None,
+            thread_writers: None,
             worktree_restore: None,
             credentials: None,
             telemetry: None,
@@ -213,6 +217,95 @@ impl RuntimePorts {
             sessions: SessionManagerOptions::default(),
             worker: WorkerOptions::default(),
         }
+    }
+}
+
+/// Who a host-side command acts for (TS `threadAccess.ts` `Caller`, `linkOrigin.ts`).
+#[derive(Clone, Debug)]
+pub struct CommandCaller {
+    /// The calling thread; `None` for a client or the scheduler.
+    pub thread_id: Option<ThreadId>,
+    /// The caller's modes: its thread's own, or a client's narrowed ceiling.
+    pub limit: crate::ports::decisions::dispatch_mode_limit::DispatchModes,
+    /// The link session that fences this caller, only when paired below full access.
+    pub link_fence: Option<OrchestrationV2LinkOrigin>,
+}
+
+/// One caller's way in: commands go through the runtime's dispatcher with the caller's
+/// authority, and `threads()` / `intake()` act through it.
+#[derive(Clone)]
+pub struct CallerCommands {
+    caller: CommandCaller,
+    dispatcher: Dispatcher,
+    layer: Arc<RuntimeLayer>,
+    management: Arc<ManagementParts>,
+    attachments: Arc<dyn AttachmentBackend>,
+    launches: Option<ThreadLaunchService>,
+}
+
+impl CallerCommands {
+    pub fn caller(&self) -> &CommandCaller {
+        &self.caller
+    }
+    /// Send, wait, interrupt, records and settle as `runtime.threads`, through this caller.
+    pub fn threads(&self) -> ThreadManagementService {
+        self.management.service(Arc::new(self.clone()))
+    }
+    /// Sends with attachments and launches, through this caller.
+    pub fn intake(&self) -> ThreadMessageIntake {
+        ThreadMessageIntake {
+            threads: self.threads(),
+            launches: self.launches.clone(),
+            attachments: self.attachments.clone(),
+            projections: self.management.reader.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl CommandDispatcher for CallerCommands {
+    fn command_lanes(
+        &self,
+    ) -> Result<Arc<crate::ports::decisions::thread_command_executor::KeyedLanes>> {
+        self.dispatcher.command_lanes()
+    }
+    async fn dispatch(&self, command: OrchestrationV2ServerCommand) -> Result<CommandReceipt> {
+        let authority = crate::runtime::dispatch::CallerAuthority {
+            thread_id: self.caller.thread_id.clone(),
+            limit: Some(self.caller.limit),
+            link_fence: self.caller.link_fence.clone(),
+        };
+        self.layer
+            .admit(self.dispatcher.dispatch_as(command, authority))
+            .await
+    }
+}
+
+/// What `runtime.threads` is built from, rebuilt per caller over its own dispatcher.
+struct ManagementParts {
+    reader: Arc<dyn ProjectionReader>,
+    committer: Arc<dyn EventCommitter>,
+    database: StoreDatabase,
+    settings: Arc<dyn SettingsService>,
+    hydrator: Arc<dyn crate::ports::thread_project::thread_management_service::TranscriptHydrator>,
+    worktree_restore: Arc<dyn ThreadWorktreeRestore>,
+    signals: OutboxSignals,
+    clock: Arc<dyn Clock>,
+}
+
+impl ManagementParts {
+    fn service(&self, dispatcher: Arc<dyn CommandDispatcher>) -> ThreadManagementService {
+        ThreadManagementService::new(ThreadManagementServices {
+            reader: self.reader.clone(),
+            dispatcher,
+            committer: self.committer.clone(),
+            database: self.database.clone(),
+            settings: self.settings.clone(),
+            hydrator: self.hydrator.clone(),
+            worktree_restore: self.worktree_restore.clone(),
+            signals: self.signals.clone(),
+            clock: self.clock.clone(),
+        })
     }
 }
 
@@ -248,6 +341,8 @@ pub struct OrchestrationRuntime {
     operations: Arc<ComposedThreads>,
     ingestor: Arc<ProviderEventIngestor>,
     launches: Option<ThreadLaunchService>,
+    management_parts: Arc<ManagementParts>,
+    caller_attachments: Arc<dyn AttachmentBackend>,
     workflow_files: Option<WorkflowFiles>,
     native_child_work:
         Option<crate::ports::runs_ingestion::native_child_work_query::NativeChildWorkQuery>,
@@ -288,6 +383,7 @@ impl OrchestrationRuntime {
             cleanup,
             workspaces,
             agent_scope,
+            thread_writers,
             worktree_restore,
             credentials,
             telemetry,
@@ -480,6 +576,7 @@ impl OrchestrationRuntime {
                 database: database.clone(),
                 ids: ids.clone(),
                 clock: clock.clone(),
+                writers: thread_writers.unwrap_or_else(|| Arc::new(NoHostWriters)),
             }),
             None => Arc::new(Unbound),
         };
@@ -520,10 +617,8 @@ impl OrchestrationRuntime {
             )
             .with_run_execution(execution.clone()),
         );
-        // Client-facing commands pass the layer's admission gate; effect-driven ones do not.
-        let threads = ThreadManagementService::new(ThreadManagementServices {
+        let management_parts = Arc::new(ManagementParts {
             reader: reader.clone(),
-            dispatcher: layer.clone(),
             committer: events.clone(),
             database: database.clone(),
             settings: settings.clone(),
@@ -532,6 +627,8 @@ impl OrchestrationRuntime {
             signals,
             clock: clock.clone(),
         });
+        // Client-facing commands pass the layer's admission gate; effect-driven ones do not.
+        let threads = management_parts.service(layer.clone());
         let _ = operations.management.set(threads.clone());
         let stop = ThreadStopService::new(ThreadStopServices {
             management: threads.clone(),
@@ -568,6 +665,7 @@ impl OrchestrationRuntime {
                 clock: clock.clone(),
             })
         });
+        let caller_attachments = attachments.clone();
         let intake = ThreadMessageIntake {
             threads: threads.clone(),
             launches: launches.clone(),
@@ -653,6 +751,8 @@ impl OrchestrationRuntime {
             operations,
             ingestor,
             launches,
+            management_parts,
+            caller_attachments,
             workflow_files,
             native_child_work,
             project_lane: tokio::sync::Mutex::new(()),
@@ -723,6 +823,20 @@ impl OrchestrationRuntime {
     /// `orchestration.launchThread` (TS `ThreadMessageIntake.launchThread`).
     pub async fn launch_thread(&self, input: LaunchInput) -> Result<LaunchResult> {
         self.intake.launch_thread(input).await
+    }
+
+    /// Commands a host-side caller (an agent over MCP, a linked or OAuth client, the scheduler)
+    /// submits: the one dispatcher, its lanes, receipts and idempotency, behind the admission
+    /// gate client commands pass, with `caller`'s authority checked under the command lock.
+    pub fn commands_for(&self, caller: CommandCaller) -> CallerCommands {
+        CallerCommands {
+            caller,
+            dispatcher: self.dispatcher.clone(),
+            layer: self.layer.clone(),
+            management: self.management_parts.clone(),
+            attachments: self.caller_attachments.clone(),
+            launches: self.launches.clone(),
+        }
     }
 
     /// `orchestration.launchThread` (TS `ws.ts`): checks the worktree base, then launches through
@@ -1324,6 +1438,20 @@ impl crate::api::CommandOutputSink
             item_id,
         };
         crate::ports::transport::command_output_hub::CommandOutputHub::finish(self, target).await
+    }
+}
+
+/// A host that reports no terminals or dev servers: a restore still refuses on the thread's turns,
+/// commands and provider background work.
+pub struct NoHostWriters;
+
+#[async_trait]
+impl ThreadWriters for NoHostWriters {
+    async fn hold(&self, _thread_id: ThreadId, _cwd: std::path::PathBuf) -> Result<WriterHold> {
+        Ok(WriterHold {
+            running: Vec::new(),
+            guard: Box::new(()),
+        })
     }
 }
 

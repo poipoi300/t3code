@@ -300,6 +300,7 @@ pub fn service(
             database: h.db.stores.clone(),
             ids: h.ids.clone(),
             clock: h.clock.clone(),
+            writers: Arc::new(t3_orchestration::composition::NoHostWriters),
         },
         sessions,
         calls,
@@ -1162,5 +1163,146 @@ async fn composed_rollback_reaches_restore_while_holding_the_workspace_lease() -
         "composed rollback: native rollback -> snapshot restore while workspace lease held -> durable rolled_back event -> lease released"
     );
     runtime.shutdown().await?;
+    Ok(())
+}
+
+/// Host writers for one thread: `live` names those still running; while a hold is out, a writer
+/// that tries to start is refused, and it records whether it ever wrote during a restore.
+#[derive(Default)]
+struct Writers {
+    live: Vec<String>,
+    held: Arc<std::sync::atomic::AtomicBool>,
+}
+impl Writers {
+    /// A writer loop's next step: it writes only while no restore holds the thread.
+    fn try_write(&self) -> bool {
+        !self.held.load(Ordering::SeqCst)
+    }
+}
+struct Release(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+#[async_trait]
+impl ThreadWriters for Writers {
+    async fn hold(&self, _thread_id: ThreadId, _cwd: PathBuf) -> Result<WriterHold> {
+        self.held.store(true, Ordering::SeqCst);
+        Ok(WriterHold {
+            running: self.live.clone(),
+            guard: Box::new(Release(self.held.clone())),
+        })
+    }
+}
+
+async fn restorable(
+    h: &Harness,
+    backend: &Arc<Backend>,
+    cwd: &Path,
+) -> Result<(OrchestrationV2CheckpointScope, OrchestrationV2Checkpoint)> {
+    h.seed("thread.created", thread("thread:test", Some(cwd)))
+        .await?;
+    let scope = h.seed_run(cwd, 1, "completed").await?;
+    let mut checkpoint = backend
+        .service()
+        .materialize_baseline(capture_input(scope.clone(), 0))
+        .await?;
+    checkpoint.status = CheckpointStatus::Ready;
+    h.seed("checkpoint.captured", &checkpoint).await?;
+    Ok((scope, checkpoint))
+}
+
+/// Review t3-git H-2: a file restore never runs under a live writer of its thread. A host
+/// terminal, a provider command and a running turn each refuse it by name, before Git is called.
+#[tokio::test]
+async fn a_restore_refuses_while_the_thread_still_writes_to_its_folder() -> Result<()> {
+    for writer in ["terminal", "command", "turn"] {
+        let temp = tempfile::tempdir()?;
+        let h = Harness::new().await?;
+        let backend = Arc::new(Backend::default());
+        let (scope, checkpoint) = restorable(&h, &backend, temp.path()).await?;
+        let writers = Arc::new(Writers {
+            live: if writer == "terminal" {
+                vec!["terminal `npm run dev`".into()]
+            } else {
+                vec![]
+            },
+            ..Default::default()
+        });
+        match writer {
+            "command" => {
+                h.seed("turn-item.updated", serde_json::json!({"id":"command:watch","threadId":"thread:test","runId":"run:1","nodeId":"node:1","providerThreadId":"provider:test","providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":7,"status":"running","title":"cargo watch","startedAt":time(),"completedAt":null,"updatedAt":time(),"type":"command_execution","input":"cargo watch"}))
+                    .await?;
+            }
+            "turn" => {
+                h.seed_run(temp.path(), 2, "running").await?;
+            }
+            _ => {}
+        }
+        let (mut service, _, _calls) = service(&h, &backend, true);
+        service.writers = writers.clone();
+        let error = service
+            .execute(
+                request(&scope, &checkpoint, true)?,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("a live writer refuses the restore");
+        let named = match writer {
+            "terminal" => "terminal `npm run dev`",
+            "command" => "command `cargo watch`",
+            _ => "a running turn",
+        };
+        assert!(
+            rollback_failure_client_message(&error).contains(named),
+            "{writer}: {error}"
+        );
+        assert_eq!(backend.restores.load(Ordering::SeqCst), 0, "{writer}");
+        assert!(
+            writers.try_write(),
+            "{writer}: the refusal releases the hold"
+        );
+    }
+    Ok(())
+}
+
+/// The reviewer's race through the service, without timing: a writer loop tries to write once
+/// Git has started restoring, and is held off until the restore returns.
+#[tokio::test]
+async fn a_writer_cannot_start_while_a_restore_runs() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let h = Harness::new().await?;
+    let backend = Arc::new(Backend::default());
+    let (scope, checkpoint) = restorable(&h, &backend, temp.path()).await?;
+    let gate = Arc::new(Gate::default());
+    *backend.restore_gate.lock().expect("restore gate") = Some(gate.clone());
+    let writers = Arc::new(Writers::default());
+    let (mut service, _, _calls) = service(&h, &backend, true);
+    service.writers = writers.clone();
+    let rollback = tokio::spawn(async move {
+        service
+            .execute(
+                request(&scope, &checkpoint, true)?,
+                CancellationToken::new(),
+            )
+            .await
+    });
+    gate.entered
+        .acquire()
+        .await
+        .expect("restore started")
+        .forget();
+    assert!(
+        !writers.try_write(),
+        "no writer of the thread may start while Git restores"
+    );
+    gate.release.add_permits(1);
+    rollback.await.expect("rollback task")?;
+    assert_eq!(backend.restores.load(Ordering::SeqCst), 1);
+    assert!(
+        writers.try_write(),
+        "the hold ends when the restore returns"
+    );
     Ok(())
 }

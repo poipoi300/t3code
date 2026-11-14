@@ -18,6 +18,64 @@ pub enum PullRequestHostError {
     Permanent { detail: String },
 }
 
+/// Why the runtime refused a caller's command, with TypeScript's texts.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CallerRefusal {
+    /// TS `OrchestratorThreadAboveModeLimitError`: a target already runs above the caller's modes.
+    #[error(
+        "Thread {} now runs in {runtime_mode}/{interaction_mode} mode, above what this caller may change.",
+        thread_id.0
+    )]
+    AboveModeLimit {
+        thread_id: ThreadId,
+        mode: crate::ports::decisions::dispatch_mode_limit::ModeLimit,
+        runtime_mode: String,
+        interaction_mode: String,
+    },
+    /// TS `resolveRuntimeMode` / `resolveInteractionMode`: the command would make a thread
+    /// broader than the caller.
+    #[error("Child {} mode {requested} is broader than parent mode {limit}.", match mode {
+        crate::ports::decisions::dispatch_mode_limit::ModeLimit::Runtime => "runtime",
+        crate::ports::decisions::dispatch_mode_limit::ModeLimit::Interaction => "interaction",
+    })]
+    Escalation {
+        mode: crate::ports::decisions::dispatch_mode_limit::ModeLimit,
+        requested: String,
+        limit: String,
+    },
+    /// TS `assertSameLink`: a fenced caller may change only threads its link started.
+    #[error(
+        "This work was started from {label} through a linked environment, so it may change only threads that link started. A link paired with full access is not limited this way."
+    )]
+    OutsideLink { label: String },
+}
+
+impl CallerRefusal {
+    /// TS `OrchestratorMcpFailure.code` for the refusal.
+    pub fn code(&self) -> &'static str {
+        use crate::ports::decisions::dispatch_mode_limit::ModeLimit;
+        match self {
+            Self::AboveModeLimit {
+                mode: ModeLimit::Runtime,
+                ..
+            }
+            | Self::Escalation {
+                mode: ModeLimit::Runtime,
+                ..
+            } => "runtime_mode_escalation_denied",
+            Self::AboveModeLimit {
+                mode: ModeLimit::Interaction,
+                ..
+            }
+            | Self::Escalation {
+                mode: ModeLimit::Interaction,
+                ..
+            } => "interaction_mode_escalation_denied",
+            Self::OutsideLink { .. } => "capability_denied",
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
@@ -37,6 +95,12 @@ pub enum Error {
     Rejected {
         command_id: CommandId,
         reason: String,
+    },
+    /// A host-side caller's command refused by its authority (`composition::CommandCaller`).
+    #[error("{refusal}")]
+    CallerRefused {
+        command_id: CommandId,
+        refusal: CallerRefusal,
     },
     #[error("thread {0:?} not found")]
     ThreadNotFound(ThreadId),
