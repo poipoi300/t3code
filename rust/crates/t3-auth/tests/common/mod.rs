@@ -191,6 +191,7 @@ pub fn bootstrap_request(key: Option<String>) -> Request {
         let payload = t3_auth::utils::b64(serde_json::to_vec(&serde_json::json!({"htm":"POST","htu":request.url,"iat":NOW/1000,"jti":t3_auth::utils::random_uuid().unwrap()})).unwrap());
         let body = format!("{header}.{payload}");
         let signature: p256::ecdsa::Signature = signer.sign(body.as_bytes());
+        let signature = signature.normalize_s().unwrap_or(signature);
         request.headers.insert(
             "DPoP".into(),
             format!("{body}.{}", t3_auth::utils::b64(signature.to_bytes())),

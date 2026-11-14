@@ -661,9 +661,20 @@ impl SessionStore {
     }
     pub async fn proof_key_thumbprint_of(&self, id: &AuthSessionId) -> Result<Option<String>> {
         let id = id.0.clone();
-        Ok(self.inner.db.reader(move |db| {
-            Ok(db.query_row("SELECT proof_key_thumbprint FROM auth_sessions WHERE session_id=?1", [id], |r| r.get::<_, Option<String>>(0)).optional()?.flatten())
-        }).await?)
+        Ok(self
+            .inner
+            .db
+            .reader(move |db| {
+                Ok(db
+                    .query_row(
+                        "SELECT proof_key_thumbprint FROM auth_sessions WHERE session_id=?1",
+                        [id],
+                        |r| r.get::<_, Option<String>>(0),
+                    )
+                    .optional()?
+                    .flatten())
+            })
+            .await?)
     }
     pub async fn revoke_by_proof_key(&self, proof_key: &str) -> Result<usize> {
         let store = self.clone();

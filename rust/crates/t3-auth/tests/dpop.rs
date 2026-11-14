@@ -132,7 +132,12 @@ fn proof_validation_matches_signature_claims_time_boundaries_and_diagnostics() {
     let low = Signature::from_slice(&unb64(parts[2]).unwrap()).unwrap();
     let high = Signature::from_scalars(low.r().to_bytes(), (-*low.s()).to_bytes()).unwrap();
     let high_proof = format!("{}.{}.{}", parts[0], parts[1], b64(high.to_bytes()));
-    assert!(verify(&high_proof, "GET", url, None, Some("token"), iat).is_ok());
+    assert_eq!(
+        verify(&high_proof, "GET", url, None, Some("token"), iat)
+            .unwrap_err()
+            .code,
+        FailureCode::InvalidSignature
+    );
     for (p, method, url, thumb, token, now, code) in [
         (
             &proof[..],
@@ -235,6 +240,14 @@ async fn request_proofs_are_single_use_across_concurrent_verifiers_and_failures_
         "replay",
     );
     request.headers.insert("dpop".into(), proof.clone());
+    let mut malformed = request.clone();
+    malformed.headers.insert("dpop".into(), "malformed".into());
+    assert!(check_request(&malformed, None, None, Some("token"), h.clock.now_ms()).is_err());
+    let checked = check_request(&request, None, None, Some("token"), h.clock.now_ms()).unwrap();
+    assert!(checked.thumbprint() == thumbprint(&key.jwk));
+    let checked_again =
+        check_request(&request, None, None, Some("token"), h.clock.now_ms()).unwrap();
+    assert!(checked_again.thumbprint() == checked.thumbprint());
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let mut tasks = Vec::new();
     for _ in 0..2 {
@@ -257,6 +270,13 @@ async fn request_proofs_are_single_use_across_concurrent_verifiers_and_failures_
             dpop_failure_reason: Some(DpopFailureReason::Replay),
             ..
         }
+    ));
+    assert!(matches!(
+        checked.consume(&h.auth.secrets).await,
+        Err(Error::InvalidCredential {
+            dpop_failure_reason: Some(DpopFailureReason::Replay),
+            ..
+        })
     ));
     let proof = key.sign(
         "GET",

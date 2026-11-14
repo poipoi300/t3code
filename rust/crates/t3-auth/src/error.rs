@@ -86,6 +86,10 @@ pub enum Error {
     InvalidScope,
     #[error("The requested authentication scope was not granted.")]
     ScopeNotGranted,
+    #[error("This T3 Connect device is waiting for approval.")]
+    BootstrapConnectApprovalPending { pairing_link_id: String },
+    #[error("This T3 Connect device is waiting for approval.")]
+    ConnectApprovalPending,
     #[error("The current authentication session cannot revoke itself.")]
     SelfRevocation,
     #[error("{0}")]
@@ -133,6 +137,21 @@ pub enum ApprovalPage {
 }
 
 impl Error {
+    pub fn connect_approval_pending_response(
+        &self,
+        trace_id: t3_contracts::base_schemas::TrimmedNonEmptyString,
+    ) -> Option<t3_contracts::environment_http::EnvironmentConnectApprovalPendingError> {
+        use t3_contracts::environment_http::{
+            EnvironmentConnectApprovalPendingError, EnvironmentConnectApprovalPendingErrorCode,
+            EnvironmentConnectApprovalPendingErrorTag,
+        };
+        matches!(self, Self::ConnectApprovalPending)
+            .then_some(EnvironmentConnectApprovalPendingError {
+            tag: EnvironmentConnectApprovalPendingErrorTag::EnvironmentConnectApprovalPendingError,
+            code: EnvironmentConnectApprovalPendingErrorCode::ConnectApprovalPending,
+            trace_id,
+        })
+    }
     pub fn credential(kind: CredentialFailure, session_id: Option<&str>) -> Self {
         Self::Credential {
             kind,

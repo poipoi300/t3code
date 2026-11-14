@@ -1,4 +1,6 @@
 //! Native server authentication and authorization; does not target wasm32-unknown-unknown.
+#[cfg(test)]
+extern crate self as t3_auth;
 pub mod authorization;
 pub mod clock;
 pub mod dpop;

@@ -9,6 +9,25 @@ mod payloads;
 #[path = "rpc_scopes.rs"]
 mod table;
 pub use table::RPC_REQUIRED_SCOPES;
+pub const CONNECT_DEVICE_HTTP_REQUIRED_SCOPES: &[(&str, &str, Scope)] = &[
+    (
+        "POST",
+        "/api/auth/connect-devices/approve",
+        Scope::AccessWrite,
+    ),
+    (
+        "POST",
+        "/api/auth/connect-devices/revoke",
+        Scope::AccessWrite,
+    ),
+];
+pub fn authorize_connect_device_http(scopes: &[Scope], method: &str, path: &str) -> Result<()> {
+    let (_, _, scope) = CONNECT_DEVICE_HTTP_REQUIRED_SCOPES
+        .iter()
+        .find(|(verb, route, _)| method == *verb && path == *route)
+        .ok_or_else(|| Error::InvalidPayload("Unknown Connect device route".into()))?;
+    require_scope(scopes, *scope)
+}
 
 pub const STANDARD_SCOPES: &[Scope] = &[
     Scope::OrchestrationRead,

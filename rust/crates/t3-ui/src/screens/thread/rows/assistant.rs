@@ -2,25 +2,36 @@
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::time::Duration;
 
 use futures::future::LocalBoxFuture;
 use nsh_core::prelude::*;
 use t3_client::state::items;
+use t3_client::thread_views::messages_timeline::{
+    MessagesTimelineRow, MessagesTimelineRowContent, resolve_assistant_message_copy_state,
+};
 use t3_client::thread_views::threads::workflows::can_fork_projected_assistant_item;
 use t3_client::types::ThreadKey;
-use t3_client::view_logic::session::{ChatMessage, TimelineContent, TimelineEntry};
+use t3_client::view_logic::session::ChatMessage;
+use t3_client::view_logic::session::timestamps::{
+    CalendarTimestamp, TimestampHost, TimestampPresenter, resolve_hour12,
+};
 use t3_contracts::base_schemas::{RunId, ThreadId};
 use t3_contracts::orchestration_v2::{
-    OrchestrationV2Checkpoint, OrchestrationV2ProjectedTurnItem,
-    OrchestrationV2ProviderCapabilities, OrchestrationV2TurnItemStatus,
+    OrchestrationV2ProjectedTurnItem, OrchestrationV2ProviderCapabilities,
+    OrchestrationV2TurnItemStatus,
 };
 use t3_contracts::orchestration_v2_id_table::IdOrIndex;
+use t3_contracts::settings::TimestampFormat;
+use t3_i18n::{DateFormat, Formats, TimeZone};
 
 use crate::i18n::t;
 use crate::runtime::Shared;
 use crate::state::layout::{Pointer, pointer};
 use crate::theme::{cn, tw};
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
+use crate::ui::icon::Icon;
+use crate::ui::toast::{ANCHORED_COPY_TOAST_TIMEOUT_MS, show_anchored_copy_success_toast};
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
 /// Display decisions belong to the client's MessagesTimeline projection, not individual cells.
@@ -33,30 +44,66 @@ pub struct AssistantRow {
     pub show_assistant_meta: bool,
     pub show_assistant_copy_button: bool,
     pub assistant_copy_streaming: bool,
-    pub assistant_turn_diff_summary: Option<Rc<OrchestrationV2Checkpoint>>,
+    pub assistant_turn_diff_summary: Option<serde_json::Value>,
 }
 
 impl AssistantRow {
-    pub fn from_entry(entry: &TimelineEntry) -> Option<Self> {
-        let TimelineContent::Message {
+    pub fn from_row(row: &MessagesTimelineRow) -> Option<Self> {
+        let (
             message,
             projected_item,
-        } = &entry.content
-        else {
-            return None;
+            show_meta,
+            suppress_empty,
+            show_copy,
+            copy_streaming,
+            summary,
+        ) = match &row.content {
+            MessagesTimelineRowContent::Message {
+                message,
+                projected_item,
+                show_assistant_meta,
+                suppress_empty_response,
+                show_assistant_copy_button,
+                assistant_copy_streaming,
+                assistant_turn_diff_summary,
+                ..
+            } => (
+                message,
+                projected_item,
+                *show_assistant_meta,
+                suppress_empty_response.unwrap_or(false),
+                *show_assistant_copy_button,
+                *assistant_copy_streaming,
+                assistant_turn_diff_summary.clone(),
+            ),
+            MessagesTimelineRowContent::AssistantMeta {
+                message,
+                projected_item,
+                show_assistant_copy_button,
+                assistant_copy_streaming,
+            } => (
+                message,
+                projected_item,
+                true,
+                false,
+                *show_assistant_copy_button,
+                *assistant_copy_streaming,
+                None,
+            ),
+            _ => return None,
         };
         if message.role != "assistant" {
             return None;
         }
         Some(Self {
-            id: entry.id.clone(),
+            id: row.id.clone(),
             message: message.clone(),
             projected_item: projected_item.clone(),
-            suppress_empty_response: false,
-            show_assistant_meta: false,
-            show_assistant_copy_button: false,
-            assistant_copy_streaming: message.streaming,
-            assistant_turn_diff_summary: None,
+            suppress_empty_response: suppress_empty,
+            show_assistant_meta: show_meta,
+            show_assistant_copy_button: show_copy,
+            assistant_copy_streaming: copy_streaming,
+            assistant_turn_diff_summary: summary,
         })
     }
 }
@@ -79,8 +126,6 @@ pub struct AssistantMarkdown {
 
 pub type MarkdownRenderer = Rc<dyn Fn(Memo<AssistantMarkdown>) -> AnyElement>;
 pub type RowSlot = Rc<dyn Fn(Memo<Option<AssistantRow>>) -> AnyElement>;
-pub type CopyRenderer = Rc<dyn Fn(&str) -> String>;
-pub type TimestampFormatter = Rc<dyn Fn(&str) -> (String, String)>;
 pub type DirectoryLookup = Rc<dyn Fn(&OrchestrationV2ProjectedTurnItem) -> Vec<String>>;
 
 #[derive(Clone)]
@@ -113,16 +158,6 @@ pub type CapabilityLookup =
     Rc<dyn Fn(&OrchestrationV2ProjectedTurnItem) -> Option<OrchestrationV2ProviderCapabilities>>;
 pub type ForkHandler = Rc<dyn Fn(ForkRequest) -> LocalBoxFuture<'static, Result<(), String>>>;
 pub type ReplyHandler = Rc<dyn Fn(ReplyRequest) -> Result<(), String>>;
-pub type ActionControlRenderer = Rc<dyn Fn(AssistantActionControl) -> AnyElement>;
-
-pub struct AssistantActionControl {
-    /// English source key; the control renderer translates its accessibility label.
-    pub label: &'static str,
-    pub variant: ButtonVariant,
-    pub size: ButtonSize,
-    pub disabled: Rc<dyn Fn() -> bool>,
-    pub on_press: Rc<dyn Fn()>,
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ForkRequest {
@@ -141,7 +176,7 @@ pub struct ReplyRequest {
 #[derive(Clone, Debug, Default, PartialEq)]
 struct ActionState {
     busy: bool,
-    error: Option<String>,
+    copied: bool,
 }
 
 /// Construct once above the virtual list; a recycled cell never owns a response's busy state.
@@ -149,6 +184,7 @@ struct ActionState {
 pub struct AssistantRowsState {
     actions: Signal<BTreeMap<String, ActionState>>,
     owner: Owner,
+    copy_resets: Stored<BTreeMap<String, Spawned<()>>>,
 }
 
 impl Default for AssistantRowsState {
@@ -156,6 +192,7 @@ impl Default for AssistantRowsState {
         Self {
             actions: signal(BTreeMap::new()),
             owner: Owner::current(),
+            copy_resets: stored(BTreeMap::new()),
         }
     }
 }
@@ -172,7 +209,6 @@ impl AssistantRowsState {
             let action = state.entry(id.into()).or_default();
             if !action.busy {
                 action.busy = true;
-                action.error = None;
                 started = true;
             }
         });
@@ -181,24 +217,33 @@ impl AssistantRowsState {
 
     fn finish(self, id: &str, result: Result<(), String>) {
         self.actions.update(|state| {
-            if let Err(error) = result {
-                state.insert(
-                    id.into(),
-                    ActionState {
-                        busy: false,
-                        error: Some(error),
-                    },
-                );
-            } else {
-                state.remove(id);
-            }
+            state.entry(id.into()).or_default().busy = false;
         });
+        if let Err(error) = result {
+            log::warn!("fork response failed: {error}");
+        }
     }
 
-    fn reply_result(self, id: &str, result: Result<(), String>) {
-        self.actions.update(|state| {
-            state.entry(id.into()).or_default().error = result.err();
+    fn copied(self, id: &str, anchor: ElementRef) {
+        if let Some(reset) = self.copy_resets.with(|resets| resets.remove(id)) {
+            reset.cancel();
+        }
+        self.actions
+            .update(|actions| actions.entry(id.into()).or_default().copied = true);
+        show_anchored_copy_success_toast(Some(&anchor));
+        let id = id.to_owned();
+        let key = id.clone();
+        let reset = self.owner.run(move || {
+            set_timeout(
+                Duration::from_millis(ANCHORED_COPY_TOAST_TIMEOUT_MS),
+                move || {
+                    self.actions
+                        .update(|actions| actions.entry(id.clone()).or_default().copied = false);
+                    self.copy_resets.with(|resets| resets.remove(&id));
+                },
+            )
         });
+        self.copy_resets.with(|resets| resets.insert(key, reset));
     }
 }
 
@@ -206,45 +251,50 @@ impl AssistantRowsState {
 pub struct AssistantRowContext {
     pub thread_ref: Option<ThreadKey>,
     pub markdown_cwd: Option<String>,
-    pub markdown: MarkdownRenderer,
+    markdown: MarkdownRenderer,
     pub agent_directories: Option<DirectoryLookup>,
-    pub copy_text: Option<CopyRenderer>,
-    pub timestamp: Option<TimestampFormatter>,
+    pub timestamp_format: TimestampFormat,
     pub provider_capabilities: Option<CapabilityLookup>,
     pub on_fork_from_run: Option<ForkHandler>,
     pub on_reply_to_response: Option<ReplyHandler>,
-    /// UI-ICONS must supply GitFork/Reply through the button primitive before these mount.
-    pub action_control: Option<ActionControlRenderer>,
     pub changed_files: Option<RowSlot>,
     pub state: AssistantRowsState,
 }
 
 impl AssistantRowContext {
-    pub fn new(markdown: MarkdownRenderer, state: AssistantRowsState) -> Self {
+    pub fn for_timeline(state: AssistantRowsState) -> Self {
         Self {
             thread_ref: None,
             markdown_cwd: None,
-            markdown,
+            markdown: Rc::new(|markdown| assistant_markdown(markdown).into_element()),
             agent_directories: None,
-            copy_text: None,
-            timestamp: None,
+            timestamp_format: TimestampFormat::Locale,
             provider_capabilities: None,
             on_fork_from_run: None,
             on_reply_to_response: None,
-            action_control: None,
             changed_files: None,
             state,
+        }
+    }
+
+    /// Retains the integrator's Markdown/code-block root while TL-MARKDOWN-BASE is in flight.
+    pub fn new(markdown: MarkdownRenderer, state: AssistantRowsState) -> Self {
+        Self {
+            markdown,
+            ..Self::for_timeline(state)
         }
     }
 }
 
 /// Adapts the runtime's per-entry memo without cloning a message on every streamed token.
-pub fn assistant_row(entry: Memo<Option<Shared<TimelineEntry>>>) -> Memo<Option<AssistantRow>> {
+pub fn assistant_row(
+    entry: Memo<Option<Shared<MessagesTimelineRow>>>,
+) -> Memo<Option<AssistantRow>> {
     computed(move || {
         entry.with(|entry| {
             entry
                 .as_ref()
-                .and_then(|entry| AssistantRow::from_entry(entry))
+                .and_then(|entry| AssistantRow::from_row(entry))
         })
     })
 }
@@ -335,6 +385,17 @@ fn markdown_input(
     }
 }
 
+fn assistant_markdown(markdown: Memo<AssistantMarkdown>) -> impl IntoElement {
+    nsh_base::text_view()
+        .markdown(move || Some(SharedString::from(markdown.get().text)))
+        .options(move || nsh_base::text_view::MarkdownOptions {
+            streaming: markdown.get().is_streaming,
+            ..Default::default()
+        })
+        .selectable(true)
+        .app_class(tw("w-full text-sm text-foreground/90"))
+}
+
 /// Port of packages/shared/src/markdownPipeline.ts shouldPreserveAssistantLineBreaks.
 pub fn should_preserve_assistant_line_breaks(text: &str) -> bool {
     text.split(['\n', '\r', '\u{2028}', '\u{2029}'])
@@ -381,7 +442,7 @@ pub fn assistant_message_meta(
     let copy_context = context.clone();
     let fork_context = context.clone();
     let reply_context = context.clone();
-    let timestamp = context.timestamp.clone();
+    let timestamp_format = context.timestamp_format.clone();
     // Group hover belongs to this cell's ancestor; the timeline supplies group/assistant.
     // NSH has no pointer-coarse variant, so resolve that class from the shared pointer signal.
     view()
@@ -411,24 +472,23 @@ pub fn assistant_message_meta(
         .child(assistant_reply_button(row, reply_context))
         .child(dynamic(move || {
             row.get().filter(|row| !row.message.streaming).map(|row| {
-                let (label, tooltip) = timestamp.as_ref().map_or_else(
-                    || {
-                        (
-                            t("Timestamp unavailable"),
-                            t("Timestamp formatting is not available yet."),
-                        )
-                    },
-                    |format| format(&row.message.updated_at),
+                let presenter = TimestampPresenter(UiTimestampHost);
+                let label = presenter.day_aware(
+                    &row.message.updated_at,
+                    &timestamp_format,
+                    nsh_core::time::unix_ms() as i64,
+                    None,
+                    false,
                 );
-                text(t(&label))
+                let hint = presenter.tooltip(&row.message.updated_at, &timestamp_format);
+                text(SharedString::from(label))
                     .app_class(tw("text-muted-foreground text-xs tabular-nums"))
-                    .tooltip(assistant_tooltip(&tooltip))
+                    .tooltip(tooltip(
+                        tooltip_create_handle(),
+                        TooltipOptions::default(),
+                        text(SharedString::from(hint)),
+                    ))
             })
-        }))
-        .child(dynamic(move || {
-            row.get()
-                .and_then(|row| context.state.action(&row.id).error)
-                .map(|error| text(t(&error)).app_class(tw("text-xs text-destructive")))
         }))
 }
 
@@ -446,83 +506,69 @@ pub fn assistant_status_badge(status: OrchestrationV2TurnItemStatus) -> impl Int
     text(t(status)).app_class(tw("rounded-full border border-border/70 px-1.5 py-0.5 font-mono text-3xs text-muted-foreground"))
 }
 
-#[derive(Debug, PartialEq)]
-pub struct AssistantMessageCopyState {
-    pub text: Option<String>,
-    pub visible: bool,
-}
-
-/// Port of MessagesTimeline.logic.ts resolveAssistantMessageCopyState; the client supplies
-/// renderCodexDirectivesForCopy rather than the UI implementing a second directive parser.
-pub fn resolve_assistant_message_copy_state(
-    text: Option<&str>,
-    show_copy_button: bool,
-    streaming: bool,
-    render_codex_directives_for_copy: impl FnOnce(&str) -> String,
-) -> AssistantMessageCopyState {
-    let text = text.filter(|text| has_text(text));
-    let visible = show_copy_button && text.is_some() && !streaming;
-    AssistantMessageCopyState {
-        text: text.map(|text| {
-            if visible {
-                render_codex_directives_for_copy(text)
-            } else {
-                text.into()
-            }
-        }),
-        visible,
-    }
-}
-
 pub fn assistant_copy_button(
     row: Memo<Option<AssistantRow>>,
     context: AssistantRowContext,
 ) -> impl IntoElement {
+    let state = context.state;
+    let visible = computed(move || {
+        row.with(|row| {
+            row.as_ref().is_some_and(|row| {
+                row.show_assistant_copy_button
+                    && !row.assistant_copy_streaming
+                    && resolve_assistant_message_copy_state(Some(&row.message.text), true, false)
+                        .visible
+            })
+        })
+    });
     dynamic(move || {
-        row.get()
-            .filter(|row| {
-                resolve_assistant_message_copy_state(
-                    Some(&row.message.text),
-                    row.show_assistant_copy_button,
-                    row.assistant_copy_streaming,
-                    |text| text.into(),
-                )
-                .visible
+        visible.get().then(|| {
+            untracked(|| {
+                let anchor = element_ref();
+                let copied = computed(move || {
+                    row.with(|row| row.as_ref().is_some_and(|row| state.action(&row.id).copied))
+                });
+                view()
+                    .element_ref(&anchor)
+                    .tooltip(assistant_tooltip("Copy message"))
+                    .child(dynamic(move || {
+                        let glyph = if copied.get() {
+                            Icon::Check
+                        } else {
+                            Icon::Copy
+                        };
+                        button(
+                            ButtonContent::Icon {
+                                icon: glyph,
+                                label: t("Copy message"),
+                            },
+                            ButtonVariant::GhostMuted,
+                            ButtonSize::Xs,
+                            move || copied.get(),
+                            move || {
+                                let Some(row) = row.get() else { return };
+                                if state.action(&row.id).copied
+                                    || !row.show_assistant_copy_button
+                                    || row.assistant_copy_streaming
+                                {
+                                    return;
+                                }
+                                let copy = resolve_assistant_message_copy_state(
+                                    Some(&row.message.text),
+                                    true,
+                                    false,
+                                );
+                                if copy.visible
+                                    && let Some(text) = copy.text
+                                {
+                                    set_clipboard(text);
+                                    state.copied(&row.id, anchor);
+                                }
+                            },
+                        )
+                    }))
             })
-            .map(|_| {
-                let renderer = context.copy_text.clone();
-                let can_copy = renderer.is_some();
-                let hint = if can_copy {
-                    "Copy message"
-                } else {
-                    "Copy formatting is not available yet."
-                };
-                view().tooltip(assistant_tooltip(hint)).child(button(
-                    ButtonContent::Icon {
-                        icon: crate::ui::icon::Icon::Copy,
-                        label: t("Copy message"),
-                    },
-                    ButtonVariant::GhostMuted,
-                    ButtonSize::Xs,
-                    move || !can_copy,
-                    move || {
-                        let Some(row) = row.get() else { return };
-                        let Some(renderer) = &renderer else { return };
-                        let copy = resolve_assistant_message_copy_state(
-                            Some(&row.message.text),
-                            row.show_assistant_copy_button,
-                            row.assistant_copy_streaming,
-                            |text| renderer(text),
-                        );
-                        if copy.visible
-                            && let Some(text) = copy.text
-                        {
-                            // NSH clipboard writes have no acknowledgement: never claim Copied.
-                            set_clipboard(text);
-                        }
-                    },
-                ))
-            })
+        })
     })
 }
 
@@ -541,51 +587,66 @@ pub fn assistant_fork_button(
             return None;
         }
         let on_fork = context.on_fork_from_run.clone()?;
-        let render_control = context.action_control.clone()?;
         let state = context.state;
         let id = current.id.clone();
         let provider_capabilities = context.provider_capabilities.clone();
-        // The frozen button primitive lacks GitFork/Reply; its owner supplies these controls.
+        let busy = computed(move || {
+            row.with(|row| row.as_ref().is_some_and(|row| state.action(&row.id).busy))
+        });
         Some(
             view()
                 .tooltip(assistant_tooltip("Fork from this response"))
-                .child(render_control(AssistantActionControl {
-                    label: "Fork from this response",
-                    variant: ButtonVariant::Ghost,
-                    size: ButtonSize::Xs,
-                    disabled: Rc::new(move || {
-                        row.get().is_none_or(|row| state.action(&row.id).busy)
-                    }),
-                    on_press: Rc::new(move || {
-                        let Some(current) = row.get() else { return };
-                        let Some(projected) = &current.projected_item else {
-                            return;
-                        };
-                        let capabilities = provider_capabilities
-                            .as_ref()
-                            .and_then(|lookup| lookup(projected));
-                        if !can_fork_projected_assistant_item(projected, capabilities.as_ref()) {
-                            return;
-                        }
-                        let Some(run_id) = items::run_id(&projected.item).clone() else {
-                            return;
-                        };
-                        if !state.begin(&id) {
-                            return;
-                        }
-                        let future = on_fork(ForkRequest {
-                            source_thread_id: projected.source_thread_id.clone(),
-                            run_id,
-                        });
-                        let id = id.clone();
-                        // The list owner retains the operation across cell recycling.
-                        state.owner.run(move || {
-                            spawn(async move {
-                                state.finish(&id, future.await);
-                            })
-                        });
-                    }),
-                })),
+                // The primitive owns its glyph; pulsing the transparent wrapper preserves its look.
+                .child(
+                    view()
+                        .app_class(move || {
+                            Some(tw(if busy.get() && !reduce_motion() {
+                                "animate-pulse"
+                            } else {
+                                "animate-none"
+                            }))
+                        })
+                        .child(button(
+                            ButtonContent::Icon {
+                                icon: Icon::GitFork,
+                                label: t("Fork from this response"),
+                            },
+                            ButtonVariant::Ghost,
+                            ButtonSize::Xs,
+                            move || busy.get(),
+                            move || {
+                                let Some(current) = row.get() else { return };
+                                let Some(projected) = &current.projected_item else {
+                                    return;
+                                };
+                                let capabilities = provider_capabilities
+                                    .as_ref()
+                                    .and_then(|lookup| lookup(projected));
+                                if !can_fork_projected_assistant_item(
+                                    projected,
+                                    capabilities.as_ref(),
+                                ) {
+                                    return;
+                                }
+                                let Some(run_id) = items::run_id(&projected.item).clone() else {
+                                    return;
+                                };
+                                if !state.begin(&id) {
+                                    return;
+                                }
+                                let future = on_fork(ForkRequest {
+                                    source_thread_id: projected.source_thread_id.clone(),
+                                    run_id,
+                                });
+                                let id = id.clone();
+                                state.owner.run(move || {
+                                    spawn(async move {
+                                        state.finish(&id, future.await);
+                                    })
+                                });
+                            },
+                        )),
+                ),
         )
     })
 }
@@ -602,17 +663,18 @@ pub fn assistant_reply_button(
         current.projected_item.as_ref()?;
         let thread_ref = context.thread_ref.clone()?;
         let on_reply = context.on_reply_to_response.clone()?;
-        let render_control = context.action_control.clone()?;
-        let state = context.state;
         Some(
             view()
                 .tooltip(assistant_tooltip("Reply to this response"))
-                .child(render_control(AssistantActionControl {
-                    label: "Reply to this response",
-                    variant: ButtonVariant::GhostMuted,
-                    size: ButtonSize::Xs,
-                    disabled: Rc::new(|| false),
-                    on_press: Rc::new(move || {
+                .child(button(
+                    ButtonContent::Icon {
+                        icon: Icon::Reply,
+                        label: t("Reply to this response"),
+                    },
+                    ButtonVariant::GhostMuted,
+                    ButtonSize::Xs,
+                    || false,
+                    move || {
                         let Some(current) = row.get() else { return };
                         if current.message.streaming || !has_text(&current.message.text) {
                             return;
@@ -620,14 +682,15 @@ pub fn assistant_reply_button(
                         let Some(projected_item) = current.projected_item else {
                             return;
                         };
-                        let result = on_reply(ReplyRequest {
+                        if let Err(error) = on_reply(ReplyRequest {
                             thread_ref: thread_ref.clone(),
                             message: current.message,
                             projected_item,
-                        });
-                        state.reply_result(&current.id, result);
-                    }),
-                })),
+                        }) {
+                            log::warn!("reply to response failed: {error}");
+                        }
+                    },
+                )),
         )
     })
 }
@@ -660,7 +723,11 @@ pub fn assistant_changed_files_section(
         row.get().is_some_and(|row| {
             row.assistant_turn_diff_summary
                 .as_ref()
-                .is_some_and(|summary| !summary.files.is_empty())
+                .is_some_and(|summary| {
+                    summary["files"]
+                        .as_array()
+                        .is_some_and(|files| !files.is_empty())
+                })
         })
     });
     dynamic(move || {
@@ -694,63 +761,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn copy_visibility_matches_the_typescript_conditions_and_keeps_the_source_when_hidden() {
-        for text in [None, Some(""), Some(" \t\n\u{feff}")] {
-            for show in [false, true] {
-                for streaming in [false, true] {
-                    assert_eq!(
-                        resolve_assistant_message_copy_state(text, show, streaming, |_| panic!(
-                            "empty text must never reach the directive renderer"
-                        )),
-                        AssistantMessageCopyState {
-                            text: None,
-                            visible: false
-                        }
-                    );
-                }
-            }
-        }
-        for show in [false, true] {
-            for streaming in [false, true] {
-                let visible = show && !streaming;
-                let copy = resolve_assistant_message_copy_state(
-                    Some(" **Reply** \n"),
-                    show,
-                    streaming,
-                    |source| {
-                        assert!(visible);
-                        format!("rendered:{source}")
-                    },
-                );
-                assert_eq!(copy.visible, visible);
-                assert_eq!(
-                    copy.text.as_deref(),
-                    Some(if visible {
-                        "rendered: **Reply** \n"
-                    } else {
-                        " **Reply** \n"
-                    })
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn copy_matches_javascript_whitespace_rather_than_rust_trim() {
-        for (text, visible) in [
-            ("\u{feff}", false),
-            ("\u{0085}", true),
-            ("\u{200b}", true),
-            ("😀", true),
-        ] {
-            let state =
-                resolve_assistant_message_copy_state(Some(text), true, false, |text| text.into());
-            assert_eq!(state.visible, visible, "{text:?}");
-            assert_eq!(state.text.as_deref(), visible.then_some(text));
-        }
-    }
-
-    #[test]
     fn insight_line_breaks_match_the_source_multiline_regex() {
         for (text, expected) in [
             ("★ Insight ─────\nBody", true),
@@ -772,5 +782,76 @@ mod tests {
                 "{text:?}"
             );
         }
+    }
+}
+
+struct UiTimestampHost;
+
+impl UiTimestampHost {
+    fn zone(zone: Option<&str>) -> TimeZone {
+        let settings = locale_settings();
+        let name = zone.unwrap_or_else(|| settings.time_zone.as_str());
+        if matches!(name, "UTC" | "Etc/UTC" | "GMT") {
+            TimeZone::Utc
+        } else {
+            TimeZone::Iana(name.into())
+        }
+    }
+    fn formats() -> Formats {
+        Formats::new(locale().as_str())
+    }
+    fn hour12(format: &TimestampFormat) -> bool {
+        resolve_hour12(format, locale_settings().hour_cycle.twelve_hour())
+    }
+}
+
+impl TimestampHost for UiTimestampHost {
+    fn parse_epoch_ms(&self, iso: &str) -> Option<i64> {
+        t3_client::time::epoch_ms(iso)
+    }
+    fn calendar(&self, epoch_ms: i64, zone: Option<&str>) -> CalendarTimestamp {
+        let day = t3_i18n::format::civil(epoch_ms, &Self::zone(zone)).day;
+        CalendarTimestamp {
+            epoch_ms,
+            day_index: day.index,
+            year: day.year,
+            month: day.month,
+            day: day.day,
+        }
+    }
+    fn short_time(&self, epoch_ms: i64, format: &TimestampFormat, zone: Option<&str>) -> String {
+        Self::formats().date(
+            DateFormat::TimeHm,
+            epoch_ms,
+            &Self::zone(zone),
+            Some(Self::hour12(format)),
+        )
+    }
+    fn numeric_date(&self, epoch_ms: i64, include_year: bool, zone: Option<&str>) -> String {
+        Self::formats().date(
+            if include_year {
+                DateFormat::MonthDayYearNumeric
+            } else {
+                DateFormat::MonthDayNumeric
+            },
+            epoch_ms,
+            &Self::zone(zone),
+            None,
+        )
+    }
+    fn full_timestamp(&self, iso: &str, format: &TimestampFormat) -> String {
+        self.parse_epoch_ms(iso)
+            .map(|epoch| {
+                Self::formats().date(
+                    DateFormat::DefaultDateTime,
+                    epoch,
+                    &Self::zone(None),
+                    Some(Self::hour12(format)),
+                )
+            })
+            .unwrap_or_default()
+    }
+    fn locale_hour12(&self) -> bool {
+        locale_settings().hour_cycle.twelve_hour()
     }
 }

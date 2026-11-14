@@ -101,6 +101,27 @@ async fn secret_create_publish_race_reuses_winner_without_partial_reads() {
 }
 
 #[tokio::test]
+async fn initialized_signing_key_can_be_replaced_and_removed_after_reading() {
+    for _ in 0..1024 {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ServerSecretStore::open(temp.path().join("secrets"))
+            .await
+            .unwrap();
+        let initial = store
+            .get_or_create_random("server-signing-key", 32)
+            .await
+            .unwrap();
+        assert!(store.get("server-signing-key").await.unwrap().unwrap() == initial);
+        store
+            .set("server-signing-key", b"replacement")
+            .await
+            .unwrap();
+        assert!(store.get("server-signing-key").await.unwrap().unwrap() == b"replacement");
+        store.remove("server-signing-key").await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn secret_read_and_persist_failures_propagate() {
     let temp = tempfile::tempdir().unwrap();
     let store = ServerSecretStore::open(temp.path().join("secrets"))

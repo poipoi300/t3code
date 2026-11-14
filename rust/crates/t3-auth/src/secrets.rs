@@ -73,7 +73,7 @@ impl ServerSecretStore {
                 drop(file);
                 secure(&temp, 0o600)?;
                 if exclusive {
-                    std::fs::hard_link(&temp, &path)?;
+                    publish_exclusive(&temp, &path)?;
                 } else {
                     std::fs::rename(&temp, &path)?;
                     secure(&path, 0o600)?;
@@ -159,6 +159,17 @@ impl ServerSecretStore {
         })
         .await
     }
+}
+#[cfg(windows)]
+fn publish_exclusive(temp: &Path, path: &Path) -> std::io::Result<()> {
+    // Windows hard-link publication can prevent replacement after a read in the same process.
+    tempfile::TempPath::try_from_path(temp.to_owned())?
+        .persist_noclobber(path)
+        .map_err(|error| error.error)
+}
+#[cfg(not(windows))]
+fn publish_exclusive(temp: &Path, path: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(temp, path)
 }
 pub const REPLAY_PREFIXES: &[&str] = &[
     "dpop-proof-",

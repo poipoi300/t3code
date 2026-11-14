@@ -1,5 +1,92 @@
 # t3-auth
 
+## Upstream auth drift: `2d8a843e6b..817a9186f9`
+
+`git log` over auth, auth repositories and shared DPoP/bootstrap sources names
+two behavior commits: `4ee3b602fc` and `a2edd281df`. Both are ported with tests.
+
+| Upstream behavior | Rust implementation and proof |
+|---|---|
+| Split DPoP checking from consuming replay state; token exchange never writes markers | `dpop::check_request` / `CheckedProof::consume`; `tests/security.rs:token_endpoint_checks_proofs_without_recording_replay_state` refuses unknown credentials and malformed proofs, then accepts a valid proof twice on a reusable credential with zero markers. HTTP/WS replay refusal remains in `tests/dpop.rs`. |
+| One ten-minute request per untrusted Connect key; two-minute credentials for trusted keys; remember successful exchanges even when approval is off | `EnvironmentAuth::issue_connect_credential`, serialized with proof-bound exchange and revocation; `tests/connect.rs` covers concurrent mints, changed-key refusal, approval, reconnect and revocation/exchange races. Pass the live approval setting on every mint. |
+| SQL consumption gate, deterministic code, first pending metadata, approved requests hidden | Pairing SQL checks trusted-key EXISTS in the atomic UPDATE; `connect.rs` handles repository methods. Lifecycle tests cover wrong proof/key/scope, pending without spending, stable metadata, notifications and approved/spent/expired/revoked requests. The code helper uses the exact TypeScript alphabet and UTF-16 slice. |
+| Denial survives relay retry until the original expiry; bulk revocation kills unused credentials without creating a denial | Individual pairing revoke writes `connect_denied=requires_connect_approval`; key revocation preserves its existing value. Lifecycle tests refuse denied retries and approvals; expiry allows a new request. |
+| Trusted-key storage, preserving first approvedAt and optional client metadata | Upsert uses COALESCE for metadata and preserves approvedAt; null client stays absent on the wire. Listing order is approvedAt DESC, proof key. Tests cover no metadata, refresh, code ambiguity, and all-except semantics. |
+| Persist session proof keys; revoke every session by key, including expired ones, and invalidate live connections | `SessionRecord`/INSERT/SELECT and `SessionStore::proof_key_thumbprint_of` / `revoke_by_proof_key`; tests cover reopening, expired sessions, idempotence, current-key siblings, tampered client identity and socket invalidation. |
+| Revoking another device's session also removes its trust and unspent credentials; revoke-others preserves only current-device trust | `EnvironmentAuth::revoke_client` and `revoke_other_client_sessions`; tests cover same-key sibling versus another key and bound/unbound current sessions. Transport must obtain currentSessionId from authentication. |
+| Approval/revocation by id or normalized code; ambiguous codes select nothing; new HTTP scopes and pending wire error | Environment service methods, `CONNECT_DEVICE_HTTP_REQUIRED_SCOPES`, and `Error::connect_approval_pending_response`. Tests pin refusal before handlers, canonical pending JSON, and exact TypeScript route declarations/scopes. Server adapters must apply HTTP status 403 and trace id. |
+| Approval setting needs access:write, including mixed patches | This guard was already present on takeover; extended execution tests prove a settings-only caller never reaches its handler. The source-table test confirms 175 main + 51 client-guarded declarations, 220 unique methods; tables are unchanged. |
+
+Migrations 90/91 belong to `t3-persistence`. Missing approval, denial, metadata,
+trusted-device or session-key columns/tables fail with a persistence error; no
+legacy-schema fallback grants access. SQL rows written by each implementation are
+read and mutated by the other's real repositories in `tools/interop.ps1`, covering
+pending metadata, approval, denial retry, consumed credentials, exact approval
+dates, session proof-key lookup, expired-session revocation and reopen checks.
+
+The initial regressions were observed failing for unapproved consumption, missing
+approval-column issuance, successful-token replay writes and secret Debug output.
+The session-key assertion also failed with the previous NULL-write behavior
+reinstated, then passed after restoring key persistence. `PublicJwk`, `VerifiedProof`
+and `CheckedProof` use the contract crate's redaction helper.
+
+MCP remains strict pending the owner's decision. The alternative is a one-line
+change to `session::ACCEPT_LEGACY_MCP_AUDIENCE` from false to true; new issuance
+still signs aud, and wrong/multiple audiences remain refused.
+
+Integration requests: `C:/Users/Administrator/t3code-rust-notes/briefs/server-seam-requests.md`
+and `client-seam-requests.md`. No server/client sources were edited or transport/UI
+verification claimed. Inherited work already supplied the main auth stores,
+cryptography, strict MCP implementation, interop harness and approval-setting guard.
+The inherited post-credential token replay write was replaced to match the new
+TypeScript specification; no other inherited implementation was discarded.
+
+Verification before the independent-review follow-up: 89 auth tests passed (11 Connect tests), scoped format
+check and all-targets Clippy with warnings denied passed. The real interop probe
+completed all five phases, including eight verification-code vectors (empty,
+short, mixed alphabet, unknown characters and UTF-16 boundary cases). Its runtime
+transcript ended with:
+
+```text
+TypeScript read Rust Connect rows, refused wrong/unapproved/spent/denied credentials, approved a request, preserved trust dates and revoked key sessions plus unspent credentials.
+Rust rejected the TypeScript-spent proof and TypeScript-revoked MCP session after reopening.
+Bidirectional TypeScript/Rust authentication interop passed.
+```
+
+The independent-review follow-up replaces the scheduling-only race test with a
+unit-test-only `Notify` seam. It stops exchange after consumption and before trust,
+observes revocation blocked on the real mutex, then releases exchange. Removing
+the exchange lock was observed to fail because exchange restored access after
+revocation completed; restoring the lock passes. Ordinary DPoP pairing never
+creates Connect trust, and pending credentials remain refused through browser
+and MCP approval paths, including the unbound pending-error mapping.
+
+The token endpoint now treats an exactly empty DPoP header as absent, matching
+TypeScript; whitespace-only and malformed proofs remain refused. High-S signatures
+are refused at the coordinator's explicit request. Contrary to the review's claim,
+the installed `@noble/curves/nist.js` sets `lowS: false` and TypeScript's shared
+verifier accepts the malleated vector. The real interop probe pins this difference:
+TypeScript accepts that high-S proof and Rust refuses it; low-S proofs still
+interoperate. A TypeScript-rejected high-S-only vector cannot be supplied without
+changing that verifier's configuration.
+
+The Windows `AccessDenied` is reproduced by a focused signing-key lifecycle test:
+hard-link publication followed by read/replace fails, including after explicitly
+closing the reader; skipping the reads or initially publishing by rename passes.
+Both files remain readable, neither is read-only, and Restart Manager
+reported no remaining user-mode owner. Windows exclusive publication now uses
+`tempfile::TempPath::persist_noclobber` (atomic no-replace rename) instead of a hard
+link; Unix retains the hard-link path. All 1,024 independent create/read/replace/
+read/remove lifecycles pass, as does the concurrent single-winner publication test.
+No retry, overwrite fallback, logging of secrets or unsafe code was added.
+
+Follow-up verification: 92 tests passed (one forced-interleaving unit test,
+12 Connect integration tests, eight storage tests); scoped formatting and
+all-targets Clippy with warnings denied passed. All five real TypeScript/Rust
+interop phases passed with normalized low-S positive vectors and an explicitly
+recorded TypeScript-accepted/Rust-refused high-S vector. The external-crate
+Connect test also checks that `issue_connect_credential` returns a `Send` future.
+
 Native, transport-neutral authentication over an injected `t3_persistence::Database`
 and explicit state/secrets paths. Never opens a default T3 home. Wire types come
 from `t3-contracts::auth`.
@@ -16,11 +103,11 @@ The TypeScript checkout is the specification, not the older inventory notes.
 | Legacy desktop bootstrap | Supplied by desktop; opaque exact token | In-memory map, reusable 24 hours, standard scopes; ordinary map equality. |
 | Rotating desktop bootstrap | Lowercase hex HMAC-SHA256 of UTF-8 `t3-desktop-bootstrap:<floor(now/43200000)>`, key is supplied UTF-8 desktop secret | Accept previous/current/next 12-hour windows, constant-time UTF-8 comparison; reusable. Takes precedence over legacy seed. Secret supplied by caller, not created by auth. |
 | Reusable dev credential | Exact configured T3CODE_DEV_AUTH_TOKEN, only web + dev URL + nonempty token | Constant-time SHA256 comparison; sid `dev-auth-<sha256 hex>`, cookie `t3_dev_session_<same hex>`. Row expires 9999-12-31T23:59:59.999Z; insert-if-absent preserves revocation. Child bearer/DPoP sessions have normal lifetimes. Rotation/removal rejects old raw token and dev tickets, leaves old rows visible. |
-| Signing secrets | OS CSPRNG, raw 32 bytes | `<secretsDir>/server-signing-key.bin` and `mcp-oauth-signing-key.bin`. Directory 0700/files 0600 on POSIX. Atomic temp+hard-link create; atomic rename replace. No keychain, encryption, or rotation in this layer. Existing nonempty bytes are reused; empty keys return `Error::EmptySecret`. |
+| Signing secrets | OS CSPRNG, raw 32 bytes | `<secretsDir>/server-signing-key.bin` and `mcp-oauth-signing-key.bin`. Directory 0700/files 0600 on POSIX. Atomic exclusive publication (Windows no-clobber rename; Unix hard link); atomic rename replace. No keychain, encryption, or rotation in this layer. Existing nonempty bytes are reused; empty keys return `Error::EmptySecret`. |
 | MCP client id | base64url JSON `{v:1,n,r,p?}` + HMAC-SHA256 of `mcp-client-id.<body>` | Stateless signed registration, no expiry. Same MCP signing secret. Constant-time MAC check. |
 | MCP CSRF | base64url HMAC-SHA256 over `mcp-csrf.` + JSON `[holder,clientId,redirectUri,codeChallenge]`; holder sid or `dpop:<jkt>` | Stateless, constant-time decoded-byte comparison, lifetime follows approving session. |
 | MCP authorization code | 32 random bytes, base64url | In-memory map; 60 seconds, removed atomically before later checks, including failed PKCE. PKCE S256 (43..128 ASCII verifier); constant-time digest comparison. Client/redirect/resource strings use ordinary equality. |
-| DPoP proof | ES256 compact JWT, public EC P-256 JWK, typ dpop+jwt, htm,htu,jti,iat,ath? | ±300 seconds inclusive, compact ECDSA, accepting high-S as the installed noble NIST configuration does. Public thumbprint/ath/method/url use ordinary equality. Replay marker `dpop-proof-<base64url SHA256(jkt+":"+jti)>.bin`, exclusive hard-link publication. Contents thumbprint/jti/iat/consumedAt lines. |
+| DPoP proof | ES256 compact JWT, public EC P-256 JWK, typ dpop+jwt, htm,htu,jti,iat,ath? | ±300 seconds inclusive, compact ECDSA with high-S refusal (explicit stricter policy than the installed TypeScript verifier). Public thumbprint/ath/method/url use ordinary equality. Replay marker `dpop-proof-<base64url SHA256(jkt+":"+jti)>.bin`, atomic exclusive publication. Contents thumbprint/jti/iat/consumedAt lines. |
 | Replay cleanup | dpop-proof-, cloud-mint-jti-, cloud-mint-nonce-, cloud-health-jti-, cloud-health-nonce- + *.bin | Remove only mtime strictly older than one day; temp files/other secrets untouched. Scheduler belongs to runtime. |
 
 Sources: `apps/server/src/auth/{SessionStore,PairingGrantStore,ReusableDevAuth,PayloadSigner,ServerSecretStore,EnvironmentAuth,McpOAuth,dpop,replayMarkers}.ts`,
@@ -47,6 +134,25 @@ automated rotation. Startup grants retain full standard scopes; legacy audience-
 WS tickets remain supported; reusable dev identifiers remain hashes of the credential.
 
 ## API and integration
+
+Cloud mint callers use the public async method on the same `EnvironmentAuth`
+instance (or a clone). `connect_trust_lock` is intentionally private: the method
+acquires it internally, so callers must not acquire another lock or mint directly.
+After verifying the cloud mint proof key, read the live setting, then:
+
+```rust,ignore
+let issued = auth.issue_connect_credential(verified_key, live_settings.require_connect_device_approval).await?;
+let credential = Secret::new(issued.credential.0);
+let expires_at_ms = t3_auth::clock::epoch(&issued.expires_at)?;
+```
+
+Map auth errors to the caller's error type. The method returns
+`Result<AuthPairingCredentialResult>` and its future is `Send`. An untrusted key
+with approval enabled still returns a credential successfully: it is the stable
+ten-minute pending request, not a granted session. Pass it back unchanged; only
+its token exchange returns `ConnectApprovalPending` until the host approves it.
+Trusted keys get two-minute credentials. Do not replace that result with a
+direct `create_pairing_link` call, which would bypass the approval gate.
 
 `EnvironmentAuth::new(db, secrets, config, policy, clock)` assembles the stores.
 The caller opens `Database` through `t3-persistence`, supplies the exact secrets
@@ -94,9 +200,12 @@ contract payloads; the git rules call the contract permission helper. The fixtur
 walks all guarded methods, and positive dynamic tests serialize real contract types.
 Pairing issuance always receives the caller's scopes and an explicit grant; delegation
 is checked inside the issuing call. Missing scopes never imply standard scopes.
-`exchange_bootstrap` takes the request, verifies its DPoP proof, validates/consumes the
-bootstrap credential and scope grant, then records replay state before issuing a session.
-Its caller cannot supply an unchecked proof thumbprint or compose replay recording.
+`exchange_bootstrap` takes the request, verifies its DPoP proof and validates/consumes
+the bootstrap credential and scope grant. Following upstream `4ee3b602fc`, this
+token endpoint writes no replay marker, including on success. Authenticated HTTP
+and WebSocket paths still check and consume proofs. `dpop::check_request` returns
+an opaque checked proof with `thumbprint()` and explicit `consume(&secrets)`.
+Callers cannot substitute an unchecked proof key into the token exchange.
 
 Store mutations finish commit and change publication in a Tokio completion task
 even if their awaiting request is cancelled: `t3-persistence` blocking closures
@@ -119,7 +228,7 @@ SQLite/filesystem dependencies; no store, crypto, or process mocks are used.
 | `McpOAuth.test.ts` | `tests/oauth.rs`, `tests/dpop.rs`: discovery, redirect/registration validation, hosted HTTPS callbacks/public PKCE, one-time MCP-only tokens, failed PKCE spending, scoped and app-specific approval codes, peer restriction, CSRF scope/holder binding and DPoP renewal; cloud handoff routing remains below |
 | `dpop.test.ts` | `tests/dpop.rs`: real AlreadyExists replay mapping versus other filesystem errors |
 
-Additional tests pin high-S signature acceptance, cancellation after SQLite
+Additional tests pin high-S signature refusal, cancellation after SQLite
 starts a revocation, corrupt persisted dates, and cookie/internal-path isolation.
 
 From `rust/`, set `CARGO_TARGET_DIR` to the task's assigned build directory, then run
@@ -228,7 +337,6 @@ duplicating the security contract. No dependant files were edited.
 | HTTPS cookies | `auth/http.ts` omits Secure for normal, dev and expired cookies. | All browser response cookies set Secure for HTTPS, including `X-Forwarded-Proto: https`; plain HTTP LAN remains usable. Both servers accept identical cookie names/values. TS can later emit a cookie without Secure; mixed deployments should account for its weaker responses. |
 | Forwarded origin host | `EnvironmentAuth.ts:browserOriginAllowed` trusts `X-Forwarded-Host` unconditionally. | Default false; set `AuthConfig::trust_forwarded_host` only for a trusted proxy/tunnel that overwrites that header. Host, trusted origins and same-origin fetch metadata retain source behavior. Mixed deployments keep valid credentials; Rust proxy-origin requests can need this explicit configuration. |
 | Trailing token segments | `SessionStore.ts` ignores segments after body/signature for sessions and tickets. | Exactly two nonempty segments are required. Neither implementation issues extras, so issued credentials interoperate; unsafe suffixed presentations are deliberately refused only by Rust. |
-| Bootstrap DPoP replay ordering | `auth/http.ts:token` records the proof before checking the bootstrap credential. | `exchange_bootstrap` verifies proof cryptography, checks/consumes the credential and scope grant, then records the marker before session issuance. Rejected credentials create no marker; a marker/storage failure issues no token. Successful proofs keep the exact TS marker format. TS may still create markers for failed credentials. |
 | Empty configured secrets | `PayloadSigner.ts` / `desktopBootstrapToken.ts` die on zero-length HMAC material; empty legacy/dev credentials are ignored. | Constructors and desktop derivation/verification return typed `EmptySecret`; explicit empty desktop seed/dev configuration is also rejected. Nonempty short keys and whitespace-only material remain accepted because TS accepts their UTF-8 bytes. Valid issued credentials interoperate. |
 | Pairing delegation | TS HTTP handler composes default full scopes and a separate delegation check. | Every public issuing call takes caller scopes and an explicit grant, validating it before writes. `AuthCreatePairingCredentialInput` without scopes/access is rejected; clients must state one. Credential format is unchanged. |
 | Invalid RPC payload | TS transport decodes all methods and its guard redecodes dynamic ones. | The final Rust guard redecodes all methods and refuses malformed payloads itself. Correct payloads and required scopes are unchanged. |
@@ -306,7 +414,8 @@ no sibling source or manifest was edited here.
   `Cookie::session(..., secure)` and `Cookie::expire(name, secure)` require the Secure
   decision. `Cookie::Debug` redacts its value while retaining useful attributes.
 - `exchange_bootstrap(request, credential, requested, metadata)` replaces its old
-  caller-provided thumbprint with proof verification/replay handling in the service.
+  caller-provided thumbprint with proof verification in the service; token exchange
+  intentionally does not consume replay state, matching the current TypeScript.
 - `McpOAuth::new(auth, watch::Receiver<bool>)` replaces the captured boolean and
   observes every registration's current linked-environments setting.
 - `McpOAuth::approve` returns `ApprovalResult { redirect, granted }`. `granted` is

@@ -183,6 +183,19 @@ fn secret_debug_is_redacted() {
         state: Some("SENSITIVE_STATE".into()),
     };
     assert!(!format!("{error:?}").contains("SENSITIVE_STATE"));
+    let key = t3_auth::dpop::PublicJwk {
+        kty: "EC".into(),
+        crv: "P-256".into(),
+        x: "SENSITIVE_KEY_X".into(),
+        y: "SENSITIVE_KEY_Y".into(),
+    };
+    assert!(!format!("{key:?}").contains("SENSITIVE_KEY"));
+    let proof = t3_auth::dpop::VerifiedProof {
+        thumbprint: "SENSITIVE_KEY".into(),
+        jti: "SENSITIVE_PROOF".into(),
+        iat: NOW,
+    };
+    assert!(!format!("{proof:?}").contains("SENSITIVE_"));
 }
 
 #[tokio::test]
@@ -566,9 +579,49 @@ async fn token_endpoint_checks_proofs_without_recording_replay_state() {
             .is_err()
     );
     assert_eq!(markers(), 0);
+    for value in [" ", "not-a-proof"] {
+        let mut invalid = request.clone();
+        invalid.headers.insert("dpop".into(), value.into());
+        assert!(
+            h.auth
+                .exchange_bootstrap(&invalid, "desktop", None, metadata())
+                .await
+                .is_err()
+        );
+    }
+    let mut empty = request.clone();
+    empty.headers.insert("dpop".into(), String::new());
+    assert!(
+        h.auth
+            .exchange_bootstrap(&empty, "invalid", None, metadata())
+            .await
+            .is_err()
+    );
+    let unbound = h
+        .auth
+        .exchange_bootstrap(&empty, "desktop", None, metadata())
+        .await
+        .unwrap();
+    assert_eq!(unbound.token_type, AuthTokenType::Bearer);
+    assert_eq!(markers(), 0);
+    let unbound = h
+        .auth
+        .sessions
+        .verify(&unbound.access_token.0)
+        .await
+        .unwrap();
+    assert!(unbound.proof_key_thumbprint.is_none());
+    h.auth.sessions.revoke(&unbound.session_id).await.unwrap();
     let mut malformed = request.clone();
-    malformed.headers.insert("dpop".into(), "not-a-proof".into());
-    assert!(h.auth.exchange_bootstrap(&malformed, "desktop", None, metadata()).await.is_err());
+    malformed
+        .headers
+        .insert("dpop".into(), "not-a-proof".into());
+    assert!(
+        h.auth
+            .exchange_bootstrap(&malformed, "desktop", None, metadata())
+            .await
+            .is_err()
+    );
     assert_eq!(markers(), 0);
     let issued = h
         .auth

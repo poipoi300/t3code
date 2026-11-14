@@ -8,13 +8,14 @@ use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use serde::{Deserialize, Serialize};
 use t3_contracts::base_schemas::DpopFailureReason;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PublicJwk {
     pub kty: String,
     pub crv: String,
     pub x: String,
     pub y: String,
 }
+t3_contracts::redacted_debug!(PublicJwk { kty, crv } redact { x, y });
 #[derive(Deserialize)]
 struct Header {
     typ: String,
@@ -64,11 +65,43 @@ impl ProofFailure {
         dpop_invalid(self.reason, reason)
     }
 }
-#[derive(Debug)]
 pub struct VerifiedProof {
     pub thumbprint: String,
     pub jti: String,
     pub iat: i64,
+}
+t3_contracts::redacted_debug!(VerifiedProof { iat } redact { thumbprint, jti });
+
+pub struct CheckedProof {
+    verified: VerifiedProof,
+    now_ms: i64,
+}
+t3_contracts::redacted_debug!(CheckedProof { } redact { verified });
+impl CheckedProof {
+    pub fn thumbprint(&self) -> &str {
+        &self.verified.thumbprint
+    }
+    pub async fn consume(&self, store: &ServerSecretStore) -> Result<()> {
+        record_request_proof(store, &self.verified, self.now_ms).await
+    }
+}
+pub fn check_request(
+    request: &Request,
+    proof: Option<&str>,
+    expected_thumbprint: Option<&str>,
+    expected_access_token: Option<&str>,
+    now_ms: i64,
+) -> Result<CheckedProof> {
+    Ok(CheckedProof {
+        verified: verify_request_proof(
+            request,
+            proof,
+            expected_thumbprint,
+            expected_access_token,
+            now_ms,
+        )?,
+        now_ms,
+    })
 }
 pub struct VerifyProof<'a> {
     pub proof: Option<&'a str>,
@@ -170,9 +203,10 @@ pub fn verify_proof(input: VerifyProof<'_>) -> std::result::Result<VerifiedProof
     }
     let public: Vec<_> = [vec![4], x, y].concat();
     let key = VerifyingKey::from_sec1_bytes(&public).map_err(|_| fail())?;
-    if key
-        .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &signature)
-        .is_err()
+    if signature.normalize_s().is_some()
+        || key
+            .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &signature)
+            .is_err()
     {
         return Err(ProofFailure::new(
             F::InvalidSignature,
@@ -201,15 +235,15 @@ pub async fn verify_request(
     expected_access_token: Option<&str>,
     now_ms: i64,
 ) -> Result<String> {
-    let verified = verify_request_proof(
+    let checked = check_request(
         request,
         proof,
         expected_thumbprint,
         expected_access_token,
         now_ms,
     )?;
-    record_request_proof(store, &verified, now_ms).await?;
-    Ok(verified.thumbprint)
+    checked.consume(store).await?;
+    Ok(checked.verified.thumbprint)
 }
 pub(crate) fn verify_request_proof(
     request: &Request,

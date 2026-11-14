@@ -4,7 +4,10 @@ import * as Effect from "../../../../apps/server/node_modules/effect/dist/Effect
 import * as Layer from "../../../../apps/server/node_modules/effect/dist/Layer.js";
 import * as Duration from "../../../../apps/server/node_modules/effect/dist/Duration.js";
 import * as Redacted from "../../../../apps/server/node_modules/effect/dist/Redacted.js";
+import * as DateTime from "../../../../apps/server/node_modules/effect/dist/DateTime.js";
+import * as Option from "../../../../apps/server/node_modules/effect/dist/Option.js";
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import * as HttpServerRequest from "../../../../apps/server/node_modules/effect/dist/http/HttpServerRequest.js";
 import * as NodeCrypto from "../../../../apps/server/node_modules/@effect/platform-node/dist/NodeCrypto.js";
 import * as NodeServices from "../../../../apps/server/node_modules/@effect/platform-node/dist/NodeServices.js";
@@ -22,6 +25,18 @@ import * as Environment from "../../../../apps/server/src/environment/ServerEnvi
 import { makeDpopKey } from "../../../../apps/server/src/auth/dpop.testkit.ts";
 import { verifyRequestDpopProof } from "../../../../apps/server/src/auth/dpop.ts";
 import { currentDesktopBootstrapToken } from "../../../../packages/shared/src/desktopBootstrapToken.ts";
+import { connectDeviceVerificationCode } from "../../../../packages/contracts/src/auth.ts";
+import { verifyDpopProof } from "../../../../packages/shared/src/dpop.ts";
+
+const p256Order = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
+const signatureVariant = (proof: string, high: boolean) => {
+  const parts = proof.split(".");
+  const signature = Buffer.from(parts[2]!, "base64url");
+  const s = BigInt(`0x${signature.subarray(32).toString("hex")}`);
+  const low = s > p256Order / 2n ? p256Order - s : s;
+  const chosen = high ? p256Order - low : low;
+  return `${parts[0]}.${parts[1]}.${Buffer.concat([signature.subarray(0,32),Buffer.from(chosen.toString(16).padStart(64,"0"),"hex")]).toString("base64url")}`;
+};
 
 const [phase, directory] = process.argv.slice(2);
 if (!directory || !Path.isAbsolute(directory) || !["prepare", "verify", "finish"].includes(phase)) {
@@ -69,6 +84,24 @@ await Effect.runPromise(Effect.gen(function* () {
   const oauth = yield* McpOAuth.McpOAuth;
   const auth = yield* EnvironmentAuth.EnvironmentAuth;
   if (phase === "prepare") {
+    const clientMetadata = { label: "TS Connect device", deviceType: "desktop" as const, os: "Windows" };
+    const pendingKey = "TS-pending-key-for-interop";
+    const deniedKey = "TS-denied-key-for-interop";
+    const trustedKey = "TS-trusted-key-for-interop";
+    const pending = yield* auth.issueConnectCredential({ proofKeyThumbprint: pendingKey, requireApproval: true });
+    yield* rejected(auth.exchangeBootstrapCredentialForAccessToken(pending.credential, undefined, clientMetadata, { proofKeyThumbprint: pendingKey }), "TS unapproved Connect request");
+    const pendingLink = (yield* pairing.listActive()).find((link) => link.connectDeviceRequest?.verificationCode === connectDeviceVerificationCode(pendingKey));
+    check(pendingLink !== undefined, "TS pending link missing");
+    const denied = yield* auth.issueConnectCredential({ proofKeyThumbprint: deniedKey, requireApproval: true });
+    const deniedLink = (yield* pairing.listActive()).find((link) => link.connectDeviceRequest?.verificationCode === connectDeviceVerificationCode(deniedKey));
+    yield* pairing.revoke(deniedLink!.id);
+    yield* pairing.trustConnectDevice(trustedKey, clientMetadata);
+    const trustedAt = (yield* pairing.listConnectDevices()).find((device) => device.proofKeyThumbprint === trustedKey)!.approvedAt;
+    const bound = yield* sessions.issue({ proofKeyThumbprint: trustedKey, method: "dpop-access-token" });
+    const boundExpired = yield* sessions.issue({ proofKeyThumbprint: trustedKey, ttl: Duration.millis(-1) });
+    const unspent = yield* auth.issueConnectCredential({ proofKeyThumbprint: trustedKey, requireApproval: true });
+    const verificationCodes = ["", "A", "ABCDEFGH", "abcdefghijklmnopqrstuvwxyz", "0123456789-_", "!é😀abcdZ", "abcdefg😀", "Kq3vZ8sYbTn0"].map((value) => [value, connectDeviceVerificationCode(value)]);
+    const connect = { verificationCodes, pending: { ...pending, expiresAt: DateTime.formatIso(pending.expiresAt) }, pendingId: pendingLink!.id, pendingKey, denied: { ...denied, expiresAt: DateTime.formatIso(denied.expiresAt) }, deniedKey, trustedKey, trustedAt: DateTime.formatIso(trustedAt), bound: bound.token, boundExpired: boundExpired.token, boundId: bound.sessionId, expiredId: boundExpired.sessionId, unspent, clientMetadata };
     const issued = yield* sessions.issue({ subject: "typescript", method: "bearer-access-token", scopes: ["orchestration:read"] });
     const key = makeDpopKey();
     const flags = yield* sessions.issue({ subject: "typescript-flags", method: "dpop-access-token", scopes: ["orchestration:read"], proofKeyThumbprint: key.thumbprint, runtimeModeCeiling: "auto", peerLink: true });
@@ -83,8 +116,10 @@ await Effect.runPromise(Effect.gen(function* () {
     const revokedPairing = yield* pairing.issueOneTimeToken();
     yield* pairing.revoke(revokedPairing.id);
     const approval = yield* pairing.issueOneTimeToken({ mcpApproval: "auto" });
-    const proof = key.sign({ method: "GET", url: "https://example.test/ws", token: issued.token, iat: Math.floor(Date.now() / 1000) });
-    const rustSpends = key.sign({ method: "GET", url: "https://example.test/ws", token: issued.token, iat: Math.floor(Date.now() / 1000) });
+    const proof = signatureVariant(key.sign({ method: "GET", url: "https://example.test/ws", token: issued.token, iat: Math.floor(Date.now() / 1000) }), false);
+    const rustSpends = signatureVariant(key.sign({ method: "GET", url: "https://example.test/ws", token: issued.token, iat: Math.floor(Date.now() / 1000) }), false);
+    const highProof = signatureVariant(proof, true);
+    check(verifyDpopProof({proof: highProof, method:"GET",url:"https://example.test/ws",expectedAccessToken:issued.token,nowEpochSeconds:Math.floor(Date.now()/1000)}).ok, "Installed TypeScript high-S policy changed; review Rust's intentional strictness");
     yield* verifyRequestDpopProof({ request: request(proof), expectedAccessToken: issued.token });
     const client = yield* oauth.register({ redirect_uris: ["https://example.test/callback"], client_name: "TS client" });
     const verifier = "v".repeat(64);
@@ -111,7 +146,7 @@ await Effect.runPromise(Effect.gen(function* () {
     const tsClient = yield* auth.authenticateMcpClient(mcpRequest(mcp.access_token));
     check(tsClient.access === "auto", "Wrong TypeScript MCP access");
     const desktop = yield* currentDesktopBootstrapToken("desktop-secret", Date.now());
-    yield* Effect.promise(() => Fs.writeFile(Path.join(base, "typescript.json"), JSON.stringify({ mcp: mcp.access_token, mcpBound, session: issued.token, flags: flags.token, ticket: ticket.token, expired: expired.token, revoked: revoked.token, expiredTicket: expiredTicket.token, revokedTicket: revokedTicket.token, pairing: pairingCode.credential, expiredPairing: expiredPairing.credential, revokedPairing: revokedPairing.credential, approval: approval.credential, proof, rustSpends, thumbprint: key.thumbprint, clientId: client.clientId, desktop })));
+    yield* Effect.promise(() => Fs.writeFile(Path.join(base, "typescript.json"), JSON.stringify({ highProof, connect, mcp: mcp.access_token, mcpBound, session: issued.token, flags: flags.token, ticket: ticket.token, expired: expired.token, revoked: revoked.token, expiredTicket: expiredTicket.token, revokedTicket: revokedTicket.token, pairing: pairingCode.credential, expiredPairing: expiredPairing.credential, revokedPairing: revokedPairing.credential, approval: approval.credential, proof, rustSpends, thumbprint: key.thumbprint, clientId: client.clientId, desktop })));
     console.log("TypeScript OAuth issued an audience-less MCP token; real PayloadSigner also signed an explicitly extended audience fixture.");
     console.log("TypeScript prepared positive and negative credentials and spent a DPoP proof.");
   } else {
@@ -121,6 +156,29 @@ await Effect.runPromise(Effect.gen(function* () {
       console.log("TypeScript confirmed persistent replay rejection after both processes reopened.");
       return;
     }
+    const connect = output.connect;
+    const pending = (yield* pairing.listActive()).find((link) => link.id === connect.pending.id);
+    check(pending?.connectDeviceRequest?.verificationCode === connectDeviceVerificationCode(connect.pendingKey), "Rust verification code differs");
+    check(isDeepStrictEqual(pending?.connectDeviceRequest?.client, connect.clientMetadata), "Rust requested client JSON differs");
+    yield* rejected(pairing.consume(connect.pending.credential, { proofKeyThumbprint: "wrong-key" }), "Rust pending request with wrong key");
+    yield* rejected(pairing.consume(connect.pending.credential, { proofKeyThumbprint: connect.pendingKey }), "Rust pending request without approval");
+    check(yield* auth.approveConnectDevice(connect.pending.id), "Cannot approve Rust pending row");
+    yield* pairing.consume(connect.pending.credential, { proofKeyThumbprint: connect.pendingKey });
+    yield* rejected(pairing.consume(connect.pending.credential, { proofKeyThumbprint: connect.pendingKey }), "Rust consumed Connect request");
+    const denied = yield* auth.issueConnectCredential({ proofKeyThumbprint: connect.deniedKey, requireApproval: true });
+    check(denied.credential === connect.denied.credential, "Rust denial was not reused");
+    yield* rejected(pairing.consume(denied.credential, { proofKeyThumbprint: connect.deniedKey }), "Rust denied Connect request");
+    check(!(yield* auth.approveConnectDevice(connect.denied.id)), "Rust denied row was approved");
+    const trusted = (yield* auth.listConnectDevices()).find((device) => device.proofKeyThumbprint === connect.trustedKey);
+    check(trusted !== undefined && DateTime.formatIso(trusted.approvedAt) === connect.trustedAt, "Rust trusted row/date differs");
+    check(isDeepStrictEqual(trusted!.client, connect.clientMetadata), "Rust trusted client JSON differs");
+    yield* pairing.trustConnectDevice(connect.trustedKey, { ...connect.clientMetadata, label: "TS refreshed Rust device" });
+    check(DateTime.formatIso((yield* auth.listConnectDevices()).find((device) => device.proofKeyThumbprint === connect.trustedKey)!.approvedAt) === connect.trustedAt, "TS replaced first approval time");
+    check(Option.getOrNull(yield* sessions.proofKeyThumbprintOf(connect.boundId)) === connect.trustedKey, "TS cannot read Rust session proof key");
+    check((yield* sessions.revokeByProofKey(connect.trustedKey)) === 2, "TS did not revoke active and expired Rust key sessions");
+    check(yield* auth.revokeConnectDevice(connect.trustedKey), "TS did not remove Rust trust");
+    yield* rejected(pairing.consume(connect.unspent.credential, { proofKeyThumbprint: connect.trustedKey }), "Rust credential after TS device revocation");
+    console.log("TypeScript read Rust Connect rows, refused wrong/unapproved/spent/denied credentials, approved a request, preserved trust dates and revoked key sessions plus unspent credentials.");
     const session = yield* sessions.verify(output.session);
     const rustMcp = yield* auth.authenticateMcpClient(mcpRequest(output.mcp));
     check(rustMcp.access === "auto" && rustMcp.label === "Rust MCP client", "Wrong Rust MCP identity/access");

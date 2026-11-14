@@ -12,8 +12,8 @@ use std::sync::{
 };
 use t3_contracts::{
     auth::{
-        AuthEnvironmentScope, AuthMcpClientAccess, AuthPairingCredentialResult, AuthPairingLink,
-        ServerAuthBootstrapMethod,
+        AuthClientMetadata, AuthConnectDeviceRequest, AuthEnvironmentScope, AuthMcpClientAccess,
+        AuthPairingCredentialResult, AuthPairingLink, ServerAuthBootstrapMethod,
     },
     base_schemas::TrimmedNonEmptyString,
     wire::WireDateTime,
@@ -27,6 +27,9 @@ pub const PAIRING_ALPHABET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 pub const PAIRING_LENGTH: usize = 12;
 pub const DESKTOP_WINDOW_MS: i64 = 43_200_000;
 pub const APPROVAL_SUBJECT_PREFIX: &str = "mcp-approval:";
+#[path = "connect.rs"]
+mod connect;
+pub use connect::connect_device_verification_code;
 
 #[derive(Clone)]
 pub struct PairingGrantStore {
@@ -42,8 +45,9 @@ struct Inner {
 }
 #[derive(Debug, Clone)]
 pub enum PairingChange {
-    PairingLinkUpserted(AuthPairingLink),
+    PairingLinkUpserted(Box<AuthPairingLink>),
     PairingLinkRemoved(String),
+    ConnectDevicesChanged,
 }
 #[derive(Default)]
 pub struct IssuePairing {
@@ -54,6 +58,7 @@ pub struct IssuePairing {
     pub proof_key_thumbprint: Option<String>,
     pub startup: bool,
     pub mcp_approval: Option<AuthMcpClientAccess>,
+    pub requires_connect_approval: bool,
 }
 #[derive(Default)]
 pub struct ConsumePairing {
@@ -78,6 +83,9 @@ struct PairingRecord {
     created_at: WireDateTime,
     consumed_at: Option<WireDateTime>,
     revoked_at: Option<WireDateTime>,
+    requires_connect_approval: bool,
+    connect_approved: bool,
+    requested_client: Option<AuthClientMetadata>,
 }
 
 impl PairingGrantStore {
@@ -157,6 +165,9 @@ impl PairingGrantStore {
             created_at: iso(now)?,
             consumed_at: None,
             revoked_at: None,
+            requires_connect_approval: input.requires_connect_approval,
+            connect_approved: false,
+            requested_client: None,
         };
         let stored = record.clone();
         let code = credential.clone();
@@ -167,8 +178,8 @@ impl PairingGrantStore {
                 db.execute(
                     "INSERT INTO auth_pairing_links(
                     id, credential, method, scopes, subject, label, proof_key_thumbprint,
-                    created_at, expires_at, consumed_at, revoked_at)
-                 VALUES(?1,?2,'one-time-token',?3,?4,?5,?6,?7,?8,NULL,NULL)",
+                    created_at, expires_at, consumed_at, revoked_at, requires_connect_approval)
+                 VALUES(?1,?2,'one-time-token',?3,?4,?5,?6,?7,?8,NULL,NULL,?9)",
                     params![
                         stored.id,
                         code,
@@ -177,15 +188,18 @@ impl PairingGrantStore {
                         stored.grant.label,
                         stored.grant.proof_key_thumbprint,
                         stored.created_at.0,
-                        stored.grant.expires_at.0
+                        stored.grant.expires_at.0,
+                        stored.requires_connect_approval
                     ],
                 )?;
                 Ok(())
             })
             .await?;
         if input.mcp_approval.is_none() {
-            self.emit(PairingChange::PairingLinkUpserted(to_link(&record)))
-                .await;
+            self.emit(PairingChange::PairingLinkUpserted(Box::new(to_link(
+                &record,
+            ))))
+            .await;
         }
         Ok(AuthPairingCredentialResult {
             id: TrimmedNonEmptyString(id),
@@ -211,7 +225,11 @@ impl PairingGrantStore {
                     .collect::<rusqlite::Result<Vec<_>>>()?)
             })
             .await?;
-        Ok(rows.iter().map(to_link).collect())
+        Ok(rows
+            .iter()
+            .filter(|r| !(r.requires_connect_approval && r.connect_approved))
+            .map(to_link)
+            .collect())
     }
     pub async fn revoke(&self, id: &str) -> Result<bool> {
         let store = self.clone();
@@ -226,7 +244,7 @@ impl PairingGrantStore {
             .db
             .writer(move |db| {
                 Ok(db.execute(
-                    "UPDATE auth_pairing_links SET revoked_at=?1
+                    "UPDATE auth_pairing_links SET revoked_at=?1, connect_denied=requires_connect_approval
                  WHERE id=?2 AND revoked_at IS NULL AND consumed_at IS NULL",
                     params![now, id_string],
                 )? > 0)
@@ -308,6 +326,7 @@ impl PairingGrantStore {
              AND expires_at>?1
              AND (subject NOT LIKE 'mcp-approval:%' OR subject=?3)
              AND (proof_key_thumbprint IS NULL OR proof_key_thumbprint=?4)
+             AND (requires_connect_approval=0 OR proof_key_thumbprint IN (SELECT proof_key_thumbprint FROM auth_connect_devices))
              AND (?5 OR EXISTS (SELECT 1
              FROM json_each(?6) AS requested
              WHERE requested.value IN (SELECT value
@@ -374,6 +393,11 @@ impl PairingGrantStore {
             ));
         }
         check_scopes(&record.grant.scopes, &input)?;
+        if record.requires_connect_approval && !record.connect_approved {
+            return Err(Error::BootstrapConnectApprovalPending {
+                pairing_link_id: record.id,
+            });
+        }
         Err(Error::credential(
             F::UnavailableBootstrapCredentialError,
             None,
@@ -502,10 +526,18 @@ fn to_link(record: &PairingRecord) -> AuthPairingLink {
             .map(TrimmedNonEmptyString),
         created_at: record.created_at.clone(),
         expires_at: record.grant.expires_at.clone(),
-        connect_device_request: None,
+        connect_device_request: record
+            .grant
+            .proof_key_thumbprint
+            .as_ref()
+            .filter(|key| record.requires_connect_approval && !key.is_empty())
+            .map(|key| AuthConnectDeviceRequest {
+                verification_code: TrimmedNonEmptyString(connect_device_verification_code(key)),
+                client: record.requested_client.clone(),
+            }),
     }
 }
-const COLUMNS: &str = "id,method,scopes,subject,label,proof_key_thumbprint,created_at,expires_at,consumed_at,revoked_at";
+const COLUMNS: &str = "id,method,scopes,subject,label,proof_key_thumbprint,created_at,expires_at,consumed_at,revoked_at,requires_connect_approval,EXISTS (SELECT 1 FROM auth_connect_devices WHERE auth_connect_devices.proof_key_thumbprint=auth_pairing_links.proof_key_thumbprint),requested_client_json";
 fn select() -> String {
     format!("SELECT {COLUMNS} FROM auth_pairing_links")
 }
@@ -523,7 +555,20 @@ fn decode(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairingRecord> {
         created_at: db_date(row.get(6)?)?,
         consumed_at: row.get::<_, Option<String>>(8)?.map(db_date).transpose()?,
         revoked_at: row.get::<_, Option<String>>(9)?.map(db_date).transpose()?,
+        requires_connect_approval: flag(row, 10)?,
+        connect_approved: flag(row, 11)?,
+        requested_client: row
+            .get::<_, Option<String>>(12)?
+            .map(|s| decode_json(&s))
+            .transpose()?,
     })
+}
+fn flag(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<bool> {
+    match row.get::<_, i64>(index)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
 }
 
 pub fn oauth_scope(scopes: &[AuthEnvironmentScope]) -> Result<String> {

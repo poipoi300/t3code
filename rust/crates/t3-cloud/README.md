@@ -26,7 +26,12 @@ Construct `api::CloudService` with `CloudServices`; native connector ownership i
 | POST `/api/t3-connect/mint-credential` | `CloudService::mint_credential` | signed relay proof + auth-backed CredentialIssuer |
 | GET `/oauth/mcp/authorize` hosted decision | `CloudService::approval_redirect` | call only after MCP client/redirect validation; peer clients stay local |
 | guest Connect hostname | `CloudService::state` → tunnelHostname | inject into GuestThreads; guest content/storage are owned by t3-host |
-| `peerLinks.list`, `peerLinks.link`, `peerLinks.unlink` | `PeerLinks::{list,link,unlink}` | host RPC guard access:read / access:write |
+| `cloud.getRelayClientStatus` | `RelayClient::status` | relay:read |
+| `cloud.installRelayClient` stream | `RelayClient::install_with_progress` | relay:write; canonical progress/completion/error stream |
+| `peerLinks.list` | `PeerService::list` | access:read; returns `{links}` |
+| `peerLinks.link` | `PeerService::link` | access:write; pairing input wrapped in Sensitive |
+| `peerLinks.unlink` | `PeerService::unlink` | access:write; canonical `{removed}` result |
+| `peerLinks.answerRequest` | `PeerService::answer_request` | access:write; records outcome through orchestration |
 
 Voice is independent of CloudLink: `t3-textgen::CloudSpeech::{configured,
 set_key,models,transcribe}` and `SpeechService` already own the voice routes.
@@ -66,10 +71,39 @@ duplicate speech or t3-host's `GuestShareContent` here.
   injectable boundaries. `ReqwestTransport` bounds response bodies and disables
   redirects. Its errors omit URLs, headers, bodies and nested transport causes.
 
-Enable `auth` to use `t3-auth::ServerSecretStore` and `EnvironmentAuth` directly.
-The required auth APIs are atomic secret creation, standard-scope single-use
-two-minute pairing grants bound to the client's P-256 thumbprint, and ordinary
-RPC WebSocket authentication (cookies, bearer/DPoP, tickets, policy and revocation).
+Enable `auth` and construct `cloud::AuthCredentialIssuer::new(shared_auth.clone(),
+shared_settings.clone())` for `CloudServices.issuer`. The adapter reads the current
+`SettingsService::snapshot()` on every mint and calls
+`EnvironmentAuth::issue_connect_credential`, which owns `connect_trust_lock` shared
+with exchange/revoke and finishes mutations after cancellation. Do not construct
+per-request auth instances or hand-build pairing grants. Keep the settings watcher
+running as for the rest of the server. Pending credentials still go back to the
+relay as signed responses, exactly as TypeScript does; auth refuses their exchange
+until approval. Denied requests reuse the same unusable credential until expiry.
+The ordinary RPC WebSocket auth adapter handles cookies, bearer/DPoP and tickets.
+
+Construct `relay_client::RelayClient` once with `RelayClientOptions` derived from
+host paths/platform (`win32`/`darwin`/`linux`, `x64`/`arm64`), the configured
+executable override, split PATH directories, `pinned_asset(platform, arch)`, and a
+live managed-install policy watch. Use `NativeDownload` and `NativeProbe` in
+production; tests replace both. `NativeManagedEndpoint::with_relay_client` resolves
+the executable when a connector starts, so installing after server startup works.
+Installation checks the upstream pin and SHA256 before execution/activation,
+uses a process-owned cross-process lock, and never falls back past an override.
+Drop the install stream to cancel, or call `shutdown()` to cancel and join.
+
+Enable `orchestration` for `OrchestrationStore::new(management, projections,
+repository_adapter, event_committer)`. It returns the shared store and an owned
+`EventForwarder`; retain and shut down the latter. The repository adapter supplies
+the project's canonical repository key. Construct `PeerLinkRequests::new(links,
+store, clock)` and `api::PeerService::new(links, requests)`. Remote delegation uses
+`RemoteDelegation::new(environment_id, store, PeerMcpClient, links)`; retain its
+`start()` runner and shut it down. Task reads are narrow; restart scans use the
+projection's outstanding remote tasks. Lag requests a rescan rather than inventing
+a task ID. Three consecutive follower defects fail unfinished tasks with a generic
+warning; ordinary transport errors/success reset the streak. Published results and
+remote stop obligations are preserved. Keep `PeerLinks.enabled` synchronized with
+the live linked-environments setting.
 DPoP verification itself remains in `t3-auth`; it is not reimplemented here.
 
 The host authenticates and authorizes link/config/preferences RPCs, applies
@@ -93,7 +127,7 @@ serialization intentionally exposes values only at storage/transport boundaries.
 | Connector token | Relay-issued `cloud-endpoint-runtime-config` JSON. Passed only as `TUNNEL_TOKEN`, never argv. | Cloudflare validates it. Tunnel recovery replaces runtime; release/unlink removes it. Confirmed-origin reuse requires exact runtime and origin. Raw child output never becomes a diagnostic. |
 | Register/recover proof (`t3-env-managed-tunnel-recovery+jwt`) | Environment EdDSA; environment issuer/subject, relay audience, random jti, action, account, origin and registration tunnel ID; 60-second lifetime. Not persisted. | Existing relay checks signature and bindings alongside environment bearer. Retries create fresh proofs. |
 | Relay health/mint requests (`t3-cloud-health+jwt`, `t3-cloud-mint+jwt`) | Issued by existing relay with its Ed25519 key. | Verify installed cloud SPKI key, exact type/EdDSA, normalized relay issuer, environment audience/id, linked account and exact scope. Require positive lifetime no longer than 300 s, `iat` at most 60 s ahead, age at most 300+60 s, and expiration with 60 s tolerance. Mint additionally requires matching `cnf.jkt` and client thumbprint. Atomically spend both jti and nonce under TS `cloud-{health,mint}-{jti,nonce}-*` names; host uses auth's pruning job. |
-| Minted pairing grant / signed mint response (`t3-env-mint+jwt`) | Auth issues a single-use standard-client grant, subject `cloud-connect`, label `T3 Connect connect`, bound to the client thumbprint. Environment EdDSA response binds credential, request nonce, environment and client key. | Grant expires within 120 s; auth verifies/spends it during normal bootstrap and verifies the client's DPoP. Relay verifies environment signature, nonce and client binding. No grant is stored by this crate. |
+| Minted pairing grant / signed mint response (`t3-env-mint+jwt`) | Auth issues a single-use standard-client grant, subject `cloud-connect`, label `T3 Connect`, bound to the client thumbprint. Environment EdDSA response binds credential, request nonce, environment and client key. | Trusted/approval-disabled grants expire within 120 s; untrusted approval requests expire within 600 s and cannot be spent until approved. Auth verifies/spends it during normal bootstrap and verifies the client's DPoP. Relay verifies environment signature, nonce and client binding. No grant is stored by this crate. |
 | Signed health response (`t3-env-health+jwt`) | Environment EdDSA response with nonce, descriptor, online status and checked-at time; 300 s lifetime. | Existing relay verifies linked environment key and request binding. Not persisted. |
 | Activity proof (`t3-env-activity+jwt`) | Environment EdDSA, random jti, environment/thread identity and full state or null tombstone; 300 s lifetime; environment bearer accompanies it. | Existing relay verifies signature/state identity. Publication requires the local opt-in flag. Failure details are redacted and details bounded before signing. |
 | Held-hook delivery (`t3-relay-hook-delivery+jwt`) | Existing relay signs queued delivery metadata. | Installed cloud key, relay issuer, environment audience/id, hook/delivery IDs and exact original received-at header; max age 25 h with 60 s tolerance. Metadata proof never replaces normal hook token/provider-signature checks. Relay owns offline queue persistence/forwarding. |
@@ -111,16 +145,19 @@ publication boundary in `relay/AgentAwarenessRelay.ts`, held-hook wake/verificat
 `peer/{PeerLinks,PeerMcpClient,PeerForwarding}.ts`, the token/authorization core of
 `guest/GuestShareService.ts`, `guest/guestAttachments.ts`, and `packages/tailscale`.
 
-Not implemented in this crate: cloud CLI browser/device login presentation,
-OS boot-service install/update/launcher and cloudflared download/pinning
-(`cloud/{bootService,pinnedRuntime,selfUpdate,...}.ts`); full reachability/UI status
-aggregation (`cloud/ConnectReachability.ts`); orchestration-backed link cards and
-remote task followers (`peer/{PeerLinkRequests,RemoteDelegation}.ts`); activity
-event projection, deduplication, completion confirmation and retry workers
-(`relay/AgentAwarenessRelay.ts`); guest snapshot/history/item/render/media/file
-authorization/storage and HTTP/multipart/cookie adapters
-(`guest/{GuestShareService,guestView,http}.ts`). These require the host's
-orchestration, attachment and transport services; they are not silently stubbed.
+Not implemented in this crate: cloud CLI browser/device login presentation and
+OS boot-service install/update (`cloud/{bootService,pinnedRuntime,selfUpdate,...}.ts`);
+automatic reachability restart/background aggregation (`cloud/ConnectReachability.ts`);
+activity event projection, deduplication, completion confirmation and retry workers
+(`relay/AgentAwarenessRelay.ts`). The signed publication boundary is implemented,
+but its worker still needs the authoritative awareness projection/feed. Guest
+content/history/media/storage are supplied by `t3-host`; HTTP cookie/multipart/SSE
+composition belongs to `t3-server`. Native launcher supervision is owned by
+`t3-host::service_launcher`; this crate does not duplicate it. Cloudflared download,
+pinning, status and install streams, link cards and remote task followers are now
+implemented. The upstream boot reset-failed delta and compact-visit awareness-worker
+classification cannot be attached to a nonexistent local boot/awareness worker;
+these remain explicit coverage gaps, not no-op matches.
 The relay Worker, push services and queue are intentionally not rewritten.
 
 Known differences: service errors are redacted Rust enums, not Effect causes;
@@ -141,8 +178,7 @@ HTTPS relay origins are accepted; fake relay tests inject the
 transport. LAN addresses are supplied by the host rather than enumerated here.
 Peer MCP tool exchanges have a 65-second request timeout (long waits are split
 into 50-second chunks); TS bounds the handshake but otherwise leaves tool calls
-open. Peer listings currently probe sequentially with the normal 3/10-second
-address timeouts rather than TS's shorter concurrent listing probes.
+open. Peer listings race addresses with a three-second deadline and retain the row order.
 No new shared wire types need moving to `t3-contracts`: local structs are service
 options/results, I/O boundaries or private persisted token/session helpers.
 
@@ -162,13 +198,27 @@ run from `rust/`: `cargo fmt -p t3-cloud`,
 `cargo clippy -p t3-cloud --all-targets --features auth -- -D warnings`, and
 `cargo test -p t3-cloud --features auth`.
 
-Verified on Windows, 2026-11-13: scoped format and all-target Clippy with default
-features and `auth`, both with `-D warnings`, pass; 40 default-feature tests and
-41 tests with `auth` pass, including real owned-child shutdown and real auth
-integration. The bidirectional TypeScript/Rust JWT probe
-passes. No real relay, Tailscale daemon or live credentials were used.
+Verified this round on Windows: `cargo fmt -p t3-cloud`, all-target Clippy
+with `auth,orchestration` and `-D warnings`, 55 default-feature tests and 57 tests
+with `auth` pass. `cargo check -p t3-cloud --features auth,orchestration` also passes.
+All cargo commands used `D:\t3code-rust-target\cloud`, two jobs and sccache; no
+wrapper fallback or machine-memory retry was needed. No commits were made.
+The inherited baseline had 38 passing default-feature tests. Earlier regression
+checks reproduced empty guest-key acceptance, lost peer refusal codes and raw
+failed-run detail publication. The Connect regression first reproduced immediate
+acceptance of an untrusted grant with approval enabled, then passed through the
+real signed cloud mint and real auth store after the fix. `tests/auth_adapter.rs`
+covers pending refusal, denial reuse/expiry, trusted mint, corrected label, live
+setting changes, binding, one-use consumption, and RPC tickets.
 
-The inherited baseline had 38 passing default-feature tests. Regression checks
-first reproduced empty guest-key acceptance, lost peer refusal codes and raw
-failed-run detail publication; each passes after its fix. Full host integration
-and native POSIX runtime verification remain as described above.
+JWT/cnf audit against current `CloudLink.ts`, `linkChecks.ts` and
+`packages/shared/src/relayJwt.ts`: no omitted trust check found. EdDSA/type,
+installed issuer/key, audience/environment/account, exact scope, bounded lifetime,
+clock tolerance/max age, matching `cnf.jkt` and both persistent replay guards are
+checked before auth issuance. `tests/protocol.rs` rejects independently signed
+wrong-account/environment/audience/scope/clock/key/cnf/type requests before consuming
+replay guards. Rust is stricter on numeric JSON syntax, JWT type spelling,
+critical/b64 headers and filesystem-safe replay IDs as noted above; valid relay
+proofs match. Mint response expiry now follows auth's two/ten-minute answer instead
+of rejecting pending answers at two minutes. No tokens or credentials enter Debug,
+errors or application logs.

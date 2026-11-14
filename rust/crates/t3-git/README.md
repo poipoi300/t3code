@@ -43,8 +43,9 @@ with `with_internal_paths` before file expansion.
 
 `GitWorkflowService` (`GitManager` alias) coordinates supplied-message stacked
 actions and PR resolution/creation/materialization/local or worktree checkout.
-Forge operations/setup are injected through `ReviewHost`; PR title/body generation
-is an input. `VcsDriverRegistry` and `resolve_vcs_kind` provide Git-only routing
+Forge operations are injected through `ReviewHost`; `WorkflowTextGenerator`
+supplies missing commit messages and PR content. `WorktreeHost` supplies project
+settings and setup execution. `VcsDriverRegistry` and `resolve_vcs_kind` provide Git-only routing
 and ancestor `.t3code/vcs.json` discovery. The TypeScript registry registers no
 non-Git driver; configured `jj` is unsupported there and here.
 
@@ -130,17 +131,39 @@ only library signature change. No downstream `t3-orchestration` or `t3-forge`
 caller used it. Checkpoint writes/deletions use `--no-deref`, so symbolic refs
 cannot redirect them into another scope or a user branch.
 
+`GitApplicationService` exposes all ten VCS application RPCs without transport
+logic. `VcsStatusBroadcaster` shares HEAD directory watches and remote pollers by
+canonical checkout, sends initial snapshots, rejects stale branch/PR publication,
+coalesces queued local reads and applies configured polling/background/auto-pull
+policy. The default remote interval is 30 seconds; failed polls back off from
+30 seconds to 15 minutes. Disabled fetching still performs an initial remote
+read. Subscriptions cancel their final shared worker on drop; `close` and
+`shutdown` also await finalizers, including subscription-owned background fetches.
+`WorktreeSetupTracker` provides sliding setup snapshots, ordered stages, bounded
+output, monotonic sequences, 30-second retention and cleanup-aware cancellation.
+Launch producers and subscriptions must share its instance. `GitActionFollowups`
+ports created-PR linking and pushed-project refresh routing over `GitActionHost`.
+Server construction and owner requests are in the external server seam brief.
+
+Ref listings reread HEAD even with cached refs, discard stale checkout locations,
+and reject missing remote defaults and remote HEAD aliases. Untracked review
+staging is capped at 256 MiB, smallest files first; available patches remain
+visible while incomplete totals/file lists are omitted. Clone completion must
+invalidate the shared Git handle's caches; both pre-init and unborn cases have
+regressions. Worktree application creation records comparison-base metadata,
+refreshes the index before returning and resolves submodule settings with
+`t3.json` fallback (recursive by default, top-level or none when selected).
+
 Remaining parity limits: `git/GitManager.ts` settled/confirmed branch-PR lookup,
 Git-state fingerprints, last-known PR fallback and exponential provider-lookup
 failure caches, PR state-change subscriptions, hosting-provider metadata, all
 toast follow-up cases, and the new-worktree rewritten-head reflog policy are not
-fully ported. `ReviewHost` still needs a forge-service adapter; hosted forge
-operations have not been integration-tested. `git/linkCreatedPullRequest.ts`,
-`refreshPushedPullRequests.ts` and `vcs/VcsStatusBroadcaster.ts` need the server's
-orchestration/project/subscription services. `detachStackFrame` is Effect-specific.
-Worktree lifecycle still lacks t3.json/settings discovery, persisted branch-base
-metadata, progress, macOS checkout caches and index refresh; submodules are
-explicit. Native remote normalization lacks some host-specific rewrites in
+fully ported. A forge-service adapter has been added by the forge owner; hosted
+forge operations have not been integration-tested here. Production construction
+still needs the project/config, orchestration, background-policy and textgen
+adapters described in the seam brief. `detachStackFrame` is Effect-specific.
+Worktree lifecycle still lacks checkout/submodule progress callbacks and macOS
+checkout caches. Native remote normalization lacks some host-specific rewrites in
 `sourceControlDefinitions.ts`. Process-boundary cause payloads are null, while
 classifications/counts are retained. Rust scalar truncation differs from JS
 UTF-16 slicing for non-BMP subject/progress text. Native-only driver options and

@@ -54,6 +54,14 @@ fn every_typescript_rpc_scope_matches_the_checked_in_source() {
     ] {
         let source = std::fs::read_to_string(root.join(path)).unwrap();
         let source = source.split("} as const").next().unwrap();
+        assert_eq!(
+            declarations.captures_iter(source).count(),
+            if path.contains("clientRpcPermissions") {
+                51
+            } else {
+                175
+            }
+        );
         for c in declarations.captures_iter(source) {
             actual.insert(constants[&c[1]].clone(), scopes[&c[2]].to_owned());
         }
@@ -64,6 +72,21 @@ fn every_typescript_rpc_scope_matches_the_checked_in_source() {
         .collect();
     assert_eq!(actual, expected);
     assert_eq!(RPC_REQUIRED_SCOPES.len(), 220);
+    let http = std::fs::read_to_string(root.join("apps/server/src/auth/http.ts")).unwrap();
+    let contracts =
+        std::fs::read_to_string(root.join("packages/contracts/src/environmentHttp.ts")).unwrap();
+    for (name, (_, path, scope)) in ["approveConnectDevice", "revokeConnectDevice"]
+        .into_iter()
+        .zip(CONNECT_DEVICE_HTTP_REQUIRED_SCOPES)
+    {
+        assert_eq!(*scope, S::AccessWrite);
+        let handler = http
+            .split(".handle(")
+            .find(|part| part.trim_start().starts_with(&format!("\"{name}\"")))
+            .unwrap();
+        assert!(handler.contains("requireEnvironmentScope(AuthAccessWriteScope)"));
+        assert!(contracts.contains(&format!("HttpApiEndpoint.post(\"{name}\", \"{path}\"")));
+    }
 }
 
 #[test]
@@ -157,6 +180,34 @@ fn static_sensitive_scopes_and_unknown_method_errors() {
 #[tokio::test]
 async fn guards_deny_before_handlers_and_apply_at_each_call_including_stream_start() {
     let mut calls = 0;
+    for patch in [
+        json!({"requireConnectDeviceApproval":false}),
+        json!({"requireConnectDeviceApproval":true,"defaultRuntimeMode":"auto"}),
+    ] {
+        assert!(
+            execute_rpc(
+                &[S::SettingsWrite],
+                "server.updateSettings",
+                &json!({"patch":patch}),
+                async || {
+                    calls += 1;
+                    Ok(())
+                }
+            )
+            .await
+            .is_err()
+        );
+    }
+    assert_eq!(calls, 0);
+    for (_, path, scope) in CONNECT_DEVICE_HTTP_REQUIRED_SCOPES {
+        assert_eq!(*scope, S::AccessWrite);
+        for scopes in [vec![], vec![S::SettingsWrite], vec![S::AccessRead]] {
+            assert!(authorize_connect_device_http(&scopes, "POST", path).is_err());
+        }
+        assert!(authorize_connect_device_http(&[S::AccessWrite], "GET", path).is_err());
+        authorize_connect_device_http(&[S::AccessWrite], "POST", path).unwrap();
+    }
+    assert!(authorize_connect_device_http(&[S::AccessWrite], "POST", "/unknown").is_err());
     for scopes in [
         vec![S::OrchestrationRead],
         vec![S::OrchestrationRead, S::EnvironmentMaintain],

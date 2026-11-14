@@ -27,6 +27,7 @@ fn proof(
     )?);
     let body = format!("{header}.{payload}");
     let signature: Signature = signer.sign(body.as_bytes());
+    let signature = signature.normalize_s().unwrap_or(signature);
     Ok(format!("{body}.{}", b64(signature.to_bytes())))
 }
 fn request(proof: &str) -> Request {
@@ -56,8 +57,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input: serde_json::Value =
         serde_json::from_slice(&std::fs::read(directory.join("typescript.json"))?)?;
     let read = |key: &str| input[key].as_str().ok_or("Missing TypeScript credential");
+    let high_proof = read("highProof")?;
+    assert!(
+        t3_auth::dpop::verify_proof(t3_auth::dpop::VerifyProof {
+            proof: Some(high_proof),
+            method: "GET",
+            url: "https://example.test/ws",
+            expected_thumbprint: None,
+            expected_access_token: Some(read("session")?),
+            now_epoch_seconds: chrono::Utc::now().timestamp(),
+            max_age_seconds: None
+        })
+        .is_err()
+    );
     let auth = EnvironmentAuth::new(
-        db,
+        db.clone(),
         ServerSecretStore::open(directory.join("secrets")).await?,
         AuthConfig {
             port: 3773,
@@ -69,12 +83,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         SystemClock::new(),
     )
     .await?;
+    let read_connect = |key: &str| {
+        input["connect"][key]
+            .as_str()
+            .ok_or("Missing TypeScript Connect fixture")
+    };
     if std::env::args().nth(2).as_deref() == Some("recheck") {
         let output: serde_json::Value =
             serde_json::from_slice(&std::fs::read(directory.join("rust.json"))?)?;
         let token = output["session"].as_str().ok_or("Missing session")?;
         let proof = output["tsSpends"].as_str().ok_or("Missing proof")?;
         let mcp = output["mcp"].as_str().ok_or("Missing MCP token")?;
+        let connect = &output["connect"];
+        let trusted_key = connect["trustedKey"]
+            .as_str()
+            .ok_or("Missing Rust trusted key")?;
+        assert!(!auth.pairing.is_connect_device_trusted(trusted_key).await?);
+        for field in ["boundId", "expiredId"] {
+            let id = t3_contracts::base_schemas::AuthSessionId(
+                connect[field]
+                    .as_str()
+                    .ok_or("Missing bound session")?
+                    .into(),
+            );
+            let row = auth.sessions.get(&id).await?.ok_or("Missing revoked row")?;
+            assert!(row.revoked_at.is_some());
+            assert!(row.proof_key_thumbprint.as_deref() == Some(trusted_key));
+        }
+        assert!(
+            auth.pairing
+                .consume(
+                    connect["unspent"]["credential"]
+                        .as_str()
+                        .ok_or("Missing unspent credential")?,
+                    ConsumePairing {
+                        proof_key_thumbprint: Some(trusted_key.into()),
+                        ..Default::default()
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let pending_key = read_connect("pendingKey")?;
+        assert!(auth.pairing.is_connect_device_trusted(pending_key).await?);
         assert!(
             auth.sessions
                 .verify_mcp(mcp, "https://example.test/mcp", &[])
@@ -98,6 +149,129 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
+    for pair in input["connect"]["verificationCodes"]
+        .as_array()
+        .ok_or("Missing code fixtures")?
+    {
+        let value = pair[0].as_str().ok_or("Missing code input")?;
+        assert!(
+            Some(t3_auth::pairing::connect_device_verification_code(value).as_str())
+                == pair[1].as_str()
+        );
+    }
+    let pending_key = read_connect("pendingKey")?;
+    let pending_id = read_connect("pendingId")?;
+    let pending_credential = input["connect"]["pending"]["credential"]
+        .as_str()
+        .ok_or("Missing TS pending credential")?;
+    assert!(
+        auth.pairing
+            .consume(
+                pending_credential,
+                ConsumePairing {
+                    proof_key_thumbprint: Some("wrong-key".into()),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        auth.pairing
+            .consume(
+                pending_credential,
+                ConsumePairing {
+                    proof_key_thumbprint: Some(pending_key.into()),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+    );
+    let pending_link = auth
+        .pairing
+        .list_active()
+        .await?
+        .into_iter()
+        .find(|link| link.id.0 == pending_id)
+        .ok_or("Missing TS pending row")?;
+    let pending_request = pending_link
+        .connect_device_request
+        .ok_or("Missing TS request data")?;
+    assert!(
+        pending_request.verification_code.0
+            == t3_auth::pairing::connect_device_verification_code(pending_key)
+    );
+    let metadata: AuthClientMetadata =
+        serde_json::from_value(input["connect"]["clientMetadata"].clone())?;
+    assert_eq!(pending_request.client, Some(metadata.clone()));
+    assert!(auth.approve_connect_device(pending_id).await?);
+    auth.pairing
+        .consume(
+            pending_credential,
+            ConsumePairing {
+                proof_key_thumbprint: Some(pending_key.into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(
+        auth.pairing
+            .consume(
+                pending_credential,
+                ConsumePairing {
+                    proof_key_thumbprint: Some(pending_key.into()),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+    );
+    let denied_key = read_connect("deniedKey")?;
+    let denied = auth.issue_connect_credential(denied_key, true).await?;
+    assert!(
+        Some(denied.credential.0.as_str()) == input["connect"]["denied"]["credential"].as_str()
+    );
+    assert!(
+        auth.pairing
+            .consume(
+                &denied.credential.0,
+                ConsumePairing {
+                    proof_key_thumbprint: Some(denied_key.into()),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert!(!auth.approve_connect_device(&denied.id.0).await?);
+    let trusted_key = read_connect("trustedKey")?;
+    let trusted = auth
+        .list_connect_devices()
+        .await?
+        .into_iter()
+        .find(|device| device.proof_key_thumbprint.0 == trusted_key)
+        .ok_or("Missing TS trust")?;
+    assert_eq!(trusted.approved_at.0, read_connect("trustedAt")?);
+    assert_eq!(trusted.client, Some(metadata));
+    let id = t3_contracts::base_schemas::AuthSessionId(read_connect("boundId")?.into());
+    assert!(auth.sessions.proof_key_thumbprint_of(&id).await?.as_deref() == Some(trusted_key));
+    assert_eq!(auth.sessions.revoke_by_proof_key(trusted_key).await?, 2);
+    assert!(auth.revoke_connect_device(trusted_key).await?);
+    assert!(auth.sessions.verify(read_connect("bound")?).await.is_err());
+    assert!(
+        auth.sessions
+            .get(&t3_contracts::base_schemas::AuthSessionId(
+                read_connect("expiredId")?.into()
+            ))
+            .await?
+            .ok_or("Missing TS expired row")?
+            .revoked_at
+            .is_some()
+    );
+    println!(
+        "Rust read TypeScript Connect rows, refused wrong/unapproved/spent/denied credentials, approved a request and revoked active plus expired key sessions."
+    );
     let ts = auth.sessions.verify(read("session")?).await?;
     let ts_mcp = auth.sessions.verify(read("mcp")?).await?;
     assert_eq!(ts_mcp.subject, "mcp-client");
@@ -224,6 +398,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         auth.now_ms(),
     )
     .await?;
+    let connect_pending_key = "Rust-pending-key-for-interop";
+    let connect_denied_key = "Rust-denied-key-for-interop";
+    let connect_trusted_key = "Rust-trusted-key-for-interop";
+    let connect_metadata: AuthClientMetadata = serde_json::from_value(
+        json!({"label":"Rust Connect device","deviceType":"desktop","os":"Windows"}),
+    )?;
+    let connect_pending = auth
+        .issue_connect_credential(connect_pending_key, true)
+        .await?;
+    auth.pairing
+        .record_connect_request_client(&connect_pending.id.0, connect_metadata.clone())
+        .await?;
+    let connect_denied = auth
+        .issue_connect_credential(connect_denied_key, true)
+        .await?;
+    auth.pairing.revoke(&connect_denied.id.0).await?;
+    auth.pairing
+        .trust_connect_device(connect_trusted_key, connect_metadata.clone())
+        .await?;
+    let connect_trusted_at = auth
+        .list_connect_devices()
+        .await?
+        .into_iter()
+        .find(|device| device.proof_key_thumbprint.0 == connect_trusted_key)
+        .ok_or("Missing Rust trust")?
+        .approved_at;
+    let connect_bound = auth
+        .sessions
+        .issue(IssueSession {
+            proof_key_thumbprint: Some(connect_trusted_key.into()),
+            ..Default::default()
+        })
+        .await?;
+    let connect_expired = auth
+        .sessions
+        .issue(IssueSession {
+            proof_key_thumbprint: Some(connect_trusted_key.into()),
+            ttl_ms: Some(-1),
+            ..Default::default()
+        })
+        .await?;
+    let connect_unspent = auth
+        .issue_connect_credential(connect_trusted_key, true)
+        .await?;
+    let connect = json!({ "pending":connect_pending, "pendingKey":connect_pending_key, "denied":connect_denied, "deniedKey":connect_denied_key, "trustedKey":connect_trusted_key, "trustedAt":connect_trusted_at, "boundId":connect_bound.session_id, "expiredId":connect_expired.session_id, "unspent":connect_unspent, "clientMetadata":connect_metadata });
     let oauth = McpOAuth::new(auth.clone(), tokio::sync::watch::channel(true).1).await?;
     assert!(oauth.parse_client_id(read("clientId")?).is_some());
     assert!(
@@ -408,6 +627,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(
         directory.join("rust.json"),
         serde_json::to_vec(&json!({
+            "connect":connect,
             "mcp":mcp.access_token,"mcpExpired":mcp_expired.token,"mcpRevoked":mcp_revoked.token,
             "session":session.token,"flags":flags.token,"ticket":ticket.ticket.0,"expired":expired.token,"revoked":revoked.token,
             "expiredTicket":expired_ticket.ticket.0,"revokedTicket":revoked_ticket.ticket.0,"pairing":pairing.credential.0,
