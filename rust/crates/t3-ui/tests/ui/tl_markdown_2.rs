@@ -20,6 +20,20 @@ use t3_ui::state::nav::{Navigator, Route};
 
 use crate::support::{DESKTOP, PHONE};
 
+fn platform_config(mut config: EngineConfig, window: (f32, f32)) -> EngineConfig {
+    config.environment.os = if window == PHONE {
+        nsh_core::platform::Os::Android
+    } else {
+        nsh_core::platform::Os::Web
+    };
+    config.environment.idiom = if window == PHONE {
+        nsh_core::platform::Idiom::Phone
+    } else {
+        nsh_core::platform::Idiom::Desktop
+    };
+    config
+}
+
 #[component]
 fn TableRecycleFixture() -> impl IntoElement {
     use t3_ui::screens::thread::{
@@ -60,12 +74,15 @@ fn TableRecycleFixture() -> impl IntoElement {
 #[test]
 fn table_copied_feedback_survives_recycling_and_reopens_the_current_menu() {
     for window in [DESKTOP, PHONE] {
-        let mut app = Headless::start(EngineConfig {
-            ui_sets: t3_ui::registries(),
-            viewport: size(px(window.0), px(window.1)),
-            clock: nsh_core::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH),
-            ..EngineConfig::new(Root::of::<TableRecycleFixture>())
-        })
+        let mut app = Headless::start(platform_config(
+            EngineConfig {
+                ui_sets: t3_ui::registries(),
+                viewport: size(px(window.0), px(window.1)),
+                clock: nsh_core::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH),
+                ..EngineConfig::new(Root::of::<TableRecycleFixture>())
+            },
+            window,
+        ))
         .expect("table fixture");
         app.wait_for("12 passed").expect("table mounted");
         app.press("role:button[Copy table]").expect("table actions");
@@ -146,12 +163,15 @@ fn FileFixture() -> impl IntoElement {
 #[test]
 fn file_options_copy_current_host_paths_with_positions_and_close_at_both_sizes() {
     for window in [DESKTOP, PHONE] {
-        let mut app = Headless::start(EngineConfig {
-            ui_sets: t3_ui::registries(),
-            viewport: size(px(window.0), px(window.1)),
-            ..EngineConfig::new(Root::of::<FileFixture>())
-        })
-        .expect("file fixture");
+        let config = platform_config(
+            EngineConfig {
+                ui_sets: t3_ui::registries(),
+                viewport: size(px(window.0), px(window.1)),
+                ..EngineConfig::new(Root::of::<FileFixture>())
+            },
+            window,
+        );
+        let mut app = Headless::start(config).expect("file fixture");
         app.wait_for("See source")
             .expect("authored descriptive label retained");
         app.press("role:button[File options for main.rs · L12:C3]")
@@ -182,6 +202,16 @@ fn file_options_copy_current_host_paths_with_positions_and_close_at_both_sizes()
             .expect("known workspace path opens the client panel");
         app.wait_for("text:panel:exact.rs;line:Some(7)")
             .expect("path and reveal line in client-owned panel state");
+        if window == PHONE {
+            app.long_press("role:link[main.rs · L12:C3]")
+                .expect("panel links retain their held-finger copy menu");
+        } else {
+            app.right_click("role:link[main.rs · L12:C3]")
+                .expect("panel links retain their secondary copy menu");
+        }
+        app.press("role:menuitem[Copy full path]")
+            .expect("secondary copy action");
+        assert_eq!(app.screen().clipboard(), Some("/repo/src/main.rs:12:3"));
         assert!(
             app.screen().opened_urls().is_empty(),
             "a file path never opens this client's filesystem"
@@ -207,11 +237,14 @@ fn ExternalFixture() -> impl IntoElement {
 #[test]
 fn external_links_keep_literal_labels_open_the_url_and_share_failed_favicon_state() {
     for window in [DESKTOP, PHONE] {
-        let mut app = Headless::start(EngineConfig {
-            ui_sets: t3_ui::registries(),
-            viewport: size(px(window.0), px(window.1)),
-            ..EngineConfig::new(Root::of::<ExternalFixture>())
-        })
+        let mut app = Headless::start(platform_config(
+            EngineConfig {
+                ui_sets: t3_ui::registries(),
+                viewport: size(px(window.0), px(window.1)),
+                ..EngineConfig::new(Root::of::<ExternalFixture>())
+            },
+            window,
+        ))
         .expect("external fixture");
         app.wait_for("role:link[Settings]")
             .expect("authored catalogue-like text stays literal in French");
@@ -300,11 +333,14 @@ fn ThreadFixture() -> impl IntoElement {
 #[test]
 fn thread_chips_read_the_real_shell_navigate_to_the_decoded_id_and_refuse_unreachable_targets() {
     for window in [DESKTOP, PHONE] {
-        let mut app = Headless::start(EngineConfig {
-            ui_sets: t3_ui::registries(),
-            viewport: size(px(window.0), px(window.1)),
-            ..EngineConfig::new(Root::of::<ThreadFixture>())
-        })
+        let mut app = Headless::start(platform_config(
+            EngineConfig {
+                ui_sets: t3_ui::registries(),
+                viewport: size(px(window.0), px(window.1)),
+                ..EngineConfig::new(Root::of::<ThreadFixture>())
+            },
+            window,
+        ))
         .expect("thread fixture");
         app.wait_for("Build the shared Rust UI slice")
             .expect("title from the demo's canonical shell projection");
@@ -383,11 +419,14 @@ fn AssistantFileFixture() -> impl IntoElement {
 #[test]
 fn assistant_reply_file_links_use_shared_prose_and_the_real_panel_action() {
     for window in [DESKTOP, PHONE] {
-        let mut app = Headless::start(EngineConfig {
-            ui_sets: t3_ui::registries(),
-            viewport: size(px(window.0), px(window.1)),
-            ..EngineConfig::new(Root::of::<AssistantFileFixture>())
-        })
+        let mut app = Headless::start(platform_config(
+            EngineConfig {
+                ui_sets: t3_ui::registries(),
+                viewport: size(px(window.0), px(window.1)),
+                ..EngineConfig::new(Root::of::<AssistantFileFixture>())
+            },
+            window,
+        ))
         .expect("assistant fixture");
         app.wait_for("role:link[main.rs · L12:C3]")
             .expect("file link from the assistant's shared prose path");

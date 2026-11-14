@@ -98,6 +98,13 @@ pub fn workspace_page_header(
     reserve_native_controls: bool,
     children: impl IntoElement,
 ) -> impl IntoElement {
+    workspace_page_header_with_reservation(reserve_native_controls.into(), children)
+}
+
+pub fn workspace_page_header_with_reservation(
+    reserve_native_controls: Prop<bool>,
+    children: impl IntoElement,
+) -> impl IntoElement {
     let panels = panels();
     let native_window = current_window();
     let reading = native_window.clone();
@@ -118,7 +125,7 @@ pub fn workspace_page_header(
             }
         })
         .pr(move || {
-            if reserve_native_controls && geometry.get().native_controls_right.0 > 0.0 {
+            if reserve_native_controls.get() && geometry.get().native_controls_right.0 > 0.0 {
                 geometry.get().native_controls_right
             } else {
                 px(safe_area().right.0 + 12.0)

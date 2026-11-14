@@ -682,15 +682,17 @@ pub fn command_panel_with_layout(
             }),
         ]))
     });
-    // NSH cannot parse min(rem, vh); keep CommandPaletteContent's bounds on the panel itself.
+    // NSH cannot parse min(rem, vh), and its views do not shrink like CSS flex items by default.
     let panel = match layout {
-        PanelLayout::List => panel.max_h(move || {
+        PanelLayout::List => panel.flex_shrink(1.0).max_h(move || {
             px((28.0 * nsh_core::geometry::REM_SIZE.0).min(window().height.0 * 0.70))
         }),
-        PanelLayout::TallList => panel.max_h(move || {
+        PanelLayout::TallList => panel.flex_shrink(1.0).max_h(move || {
             px((34.0 * nsh_core::geometry::REM_SIZE.0).min(window().height.0 * 0.76))
         }),
-        PanelLayout::Default | PanelLayout::Fill => panel,
+        // NSH's flex-1 uses a zero-point basis; the browser resolves this shorthand to zero percent.
+        PanelLayout::Fill => panel.basis(Percentage(0.0)),
+        PanelLayout::Default => panel,
     };
     panel.child(children)
 }

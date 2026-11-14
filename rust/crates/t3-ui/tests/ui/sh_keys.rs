@@ -41,6 +41,7 @@ fn KeybindingsFixture() -> impl IntoElement {
         id: environment.clone(),
         label: "a".into(),
         routes: Vec::new(),
+        damaged: false,
         state: ConnectionState {
             phase: ConnectionPhase::Connected,
             ..Default::default()

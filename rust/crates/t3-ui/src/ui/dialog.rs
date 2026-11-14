@@ -82,6 +82,42 @@ impl From<ActionVariant> for ButtonVariant {
     }
 }
 
+/// The width class a caller's `className` gives DialogPopup (`max-w-xl`, `sm:max-w-3xl`): the
+/// default variant's `max-w-lg` unless one is chosen. Ignored by the media variant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MaxWidth {
+    Sm,
+    Md,
+    #[default]
+    Lg,
+    Xl,
+    TwoXl,
+    ThreeXl,
+    FourXl,
+}
+
+impl MaxWidth {
+    fn class(self) -> &'static str {
+        match self {
+            Self::Sm => "max-w-sm",
+            Self::Md => "max-w-md",
+            Self::Lg => "max-w-lg",
+            Self::Xl => "max-w-xl",
+            Self::TwoXl => "max-w-2xl",
+            Self::ThreeXl => "max-w-3xl",
+            Self::FourXl => "max-w-4xl",
+        }
+    }
+}
+
+/// `sm:justify-end` (the source's default) or a caller's `sm:justify-between`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FooterJustify {
+    #[default]
+    End,
+    Between,
+}
+
 #[derive(Clone, Copy)]
 pub struct PopupOptions {
     pub variant: Variant,
@@ -89,6 +125,7 @@ pub struct PopupOptions {
     pub bottom_stick_on_mobile: bool,
     pub initial_focus: Option<ElementRef>,
     pub popup_ref: Option<ElementRef>,
+    pub max_width: MaxWidth,
 }
 
 /// AlertDialogPopup has neither a media variant nor a built-in close button in TSX.
@@ -117,6 +154,7 @@ impl Default for PopupOptions {
             bottom_stick_on_mobile: true,
             initial_focus: None,
             popup_ref: None,
+            max_width: MaxWidth::Lg,
         }
     }
 }
@@ -235,6 +273,15 @@ impl DialogState {
                 target,
                 disabled: Rc::new(disabled),
             })
+        });
+    }
+
+    /// A caller's own `data-slot="dialog-panel"` element (WizardPanel), which the header's
+    /// `has([data-slot=dialog-panel])` variant sees as DialogPanel does.
+    pub fn register_panel(self) {
+        self.has_panel.set(true);
+        cleanup(move || {
+            let _ = self.has_panel.try_set(false);
         });
     }
 
@@ -585,6 +632,7 @@ pub fn alert_dialog_popup<M: 'static, E: IntoChild<M> + 'static>(
             bottom_stick_on_mobile: options.bottom_stick_on_mobile,
             initial_focus: options.initial_focus,
             popup_ref: options.popup_ref,
+            max_width: MaxWidth::Lg,
         },
         children,
     )
@@ -742,7 +790,8 @@ fn popup_surface(
             let sheet = options.bottom_stick_on_mobile && layout_class().is_compact();
             let classes = cn([
                 Some("relative flex min-h-0 w-full min-w-0 flex-col outline-none duration-200 ease-in-out row-start-2 text-popover-foreground"),
-                (options.variant == Variant::Default).then_some("rounded-2xl border max-h-full max-w-lg"),
+                (options.variant == Variant::Default).then_some("rounded-2xl border max-h-full"),
+                (options.variant == Variant::Default).then_some(options.max_width.class()),
                 // index.css @utility dialog-glass; NSH has no backdrop-filter support query.
                 (options.variant == Variant::Default).then_some("bg-background/80 backdrop-blur-[12px] dark:backdrop-blur-[16px] backdrop-saturate-[1.14] dark:backdrop-saturate-[1.08] border-contrast-foreground/10 dark:border-white/8 shadow-[0_24px_64px_-24px_rgb(0_0_0/65%)] dark:shadow-[inset_0_1px_rgb(255_255_255/4%),0_24px_72px_-20px_rgb(0_0_0/90%)]"),
                 (options.variant == Variant::Media).then_some("w-auto overflow-visible rounded-none border border-transparent bg-transparent p-0 shadow-none"),
@@ -806,7 +855,17 @@ pub fn dialog_footer<M>(
     variant: FooterVariant,
     children: impl IntoChild<M>,
 ) -> impl IntoElement {
-    footer(state, variant, false, children)
+    footer(state, variant, false, FooterJustify::End, children)
+}
+
+/// DialogFooter with a caller's `sm:justify-between` (WizardFooter with a leading slot).
+pub fn dialog_footer_justified<M>(
+    state: DialogState,
+    variant: FooterVariant,
+    justify: FooterJustify,
+    children: impl IntoChild<M>,
+) -> impl IntoElement {
+    footer(state, variant, false, justify, children)
 }
 
 /// Port of alert-dialog.tsx AlertDialogFooter.
@@ -815,13 +874,14 @@ pub fn alert_dialog_footer<M>(
     variant: FooterVariant,
     children: impl IntoChild<M>,
 ) -> impl IntoElement {
-    footer(state, variant, true, children)
+    footer(state, variant, true, FooterJustify::End, children)
 }
 
 fn footer<M>(
     state: DialogState,
     variant: FooterVariant,
     alert: bool,
+    justify: FooterJustify,
     children: impl IntoChild<M>,
 ) -> impl IntoElement {
     state.bare_footer.set(variant == FooterVariant::Bare);
@@ -839,6 +899,7 @@ fn footer<M>(
             (variant == FooterVariant::Default).then_some("border-t bg-muted/72 py-4"),
             (variant == FooterVariant::Bare && alert).then_some("pb-6"),
             (variant == FooterVariant::Bare && !alert).then_some("py-4"),
+            (justify == FooterJustify::Between).then_some("sm:justify-between"),
         ])))
         // sm:rounded-b-[calc(var(--radius-2xl)-1px)] is a token length minus one point.
         .rounded_b(move || {

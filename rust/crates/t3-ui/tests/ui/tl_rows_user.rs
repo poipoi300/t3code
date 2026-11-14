@@ -147,23 +147,23 @@ fn client_attribution_folds_are_independent_when_the_cell_is_reused() {
     for window in [PHONE, DESKTOP] {
         let mut app = fixture(window);
         app.wait_for("Daily audit").expect("summary");
-        assert!(!app.screen().shows("Run the full daily audit."));
+        assert!(!app.screen().shows(r"text:/Run the full daily audit\./"));
         app.press("role:button[Automation]").expect("expand");
-        app.wait_for("Run the full daily audit.")
+        app.wait_for(r"text:/Run the full daily audit\./")
             .expect("automation body");
         app.press("role:button[Agent example]").expect("recycle");
         app.wait_for("Agent summary").expect("agent summary");
-        assert!(!app.screen().shows("Hidden agent payload"));
+        assert!(!app.screen().shows("text:/Hidden agent payload/"));
         app.press("role:button[Agent]").expect("expand agent");
-        app.wait_for("Hidden agent payload").expect("agent body");
+        app.wait_for("text:/Hidden agent payload/").expect("agent body");
         app.press("role:button[Automation example]").expect("reuse");
-        app.wait_for("Run the full daily audit.")
+        app.wait_for(r"text:/Run the full daily audit\./")
             .expect("preserved fold");
         app.press("role:button[Automation]").expect("collapse");
-        assert!(!app.screen().shows("Run the full daily audit."));
+        assert!(!app.screen().shows(r"text:/Run the full daily audit\./"));
         app.press("role:button[Agent example]")
             .expect("reuse agent");
-        app.wait_for("Hidden agent payload")
+        app.wait_for("text:/Hidden agent payload/")
             .expect("independent state");
     }
 }
@@ -222,9 +222,9 @@ fn client_file_guest_and_markdown_content_render_without_injected_presentations(
         );
         app.press("role:button[Markdown example]")
             .expect("markdown");
-        app.wait_for("Strong").expect("parsed strong");
-        assert!(!app.screen().shows("**Strong**"));
-        assert!(app.screen().shows("Second line"));
+        app.wait_for(r"text:/^Strong\nSecond line$/")
+            .expect("parsed strong");
+        assert!(!app.screen().shows(r"text:/\*\*Strong\*\*/"));
         app.press("role:button[Server example]").expect("server");
         app.wait_for("Sent by T3 Code").expect("server attribution");
     }

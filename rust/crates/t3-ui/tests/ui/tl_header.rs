@@ -182,6 +182,8 @@ fn fixture(bound: bool) -> impl IntoElement {
     provide_context(Rt::new(store.clone(), backend.clone(), Choice::Demo));
     let nav = Navigator::new(Route::Thread(key()));
     provide_context(nav);
+    let panels = t3_ui::state::panels::Panels::new();
+    provide_context(panels);
     t3_ui::state::clock::start();
     let client = client(store);
     if bound {
@@ -213,6 +215,7 @@ fn fixture(bound: bool) -> impl IntoElement {
         view().w_full().h_full()
             .child(when(ready, || header::thread_header(key())))
             .child(control("Outside rename", || {}))
+            .child(control("Toggle sidebar fixture", move || panels.sidebar_open.update(|open| *open = !*open)))
             .child(nsh_base::input().label("Another field"))
             .child(nsh_base::button().test_id("server-update").accessibility_label("Concurrent title").on_press(move || concurrent.publish(|thread| thread.title = "Concurrent server title".into())))
             .child(control("Fail next rename", move || *failure.fail.borrow_mut() = Some(HeaderError::Failed { title: "Failed to rename thread".into(), detail: Some(Text::content("Server rejected this name")) })))
@@ -397,11 +400,27 @@ fn scratch_identity_project_navigation_and_guest_share_use_the_bound_services() 
         app.press("role:button[Guest link]")
             .expect("guest projection");
         app.wait_for("Alex is a guest").expect("source guest state");
+        if window == DESKTOP {
+            app.press(TITLE_BUTTON)
+                .expect("title remains reachable beside guest controls");
+            app.press_key("Escape").expect("close title actions");
+        }
         app.press("role:button[Expired guest link]")
             .expect("expired projection");
         app.wait_for("Guest link expired")
             .expect("expired share remains visible");
-        app.press("role:button[Stop sharing]").expect("close share");
+        app.press("role:button[Stop sharing]")
+            .unwrap_or_else(|error| {
+                panic!(
+                    "close share at {window:?}: {error}; bounds: {:?}",
+                    app.screen()
+                        .layout_nodes()
+                        .into_iter()
+                        .filter(|node| node.bounds.origin.y.0 < 52.0)
+                        .map(|node| (node.id, node.parent, node.test_id, node.bounds))
+                        .collect::<Vec<_>>()
+                )
+            });
         app.wait_for("text:calls:stop-sharing")
             .expect("client close operation");
         assert!(!app.screen().shows("Alex is a guest"));
@@ -511,7 +530,14 @@ fn production_app_mounts_the_header_rename_failure_toast() {
     config.environment.os = nsh_core::platform::Os::Web;
     let mut app =
         Headless::start_with_link(config, crate::support::DEMO_LINK).expect("production App");
-    crate::support::pair(&mut app);
+    app.wait_for("Connect to T3 Code").expect("pairing screen");
+    app.press("role:button[Fill in the demo server]")
+        .expect("demo link");
+    app.type_text("label:Pairing link", "")
+        .expect("focus pairing input");
+    app.press_key("Enter").expect("submit pairing input");
+    app.wait_for("Build the shared Rust UI slice")
+        .expect("paired workspace");
     app.press("role:button[Build the shared Rust UI slice, t3code]")
         .expect("open thread");
     app.wait_for(TITLE_BUTTON).expect("production header");
@@ -542,4 +568,126 @@ fn parent_collapses_from_measured_room_and_keeps_its_full_navigation_label() {
             .matches("id:parent-breadcrumb-ellipsis")
             .expect("parent expands")
     );
+}
+
+#[test]
+fn native_titlebar_insets_keep_header_controls_clear_when_wide_narrow_and_collapsed() {
+    use nsh_core::{
+        desktop::WindowState,
+        geometry::Edges,
+        platform::{Idiom, Os},
+    };
+    for (os, top, left, right) in [
+        (Os::MacOs, 52.0, 78.0, 0.0),
+        (Os::Windows, 40.0, 0.0, 138.0),
+    ] {
+        for width in [DESKTOP.0, 700.0] {
+            let mut config = EngineConfig {
+                ui_sets: t3_ui::registries(),
+                viewport: size(px(width), px(DESKTOP.1)),
+                ..EngineConfig::new(Root::of::<HeaderFixture>())
+            };
+            config.environment.os = os;
+            config.environment.idiom = Idiom::Desktop;
+            config.environment.title_bar = Edges {
+                top: px(top),
+                left: px(left),
+                right: px(right),
+                bottom: px(0.0),
+            };
+            config.environment.window_state = Some(WindowState::default());
+            let mut app = Headless::start(config).expect("native header");
+            app.wait_for(TITLE_BUTTON).expect("actual title button");
+            let bounds = |app: &Headless, id: &str| {
+                app.screen()
+                    .layout_nodes()
+                    .into_iter()
+                    .find(|node| node.test_id.as_deref() == Some(id))
+                    .expect("header element")
+                    .bounds
+            };
+            for collapsed in [false, true] {
+                if collapsed {
+                    app.press("role:button[Toggle sidebar fixture]")
+                        .expect("collapse sidebar");
+                }
+                let content_left = if collapsed || width < 768.0 {
+                    left + 52.0
+                } else {
+                    12.0
+                };
+                let title = bounds(&app, "thread-title-actions");
+                let controls = bounds(&app, "thread-panel-layout-controls");
+                assert!(title.size.width.0 > 0.0);
+                assert!(controls.size.width.0 > 48.0);
+                assert!(
+                    title.origin.x.0 >= content_left,
+                    "{os:?}, width={width}, collapsed={collapsed}: {title:?}"
+                );
+                assert!(
+                    controls.origin.x.0 + controls.size.width.0 <= width - right - 12.0,
+                    "{os:?}, width={width}, collapsed={collapsed}: {controls:?}"
+                );
+                assert_eq!(bounds(&app, "workspace-page-header").size.height, px(top));
+            }
+        }
+    }
+}
+
+#[component]
+fn ReactiveReservation() -> impl IntoElement {
+    t3_ui::theme::install(&Default::default());
+    provide_context(t3_ui::state::panels::Panels::new());
+    let reserve = signal(true);
+    t3_ui::screens::titlebar::workspace_page_header_with_reservation(
+        Prop::bind(move || reserve.get()),
+        view()
+            .flex_1()
+            .child(t3_ui::screens::titlebar::titlebar_controls(
+                nsh_base::button()
+                    .test_id("reservation-control")
+                    .accessibility_label("Toggle reservation")
+                    .w_full()
+                    .h(px(28.0))
+                    .on_press(move || reserve.update(|value| *value = !*value)),
+            )),
+    )
+}
+
+#[test]
+fn pane_reservation_changes_without_recreating_the_header_control() {
+    let mut config = EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(DESKTOP.0), px(DESKTOP.1)),
+        ..EngineConfig::new(Root::of::<ReactiveReservation>())
+    };
+    config.environment.os = nsh_core::platform::Os::Windows;
+    config.environment.idiom = nsh_core::platform::Idiom::Desktop;
+    config.environment.title_bar = nsh_core::geometry::Edges {
+        top: px(40.0),
+        right: px(138.0),
+        ..Default::default()
+    };
+    config.environment.window_state = Some(Default::default());
+    let mut app = Headless::start(config).expect("reactive reservation");
+    app.wait_for("id:reservation-control").expect("control");
+    let node = |app: &Headless| {
+        app.screen()
+            .layout_nodes()
+            .into_iter()
+            .find(|node| node.test_id.as_deref() == Some("reservation-control"))
+            .expect("control node")
+    };
+    let reserved = node(&app);
+    app.press("id:reservation-control")
+        .expect("pane owns native controls");
+    let released = node(&app);
+    assert_eq!(reserved.id, released.id);
+    assert_eq!(
+        released.bounds.size.width - reserved.bounds.size.width,
+        px(138.0)
+    );
+    app.press("id:reservation-control")
+        .expect("header owns native controls again");
+    assert_eq!(node(&app).bounds, reserved.bounds);
 }

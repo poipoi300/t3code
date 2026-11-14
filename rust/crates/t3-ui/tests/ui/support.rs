@@ -11,12 +11,18 @@ pub const DESKTOP: (f32, f32) = (1280.0, 800.0);
 /// launch link reaches the app only in a scheme it claims (`Root::url_schemes`).
 pub const DEMO_LINK: &str = "t3code://pair?backend=demo";
 
+/// Headless windows start as an iOS phone; `DESKTOP` is a Linux desktop window, which has a mouse.
 fn config(window: (f32, f32)) -> EngineConfig {
-    EngineConfig {
+    let mut config = EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
         ..EngineConfig::new(Root::of::<t3_ui::App>().url_schemes(["t3code"]))
+    };
+    if window == DESKTOP {
+        config.environment.os = nsh_core::platform::Os::Linux;
+        config.environment.idiom = nsh_core::platform::Idiom::Desktop;
     }
+    config
 }
 
 /// The app on the demo backend.

@@ -282,7 +282,7 @@ fn commit_exclusion_message_failure_and_editor_root_follow_the_component() {
     open_commit(&mut app);
     app.press("role:button[Open a.ts in editor]")
         .expect("open file");
-    app.wait_for("editor:/repo-root/a.ts")
+    app.wait_for("text:editor:/repo-root/a.ts")
         .expect("repository root");
     app.press("role:button[Edit]").expect("edit selection");
     app.press("role:checkbox[b.ts]").expect("exclude b");
@@ -292,7 +292,7 @@ fn commit_exclusion_message_failure_and_editor_root_follow_the_component() {
     app.press_key("ctrl+shift+f")
         .expect("server refusal while dialog stays open");
     app.press("role:button[Commit]").expect("commit");
-    app.wait_for("ran:Commit;feature:false;files:a.ts;message:Keep my typed message;env:first")
+    app.wait_for("text:ran:Commit;feature:false;files:a.ts;message:Keep my typed message;env:first")
         .expect("selected files only");
     open_commit(&mut app);
     assert_eq!(
@@ -314,7 +314,7 @@ fn default_ref_confirmation_aborts_or_runs_the_same_action_on_a_feature_ref() {
     app.press("role:button[Commit & push]").expect("again");
     app.press("role:button[Check out feature branch & continue]")
         .expect("feature branch");
-    app.wait_for("ran:CommitPush;feature:true;files:all;message:auto;env:first")
+    app.wait_for("text:ran:CommitPush;feature:true;files:all;message:auto;env:first")
         .expect("same action on feature branch");
 }
 
@@ -337,7 +337,7 @@ fn clone_completion_uses_the_real_default_branch_and_not_the_unborn_head() {
     assert!(app.screen().shows("no mutation"));
     app.press("role:button[Clone finished]")
         .expect("clone complete");
-    app.wait_for("synced:real-default")
+    app.wait_for("text:synced:real-default")
         .expect("deferred automatic branch selection");
     assert!(!app.screen().shows("synced:unborn"));
 }
@@ -376,7 +376,7 @@ fn a_checkout_change_disposes_the_open_commit_message_and_exclusions() {
         Ok(Some(""))
     );
     app.press("role:button[Commit]").expect("commit");
-    app.wait_for("ran:Commit;feature:false;files:all;message:auto;env:second")
+    app.wait_for("text:ran:Commit;feature:false;files:all;message:auto;env:second")
         .expect("destination environment follows scope");
 }
 

@@ -103,6 +103,10 @@ fn five_hundred_lines_are_thirteen_list_items_and_copy_uses_unmounted_chunks() {
         13
     );
     assert!(model.cell(model.len()).is_none());
+    for index in 0..model.len() {
+        let key = model.key_at(index).expect("per-index identity");
+        assert_eq!(model.index_for_key(&key), Some(index));
+    }
 }
 
 #[test]
@@ -159,10 +163,12 @@ fn reorder_edit_remove_and_reinsert_do_not_reuse_another_messages_content() {
     model.update(&first.rows);
     let first_code = cell_with(&model, |kind| matches!(kind, BlockKind::Code(_)));
     let leaf = model.cell(first_code).expect("code").leaf.expect("leaf");
+    let key = model.key_at(first_code).expect("block key");
     let next = rows(vec![b.clone(), a], Some(&first));
     model.update(&next.rows);
     let moved = cell_with(&model, |kind| matches!(kind, BlockKind::Code(_)));
     assert_ne!(first_code, moved);
+    assert_eq!(model.index_for_key(&key), Some(moved));
     assert_eq!(model.cell(moved).expect("moved").leaf.as_ref(), Some(&leaf));
     let edited = rows(vec![code("a", 1, "```", false)], None);
     model.update(&edited.rows);
@@ -322,6 +328,37 @@ fn control(label: &'static str, action: impl Fn() + 'static) -> impl IntoElement
         .child(text(SharedString::from(label)))
 }
 
+fn thread_options() -> BlockListOptions {
+    use t3_client::{
+        ClientStore,
+        types::{EnvironmentId, ThreadId, ThreadKey},
+    };
+    use t3_ui::runtime::{Rt, backend::Unavailable, host::Choice};
+    use t3_ui::screens::thread::rows::{
+        approval::{ApprovalContext, ApprovalRowsState},
+        groups::WorkGroupsState,
+        plan::{PlanContext, PlanRowsState},
+    };
+    use t3_ui::state::nav::{Navigator, Route};
+    provide_context(Rt::new(
+        ClientStore::default(),
+        Rc::new(Unavailable("fixture".into())),
+        Choice::Demo,
+    ));
+    provide_context(Navigator::new(Route::Home));
+    let key = ThreadKey {
+        environment: EnvironmentId("environment".into()),
+        thread: ThreadId("blocks".into()),
+    };
+    BlockListOptions::for_thread(
+        key.clone(),
+        WorkGroupsState::default(),
+        ApprovalContext::new(key.clone(), ApprovalRowsState::default()),
+        PlanContext::new(key, PlanRowsState::default()),
+        computed(|| false),
+    )
+}
+
 #[component]
 fn BlockListFixture() -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
@@ -345,7 +382,7 @@ fn BlockListFixture() -> impl IntoElement {
             rows
         })
     });
-    let options = BlockListOptions::default();
+    let options = thread_options();
     view()
         .w_full()
         .h_full()
@@ -524,7 +561,7 @@ fn one_long_message_is_recycled_by_chunk_and_empty_has_a_reverse_state() {
         app.wait_for("Wrap lines")
             .expect("wrap override survives recycling");
         app.press("role:button[Empty]").expect("clear");
-        app.wait_for("Send a message to start the conversation.")
+        app.wait_for("Send a message to start this thread.")
             .expect("empty state");
         app.press("role:button[Restore]").expect("restore");
         app.wait_for("const end = 500;")
@@ -646,4 +683,363 @@ fn five_hundred_twelve_fences_share_one_bounded_frame_budget() {
         "the aggregate counter must progress across distinct one-chunk fences: {samples:?}"
     );
     eprintln!("TL-BLOCKS-3 512-fence frame samples: {samples:?}");
+}
+
+fn mixed_entry(value: serde_json::Value) -> Rc<TimelineEntry> {
+    Rc::new(serde_json::from_value(value).expect("canonical mixed timeline entry"))
+}
+
+fn mixed_message(id: &str, role: &str, run: &str) -> Rc<TimelineEntry> {
+    mixed_entry(json!({"id":id,"kind":"message","createdAt":AT,
+        "message":{"id":id,"role":role,"text":id,"runId":run,
+        "inputIntent":"turn_start","streaming":false,"createdAt":AT,"updatedAt":AT}}))
+}
+
+fn mixed_work(id: &str, run: &str, extra: serde_json::Value) -> Rc<TimelineEntry> {
+    let mut entry = json!({"id":id,"runId":run,"createdAt":AT,"label":id,
+        "tone":"tool","itemType":"command_execution","toolLifecycleStatus":"completed"});
+    entry
+        .as_object_mut()
+        .expect("work fields")
+        .extend(extra.as_object().expect("extra fields").clone());
+    mixed_entry(json!({"id":id,"kind":"work","createdAt":AT,"entry":entry}))
+}
+
+fn mixed_approval_projection(live: bool) -> t3_client::state::sharing::SharedThreadProjection {
+    use t3_contracts::orchestration_v2::OrchestrationV2ThreadProjection;
+    let mut source: serde_json::Value = serde_json::from_str(
+        include_str!("../../../../fixtures/samples/OrchestrationV2ThreadProjection.jsonl")
+            .lines()
+            .next()
+            .expect("projection sample"),
+    )
+    .expect("canonical projection");
+    source["thread"]["id"] = json!("mixed");
+    source["runtimeRequests"] = json!(["matched", "unmatched"].map(|id| json!({
+        "id":id,"nodeId":"node","providerTurnId":null,"nativeRequestRef":null,
+        "kind":"command","status":"pending","responseCapability":{"type":"live","providerSessionId":"session"},
+        "createdAt":AT,"resolvedAt":null
+    })));
+    let item = json!({"id":"approval-item","threadId":"mixed","runId":null,"nodeId":null,
+        "providerThreadId":null,"providerTurnId":null,"nativeItemRef":null,"parentItemId":null,
+        "ordinal":0,"status":"waiting","title":null,"startedAt":AT,"completedAt":null,"updatedAt":AT,
+        "type":"approval_request","requestId":"matched","requestKind":"command","prompt":"Run mixed command","reason":"Mixed permission"});
+    source["turnItems"] = json!([item]);
+    source["visibleTurnItems"] = json!([{"position":0,"visibility":"local","sourceThreadId":"mixed","sourceItemId":"approval-item","item":item}]);
+    if live {
+        source["runtimeRequests"] = json!([]);
+        source["turnItems"] = json!([]);
+        source["visibleTurnItems"] = json!([]);
+    }
+    t3_client::state::sharing::SharedThreadProjection::update(
+        Rc::new(
+            serde_json::from_value::<OrchestrationV2ThreadProjection>(source)
+                .expect("mixed requests"),
+        ),
+        None,
+    )
+}
+
+fn mixed_input(
+    mode: &str,
+    projection: &t3_client::state::sharing::SharedThreadProjection,
+) -> MessagesTimelineRowsInput {
+    use t3_client::thread_views::messages_timeline::TimelineLatestRun;
+    use t3_client::view_logic::session::{
+        TimelineEntriesInput, derive_timeline_entries_from_visible_turn_items_with_state,
+    };
+    let mut entries = vec![mixed_message("Mixed user", "user", "run")];
+    match mode {
+        "mixed" => {
+            entries.extend([
+                mixed_message("Mixed assistant", "assistant", "run"),
+                mixed_work(
+                    "Mixed read",
+                    "run",
+                    json!({"toolTitle":"read","viewedImagePath":"/unrendered-viewed-image.png"}),
+                ),
+                mixed_work("Mixed command", "run", json!({"command":"vp test run"})),
+                mixed_work(
+                    "Mixed work notice",
+                    "notice-run",
+                    json!({"tone":"error","detail":"Mixed work detail"}),
+                ),
+            ]);
+            let approvals = derive_timeline_entries_from_visible_turn_items_with_state(
+                TimelineEntriesInput {
+                    visible_turn_items: projection.visible_turn_items.to_vec(),
+                    ..Default::default()
+                },
+                None,
+            );
+            entries.extend(approvals.entries.iter().cloned());
+            let item = json!({"id":"event","type":"run_interrupt_result","threadId":"mixed","runId":null,"nodeId":null,
+                "providerThreadId":null,"providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":1,
+                "status":"completed","title":null,"startedAt":AT,"completedAt":AT,"updatedAt":AT,"message":"Mixed interruption"});
+            entries.push(mixed_entry(json!({"id":"event","kind":"event","createdAt":AT,
+                "projectedItem":{"position":1,"visibility":"local","sourceThreadId":"mixed","sourceItemId":"event","item":item}})));
+            entries.push(mixed_entry(json!({"id":"plan","kind":"proposed-plan","createdAt":AT,
+                "proposedPlan":{"id":"plan","runId":null,"planMarkdown":"# Mixed plan\n\nPlan body","status":"completed","createdAt":AT,"updatedAt":AT}})));
+            entries.push(mixed_entry(json!({"id":"sent","kind":"sent-message","createdAt":AT,"runId":null,"text":"Mixed sent **message**"})));
+            entries.push(mixed_entry(json!({"id":"html","kind":"html-render","createdAt":AT,"runId":null,"htmlRender":{"html":"Unrendered HTML sentinel"}})));
+            entries.push(mixed_entry(json!({"id":"mcp","kind":"mcp-app","createdAt":AT,"runId":null,"sourceThreadId":"mixed","itemId":"mcp","revision":"one","mcpApp":{"title":"Unrendered MCP sentinel"}})));
+            entries.push(mixed_work(
+                "Unrendered compaction sentinel",
+                "compact-run",
+                json!({"sourceActivityKind":"context-compaction"}),
+            ));
+        }
+        "live" => entries.push(mixed_work(
+            "Live command",
+            "run",
+            json!({"command":"vp test run","toolLifecycleStatus":"inProgress"}),
+        )),
+        "attempt" => {
+            let mut old = serde_json::to_value(mixed_work("Old attempt tool", "run", json!({})))
+                .expect("entry");
+            old["attempt"] = json!({"id":"old-attempt","runId":"run","attemptOrdinal":1,"rootNodeId":"root",
+                "providerInstanceId":"codex","providerThreadId":"provider-thread","providerTurnId":null,
+                "reason":"initial","status":"superseded","startedAt":AT,"completedAt":AT});
+            entries.push(mixed_entry(old));
+            entries.push(mixed_work(
+                "Current attempt tool",
+                "run",
+                json!({"command":"vp test run","toolLifecycleStatus":"inProgress"}),
+            ));
+        }
+        "thinking" => {}
+        _ => panic!("unknown data scenario"),
+    }
+    let live = mode != "mixed";
+    MessagesTimelineRowsInput {
+        timeline_entries: entries,
+        is_working: live,
+        running_run_id: live.then(|| "run".into()),
+        active_turn_started_at: live.then(|| AT.into()),
+        latest_run: Some(TimelineLatestRun {
+            run_id: "run".into(),
+            status: if live { "running" } else { "completed" }.into(),
+            started_at: Some(AT.into()),
+            completed_at: (!live).then(|| AT.into()),
+            turn_ended: None,
+        }),
+        worktree_setup: (!live).then(|| json!({"phase":"done","startedAt":AT})),
+        tool_call_visibility: "showAll".into(),
+        ..Default::default()
+    }
+}
+
+#[component]
+fn MixedRowsFixture() -> impl IntoElement {
+    use t3_client::thread_views::composer::send::{PendingMessage, SendState};
+    use t3_client::types::{EnvironmentId, ThreadId, ThreadKey};
+    use t3_client::{ClientStore, composition::ClientRuntime, testing::FakePlatform};
+    use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+    use t3_ui::runtime::{Rt, backend::Unavailable, host::Choice};
+    use t3_ui::screens::composer::send::PendingMessages;
+    use t3_ui::screens::thread::rows::approval::{ApprovalContext, ApprovalRowsState};
+    use t3_ui::screens::thread::rows::groups::WorkGroupsState;
+    use t3_ui::screens::thread::rows::plan::{PlanContext, PlanRowsState};
+    use t3_ui::state::nav::{Navigator, Route};
+    t3_ui::theme::install(&Default::default());
+    provide_context(Rt::new(
+        ClientStore::default(),
+        Rc::new(Unavailable("fixture".into())),
+        Choice::Demo,
+    ));
+    provide_context(Navigator::new(Route::Home));
+    let key = ThreadKey {
+        environment: EnvironmentId("environment".into()),
+        thread: ThreadId("mixed".into()),
+    };
+    let mode = signal("mixed");
+    let groups = WorkGroupsState::default();
+    groups
+        .expanded_run_ids
+        .set(["run".into(), "notice-run".into()].into_iter().collect());
+    let projection = computed(move || {
+        Some(Shared(Rc::new(mixed_approval_projection(
+            mode.get() != "mixed",
+        ))))
+    });
+    let approvals =
+        ApprovalContext::from_projection(key.clone(), projection, ApprovalRowsState::default());
+    let pending_approvals = approvals.pending;
+    let rows = computed(move || {
+        projection.with(|projection| {
+            let mut input = mixed_input(mode.get(), projection.as_ref().expect("projection"));
+            groups.apply_to_input(&mut input);
+            input.pending_approval_request_ids =
+                pending_approvals.with(|pending| pending.keys().cloned().collect());
+            Shared(derive_messages_timeline_rows_with_state(&input, None).rows)
+        })
+    });
+    let inventory = computed(move || {
+        rows.with(|rows| {
+            let kinds = rows
+                .iter()
+                .map(|row| {
+                    let value = serde_json::to_value(row.as_ref()).expect("row");
+                    if value["kind"] == "message" {
+                        format!(
+                            "message:{}",
+                            value["message"]["role"].as_str().expect("role")
+                        )
+                    } else {
+                        value["kind"].as_str().expect("kind").to_owned()
+                    }
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            format!(
+                "mixed inventory {}",
+                serde_json::to_string(&kinds).expect("inventory")
+            )
+        })
+    });
+    let mut options = BlockListOptions::for_thread(
+        key.clone(),
+        groups,
+        approvals,
+        PlanContext::new(key.clone(), PlanRowsState::default()),
+        computed(move || mode.get() != "mixed"),
+    );
+    let client = Rc::new(ClientRuntime::new(
+        FakePlatform::default(),
+        ClientStore::default(),
+        OrchestrationV2CreationSource::Web,
+        Rc::new(|_| {}),
+    ));
+    let pending = PendingMessage {message:Rc::new(serde_json::from_value(json!({
+        "environmentId":"environment","threadId":"mixed","messageId":"pending","commandId":"pending-command",
+        "text":"Mixed pending message","attachments":[],"createdAt":AT})).expect("canonical queued message")), state:SendState::Queued};
+    let pending = PendingMessages {
+        messages: signal(Rc::new(vec![pending])),
+        restored_draft: signal(None),
+        delivery_problem: signal(None),
+    };
+    options.thread.as_mut().expect("thread mount").pending = Some((pending, client));
+    view()
+        .w_full()
+        .h_full()
+        .child(control("Mixed", move || mode.set("mixed")))
+        .child(control("Live", move || mode.set("live")))
+        .child(control("Thinking", move || mode.set("thinking")))
+        .child(control("Attempt", move || mode.set("attempt")))
+        .child(control("Fold", move || {
+            groups.expanded_run_ids.set(Default::default())
+        }))
+        .child(text(move || inventory.get()))
+        .child(messages_timeline(rows, options))
+}
+
+#[test]
+fn every_client_row_kind_uses_its_owner_or_an_explicit_unrendered_arm() {
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(1280.0), px(6000.0)),
+        ..EngineConfig::new(Root::of::<MixedRowsFixture>())
+    })
+    .expect("mixed production block timeline");
+    app.wait_for("Mixed pending message")
+        .expect("pending footer");
+    let mut observed = std::collections::BTreeSet::<String>::new();
+    for (control, expected) in [
+        (
+            "Mixed",
+            vec![
+                "Mixed user",
+                "Mixed assistant",
+                "Mixed work detail",
+                "Working...",
+                "Mixed interruption",
+                "Mixed plan",
+                "Mixed sent message",
+                "Run mixed command",
+            ],
+        ),
+        ("Fold", vec!["id:turn-fold:run"]),
+        ("Live", vec!["Running vp"]),
+        ("Thinking", vec!["Thinking"]),
+        ("Attempt", vec!["Cut off by a steer"]),
+    ] {
+        app.press(&format!("role:button[{control}]"))
+            .expect("data scenario");
+        for text in expected {
+            app.wait_for(text)
+                .unwrap_or_else(|error| panic!("{control}: {text}: {error:?}"));
+        }
+        if control == "Mixed" {
+            assert_eq!(
+                app.screen()
+                    .texts()
+                    .iter()
+                    .filter(|text| **text == "Command approval")
+                    .count(),
+                1,
+                "unmatched footer mounts its generic owner card; the matched row shows its prompt"
+            );
+            app.press("role:button[Copy message]")
+                .expect("standalone assistant meta action");
+            assert_eq!(app.screen().clipboard(), Some("Mixed assistant"));
+            app.press("id:work-toggle:Mixed read")
+                .expect("owner group disclosure");
+            app.wait_for("vp test run").expect("owner work detail");
+        }
+        let screen = app.screen();
+        let encoded = screen
+            .texts()
+            .into_iter()
+            .find_map(|text| text.strip_prefix("mixed inventory "))
+            .expect("raw client kind inventory");
+        observed.extend(serde_json::from_str::<Vec<String>>(encoded).expect("kinds"));
+        for absent in [
+            "Unrendered HTML sentinel",
+            "Unrendered MCP sentinel",
+            "Unrendered compaction sentinel",
+            "/unrendered-viewed-image.png",
+        ] {
+            assert!(
+                !screen.shows(absent),
+                "unavailable row content was invented: {absent}"
+            );
+        }
+    }
+    let mounted = [
+        "message:user",
+        "message:assistant",
+        "assistant-meta",
+        "sent-message",
+        "event",
+        "proposed-plan",
+        "work",
+        "work-live",
+        "working",
+        "thinking",
+        "work-toggle",
+        "turn-fold",
+        "attempt-fold",
+    ];
+    let unrendered = [
+        "worktree-setup",
+        "viewed-images",
+        "context-compaction",
+        "html-render",
+        "mcp-app",
+    ];
+    for kind in mounted.into_iter().chain(unrendered) {
+        assert!(
+            observed.contains(kind),
+            "client fixture did not exercise {kind}: {observed:?}"
+        );
+    }
+    assert_eq!(
+        app.screen()
+            .layout_nodes()
+            .iter()
+            .filter(|node| node.scroll.is_some())
+            .count(),
+        1,
+        "viewport/footer share the block list's single scroller"
+    );
+    eprintln!("TL-BLOCKS-3 mounted kinds: {mounted:?}; explicitly unrendered: {unrendered:?}");
 }

@@ -267,16 +267,28 @@ fn content_search_keeps_file_groups_and_opens_the_matching_line() {
             .expect("list reveals the selected match");
         let active = app.screen().id("role:button[b.ts:2]").expect("match");
         let nodes = app.screen().layout_nodes();
-        let viewport = nodes
+        let viewport_node = nodes
             .iter()
             .find(|node| node.scroll.is_some())
-            .expect("content viewport")
-            .bounds;
-        let row = nodes
+            .expect("content viewport");
+        let row_node = nodes
             .iter()
             .find(|node| node.id == active)
-            .expect("selected match bounds")
-            .bounds;
+            .expect("selected match bounds");
+        let mut content_node = row_node;
+        while content_node.parent != viewport_node.id {
+            content_node = nodes
+                .iter()
+                .find(|node| node.id == content_node.parent)
+                .expect("match is inside the scrolling content");
+        }
+        let content = content_node.bounds;
+        let viewport = viewport_node.bounds;
+        assert!(
+            viewport.size.height.0 > content.size.height.0,
+            "Fill expands beyond short search results"
+        );
+        let row = row_node.bounds;
         assert!(row.origin.y.0 >= viewport.origin.y.0);
         assert!(row.origin.y.0 + row.size.height.0 <= viewport.origin.y.0 + viewport.size.height.0);
         app.press("role:button[b.ts:2]")

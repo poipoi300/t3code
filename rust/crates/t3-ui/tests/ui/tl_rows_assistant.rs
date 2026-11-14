@@ -213,6 +213,8 @@ fn start(window: (f32, f32)) -> Headless {
         clock: nsh_core::time::Clock::manual(SystemTime::UNIX_EPOCH + Duration::from_millis(epoch)),
         ..EngineConfig::new(Root::of::<AssistantFixture>())
     };
+    config.environment.locale_settings.time_zone =
+        nsh_core::platform::TimeZone::parse("UTC").expect("fixture timezone");
     if window == DESKTOP {
         config.environment.os = nsh_core::platform::Os::Windows;
         config.environment.idiom = nsh_core::platform::Idiom::Desktop;

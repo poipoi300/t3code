@@ -114,6 +114,7 @@ fn ListFixture() -> impl IntoElement {
                 id: EnvironmentId(id.into()),
                 label: id.into(),
                 routes: Vec::new(),
+                damaged: false,
                 state: ConnectionState {
                     phase: Phase::Connected,
                     ..Default::default()

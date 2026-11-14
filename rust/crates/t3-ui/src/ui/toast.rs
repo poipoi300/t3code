@@ -783,9 +783,10 @@ pub fn toasts(
                 ))
                 .child(when(
                     move || {
-                        visible.with(|entries| {
-                            entries.iter().any(|entry| !entry.ending && !entry.limited)
-                        })
+                        focused.get()
+                            && visible.with(|entries| {
+                                entries.iter().any(|entry| !entry.ending && !entry.limited)
+                            })
                     },
                     move || {
                         let cancel = cancel.clone();

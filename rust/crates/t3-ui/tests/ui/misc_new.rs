@@ -160,3 +160,217 @@ fn a_denied_creation_cannot_submit_and_keeps_the_saved_prompt() {
         assert!(app.screen().shows("Retain this draft"));
     }
 }
+
+use new_thread::{Destination, LinkAction, LinkChoice};
+const LINK_QUERY: &str = "?prompt=123&repo=owner%2Frepo";
+fn choice_label(action: LinkAction) -> &'static str {
+    match action {
+        LinkAction::CloneRepository => "Clone owner/repo",
+        LinkAction::UseWithoutProject => "Use without project",
+        LinkAction::CheckoutPullRequest => "Check out",
+        LinkAction::ReplaceDraft => "Replace draft",
+    }
+}
+fn unused<T: 'static>() -> LocalBoxFuture<'static, Result<T, Text>> {
+    futures::future::ready(Err(Text::content("Unused test operation"))).boxed_local()
+}
+struct LinkFake {
+    action: LinkAction,
+    disabled: bool,
+    success: bool,
+    calls: Signal<usize>,
+}
+impl NewThreadClient for LinkFake {
+    fn watch(&self, _: Target) -> LocalBoxStream<'static, Rc<NewThreadView>> {
+        futures::stream::once(futures::future::ready(Rc::new(NewThreadView::LinkChoice {
+            title: Text::content("Source link"),
+            message: Text::content("Read before sending"),
+            choices: vec![LinkChoice {
+                action: self.action,
+                label: Text::content(choice_label(self.action)),
+                disabled_reason: self.disabled.then(|| Text::content("Checking out...")),
+            }],
+        })))
+        .chain(futures::stream::pending())
+        .boxed_local()
+    }
+    fn retry(&self, _: Target) -> LocalBoxFuture<'static, Result<(), Text>> {
+        unused()
+    }
+    fn start_scratch(&self, _: Option<String>) -> LocalBoxFuture<'static, Result<(), Text>> {
+        unused()
+    }
+    fn select_project(
+        &self,
+        _: String,
+        _: ProjectKey,
+    ) -> LocalBoxFuture<'static, Result<(), Text>> {
+        unused()
+    }
+    fn set_prompt(&self, _: &str, _: String, _: usize) -> Result<u64, Text> {
+        Err(Text::content("Unused test operation"))
+    }
+    fn submit(
+        &self,
+        _: String,
+        _: u64,
+        _: ComposerDispatchMode,
+    ) -> LocalBoxFuture<'static, Result<ThreadKey, Text>> {
+        unused()
+    }
+    fn attachments(&self, _: &str) -> Option<AttachmentSession> {
+        None
+    }
+    fn model_picker(&self, _: &str) -> Option<PickerProps> {
+        None
+    }
+    fn link_action(
+        &self,
+        search: String,
+        action: LinkAction,
+    ) -> LocalBoxFuture<'static, Result<Option<Destination>, Text>> {
+        assert_eq!(search, LINK_QUERY);
+        assert_eq!(action, self.action);
+        self.calls.update(|calls| *calls += 1);
+        futures::future::ready(if self.success {
+            Ok(Some(Destination::Draft("created".into())))
+        } else {
+            Err(Text::content("Choice rejected"))
+        })
+        .boxed_local()
+    }
+}
+#[derive(Clone, PartialEq, Props)]
+struct LinkHarnessProps {
+    action: String,
+    disabled: bool,
+    success: bool,
+}
+#[component]
+fn LinkHarness(props: LinkHarnessProps) -> impl IntoElement {
+    theme::install(&theme::ThemeChoice::default());
+    let nav = Navigator::new(Route::NewThread);
+    provide_context(nav);
+    let requests = signal(Vec::new());
+    if props.success {
+        use t3_ui::state::url::{Location, UrlState};
+        let (sender, receiver) = mpsc::unbounded();
+        UrlState::install(
+            Location::parse(&format!("/new{LINK_QUERY}")),
+            nav,
+            Rc::new(LinkUrls {
+                sender,
+                receiver: RefCell::new(Some(receiver)),
+                requests,
+            }),
+        );
+    }
+    let calls = signal(0usize);
+    provide_context(NewThreadRuntime(Rc::new(LinkFake {
+        action: [LinkAction::CloneRepository, LinkAction::UseWithoutProject, LinkAction::CheckoutPullRequest, LinkAction::ReplaceDraft]
+            .into_iter().find(|action| choice_label(*action) == props.action)
+            .expect("known fixture action"),
+        disabled: props.disabled,
+        success: props.success,
+        calls,
+    })));
+    view()
+        .w_full()
+        .h_full()
+        .child(new_thread::new_thread_link_route(LINK_QUERY))
+        .child(text(move || format!("Link actions: {}", calls.get())))
+        .child(text(move || {
+            format!("Link URL requests: {:?}", requests.get())
+        }))
+}
+#[test]
+fn every_link_choice_delegates_raw_search_and_respects_the_latest_disabled_state() {
+    for action in [
+        LinkAction::CloneRepository,
+        LinkAction::UseWithoutProject,
+        LinkAction::CheckoutPullRequest,
+        LinkAction::ReplaceDraft,
+    ] {
+        for window in [DESKTOP, PHONE] {
+            for disabled in [false, true] {
+                let mut app = Headless::start(EngineConfig {
+                    ui_sets: t3_ui::registries(),
+                    viewport: size(px(window.0), px(window.1)),
+                    ..EngineConfig::new(Root::new::<LinkHarness>(move || LinkHarnessProps {
+                        action: choice_label(action).into(),
+                        disabled,
+                        success: false,
+                    }))
+                })
+                .expect("link harness");
+                app.wait_for("Source link").expect("client choice");
+                let _ = app.press(&format!("role:button[{}]", choice_label(action)));
+                if disabled {
+                    assert!(app.screen().shows("Link actions: 0"));
+                } else {
+                    app.wait_for("Choice rejected").expect("typed rejection");
+                    assert!(app.screen().shows("Link actions: 1"));
+                }
+                assert!(app.screen().shows("Source link"));
+            }
+        }
+    }
+}
+
+use t3_ui::state::url::{RoutePolicy, UrlClient, UrlRequest, UrlSnapshot};
+struct LinkUrls {
+    sender: mpsc::UnboundedSender<UrlSnapshot>,
+    receiver: RefCell<Option<mpsc::UnboundedReceiver<UrlSnapshot>>>,
+    requests: Signal<Vec<UrlRequest>>,
+}
+fn link_url(path: String) -> UrlSnapshot {
+    UrlSnapshot {
+        path,
+        history_index: 0,
+        can_go_back: false,
+        can_go_forward: false,
+        policy: RoutePolicy {
+            authenticated_or_hosted: true,
+            ..Default::default()
+        },
+    }
+}
+impl UrlClient for LinkUrls {
+    fn watch(&self) -> LocalBoxStream<'static, UrlSnapshot> {
+        futures::stream::once(futures::future::ready(link_url(format!(
+            "/new{LINK_QUERY}"
+        ))))
+        .chain(self.receiver.borrow_mut().take().expect("one URL observer"))
+        .boxed_local()
+    }
+    fn navigate(&self, request: UrlRequest) -> LocalBoxFuture<'static, Result<(), Text>> {
+        self.requests
+            .update(|requests| requests.push(request.clone()));
+        if let UrlRequest::Push(path) | UrlRequest::Replace(path) = request {
+            self.sender
+                .unbounded_send(link_url(path))
+                .expect("URL listener");
+        }
+        futures::future::ready(Ok(())).boxed_local()
+    }
+}
+#[test]
+fn an_accepted_link_replaces_its_url_instead_of_trapping_back_navigation() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = Headless::start(EngineConfig {
+            ui_sets: t3_ui::registries(),
+            viewport: size(px(window.0), px(window.1)),
+            ..EngineConfig::new(Root::new::<LinkHarness>(|| LinkHarnessProps {
+                action: choice_label(LinkAction::ReplaceDraft).into(),
+                disabled: false,
+                success: true,
+            }))
+        })
+        .expect("link URL harness");
+        app.wait_for("Source link").expect("replacement choice");
+        app.press("role:button[Replace draft]")
+            .expect("accept prompt");
+        app.wait_for("Link URL requests: [Replace(\"/draft/created\")]")
+            .expect("replace the source URL");
+    }
+}

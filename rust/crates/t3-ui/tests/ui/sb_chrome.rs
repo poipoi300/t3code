@@ -117,7 +117,7 @@ fn search_clear_restores_focus_and_project_controls_return_after_empty_state() {
             .expect("scope remounted");
         app.press("role:button[Add project]")
             .expect("add project route");
-        app.wait_for("text:route:/projects/new")
+        app.wait_for("text:route:@add-project")
             .expect("add project destination");
         app.press("role:button[New thread]")
             .expect("new thread route");

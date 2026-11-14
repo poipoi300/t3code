@@ -125,6 +125,19 @@ fn virtualized_keyboard_selection_reaches_rows_outside_the_initial_window() {
     for size_ in [PHONE, DESKTOP] {
         let mut app = start(size_, true);
         app.wait_for("Result 0").expect("first window");
+        let input = app
+            .screen()
+            .id("role:combobox[Command palette]")
+            .expect("palette input");
+        app.wait_until("palette initial focus", nsh_testing::WAIT, move |screen| {
+            screen.commands().iter().any(|(target, command)| {
+                *target == input && matches!(command, nsh_core::Command::Focus)
+            })
+        })
+        .expect("the component focuses its input");
+        // Headless can paint recycled rows before publishing the input's native keymap.
+        app.type_text("role:combobox[Command palette]", "")
+            .expect("native input ready before navigation");
         for _ in 0..75 {
             app.press_key("down").expect("move highlight");
         }
@@ -141,6 +154,7 @@ fn virtualized_keyboard_selection_reaches_rows_outside_the_initial_window() {
             .find(|node| node.scroll.is_some())
             .expect("list viewport")
             .bounds;
+        assert!(viewport.size.height.0 <= 300.0, "bounded palette viewport");
         let row = nodes
             .iter()
             .find(|node| node.id == active)

@@ -133,6 +133,13 @@ pub fn timeline_row_keys(
     })
 }
 
+#[derive(Clone)]
+struct IndexedRows {
+    count: Memo<usize>,
+    key: Rc<dyn Fn(usize) -> Option<SharedString>>,
+    index: Rc<dyn Fn(&str) -> Option<usize>>,
+}
+
 struct Visit {
     key: ThreadKey,
     memory: PositionMemory,
@@ -146,6 +153,7 @@ struct Visit {
     sampling: bool,
     follow_pending: bool,
     frame: Option<Measurement>,
+    indexed: Option<IndexedRows>,
 }
 
 /// One mounted visit; the list owns its keyed splices and height index.
@@ -182,6 +190,7 @@ impl TimelineViewport {
                 sampling: false,
                 follow_pending: false,
                 frame: None,
+                indexed: None,
             }),
         };
         // Synchronizes data arriving after an empty/loading mount with the native list.
@@ -197,23 +206,69 @@ impl TimelineViewport {
         this
     }
 
+    /// Block lists resolve identities on demand; NSH's keys() would clone/hash the whole reply.
+    pub fn with_indexed_rows(
+        self,
+        count: Memo<usize>,
+        key: impl Fn(usize) -> Option<SharedString> + 'static,
+        index: impl Fn(&str) -> Option<usize> + 'static,
+    ) -> Self {
+        self.visit.with(|visit| {
+            visit.indexed = Some(IndexedRows {
+                count,
+                key: Rc::new(key),
+                index: Rc::new(index),
+            })
+        });
+        effect(move || {
+            count.get();
+            after_answer(move || self.position());
+        });
+        self
+    }
+
+    fn row_count(self) -> usize {
+        self.visit.with(|visit| visit.indexed.clone()).map_or_else(
+            || self.keys.with_untracked(|keys| keys.len()),
+            |rows| rows.count.get_untracked(),
+        )
+    }
+
+    fn row_key(self, index: usize) -> Option<SharedString> {
+        self.visit.with(|visit| visit.indexed.clone()).map_or_else(
+            || self.keys.with_untracked(|keys| keys.get(index).cloned()),
+            |rows| (rows.key)(index),
+        )
+    }
+
+    fn row_index(self, key: &str) -> Option<usize> {
+        self.visit.with(|visit| visit.indexed.clone()).map_or_else(
+            || {
+                self.keys
+                    .with_untracked(|keys| keys.iter().position(|id| id.as_str() == key))
+            },
+            |rows| (rows.index)(key),
+        )
+    }
+
     /// Attach to the real list, without a second scroll container or any per-row measurement.
     pub fn attach(self, list: VirtualList) -> VirtualList {
         let saved = self.visit.with(|v| v.saved.clone());
         // NSH follows index/end commands through measurement; no RAF settling loop is needed.
         let list = if let Some(saved) = saved.filter(|p| !p.at_end) {
-            match self
-                .keys
-                .with(|keys| keys.iter().position(|id| *id == saved.row_id))
-            {
+            match self.row_index(saved.row_id.as_str()) {
                 Some(index) => list.initial_scroll_index(index),
                 None => list,
             }
         } else {
             list.initial_scroll_at_end()
         };
+        let list = if self.visit.with(|visit| visit.indexed.is_some()) {
+            list
+        } else {
+            list.keys(move || self.keys.get().0.as_ref().clone())
+        };
         list.alignment(ListAlignment::Top)
-            .keys(move || self.keys.get().0.as_ref().clone())
             .element_ref(&self.element)
             // NSH has no indicator inset: keep the list frame inside the vertical-bar safe area.
             .mr(move || safe_area().right)
@@ -332,8 +387,7 @@ impl TimelineViewport {
     }
 
     fn position(self) {
-        let keys = self.keys.get_untracked();
-        if keys.is_empty() || self.element.node().is_none() {
+        if self.row_count() == 0 || self.element.node().is_none() {
             return;
         }
         let start = self.visit.with(|v| {
@@ -347,7 +401,7 @@ impl TimelineViewport {
         let Some(saved) = start else { return };
         match saved.filter(|p| !p.at_end) {
             Some(saved) => {
-                if let Some(index) = keys.iter().position(|id| *id == saved.row_id) {
+                if let Some(index) = self.row_index(saved.row_id.as_str()) {
                     self.element.scroll_to_index(
                         index as u32,
                         Percentage(0.0),
@@ -422,22 +476,30 @@ impl TimelineViewport {
         });
         let Some(serial) = serial else { return };
         let keys = self.keys.get_untracked();
+        let count = self.row_count();
         spawn(async move {
             let position = self.element.measure_scroll_position().await;
             let current_keys = self.keys.get_untracked();
+            let current_count = self.row_count();
+            let anchor = position.and_then(|position| {
+                self.row_key(position.index as usize)
+                    .map(|key| (key, position))
+            });
             let dirty = self.visit.with(|v| {
                 v.sampling = false;
-                if serial != v.serial || !Rc::ptr_eq(&keys.0, &current_keys.0) {
+                if serial != v.serial
+                    || count != current_count
+                    || !Rc::ptr_eq(&keys.0, &current_keys.0)
+                {
                     return true;
                 }
-                if let Some(position) = position
-                    && let Some(row_id) = keys.get(position.index as usize)
+                if let Some((row_id, position)) = anchor
                     && let Some(metrics) = v.metrics
                 {
                     v.memory.0.borrow_mut().remember(
                         v.key.clone(),
                         RememberedTimelinePosition {
-                            row_id: row_id.clone(),
+                            row_id,
                             offset_within_row: position.offset.0,
                             scroll_offset: metrics.offset.y.0,
                             at_end: is_at_end(metrics),

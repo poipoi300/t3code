@@ -140,6 +140,10 @@ fn resolve_variant(variant: &str, attrs: &[(&str, &str)]) -> Variant {
     if variant == "any-hover" {
         return Variant::Keep("hover".into());
     }
+    // CSS `any-pointer` asks about any input; NSH's pointer condition is the device's.
+    if let Some(kind) = variant.strip_prefix("any-pointer-") {
+        return Variant::Keep(format!("pointer-{kind}"));
+    }
     if let Some(group) = variant.strip_prefix("group-any-hover") {
         return Variant::Keep(format!("group-hover{group}"));
     }
@@ -536,6 +540,7 @@ mod tests {
                 "transition hover:bg-accent",
             ),
             ("transition-[width]", "transition-[width]"),
+            ("any-pointer-coarse:relative any-pointer-fine:z-30", "pointer-coarse:relative pointer-fine:z-30"),
         ] {
             assert_eq!(rewrite(web, Scope::Root, &[], &is_color, false), nsh, "{web}");
         }

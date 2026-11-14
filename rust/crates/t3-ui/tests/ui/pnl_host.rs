@@ -542,6 +542,7 @@ fn ProjectedWorkspace() -> impl IntoElement {
 
     t3_ui::theme::install(&Default::default());
     provide_context(t3_ui::theme::text_view_parts());
+    provide_context(t3_ui::state::panels::Panels::new());
     let store = t3_client::ClientStore::default();
     let backend: Rc<dyn Backend> = Rc::new(demo::DemoBackend::new(store.clone()));
     provide_context(Rt::new(store, backend.clone(), Choice::Demo));
