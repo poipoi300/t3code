@@ -16,19 +16,14 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-#[path = "terminal_output.rs"]
-pub mod terminal_output;
+pub use t3_shared::terminal_output;
 pub use terminal_output::NativeTerminalOutputFold;
 
 pub const TERMINAL_OUTPUT_TAIL_CHARS: usize = 64 * 1024;
 const MAX_APPEND_CHARS: usize = 16 * 1024;
 const MAX_FINAL_SOURCE_CHARS: usize = TERMINAL_OUTPUT_TAIL_CHARS * 4;
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct TerminalText {
-    pub text: String,
-    pub truncated: bool,
-}
+pub use terminal_output::TerminalText;
 
 /// Opaque state is shared with the replay recorder; NativeTerminalOutputFold is the canonical fold.
 pub trait TerminalOutputFold: Send + Sync {

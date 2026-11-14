@@ -105,7 +105,7 @@ async fn context(adapter: Arc<OrchestrationAdapter>, name: &str, input: &Value) 
     access::authorize(
         adapter,
         scope,
-        access::tool_rule(name, input),
+        access::tool_rule(name, input).unwrap(),
         name,
         input,
         false,

@@ -8,7 +8,7 @@ pub fn required_scopes(name: &str, input: &Value) -> Result<Vec<Scope>> {
     }
     let mut scopes = vec![Scope::OrchestrationRead];
     if !matches!(
-        tool_rule(name, input),
+        tool_rule(name, input)?,
         AccessRule::Reads | AccessRule::ReadsAsCaller
     ) {
         scopes.push(Scope::OrchestrationOperate);

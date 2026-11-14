@@ -139,12 +139,7 @@ impl OrchestratorService for SchedulerAdapter {
             {
                 continue;
             }
-            let may_run = self.check_task(&context, &task).await.is_ok()
-                && context
-                    .scope
-                    .client
-                    .as_ref()
-                    .is_none_or(|c| c.access != ClientAccess::ReadOnly);
+            let may_run = context.caller_may_start() && self.check_task(&context, &task).await.is_ok();
             tasks.push(summary(task, may_run)?);
         }
         Ok(OrchestratorMcpListScheduledTasksResult { tasks })

@@ -170,9 +170,13 @@ impl RuntimePorts {
             telemetry: None,
             titles: None,
             message_context: None,
-            thread_find_text: None,
-            terminal_output: None,
-            search_policy: None,
+            thread_find_text: Some(Arc::new(t3_shared::find_text::NativeThreadFindText)),
+            terminal_output: Some(Arc::new(
+                t3_shared::terminal_output::NativeTerminalOutputFold,
+            )),
+            search_policy: Some(Arc::new(
+                t3_shared::search_policy::NativeThreadSearchPolicy::default(),
+            )),
             launch: None,
             pull_requests: None,
             pull_request_identities: None,

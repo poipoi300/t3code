@@ -25,6 +25,8 @@ required-features = ["acp-adapter"]
 [dependencies]
 t3-contracts = { path = "../t3-contracts" }
 t3-persistence = { path = "../t3-persistence" }
+# Pure helpers shared with the client: terminal fold, find text, search policy.
+t3-shared = { path = "../t3-shared" }
 t3-git = { path = "../t3-git", optional = true }
 t3-process = { path = "../t3-process", optional = true }
 t3-codex-app-server = { path = "../t3-codex-app-server", optional = true }

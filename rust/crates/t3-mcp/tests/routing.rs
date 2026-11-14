@@ -6,6 +6,97 @@ use std::sync::{Arc, Mutex};
 use t3_mcp::{services::*, *};
 struct Recorder(Arc<Mutex<Vec<String>>>);
 #[async_trait]
+impl PreviewControlsService for Recorder {
+    async fn t3_preview_list(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_preview_list".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+    async fn t3_preview_close(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_preview_close".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+}
+#[async_trait]
+impl EnvironmentService for Recorder {
+    async fn t3_environment_read(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_environment_read".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+    async fn t3_environment_preferences_update(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        self.0
+            .lock()
+            .unwrap()
+            .push("t3_environment_preferences_update".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+}
+#[async_trait]
+impl ThemeService for Recorder {
+    async fn t3_theme_read(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_theme_read".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+    async fn t3_theme_set(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_theme_set".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+}
+#[async_trait]
+impl ProjectService for Recorder {
+    async fn t3_thread_launch(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_thread_launch".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+    async fn t3_project_list(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_project_list".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+    async fn t3_project_read(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_project_read".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+    async fn t3_project_create(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_project_create".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+    async fn t3_project_update(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_project_update".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+    async fn t3_project_delete(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_project_delete".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+    async fn t3_project_clone(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<t3_contracts::source_control::SourceControlCloneRepositoryResult> {
+        self.0.lock().unwrap().push("t3_project_clone".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+}
+#[async_trait]
 impl AttachmentService for Recorder {
     async fn t3_attachment_prepare_upload(
         &self,
@@ -39,77 +130,53 @@ impl AttachmentService for Recorder {
     }
 }
 #[async_trait]
-impl DeviceService for Recorder {
-    async fn device_list(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<t3_contracts::device::DeviceToolListResult> {
-        self.0.lock().unwrap().push("device_list".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn device_open(
-        &self,
-        _context: CallContext,
-        _input: t3_contracts::device::DeviceToolOpenInput,
-    ) -> Result<t3_contracts::device::DeviceToolOpenResult> {
-        self.0.lock().unwrap().push("device_open".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn device_screenshot(
-        &self,
-        _context: CallContext,
-        _input: t3_contracts::device::DeviceToolTargetInput,
-    ) -> Result<t3_contracts::device::DeviceToolScreenshotResult> {
-        self.0.lock().unwrap().push("device_screenshot".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn device_close(
-        &self,
-        _context: CallContext,
-        _input: t3_contracts::device::DeviceToolCloseInput,
-    ) -> Result<Value> {
-        self.0.lock().unwrap().push("device_close".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-}
-#[async_trait]
-impl EnvironmentService for Recorder {
-    async fn t3_environment_read(
+impl ThreadService for Recorder {
+    async fn run_scheduled_task_now(
         &self,
         _context: CallContext,
         _input: DecodedInput,
     ) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_environment_read".into());
+        self.0.lock().unwrap().push("run_scheduled_task_now".into());
         Err(McpError::failure("recorded", "recorded"))
     }
-    async fn t3_environment_preferences_update(
+    async fn t3_thread_search(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_thread_search".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+    async fn t3_thread_configure(
         &self,
         _context: CallContext,
         _input: DecodedInput,
     ) -> Result<Value> {
-        self.0
-            .lock()
-            .unwrap()
-            .push("t3_environment_preferences_update".into());
+        self.0.lock().unwrap().push("t3_thread_configure".into());
         Err(McpError::failure("recorded", "recorded"))
     }
-}
-#[async_trait]
-impl HtmlService for Recorder {
-    async fn html_preview(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        self.0.lock().unwrap().push("html_preview".into());
+    async fn t3_thread_transfer(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_thread_transfer".into());
         Err(McpError::failure("recorded", "recorded"))
     }
-    async fn html_render(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        self.0.lock().unwrap().push("html_render".into());
+    async fn t3_thread_organize(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_thread_organize".into());
         Err(McpError::failure("recorded", "recorded"))
     }
-}
-#[async_trait]
-impl MessageService for Recorder {
-    async fn send_to_user(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        self.0.lock().unwrap().push("send_to_user".into());
+    async fn t3_pending_request(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_pending_request".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+    async fn t3_queue(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        self.0.lock().unwrap().push("t3_queue".into());
         Err(McpError::failure("recorded", "recorded"))
     }
 }
@@ -378,60 +445,36 @@ impl PreviewService for Recorder {
     }
 }
 #[async_trait]
-impl PreviewControlsService for Recorder {
-    async fn t3_preview_list(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_preview_list".into());
+impl WorktreeService for Recorder {
+    async fn t3_worktree_handoff(
+        &self,
+        _context: CallContext,
+        _input: t3_contracts::worktree_mcp::WorktreeMcpHandoffInput,
+    ) -> Result<t3_contracts::worktree_mcp::WorktreeMcpHandoffResult> {
+        self.0.lock().unwrap().push("t3_worktree_handoff".into());
         Err(McpError::failure("recorded", "recorded"))
     }
-    async fn t3_preview_close(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_preview_close".into());
+    async fn t3_worktree_status(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<t3_contracts::worktree_mcp::WorktreeMcpStatusResult> {
+        self.0.lock().unwrap().push("t3_worktree_status".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+    async fn t3_worktree_list(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<t3_contracts::git::VcsListRefsResult> {
+        self.0.lock().unwrap().push("t3_worktree_list".into());
         Err(McpError::failure("recorded", "recorded"))
     }
 }
 #[async_trait]
-impl ProjectService for Recorder {
-    async fn t3_thread_launch(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_thread_launch".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn t3_project_list(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_project_list".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn t3_project_read(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_project_read".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn t3_project_create(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_project_create".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn t3_project_update(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_project_update".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn t3_project_delete(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_project_delete".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn t3_project_clone(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<t3_contracts::source_control::SourceControlCloneRepositoryResult> {
-        self.0.lock().unwrap().push("t3_project_clone".into());
+impl ToolSearchService for Recorder {
+    async fn tool_search(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        self.0.lock().unwrap().push("tool_search".into());
         Err(McpError::failure("recorded", "recorded"))
     }
 }
@@ -520,98 +563,55 @@ impl PullRequestsService for Recorder {
     }
 }
 #[async_trait]
-impl ThemeService for Recorder {
-    async fn t3_theme_read(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_theme_read".into());
+impl DeviceService for Recorder {
+    async fn device_list(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<t3_contracts::device::DeviceToolListResult> {
+        self.0.lock().unwrap().push("device_list".into());
         Err(McpError::failure("recorded", "recorded"))
     }
-    async fn t3_theme_set(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_theme_set".into());
+    async fn device_open(
+        &self,
+        _context: CallContext,
+        _input: t3_contracts::device::DeviceToolOpenInput,
+    ) -> Result<t3_contracts::device::DeviceToolOpenResult> {
+        self.0.lock().unwrap().push("device_open".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+    async fn device_screenshot(
+        &self,
+        _context: CallContext,
+        _input: t3_contracts::device::DeviceToolTargetInput,
+    ) -> Result<t3_contracts::device::DeviceToolScreenshotResult> {
+        self.0.lock().unwrap().push("device_screenshot".into());
+        Err(McpError::failure("recorded", "recorded"))
+    }
+    async fn device_close(
+        &self,
+        _context: CallContext,
+        _input: t3_contracts::device::DeviceToolCloseInput,
+    ) -> Result<Value> {
+        self.0.lock().unwrap().push("device_close".into());
         Err(McpError::failure("recorded", "recorded"))
     }
 }
 #[async_trait]
-impl ThreadService for Recorder {
-    async fn run_scheduled_task_now(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        self.0.lock().unwrap().push("run_scheduled_task_now".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn t3_thread_search(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_thread_search".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn t3_thread_configure(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_thread_configure".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn t3_thread_transfer(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_thread_transfer".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn t3_thread_organize(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_thread_organize".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn t3_pending_request(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_pending_request".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn t3_queue(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        self.0.lock().unwrap().push("t3_queue".into());
+impl MessageService for Recorder {
+    async fn send_to_user(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        self.0.lock().unwrap().push("send_to_user".into());
         Err(McpError::failure("recorded", "recorded"))
     }
 }
 #[async_trait]
-impl ToolSearchService for Recorder {
-    async fn tool_search(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        self.0.lock().unwrap().push("tool_search".into());
+impl HtmlService for Recorder {
+    async fn html_preview(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        self.0.lock().unwrap().push("html_preview".into());
         Err(McpError::failure("recorded", "recorded"))
     }
-}
-#[async_trait]
-impl WorktreeService for Recorder {
-    async fn t3_worktree_handoff(
-        &self,
-        _context: CallContext,
-        _input: t3_contracts::worktree_mcp::WorktreeMcpHandoffInput,
-    ) -> Result<t3_contracts::worktree_mcp::WorktreeMcpHandoffResult> {
-        self.0.lock().unwrap().push("t3_worktree_handoff".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn t3_worktree_status(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<t3_contracts::worktree_mcp::WorktreeMcpStatusResult> {
-        self.0.lock().unwrap().push("t3_worktree_status".into());
-        Err(McpError::failure("recorded", "recorded"))
-    }
-    async fn t3_worktree_list(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<t3_contracts::git::VcsListRefsResult> {
-        self.0.lock().unwrap().push("t3_worktree_list".into());
+    async fn html_render(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        self.0.lock().unwrap().push("html_render".into());
         Err(McpError::failure("recorded", "recorded"))
     }
 }
@@ -629,20 +629,20 @@ impl AccessStore for Store {
 async fn every_tool_decodes_and_dispatches_to_its_own_service_method_once() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let services = Services {
-        attachment: Arc::new(Recorder(calls.clone())),
-        device: Arc::new(Recorder(calls.clone())),
+        preview_controls: Arc::new(Recorder(calls.clone())),
         environment: Arc::new(Recorder(calls.clone())),
-        html: Arc::new(Recorder(calls.clone())),
-        message: Arc::new(Recorder(calls.clone())),
+        theme: Arc::new(Recorder(calls.clone())),
+        project: Arc::new(Recorder(calls.clone())),
+        attachment: Arc::new(Recorder(calls.clone())),
+        thread: Arc::new(Recorder(calls.clone())),
         orchestrator: Arc::new(Recorder(calls.clone())),
         preview: Arc::new(Recorder(calls.clone())),
-        preview_controls: Arc::new(Recorder(calls.clone())),
-        project: Arc::new(Recorder(calls.clone())),
-        pull_requests: Arc::new(Recorder(calls.clone())),
-        theme: Arc::new(Recorder(calls.clone())),
-        thread: Arc::new(Recorder(calls.clone())),
-        tool_search: Arc::new(Recorder(calls.clone())),
         worktree: Arc::new(Recorder(calls.clone())),
+        tool_search: Arc::new(Recorder(calls.clone())),
+        pull_requests: Arc::new(Recorder(calls.clone())),
+        device: Arc::new(Recorder(calls.clone())),
+        message: Arc::new(Recorder(calls.clone())),
+        html: Arc::new(Recorder(calls.clone())),
     };
     let scope:InvocationScope=serde_json::from_value(json!({"environmentId":"environment","requestNamespace":"fixture","issuedAt":0,"capabilities":["orchestration"],"client":{"sessionId":"fixture","label":"fixture","access":"full-access"}})).unwrap();
     let context = access::authorize(

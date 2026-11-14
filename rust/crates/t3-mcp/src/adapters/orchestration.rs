@@ -410,7 +410,7 @@ impl OrchestratorService for OrchestrationAdapter {
                     timeout: Duration::from_millis(timeout as u64),
                     until_delegated_work_settled: input["untilDelegatedWorkSettled"] == true,
                 },
-                tokio_util::sync::CancellationToken::new(),
+                context.cancellation.clone(),
             )
             .await
             .map_err(failure)?;

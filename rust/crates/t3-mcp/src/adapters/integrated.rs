@@ -16,20 +16,49 @@ pub struct ServiceAdapters {
 }
 impl ServiceAdapters {
     pub fn install(self: Arc<Self>, services: &mut Services) {
-        services.attachment = self.clone();
-        services.device = self.clone();
+        services.preview_controls = self.clone();
         services.environment = self.clone();
-        services.html = self.clone();
-        services.message = self.clone();
+        services.theme = self.clone();
+        services.project = self.clone();
+        services.attachment = self.clone();
+        services.thread = self.clone();
         services.orchestrator = self.clone();
         services.preview = self.clone();
-        services.preview_controls = self.clone();
-        services.project = self.clone();
-        services.pull_requests = self.clone();
-        services.theme = self.clone();
-        services.thread = self.clone();
-        services.tool_search = self.clone();
         services.worktree = self.clone();
+        services.tool_search = self.clone();
+        services.pull_requests = self.clone();
+        services.device = self.clone();
+        services.message = self.clone();
+        services.html = self.clone();
+    }
+}
+#[async_trait]
+impl PreviewControlsService for ServiceAdapters {}
+#[async_trait]
+impl EnvironmentService for ServiceAdapters {}
+#[async_trait]
+impl ThemeService for ServiceAdapters {}
+#[async_trait]
+impl ProjectService for ServiceAdapters {
+    async fn t3_project_list(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        #[cfg(feature = "orchestration")]
+        if let Some(adapter) = &self.orchestration {
+            return ProjectService::t3_project_list(adapter.as_ref(), _context, _input).await;
+        }
+        Err(super::not_available(
+            "t3_project_list",
+            "t3-orchestration::ProjectService::t3_project_list",
+        ))
+    }
+    async fn t3_project_read(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        #[cfg(feature = "orchestration")]
+        if let Some(adapter) = &self.orchestration {
+            return ProjectService::t3_project_read(adapter.as_ref(), _context, _input).await;
+        }
+        Err(super::not_available(
+            "t3_project_read",
+            "t3-orchestration::ProjectService::t3_project_read",
+        ))
     }
 }
 #[async_trait]
@@ -89,13 +118,88 @@ impl AttachmentService for ServiceAdapters {
     }
 }
 #[async_trait]
-impl DeviceService for ServiceAdapters {}
-#[async_trait]
-impl EnvironmentService for ServiceAdapters {}
-#[async_trait]
-impl HtmlService for ServiceAdapters {}
-#[async_trait]
-impl MessageService for ServiceAdapters {}
+impl ThreadService for ServiceAdapters {
+    async fn run_scheduled_task_now(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        #[cfg(feature = "scheduler")]
+        if let Some(adapter) = &self.scheduler {
+            return ThreadService::run_scheduled_task_now(adapter.as_ref(), _context, _input).await;
+        }
+        Err(super::not_available(
+            "run_scheduled_task_now",
+            "t3-orchestration::ThreadManagementService::run_scheduled_task_now",
+        ))
+    }
+    async fn t3_thread_configure(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        #[cfg(feature = "orchestration")]
+        if let Some(adapter) = &self.orchestration {
+            return ThreadService::t3_thread_configure(adapter.as_ref(), _context, _input).await;
+        }
+        Err(super::not_available(
+            "t3_thread_configure",
+            "t3-orchestration::ThreadManagementService::t3_thread_configure",
+        ))
+    }
+    async fn t3_thread_transfer(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        #[cfg(feature = "orchestration")]
+        if let Some(adapter) = &self.orchestration {
+            return ThreadService::t3_thread_transfer(adapter.as_ref(), _context, _input).await;
+        }
+        Err(super::not_available(
+            "t3_thread_transfer",
+            "t3-orchestration::ThreadManagementService::t3_thread_transfer",
+        ))
+    }
+    async fn t3_thread_organize(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        #[cfg(feature = "orchestration")]
+        if let Some(adapter) = &self.orchestration {
+            return ThreadService::t3_thread_organize(adapter.as_ref(), _context, _input).await;
+        }
+        Err(super::not_available(
+            "t3_thread_organize",
+            "t3-orchestration::ThreadManagementService::t3_thread_organize",
+        ))
+    }
+    async fn t3_pending_request(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        #[cfg(feature = "orchestration")]
+        if let Some(adapter) = &self.orchestration {
+            return ThreadService::t3_pending_request(adapter.as_ref(), _context, _input).await;
+        }
+        Err(super::not_available(
+            "t3_pending_request",
+            "t3-orchestration::ThreadManagementService::t3_pending_request",
+        ))
+    }
+    async fn t3_queue(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        #[cfg(feature = "orchestration")]
+        if let Some(adapter) = &self.orchestration {
+            return ThreadService::t3_queue(adapter.as_ref(), _context, _input).await;
+        }
+        Err(super::not_available(
+            "t3_queue",
+            "t3-orchestration::ThreadManagementService::t3_queue",
+        ))
+    }
+}
 #[async_trait]
 impl OrchestratorService for ServiceAdapters {
     async fn t3_workflow_stop(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
@@ -228,120 +332,6 @@ impl OrchestratorService for ServiceAdapters {
 #[async_trait]
 impl PreviewService for ServiceAdapters {}
 #[async_trait]
-impl PreviewControlsService for ServiceAdapters {}
-#[async_trait]
-impl ProjectService for ServiceAdapters {
-    async fn t3_project_list(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        #[cfg(feature = "orchestration")]
-        if let Some(adapter) = &self.orchestration {
-            return ProjectService::t3_project_list(adapter.as_ref(), _context, _input).await;
-        }
-        Err(super::not_available(
-            "t3_project_list",
-            "t3-orchestration::ProjectService::t3_project_list",
-        ))
-    }
-    async fn t3_project_read(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        #[cfg(feature = "orchestration")]
-        if let Some(adapter) = &self.orchestration {
-            return ProjectService::t3_project_read(adapter.as_ref(), _context, _input).await;
-        }
-        Err(super::not_available(
-            "t3_project_read",
-            "t3-orchestration::ProjectService::t3_project_read",
-        ))
-    }
-}
-#[async_trait]
-impl PullRequestsService for ServiceAdapters {}
-#[async_trait]
-impl ThemeService for ServiceAdapters {}
-#[async_trait]
-impl ThreadService for ServiceAdapters {
-    async fn run_scheduled_task_now(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        #[cfg(feature = "scheduler")]
-        if let Some(adapter) = &self.scheduler {
-            return ThreadService::run_scheduled_task_now(adapter.as_ref(), _context, _input).await;
-        }
-        Err(super::not_available(
-            "run_scheduled_task_now",
-            "t3-orchestration::ThreadManagementService::run_scheduled_task_now",
-        ))
-    }
-    async fn t3_thread_configure(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        #[cfg(feature = "orchestration")]
-        if let Some(adapter) = &self.orchestration {
-            return ThreadService::t3_thread_configure(adapter.as_ref(), _context, _input).await;
-        }
-        Err(super::not_available(
-            "t3_thread_configure",
-            "t3-orchestration::ThreadManagementService::t3_thread_configure",
-        ))
-    }
-    async fn t3_thread_transfer(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        #[cfg(feature = "orchestration")]
-        if let Some(adapter) = &self.orchestration {
-            return ThreadService::t3_thread_transfer(adapter.as_ref(), _context, _input).await;
-        }
-        Err(super::not_available(
-            "t3_thread_transfer",
-            "t3-orchestration::ThreadManagementService::t3_thread_transfer",
-        ))
-    }
-    async fn t3_thread_organize(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        #[cfg(feature = "orchestration")]
-        if let Some(adapter) = &self.orchestration {
-            return ThreadService::t3_thread_organize(adapter.as_ref(), _context, _input).await;
-        }
-        Err(super::not_available(
-            "t3_thread_organize",
-            "t3-orchestration::ThreadManagementService::t3_thread_organize",
-        ))
-    }
-    async fn t3_pending_request(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        #[cfg(feature = "orchestration")]
-        if let Some(adapter) = &self.orchestration {
-            return ThreadService::t3_pending_request(adapter.as_ref(), _context, _input).await;
-        }
-        Err(super::not_available(
-            "t3_pending_request",
-            "t3-orchestration::ThreadManagementService::t3_pending_request",
-        ))
-    }
-    async fn t3_queue(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        #[cfg(feature = "orchestration")]
-        if let Some(adapter) = &self.orchestration {
-            return ThreadService::t3_queue(adapter.as_ref(), _context, _input).await;
-        }
-        Err(super::not_available(
-            "t3_queue",
-            "t3-orchestration::ThreadManagementService::t3_queue",
-        ))
-    }
-}
-#[async_trait]
-impl ToolSearchService for ServiceAdapters {}
-#[async_trait]
 impl WorktreeService for ServiceAdapters {
     async fn t3_worktree_list(
         &self,
@@ -358,3 +348,13 @@ impl WorktreeService for ServiceAdapters {
         ))
     }
 }
+#[async_trait]
+impl ToolSearchService for ServiceAdapters {}
+#[async_trait]
+impl PullRequestsService for ServiceAdapters {}
+#[async_trait]
+impl DeviceService for ServiceAdapters {}
+#[async_trait]
+impl MessageService for ServiceAdapters {}
+#[async_trait]
+impl HtmlService for ServiceAdapters {}

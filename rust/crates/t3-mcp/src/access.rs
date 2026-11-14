@@ -34,7 +34,8 @@ pub trait AccessStore: Send + Sync {
     async fn thread_shell(&self, id: &ThreadId) -> Result<Option<ThreadShell>>;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all="camelCase")]
 pub enum AccessRule {
     Reads,
     ReadsAsCaller,
@@ -46,9 +47,9 @@ pub enum AccessRule {
     WritesEnvironment,
 }
 
-pub fn tool_rule(name: &str, input: &Value) -> AccessRule {
+pub fn tool_rule(name: &str, input: &Value) -> Result<AccessRule> {
     use AccessRule::*;
-    match name {
+    Ok(match name {
         "preview_status" | "preview_snapshot" | "preview_wait_for" | "device_list"
         | "device_screenshot" | "t3_preview_list" | "t3_worktree_status" | "html_preview"
         | "tool_search" => ReadsAsCaller,
@@ -64,7 +65,9 @@ pub fn tool_rule(name: &str, input: &Value) -> AccessRule {
         | "t3_preview_close"
         | "device_open"
         | "device_close" => ActsAsCaller,
-        name if name.starts_with("preview_") => ActsAsCaller,
+        "preview_open" | "preview_navigate" | "preview_act" | "preview_evaluate"
+        | "preview_recording_start" | "preview_recording_stop" | "preview_dialog"
+        | "preview_resize" | "preview_set_appearance" => ActsAsCaller,
         "t3_environment_preferences_update"
         | "t3_project_create"
         | "t3_project_update"
@@ -101,8 +104,12 @@ pub fn tool_rule(name: &str, input: &Value) -> AccessRule {
         | "unlink_pull_requests"
         | "watch_pull_request"
         | "unwatch_pull_request" => WritesThreads,
-        _ => Reads,
-    }
+        "orchestrator_capabilities" | "list_scheduled_tasks" | "t3_thread_list" | "t3_thread_read"
+        | "t3_thread_wait" | "t3_environment_links" | "t3_thread_search" | "t3_project_list"
+        | "t3_project_read" | "t3_environment_read" | "t3_theme_read" | "t3_worktree_list"
+        | "list_thread_pull_requests" | "read_pull_request_guide" => Reads,
+        _ => return Err(McpError::failure("invalid_request",format!("Tool '{name}' has no registered access declaration."))),
+    })
 }
 
 pub fn check_modes(limits: Modes, target: Modes) -> Result<()> {
@@ -139,7 +146,9 @@ fn mode_text(mode: RuntimeMode) -> &'static str {
 #[derive(Clone)]
 pub struct CallContext {
     pub scope: InvocationScope,
+    pub caller: Option<ThreadShell>,
     pub limits: Modes,
+    pub cancellation: tokio_util::sync::CancellationToken,
     pub started_modes: Option<Modes>,
     pub link_origin: Option<LinkOrigin>,
     store: Arc<dyn AccessStore>,
@@ -149,6 +158,19 @@ pub struct CallContext {
 }
 
 impl CallContext {
+    pub fn caller_may_start(&self)->bool {
+        self.scope.thread.as_ref().map_or_else(
+            ||self.scope.client.as_ref().is_none_or(|client|client.access!=ClientAccess::ReadOnly),
+            |owner|self.caller.as_ref().is_some_and(|caller|live_caller(caller,owner)),
+        )
+    }
+    pub fn check_forwarding(&self)->Result<()> {
+        self.scope.require_capability(Capability::Orchestration)?;
+        if let Some(origin)=self.link_origin.as_ref().filter(|origin|origin.access!=ClientAccess::FullAccess) {
+            return Err(outside_link(origin,"it cannot use this environment's links."));
+        }
+        Ok(())
+    }
     /// Call under the service's command lock, before deciding or committing a write.
     pub fn check_dispatch(&self, target: &ThreadShell) -> Result<()> {
         let result = check_modes(self.limits, target.modes).and_then(|()| self.check_link(target));
@@ -211,6 +233,11 @@ impl CallContext {
     }
 }
 
+fn live_caller(shell:&ThreadShell,caller:&crate::ThreadCaller)->bool {
+    !shell.deleted && !shell.archived && shell.provider_instance_id.as_ref()==Some(&caller.provider_instance_id)
+        && (shell.active || shell.background_subagent_providers.contains(&caller.provider_instance_id))
+}
+
 fn outside_link(origin: &LinkOrigin, message: &str) -> McpError {
     McpError::failure(
         "capability_denied",
@@ -259,7 +286,7 @@ pub async fn authorize(
             "This credential cannot control threads.",
         ));
     }
-    let caller = if writing {
+    let caller = if writing || remote || tool=="list_scheduled_tasks" {
         if let Some(caller) = &scope.thread {
             let shell = store
                 .thread_shell(&caller.thread_id)
@@ -269,13 +296,7 @@ pub async fn authorize(
                 .ok_or_else(|| {
                     McpError::failure("thread_not_found", "The calling thread was not found.")
                 })?;
-            if shell.archived
-                || shell.provider_instance_id.as_ref() != Some(&caller.provider_instance_id)
-                || !(shell.active
-                    || shell
-                        .background_subagent_providers
-                        .contains(&caller.provider_instance_id))
-            {
+            if writing && !live_caller(&shell,caller) {
                 return Err(McpError::failure(
                     "parent_not_active",
                     "The calling provider no longer owns an active thread run.",
@@ -312,7 +333,9 @@ pub async fn authorize(
         });
     let context = CallContext {
         scope,
+        caller,
         limits,
+        cancellation:tokio_util::sync::CancellationToken::new(),
         started_modes: None,
         link_origin,
         store,

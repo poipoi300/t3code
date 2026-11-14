@@ -13,6 +13,9 @@ use std::{borrow::Cow, sync::Arc};
 
 #[async_trait]
 pub trait PeerService: Send + Sync {
+    /// The server loads the local caller, checks capabilities and rejects fenced links first.
+    /// Preserve context limits and caller identity at the destination; namespace retry IDs,
+    /// remove environmentId from arguments and derive sender metadata from the local caller.
     async fn call(
         &self,
         context: crate::CallContext,
@@ -79,6 +82,13 @@ impl McpServer {
         arguments: Value,
         granted_scopes: Option<&[t3_contracts::auth::AuthEnvironmentScope]>,
     ) -> std::result::Result<Value, ErrorData> {
+        self.call_with_cancellation(scope,name,arguments,granted_scopes,tokio_util::sync::CancellationToken::new()).await
+    }
+    pub async fn call_with_cancellation(
+        &self,scope:InvocationScope,name:&str,arguments:Value,
+        granted_scopes:Option<&[t3_contracts::auth::AuthEnvironmentScope]>,
+        cancellation:tokio_util::sync::CancellationToken,
+    )->std::result::Result<Value,ErrorData> {
         if tool(name).is_none() || !enabled(&scope, name) {
             return Err(ErrorData::invalid_params(
                 format!("Tool '{name}' not found"),
@@ -86,7 +96,7 @@ impl McpServer {
             ));
         }
         let request = arguments.clone();
-        let result = self.invoke(scope, name, arguments, granted_scopes).await;
+        let result = self.invoke(scope, name, arguments, granted_scopes,cancellation).await;
         match result {
             Ok(value) => output::success(name, &request, value, self.artifacts.as_deref())
                 .await
@@ -105,6 +115,7 @@ impl McpServer {
         name: &str,
         arguments: Value,
         granted_scopes: Option<&[t3_contracts::auth::AuthEnvironmentScope]>,
+        cancellation:tokio_util::sync::CancellationToken,
     ) -> Result<Value> {
         if let Some(scopes) = granted_scopes {
             crate::authorization::authorize_tool(scopes, name, &arguments)?;
@@ -125,40 +136,19 @@ impl McpServer {
         if remote && scope.linked_environments == Some(false) {
             return Err(McpError::failure(
                 "capability_denied",
-                "Linked environments is off on this machine. Turn it on in its Settings → Labs.",
+                crate::instructions::fixture()["linkedEnvironmentsOff"]["message"].as_str().ok_or(McpError::Internal)?,
             ));
         }
-        let context = authorize(
+        let mut context = authorize(
             self.access.clone(),
             scope,
-            tool_rule(name, &input),
+            tool_rule(name, &input)?,
             name,
             &input,
             remote,
         )
         .await?;
-        if remote {
-            let peers = self.peers.as_ref().ok_or_else(|| {
-                McpError::failure(
-                    "orchestration_error",
-                    "This environment cannot reach linked environments.",
-                )
-            })?;
-            return peers
-                .call(
-                    context,
-                    destination.as_deref().expect("remote target exists"),
-                    name,
-                    input,
-                )
-                .await;
-        }
-        if routed {
-            input
-                .as_object_mut()
-                .expect("decoded object")
-                .remove("environmentId");
-        }
+        context.cancellation=cancellation;
         let scope = &context.scope;
         let kit = &catalog().definitions[name].toolkit;
         match kit.as_str() {
@@ -190,6 +180,12 @@ impl McpServer {
             }
             _ => {}
         }
+        if remote {
+            context.check_forwarding()?;
+            let peers=self.peers.as_ref().ok_or_else(||McpError::failure("orchestration_error","This environment cannot reach linked environments."))?;
+            return peers.call(context,destination.as_deref().ok_or(McpError::Internal)?,name,input).await;
+        }
+        if routed {input.as_object_mut().ok_or(McpError::Internal)?.remove("environmentId");}
         if name == "tool_search" {
             return Ok(self.exposure.search(
                 &scope.require_thread("tool_search")?.provider_session_id,
@@ -221,6 +217,7 @@ impl McpServer {
                     .access
                     .thread_shell(&scope.require_thread("This tool")?.thread_id)
                     .await?
+                    .filter(|thread|!thread.deleted)
                     .ok_or_else(|| {
                         McpError::failure("thread_not_found", "The calling thread was not found.")
                     })?;
@@ -333,11 +330,12 @@ impl ServerHandler for ProtocolHandler {
         let authenticated = request_scope(&context)?;
         let name = request.name.to_string();
         let value = self
-            .call_with_scopes(
+            .call_with_cancellation(
                 authenticated.scope,
                 &name,
                 Value::Object(request.arguments.unwrap_or_default()),
                 authenticated.granted_scopes.as_deref(),
+                context.ct.clone(),
             )
             .await?;
         if name == "tool_search"

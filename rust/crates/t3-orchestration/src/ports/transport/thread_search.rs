@@ -15,31 +15,9 @@ use std::{
 use t3_contracts::{base_schemas::*, orchestration_v2::*, thread_search::*};
 use t3_persistence::rusqlite::{Connection, params};
 
-pub struct MessageSearchRequest {
-    pub match_query: Option<String>,
-    pub substrings: Vec<String>,
-    pub short_spellings: Vec<Vec<String>>,
-}
-#[derive(Clone)]
-pub struct MessageHit {
-    pub thread_id: ThreadId,
-    pub project_id: ProjectId,
-    pub message_id: MessageId,
-    pub source: OrchestrationThreadSearchSource,
-    pub text: String,
-    pub message_created_at: Option<IsoDateTime>,
-    pub quality: f64,
-    pub offset: usize,
-    pub hits: u64,
-    pub opens: Option<Value>,
-    pub activity_at: Option<IsoDateTime>,
-}
-#[derive(Clone)]
-pub struct TitleCandidate {
-    pub thread: Value,
-    pub project_title: String,
-    pub latest_user_message_at: Option<IsoDateTime>,
-}
+pub use t3_shared::search_policy::{
+    MessageHit, MessageSearchRequest, NativeThreadSearchPolicy, TitleCandidate,
+};
 /// Local shared/paletteSearch shim: normalization, word matching and ranking stay authoritative.
 pub trait ThreadSearchPolicy: Send + Sync {
     fn message_search(&self, query: &str, has_index: bool) -> Option<MessageSearchRequest>;

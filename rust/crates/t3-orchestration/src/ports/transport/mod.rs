@@ -3,6 +3,7 @@ pub mod command_output_hub;
 pub mod http;
 pub mod live_stream_budget;
 pub mod message_search_index;
+mod shared_helpers;
 pub mod shell_stream;
 pub mod thread_find;
 pub mod thread_history_paging;

@@ -14,6 +14,10 @@
   "runtimeWithoutLinking": "<runtime_info>In case you're asked: you are running in T3 Code through the __HARNESS__ harness, as __MODEL_NAME__ (model slug: __MODEL__) with __EFFORT__ reasoning effort. No need to mention this otherwise. You can embed images, video, and audio using Markdown image syntax with absolute file paths. Link every other file you cite or produce by its absolute path, as in [http.ts:42](/abs/path/http.ts:42), so the user can open it in T3 Code's files viewer.</runtime_info>",
   "sendToUserAcknowledgement": "Shown to the user. Don't repeat it.",
   "themeSetInvalidRequest": "Give `themeId`, `appearance`, or both. `theme` needs a `themeId`.",
+  "linkedEnvironmentsOff": {
+    "code": "capability_denied",
+    "message": "Linked environments is off on this machine, so no tool can act on another machine. Leave out environmentId to work here; the user can turn it on in Settings → Labs."
+  },
   "runningTaskNext": "Completion wakes this thread. Do not wait on it or poll it. Continue other work, and end your turn when none is left.",
   "contextBudget": {
     "claudeSystemAppendBytes": 5930,

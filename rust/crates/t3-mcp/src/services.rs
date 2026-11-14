@@ -5,6 +5,124 @@ use serde_json::Value;
 use std::sync::Arc;
 
 #[async_trait]
+pub trait PreviewControlsService: Send + Sync {
+    async fn t3_preview_list(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_preview_list",
+            "t3-preview::PreviewControlsService::t3_preview_list",
+        ))
+    }
+    async fn t3_preview_close(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_preview_close",
+            "t3-preview::PreviewControlsService::t3_preview_close",
+        ))
+    }
+}
+
+#[async_trait]
+pub trait EnvironmentService: Send + Sync {
+    async fn t3_environment_read(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_environment_read",
+            "t3-config::EnvironmentMcpService::t3_environment_read",
+        ))
+    }
+    async fn t3_environment_preferences_update(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_environment_preferences_update",
+            "t3-config::EnvironmentMcpService::t3_environment_preferences_update",
+        ))
+    }
+}
+
+#[async_trait]
+pub trait ThemeService: Send + Sync {
+    async fn t3_theme_read(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_theme_read",
+            "t3-server::EnvironmentThemeService::t3_theme_read",
+        ))
+    }
+    async fn t3_theme_set(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_theme_set",
+            "t3-server::EnvironmentThemeService::t3_theme_set",
+        ))
+    }
+}
+
+#[async_trait]
+pub trait ProjectService: Send + Sync {
+    async fn t3_thread_launch(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_thread_launch",
+            "t3-orchestration::ProjectService::t3_thread_launch",
+        ))
+    }
+    async fn t3_project_list(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_project_list",
+            "t3-orchestration::ProjectService::t3_project_list",
+        ))
+    }
+    async fn t3_project_read(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_project_read",
+            "t3-orchestration::ProjectService::t3_project_read",
+        ))
+    }
+    async fn t3_project_create(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_project_create",
+            "t3-orchestration::ProjectService::t3_project_create",
+        ))
+    }
+    async fn t3_project_update(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_project_update",
+            "t3-orchestration::ProjectService::t3_project_update",
+        ))
+    }
+    async fn t3_project_delete(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_project_delete",
+            "t3-orchestration::ProjectService::t3_project_delete",
+        ))
+    }
+    async fn t3_project_clone(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<t3_contracts::source_control::SourceControlCloneRepositoryResult> {
+        Err(crate::adapters::not_available(
+            "t3_project_clone",
+            "t3-orchestration::ProjectService::t3_project_clone",
+        ))
+    }
+}
+
+#[async_trait]
 pub trait AttachmentService: Send + Sync {
     async fn t3_attachment_prepare_upload(
         &self,
@@ -39,93 +157,68 @@ pub trait AttachmentService: Send + Sync {
 }
 
 #[async_trait]
-pub trait DeviceService: Send + Sync {
-    async fn device_list(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<t3_contracts::device::DeviceToolListResult> {
-        Err(crate::adapters::not_available(
-            "device_list",
-            "t3-device::DeviceService::device_list",
-        ))
-    }
-    async fn device_open(
-        &self,
-        _context: CallContext,
-        _input: t3_contracts::device::DeviceToolOpenInput,
-    ) -> Result<t3_contracts::device::DeviceToolOpenResult> {
-        Err(crate::adapters::not_available(
-            "device_open",
-            "t3-device::DeviceService::device_open",
-        ))
-    }
-    async fn device_screenshot(
-        &self,
-        _context: CallContext,
-        _input: t3_contracts::device::DeviceToolTargetInput,
-    ) -> Result<t3_contracts::device::DeviceToolScreenshotResult> {
-        Err(crate::adapters::not_available(
-            "device_screenshot",
-            "t3-device::DeviceService::device_screenshot",
-        ))
-    }
-    async fn device_close(
-        &self,
-        _context: CallContext,
-        _input: t3_contracts::device::DeviceToolCloseInput,
-    ) -> Result<Value> {
-        Err(crate::adapters::not_available(
-            "device_close",
-            "t3-device::DeviceService::device_close",
-        ))
-    }
-}
-
-#[async_trait]
-pub trait EnvironmentService: Send + Sync {
-    async fn t3_environment_read(
+pub trait ThreadService: Send + Sync {
+    async fn run_scheduled_task_now(
         &self,
         _context: CallContext,
         _input: DecodedInput,
     ) -> Result<Value> {
         Err(crate::adapters::not_available(
-            "t3_environment_read",
-            "t3-config::EnvironmentMcpService::t3_environment_read",
+            "run_scheduled_task_now",
+            "t3-orchestration::ThreadManagementService::run_scheduled_task_now",
         ))
     }
-    async fn t3_environment_preferences_update(
+    async fn t3_thread_search(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_thread_search",
+            "t3-orchestration::ThreadManagementService::t3_thread_search",
+        ))
+    }
+    async fn t3_thread_configure(
         &self,
         _context: CallContext,
         _input: DecodedInput,
     ) -> Result<Value> {
         Err(crate::adapters::not_available(
-            "t3_environment_preferences_update",
-            "t3-config::EnvironmentMcpService::t3_environment_preferences_update",
+            "t3_thread_configure",
+            "t3-orchestration::ThreadManagementService::t3_thread_configure",
         ))
     }
-}
-
-#[async_trait]
-pub trait HtmlService: Send + Sync {
-    async fn html_preview(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+    async fn t3_thread_transfer(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
         Err(crate::adapters::not_available(
-            "html_preview",
-            "t3-preview::HtmlService::html_preview",
+            "t3_thread_transfer",
+            "t3-orchestration::ThreadManagementService::t3_thread_transfer",
         ))
     }
-    async fn html_render(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+    async fn t3_thread_organize(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
         Err(crate::adapters::not_available(
-            "html_render",
-            "t3-preview::HtmlService::html_render",
+            "t3_thread_organize",
+            "t3-orchestration::ThreadManagementService::t3_thread_organize",
         ))
     }
-}
-
-#[async_trait]
-pub trait MessageService: Send + Sync {
-    async fn send_to_user(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        crate::message::send_to_user(_input)
+    async fn t3_pending_request(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_pending_request",
+            "t3-orchestration::ThreadManagementService::t3_pending_request",
+        ))
+    }
+    async fn t3_queue(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "t3_queue",
+            "t3-orchestration::ThreadManagementService::t3_queue",
+        ))
     }
 }
 
@@ -454,79 +547,45 @@ pub trait PreviewService: Send + Sync {
 }
 
 #[async_trait]
-pub trait PreviewControlsService: Send + Sync {
-    async fn t3_preview_list(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+pub trait WorktreeService: Send + Sync {
+    async fn t3_worktree_handoff(
+        &self,
+        _context: CallContext,
+        _input: t3_contracts::worktree_mcp::WorktreeMcpHandoffInput,
+    ) -> Result<t3_contracts::worktree_mcp::WorktreeMcpHandoffResult> {
         Err(crate::adapters::not_available(
-            "t3_preview_list",
-            "t3-preview::PreviewControlsService::t3_preview_list",
+            "t3_worktree_handoff",
+            "t3-git::WorktreeMcpService::t3_worktree_handoff",
         ))
     }
-    async fn t3_preview_close(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+    async fn t3_worktree_status(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<t3_contracts::worktree_mcp::WorktreeMcpStatusResult> {
         Err(crate::adapters::not_available(
-            "t3_preview_close",
-            "t3-preview::PreviewControlsService::t3_preview_close",
+            "t3_worktree_status",
+            "t3-git::WorktreeMcpService::t3_worktree_status",
+        ))
+    }
+    async fn t3_worktree_list(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<t3_contracts::git::VcsListRefsResult> {
+        Err(crate::adapters::not_available(
+            "t3_worktree_list",
+            "t3-git::WorktreeMcpService::t3_worktree_list",
         ))
     }
 }
 
 #[async_trait]
-pub trait ProjectService: Send + Sync {
-    async fn t3_thread_launch(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+pub trait ToolSearchService: Send + Sync {
+    async fn tool_search(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
         Err(crate::adapters::not_available(
-            "t3_thread_launch",
-            "t3-orchestration::ProjectService::t3_thread_launch",
-        ))
-    }
-    async fn t3_project_list(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        Err(crate::adapters::not_available(
-            "t3_project_list",
-            "t3-orchestration::ProjectService::t3_project_list",
-        ))
-    }
-    async fn t3_project_read(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        Err(crate::adapters::not_available(
-            "t3_project_read",
-            "t3-orchestration::ProjectService::t3_project_read",
-        ))
-    }
-    async fn t3_project_create(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        Err(crate::adapters::not_available(
-            "t3_project_create",
-            "t3-orchestration::ProjectService::t3_project_create",
-        ))
-    }
-    async fn t3_project_update(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        Err(crate::adapters::not_available(
-            "t3_project_update",
-            "t3-orchestration::ProjectService::t3_project_update",
-        ))
-    }
-    async fn t3_project_delete(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        Err(crate::adapters::not_available(
-            "t3_project_delete",
-            "t3-orchestration::ProjectService::t3_project_delete",
-        ))
-    }
-    async fn t3_project_clone(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<t3_contracts::source_control::SourceControlCloneRepositoryResult> {
-        Err(crate::adapters::not_available(
-            "t3_project_clone",
-            "t3-orchestration::ProjectService::t3_project_clone",
+            "tool_search",
+            "t3-mcp::ToolExposure::tool_search",
         ))
     }
 }
@@ -626,181 +685,122 @@ pub trait PullRequestsService: Send + Sync {
 }
 
 #[async_trait]
-pub trait ThemeService: Send + Sync {
-    async fn t3_theme_read(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+pub trait DeviceService: Send + Sync {
+    async fn device_list(
+        &self,
+        _context: CallContext,
+        _input: DecodedInput,
+    ) -> Result<t3_contracts::device::DeviceToolListResult> {
         Err(crate::adapters::not_available(
-            "t3_theme_read",
-            "t3-server::EnvironmentThemeService::t3_theme_read",
+            "device_list",
+            "t3-device::DeviceService::device_list",
         ))
     }
-    async fn t3_theme_set(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+    async fn device_open(
+        &self,
+        _context: CallContext,
+        _input: t3_contracts::device::DeviceToolOpenInput,
+    ) -> Result<t3_contracts::device::DeviceToolOpenResult> {
         Err(crate::adapters::not_available(
-            "t3_theme_set",
-            "t3-server::EnvironmentThemeService::t3_theme_set",
+            "device_open",
+            "t3-device::DeviceService::device_open",
+        ))
+    }
+    async fn device_screenshot(
+        &self,
+        _context: CallContext,
+        _input: t3_contracts::device::DeviceToolTargetInput,
+    ) -> Result<t3_contracts::device::DeviceToolScreenshotResult> {
+        Err(crate::adapters::not_available(
+            "device_screenshot",
+            "t3-device::DeviceService::device_screenshot",
+        ))
+    }
+    async fn device_close(
+        &self,
+        _context: CallContext,
+        _input: t3_contracts::device::DeviceToolCloseInput,
+    ) -> Result<Value> {
+        Err(crate::adapters::not_available(
+            "device_close",
+            "t3-device::DeviceService::device_close",
         ))
     }
 }
 
 #[async_trait]
-pub trait ThreadService: Send + Sync {
-    async fn run_scheduled_task_now(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        Err(crate::adapters::not_available(
-            "run_scheduled_task_now",
-            "t3-orchestration::ThreadManagementService::run_scheduled_task_now",
-        ))
-    }
-    async fn t3_thread_search(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        Err(crate::adapters::not_available(
-            "t3_thread_search",
-            "t3-orchestration::ThreadManagementService::t3_thread_search",
-        ))
-    }
-    async fn t3_thread_configure(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        Err(crate::adapters::not_available(
-            "t3_thread_configure",
-            "t3-orchestration::ThreadManagementService::t3_thread_configure",
-        ))
-    }
-    async fn t3_thread_transfer(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        Err(crate::adapters::not_available(
-            "t3_thread_transfer",
-            "t3-orchestration::ThreadManagementService::t3_thread_transfer",
-        ))
-    }
-    async fn t3_thread_organize(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        Err(crate::adapters::not_available(
-            "t3_thread_organize",
-            "t3-orchestration::ThreadManagementService::t3_thread_organize",
-        ))
-    }
-    async fn t3_pending_request(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<Value> {
-        Err(crate::adapters::not_available(
-            "t3_pending_request",
-            "t3-orchestration::ThreadManagementService::t3_pending_request",
-        ))
-    }
-    async fn t3_queue(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
-        Err(crate::adapters::not_available(
-            "t3_queue",
-            "t3-orchestration::ThreadManagementService::t3_queue",
-        ))
+pub trait MessageService: Send + Sync {
+    async fn send_to_user(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+        crate::message::send_to_user(_input)
     }
 }
 
 #[async_trait]
-pub trait ToolSearchService: Send + Sync {
-    async fn tool_search(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
+pub trait HtmlService: Send + Sync {
+    async fn html_preview(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
         Err(crate::adapters::not_available(
-            "tool_search",
-            "t3-mcp::ToolExposure::tool_search",
+            "html_preview",
+            "t3-preview::HtmlService::html_preview",
         ))
     }
-}
-
-#[async_trait]
-pub trait WorktreeService: Send + Sync {
-    async fn t3_worktree_handoff(
-        &self,
-        _context: CallContext,
-        _input: t3_contracts::worktree_mcp::WorktreeMcpHandoffInput,
-    ) -> Result<t3_contracts::worktree_mcp::WorktreeMcpHandoffResult> {
+    async fn html_render(&self, _context: CallContext, _input: DecodedInput) -> Result<Value> {
         Err(crate::adapters::not_available(
-            "t3_worktree_handoff",
-            "t3-git::WorktreeMcpService::t3_worktree_handoff",
-        ))
-    }
-    async fn t3_worktree_status(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<t3_contracts::worktree_mcp::WorktreeMcpStatusResult> {
-        Err(crate::adapters::not_available(
-            "t3_worktree_status",
-            "t3-git::WorktreeMcpService::t3_worktree_status",
-        ))
-    }
-    async fn t3_worktree_list(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<t3_contracts::git::VcsListRefsResult> {
-        Err(crate::adapters::not_available(
-            "t3_worktree_list",
-            "t3-git::WorktreeMcpService::t3_worktree_list",
+            "html_render",
+            "t3-preview::HtmlService::html_render",
         ))
     }
 }
 
 pub struct Unavailable;
-impl AttachmentService for Unavailable {}
-impl DeviceService for Unavailable {}
+impl PreviewControlsService for Unavailable {}
 impl EnvironmentService for Unavailable {}
-impl HtmlService for Unavailable {}
-impl MessageService for Unavailable {}
+impl ThemeService for Unavailable {}
+impl ProjectService for Unavailable {}
+impl AttachmentService for Unavailable {}
+impl ThreadService for Unavailable {}
 impl OrchestratorService for Unavailable {}
 impl PreviewService for Unavailable {}
-impl PreviewControlsService for Unavailable {}
-impl ProjectService for Unavailable {}
-impl PullRequestsService for Unavailable {}
-impl ThemeService for Unavailable {}
-impl ThreadService for Unavailable {}
-impl ToolSearchService for Unavailable {}
 impl WorktreeService for Unavailable {}
+impl ToolSearchService for Unavailable {}
+impl PullRequestsService for Unavailable {}
+impl DeviceService for Unavailable {}
+impl MessageService for Unavailable {}
+impl HtmlService for Unavailable {}
 
 #[derive(Clone)]
 pub struct Services {
-    pub attachment: Arc<dyn AttachmentService>,
-    pub device: Arc<dyn DeviceService>,
+    pub preview_controls: Arc<dyn PreviewControlsService>,
     pub environment: Arc<dyn EnvironmentService>,
-    pub html: Arc<dyn HtmlService>,
-    pub message: Arc<dyn MessageService>,
+    pub theme: Arc<dyn ThemeService>,
+    pub project: Arc<dyn ProjectService>,
+    pub attachment: Arc<dyn AttachmentService>,
+    pub thread: Arc<dyn ThreadService>,
     pub orchestrator: Arc<dyn OrchestratorService>,
     pub preview: Arc<dyn PreviewService>,
-    pub preview_controls: Arc<dyn PreviewControlsService>,
-    pub project: Arc<dyn ProjectService>,
-    pub pull_requests: Arc<dyn PullRequestsService>,
-    pub theme: Arc<dyn ThemeService>,
-    pub thread: Arc<dyn ThreadService>,
-    pub tool_search: Arc<dyn ToolSearchService>,
     pub worktree: Arc<dyn WorktreeService>,
+    pub tool_search: Arc<dyn ToolSearchService>,
+    pub pull_requests: Arc<dyn PullRequestsService>,
+    pub device: Arc<dyn DeviceService>,
+    pub message: Arc<dyn MessageService>,
+    pub html: Arc<dyn HtmlService>,
 }
 impl Default for Services {
     fn default() -> Self {
         Self {
-            attachment: Arc::new(Unavailable),
-            device: Arc::new(Unavailable),
+            preview_controls: Arc::new(Unavailable),
             environment: Arc::new(Unavailable),
-            html: Arc::new(Unavailable),
-            message: Arc::new(Unavailable),
+            theme: Arc::new(Unavailable),
+            project: Arc::new(Unavailable),
+            attachment: Arc::new(Unavailable),
+            thread: Arc::new(Unavailable),
             orchestrator: Arc::new(Unavailable),
             preview: Arc::new(Unavailable),
-            preview_controls: Arc::new(Unavailable),
-            project: Arc::new(Unavailable),
-            pull_requests: Arc::new(Unavailable),
-            theme: Arc::new(Unavailable),
-            thread: Arc::new(Unavailable),
-            tool_search: Arc::new(Unavailable),
             worktree: Arc::new(Unavailable),
+            tool_search: Arc::new(Unavailable),
+            pull_requests: Arc::new(Unavailable),
+            device: Arc::new(Unavailable),
+            message: Arc::new(Unavailable),
+            html: Arc::new(Unavailable),
         }
     }
 }
@@ -812,6 +812,62 @@ impl Services {
         input: DecodedInput,
     ) -> Result<Value> {
         match name {
+            "t3_preview_list" => serde_json::to_value(
+                self.preview_controls
+                    .t3_preview_list(context, input)
+                    .await?,
+            )
+            .map_err(|_| McpError::Internal),
+            "t3_preview_close" => serde_json::to_value(
+                self.preview_controls
+                    .t3_preview_close(context, input)
+                    .await?,
+            )
+            .map_err(|_| McpError::Internal),
+            "t3_environment_read" => {
+                serde_json::to_value(self.environment.t3_environment_read(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
+            "t3_environment_preferences_update" => serde_json::to_value(
+                self.environment
+                    .t3_environment_preferences_update(context, input)
+                    .await?,
+            )
+            .map_err(|_| McpError::Internal),
+            "t3_theme_read" => {
+                serde_json::to_value(self.theme.t3_theme_read(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
+            "t3_theme_set" => serde_json::to_value(self.theme.t3_theme_set(context, input).await?)
+                .map_err(|_| McpError::Internal),
+            "t3_thread_launch" => {
+                serde_json::to_value(self.project.t3_thread_launch(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
+            "t3_project_list" => {
+                serde_json::to_value(self.project.t3_project_list(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
+            "t3_project_read" => {
+                serde_json::to_value(self.project.t3_project_read(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
+            "t3_project_create" => {
+                serde_json::to_value(self.project.t3_project_create(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
+            "t3_project_update" => {
+                serde_json::to_value(self.project.t3_project_update(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
+            "t3_project_delete" => {
+                serde_json::to_value(self.project.t3_project_delete(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
+            "t3_project_clone" => {
+                serde_json::to_value(self.project.t3_project_clone(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
             "t3_attachment_prepare_upload" => serde_json::to_value(
                 self.attachment
                     .t3_attachment_prepare_upload(context, input)
@@ -830,40 +886,32 @@ impl Services {
                     .await?,
             )
             .map_err(|_| McpError::Internal),
-            "device_list" => serde_json::to_value(self.device.device_list(context, input).await?)
+            "run_scheduled_task_now" => {
+                serde_json::to_value(self.thread.run_scheduled_task_now(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
+            "t3_thread_search" => {
+                serde_json::to_value(self.thread.t3_thread_search(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
+            "t3_thread_configure" => {
+                serde_json::to_value(self.thread.t3_thread_configure(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
+            "t3_thread_transfer" => {
+                serde_json::to_value(self.thread.t3_thread_transfer(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
+            "t3_thread_organize" => {
+                serde_json::to_value(self.thread.t3_thread_organize(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
+            "t3_pending_request" => {
+                serde_json::to_value(self.thread.t3_pending_request(context, input).await?)
+                    .map_err(|_| McpError::Internal)
+            }
+            "t3_queue" => serde_json::to_value(self.thread.t3_queue(context, input).await?)
                 .map_err(|_| McpError::Internal),
-            "device_open" => {
-                serde_json::to_value(self.device.device_open(context, input.decode()?).await?)
-                    .map_err(|_| McpError::Internal)
-            }
-            "device_screenshot" => serde_json::to_value(
-                self.device
-                    .device_screenshot(context, input.decode()?)
-                    .await?,
-            )
-            .map_err(|_| McpError::Internal),
-            "device_close" => {
-                serde_json::to_value(self.device.device_close(context, input.decode()?).await?)
-                    .map_err(|_| McpError::Internal)
-            }
-            "t3_environment_read" => {
-                serde_json::to_value(self.environment.t3_environment_read(context, input).await?)
-                    .map_err(|_| McpError::Internal)
-            }
-            "t3_environment_preferences_update" => serde_json::to_value(
-                self.environment
-                    .t3_environment_preferences_update(context, input)
-                    .await?,
-            )
-            .map_err(|_| McpError::Internal),
-            "html_preview" => serde_json::to_value(self.html.html_preview(context, input).await?)
-                .map_err(|_| McpError::Internal),
-            "html_render" => serde_json::to_value(self.html.html_render(context, input).await?)
-                .map_err(|_| McpError::Internal),
-            "send_to_user" => {
-                serde_json::to_value(self.message.send_to_user(context, input).await?)
-                    .map_err(|_| McpError::Internal)
-            }
             "orchestrator_capabilities" => serde_json::to_value(
                 self.orchestrator
                     .orchestrator_capabilities(context, input.decode()?)
@@ -1044,44 +1092,22 @@ impl Services {
                     .await?,
             )
             .map_err(|_| McpError::Internal),
-            "t3_preview_list" => serde_json::to_value(
-                self.preview_controls
-                    .t3_preview_list(context, input)
+            "t3_worktree_handoff" => serde_json::to_value(
+                self.worktree
+                    .t3_worktree_handoff(context, input.decode()?)
                     .await?,
             )
             .map_err(|_| McpError::Internal),
-            "t3_preview_close" => serde_json::to_value(
-                self.preview_controls
-                    .t3_preview_close(context, input)
-                    .await?,
-            )
-            .map_err(|_| McpError::Internal),
-            "t3_thread_launch" => {
-                serde_json::to_value(self.project.t3_thread_launch(context, input).await?)
+            "t3_worktree_status" => {
+                serde_json::to_value(self.worktree.t3_worktree_status(context, input).await?)
                     .map_err(|_| McpError::Internal)
             }
-            "t3_project_list" => {
-                serde_json::to_value(self.project.t3_project_list(context, input).await?)
+            "t3_worktree_list" => {
+                serde_json::to_value(self.worktree.t3_worktree_list(context, input).await?)
                     .map_err(|_| McpError::Internal)
             }
-            "t3_project_read" => {
-                serde_json::to_value(self.project.t3_project_read(context, input).await?)
-                    .map_err(|_| McpError::Internal)
-            }
-            "t3_project_create" => {
-                serde_json::to_value(self.project.t3_project_create(context, input).await?)
-                    .map_err(|_| McpError::Internal)
-            }
-            "t3_project_update" => {
-                serde_json::to_value(self.project.t3_project_update(context, input).await?)
-                    .map_err(|_| McpError::Internal)
-            }
-            "t3_project_delete" => {
-                serde_json::to_value(self.project.t3_project_delete(context, input).await?)
-                    .map_err(|_| McpError::Internal)
-            }
-            "t3_project_clone" => {
-                serde_json::to_value(self.project.t3_project_clone(context, input).await?)
+            "tool_search" => {
+                serde_json::to_value(self.tool_search.tool_search(context, input).await?)
                     .map_err(|_| McpError::Internal)
             }
             "link_pull_request" => {
@@ -1136,56 +1162,30 @@ impl Services {
                     .await?,
             )
             .map_err(|_| McpError::Internal),
-            "t3_theme_read" => {
-                serde_json::to_value(self.theme.t3_theme_read(context, input).await?)
-                    .map_err(|_| McpError::Internal)
-            }
-            "t3_theme_set" => serde_json::to_value(self.theme.t3_theme_set(context, input).await?)
+            "device_list" => serde_json::to_value(self.device.device_list(context, input).await?)
                 .map_err(|_| McpError::Internal),
-            "run_scheduled_task_now" => {
-                serde_json::to_value(self.thread.run_scheduled_task_now(context, input).await?)
+            "device_open" => {
+                serde_json::to_value(self.device.device_open(context, input.decode()?).await?)
                     .map_err(|_| McpError::Internal)
             }
-            "t3_thread_search" => {
-                serde_json::to_value(self.thread.t3_thread_search(context, input).await?)
-                    .map_err(|_| McpError::Internal)
-            }
-            "t3_thread_configure" => {
-                serde_json::to_value(self.thread.t3_thread_configure(context, input).await?)
-                    .map_err(|_| McpError::Internal)
-            }
-            "t3_thread_transfer" => {
-                serde_json::to_value(self.thread.t3_thread_transfer(context, input).await?)
-                    .map_err(|_| McpError::Internal)
-            }
-            "t3_thread_organize" => {
-                serde_json::to_value(self.thread.t3_thread_organize(context, input).await?)
-                    .map_err(|_| McpError::Internal)
-            }
-            "t3_pending_request" => {
-                serde_json::to_value(self.thread.t3_pending_request(context, input).await?)
-                    .map_err(|_| McpError::Internal)
-            }
-            "t3_queue" => serde_json::to_value(self.thread.t3_queue(context, input).await?)
-                .map_err(|_| McpError::Internal),
-            "tool_search" => {
-                serde_json::to_value(self.tool_search.tool_search(context, input).await?)
-                    .map_err(|_| McpError::Internal)
-            }
-            "t3_worktree_handoff" => serde_json::to_value(
-                self.worktree
-                    .t3_worktree_handoff(context, input.decode()?)
+            "device_screenshot" => serde_json::to_value(
+                self.device
+                    .device_screenshot(context, input.decode()?)
                     .await?,
             )
             .map_err(|_| McpError::Internal),
-            "t3_worktree_status" => {
-                serde_json::to_value(self.worktree.t3_worktree_status(context, input).await?)
+            "device_close" => {
+                serde_json::to_value(self.device.device_close(context, input.decode()?).await?)
                     .map_err(|_| McpError::Internal)
             }
-            "t3_worktree_list" => {
-                serde_json::to_value(self.worktree.t3_worktree_list(context, input).await?)
+            "send_to_user" => {
+                serde_json::to_value(self.message.send_to_user(context, input).await?)
                     .map_err(|_| McpError::Internal)
             }
+            "html_preview" => serde_json::to_value(self.html.html_preview(context, input).await?)
+                .map_err(|_| McpError::Internal),
+            "html_render" => serde_json::to_value(self.html.html_render(context, input).await?)
+                .map_err(|_| McpError::Internal),
             _ => Err(McpError::InvalidInput(format!("Tool '{name}' not found"))),
         }
     }

@@ -1,4 +1,5 @@
 use crate::error::Result;
+pub use t3_shared::find_text::NativeThreadFindText;
 use async_trait::async_trait;
 use std::{
     collections::{BTreeMap, VecDeque},

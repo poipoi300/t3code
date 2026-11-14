@@ -1,12 +1,36 @@
 // Run with Node from apps/server; imports production definitions, never copied descriptions.
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
-import { createRequire } from "node:module";
+import { createRequire, registerHooks } from "node:module";
+import { createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const dest = fileURLToPath(new URL("./fixtures/", import.meta.url));
+const sourcePaths = new Set<string>();
+registerHooks({load(url,context,nextLoad) {
+  const result=nextLoad(url,context);
+  if(!url.startsWith("file:")) return result;
+  const path=fileURLToPath(url);
+  if(path.startsWith(root) && !path.includes("node_modules") && /\.(ts|json)$/.test(path)) sourcePaths.add(path);
+  if(!url.endsWith("/mcp/McpToolAccess.ts")) return result;
+  let source=String(result.source);
+  const kinds=["reads","readsAsCaller","actsAsCaller","writes","writesWithCapability","writesThreads","startsThreads","writesEnvironment","either","afterForwarding","toLayer"];
+  for(const kind of kinds) {
+    const declaration=`export const ${kind} =`;
+    if(!source.includes(declaration)) throw new Error(`Cannot observe MCP access constructor ${kind}`);
+    source=source.replace(declaration,`const __original_${kind} =`);
+  }
+  source+=`\nconst __accessTrees=new WeakMap(); export const __accessDeclarations=new Map();\n`;
+  for(const kind of kinds.filter(kind=>kind!=="toLayer")) {
+    const tree=kind==="either" ? `{kind:"either",predicate:args[0],first:__accessTrees.get(args[1]),second:__accessTrees.get(args[2])}`
+      :kind==="afterForwarding"?`__accessTrees.get(args[0])`:`{kind:${JSON.stringify(kind)}}`;
+    source+=`export const ${kind}=(...args)=>{const result=__original_${kind}(...args);__accessTrees.set(result,${tree});return result;};\n`;
+  }
+  source+=`export const toLayer=(toolkit,build)=>{const observe=(declarations)=>{for(const [name,value] of Object.entries(declarations)){const tree=__accessTrees.get(value);if(!tree)throw new Error("No observed MCP access declaration for "+name);__accessDeclarations.set(name,tree);}return declarations;};return __original_toLayer(toolkit,Effect.isEffect(build)?Effect.map(build,observe):observe(build));};\n`;
+  return {...result,source};
+}});
 const require = createRequire(resolve(root, "apps/server/package.json"));
 const load = (name: string) => import(pathToFileURL(name.startsWith("@t3tools/")
   ? resolve(root, name.replace("@t3tools/", "packages/").replace("/server/", "/src/server/") + ".ts")
@@ -38,7 +62,10 @@ imports.NodeServices = await load("@effect/platform-node/NodeServices");
 imports.NodeCrypto = await load("@effect/platform-node/NodeCrypto");
 const services = Function(...Object.keys(imports), `${declarations}; return toolHandlerServices;`)(...Object.values(imports));
 const toolkits: Record<string, any> = {};
-for (const name of ["attachment", "device", "environment", "html", "message", "orchestrator", "preview", "previewControls", "project", "pullRequests", "theme", "thread", "toolSearch", "worktree"]) {
+const httpSource=await readFile(resolve(root,"apps/server/src/mcp/McpHttpServer.ts"),"utf8");
+const toolkitNames=[...new Set([...httpSource.matchAll(/from "\.\/toolkits\/([^/]+)\/tools\.ts"/g)].map(match=>match[1]))];
+if(!toolkitNames.length) throw new Error("No TypeScript toolkit imports found");
+for (const name of toolkitNames) {
   const module = await server(`mcp/toolkits/${name}/tools.ts`);
   const key = name === "toolSearch" ? "ToolSearchToolkit" : name[0].toUpperCase() + name.slice(1) + "Toolkit";
   toolkits[name] = module[key];
@@ -99,6 +126,8 @@ const fixture = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       outputSchema: Schema.toJsonSchemaDocument(Schema.toCodecJson(tool.successSchema)).schema,
     };
   }
+  const registered=tools.map((tool:any)=>tool.name).sort();
+  if(JSON.stringify(registered)!==JSON.stringify(Object.keys(definitions).sort())) throw new Error("MCP definitions do not cover exactly the registered tools");
   const actionSchemas = Object.fromEntries(Object.entries(contracts.PreviewAutomationActInputs).map(([name, schema]) => [name, Schema.toJsonSchemaDocument(Schema.toCodecJson(schema)).schema]));
   const capabilityMessages={preview:new contracts.PreviewAutomationUnavailableError({capability:"preview",environmentId:"fixture"}).message,
     generic:new contracts.McpCapabilityUnavailableError({capability:"__CAPABILITY__",environmentId:"fixture"}).message};
@@ -203,6 +232,8 @@ const themeSource=await readFile(resolve(root,"apps/server/src/mcp/toolkits/them
 const themeInvalid=themeSource.match(/\bmessage:\s*("(?:[^"\\]|\\.)*")/u);
 if(!themeInvalid) throw new Error("Theme validation message not found in production handler");
 instructions.themeSetInvalidRequest=JSON.parse(themeInvalid[1]);
+const peers=await server("peer/PeerForwarding.ts");
+instructions.linkedEnvironmentsOff={code:peers.linkedEnvironmentsOff.code,message:peers.linkedEnvironmentsOff.message};
 instructions.runningTaskNext=contracts.ORCHESTRATOR_MCP_RUNNING_TASK_NEXT;
 const contextBudget=JSON.parse(await readFile(resolve(root,"apps/server/src/provider/agentContextBudget.json"),"utf8"));
 instructions.contextBudget=contextBudget;
@@ -375,7 +406,27 @@ const bindings=Object.fromEntries(Object.entries(methods).flatMap(([kit,tools])=
     expectedServiceMethod:`${serviceOwner[kit]}::${tool.name}`, serviceMethods:nativeMethods[tool.name] ?? [],
     status:["tool_search","send_to_user"].includes(tool.name)?"built-in":route?"adapter": ["preview","previewControls","device","html"].includes(kit)?"host-trait":"missing-service-method"}];
 })));
+const access=await server("mcp/McpToolAccess.ts");
+function declaration(tree:any):any {
+  if(!tree) throw new Error("Unobserved nested access declaration");
+  return tree.kind==="either"?{kind:tree.kind,first:declaration(tree.first),second:declaration(tree.second)}:{kind:tree.kind};
+}
+function accessRule(tree:any,input:any):string {return tree.kind==="either"?accessRule(tree.predicate(input)?tree.first:tree.second,input):tree.kind;}
+const accessInputs=[{},...["list","read","respond","status","edit","rename","fork"].map(action=>({action})),{modelSelection:{}},{scheduledTaskId:"existing"}];
+for(const [name,binding] of Object.entries(bindings)) {
+  const tree=access.__accessDeclarations.get(name);
+  binding.accessDeclaration=declaration(tree);
+  binding.accessCases=accessInputs.map(input=>({input,rule:accessRule(tree,input)}));
+}
 const bindingsPath=resolve(dest,"bindings.json");
 const bindingsText=JSON.stringify(bindings,null,2)+"\n";
 if(process.argv.includes("--check")) {if(await readFile(bindingsPath,"utf8")!==bindingsText) throw new Error("bindings.json differs; regenerate");}
 else await writeFile(bindingsPath,bindingsText);
+for(const relative of ["rust/crates/t3-mcp/export.ts","apps/server/src/provider/agentContextBudget.json"]) sourcePaths.add(resolve(root,relative));
+const hashes:Record<string,string>={};
+for(const path of [...sourcePaths].sort()) hashes[path.slice(root.length).replaceAll("\\","/")]=createHash("sha256").update(await readFile(path)).digest("hex");
+for(const relative of ["tools.json","decoders.json","bindings.json","instructions.json"]) hashes[`rust/crates/t3-mcp/fixtures/${relative}`]=createHash("sha256").update(await readFile(resolve(dest,relative))).digest("hex");
+const manifest=JSON.stringify(hashes,null,2)+"\n";
+const manifestPath=resolve(dest,"source-hashes.json");
+if(process.argv.includes("--check")) {if(await readFile(manifestPath,"utf8")!==manifest) throw new Error("Source hashes differ; regenerate MCP fixtures");}
+else await writeFile(manifestPath,manifest);
