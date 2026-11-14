@@ -12,8 +12,6 @@ workspace = ["dep:t3-workspace"]
 forge = ["dep:t3-forge"]
 scheduler = ["dep:t3-scheduler"]
 git = ["dep:t3-git", "orchestration"]
-# Staging gate for the orchestrator thread reads (`adapters/threads.rs`); off until it builds.
-thread-reads = ["orchestration"]
 
 [dependencies]
 t3-contracts = { path = "../t3-contracts" }

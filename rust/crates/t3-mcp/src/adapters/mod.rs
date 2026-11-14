@@ -5,7 +5,7 @@ pub mod integrated;
 pub mod orchestration;
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
-#[cfg(feature = "thread-reads")]
+#[cfg(feature = "orchestration")]
 pub mod threads;
 #[cfg(feature = "git")]
 pub mod worktree;
