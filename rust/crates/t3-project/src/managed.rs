@@ -10,6 +10,10 @@ use t3_git::{ExecuteOptions, Git};
 use tokio::sync::Mutex;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+pub fn scratch_folder_root(base_dir: &Path) -> PathBuf {
+    base_dir.join("scratch")
+}
+
 /// Required workspace extension: these operations are not exported by t3-workspace yet.
 #[async_trait]
 pub trait ManagedFolderIo: Send + Sync {
@@ -61,7 +65,7 @@ impl ManagedProjectFolders {
                         t3_process::ProcessError::NotFound { .. }
                     ))
             );
-            *probe = Some(available.then(|| self.base_dir.join("scratch")));
+            *probe = Some(available.then(|| scratch_folder_root(&self.base_dir)));
         }
         let root = probe.as_ref()?.clone()?;
         drop(probe);

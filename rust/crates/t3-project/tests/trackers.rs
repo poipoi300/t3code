@@ -292,13 +292,23 @@ async fn concrete_forge_backend_clones_fixture_and_refuses_foreign_contents() {
         cwd: tmp.path().into(),
         home: tmp.path().into(),
     };
-    input.remote_url = Some(Some(fixture.source.to_string_lossy().into_owned().into()));
+    let source = fixture.source.to_string_lossy().replace('\\', "/");
+    let remote = if cfg!(windows) {
+        format!("file:///{source}")
+    } else {
+        format!("file://{source}")
+    };
+    input.remote_url = Some(Some(remote.into()));
     let prepared = backend.prepare(&input).await.unwrap();
+    let progress = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = progress.clone();
     backend
         .clone_repository(
             &input,
             &prepared,
-            Arc::new(|_| {}),
+            Arc::new(move |_| {
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
             CancellationToken::new(),
         )
         .await
@@ -308,6 +318,24 @@ async fn concrete_forge_backend_clones_fixture_and_refuses_foreign_contents() {
             .unwrap(),
         "fixture checkout"
     );
+    assert!(progress.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    backend.discard(&input.destination_path.0).await.unwrap();
+    assert!(
+        std::fs::read_dir(&input.destination_path.0)
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    t3_git::Git::new(&input.destination_path.0)
+        .with_environment(git_environment(tmp.path()))
+        .execute(&["init"], Default::default())
+        .await
+        .unwrap();
+    std::fs::write(
+        std::path::Path::new(&input.destination_path.0).join(".git/objects/incomplete"),
+        "partial pack",
+    )
+    .unwrap();
     backend.discard(&input.destination_path.0).await.unwrap();
     assert!(
         std::fs::read_dir(&input.destination_path.0)

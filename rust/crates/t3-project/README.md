@@ -6,6 +6,36 @@ server RPC/HTTP ledger, per-filename searches of orchestration-plan.md, and
 reports/orchestration-08-takeover.txt. Package 08 ports orchestration-v2 files,
 not the similarly named project-directory services.
 
+## Current upstream round (817a9186f9)
+
+Specification was re-read after the head-91 upstream merge. The server now uses
+this service for ensureScratch/mutate/createNew. Remaining server construction
+and exact RPC calls are recorded in the t3-project next-round section of
+C:\Users\Administrator\t3code-rust-notes\briefs\server-seam-requests.md.
+ForgeCloneRepository already supplies the real Git backend; the server still
+constructs CloningUnavailable. Promotion's scheduler adapter also exists, but
+server G/A must retain/expose its existing Arc<ScheduledTaskService>.
+
+Changed tests were added before behavior: imported linked worktrees must retain
+path/branch/runtime cwd; container create/root-change must refuse without commits.
+These cannot yet execute: orchestration composition.rs:457 is missing the new
+ThreadManagementServices.worktree_restore field. No behavior fix is claimed.
+RecentSession::Importable now carries optional SessionWorktree metadata, but the
+importer still ignores it pending the required observed-red test. The active
+t3-git owner has a precise worktree-container probe request in the seam file;
+the privileged metadata read API needed for that conservative probe is absent.
+Native provider inventory (including bounded decompressed .jsonl.zst processing)
+and the runtime repository remain blocked as described below.
+
+The concrete clone test now uses a temp file:// remote, asserts progress and
+checks partial-repository cleanup, then verifies foreign contents are preserved.
+Session fixtures now live inside an explicit temp .codex/sessions tree. No real
+provider home is read. scratch_folder_root is exported for cleanup/recovery;
+the existing scratch-root behavior is unchanged. Current build output is
+D:\t3code-rust-target\project with two configured jobs and sccache. No sccache
+error or memory-allocation failure occurred. Format passes; current tests/clippy
+are not green because the dependency does not type-check (47 tests expected).
+
 ## Coverage audit (initial state)
 
 Every path below is relative to `apps/server/src/project/`. Status refers to
@@ -30,6 +60,7 @@ behavioral completeness, not the mere presence of a similarly named type.
 | AgentSessionImporter.ts | None; legacy_v1_thread_importer handles a different format | No |
 | http.ts | None; ports::transport::http handles thread routes, not project routes | No; service targets snapshot/mutate |
 | threadWorkspaceRoot.ts | Equivalent workspace lookup inside thread launch/title services, no exported helper | Partial |
+| worktreeContainer.ts (upstream addition) | No current home; requested t3-git public probe, consumed by t3-project validation | Blocked on active Git owner |
 
 Tests alongside these TypeScript files are the specification. Existing sibling
 implementations will be reused and never edited here.
@@ -62,6 +93,7 @@ uses those APIs; the initially necessary local progress parser was removed.
 | AgentSessionImporter.ts | t3-project::sessions::AgentSessionImporter | Recent history import; runtime adapter/native history missing |
 | http.ts | t3-project::service::{snapshot,mutate} | Service targets implemented; transport wiring remains with handler owner |
 | threadWorkspaceRoot.ts | t3-project::promotion::thread_workspace_root | Implemented |
+| worktreeContainer.ts | t3-git requested probe; t3-project create/root-change validation consumer | New upstream refusal test staged; Git API and observed-red execution pending |
 
 Implemented does not mean every original acceptance test has been ported.
 

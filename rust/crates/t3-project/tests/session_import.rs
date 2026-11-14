@@ -23,6 +23,7 @@ struct Inventory {
     file: std::path::PathBuf,
     root: String,
     source: AgentSessionImportSource,
+    worktree: Option<SessionWorktree>,
 }
 #[async_trait]
 impl SessionInventory for Inventory {
@@ -63,6 +64,7 @@ impl SessionInventory for Inventory {
         Ok(vec![RecentSession::Importable {
             thread,
             source: self.source.clone(),
+            worktree: self.worktree.clone(),
         }])
     }
 }
@@ -148,12 +150,22 @@ impl SessionImportStore for RuntimeStore {
     }
 }
 async fn importer(f: &Fixture, fail_once: bool) -> (AgentSessionImporter, AgentSessionImportInput) {
+    importer_at(f, fail_once, None).await
+}
+async fn importer_at(
+    f: &Fixture,
+    fail_once: bool,
+    worktree: Option<SessionWorktree>,
+) -> (AgentSessionImporter, AgentSessionImportInput) {
     let root = f.root("project");
     f.service
         .create(f.create("p", "create", &root))
         .await
         .unwrap();
-    let file = f.temp.path().join("session.jsonl");
+    let provider_home = f.root("fixture-provider-home");
+    let sessions = provider_home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let file = sessions.join("rollout-2026-01-01T00-00-00-session.jsonl");
     let contents=[json!({"type":"session_meta","payload":{"id":"session","cwd":root}}),json!({"type":"event_msg","payload":{"type":"user_message","message":"A fixture request"}}),json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Fixture answer"}]}})].iter().map(|v|v.to_string()).collect::<Vec<_>>().join("\n");
     std::fs::write(&file, &contents).unwrap();
     let source=serde_json::from_value(json!({"provider":"codex","providerInstanceId":"codex","providerSessionId":"session","filePath":file,"size":contents.len(),"mtimeMs":1000,"device":1,"inode":"1","birthtimeMs":0})).unwrap();
@@ -162,10 +174,11 @@ async fn importer(f: &Fixture, fail_once: bool) -> (AgentSessionImporter, AgentS
             file,
             root: root.to_string_lossy().into(),
             source,
+            worktree,
         }),
         projects: f.service.clone(),
         clock: f.clock.clone(),
-        home: f.root("home"),
+        home: provider_home,
         temporary_root: f.root("tmp"),
         base_dir: f.root("base"),
         worktrees_dir: f.root("worktrees"),
@@ -184,6 +197,69 @@ async fn importer(f: &Fixture, fail_once: bool) -> (AgentSessionImporter, AgentS
     let input =
         serde_json::from_value(json!({"projectId":"p","expectedWorkspaceRoot":root})).unwrap();
     (service, input)
+}
+
+#[tokio::test]
+async fn imported_linked_worktree_keeps_its_path_branch_and_runtime_cwd() {
+    let f = Fixture::new();
+    let linked = f.temp.path().join("linked");
+    let (service, input) = importer_at(
+        &f,
+        false,
+        Some(SessionWorktree {
+            path: linked.to_string_lossy().into(),
+            branch: Some("feature".into()),
+        }),
+    )
+    .await;
+    let project = f
+        .service
+        .get_by_id(&input.project_id, false)
+        .await
+        .unwrap()
+        .unwrap();
+    let git = t3_git::Git::new(&project.workspace_root.0)
+        .with_environment(git_environment(f.temp.path()));
+    git.execute(&["init"], Default::default()).await.unwrap();
+    std::fs::write(
+        std::path::Path::new(&project.workspace_root.0).join("file"),
+        "fixture",
+    )
+    .unwrap();
+    git.execute(&["add", "file"], Default::default())
+        .await
+        .unwrap();
+    git.execute(&["commit", "-m", "fixture"], Default::default())
+        .await
+        .unwrap();
+    git.execute(
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            &linked.to_string_lossy(),
+        ],
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(service.import(input).await.unwrap().imported_count, 1);
+    let thread = f
+        .projections
+        .projection(ThreadId("import:codex:session".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    let value = serde_json::to_value(thread.thread).unwrap();
+    assert_eq!(value["worktreePath"], linked.to_string_lossy().as_ref());
+    assert_eq!(value["branch"], "feature");
+    let cwd = f.database.read(|db| {
+        let raw: String = db.query_row("SELECT runtime_payload_json FROM provider_session_runtime WHERE thread_id='import:codex:session'", [], |r| r.get(0))?;
+        Ok(serde_json::from_str::<serde_json::Value>(&raw)?["cwd"].clone())
+    }).await.unwrap();
+    assert_eq!(cwd, linked.to_string_lossy().as_ref());
+    f.shutdown().await;
 }
 #[tokio::test]
 async fn imports_fixture_history_to_real_projections_and_retries_without_duplication() {

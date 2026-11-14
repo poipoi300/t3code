@@ -33,10 +33,16 @@ pub enum RecentSession {
     Importable {
         thread: SessionThread,
         source: AgentSessionImportSource,
+        worktree: Option<SessionWorktree>,
     },
     AlreadyImported(AgentSessionImportSource),
     Duplicate(AgentSessionImportSource),
     Skipped,
+}
+#[derive(Debug, Clone)]
+pub struct SessionWorktree {
+    pub path: String,
+    pub branch: Option<String>,
 }
 /// Native discovery/streaming adapters must come from workspace/provider composition.
 /// Implementations enforce scanner byte/operation budgets, regular-file reads and identity checks.
@@ -278,7 +284,11 @@ impl AgentSessionImporter {
                     }
                     continue;
                 }
-                RecentSession::Importable { thread, source } => (source, thread),
+                RecentSession::Importable {
+                    thread,
+                    source,
+                    worktree: _,
+                } => (source, thread),
             };
             let id = ThreadId(format!(
                 "import:{}:{}",

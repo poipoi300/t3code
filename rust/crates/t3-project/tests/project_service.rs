@@ -6,6 +6,82 @@ use t3_contracts::{base_schemas::ProjectId, project::ProjectMutation};
 use t3_project::Error;
 
 #[tokio::test]
+async fn refuses_worktree_containers_on_create_and_root_change_without_committing() {
+    let f = Fixture::new();
+    let source = f.root("container-source");
+    let git = t3_git::Git::new(&source).with_environment(git_environment(f.temp.path()));
+    git.execute(&["init", "-b", "develop"], Default::default())
+        .await
+        .unwrap();
+    std::fs::write(source.join("README.md"), "fixture").unwrap();
+    git.execute(&["add", "README.md"], Default::default())
+        .await
+        .unwrap();
+    git.execute(&["commit", "-m", "fixture"], Default::default())
+        .await
+        .unwrap();
+    let container = f.root("container");
+    git.execute(
+        &[
+            "clone",
+            "--bare",
+            &source.to_string_lossy(),
+            &container.join(".bare").to_string_lossy(),
+        ],
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    std::fs::write(container.join(".git"), "gitdir: ./.bare\n").unwrap();
+    let git = t3_git::Git::new(&container).with_environment(git_environment(f.temp.path()));
+    git.execute(
+        &["worktree", "add", "develop", "develop"],
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    for bare in ["true", "false"] {
+        git.execute(&["config", "core.bare", bare], Default::default())
+            .await
+            .unwrap();
+        let error = f
+            .service
+            .create(f.create(
+                &format!("container-{bare}"),
+                &format!("create-{bare}"),
+                &container,
+            ))
+            .await;
+        assert!(
+            matches!(error, Err(Error::Invalid(_))),
+            "container core.bare={bare} was accepted"
+        );
+        assert!(f.service.snapshot().await.unwrap().projects.is_empty());
+    }
+    let worktree = container.join("develop");
+    let project = f
+        .service
+        .create(f.create("checkout", "create-checkout", &worktree))
+        .await
+        .unwrap();
+    let update = serde_json::from_value(json!({"type":"project.update","commandId":"move-container","projectId":project.id,"workspaceRoot":container})).unwrap();
+    assert!(matches!(
+        f.service.update(update).await,
+        Err(Error::Invalid(_))
+    ));
+    assert_eq!(
+        f.service
+            .get_by_id(&project.id, false)
+            .await
+            .unwrap()
+            .unwrap()
+            .workspace_root,
+        project.workspace_root
+    );
+    f.shutdown().await;
+}
+
+#[tokio::test]
 async fn lifecycle_uses_receipts_and_keeps_user_directories() {
     let f = Fixture::new();
     let root = f.root("repo");
