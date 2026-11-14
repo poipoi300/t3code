@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>limits</key>
+	<dict>
+		<key>maxRuntimeMode</key>
+		<string>auto-accept-edits</string>
+	</dict>
+	<key>organization</key>
+	<string>Acme</string>
+	<key>schemaVersion</key>
+	<real>1.0</real>
+</dict>
+</plist>

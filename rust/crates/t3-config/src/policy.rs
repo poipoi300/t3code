@@ -17,7 +17,10 @@ pub fn selected_policy_path(
     dev_build: bool,
     env: &crate::config::Environment,
 ) -> PathBuf {
-    if dev_build && let Some(path) = env.get("T3CODE_DEV_MANAGED_POLICY_PATH") {
+    if dev_build
+        && crate::policy_sources::DEV_OVERRIDES
+        && let Some(path) = env.get("T3CODE_DEV_MANAGED_POLICY_PATH")
+    {
         return path.into();
     }
     managed_policy_path(platform)
@@ -92,6 +95,7 @@ impl ManagedPolicy {
 }
 pub fn decode(path: &Path, raw: &str) -> Result<ManagedPolicyDocument> {
     let value: Value = serde_json::from_str(raw)
+        .map(javascript_numbers)
         .map_err(|e| invalid(path.display().to_string(), e.to_string()))?;
     let document: ManagedPolicyDocument = serde_json::from_value(value.clone())
         .map_err(|e| invalid(path.display().to_string(), e.to_string()))?;
@@ -127,6 +131,26 @@ pub fn decode(path: &Path, raw: &str) -> Result<ManagedPolicyDocument> {
         return Err(invalid("managed policy", "feedUrl must be HTTPS"));
     }
     Ok(document)
+}
+/// A JSON number as `JSON.parse` reads it: there is one number type, so `1.0` is `1`. macOS
+/// writes a profile's `<real>` that way, and TypeScript accepts it wherever an integer goes.
+fn javascript_numbers(value: Value) -> Value {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    match value {
+        Value::Number(number) if !number.is_i64() && !number.is_u64() => match number.as_f64() {
+            Some(float) if float.fract() == 0.0 && float.abs() <= MAX_SAFE_INTEGER => {
+                Value::from(float as i64)
+            }
+            _ => Value::Number(number),
+        },
+        Value::Array(items) => Value::Array(items.into_iter().map(javascript_numbers).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, javascript_numbers(value)))
+                .collect(),
+        ),
+        other => other,
+    }
 }
 fn reject_excess(raw: &Value, encoded: &Value, path: &str) -> Result<()> {
     if path.starts_with("settings.") && path.ends_with(".value") {

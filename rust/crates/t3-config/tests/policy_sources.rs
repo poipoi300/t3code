@@ -3,12 +3,14 @@
 //! reader is tested in `src/policy_sources/windows.rs`, the real plutil in `plutil.rs` (macOS).
 
 use serde_json::{Value, json};
+use std::cell::Cell;
 use std::{collections::BTreeMap, path::Path};
 use t3_config::{
     Error,
     policy_sources::{
-        Converted, PolicyRegistry, PolicySources, ProfileConverter, RegistryData, RegistryError,
-        RegistryKey, RegistryValue, WINDOWS_POLICY_KEY, read_managed_policy,
+        Converted, PolicyLock, PolicyLockGuard, PolicyRegistry, PolicySources, ProfileConverter,
+        RegistryData, RegistryError, RegistryKey, RegistryValue, WINDOWS_POLICY_KEY,
+        read_managed_policy,
     },
 };
 
@@ -99,14 +101,33 @@ fn policy_key(values: Vec<RegistryValue>, subkeys: &[(&str, &[(&str, u32)])]) ->
     Registry::Keys(keys)
 }
 
+/// The machine policy section: counts entries and exits, or cannot be taken.
+#[derive(Default)]
+struct Lock {
+    entered: Cell<u32>,
+    left: Cell<u32>,
+    fails: bool,
+}
+impl PolicyLock for Lock {
+    fn enter(&self) -> Result<PolicyLockGuard<'_>, String> {
+        if self.fails {
+            return Err("Windows error 1450".into());
+        }
+        self.entered.set(self.entered.get() + 1);
+        Ok(PolicyLockGuard::new(|| self.left.set(self.left.get() + 1)))
+    }
+}
+
 /// A machine: a temporary directory where the policy file and the profile may exist.
 struct Machine {
     dir: tempfile::TempDir,
+    lock: Lock,
 }
 impl Machine {
     fn new() -> Self {
         Self {
             dir: tempfile::tempdir().unwrap(),
+            lock: Lock::default(),
         }
     }
     fn file(&self) -> std::path::PathBuf {
@@ -133,14 +154,22 @@ impl Machine {
         registry: &Registry,
         known_drivers: &[&str],
     ) -> Result<t3_config::policy::ManagedPolicy, Error> {
-        read_managed_policy(&PolicySources {
+        let before = self.lock.entered.get();
+        let read = read_managed_policy(&PolicySources {
             platform,
             file: self.file(),
             profile: self.profile(),
             registry,
+            lock: &self.lock,
             converter,
             known_drivers,
-        })
+        });
+        // Review M1: every Windows read, whatever its outcome, holds the machine policy section
+        // and leaves it; no other platform takes it.
+        let expected = u32::from(platform == "win32" && !self.lock.fails);
+        assert_eq!(self.lock.entered.get() - before, expected, "{read:?}");
+        assert_eq!(self.lock.left.get(), self.lock.entered.get(), "{read:?}");
+        read
     }
     /// The source read, `None` for no policy, or `error: <reason>`.
     fn read(&self, platform: &str, converter: &Plutil, registry: &Registry) -> Option<String> {
@@ -463,4 +492,129 @@ fn builds_the_policy_from_the_values_the_group_policy_template_writes() {
             "{found} lacks {reason:?}"
         );
     }
+}
+
+/// Review M1: when the machine policy section cannot be taken, start is refused rather than the
+/// registry read without it.
+#[test]
+fn refuses_when_the_machine_policy_section_cannot_be_taken() {
+    let mut machine = Machine::new();
+    machine.lock.fails = true;
+    let registry = policy_key(vec![text("Policy", POLICY)], &[]);
+    includes(
+        machine.read("win32", &Plutil(None), &registry),
+        "the machine policy lock cannot be taken (Windows error 1450)",
+    );
+    assert_eq!(machine.read("linux", &Plutil(None), &registry), None);
+}
+
+/// Review L2: values or subkeys whose names fold to one name, and JSON that names a key twice,
+/// refuse start instead of letting enumeration or parse order decide. TypeScript keeps the last.
+#[test]
+fn refuses_names_that_fold_together_and_repeated_json_keys() {
+    let machine = Machine::new();
+    let organization = || text("Organization", "Acme");
+    // KELVIN SIGN folds to `k`; the registry keeps the two names apart.
+    let kelvin = "Webhoo\u{212A}Tasks";
+    for values in [
+        vec![organization(), dword("WebhookTasks", 0), dword(kelvin, 1)],
+        vec![organization(), dword(kelvin, 1), dword("WebhookTasks", 0)],
+    ] {
+        let found = machine.document(&policy_key(values, &[]));
+        let found = found.as_str().unwrap_or_default();
+        assert!(
+            found.contains("WebhookTasks") && found.contains(r"Webhoo\u{212a}Tasks"),
+            "{found}"
+        );
+    }
+    let mut subkeys = policy_key(vec![organization(), dword("Clients", 1)], &[]);
+    if let Registry::Keys(keys) = &mut subkeys {
+        keys.get_mut("").unwrap().subkeys = vec!["Clients".into(), "clients".into()];
+    }
+    let drivers = policy_key(
+        vec![organization(), dword("AllowedDrivers", 1)],
+        &[("AllowedDrivers", &[("kiro", 1), ("\u{212A}iro", 0)])],
+    );
+    for (registry, names) in [
+        (subkeys, ["Clients", "clients"]),
+        (drivers, ["kiro", r"\u{212a}iro"]),
+    ] {
+        let found = machine.document(&registry);
+        let found = found.as_str().unwrap_or_default();
+        assert!(
+            found.contains(names[0]) && found.contains(names[1]),
+            "{found}"
+        );
+    }
+    let twice = r#"{"schemaVersion":1,"organization":"Acme","limits":{"maxRuntimeMode":"approval-required","maxRuntimeMode":"full-access"}}"#;
+    for (registry, place) in [
+        (policy_key(vec![text("Policy", twice)], &[]), "Policy"),
+        (
+            policy_key(
+                vec![
+                    organization(),
+                    text(
+                        "Settings",
+                        r#"{"enableAgentBrowserAccess":{"value":false,"locked":true},"enableAgentBrowserAccess":{"value":true,"locked":true}}"#,
+                    ),
+                ],
+                &[],
+            ),
+            "Settings",
+        ),
+        (
+            policy_key(
+                vec![
+                    organization(),
+                    text("ProviderInstances", r#"{"codex":{},"codex":{}}"#),
+                ],
+                &[],
+            ),
+            "ProviderInstances",
+        ),
+    ] {
+        let found = machine.document(&registry);
+        let found = found.as_str().unwrap_or_default();
+        assert!(found.contains(place) && found.contains("twice"), "{found}");
+    }
+}
+
+/// Shapes real managed Macs write, as TypeScript reads them (checked by running its reader on
+/// the same plutil output): a `<real>` number is a JSON number like any other, so
+/// `schemaVersion` 1.0 is 1; a `Forced` entry carrying `mcx_data_timestamp` is not the wrapper
+/// and is refused.
+#[test]
+fn reads_macos_numbers_written_as_reals_and_pins_the_timestamped_wrapper() {
+    let machine = Machine::new().with(None, true);
+    let real = r#"{"schemaVersion":1.0,"organization":"Acme","limits":{"maxRuntimeMode":"auto-accept-edits"}}"#;
+    let policy = machine
+        .read_with("darwin", &plutil(real, 0), &no_registry(), &[])
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(policy.document.unwrap()).unwrap(),
+        json!({"schemaVersion":1,"organization":"Acme","limits":{"maxRuntimeMode":"auto-accept-edits"}})
+    );
+    includes(
+        machine.read(
+            "darwin",
+            &plutil(r#"{"schemaVersion":1.5,"organization":"Acme"}"#, 0),
+            &no_registry(),
+        ),
+        "does not match the policy schema",
+    );
+    // JSON.parse reads a policy file's 1.0 as 1 too.
+    let machine = machine.with(
+        Some(r#"{"schemaVersion":1.0,"organization":"Acme"}"#),
+        false,
+    );
+    assert_eq!(
+        machine.read("linux", &Plutil(None), &no_registry()),
+        Some(machine.file().display().to_string())
+    );
+    let machine = machine.with(None, true);
+    let stamped = json!({"Forced":[{"mcx_data_timestamp":"2026-01-01T00:00:00Z","mcx_preference_settings":{"schemaVersion":1,"organization":"Acme"}}]});
+    includes(
+        machine.read("darwin", &plist(stamped), &no_registry()),
+        "does not match the policy schema",
+    );
 }

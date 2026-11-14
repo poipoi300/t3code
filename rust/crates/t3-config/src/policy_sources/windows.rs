@@ -151,10 +151,59 @@ pub(super) fn read_key(hive: Hive, subkey: &str) -> Result<Option<RegistryKey>, 
     Ok(Some(RegistryKey { values, subkeys }))
 }
 
+/// `EnterCriticalPolicySection(TRUE)`: Group Policy stops applying machine policy until the guard
+/// drops. Microsoft documents neither how long the call may block nor which rights it needs;
+/// Chromium enters it off-thread because it "could take minutes to return" and waits 15 seconds.
+/// The section is entered and left on a helper thread; past `timeout` the read is refused, and
+/// the helper leaves the section as soon as it finally gets it. Windows itself releases a section
+/// held for ten minutes.
+pub(super) fn enter_machine_policy_section(
+    timeout: std::time::Duration,
+) -> Result<super::PolicyLockGuard<'static>, String> {
+    use std::sync::mpsc;
+    use windows_sys::Win32::{
+        Foundation::GetLastError,
+        System::GroupPolicy::{EnterCriticalPolicySection, LeaveCriticalPolicySection},
+    };
+    let (entered_tx, entered) = mpsc::channel::<Result<(), u32>>();
+    let (done, done_rx) = mpsc::channel::<()>();
+    let helper = std::thread::Builder::new()
+        .name("machine-policy-section".into())
+        .spawn(move || {
+            // SAFETY: plain call; the handle is used only on this thread and left once.
+            let section = unsafe { EnterCriticalPolicySection(1) };
+            if section.is_null() {
+                // SAFETY: reads this thread's last error right after the failed call.
+                let _ = entered_tx.send(Err(unsafe { GetLastError() }));
+                return;
+            }
+            let _ = entered_tx.send(Ok(()));
+            // Returns when the guard drops, or at once when the reader gave up waiting.
+            let _ = done_rx.recv();
+            // SAFETY: `section` came from a successful EnterCriticalPolicySection.
+            unsafe { LeaveCriticalPolicySection(section) };
+        })
+        .map_err(|error| format!("its thread cannot start: {error}"))?;
+    match entered.recv_timeout(timeout) {
+        Ok(Ok(())) => Ok(super::PolicyLockGuard::new(move || {
+            drop(done);
+            let _ = helper.join();
+        })),
+        Ok(Err(code)) => Err(format!("Windows error {code}")),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "Group Policy held it for more than {} seconds",
+            timeout.as_secs()
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err("its thread stopped".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{
-        PolicyRegistry, PolicySources, ProfileConverter, WindowsRegistry, read_managed_policy,
+        DEV_REGISTRY_KEY_ENV, MachinePolicyLock, PolicyLock, PolicyRegistry, PolicySources,
+        ProfileConverter, WINDOWS_POLICY_KEY, WindowsRegistry, read_managed_policy,
+        read_selected_managed_policy, read_system_managed_policy,
     };
     use super::*;
     use windows_sys::Win32::System::Registry::{
@@ -335,6 +384,7 @@ mod tests {
                 file: file.clone(),
                 profile: temp.path().join("unused.plist"),
                 registry,
+                lock: &MachinePolicyLock::default(),
                 converter: &NoConverter,
                 known_drivers: &["codex", "claudeAgent"],
             })
@@ -370,5 +420,96 @@ mod tests {
                 .and_then(|limits| limits.telemetry),
             Some(false)
         );
+    }
+
+    /// Review M1: the real machine policy section is taken and left, so a second entry from
+    /// another thread does not wait.
+    #[test]
+    fn takes_and_leaves_the_machine_policy_section() {
+        let lock = MachinePolicyLock {
+            timeout: std::time::Duration::from_secs(20),
+        };
+        for _ in 0..3 {
+            drop(lock.enter().unwrap());
+        }
+    }
+
+    /// Review L2 on the real registry: it keeps `WebhookTasks` and `Webhoo\u{212A}Tasks` (KELVIN
+    /// SIGN) apart, and the reader refuses the pair instead of letting enumeration order decide.
+    #[test]
+    fn refuses_two_real_values_that_fold_to_one_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let key = TemporaryKey::new();
+        key.text("", "Organization", "Acme");
+        key.dword("", "WebhookTasks", 0);
+        key.dword("", "Webhoo\u{212A}Tasks", 1);
+        let registry = key.registry();
+        assert_eq!(registry.read_key("").unwrap().unwrap().values.len(), 3);
+        let error = read_managed_policy(&PolicySources {
+            platform: "win32",
+            file: temp.path().join("policy.json"),
+            profile: temp.path().join("unused.plist"),
+            registry: &registry,
+            lock: &MachinePolicyLock::default(),
+            converter: &NoConverter,
+            known_drivers: &[],
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("WebhookTasks") && error.contains(r"Webhoo\u{212a}Tasks"),
+            "{error}"
+        );
+    }
+
+    /// Review L1 and L4: the server's selection reads HKLM and the real policy file. The
+    /// `T3CODE_DEV_MANAGED_*` overrides apply only in a debug build compiled with the
+    /// `dev-policy-overrides` feature; the debug flag alone no longer opens them.
+    #[test]
+    fn the_dev_overrides_need_the_build_switch() {
+        const POLICY: &str = r#"{"schemaVersion":1,"organization":"Acme"}"#;
+        let key = TemporaryKey::new();
+        key.text("", "Policy", POLICY);
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("dev-policy.json");
+        std::fs::write(&file, POLICY).unwrap();
+        let file_env = (
+            "T3CODE_DEV_MANAGED_POLICY_PATH".to_owned(),
+            file.display().to_string(),
+        );
+        let both = crate::config::Environment::from([
+            (DEV_REGISTRY_KEY_ENV.to_owned(), key.0.clone()),
+            file_env.clone(),
+        ]);
+        let file_only = crate::config::Environment::from([file_env]);
+        let summary = |policy: crate::policy::ManagedPolicy| {
+            (
+                policy.path.display().to_string(),
+                serde_json::to_value(policy.document).unwrap(),
+            )
+        };
+        assert_eq!(
+            WindowsRegistry::machine_policy().source(),
+            WINDOWS_POLICY_KEY
+        );
+        let machine = summary(read_system_managed_policy("win32", &[]).unwrap());
+        for env in [&both, &file_only] {
+            let release = read_selected_managed_policy("win32", false, env, &[]).unwrap();
+            assert_eq!(summary(release), machine);
+        }
+        let debug = read_selected_managed_policy("win32", true, &both, &[]);
+        let debug_file = read_selected_managed_policy("win32", true, &file_only, &[]).unwrap();
+        if cfg!(feature = "dev-policy-overrides") {
+            let error = debug.unwrap_err().to_string();
+            assert!(
+                error.contains(&format!(r"HKCU\{}", key.0))
+                    && error.contains("deploy the policy one way"),
+                "{error}"
+            );
+            assert_eq!(debug_file.path, file);
+        } else {
+            assert_eq!(summary(debug.unwrap()), machine);
+            assert_eq!(summary(debug_file), machine);
+        }
     }
 }

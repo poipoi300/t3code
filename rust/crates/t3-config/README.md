@@ -91,19 +91,43 @@ access and ownership. It does not start a server or discover the user's home.
   | macOS | `/Library/Managed Preferences/com.t3tools.t3code.plist`, converted by `/usr/bin/plutil -convert json` (binary or XML; a `Forced[0].mcx_preference_settings` wrapper is unwrapped; `Payload*` and `_*` keys dropped) | `/Library/Application Support/T3Code/policy.json` |
   | Linux and others | none | `/etc/t3code/policy.json` |
 
-  Each document goes through the file's strict `policy::decode`. Start is refused when: a
-  platform source and the file both hold a policy; the registry key or profile exists but cannot
-  be checked, opened or enumerated (any Win32 error but "not found"), or plutil fails, exits
-  non-zero or runs past 10 seconds; a registry value is not one the template writes, has the
-  wrong type (only REG_SZ and 4-byte REG_DWORD count; REG_EXPAND_SZ never does), or a DWORD other
-  than 0 or 1; a subkey is not `Clients`/`AllowedDrivers` or nests further; `Policy` sits beside
-  template values or non-empty subkeys; template values set anything without `Organization`; or
-  the document fails decoding. A key that is absent, empty, or holds only Disabled policies is no
-  policy. Development builds also honor `T3CODE_DEV_MANAGED_POLICY_REGISTRY_KEY` (a key below
-  HKCU read in place of the Policies key) and `T3CODE_DEV_MANAGED_PREFERENCES_PATH` (a property
-  list in place of the managed preferences); with either set, the file read beside it is
-  `T3CODE_DEV_MANAGED_POLICY_PATH` when given. With only `T3CODE_DEV_MANAGED_POLICY_PATH`, that
-  file is the only source, as in TypeScript.
+  Each document goes through the file's strict `policy::decode`. The Windows read holds Group
+  Policy's machine policy section (`EnterCriticalPolicySection(TRUE)`) from the first open to the
+  last enumeration. Start is refused when: a platform source and the file both hold a policy; the
+  policy section cannot be entered, or is not entered within 30 seconds; the registry key or
+  profile exists but cannot be checked, opened or enumerated (any Win32 error but "not found"),
+  or plutil fails, exits non-zero, or has not printed its output and exited within 10 seconds; a
+  registry value is not one the template writes, has the wrong type (only REG_SZ and 4-byte
+  REG_DWORD count; REG_EXPAND_SZ never does), or a DWORD other than 0 or 1; two values, two
+  subkeys, or two checkboxes of one subkey have names that fold to one (`WebhookTasks` and
+  `Webhoo\u{212a}Tasks`); a subkey is not `Clients`/`AllowedDrivers` or nests further; `Policy`
+  sits beside template values or non-empty subkeys; the `Policy`, `Settings` or
+  `ProviderInstances` JSON repeats a key inside one object; template values set anything without
+  `Organization`; or the document fails decoding. A key that is absent, empty, or holds only
+  Disabled policies is no policy. Numbers are read as `JSON.parse` reads them, so `1.0` (a
+  profile's `<real>`) is `1`.
+
+  Development overrides exist only in a debug build of a build with the `dev-policy-overrides`
+  feature (off by default; `t3-server`'s tests enable it through a dev-dependency, and
+  `t3-server` forwards it as its own non-default feature). A shipped binary must never enable it.
+  Without it every build reads HKLM, the managed preferences and the real file. With it:
+  `T3CODE_DEV_MANAGED_POLICY_REGISTRY_KEY` (a key below HKCU read in place of the Policies key)
+  and `T3CODE_DEV_MANAGED_PREFERENCES_PATH` (a property list in place of the managed
+  preferences); with either set, the file read beside it is `T3CODE_DEV_MANAGED_POLICY_PATH`
+  when given. With only `T3CODE_DEV_MANAGED_POLICY_PATH`, that file is the only source, as in
+  TypeScript's dev channel.
+
+  Differences from TypeScript (`packages/shared/src/managedPolicyFile.ts`), each stricter:
+  - TypeScript reads the registry without the policy section, so a Group Policy refresh during
+    start can leave it reading a partly written key; Rust holds the section and refuses start
+    when it cannot.
+  - TypeScript lets the later of two folding names, or of two repeated JSON keys, decide
+    (`"approval-required"` then `"full-access"` gives `full-access`); Rust refuses both.
+  - TypeScript's overrides follow its build channel (`__T3CODE_TELEMETRY_CHANNEL__`, `dev` when
+    unset); Rust's need the explicit feature as well as a debug build.
+  - Rust reads the 64-bit registry view from a 32-bit process too; TypeScript refuses there.
+  - The schema-error detail is the Rust decoder's (`limits.maxRuntimeMod`), not Effect's
+    (`["limits"]["maxRuntimeMod"]`).
 
 ## Resolution precedence
 

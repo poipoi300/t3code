@@ -22,11 +22,17 @@ file-id = "0.2"
 tracing = "0.1"
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 
+[features]
+# Honour the `T3CODE_DEV_MANAGED_*` policy overrides in debug builds. Off by default: only tests
+# and a development runner enable it, never a shipped binary, since it lets a user point the
+# reader away from the machine's policy.
+dev-policy-overrides = []
+
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_GroupPolicy", "Win32_System_Registry"] }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }

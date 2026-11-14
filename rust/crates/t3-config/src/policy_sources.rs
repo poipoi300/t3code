@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "macos")]
 mod plutil;
+// plutil's runner; its deadline tests run on every platform.
+#[cfg(any(target_os = "macos", test))]
+mod process;
 #[cfg(windows)]
 mod windows;
 
@@ -24,10 +27,16 @@ pub const MACOS_MANAGED_PREFERENCES_PATH: &str =
 /// as JSON.
 pub const WINDOWS_POLICY_SUBKEY: &str = r"SOFTWARE\Policies\T3Tools\T3Code";
 pub const WINDOWS_POLICY_KEY: &str = r"HKLM\SOFTWARE\Policies\T3Tools\T3Code";
-/// Development builds only, as `T3CODE_DEV_MANAGED_POLICY_PATH`: a key below HKCU read in place of
-/// the Policies key, so the registry source can be tried and tested without administrator rights.
+/// Whether this build honours the `T3CODE_DEV_MANAGED_*` overrides at all: only with the
+/// `dev-policy-overrides` feature, which tests and a development runner enable and a shipped
+/// binary must not (TypeScript's dev channel, `ManagedPolicy.ts:176-185`). A debug build without
+/// it reads the machine's policy like a release build.
+pub const DEV_OVERRIDES: bool = cfg!(feature = "dev-policy-overrides");
+/// With [`DEV_OVERRIDES`], in a debug build: a key below HKCU read in place of the Policies key,
+/// so the registry source can be tried and tested without administrator rights.
 pub const DEV_REGISTRY_KEY_ENV: &str = "T3CODE_DEV_MANAGED_POLICY_REGISTRY_KEY";
-/// Development builds only: a property list read in place of the managed preferences.
+/// With [`DEV_OVERRIDES`], in a debug build: a property list read in place of the managed
+/// preferences.
 pub const DEV_PREFERENCES_PATH_ENV: &str = "T3CODE_DEV_MANAGED_PREFERENCES_PATH";
 
 #[derive(Clone, Copy)]
@@ -184,6 +193,51 @@ impl PolicyRegistry for WindowsRegistry {
     }
 }
 
+/// Holds Group Policy's machine policy section while the registry is read, so a policy refresh
+/// cannot change the key part-way through the read.
+pub trait PolicyLock {
+    /// Takes the section; the guard leaves it when dropped. The error says why it cannot be taken.
+    fn enter(&self) -> std::result::Result<PolicyLockGuard<'_>, String>;
+}
+/// Leaves the policy section when dropped, on every path.
+pub struct PolicyLockGuard<'a>(Option<Box<dyn FnOnce() + 'a>>);
+impl<'a> PolicyLockGuard<'a> {
+    pub fn new(leave: impl FnOnce() + 'a) -> Self {
+        Self(Some(Box::new(leave)))
+    }
+}
+impl Drop for PolicyLockGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(leave) = self.0.take() {
+            leave();
+        }
+    }
+}
+
+/// `EnterCriticalPolicySection(TRUE)` on a helper thread, waited for at most `timeout`: the call
+/// can block for minutes while Group Policy applies.
+#[derive(Debug, Clone, Copy)]
+pub struct MachinePolicyLock {
+    pub timeout: std::time::Duration,
+}
+/// Chromium's loader waits 15 seconds, which its field data says covers 99.9% of machines.
+pub const MACHINE_POLICY_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+impl Default for MachinePolicyLock {
+    fn default() -> Self {
+        Self {
+            timeout: MACHINE_POLICY_LOCK_TIMEOUT,
+        }
+    }
+}
+impl PolicyLock for MachinePolicyLock {
+    fn enter(&self) -> std::result::Result<PolicyLockGuard<'_>, String> {
+        #[cfg(windows)]
+        return windows::enter_machine_policy_section(self.timeout);
+        #[cfg(not(windows))]
+        Err("Group Policy exists only on Windows".into())
+    }
+}
+
 /// What `plutil -convert json` printed and how it exited.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Converted {
@@ -220,6 +274,8 @@ pub struct PolicySources<'a> {
     pub file: PathBuf,
     pub profile: PathBuf,
     pub registry: &'a dyn PolicyRegistry,
+    /// Taken around the whole registry read.
+    pub lock: &'a dyn PolicyLock,
     pub converter: &'a dyn ProfileConverter,
     /// The drivers this build knows; a checkbox naming one in other case takes its spelling.
     pub known_drivers: &'a [&'a str],
@@ -257,22 +313,28 @@ pub fn read_system_managed_policy(platform: &str, known_drivers: &[&str]) -> Res
         file: policy::managed_policy_path(platform),
         profile: MACOS_MANAGED_PREFERENCES_PATH.into(),
         registry: &WindowsRegistry::machine_policy(),
+        lock: &MachinePolicyLock::default(),
         converter: &Plutil,
         known_drivers,
     })
 }
 
-/// The server's choice (`ManagedPolicy.ts` `make`). Release builds read the machine's sources.
-/// A development build given `T3CODE_DEV_MANAGED_POLICY_PATH` alone reads that file only, as
-/// TypeScript does; given a registry key or preferences override as well, it reads that platform
-/// source beside the file (the dev file when set), with the same both-exist refusal.
+/// The server's choice (`ManagedPolicy.ts` `make`): the machine's sources. Only a debug build
+/// (`dev_build`) of a build with [`DEV_OVERRIDES`] honours the overrides: given
+/// `T3CODE_DEV_MANAGED_POLICY_PATH` alone it reads that file only, as TypeScript's dev channel
+/// does; given a registry key or preferences override as well, it reads that platform source
+/// beside the file (the dev file when set), with the same both-exist refusal.
 pub fn read_selected_managed_policy(
     platform: &str,
     dev_build: bool,
     env: &Environment,
     known_drivers: &[&str],
 ) -> Result<ManagedPolicy> {
-    let dev = |name: &str| dev_build.then(|| env.get(name)).flatten();
+    let dev = |name: &str| {
+        (DEV_OVERRIDES && dev_build)
+            .then(|| env.get(name))
+            .flatten()
+    };
     let (registry_key, preferences) = (dev(DEV_REGISTRY_KEY_ENV), dev(DEV_PREFERENCES_PATH_ENV));
     if registry_key.is_none() && preferences.is_none() {
         if let Some(path) = dev("T3CODE_DEV_MANAGED_POLICY_PATH") {
@@ -288,6 +350,7 @@ pub fn read_selected_managed_policy(
         file: policy::selected_policy_path(platform, dev_build, env),
         profile: preferences.map_or_else(|| MACOS_MANAGED_PREFERENCES_PATH.into(), PathBuf::from),
         registry: &registry,
+        lock: &MachinePolicyLock::default(),
         converter: &Plutil,
         known_drivers,
     })
@@ -323,6 +386,17 @@ fn read_profile(sources: &PolicySources<'_>) -> Result<Option<ManagedPolicy>> {
 
 fn read_registry(sources: &PolicySources<'_>) -> Result<Option<ManagedPolicy>> {
     let path = sources.registry.source();
+    // Not in TypeScript (`managedPolicyFile.ts:520-577` reads unlocked): a Group Policy refresh
+    // rewrites the key, and a read in the middle could see a weaker policy or none.
+    let _section = sources.lock.enter().map_err(|reason| {
+        refuse(
+            &path,
+            format!(
+                "the machine policy lock cannot be taken ({reason}); start again once Group \
+                 Policy has finished applying"
+            ),
+        )
+    })?;
     let read_key = |subkey: &str| {
         sources.registry.read_key(subkey).map_err(|error| {
             refuse(
@@ -340,6 +414,18 @@ fn read_registry(sources: &PolicySources<'_>) -> Result<Option<ManagedPolicy>> {
     let Some(root) = read_key("")? else {
         return Ok(None);
     };
+    if let Some((first, second)) = same_name(root.values.iter().map(|value| value.name.as_str())) {
+        return Err(refuse(
+            &path,
+            format!("the values {first} and {second} name the same setting; keep one"),
+        ));
+    }
+    if let Some((first, second)) = same_name(root.subkeys.iter().map(String::as_str)) {
+        return Err(refuse(
+            &path,
+            format!("the subkeys {first} and {second} name the same setting; keep one"),
+        ));
+    }
     if let Some(json) = root
         .values
         .iter()
@@ -363,6 +449,12 @@ fn read_registry(sources: &PolicySources<'_>) -> Result<Option<ManagedPolicy>> {
         let RegistryData::Text(text) = &json.data else {
             return Err(refuse(&path, "its Policy value is not a string (REG_SZ)"));
         };
+        if let Some(key) = repeated_key(text) {
+            return Err(refuse(
+                &path,
+                format!("its Policy value has the key {key:?} twice"),
+            ));
+        }
         return decode_document(&path, Raw::Text(text.clone())).map(Some);
     }
     let mut values: Vec<(&str, RegistryValue)> = root
@@ -384,6 +476,14 @@ fn read_registry(sources: &PolicySources<'_>) -> Result<Option<ManagedPolicy>> {
         let Some(checkboxes) = read_key(subkey)? else {
             continue;
         };
+        if let Some((first, second)) =
+            same_name(checkboxes.values.iter().map(|value| value.name.as_str()))
+        {
+            return Err(refuse(
+                &path,
+                format!(r"{subkey}\{first} and {subkey}\{second} name the same checkbox; keep one"),
+            ));
+        }
         if let Some(nested) = checkboxes.subkeys.first() {
             return Err(refuse(
                 &path,
@@ -398,6 +498,101 @@ fn read_registry(sources: &PolicySources<'_>) -> Result<Option<ManagedPolicy>> {
         Ok(None) => Ok(None),
         Ok(Some(document)) => decode_document(&path, Raw::Value(document)).map(Some),
     }
+}
+
+/// A registry name as start errors print it: characters outside ASCII escaped, so two names that
+/// look alike, such as `K` and KELVIN SIGN, read differently.
+fn shown(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii() {
+                c.to_string()
+            } else {
+                format!("\\u{{{:x}}}", u32::from(c))
+            }
+        })
+        .collect()
+}
+
+/// The first two names the reader would take for one (it folds case as TypeScript's
+/// `toLowerCase` does). Not in TypeScript, where the later value silently wins.
+fn same_name<'a>(names: impl Iterator<Item = &'a str>) -> Option<(String, String)> {
+    let mut seen: Vec<(String, &str)> = Vec::new();
+    for name in names {
+        let folded = name.to_lowercase();
+        if let Some((_, first)) = seen.iter().find(|(other, _)| *other == folded) {
+            return Some((shown(first), shown(name)));
+        }
+        seen.push((folded, name));
+    }
+    None
+}
+
+/// Walks a JSON document and records the first object key that appears twice in one object.
+#[derive(Clone, Copy)]
+struct UniqueKeys<'a>(&'a std::cell::RefCell<Option<String>>);
+impl<'de> serde::de::DeserializeSeed<'de> for UniqueKeys<'_> {
+    type Value = ();
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> std::result::Result<(), D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+impl<'de> serde::de::Visitor<'de> for UniqueKeys<'_> {
+    type Value = ();
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("JSON")
+    }
+    fn visit_bool<E>(self, _: bool) -> std::result::Result<(), E> {
+        Ok(())
+    }
+    fn visit_i64<E>(self, _: i64) -> std::result::Result<(), E> {
+        Ok(())
+    }
+    fn visit_u64<E>(self, _: u64) -> std::result::Result<(), E> {
+        Ok(())
+    }
+    fn visit_f64<E>(self, _: f64) -> std::result::Result<(), E> {
+        Ok(())
+    }
+    fn visit_str<E>(self, _: &str) -> std::result::Result<(), E> {
+        Ok(())
+    }
+    fn visit_unit<E>(self) -> std::result::Result<(), E> {
+        Ok(())
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> std::result::Result<(), A::Error> {
+        while seq.next_element_seed(self)?.is_some() {}
+        Ok(())
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<(), A::Error> {
+        let mut seen = std::collections::HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !seen.insert(key.clone()) {
+                *self.0.borrow_mut() = Some(key);
+                return Err(serde::de::Error::custom("a key appears twice"));
+            }
+            map.next_value_seed(self)?;
+        }
+        Ok(())
+    }
+}
+
+/// The first key `json` repeats inside one object. `JSON.parse` and serde both keep the last
+/// value, so a repeated restriction would be decided by its order; refused instead.
+fn repeated_key(json: &str) -> Option<String> {
+    use serde::de::DeserializeSeed;
+    let found = std::cell::RefCell::new(None);
+    let _ = UniqueKeys(&found).deserialize(&mut serde_json::Deserializer::from_str(json));
+    found.into_inner()
 }
 
 fn lookup<'a>(table: &'a [(&'a str, &'a [&'a str])], name: &str) -> Option<&'a [&'a str]> {
@@ -547,10 +742,15 @@ fn windows_policy_document(
         }
         match field {
             FieldType::String => put(&mut document, path, Value::String(text.clone())),
-            _ => match serde_json::from_str::<Value>(text) {
-                Ok(parsed) => put(&mut document, path, parsed),
-                Err(_) => return Err(format!("{place} is not valid JSON")),
-            },
+            _ => {
+                let Ok(parsed) = serde_json::from_str::<Value>(text) else {
+                    return Err(format!("{place} is not valid JSON"));
+                };
+                if let Some(key) = repeated_key(text) {
+                    return Err(format!("{place} has the key {key:?} twice"));
+                }
+                put(&mut document, path, parsed);
+            }
         }
     }
     for (key, list) in lists {
