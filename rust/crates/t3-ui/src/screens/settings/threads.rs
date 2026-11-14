@@ -161,9 +161,7 @@ fn response_streaming_description(mode: &str) -> &'static str {
     }
 }
 
-/// `ThreadsSettingsPanel`. Not yet here: `ProjectDefaultsSettings`, `SnoozePresetsRow`,
-/// `ThreadTitleInstructionsSettings` and the text generation model and traits pickers (see the
-/// SET-THREADS hand-off).
+/// `ThreadsSettingsPanel`.
 pub fn threads_settings_panel() -> impl IntoElement {
     let context = use_settings();
     let has_server_targets = move || {
@@ -213,6 +211,16 @@ pub fn threads_settings_panel() -> impl IntoElement {
                     )),
             ))
             .child(project_defaults_settings(context))
+            .child(when(
+                move || context.view().is_none_or(|v| !v.scope.is_project_scope()),
+                move || {
+                    settings_section(
+                        "snooze",
+                        Text::from("Snooze"),
+                        super::snooze::snooze_presets_row(context),
+                    )
+                },
+            ))
             .child(settings_section(
                 "usage-limits",
                 Text::from("Usage limits"),
@@ -830,7 +838,7 @@ pub fn project_defaults_settings(context: SettingsContext) -> impl IntoElement {
                     .iter()
                     .map(|mode| {
                         // The web shows the reason under the label; NSH's items carry one title.
-                        let denied = context.view().and_then(|v| managed_runtime_mode_denial(&v, mode.clone()));
+                        let denied = context.view().and_then(|v| managed_runtime_mode_denial(&v, *mode));
                         SelectItem::new(wire(mode), Text::from(runtime_mode_label(mode)).resolve())
                             .disabled(denied.is_some())
                     })

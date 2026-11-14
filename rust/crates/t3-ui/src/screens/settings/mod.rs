@@ -21,6 +21,7 @@ pub mod scheduled_tasks;
 pub mod search;
 pub mod secrets;
 pub mod shell;
+pub mod snooze;
 pub mod snap_shot;
 pub mod source_control;
 pub mod threads;

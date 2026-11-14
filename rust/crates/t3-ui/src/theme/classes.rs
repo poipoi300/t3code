@@ -11,7 +11,9 @@
 //! - `data-[k=v]:`, `data-k:`, `aria-[k=v]:`, `aria-k:` and their `group-`/`in-` forms: kept when
 //!   the attributes passed in say so (the element's, or the ancestor's the variant names), as the
 //!   TSX sets them;
-//! - inside the sidebar ([`Scope::Sidebar`]), colours the sidebar redeclares use its values.
+//! - inside the sidebar ([`Scope::Sidebar`]), colours the sidebar redeclares use its values;
+//! - a border width with no colour of its own: `index.css`'s base `* { @apply border-border }`
+//!   (NSH's width utilities otherwise colour the border `currentColor`, the text colour).
 //!
 //! Everything else passes through. What NSH cannot express (pseudo-elements, selector variants,
 //! container queries, `has-*`) is ported by hand per the table in `ui-package.md`; the
@@ -79,6 +81,31 @@ pub(crate) fn rewrite(
                 .any(|v| *v == "light" || *v == "not-dark")
             && color_utility(parts[parts.len() - 1], is_color).is_some()
     });
+    // The base layer's `border-border`, unless the element names its own plain border colour.
+    let base_border = classes
+        .split_whitespace()
+        .filter(|class| split_variants(class).len() == 1)
+        .filter_map(|class| {
+            let utility = class.trim_start_matches('!');
+            color_utility(utility, is_color)
+                .is_some_and(|(prefix, _, _)| prefix == "border-")
+                .then_some(utility)
+        })
+        .last()
+        .unwrap_or("border-border");
+    let map_color = |utility: String, light: bool| match color_utility(&utility, is_color) {
+        Some((prefix, color, alpha)) => {
+            let mut color = color.to_owned();
+            if scope == Scope::Sidebar && is_color(&format!("{SIDEBAR_COLOR_PREFIX}{color}")) {
+                color = format!("{SIDEBAR_COLOR_PREFIX}{color}");
+            }
+            if light {
+                color = format!("{LIGHT_COLOR_PREFIX}{color}");
+            }
+            format!("{prefix}{color}{alpha}")
+        }
+        None => utility,
+    };
     let mut out: Vec<String> = Vec::new();
     for class in classes.split_whitespace() {
         let (important, class) = match class.strip_prefix('!') {
@@ -111,18 +138,16 @@ pub(crate) fn rewrite(
             variants.insert(0, "light".to_owned());
             light = false;
         }
-        if let Some((prefix, color, alpha)) = color {
-            let mut color = color.to_owned();
-            if scope == Scope::Sidebar && is_color(&format!("{SIDEBAR_COLOR_PREFIX}{color}")) {
-                color = format!("{SIDEBAR_COLOR_PREFIX}{color}");
-            }
-            if light {
-                color = format!("{LIGHT_COLOR_PREFIX}{color}");
-            }
-            utility = format!("{prefix}{color}{alpha}");
+        if color.is_some() {
+            utility = map_color(utility, light);
         }
         let chain: String = variants.iter().map(|v| format!("{v}:")).collect();
+        let width = is_border_width(&utility);
         out.push(format!("{important}{chain}{utility}"));
+        if width {
+            let base = map_color(base_border.to_owned(), false);
+            out.push(format!("{important}{chain}{base}"));
+        }
     }
     out.join(" ")
 }
@@ -225,7 +250,9 @@ fn rewrite_utility(utility: &str) -> String {
     if let Some(list) = utility
         .strip_prefix("transition-[")
         .and_then(|rest| rest.strip_suffix(']'))
-        && list.split(',').all(|property| TRANSITION_FAMILIES.contains(&property.trim()))
+        && list
+            .split(',')
+            .all(|property| TRANSITION_FAMILIES.contains(&property.trim()))
     {
         return "transition".to_owned();
     }
@@ -278,6 +305,28 @@ const COLOR_UTILITIES: [&str; 15] = [
     "divide-",
 ];
 
+/// `border`, `border-2`, `border-t`, `border-x-[3px]`: a width, which NSH colours `currentColor`.
+fn is_border_width(utility: &str) -> bool {
+    let Some(rest) = utility.strip_prefix("border") else {
+        return false;
+    };
+    let Some(rest) = rest.strip_prefix('-') else {
+        return rest.is_empty();
+    };
+    let width = |value: &str| {
+        !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+            || value
+                .strip_prefix('[')
+                .is_some_and(|inner| inner.starts_with(|c: char| c.is_ascii_digit()))
+    };
+    const SIDES: [&str; 8] = ["x", "y", "t", "r", "b", "l", "s", "e"];
+    match rest.split_once('-') {
+        _ if SIDES.contains(&rest) => true,
+        Some((side, value)) if SIDES.contains(&side) => width(value),
+        _ => width(rest),
+    }
+}
+
 /// A colour utility's prefix, colour token and `/alpha` suffix, when the name is a colour.
 fn color_utility<'a>(
     utility: &'a str,
@@ -302,6 +351,8 @@ mod tests {
         matches!(
             name,
             "foreground"
+                | "border"
+                | "input"
                 | "sidebar-border"
                 | "sb-foreground"
                 | "sidebar-row-active"
@@ -333,6 +384,31 @@ mod tests {
             run("h-[var(--workspace-topbar-height)]", Scope::Root, &[]),
             "h-(--workspace-topbar-height)"
         );
+    }
+
+    #[test]
+    fn a_border_width_takes_the_base_layers_colour_unless_it_names_one() {
+        for (web, nsh) in [
+            (
+                "rounded-2xl sm:border sm:shadow-2xl/40",
+                "rounded-2xl sm:border sm:border-border sm:shadow-2xl/40",
+            ),
+            (
+                "border-t border-b-2",
+                "border-t border-border border-b-2 border-border",
+            ),
+            (
+                "border-input/50 border",
+                "border-input/50 border border-input/50",
+            ),
+            (
+                "border hover:border-foreground",
+                "border border-border hover:border-foreground",
+            ),
+            ("border-border border-solid", "border-border border-solid"),
+        ] {
+            assert_eq!(run(web, Scope::Root, &[]), nsh, "{web}");
+        }
     }
 
     #[test]
@@ -533,16 +609,26 @@ mod tests {
         );
         // Per-axis overflow and listed transitions become NSH's one-property forms.
         for (web, nsh) in [
-            ("min-w-0 overflow-x-clip overflow-y-visible", "min-w-0 overflow-hidden"),
+            (
+                "min-w-0 overflow-x-clip overflow-y-visible",
+                "min-w-0 overflow-hidden",
+            ),
             ("overflow-y-visible", ""),
             (
                 "transition-[background-color,border-color,box-shadow] hover:bg-accent",
                 "transition hover:bg-accent",
             ),
             ("transition-[width]", "transition-[width]"),
-            ("any-pointer-coarse:relative any-pointer-fine:z-30", "pointer-coarse:relative pointer-fine:z-30"),
+            (
+                "any-pointer-coarse:relative any-pointer-fine:z-30",
+                "pointer-coarse:relative pointer-fine:z-30",
+            ),
         ] {
-            assert_eq!(rewrite(web, Scope::Root, &[], &is_color, false), nsh, "{web}");
+            assert_eq!(
+                rewrite(web, Scope::Root, &[], &is_color, false),
+                nsh,
+                "{web}"
+            );
         }
     }
 }

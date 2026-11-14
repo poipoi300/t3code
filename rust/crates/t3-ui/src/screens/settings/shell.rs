@@ -497,7 +497,16 @@ pub fn section_icon(page: SettingsPage) -> Icon {
 
 /// The settings route: mount with `Route::Settings(page) => settings::shell::screen(*page)`.
 pub fn screen(page: SettingsPage) -> AnyElement {
-    untracked(|| settings_route_layout(page).into_element())
+    untracked(|| settings_route_layout(page, host_runtime()).into_element())
+}
+
+/// `screen` over a given client runtime (the router passes the host's through `screen`).
+pub fn screen_for<P: t3_client::platform::Platform + Clone + 'static>(
+    page: SettingsPage,
+    client: &t3_client::composition::ClientRuntime<P>,
+) -> AnyElement {
+    let runtime = crate::runtime::services::settings::settings(client);
+    untracked(|| settings_route_layout(page, Some(runtime)).into_element())
 }
 
 /// `None` only for the demo backend and an unavailable host, which have no settings store.
@@ -509,7 +518,7 @@ fn host_runtime() -> Option<SettingsRuntime> {
 }
 
 /// `SettingsRouteLayout` with `SettingsScopeProvider`.
-fn settings_route_layout(page: SettingsPage) -> impl IntoElement {
+fn settings_route_layout(page: SettingsPage, runtime: Option<SettingsRuntime>) -> impl IntoElement {
     let location = SettingsLocation {
         urls: use_context::<UrlState>(),
         nav: navigator(),
@@ -525,7 +534,7 @@ fn settings_route_layout(page: SettingsPage) -> impl IntoElement {
             location.navigate(to, None, &hash);
         }
     });
-    let context = SettingsContext::new(page, host_runtime(), location);
+    let context = SettingsContext::new(page, runtime, location);
     provide_context(context);
     app_route_modal(t("Settings"), location, settings_content_layout(context))
 }
@@ -1538,7 +1547,9 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
                 let children = children.clone();
                 let content = untracked(|| children());
                 if inert {
+                    // The web's `inert`: one accessibility element, nothing inside reachable.
                     view()
+                        .accessible(true)
                         .pointer_events(PointerEvents::None)
                         .app_class(tw("opacity-50"))
                         .child(content)
@@ -1553,15 +1564,17 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
 /// `inertControl`: the control dimmed and unreachable, with the reason as a tooltip.
 fn inert_control(message: String, control: AnyElement) -> impl IntoElement {
     let handle = tooltip_create_handle();
+    // The web's `inert` subtree: one accessibility element named by the reason, so the control
+    // inside is neither announced nor pressable.
     view()
         .focusable(true)
+        .accessible(true)
         .label(message.clone())
         .tooltip(tooltip(handle, TooltipOptions::default(), text(message)))
         .app_class(tw("flex w-full flex-row items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
         .child(
             view()
                 .pointer_events(PointerEvents::None)
-                .accessible(false)
                 .app_class(tw("flex w-full flex-row items-center gap-2 opacity-50"))
                 .child(control),
         )

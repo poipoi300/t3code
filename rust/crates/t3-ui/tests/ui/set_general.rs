@@ -12,7 +12,8 @@ fn a_switch_saves_the_device_setting_and_its_reset_restores_the_default() {
         app.wait_for("delete=true").expect("default record");
         assert!(
             !app.screen()
-                .shows("role:button[Reset delete confirmation to default]")
+                .matches("role:button[Reset delete confirmation to default]")
+                .expect("selector")
         );
         app.press("role:switch[Confirm thread deletion]")
             .expect("toggle");

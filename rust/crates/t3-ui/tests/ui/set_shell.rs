@@ -157,7 +157,11 @@ fn the_nav_lists_the_web_groups_and_opens_a_section_with_its_breadcrumb() {
         assert!(app.screen().shows(label), "{label}");
     }
     // The secrets page is behind its feature flag, as on the web.
-    assert!(!app.screen().shows("role:button[Secrets]"));
+    assert!(
+        !app.screen()
+            .matches("role:button[Secrets]")
+            .expect("selector")
+    );
     app.press("role:button[Chat]").expect("chat section");
     app.wait_for("Route chat").expect("navigated");
     app.wait_for("Follow-ups")
@@ -166,7 +170,11 @@ fn the_nav_lists_the_web_groups_and_opens_a_section_with_its_breadcrumb() {
     assert!(app.screen().shows("Settings"));
     assert!(app.screen().shows("/"));
     // Restore device defaults belongs to General only.
-    assert!(!app.screen().shows("role:button[Restore device defaults]"));
+    assert!(
+        !app.screen()
+            .matches("role:button[Restore device defaults]")
+            .expect("selector")
+    );
 }
 
 #[test]
@@ -188,4 +196,151 @@ fn close_returns_to_the_page_that_opened_settings() {
     app.wait_for("Follow-ups").expect("chat page");
     app.press("role:button[Close]").expect("close");
     app.wait_for("Route Home").expect("back to the origin");
+}
+
+/// What the connected harness's environment answers.
+#[derive(Clone, Copy, PartialEq, Default)]
+pub struct Remote {
+    /// `autoResumeLimitedThreads` on the environment (the built-in default is `false`).
+    pub auto_resume: bool,
+    /// A managed policy from "Acme" locking `snoozeLimitedThreads`.
+    pub policy: bool,
+}
+
+#[derive(Clone, PartialEq, Props)]
+struct ConnectedProps {
+    page: usize,
+    auto_resume: bool,
+    policy: bool,
+}
+
+/// The production `settings::shell::screen_for` over a client runtime really paired with
+/// `t3_client::testing::environment::FakeEnvironment`, which grants `settings:write`. "Read
+/// server" shows the `server.updateSettings` payloads the environment received.
+#[component]
+fn Connected(props: ConnectedProps) -> impl IntoElement {
+    use futures::FutureExt;
+    use t3_client::composition::{ClientRuntime, Spawner};
+    use t3_client::testing::environment::FakeEnvironment;
+    use t3_client::types::EnvironmentId;
+    use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+    theme::install(&theme::ThemeChoice::default());
+    let page = SettingsPage::ALL[props.page];
+    provide_context(Navigator::new(Route::Settings(page)));
+    let store = ClientStore::default();
+    let owner = Owner::current();
+    let spawner: Spawner = Rc::new(move |future| {
+        owner.run(|| {
+            spawn(future);
+        });
+    });
+    let server = FakeEnvironment::new("env", spawner.clone());
+    server.set_permissions(&[
+        "orchestration:read",
+        "orchestration:operate",
+        "settings:write",
+    ]);
+    let remote = Remote {
+        auto_resume: props.auto_resume,
+        policy: props.policy,
+    };
+    server.edit_config(|config| {
+        config["settings"]["autoResumeLimitedThreads"] = serde_json::json!(remote.auto_resume);
+        config["settings"]["snoozeLimitedThreads"] = serde_json::json!(false);
+        if remote.policy {
+            config["managedPolicy"] =
+                serde_json::json!({"organization": "Acme", "lockedSettings": ["snoozeLimitedThreads"]});
+        }
+    });
+    let client = ClientRuntime::new(
+        server.platform(),
+        store.clone(),
+        OrchestrationV2CreationSource::Web,
+        spawner.clone(),
+    );
+    provide_context(Rt::new(
+        store.clone(),
+        Rc::new(client.clone()),
+        t3_ui::runtime::host::Choice::Client,
+    ));
+    let pairing = client.pair(server.pairing());
+    spawner(
+        async move {
+            let _ = pairing.await;
+        }
+        .boxed_local(),
+    );
+    let ready = signal(false);
+    {
+        let client = client.clone();
+        let mut changes = store.subscribe();
+        spawn(async move {
+            let environment = EnvironmentId("env".into());
+            while changes.next().await.is_some() {
+                let session = client
+                    .client(&environment)
+                    .and_then(|connected| connected.session())
+                    .is_some();
+                let config = client
+                    .store()
+                    .snapshot()
+                    .environments
+                    .get(&environment)
+                    .is_some_and(|environment| environment.config.is_some());
+                ready.set(session && config);
+            }
+        });
+    }
+    let updates = signal(Vec::<serde_json::Value>::new());
+    view()
+        .flex_1()
+        .child(text(move || {
+            if ready.get() {
+                "Session ready"
+            } else {
+                "No session"
+            }
+        }))
+        .child(
+            nsh_base::button()
+                .test_id("read-server")
+                .on_press(move || updates.set(server.calls("server.updateSettings")))
+                .child(text("Read server")),
+        )
+        .child(text(move || format!("Updates {}", updates.with(Vec::len))))
+        .child(text(move || {
+            format!(
+                "Last update {}",
+                updates.with(|calls| calls
+                    .last()
+                    .map(serde_json::Value::to_string)
+                    .unwrap_or_default())
+            )
+        }))
+        .child(untracked(|| shell::screen_for(page, &client)))
+}
+
+pub fn start_connected(window: (f32, f32), page: SettingsPage, remote: Remote) -> Headless {
+    let index = SettingsPage::ALL
+        .iter()
+        .position(|p| *p == page)
+        .unwrap_or(0);
+    let mut config = EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(window.0), px(window.1)),
+        ..EngineConfig::new(Root::new::<Connected>(move || ConnectedProps {
+            page: index,
+            auto_resume: remote.auto_resume,
+            policy: remote.policy,
+        }))
+    };
+    config.environment.idiom = if window == PHONE {
+        nsh_core::platform::Idiom::Phone
+    } else {
+        nsh_core::platform::Idiom::Desktop
+    };
+    let mut app = Headless::start(config).expect("connected settings harness starts");
+    app.wait_for("Session ready")
+        .expect("paired with the fake environment and read its config");
+    app
 }
