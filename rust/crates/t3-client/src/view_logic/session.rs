@@ -21,6 +21,8 @@ pub mod links;
 pub mod markdown_link_presentation;
 #[path = "session/markdown.rs"]
 pub mod markdown;
+pub mod markdown_references;
+pub mod image_gallery;
 #[path = "session/questions.rs"]
 pub mod questions;
 #[path = "session/review.rs"]

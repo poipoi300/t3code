@@ -31,9 +31,28 @@ impl ReviewSetup for Setup {
         panic!("foreign requests cannot run setup")
     }
 }
-fn forge(cli: Arc<Recorder>) -> Arc<dyn Forge> {
+fn git(root: &std::path::Path) -> t3_git::Git {
+    let program = root.join(if cfg!(windows) {
+        "record-git.cmd"
+    } else {
+        "record-git"
+    });
+    let source = if cfg!(windows) {
+        "@echo off\r\n>\"%~dp0git-spawned\" echo spawned\r\nexit /b 1\r\n"
+    } else {
+        "#!/bin/sh\n: > \"$(dirname \"$0\")/git-spawned\"\nexit 1\n"
+    };
+    std::fs::write(&program, source).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    t3_git::Git::new(root).with_program(program)
+}
+fn forge(cli: Arc<Recorder>, root: &std::path::Path) -> Arc<dyn Forge> {
     Arc::new(
-        GitLab::new(t3_git::Git::new("unused-fixture"))
+        GitLab::new(git(root))
             .unwrap()
             .with_cli(cli)
             .with_environment(
@@ -45,7 +64,11 @@ fn forge(cli: Arc<Recorder>) -> Arc<dyn Forge> {
             ),
     )
 }
-fn assert_no_process(cli: &Recorder) {
+fn assert_no_process(cli: &Recorder, root: &std::path::Path) {
+    assert!(
+        !root.join("git-spawned").exists(),
+        "a refused operation spawned Git"
+    );
     let requests = cli.0.lock().unwrap();
     assert!(
         requests.is_empty(),
@@ -62,8 +85,8 @@ async fn lookup_refuses_foreign_authorities_before_building_a_cli_request() {
         let root = tempfile::tempdir().unwrap();
         let cli = Arc::new(Recorder::default());
         let service = SourceControlRepositoryService::new(
-            Arc::new(ForgeRegistry::new([forge(cli.clone())])),
-            t3_git::Git::new(root.path()),
+            Arc::new(ForgeRegistry::new([forge(cli.clone(), root.path())])),
+            git(root.path()),
             root.path().into(),
         );
         assert!(
@@ -75,7 +98,7 @@ async fn lookup_refuses_foreign_authorities_before_building_a_cli_request() {
                 .await
                 .is_err()
         );
-        assert_no_process(&cli);
+        assert_no_process(&cli, root.path());
     }
 }
 #[tokio::test]
@@ -83,12 +106,12 @@ async fn clone_refuses_foreign_authority_before_building_a_cli_request() {
     let root = tempfile::tempdir().unwrap();
     let cli = Arc::new(Recorder::default());
     let service = SourceControlRepositoryService::new(
-        Arc::new(ForgeRegistry::new([forge(cli.clone())])),
-        t3_git::Git::new(root.path()),
+        Arc::new(ForgeRegistry::new([forge(cli.clone(), root.path())])),
+        git(root.path()),
         root.path().into(),
     );
     assert!(service.clone_repository(serde_json::from_value(json!({"provider":"gitlab", "repository":"https://attacker.example/a/b", "destinationPath":root.path().join("clone")})).unwrap(), Default::default()).await.is_err());
-    assert_no_process(&cli);
+    assert_no_process(&cli, root.path());
 }
 #[tokio::test]
 async fn prepare_thread_refuses_foreign_authority_before_building_a_cli_request() {
@@ -96,23 +119,24 @@ async fn prepare_thread_refuses_foreign_authority_before_building_a_cli_request(
     let cli = Arc::new(Recorder::default());
     let host = ForgeReviewHost::new(
         ForgeHandle {
-            forge: forge(cli.clone()),
+            forge: forge(cli.clone(), root.path()),
             context: None,
         },
         Arc::new(Setup),
     );
-    let service = t3_git::GitWorkflowService::new(t3_git::Git::new(root.path()))
-        .with_review_host(Arc::new(host));
+    let service =
+        t3_git::GitWorkflowService::new(git(root.path())).with_review_host(Arc::new(host));
     assert!(service.prepare_pull_request_thread(&serde_json::from_value(json!({"cwd":root.path(), "reference":"https://attacker.example/a/b/-/merge_requests/1", "mode":"local"})).unwrap()).await.is_err());
-    assert_no_process(&cli);
+    assert_no_process(&cli, root.path());
 }
 #[tokio::test]
 async fn review_clone_urls_refuse_foreign_host_overrides() {
     use t3_git::ReviewHost;
+    let root = tempfile::tempdir().unwrap();
     let cli = Arc::new(Recorder::default());
     let host = ForgeReviewHost::new(
         ForgeHandle {
-            forge: forge(cli.clone()),
+            forge: forge(cli.clone(), root.path()),
             context: None,
         },
         Arc::new(Setup),
@@ -126,7 +150,7 @@ async fn review_clone_urls_refuse_foreign_host_overrides() {
         .await
         .is_err()
     );
-    assert_no_process(&cli);
+    assert_no_process(&cli, root.path());
 }
 
 #[tokio::test]
