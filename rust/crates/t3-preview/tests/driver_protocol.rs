@@ -7,6 +7,13 @@ use t3_preview::{
 };
 #[tokio::test]
 async fn driver_can_open_resize_navigate_and_close_through_real_worker_with_fake_playwright() {
+    exercise_worker("worker-fixture.cjs").await;
+}
+#[tokio::test]
+async fn unknown_and_malformed_events_do_not_disconnect_valid_worker_requests() {
+    exercise_worker("events-fixture.cjs").await;
+}
+async fn exercise_worker(module: &str) {
     let root = tempfile::tempdir().unwrap();
     let driver = PlaywrightDriver::start(PlaywrightOptions {
         node: "node".into(),
@@ -16,12 +23,15 @@ async fn driver_can_open_resize_navigate_and_close_through_real_worker_with_fake
         downloads_dir: root.path().join("downloads"),
         attachments_dir: root.path().join("attachments"),
         playwright_module: Some(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("driver/tests/worker-fixture.cjs"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("driver/tests")
+                .join(module),
         ),
         sandbox: true,
     })
     .await
     .unwrap();
+    let mut events = driver.subscribe();
     let snapshot=serde_json::from_value(json!({"threadId":"thread","tabId":"one","navStatus":{"_tag":"Idle"},"canGoBack":false,"canGoForward":false,"viewport":{"_tag":"fill"},"runtime":"server","updatedAt":"2026-01-01T00:00:00Z"})).unwrap();
     let opened = driver
         .call(
@@ -37,6 +47,10 @@ async fn driver_can_open_resize_navigate_and_close_through_real_worker_with_fake
         .await
         .unwrap();
     assert_eq!(opened["viewport"], json!({"width":1280,"height":800}));
+    assert_eq!(
+        opened["_workerGeneration"].as_u64(),
+        Some(driver.generation())
+    );
     let key = TabKey::new("thread", "one");
     let navigated = driver
         .call(
@@ -53,6 +67,11 @@ async fn driver_can_open_resize_navigate_and_close_through_real_worker_with_fake
         .unwrap();
     assert_eq!(navigated["url"], "https://example.com/");
     assert_eq!(navigated["title"], "Fixture page");
+    let t3_preview::driver::BrowserEvent::Worker { generation, .. } = events.recv().await.unwrap()
+    else {
+        panic!("missing worker generation")
+    };
+    assert_eq!(generation, driver.generation());
     let resized = driver
         .call(
             BrowserCommand::Operate {

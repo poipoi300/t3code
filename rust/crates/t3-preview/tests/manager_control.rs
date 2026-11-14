@@ -86,7 +86,14 @@ async fn navigation_preserves_profile_viewport_and_reveal_request() {
     let mut events = manager.subscribe_events();
     let mut input = open("a", None, None);
     input.profile_id = Some(Some("work".into()));
+    input.color_scheme = Some(Some(PreviewAppearancePreference::Dark));
+    input.zoom_factor = Some(Some(serde_json::from_value(json!(1.25)).unwrap()));
     let tab = manager.open(input).await.unwrap();
+    assert_eq!(
+        tab.color_scheme,
+        Some(Some(PreviewAppearancePreference::Dark))
+    );
+    assert_eq!(serde_json::to_value(&tab.zoom_factor).unwrap(), json!(1.25));
     let viewport = PreviewViewportSetting::Freeform {
         width: 1024,
         height: 768,
@@ -151,6 +158,39 @@ async fn navigation_preserves_profile_viewport_and_reveal_request() {
     for n in 1..=5 {
         assert_eq!(revision(&events.recv().await.unwrap()), n);
     }
+    manager
+        .report_status(PreviewReportStatusInput {
+            thread_id: "a".into(),
+            tab_id: tab.tab_id.clone(),
+            nav_status: PreviewNavStatus::LoadFailed {
+                url: "https://example.com/failed".into(),
+                title: "".into(),
+                code: -105,
+                description: "ERR_NAME_NOT_RESOLVED".into(),
+                download: None,
+            },
+            can_go_back: true,
+            can_go_forward: false,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        PreviewEvent::Failed { .. }
+    ));
+    manager
+        .request_reveal("a", tab.tab_id.as_str(), true)
+        .await
+        .unwrap();
+    let event = events.recv().await.unwrap();
+    let PreviewEvent::Navigated { snapshot, .. } = event else {
+        panic!("reveal must carry the snapshot: {event:?}")
+    };
+    assert!(matches!(
+        snapshot.nav_status,
+        PreviewNavStatus::LoadFailed { .. }
+    ));
+    assert!(snapshot.reveal_request.flatten().unwrap().force);
 }
 
 #[tokio::test]

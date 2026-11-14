@@ -327,10 +327,10 @@ impl SecretRequests {
             let stored = fs::read(entry.path())
                 .ok()
                 .and_then(|b| serde_json::from_slice::<StoredSecret>(&b).ok());
-            if stored.is_none_or(|s| self.clock.now_ms().saturating_sub(s.saved_at) > TTL_MS) {
-                if self.store.remove(name.trim_end_matches(".bin")).is_ok() {
-                    removed += 1;
-                }
+            if stored.is_none_or(|s| self.clock.now_ms().saturating_sub(s.saved_at) > TTL_MS)
+                && self.store.remove(name.trim_end_matches(".bin")).is_ok()
+            {
+                removed += 1;
             }
         }
         let files = self.directory.join("files");
@@ -356,10 +356,8 @@ impl SecretRequests {
                     .is_none_or(|d| {
                         i128::from(self.clock.now_ms()) - d.as_millis() as i128 > i128::from(TTL_MS)
                     });
-                if expired {
-                    if fs::remove_file(entry.path()).is_ok() {
-                        removed += 1;
-                    }
+                if expired && fs::remove_file(entry.path()).is_ok() {
+                    removed += 1;
                 }
             }
         }
@@ -390,20 +388,6 @@ fn secret_file_name(name: &str) -> bool {
         ))
         .is_ok()
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn plaintext_temporary_file_name_is_recognized_by_the_expiry_sweep() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut temp = secret_temp(directory.path(), "0123456789abcdef0123456789abcdef").unwrap();
-        temp.write_all(b"sensitive plaintext").unwrap();
-        assert!(
-            secret_file_name(temp.path().file_name().unwrap().to_str().unwrap()),
-            "a crash must leave a sweepable plaintext file"
-        );
-    }
-}
 fn private_permissions(path: &Path, directory: bool) -> Result<()> {
     #[cfg(unix)]
     {
@@ -417,4 +401,19 @@ fn private_permissions(path: &Path, directory: bool) -> Result<()> {
     #[cfg(not(unix))]
     let _ = (path, directory);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn plaintext_temporary_file_name_is_recognized_by_the_expiry_sweep() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut temp = secret_temp(directory.path(), "0123456789abcdef0123456789abcdef").unwrap();
+        temp.write_all(b"sensitive plaintext").unwrap();
+        assert!(
+            secret_file_name(temp.path().file_name().unwrap().to_str().unwrap()),
+            "a crash must leave a sweepable plaintext file"
+        );
+    }
 }

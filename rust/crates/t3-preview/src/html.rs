@@ -96,9 +96,20 @@ pub struct HtmlOptions {
 }
 #[derive(Clone)]
 pub struct HtmlService {
+    #[cfg(test)]
+    work_threads: Arc<Mutex<Vec<std::thread::ThreadId>>>,
+    #[cfg(test)]
+    write_gate: Option<Arc<WriteGate>>,
     options: Arc<HtmlOptions>,
     driver: Option<Arc<dyn BrowserDriver>>,
     browsers: Arc<tokio::sync::Semaphore>,
+}
+#[cfg(test)]
+#[derive(Default)]
+struct WriteGate {
+    entered: tokio::sync::Notify,
+    released: Mutex<bool>,
+    changed: std::sync::Condvar,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,14 +126,17 @@ pub struct HtmlPreview {
 impl HtmlService {
     pub fn new(options: HtmlOptions, driver: Option<Arc<dyn BrowserDriver>>) -> Self {
         Self {
+            #[cfg(test)]
+            work_threads: Arc::default(),
+            #[cfg(test)]
+            write_gate: None,
             options: Arc::new(options),
             driver,
             browsers: Arc::new(tokio::sync::Semaphore::new(2)),
         }
     }
     pub async fn prepare(&self, html: &str) -> Result<String> {
-        reject_viewport_height(html)?;
-        let inlined = inline_images(inject_bootstrap(html)).await?;
+        let inlined = self.inline_document(html.to_owned()).await?;
         if !inlined.1.is_empty() {
             return Err(Error::Operation {
                 tag: "HtmlRenderImagesNotFoundError".into(),
@@ -134,6 +148,18 @@ impl HtmlService {
             });
         }
         Ok(inlined.0)
+    }
+    async fn inline_document(&self, source: String) -> Result<(String, Vec<String>)> {
+        #[cfg(test)]
+        let work_threads = self.work_threads.clone();
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            lock(&work_threads).push(std::thread::current().id());
+            reject_viewport_height(&source)?;
+            inline_images(inject_bootstrap(&source))
+        })
+        .await
+        .map_err(|error| Error::Io(error.to_string()))?
     }
     pub async fn read_source(&self, source: &HtmlSource) -> Result<String> {
         match source {
@@ -187,23 +213,42 @@ impl HtmlService {
         }
         tokio::fs::create_dir_all(&self.options.attachments_dir).await?;
         admission().await?;
-        let mut rollback = PublishedFile {
+        let rollback = PublishedFile {
             path: path.clone(),
             thread: thread.clone(),
             reference: reference.clone(),
             recovery: self.options.recovery.clone(),
             committed: false,
         };
-        // A synchronous bounded file write leaves no detached write racing cancellation cleanup.
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|error| Error::operation("HtmlRenderStoreError", error.to_string()))?;
-        use std::io::Write;
-        file.write_all(html.as_bytes())
-            .map_err(|error| Error::operation("HtmlRenderStoreError", error.to_string()))?;
-        drop(file);
+        #[cfg(test)]
+        let work_threads = self.work_threads.clone();
+        #[cfg(test)]
+        let gate = self.write_gate.clone();
+        // The job owns rollback until its write finishes, even when its async waiter is cancelled.
+        let (mut rollback, html) = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            lock(&work_threads).push(std::thread::current().id());
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|error| Error::operation("HtmlRenderStoreError", error.to_string()))?;
+            #[cfg(test)]
+            if let Some(gate) = gate {
+                gate.entered.notify_one();
+                let mut released = lock(&gate.released);
+                while !*released {
+                    released = gate.changed.wait(released).expect("write gate");
+                }
+            }
+            use std::io::Write;
+            file.write_all(html.as_bytes())
+                .map_err(|error| Error::operation("HtmlRenderStoreError", error.to_string()))?;
+            drop(file);
+            Ok::<_, Error>((rollback, html))
+        })
+        .await
+        .map_err(|error| Error::Io(error.to_string()))??;
         if let Some(driver) = &self.driver {
             let measure = async {
                 let _permit = self
@@ -249,8 +294,7 @@ impl HtmlService {
             return Err(Error::InvalidInput("Invalid appearance".into()));
         }
         let source = self.read_source(&source).await?;
-        reject_viewport_height(&source)?;
-        let (html, missing) = inline_images(inject_bootstrap(&source)).await?;
+        let (html, missing) = self.inline_document(source).await?;
         let driver = self.driver.as_ref().ok_or_else(|| {
             Error::operation(
                 "HtmlRenderBrowserError",
@@ -351,7 +395,33 @@ pub fn truncate_utf16(text: &str, limit: usize) -> String {
         .collect()
 }
 fn rx(pattern: &'static str) -> Regex {
-    Regex::new(pattern).expect("literal regex")
+    static COMPILED: OnceLock<Mutex<BTreeMap<&'static str, Regex>>> = OnceLock::new();
+    lock(COMPILED.get_or_init(Mutex::default))
+        .entry(pattern)
+        .or_insert_with(|| Regex::new(pattern).expect("literal regex"))
+        .clone()
+}
+fn raw_text_closing(tag: &str) -> &'static Regex {
+    static CLOSING: OnceLock<Vec<(&str, Regex)>> = OnceLock::new();
+    &CLOSING
+        .get_or_init(|| {
+            [
+                "script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes",
+                "noscript",
+            ]
+            .into_iter()
+            .map(|tag| {
+                (
+                    tag,
+                    Regex::new(&format!(r"(?i)</{tag}\s*>")).expect("known raw text tag"),
+                )
+            })
+            .collect()
+        })
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(tag))
+        .expect("known raw text tag")
+        .1
 }
 pub fn reject_viewport_height(html: &str) -> Result<()> {
     static SOURCE: OnceLock<Regex> = OnceLock::new();
@@ -397,8 +467,7 @@ pub fn inject_bootstrap(html: &str) -> String {
             if tag.as_str().eq_ignore_ascii_case("plaintext") {
                 html.len()
             } else {
-                Regex::new(&format!(r"(?i)</{}\s*>", tag.as_str()))
-                    .expect("known raw text tag")
+                raw_text_closing(tag.as_str())
                     .find(&html[after..])
                     .map_or(html.len(), |close| after + close.end())
             }
@@ -529,7 +598,7 @@ fn image_refs(html: &str) -> Vec<ImageRef> {
     out.dedup_by_key(|r| r.start);
     out
 }
-async fn inline_images(html: String) -> Result<(String, Vec<String>)> {
+fn inline_images(html: String) -> Result<(String, Vec<String>)> {
     let refs = image_refs(&html);
     let mut files = Vec::new();
     for reference in &refs {
@@ -547,8 +616,7 @@ async fn inline_images(html: String) -> Result<(String, Vec<String>)> {
         } else {
             path.clone()
         };
-        let size = tokio::fs::metadata(&file)
-            .await
+        let size = std::fs::metadata(&file)
             .ok()
             .filter(|m| m.is_file())
             .map(|m| m.len() as usize);
@@ -575,15 +643,13 @@ async fn inline_images(html: String) -> Result<(String, Vec<String>)> {
                 ));
             }
             let path_owned = file.clone();
-            let bytes = tokio::task::spawn_blocking(move || {
+            let bytes = (|| {
                 let file = open_regular_file(Path::new(&path_owned), false)?;
                 let mut bytes = Vec::new();
                 file.take((MAX_IMAGE_BYTES + 1) as u64)
                     .read_to_end(&mut bytes)?;
                 Ok::<_, std::io::Error>(bytes)
-            })
-            .await
-            .map_err(|e| Error::Io(e.to_string()))?;
+            })();
             if let Ok(bytes) = bytes
                 && is_image_bytes(&bytes)
             {
@@ -846,4 +912,143 @@ fn singly_linked(file: &std::fs::File, _metadata: &std::fs::Metadata) -> bool {
 #[cfg(not(any(unix, windows)))]
 fn singly_linked(_: &std::fs::File, _: &std::fs::Metadata) -> bool {
     false
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+    #[tokio::test]
+    async fn agent_html_processing_runs_off_the_async_runtime_thread() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let service = HtmlService::new(
+            HtmlOptions {
+                attachments_dir: root.path().join("attachments"),
+                state_dir: root.path().join("state"),
+                secrets_dir: root.path().join("secrets"),
+                recovery: Arc::new(MemoryHtmlRecovery::default()),
+            },
+            None,
+        );
+        let runtime_thread = std::thread::current().id();
+        let html = format!(
+            "<html><head>{}</head><p>content</p></html>",
+            "<script>const inert='</style><head>';</script>".repeat(100)
+        );
+        let prepared = service.prepare(&html).await.expect("prepare");
+        assert!(prepared.contains("<p>content</p>"));
+        let threads = lock(&service.work_threads);
+        assert!(!threads.is_empty());
+        assert!(
+            threads.iter().all(|thread| *thread != runtime_thread),
+            "HTML parsing/inlining ran on the async runtime thread"
+        );
+    }
+    #[tokio::test]
+    async fn publication_file_writes_run_off_the_async_runtime_thread() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let service = HtmlService::new(
+            HtmlOptions {
+                attachments_dir: root.path().join("attachments"),
+                state_dir: root.path().join("state"),
+                secrets_dir: root.path().join("secrets"),
+                recovery: Arc::new(MemoryHtmlRecovery::default()),
+            },
+            None,
+        );
+        let runtime_thread = std::thread::current().id();
+        service
+            .publish(
+                "thread".into(),
+                PublishedSource {
+                    source: HtmlSource::Html {
+                        html: "<p>publication</p>".into(),
+                    },
+                    title: "Page".into(),
+                    height: 200.0,
+                },
+            )
+            .await
+            .expect("publication");
+        let threads = lock(&service.work_threads);
+        assert_eq!(threads.len(), 2);
+        assert!(
+            threads.iter().all(|thread| *thread != runtime_thread),
+            "publication wrote the file on the async runtime thread"
+        );
+    }
+    #[tokio::test]
+    async fn cancelled_writer_finishes_before_removing_its_file_and_never_records_recovery() {
+        struct Recovery {
+            forgotten: tokio::sync::Notify,
+            records: std::sync::atomic::AtomicUsize,
+        }
+        impl HtmlRenderRecovery for Recovery {
+            fn record(
+                &self,
+                _: &ThreadId,
+                _: &PublishedSource,
+                _: &HtmlRenderReference,
+            ) -> Result<()> {
+                self.records
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+            fn forget(&self, _: &ThreadId, _: &HtmlRenderReference) {
+                self.forgotten.notify_one();
+            }
+        }
+        let root = tempfile::tempdir().expect("tempdir");
+        let attachments = root.path().join("attachments");
+        let recovery = Arc::new(Recovery {
+            forgotten: tokio::sync::Notify::new(),
+            records: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut service = HtmlService::new(
+            HtmlOptions {
+                attachments_dir: attachments.clone(),
+                state_dir: root.path().join("state"),
+                secrets_dir: root.path().join("secrets"),
+                recovery: recovery.clone(),
+            },
+            None,
+        );
+        let gate = Arc::new(WriteGate::default());
+        service.write_gate = Some(gate.clone());
+        let publishing = tokio::spawn(async move {
+            service
+                .publish(
+                    "thread".into(),
+                    PublishedSource {
+                        source: HtmlSource::Html {
+                            html: "<p>cancel during write</p>".into(),
+                        },
+                        title: "Page".into(),
+                        height: 200.0,
+                    },
+                )
+                .await
+        });
+        gate.entered.notified().await;
+        assert_eq!(
+            std::fs::read_dir(&attachments)
+                .expect("attachments")
+                .count(),
+            1
+        );
+        publishing.abort();
+        assert!(publishing.await.expect_err("cancelled").is_cancelled());
+        *lock(&gate.released) = true;
+        gate.changed.notify_one();
+        recovery.forgotten.notified().await;
+        assert_eq!(
+            std::fs::read_dir(&attachments)
+                .expect("attachments")
+                .count(),
+            0
+        );
+        assert_eq!(
+            recovery.records.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
 }

@@ -117,6 +117,41 @@ fn every_supported_head_resumes_to_identical_schema() {
     }
 }
 
+#[test]
+fn auth_connect_migrations_preserve_head89_data_and_defaults() {
+    let mut connection = database_at(89);
+    connection.execute_batch("INSERT INTO auth_pairing_links(id,credential,method,scopes,subject,label,proof_key_thumbprint,created_at,expires_at,revoked_at) VALUES ('link','credential','one-time-token','[\"access:read\"]','device','Original label','key','2026-10-01','2027-10-01','2026-10-02');
+        INSERT INTO auth_sessions(session_id,subject,scopes,method,issued_at,expires_at,client_label) VALUES ('session','device','[\"access:read\"]','access-token','2026-10-01','2027-10-01','Original client');
+        UPDATE effect_sql_migrations SET created_at='2026-10-01 01:02:03';").unwrap();
+    assert_eq!(
+        migrations::run_migrations(&mut connection, Some(90))
+            .unwrap()
+            .iter()
+            .map(|entry| (entry.id, entry.name.as_str()))
+            .collect::<Vec<_>>(),
+        [(90, "AuthConnectDevices")]
+    );
+    assert_eq!(connection.query_row("SELECT requires_connect_approval,requested_client_json,revoked_at,label,proof_key_thumbprint FROM auth_pairing_links WHERE id='link'", [], |row| Ok((row.get::<_,i64>(0)?, row.get::<_,Option<String>>(1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?, row.get::<_,String>(4)?))).unwrap(), (0,None,"2026-10-02".into(),"Original label".into(),"key".into()));
+    assert_eq!(connection.query_row("SELECT proof_key_thumbprint,client_label FROM auth_sessions WHERE session_id='session'", [], |row| Ok((row.get::<_,Option<String>>(0)?,row.get::<_,String>(1)?))).unwrap(), (None,"Original client".into()));
+    connection.execute_batch("UPDATE auth_pairing_links SET requires_connect_approval=1,requested_client_json='{\"label\":\"Device\"}';
+        UPDATE auth_sessions SET proof_key_thumbprint='key';
+        INSERT INTO auth_connect_devices VALUES ('key','{\"label\":\"Device\"}','2026-10-03');").unwrap();
+    assert_eq!(
+        migrations::run_migrations(&mut connection, None)
+            .unwrap()
+            .iter()
+            .map(|entry| (entry.id, entry.name.as_str()))
+            .collect::<Vec<_>>(),
+        [(91, "AuthConnectDeniedRequests")]
+    );
+    assert_eq!(connection.query_row("SELECT connect_denied,requires_connect_approval,requested_client_json FROM auth_pairing_links", [], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?))).unwrap(), (0,1,"{\"label\":\"Device\"}".into()));
+    assert_eq!(connection.query_row("SELECT proof_key_thumbprint FROM auth_sessions", [], |row| row.get::<_,String>(0)).unwrap(), "key");
+    assert_eq!(connection.query_row("SELECT approved_at FROM auth_connect_devices WHERE proof_key_thumbprint='key'", [], |row| row.get::<_,String>(0)).unwrap(), "2026-10-03");
+    assert_eq!(connection.query_row("SELECT COUNT(*) FROM effect_sql_migrations WHERE migration_id<=89 AND created_at='2026-10-01 01:02:03'", [], |row| row.get::<_,i64>(0)).unwrap(),89);
+    assert_head_schema(&connection);
+    assert!(migrations::run_migrations(&mut connection, None).unwrap().is_empty());
+}
+
 fn insert_message(connection: &Connection, id: &str, text: serde_json::Value) {
     connection.execute("INSERT INTO orchestration_v2_projection_messages(message_id,thread_id,role,streaming,created_at,updated_at,payload_json) VALUES (?1,'thread:quote','user',0,'2026-10-01','2026-10-01',?2)", (id,json!({"text":text}).to_string())).unwrap();
 }

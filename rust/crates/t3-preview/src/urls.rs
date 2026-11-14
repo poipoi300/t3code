@@ -11,12 +11,13 @@ pub fn is_loopback_host(host: &str) -> bool {
 
 pub fn normalize_preview_url(raw: &str) -> Result<String> {
     let s = raw.trim();
-    let fail = |reason: &str| Error::InvalidUrl {
+    let fail = |reason: &str, protocol: Option<&str>| Error::InvalidUrl {
         reason: reason.into(),
         input_length: raw.encode_utf16().count(),
+        protocol: protocol.map(str::to_owned),
     };
     if s.is_empty() {
-        return Err(fail("empty"));
+        return Err(fail("empty", None));
     }
     if let Some((scheme, _)) = s.split_once(':')
         && matches!(
@@ -37,7 +38,10 @@ pub fn normalize_preview_url(raw: &str) -> Result<String> {
                 | "wss"
         )
     {
-        return Err(fail("unsupported-protocol"));
+        return Err(fail(
+            "unsupported-protocol",
+            Some(&format!("{}:", scheme.to_ascii_lowercase())),
+        ));
     }
     let scheme = s.split_once("://").map(|(scheme, _)| scheme);
     let candidate = if scheme.is_some_and(|scheme| {
@@ -59,12 +63,18 @@ pub fn normalize_preview_url(raw: &str) -> Result<String> {
             });
         format!("{}://{s}", if local { "http" } else { "https" })
     };
-    let url = Url::parse(&candidate).map_err(|_| fail("parse"))?;
+    let protocol = candidate
+        .split_once(':')
+        .map(|(scheme, _)| format!("{}:", scheme.to_ascii_lowercase()));
+    let url = Url::parse(&candidate).map_err(|_| fail("parse", protocol.as_deref()))?;
     if !matches!(url.scheme(), "http" | "https") {
-        return Err(fail("unsupported-protocol"));
+        return Err(fail(
+            "unsupported-protocol",
+            Some(&format!("{}:", url.scheme())),
+        ));
     }
     if url.host_str().is_none() {
-        return Err(fail("parse"));
+        return Err(fail("parse", protocol.as_deref()));
     }
     Ok(url.to_string())
 }

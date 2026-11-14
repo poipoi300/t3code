@@ -505,6 +505,7 @@ pub async fn diagnose_launch_failure(
 }
 
 pub struct ManagedBrowserDriver {
+    generation: std::sync::atomic::AtomicU64,
     installer: PreviewBrowser,
     options: PlaywrightOptions,
     driver: tokio::sync::Mutex<Option<Arc<PlaywrightDriver>>>,
@@ -527,6 +528,7 @@ impl ManagedBrowserDriver {
         let setup_command = format!("t3 browser setup --base-dir {quoted}");
         Self {
             installer,
+            generation: std::sync::atomic::AtomicU64::new(0),
             options,
             driver: tokio::sync::Mutex::new(None),
             events: Events::default(),
@@ -539,13 +541,37 @@ impl ManagedBrowserDriver {
     }
 }
 impl ManagedBrowserDriver {
+    async fn worker(&self) -> Result<Arc<PlaywrightDriver>> {
+        let mut driver = self.driver.lock().await;
+        if driver.as_ref().is_some_and(|driver| !driver.is_connected()) {
+            *driver = None;
+        }
+        if driver.is_none() {
+            let mut options = self.options.clone();
+            if let Some(executable) = self.installer.installed() {
+                options.executable = executable;
+            }
+            let child = Arc::new(PlaywrightDriver::start(options).await?);
+            self.generation
+                .store(child.generation(), std::sync::atomic::Ordering::Release);
+            let mut events = child.subscribe();
+            let outgoing = self.events.clone();
+            tokio::spawn(async move {
+                while let Some(event) = events.recv().await {
+                    outgoing.publish(event);
+                }
+            });
+            *driver = Some(child);
+        }
+        Ok(driver.as_ref().expect("driver initialized").clone())
+    }
     async fn call_inner(&self, command: BrowserCommand, timeout: Duration) -> Result<Value> {
         if matches!(command, BrowserCommand::HtmlMeasure { .. })
             && self.installer.installed().is_none()
         {
             return Ok(Value::Null);
         }
-        let driver = {
+        {
             let mut driver = self.driver.lock().await;
             if driver.as_ref().is_some_and(|driver| !driver.is_connected()) {
                 *driver = None;
@@ -572,22 +598,17 @@ impl ManagedBrowserDriver {
                     | BrowserCommand::DiscardPopup { .. } => return Ok(Value::Null),
                     _ => {}
                 }
-                let mut options = self.options.clone();
-                if let Some(executable) = self.installer.installed() {
-                    options.executable = executable;
-                }
-                let child = Arc::new(PlaywrightDriver::start(options).await?);
-                let mut events = child.subscribe();
-                let outgoing = self.events.clone();
-                tokio::spawn(async move {
-                    while let Some(event) = events.recv().await {
-                        outgoing.publish(event);
-                    }
-                });
-                *driver = Some(child);
             }
-            driver.as_ref().expect("driver initialized").clone()
-        };
+        }
+        self.dispatch_on(self.worker().await?, command, timeout)
+            .await
+    }
+    async fn dispatch_on(
+        &self,
+        driver: Arc<PlaywrightDriver>,
+        command: BrowserCommand,
+        timeout: Duration,
+    ) -> Result<Value> {
         let needs_executable = matches!(
             &command,
             BrowserCommand::Open {
@@ -623,12 +644,84 @@ impl ManagedBrowserDriver {
 }
 #[async_trait]
 impl BrowserDriver for ManagedBrowserDriver {
-    async fn call(&self, command: BrowserCommand, timeout: Duration) -> Result<Value> {
-        tokio::time::timeout(timeout, self.call_inner(command, timeout))
+    fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+    async fn prepare(&self) -> Result<u64> {
+        Ok(self.worker().await?.generation())
+    }
+    async fn call_on(
+        &self,
+        generation: u64,
+        command: BrowserCommand,
+        timeout: Duration,
+    ) -> Result<Value> {
+        let driver = self
+            .driver
+            .lock()
             .await
-            .map_err(|_| Error::Timeout("managed browser driver".into()))?
+            .as_ref()
+            .filter(|driver| driver.generation() == generation && driver.is_connected())
+            .cloned()
+            .ok_or(Error::Disconnected)?;
+        self.dispatch_on(driver, command, timeout).await
+    }
+    async fn call(&self, command: BrowserCommand, timeout: Duration) -> Result<Value> {
+        // Installation has its own shared wait budget; the driver bounds the browser command.
+        self.call_inner(command, timeout).await
     }
     fn subscribe(&self) -> mpsc::UnboundedReceiver<BrowserEvent> {
         self.events.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    #[tokio::test]
+    async fn queued_command_cannot_switch_to_the_replacement_worker() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let options = PlaywrightOptions {
+            node: "node".into(),
+            cwd: root.path().into(),
+            executable: root.path().join("never-run-chrome"),
+            profiles_dir: root.path().join("profiles"),
+            downloads_dir: root.path().join("downloads"),
+            attachments_dir: root.path().join("attachments"),
+            playwright_module: None,
+            sandbox: true,
+        };
+        let managed = ManagedBrowserDriver::new(
+            PreviewBrowser::with_release(root.path().into(), None, Duration::from_secs(1))
+                .expect("installer"),
+            options.clone(),
+        );
+        let original = managed.prepare().await.expect("original worker");
+        let mut state = managed.driver.lock().await;
+        let mut command = Box::pin(managed.call_on(
+            original,
+            BrowserCommand::Executable {
+                path: root.path().join("stale-command"),
+            },
+            Duration::from_secs(5),
+        ));
+        assert!(futures_util::poll!(command.as_mut()).is_pending());
+        let replacement = Arc::new(
+            PlaywrightDriver::start(options)
+                .await
+                .expect("replacement worker"),
+        );
+        managed.generation.store(
+            replacement.generation(),
+            std::sync::atomic::Ordering::Release,
+        );
+        let previous = state.replace(replacement);
+        drop(previous);
+        drop(state);
+        assert!(matches!(command.await, Err(Error::Disconnected)));
+        managed
+            .call(BrowserCommand::Shutdown, Duration::from_secs(5))
+            .await
+            .expect("shutdown");
     }
 }

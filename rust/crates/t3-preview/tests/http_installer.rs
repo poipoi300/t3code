@@ -485,3 +485,106 @@ async fn clearing_an_unopened_profile_and_shutdown_need_neither_node_nor_chrome(
         .unwrap();
     assert!(!root.path().join("tools").exists());
 }
+
+#[tokio::test]
+async fn browser_installation_has_its_own_wait_budget_before_the_render_deadline() {
+    use t3_preview::{
+        BrowserDriver,
+        driver::{BrowserCommand, PlaywrightOptions},
+        installer::ManagedBrowserDriver,
+    };
+    let binary = format!("chrome-headless-shell-fixture/{}", browser_name());
+    let bytes = archive(&[(&binary, b"not executable", 0o755)]);
+    let hash = {
+        use sha2::Digest;
+        format!("{:x}", sha2::Sha256::digest(&bytes))
+    };
+    let size = bytes.len();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (requested, request) = tokio::sync::oneshot::channel();
+    let (respond, response) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = [0u8; 1024];
+        assert!(socket.read(&mut buffer).await.unwrap() > 0);
+        requested.send(()).unwrap();
+        response.await.unwrap();
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    bytes.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        socket.write_all(&bytes).await.unwrap();
+    });
+    let root = tempfile::tempdir().unwrap();
+    let installer = PreviewBrowser::with_release(
+        root.path().into(),
+        Some(BrowserRelease {
+            version: "1.0.0".into(),
+            platform: "fixture".into(),
+            url,
+            bytes: size as u64,
+            sha256: hash,
+        }),
+        Duration::from_secs(45),
+    )
+    .unwrap();
+    let installing = {
+        let installer = installer.clone();
+        tokio::spawn(async move { installer.executable().await })
+    };
+    request.await.unwrap();
+    let driver = ManagedBrowserDriver::new(
+        installer,
+        PlaywrightOptions {
+            node: "node".into(),
+            cwd: root.path().into(),
+            executable: root.path().join("never-run"),
+            profiles_dir: root.path().join("profiles"),
+            downloads_dir: root.path().join("downloads"),
+            attachments_dir: root.path().join("attachments"),
+            playwright_module: None,
+            sandbox: true,
+        },
+    );
+    driver
+        .call(
+            BrowserCommand::Executable {
+                path: root.path().join("never-run"),
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    tokio::time::pause();
+    let mut capture = Box::pin(driver.call(
+        BrowserCommand::HtmlCapture {
+            html: "<p>test</p>".into(),
+            width: 728,
+            appearance: "dark".into(),
+            fragment: String::new(),
+        },
+        Duration::from_secs(1),
+    ));
+    assert!(futures_util::poll!(capture.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(
+        futures_util::poll!(capture.as_mut()).is_pending(),
+        "installation consumed the render deadline"
+    );
+    drop(capture);
+    tokio::time::resume();
+    respond.send(()).unwrap();
+    installing.await.unwrap().unwrap();
+    server.await.unwrap();
+    driver
+        .call(BrowserCommand::Shutdown, Duration::from_secs(5))
+        .await
+        .unwrap();
+}

@@ -112,12 +112,12 @@ impl McpAdapter {
                     .access
                     .thread_shell(&caller.thread_id)
                     .await?
+                    .filter(|shell| !shell.deleted)
                     .ok_or_else(|| {
                         McpError::failure("thread_not_found", "The calling thread was not found.")
                     })?;
-                if shell.modes.runtime_mode != RuntimeMode::FullAccess
-                    || context.limits.runtime_mode != RuntimeMode::FullAccess
-                {
+                // Read-only call contexts have a read ceiling; file access uses the live caller mode.
+                if shell.modes.runtime_mode != RuntimeMode::FullAccess {
                     return Err(McpError::failure(
                         "capability_denied",
                         "Pass html instead of path: only full-access threads may pass a path.",
@@ -143,6 +143,18 @@ fn map_error(error: Error) -> McpError {
         return error;
     }
     let mut fields = json!({});
+    if let Error::InvalidUrl {
+        reason,
+        input_length,
+        protocol,
+    } = &error
+    {
+        fields["reason"] = reason.clone().into();
+        fields["inputLength"] = (*input_length).into();
+        if let Some(protocol) = protocol {
+            fields["protocol"] = protocol.clone().into();
+        }
+    }
     if let Error::Control(reason) = &error {
         fields["reason"] = serde_json::to_value(reason).unwrap_or(Value::Null);
     }
@@ -510,4 +522,344 @@ pub async fn claim_recording(
         .ok_or_else(error)?
         .remove("uploadedAttachmentId");
     Ok(artifact)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::{
+        browser::PreviewOptions,
+        driver::{BrowserCommand, BrowserDriver, BrowserEvent, TabKey},
+        html::{HtmlOptions, MemoryHtmlRecovery},
+    };
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::{Mutex, RwLock},
+    };
+    use t3_mcp::{
+        AccessStore, Capability, InvocationScope, Modes, ThreadCaller, ThreadShell,
+        access::{authorize, tool_rule},
+        decode::decode_input,
+    };
+    struct Store(RwLock<ThreadShell>);
+    #[async_trait]
+    impl AccessStore for Store {
+        async fn thread_shell(
+            &self,
+            id: &t3_contracts::base_schemas::ThreadId,
+        ) -> t3_mcp::Result<Option<ThreadShell>> {
+            Ok((id.0 == "thread").then(|| self.0.read().unwrap().clone()))
+        }
+    }
+    #[derive(Default)]
+    struct Driver {
+        commands: Mutex<Vec<Value>>,
+        pages: Mutex<BTreeMap<TabKey, Value>>,
+    }
+    #[async_trait]
+    impl BrowserDriver for Driver {
+        async fn call(
+            &self,
+            command: BrowserCommand,
+            _timeout: std::time::Duration,
+        ) -> crate::Result<Value> {
+            self.commands
+                .lock()
+                .unwrap()
+                .push(serde_json::to_value(&command).unwrap());
+            match command {
+                BrowserCommand::Open { snapshot, .. } => {
+                    let url = match &snapshot.nav_status {
+                        PreviewNavStatus::Loading { url, .. } => Some(url.as_str()),
+                        _ => None,
+                    };
+                    let value = json!({"url":url,"title":null,"loading":false,"dialog":null,"fileChooser":null,"downloads":[]});
+                    self.pages
+                        .lock()
+                        .unwrap()
+                        .insert(TabKey::of(&snapshot), value.clone());
+                    Ok(value)
+                }
+                BrowserCommand::Operate {
+                    key,
+                    operation,
+                    input,
+                    ..
+                } => {
+                    let mut pages = self.pages.lock().unwrap();
+                    let page = pages.get_mut(&key).ok_or(Error::TabNotFound)?;
+                    if operation == "navigate" {
+                        page["url"] = input["url"].clone();
+                    }
+                    Ok(page.clone())
+                }
+                _ => Ok(json!({})),
+            }
+        }
+        fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<BrowserEvent> {
+            tokio::sync::mpsc::unbounded_channel().1
+        }
+    }
+    async fn fixture(
+        mode: RuntimeMode,
+    ) -> (tempfile::TempDir, McpAdapter, Arc<Store>, Arc<Driver>) {
+        let root = tempfile::tempdir().unwrap();
+        let driver = Arc::new(Driver::default());
+        let preview =
+            PreviewService::new(driver.clone(), PreviewOptions::new(root.path().into())).await;
+        let store = Arc::new(Store(RwLock::new(ThreadShell {
+            id: "thread".into(),
+            modes: Modes {
+                runtime_mode: mode,
+                interaction_mode: t3_contracts::provider_policy::ProviderInteractionMode::Default,
+            },
+            deleted: false,
+            archived: false,
+            active: true,
+            provider_instance_id: Some("codex".into()),
+            background_subagent_providers: vec![],
+            link_origin: None,
+        })));
+        let attachments_dir = root.path().join("attachments");
+        let html = HtmlService::new(
+            HtmlOptions {
+                attachments_dir: attachments_dir.clone(),
+                state_dir: root.path().join("state"),
+                secrets_dir: root.path().join("secrets"),
+                recovery: Arc::new(MemoryHtmlRecovery::default()),
+            },
+            None,
+        );
+        (
+            root,
+            McpAdapter {
+                preview,
+                html,
+                access: store.clone(),
+                attachments_dir,
+            },
+            store,
+            driver,
+        )
+    }
+    async fn context(store: Arc<Store>, tool: &str, input: &Value) -> CallContext {
+        let scope = InvocationScope {
+            environment_id: "environment".into(),
+            request_namespace: "preview-tests".into(),
+            issued_at: 0,
+            capabilities: BTreeSet::from([Capability::Preview]),
+            thread: Some(ThreadCaller {
+                thread_id: "thread".into(),
+                provider_session_id: "session".into(),
+                provider_instance_id: "codex".into(),
+                subagent: false,
+            }),
+            client: None,
+            linked_environments: Some(false),
+        };
+        authorize(store, scope, tool_rule(tool, input), tool, input, false)
+            .await
+            .unwrap()
+    }
+    #[tokio::test]
+    async fn path_sources_require_the_calling_threads_live_full_access_for_both_html_tools() {
+        for tool in ["html_preview", "html_render"] {
+            for mode in [
+                RuntimeMode::ApprovalRequired,
+                RuntimeMode::AutoAcceptEdits,
+                RuntimeMode::Auto,
+                RuntimeMode::FullAccess,
+            ] {
+                let (_root, adapter, store, _driver) = fixture(mode).await;
+                let input = json!({"path":"C:/isolated/page.html"});
+                let call = context(store.clone(), tool, &input).await;
+                let result = adapter.source(&call, &input).await;
+                if mode == RuntimeMode::FullAccess {
+                    assert!(
+                        matches!(result, Ok(HtmlSource::Path { .. })),
+                        "{tool}: {result:?}"
+                    );
+                } else {
+                    assert!(
+                        matches!(result,Err(McpError::Failure {ref code,..}) if code=="capability_denied")
+                    );
+                }
+                assert!(matches!(
+                    adapter
+                        .source(&call, &json!({"html":"<p>inline</p>"}))
+                        .await,
+                    Ok(HtmlSource::Html { .. })
+                ));
+                for ambiguous in [
+                    json!({}),
+                    json!({"path":"C:/isolated/page.html","html":"<p>both</p>"}),
+                ] {
+                    assert!(
+                        matches!(adapter.source(&call,&ambiguous).await,Err(McpError::Failure {ref code,..}) if code=="invalid_request")
+                    );
+                }
+            }
+        }
+        let (_root, adapter, store, _driver) = fixture(RuntimeMode::FullAccess).await;
+        let input = json!({"path":"C:/isolated/page.html"});
+        let call = context(store.clone(), "html_render", &input).await;
+        store.0.write().unwrap().modes.runtime_mode = RuntimeMode::ApprovalRequired;
+        assert!(
+            matches!(adapter.source(&call,&input).await,Err(McpError::Failure {ref code,..}) if code=="capability_denied")
+        );
+        {
+            let mut shell = store.0.write().unwrap();
+            shell.modes.runtime_mode = RuntimeMode::FullAccess;
+            shell.deleted = true;
+        }
+        assert!(
+            matches!(adapter.source(&call,&input).await,Err(McpError::Failure {ref code,..}) if code=="thread_not_found")
+        );
+    }
+    #[tokio::test]
+    async fn preview_open_prefers_target_over_url_and_preserves_url_only_navigation() {
+        use t3_mcp::services::PreviewService as _;
+        for (input, expected, uses_target) in [
+            (
+                json!({"url":"localhost:5173/app","show":false}),
+                "http://localhost:5173/app",
+                false,
+            ),
+            (
+                json!({"url":"javascript:ignored","target":{"kind":"environment-port","port":3000,"path":"/login"},"show":false}),
+                "http://localhost:3000/login",
+                true,
+            ),
+            (
+                json!({"target":{"kind":"environment-port","port":8443,"protocol":"https","path":"/path"},"show":false}),
+                "https://localhost:8443/path",
+                true,
+            ),
+        ] {
+            let (_root, adapter, store, driver) = fixture(RuntimeMode::FullAccess).await;
+            let call = context(store, "preview_open", &input).await;
+            let result = adapter
+                .preview_open(call, decode_input("preview_open", input).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(result.url.as_deref(), Some(expected));
+            let commands = driver.commands.lock().unwrap();
+            let open = commands.iter().find(|c| c["command"] == "open").unwrap();
+            assert_eq!(
+                open["snapshot"]["navStatus"]["_tag"],
+                if uses_target { "Idle" } else { "Loading" }
+            );
+            let navigate = commands.iter().find(|c| c["operation"] == "navigate");
+            assert_eq!(navigate.is_some(), uses_target);
+            if let Some(navigate) = navigate {
+                assert_eq!(navigate["input"]["url"], expected);
+            }
+        }
+    }
+    #[tokio::test]
+    async fn recording_claims_reject_unowned_ids_traversal_extensions_and_size_mismatches() {
+        let root = tempfile::tempdir().unwrap();
+        let thread = "thread".into();
+        for pending in [
+            "pending-../escape-webm",
+            "pending-not-a-uuid-webm",
+            "pending-00000000-0000-0000-0000-000000000000-../webm",
+            "thread-00000000-0000-0000-0000-000000000000-webm",
+        ] {
+            let error = claim_recording(
+                root.path(),
+                &thread,
+                json!({"uploadedAttachmentId":pending,"sizeBytes":3}),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.tag(), "PreviewAutomationRecordingTransferError");
+        }
+        let missing = claim_recording(root.path(), &thread, json!({"sizeBytes":3}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            missing.tag(),
+            "PreviewAutomationRecordingDesktopUpdateRequiredError"
+        );
+        let pending = format!("pending-{}-webm", uuid::Uuid::new_v4());
+        let source = root.path().join(format!("{pending}.webm"));
+        std::fs::write(&source, b"abc").unwrap();
+        for size in [0, 4, 50 * 1024 * 1024 + 1] {
+            assert_eq!(
+                claim_recording(
+                    root.path(),
+                    &thread,
+                    json!({"uploadedAttachmentId":pending,"sizeBytes":size})
+                )
+                .await
+                .unwrap_err()
+                .tag(),
+                "PreviewAutomationRecordingTransferError"
+            );
+            assert!(source.is_file());
+        }
+        let claimed = claim_recording(
+            root.path(),
+            &thread,
+            json!({"uploadedAttachmentId":pending,"sizeBytes":3}),
+        )
+        .await
+        .unwrap();
+        assert!(!source.exists());
+        assert!(std::path::Path::new(claimed["path"].as_str().unwrap()).is_file());
+    }
+    #[test]
+    fn error_tags_reasons_and_html_failure_codes_survive_the_adapter() {
+        for (error, expected) in [
+            (Error::TabNotFound, "PreviewAutomationTabNotFoundError"),
+            (
+                Error::Timeout("test".into()),
+                "PreviewAutomationTimeoutError",
+            ),
+            (Error::ControlRequired, "PreviewControlRequiredError"),
+            (
+                Error::Disconnected,
+                "PreviewAutomationClientDisconnectedError",
+            ),
+        ] {
+            assert!(matches!(map_error(error),McpError::Domain {ref tag,..} if tag==expected));
+        }
+        let McpError::Domain { tag, fields, .. } =
+            map_error(Error::Control(PreviewAutomationControlReason::HumanControl))
+        else {
+            panic!()
+        };
+        assert_eq!(tag, "PreviewAutomationControlInterruptedError");
+        assert_eq!(fields["reason"], "humanControl");
+        assert!(
+            matches!(map_error(Error::Mcp(McpError::failure("capability_denied","revoked"))),McpError::Failure {ref code,..} if code=="capability_denied")
+        );
+        for tag in [
+            "HtmlRenderFileError",
+            "HtmlRenderFileTooLargeError",
+            "HtmlRenderImagesNotFoundError",
+            "HtmlRenderImageTooLargeError",
+            "HtmlRenderPageTooLargeError",
+            "HtmlRenderViewportHeightError",
+        ] {
+            assert!(
+                matches!(html_error(Error::operation(tag,"test")),McpError::Failure {ref code,..} if code=="invalid_request")
+            );
+        }
+        assert!(
+            matches!(html_error(Error::operation("HtmlRenderBrowserError","test")),McpError::Failure {ref code,..} if code=="orchestration_error")
+        );
+        let raw = "javascript:private";
+        let McpError::Domain { tag, fields, .. } =
+            map_error(crate::urls::normalize_preview_url(raw).unwrap_err())
+        else {
+            panic!()
+        };
+        assert_eq!(tag, "PreviewInvalidUrlError");
+        assert_eq!(fields["reason"], "unsupported-protocol");
+        assert_eq!(fields["protocol"], "javascript:");
+        assert_eq!(fields["inputLength"], raw.encode_utf16().count());
+    }
 }

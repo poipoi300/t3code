@@ -51,6 +51,34 @@ fn url_normalization_preserves_remote_access_and_refuses_non_web_protocols() {
 }
 
 #[test]
+fn invalid_preview_url_text_preserves_protocol_length_and_blank_tab_guidance() {
+    for (raw, reason, protocol) in [
+        ("", "empty", None),
+        (
+            " JavaScript:private ",
+            "unsupported-protocol",
+            Some("javascript:"),
+        ),
+        ("http://[", "parse", Some("http:")),
+        (
+            "gopher://example.com",
+            "unsupported-protocol",
+            Some("gopher:"),
+        ),
+    ] {
+        let error = normalize_preview_url(raw).unwrap_err();
+        let suffix = protocol.map(|p| format!(": {p}")).unwrap_or_default();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Invalid preview URL ({reason}{suffix}; input length {}). Use an http(s) URL or a schemeless host such as localhost:5173. With preview_open, omit url when creating a new tab to open a blank tab.",
+                raw.encode_utf16().count()
+            )
+        );
+    }
+}
+
+#[test]
 fn configured_discovery_urls_are_loopback_only_capped_and_rewrite_wildcards() {
     let urls = [
         "http://0.0.0.0:3000/docs#first",

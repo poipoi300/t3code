@@ -15,10 +15,16 @@ use tokio::sync::{Mutex, RwLock, watch};
 pub trait ProviderInstanceService: Send + Sync {
     fn instance_id(&self) -> &ProviderInstanceId;
     async fn snapshot(&self, cwd: Option<&str>, fresh: bool) -> ServiceResult<ServerProvider>;
+    fn subscribe_snapshots(&self) -> Option<watch::Receiver<Option<ServerProvider>>> {
+        None
+    }
     async fn reload_secrets(&self) -> ServiceResult<()> {
         Ok(())
     }
     async fn refresh_models(&self) -> ServiceResult<()> {
+        Ok(())
+    }
+    async fn invalidate_usage_cache(&self) -> ServiceResult<()> {
         Ok(())
     }
     async fn invalidate_models(&self, _cwd: Option<&str>, _fresh: bool) -> ServiceResult<()> {
@@ -96,6 +102,8 @@ impl MaintenanceExecutor for ProcessMaintenanceExecutor {
 }
 
 pub struct ProviderService {
+    self_ref: std::sync::Weak<Self>,
+    watchers: Mutex<BTreeMap<ProviderInstanceId, SnapshotWatcher>>,
     pub auth: Arc<AuthService>,
     instances: RwLock<BTreeMap<ProviderInstanceId, Arc<dyn ProviderInstanceService>>>,
     snapshots: RwLock<BTreeMap<ProviderInstanceId, ServerProvider>>,
@@ -117,6 +125,12 @@ pub struct ProviderService {
     text_generators: RwLock<Option<Arc<crate::text_generators::TextGenerators>>>,
     sources: RwLock<Option<Arc<dyn GlobalProviderSources>>>,
 }
+struct SnapshotWatcher(tokio::task::JoinHandle<()>);
+impl Drop for SnapshotWatcher {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 impl ProviderService {
     pub fn new(
         auth: Arc<AuthService>,
@@ -127,7 +141,9 @@ impl ProviderService {
         server_version: String,
     ) -> Arc<Self> {
         let (changes, _) = watch::channel(0);
-        Arc::new(Self {
+        Arc::new_cyclic(|weak| Self {
+            self_ref: weak.clone(),
+            watchers: Mutex::new(BTreeMap::new()),
             auth,
             instances: RwLock::new(BTreeMap::new()),
             snapshots: RwLock::new(BTreeMap::new()),
@@ -214,12 +230,84 @@ impl ProviderService {
         service.list_models(input).await
     }
     pub async fn register(&self, instance: Arc<dyn ProviderInstanceService>) {
-        self.instances
-            .write()
-            .await
-            .insert(instance.instance_id().clone(), instance);
+        let id = instance.instance_id().clone();
+        let subscription = instance.subscribe_snapshots();
+        let expected = Arc::downgrade(&instance);
+        let mut watchers = self.watchers.lock().await;
+        watchers.remove(&id);
+        {
+            let mut instances = self.instances.write().await;
+            instances.insert(id.clone(), instance);
+            self.snapshots.write().await.remove(&id);
+        }
+        if let Some(mut updates) = subscription {
+            let service = self.self_ref.clone();
+            let task_id = id.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    let value = updates.borrow_and_update().clone();
+                    if let Some(value) = value {
+                        let (Some(service), Some(expected)) =
+                            (service.upgrade(), expected.upgrade())
+                        else {
+                            break;
+                        };
+                        if value.instance_id != task_id
+                            || !service.store_snapshot(&expected, value).await
+                        {
+                            break;
+                        }
+                        service.publish();
+                    }
+                    if updates.changed().await.is_err() {
+                        break;
+                    }
+                }
+            });
+            watchers.insert(id, SnapshotWatcher(task));
+        }
+    }
+    pub async fn register_with_snapshot(
+        &self,
+        instance: Arc<dyn ProviderInstanceService>,
+        snapshot: ServerProvider,
+    ) -> ServiceResult<()> {
+        if snapshot.instance_id != *instance.instance_id() {
+            return Err(ServiceError::Response);
+        }
+        self.register(instance.clone()).await;
+        self.store_snapshot(&instance, snapshot).await;
+        self.publish();
+        Ok(())
+    }
+    async fn store_snapshot(
+        &self,
+        instance: &Arc<dyn ProviderInstanceService>,
+        mut value: ServerProvider,
+    ) -> bool {
+        let id = instance.instance_id();
+        let current = self.instances.read().await;
+        if current
+            .get(id)
+            .is_none_or(|current| !Arc::ptr_eq(current, instance))
+        {
+            return false;
+        }
+        let mut snapshots = self.snapshots.write().await;
+        if let Some(updates) = instance.subscribe_snapshots()
+            && let Some(latest) = updates.borrow().as_ref()
+            && latest.instance_id == *id
+        {
+            value = latest.clone();
+        }
+        if let Some(previous) = snapshots.get(id) {
+            value.update_state = previous.update_state.clone();
+        }
+        snapshots.insert(id.clone(), value);
+        true
     }
     pub async fn unregister(&self, id: &ProviderInstanceId) {
+        self.watchers.lock().await.remove(id);
         self.instances.write().await.remove(id);
         self.snapshots.write().await.remove(id);
         self.auth.unregister(id).await;
@@ -312,10 +400,7 @@ impl ProviderService {
                 instance.refresh_models().await?;
                 snapshot = instance.snapshot(None, false).await?;
             }
-            self.snapshots
-                .write()
-                .await
-                .insert(instance.instance_id().clone(), snapshot);
+            self.store_snapshot(&instance, snapshot).await;
         }
         self.publish();
         let mut providers = self.get_providers().await;

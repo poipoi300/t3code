@@ -38,6 +38,7 @@ struct ViewerState {
     queue: ViewerQueue,
 }
 struct Tab {
+    worker_generation: std::sync::atomic::AtomicU64,
     key: TabKey,
     control: SessionControl,
     created: u64,
@@ -51,6 +52,12 @@ struct Tab {
     popup: Option<String>,
     opener: Option<String>,
     viewer_attached: tokio::sync::Notify,
+}
+impl Tab {
+    fn driver_generation(&self) -> u64 {
+        self.worker_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 struct State {
     tabs: BTreeMap<TabKey, Arc<Tab>>,
@@ -205,13 +212,15 @@ impl PreviewService {
                 if let Some(tab) = self.get(&key) {
                     *lock(&tab.snapshot) = snapshot.clone();
                     let driver = self.inner.driver.clone();
+                    let worker_generation = tab.driver_generation();
                     let control = tab.control.clone();
                     let request = serde_json::to_value(request.flatten()).unwrap_or(Value::Null);
                     let _ = control
                         .system(
                             async move {
                                 driver
-                                    .call(
+                                    .call_on(
+                                        worker_generation,
                                         BrowserCommand::Adjust {
                                             snapshot: Box::new(snapshot),
                                             request,
@@ -229,9 +238,34 @@ impl PreviewService {
         }
     }
     async fn driver_event(&self, event: BrowserEvent) {
+        let (generation, event) = match event {
+            BrowserEvent::Worker {
+                generation,
+                message,
+            } => (Some(generation), *message),
+            event => (None, event),
+        };
+        if !matches!(event, BrowserEvent::Disconnected)
+            && generation.is_some_and(|generation| generation != self.inner.driver.generation())
+        {
+            return;
+        }
         match event {
+            BrowserEvent::Worker { .. } => {}
             BrowserEvent::Disconnected => {
-                let tabs: Vec<_> = lock(&self.inner.state).tabs.values().cloned().collect();
+                let tabs: Vec<_> = lock(&self.inner.state)
+                    .tabs
+                    .values()
+                    .filter(|tab| {
+                        generation.is_none_or(|generation| {
+                            generation
+                                == tab
+                                    .worker_generation
+                                    .load(std::sync::atomic::Ordering::Acquire)
+                        })
+                    })
+                    .cloned()
+                    .collect();
                 for tab in tabs {
                     let desktop = lock(&tab.desktop).is_some();
                     self.drop_tab(&tab.key, !desktop).await;
@@ -270,7 +304,12 @@ impl PreviewService {
                         {
                             let dropped = viewer.queue.push(output.clone());
                             for frame_id in dropped {
-                                self.ack_frame(key.clone(), id.clone(), frame_id);
+                                self.ack_frame(
+                                    key.clone(),
+                                    id.clone(),
+                                    frame_id,
+                                    tab.driver_generation(),
+                                );
                             }
                         }
                     }
@@ -337,6 +376,7 @@ impl PreviewService {
             } else {
                 state.sequence += 1;
                 let tab = Arc::new(Tab {
+                    worker_generation: std::sync::atomic::AtomicU64::new(0),
                     key: key.clone(),
                     control: SessionControl::new(snapshot.automation_owner.clone().flatten()),
                     created: state.sequence,
@@ -434,10 +474,17 @@ impl PreviewService {
             .as_ref()
             .map(|connection| connection.endpoint.url.clone());
         *lock(&tab.desktop) = connection;
+        let generation = self.inner.driver.prepare().await?;
+        tab.worker_generation
+            .store(generation, std::sync::atomic::Ordering::Release);
+        if tab.closed.is_cancelled() {
+            return Err(Error::TabNotFound);
+        }
         let result = self
             .inner
             .driver
-            .call(
+            .call_on(
+                generation,
                 BrowserCommand::Open {
                     snapshot: Box::new(snapshot),
                     desktop_endpoint: endpoint,
@@ -453,7 +500,8 @@ impl PreviewService {
             let _ = self
                 .inner
                 .driver
-                .call(
+                .call_on(
+                    tab.driver_generation(),
                     BrowserCommand::Close {
                         key: tab.key.clone(),
                         desktop,
@@ -486,7 +534,8 @@ impl PreviewService {
             let _ = self
                 .inner
                 .driver
-                .call(
+                .call_on(
+                    tab.driver_generation(),
                     BrowserCommand::Close {
                         key: key.clone(),
                         desktop,
@@ -608,6 +657,8 @@ impl PreviewService {
                     thread_id: thread.into(),
                     url: input.url.flatten().map(|s| Some(s.into())),
                     viewport: None,
+                    color_scheme: None,
+                    zoom_factor: None,
                     profile_id: profile.map(Some),
                     runtime: Some(Some(PreviewRuntime::Server)),
                     reveal: Some(Some(false)),
@@ -714,7 +765,8 @@ impl PreviewService {
         let read = self
             .inner
             .driver
-            .call(
+            .call_on(
+                tab.driver_generation(),
                 BrowserCommand::Operate {
                     key: tab.key.clone(),
                     operation: "status".into(),
@@ -768,9 +820,10 @@ impl PreviewService {
     }
     pub async fn execute_admitted(
         &self,
-        request: PreviewAutomationRequest,
+        mut request: PreviewAutomationRequest,
         admission: crate::Admission,
     ) -> Result<Value> {
+        request.input = automation_input(request.operation, request.input)?;
         let service = self.clone();
         // An admitted operation owns its cleanup even if its transport future is dropped.
         tokio::spawn(async move {
@@ -996,7 +1049,8 @@ impl PreviewService {
     ) -> Result<Value> {
         self.inner
             .driver
-            .call(
+            .call_on(
+                tab.driver_generation(),
                 BrowserCommand::Operate {
                     key: tab.key.clone(),
                     operation: operation.into(),
@@ -1090,9 +1144,11 @@ impl PreviewService {
                 let driver = service.inner.driver.clone();
                 let key = owned.key.clone();
                 let generation = owned.control.generation();
+                let worker_generation = owned.driver_generation();
                 let waiting = tokio::spawn(async move {
                     let _ = driver
-                        .call(
+                        .call_on(
+                            worker_generation,
                             BrowserCommand::Operate {
                                 key,
                                 operation: "waitPending".into(),
@@ -1191,15 +1247,16 @@ impl PreviewService {
                 dialog.clone(),
             ));
             for frame in dropped {
-                self.ack_frame(tab.key.clone(), id.clone(), frame);
+                self.ack_frame(tab.key.clone(), id.clone(), frame, tab.driver_generation());
             }
         }
     }
-    fn ack_frame(&self, key: TabKey, viewer_id: String, frame_id: u64) {
+    fn ack_frame(&self, key: TabKey, viewer_id: String, frame_id: u64, worker_generation: u64) {
         let driver = self.inner.driver.clone();
         tokio::spawn(async move {
             let _ = driver
-                .call(
+                .call_on(
+                    worker_generation,
                     BrowserCommand::ViewerAck {
                         key,
                         viewer_id,
@@ -1244,6 +1301,7 @@ impl PreviewService {
             key: key.clone(),
             id: id.clone(),
             can_operate: options.can_operate,
+            worker_generation: tab.driver_generation(),
             output: queue,
         };
         if options.can_operate
@@ -1255,7 +1313,8 @@ impl PreviewService {
         self.broadcast_control(&tab);
         self.inner
             .driver
-            .call(
+            .call_on(
+                tab.driver_generation(),
                 BrowserCommand::ViewerAttach {
                     key,
                     viewer_id: id,
@@ -1273,6 +1332,11 @@ impl PreviewService {
             return Ok(());
         }
         let tab = self.get(&viewer.key).ok_or(Error::TabNotFound)?;
+        if viewer.worker_generation != tab.driver_generation()
+            || !lock(&tab.viewers).contains_key(&viewer.id)
+        {
+            return Err(Error::Disconnected);
+        }
         let kind = input["type"].as_str().unwrap_or("").to_owned();
         match kind.as_str() {
             "takeControl" => {
@@ -1291,11 +1355,13 @@ impl PreviewService {
                 let driver = self.inner.driver.clone();
                 let key = viewer.key.clone();
                 let viewer_id = viewer.id.clone();
+                let worker_generation = viewer.worker_generation;
                 let released = tab.control.release(
                     &viewer.id,
                     async move {
                         driver
-                            .call(
+                            .call_on(
+                                worker_generation,
                                 BrowserCommand::ViewerInput {
                                     key,
                                     viewer_id,
@@ -1338,14 +1404,30 @@ impl PreviewService {
                 let viewer_id = viewer.id.clone();
                 let driver = self.inner.driver.clone();
                 let control = tab.control.clone();
-                let dispatch: Action = Arc::new(move |input| {
+                let worker_generation = viewer.worker_generation;
+                let manager = self.inner.manager.clone();
+                let dispatch: Action = Arc::new(move |mut input| {
                     let driver = driver.clone();
                     let key = key.clone();
                     let viewer_id = viewer_id.clone();
                     let control = control.clone();
+                    let manager = manager.clone();
                     async move {
+                        if input["type"] == "viewport" {
+                            let setting: PreviewViewportSetting =
+                                serde_json::from_value(input["setting"].clone())?;
+                            let snapshot = manager
+                                .resize(PreviewResizeInput {
+                                    thread_id: key.thread_id.as_str().into(),
+                                    tab_id: key.tab_id.as_str().into(),
+                                    viewport: setting,
+                                })
+                                .await?;
+                            input["setting"] = serde_json::to_value(snapshot.viewport.flatten())?;
+                        }
                         let result = driver
-                            .call(
+                            .call_on(
+                                worker_generation,
                                 BrowserCommand::ViewerInput {
                                     key: key.clone(),
                                     viewer_id,
@@ -1359,7 +1441,8 @@ impl PreviewService {
                             let generation = control.generation();
                             let work = tokio::spawn(async move {
                                 let _ = driver
-                                    .call(
+                                    .call_on(
+                                        worker_generation,
                                         BrowserCommand::Operate {
                                             key,
                                             operation: "waitPending".into(),
@@ -1447,7 +1530,8 @@ impl PreviewService {
         let result = self
             .inner
             .driver
-            .call(
+            .call_on(
+                tab.driver_generation(),
                 BrowserCommand::AnswerFileChooser {
                     key,
                     chooser_id,
@@ -1486,6 +1570,8 @@ impl PreviewService {
                             .filter(|url| url.starts_with("http:") || url.starts_with("https:"))
                             .map(|url| Some(url.into())),
                         viewport: snapshot.viewport,
+                        color_scheme: None,
+                        zoom_factor: None,
                         profile_id: snapshot.profile_id,
                         runtime: Some(Some(PreviewRuntime::Server)),
                         reveal: tab.control.agent_id().map(|_| Some(false)),
@@ -1531,6 +1617,38 @@ impl PreviewService {
         result
     }
 }
+fn automation_input(operation: PreviewAutomationOperation, input: Value) -> Result<Value> {
+    if !input.is_object() {
+        return Err(Error::InvalidInput(
+            "Expected an automation input object".into(),
+        ));
+    }
+    fn decode<T: serde::de::DeserializeOwned + serde::Serialize>(input: Value) -> Result<Value> {
+        Ok(serde_json::to_value(serde_json::from_value::<T>(input)?)?)
+    }
+    use PreviewAutomationOperation::*;
+    match operation {
+        Status | Close | RecordingStart | RecordingStop => {
+            decode::<PreviewAutomationTabTargetInput>(input)
+        }
+        Open => decode::<PreviewAutomationOpenInput>(input),
+        Navigate => decode::<PreviewAutomationNavigateInput>(input),
+        Resize => decode::<PreviewAutomationResizeInput>(input),
+        SetColorScheme => decode::<PreviewAutomationSetColorSchemeInput>(input),
+        Snapshot => decode::<PreviewAutomationSnapshotInput>(input),
+        Click => decode::<PreviewAutomationClickInput>(input),
+        Hover => decode::<PreviewAutomationHoverInput>(input),
+        Type => decode::<PreviewAutomationTypeInput>(input),
+        Press => decode::<PreviewAutomationPressInput>(input),
+        Scroll => decode::<PreviewAutomationScrollInput>(input),
+        Select => decode::<PreviewAutomationSelectInput>(input),
+        Drag => decode::<PreviewAutomationDragInput>(input),
+        Upload => decode::<PreviewAutomationUploadInput>(input),
+        Dialog => decode::<PreviewAutomationDialogInput>(input),
+        Evaluate => decode::<PreviewAutomationEvaluateInput>(input),
+        WaitFor => decode::<PreviewAutomationWaitForInput>(input),
+    }
+}
 fn owner(tab: &Tab) -> &str {
     if tab.control.controller().is_some() {
         "human"
@@ -1549,6 +1667,7 @@ pub struct ViewerOptions {
     pub quality: u8,
 }
 pub struct PreviewViewer {
+    worker_generation: u64,
     service: Weak<Inner>,
     key: TabKey,
     id: String,
@@ -1564,7 +1683,8 @@ impl PreviewViewer {
         let inner = self.service.upgrade().ok_or(Error::Disconnected)?;
         inner
             .driver
-            .call(
+            .call_on(
+                self.worker_generation,
                 BrowserCommand::ViewerAck {
                     key: self.key.clone(),
                     viewer_id: self.id.clone(),
@@ -1583,10 +1703,14 @@ impl Drop for PreviewViewer {
         {
             let key = self.key.clone();
             let id = self.id.clone();
+            let worker_generation = self.worker_generation;
             self.output.close();
             runtime.spawn(async move {
                 let service = PreviewService { inner };
-                if let Some(tab) = service.get(&key) {
+                if let Some(tab) = service
+                    .get(&key)
+                    .filter(|tab| tab.driver_generation() == worker_generation)
+                {
                     let _ = tab
                         .control
                         .disconnect(&id, futures_util::future::ready(Ok(Value::Null)).boxed())
@@ -1597,7 +1721,8 @@ impl Drop for PreviewViewer {
                 let _ = service
                     .inner
                     .driver
-                    .call(
+                    .call_on(
+                        worker_generation,
                         BrowserCommand::ViewerDetach { key, viewer_id: id },
                         Duration::from_secs(5),
                     )

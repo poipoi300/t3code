@@ -104,8 +104,8 @@ impl PreviewManager {
             can_go_back: false,
             can_go_forward: false,
             viewport: Some(Some(viewport)),
-            color_scheme: None,
-            zoom_factor: None,
+            color_scheme: input.color_scheme,
+            zoom_factor: input.zoom_factor,
             profile_id: input.profile_id,
             runtime: runtime.map(Some),
             headless: None,
@@ -162,13 +162,14 @@ impl PreviewManager {
                 snapshot: snapshot.clone(),
                 request: request.map(Some),
             }
-        } else if let PreviewNavStatus::LoadFailed {
-            url,
-            title,
-            code,
-            description,
-            download,
-        } = &snapshot.nav_status
+        } else if kind == "status"
+            && let PreviewNavStatus::LoadFailed {
+                url,
+                title,
+                code,
+                description,
+                download,
+            } = &snapshot.nav_status
         {
             PreviewEvent::Failed {
                 thread_id: snapshot.thread_id.clone(),
@@ -203,7 +204,7 @@ impl PreviewManager {
         self.mutate(
             input.thread_id.0.as_str(),
             input.tab_id.as_str(),
-            "navigated",
+            "status",
             None,
             |snapshot| {
                 if snapshot.runtime == Some(Some(PreviewRuntime::Server)) && !server {

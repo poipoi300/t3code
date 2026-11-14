@@ -52,7 +52,9 @@ live in Rust. `execute_admitted` rechecks admission inside queued mutations.
 resources; hold `activity().begin(thread)` for each active provider turn.
 
 `BrowserDriver` is the browser boundary. Fakes implement only its command/reply
-and event methods. `PlaywrightDriver` owns the Node worker through `t3-process`,
+and event methods. `prepare` binds a tab to a worker generation before opening;
+`call_on` keeps queued commands and viewer cleanup on that generation. Late
+disconnects retire only that worker's tabs. `PlaywrightDriver` owns the Node worker through `t3-process`,
 drains both pipes, bounds messages and deadlines, and terminates only its owned
 process tree. Chromium is the worker's child, controlled by Playwright/CDP.
 `ManagedBrowserDriver` adds lazy pinned Chrome installation and host diagnostics.
@@ -60,6 +62,7 @@ The installer verifies exact archive size and SHA-256 before extraction, refuses
 unsafe ZIP entries, publishes by rename and retains the newest other version.
 An interrupted waiter does not cancel the shared installation. Sandbox disabling
 must be an explicit host option; failures never trigger a sandbox-off retry.
+The shared installation wait precedes the individual browser command deadline.
 `with_setup_command` accepts the host CLI's resolved invocation for diagnostics.
 
 `HtmlService::{prepare, read_source, publish, publish_admitted, preview}` covers
@@ -71,6 +74,9 @@ public-network-only SOCKS proxy, blocked top navigation/popups and disabled
 WebRTC. Browser/proxy resources close on failure and timeout, including a browser
 launch that finishes after its request expired. Publication cancellation rolls
 back the attachment. Browser concurrency is limited to two.
+Parsing, regex scans, image inlining and publication writes run on blocking
+workers. A write job owns its rollback guard until writing finishes, including
+when its async waiter is cancelled.
 
 `McpAdapter` implements all 12 methods of `t3_mcp::services::PreviewService`, both
 preview-control methods and both HTML methods. It uses `CallContext`, the live
@@ -114,9 +120,8 @@ Known differences and limits:
 - The standalone `PreviewAutomationBroker` host routing, actual HTTP registration,
   Electron bootstrap/relay and privileged setup CLI await their owners above.
   The service methods and explicit integration seams are implemented here.
-- Tab IDs use a manager-local sequence and the server epoch rather than the
-  shared TypeScript random tab-ID helper. They remain opaque and cannot alias
-  a server tab after restart. Error prose and OS error details are not identical.
+- Tab IDs use the same sequence/server-epoch scheme as TypeScript. OS error
+  details and some browser diagnostic prose are not identical.
 - Browser commands/replies have a 150 MiB bound. Interrupted partial writes close
   the worker rather than leaving its protocol desynchronized. IPC setup/sends
   have additional five-second bounds. Interrupted HTML rendering closes owned
@@ -125,6 +130,8 @@ Known differences and limits:
 - A worker exit closes headless sessions and releases desktop connections while
   retaining their manager sessions for shell reattachment. A subsequent command
   starts a fresh worker. The source runs these resources in the server process.
+  Unknown/malformed worker events are logged and skipped; oversized or partial
+  protocol frames still disconnect the worker.
 - Public installer errors and root/sandbox/library diagnosis are ported; AppArmor
   restriction probing, distro package selection and profile installation belong
   to the unported setup CLI. Pruning compares numeric version components rather

@@ -130,6 +130,10 @@ pub struct UploadFile {
     rename_all_fields = "camelCase"
 )]
 pub enum BrowserEvent {
+    Worker {
+        generation: u64,
+        message: Box<BrowserEvent>,
+    },
     Disconnected,
     Status {
         input: PreviewReportStatusInput,
@@ -155,6 +159,23 @@ pub enum BrowserEvent {
 /// Browser ownership/automation boundary. Desktop shells supply CDP through DesktopBrowser.
 #[async_trait]
 pub trait BrowserDriver: Send + Sync {
+    fn generation(&self) -> u64 {
+        0
+    }
+    async fn prepare(&self) -> Result<u64> {
+        Ok(self.generation())
+    }
+    async fn call_on(
+        &self,
+        generation: u64,
+        command: BrowserCommand,
+        timeout: Duration,
+    ) -> Result<Value> {
+        if generation != self.generation() {
+            return Err(Error::Disconnected);
+        }
+        self.call(command, timeout).await
+    }
     async fn call(&self, command: BrowserCommand, timeout: Duration) -> Result<Value>;
     fn subscribe(&self) -> mpsc::UnboundedReceiver<BrowserEvent>;
 }
@@ -174,6 +195,7 @@ pub struct PlaywrightOptions {
 
 type Pending = Arc<Mutex<BTreeMap<u64, oneshot::Sender<Result<Value>>>>>;
 pub struct PlaywrightDriver {
+    generation: u64,
     stdin: AsyncMutex<tokio::process::ChildStdin>,
     pending: Pending,
     sequence: AtomicU64,
@@ -183,6 +205,8 @@ pub struct PlaywrightDriver {
 
 impl PlaywrightDriver {
     pub async fn start(options: PlaywrightOptions) -> Result<Self> {
+        static GENERATION: AtomicU64 = AtomicU64::new(1);
+        let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
         let runtime = tempfile::Builder::new()
             .prefix("t3-preview-driver-")
             .tempdir()?;
@@ -240,7 +264,8 @@ impl PlaywrightDriver {
             let mut stdout = BufReader::new(stdout);
             while let Ok(Some(line)) = read_bounded_line(&mut stdout, 150 * 1024 * 1024).await {
                 let Ok(message) = serde_json::from_slice::<Value>(&line) else {
-                    break;
+                    tracing::warn!("Ignoring malformed preview driver JSON event");
+                    continue;
                 };
                 if let Some(id) = message["id"].as_u64() {
                     let result = if message["ok"] == true {
@@ -262,9 +287,12 @@ impl PlaywrightDriver {
                         let _ = reply.send(result);
                     }
                 } else if let Ok(event) = serde_json::from_value(message) {
-                    reader_events.publish(event);
+                    reader_events.publish(BrowserEvent::Worker {
+                        generation,
+                        message: Box::new(event),
+                    });
                 } else {
-                    break;
+                    tracing::warn!("Ignoring unknown or malformed preview driver event");
                 }
             }
             let pending = std::mem::take(&mut *lock(&reader_pending));
@@ -272,7 +300,10 @@ impl PlaywrightDriver {
                 let _ = reply.send(Err(Error::Disconnected));
             }
             reader_stop.cancel();
-            reader_events.publish(BrowserEvent::Disconnected);
+            reader_events.publish(BrowserEvent::Worker {
+                generation,
+                message: Box::new(BrowserEvent::Disconnected),
+            });
         });
         let monitor_stop = stop.clone();
         tokio::spawn(async move {
@@ -291,6 +322,7 @@ impl PlaywrightDriver {
             }
         });
         Ok(Self {
+            generation,
             stdin: AsyncMutex::new(stdin),
             pending,
             sequence: AtomicU64::new(0),
@@ -324,7 +356,11 @@ impl Drop for Waiting {
 
 #[async_trait]
 impl BrowserDriver for PlaywrightDriver {
+    fn generation(&self) -> u64 {
+        self.generation
+    }
     async fn call(&self, command: BrowserCommand, timeout: Duration) -> Result<Value> {
+        let opening = matches!(command, BrowserCommand::Open { .. });
         if self.stop.is_cancelled() {
             return Err(Error::Disconnected);
         }
@@ -344,7 +380,7 @@ impl BrowserDriver for PlaywrightDriver {
             ));
         }
         bytes.push(b'\n');
-        tokio::time::timeout(timeout,async {
+        let mut value=tokio::time::timeout(timeout,async {
             {
                 let mut stdin = self.stdin.lock().await;
                 let mut writing=Writing {stop:self.stop.clone(),complete:false};
@@ -353,7 +389,14 @@ impl BrowserDriver for PlaywrightDriver {
                 writing.complete=true;
             }
             tokio::select! { reply = rx => reply.unwrap_or(Err(Error::Disconnected)), _ = self.stop.cancelled() => Err(Error::Disconnected) }
-        }).await.map_err(|_| Error::Timeout("browser driver".into()))?
+        }).await.map_err(|_| Error::Timeout("browser driver".into()))??;
+        if opening {
+            value
+                .as_object_mut()
+                .ok_or_else(|| Error::InvalidInput("Invalid browser open reply".into()))?
+                .insert("_workerGeneration".into(), self.generation.into());
+        }
+        Ok(value)
     }
     fn subscribe(&self) -> mpsc::UnboundedReceiver<BrowserEvent> {
         self.events.subscribe()

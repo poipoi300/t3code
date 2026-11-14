@@ -23,6 +23,7 @@ use t3_preview::{
 use tokio::sync::{Notify, Semaphore, mpsc};
 
 struct Fake {
+    generation: std::sync::atomic::AtomicU64,
     events: Mutex<Vec<mpsc::UnboundedSender<BrowserEvent>>>,
     commands: Mutex<Vec<Value>>,
     pages: Mutex<BTreeMap<TabKey, Value>>,
@@ -39,6 +40,7 @@ impl Fake {
         let (started, rx) = mpsc::unbounded_channel();
         (
             Arc::new(Self {
+                generation: std::sync::atomic::AtomicU64::new(0),
                 events: Mutex::default(),
                 commands: Mutex::default(),
                 pages: Mutex::default(),
@@ -56,6 +58,9 @@ impl Fake {
 }
 #[async_trait]
 impl BrowserDriver for Fake {
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
     async fn call(&self, command: BrowserCommand, _: Duration) -> Result<Value> {
         self.commands
             .lock()
@@ -74,7 +79,7 @@ impl BrowserDriver for Fake {
                 if self.fail_open.swap(false, Ordering::SeqCst) {
                     return Err(Error::operation("LaunchError", "fake launch failure"));
                 }
-                let value = json!({"url":null,"title":null,"loading":false,"dialog":null,"fileChooser":null,"downloads":[],"viewport":{"width":1280,"height":800}});
+                let value = json!({"_workerGeneration":self.generation.load(Ordering::SeqCst),"url":null,"title":null,"loading":false,"dialog":null,"fileChooser":null,"downloads":[],"viewport":{"width":1280,"height":800}});
                 self.pages
                     .lock()
                     .unwrap()
@@ -855,4 +860,301 @@ async fn html_admission_is_checked_after_preparation_before_any_attachment_write
         .unwrap_err();
     assert!(error.to_string().contains("revoked"));
     assert_eq!(std::fs::read_dir(attachments).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn viewer_viewport_refuses_malformed_oversized_and_excess_area_before_the_driver() {
+    let (_root, service, driver, _) = make().await;
+    let id = open(&service, "agent").await;
+    let viewer = service
+        .attach_viewer(
+            TabKey::new("thread", &id),
+            ViewerOptions {
+                can_operate: true,
+                max_width: 1280,
+                max_height: 800,
+                quality: 70,
+            },
+        )
+        .await
+        .unwrap();
+    viewer.input(json!({"type":"takeControl"})).await.unwrap();
+    let before = service
+        .manager()
+        .list(PreviewListInput {
+            thread_id: "thread".into(),
+        })
+        .await;
+    for input in [
+        json!({"type":"viewport"}),
+        json!({"type":"viewport","setting":null}),
+        json!({"type":"viewport","setting":{"_tag":"unknown"}}),
+        json!({"type":"viewport","setting":{"_tag":"freeform","width":100000,"height":100000}}),
+        json!({"type":"viewport","setting":{"_tag":"freeform","width":3840,"height":3840}}),
+    ] {
+        assert!(
+            viewer.input(input.clone()).await.is_err(),
+            "accepted {input}"
+        );
+    }
+    assert_eq!(
+        service
+            .manager()
+            .list(PreviewListInput {
+                thread_id: "thread".into()
+            })
+            .await,
+        before
+    );
+    assert!(
+        !driver
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|command| command["command"] == "viewerInput"
+                && command["input"]["type"] == "viewport")
+    );
+}
+
+#[tokio::test]
+async fn viewer_viewport_updates_the_manager_snapshot_and_resized_event() {
+    let (_root, service, _driver, _) = make().await;
+    let id = open(&service, "agent").await;
+    let viewer = service
+        .attach_viewer(
+            TabKey::new("thread", &id),
+            ViewerOptions {
+                can_operate: true,
+                max_width: 1280,
+                max_height: 800,
+                quality: 70,
+            },
+        )
+        .await
+        .unwrap();
+    viewer.input(json!({"type":"takeControl"})).await.unwrap();
+    let mut events = service.manager().subscribe_events();
+    let setting = json!({"_tag":"freeform","width":390,"height":844});
+    viewer
+        .input(json!({"type":"viewport","setting":setting}))
+        .await
+        .unwrap();
+    let listed = service
+        .manager()
+        .list(PreviewListInput {
+            thread_id: "thread".into(),
+        })
+        .await;
+    assert_eq!(
+        serde_json::to_value(&listed.sessions[0].viewport).unwrap(),
+        setting
+    );
+    let PreviewEvent::Resized { snapshot, .. } = events.try_recv().unwrap() else {
+        panic!("missing resize event")
+    };
+    assert_eq!(serde_json::to_value(snapshot.viewport).unwrap(), setting);
+}
+
+#[tokio::test]
+async fn late_disconnect_closes_only_tabs_from_the_dead_worker() {
+    let (_root, service, driver, _) = make().await;
+    driver.generation.store(1, Ordering::SeqCst);
+    let old = open(&service, "agent").await;
+    driver.generation.store(2, Ordering::SeqCst);
+    let fresh = open(&service, "agent").await;
+    let viewer = service
+        .attach_viewer(
+            TabKey::new("thread", &fresh),
+            ViewerOptions {
+                can_operate: false,
+                max_width: 1280,
+                max_height: 800,
+                quality: 70,
+            },
+        )
+        .await
+        .unwrap();
+    let marker =
+        json!({"type":"alert","message":"processed after stale disconnect","defaultValue":""});
+    for sender in driver.events.lock().unwrap().iter() {
+        sender
+            .send(BrowserEvent::Worker {
+                generation: 1,
+                message: Box::new(BrowserEvent::Disconnected),
+            })
+            .unwrap();
+        sender
+            .send(BrowserEvent::Viewer {
+                key: TabKey::new("thread", &fresh),
+                viewer_id: None,
+                output: json!({"type":"dialogState","dialog":marker}),
+            })
+            .unwrap();
+    }
+    loop {
+        match viewer.output.recv().await {
+            Some(t3_preview::stream::ViewerOutput::Message(message))
+                if message["dialog"] == marker =>
+            {
+                break;
+            }
+            Some(t3_preview::stream::ViewerOutput::Gone) | None => {
+                panic!("stale worker closed the replacement tab")
+            }
+            _ => {}
+        }
+    }
+    let listed = service
+        .manager()
+        .list(PreviewListInput {
+            thread_id: "thread".into(),
+        })
+        .await;
+    assert!(!listed.sessions.iter().any(|tab| tab.tab_id.as_str() == old));
+    assert!(
+        listed
+            .sessions
+            .iter()
+            .any(|tab| tab.tab_id.as_str() == fresh)
+    );
+}
+
+#[tokio::test]
+async fn malformed_automation_inputs_are_rejected_before_any_driver_action_or_task_panic() {
+    use PreviewAutomationOperation::*;
+    let (_root, service, driver, _) = make().await;
+    let id = open(&service, "agent").await;
+    for operation in [
+        Snapshot,
+        Evaluate,
+        WaitFor,
+        Click,
+        Hover,
+        Type,
+        Press,
+        Scroll,
+        Select,
+        Drag,
+        Upload,
+        RecordingStart,
+        RecordingStop,
+        Dialog,
+        SetColorScheme,
+        Resize,
+        Navigate,
+        Open,
+        Status,
+        Close,
+    ] {
+        for input in [Value::Null, json!([]), json!("not an object"), json!(1)] {
+            let error = service
+                .execute(request("agent", operation, Some(&id), input.clone()))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, Error::InvalidInput(_)),
+                "{operation:?} {input}: {error:?}"
+            );
+        }
+    }
+    for (operation, input) in [
+        (
+            Scroll,
+            json!({"deltaX":"1);globalThis.injected=true;//","deltaY":0}),
+        ),
+        (Type, json!({"text":7})),
+        (Press, json!({"key":"Enter","modifiers":["invalid"]})),
+        (Upload, json!({"paths":[["bad"]]})),
+        (Select, json!({"values":{}})),
+        (Drag, json!({"source":"#from","target":7})),
+        (Dialog, json!({"accept":"yes"})),
+        (Evaluate, json!({"expression":5})),
+    ] {
+        assert!(matches!(
+            service
+                .execute(request("agent", operation, Some(&id), input))
+                .await,
+            Err(Error::InvalidInput(_))
+        ));
+    }
+    assert!(
+        !driver
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|command| command["command"] == "operate" && command["operation"] != "status")
+    );
+}
+
+#[tokio::test]
+async fn worker_disconnect_during_open_cannot_leave_a_successful_dead_tab() {
+    let (_root, service, driver, mut started) = make().await;
+    let marker = service
+        .manager()
+        .open(serde_json::from_value(json!({"threadId":"marker","runtime":"desktop"})).unwrap())
+        .await
+        .unwrap();
+    let mut events = service.manager().subscribe_events();
+    driver.generation.store(1, Ordering::SeqCst);
+    driver.block_open.store(true, Ordering::SeqCst);
+    let opening = {
+        let service = service.clone();
+        tokio::spawn(async move {
+            service
+                .execute(request(
+                    "agent",
+                    PreviewAutomationOperation::Open,
+                    None,
+                    json!({"reuseExistingTab":false,"show":false}),
+                ))
+                .await
+        })
+    };
+    assert_eq!(started.recv().await.unwrap(), "open");
+    for sender in driver.events.lock().unwrap().iter() {
+        sender
+            .send(BrowserEvent::Worker {
+                generation: 1,
+                message: Box::new(BrowserEvent::Disconnected),
+            })
+            .unwrap();
+        sender
+            .send(BrowserEvent::Status {
+                input: PreviewReportStatusInput {
+                    thread_id: "marker".into(),
+                    tab_id: marker.tab_id.clone(),
+                    nav_status: PreviewNavStatus::Success {
+                        url: "https://example.com/processed".into(),
+                        title: "marker".into(),
+                    },
+                    can_go_back: false,
+                    can_go_forward: false,
+                },
+            })
+            .unwrap();
+    }
+    loop {
+        if let PreviewEvent::Navigated { thread_id, .. } = events.recv().await.unwrap()
+            && thread_id.as_str() == "marker"
+        {
+            break;
+        }
+    }
+    let before = service
+        .manager()
+        .list(PreviewListInput {
+            thread_id: "thread".into(),
+        })
+        .await;
+    driver.block_open.store(false, Ordering::SeqCst);
+    driver.open_gate.add_permits(1);
+    let result = opening.await.unwrap();
+    assert!(
+        before.sessions.is_empty(),
+        "dead worker left a pending session"
+    );
+    assert!(result.is_err(), "open returned a dead page");
+    assert!(driver.pages.lock().unwrap().is_empty());
 }

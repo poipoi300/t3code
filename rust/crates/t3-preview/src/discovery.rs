@@ -597,7 +597,7 @@ impl PortDiscovery {
             return Ok(listeners);
         }
         if !cache.lsof_missing {
-            match run(
+            match run_probe(
                 "lsof",
                 &["-iTCP", "-sTCP:LISTEN", "-P", "-n", "-F", "pcn"],
                 1024 * 1024,
@@ -711,7 +711,7 @@ impl PortDiscovery {
                 .map(u64::to_string)
                 .collect::<Vec<_>>()
                 .join(",");
-            let raw = run(
+            let raw = run_probe(
                 "ps",
                 &["-E", "-ww", "-o", "pid=,command=", "-p", &pids],
                 8 * 1024 * 1024,
@@ -801,7 +801,17 @@ impl PortDiscovery {
     }
     pub async fn stop_server(&self, input: PreviewStopLocalServerInput) -> Result<()> {
         self.stop_owned_server(input).await?;
-        self.poll().await
+        self.refresh_after_stop().await
+    }
+    async fn refresh_after_stop(&self) -> Result<()> {
+        let retained = {
+            let state = lock(&self.inner.state);
+            state.retained > 0 || !state.subscriptions.is_empty()
+        };
+        if retained && let Err(error) = self.poll().await {
+            tracing::warn!(%error,"preview port refresh after stop failed");
+        }
+        Ok(())
     }
     async fn stop_owned_server(&self, input: PreviewStopLocalServerInput) -> Result<()> {
         if cfg!(windows) {
@@ -891,11 +901,78 @@ fn signal_group(_: u64, _: bool) -> Result<bool> {
     Err(Error::Stop(PreviewStopLocalServerReason::Unsupported))
 }
 async fn run(program: &str, args: &[&str], limit: usize) -> Result<String> {
+    run_with_exit(program, args, limit, true).await
+}
+async fn run_probe(program: &str, args: &[&str], limit: usize) -> Result<String> {
+    run_with_exit(program, args, limit, false).await
+}
+async fn run_with_exit(
+    program: &str,
+    args: &[&str],
+    limit: usize,
+    check_exit: bool,
+) -> Result<String> {
     let mut options = t3_process::ProcessOptions::new(program).args(args.iter().copied());
     options.timeout = Some(Duration::from_secs(5));
     options.max_output_bytes = limit;
+    options.check_exit = check_exit;
     let output = t3_process::run(options).await?;
     Ok(output.stdout_text())
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    #[tokio::test]
+    async fn nonzero_probe_exit_preserves_stdout_but_output_limits_still_fail_closed() {
+        let source = "process.stdout.write('p42\\ncnode\\nn127.0.0.1:3000\\n');process.exitCode=1";
+        let output = run_probe("node", &["-e", source], 1024)
+            .await
+            .expect("probe stdout must survive nonzero exit");
+        assert_eq!(
+            parse_lsof(&output),
+            vec![Listener {
+                port: 3000,
+                pid: Some(42),
+                process_name: Some("node".into())
+            }]
+        );
+        assert!(
+            run_probe(
+                "node",
+                &[
+                    "-e",
+                    "process.stdout.write('x'.repeat(1025));process.exitCode=1"
+                ],
+                1024
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            run("node", &["-e", source], 1024).await.is_err(),
+            "strict process-table/Windows probes must still reject nonzero exit"
+        );
+    }
+    #[tokio::test]
+    async fn stop_refresh_skips_unretained_scans_but_refreshes_active_consumers() {
+        let scanner = PortDiscovery::with_options(false, PathBuf::new()).expect("discovery");
+        let guard = scanner.inner.cache.lock().await;
+        let mut refresh = Box::pin(scanner.refresh_after_stop());
+        assert!(
+            matches!(
+                futures_util::poll!(refresh.as_mut()),
+                std::task::Poll::Ready(Ok(()))
+            ),
+            "unretained stop attempted another scan"
+        );
+        drop(refresh);
+        lock(&scanner.inner.state).retained = 1;
+        let mut refresh = Box::pin(scanner.refresh_after_stop());
+        assert!(futures_util::poll!(refresh.as_mut()).is_pending());
+        drop(guard);
+        refresh.await.expect("refresh retained consumers");
+    }
 }
 fn find_socket_owners(
     root: &Path,

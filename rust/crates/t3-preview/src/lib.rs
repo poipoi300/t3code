@@ -27,10 +27,12 @@ pub type Admission =
 pub enum Error {
     #[error(transparent)]
     Mcp(#[from] t3_mcp::McpError),
-    #[error(
-        "Invalid preview URL ({reason}; input length {input_length}). Use an http(s) URL or a schemeless host such as localhost:5173."
-    )]
-    InvalidUrl { reason: String, input_length: usize },
+    #[error("{}", invalid_url_message(.reason, *.input_length, .protocol.as_deref()))]
+    InvalidUrl {
+        reason: String,
+        input_length: usize,
+        protocol: Option<String>,
+    },
     #[error("The preview tab does not exist.")]
     TabNotFound,
     #[error("Server preview tabs require server control.")]
@@ -53,6 +55,14 @@ pub enum Error {
     InvalidInput(String),
     #[error("Could not stop local server: {0:?}.")]
     Stop(t3_contracts::preview::PreviewStopLocalServerReason),
+}
+fn invalid_url_message(reason: &str, length: usize, protocol: Option<&str>) -> String {
+    let suffix = protocol
+        .map(|protocol| format!(": {protocol}"))
+        .unwrap_or_default();
+    format!(
+        "Invalid preview URL ({reason}{suffix}; input length {length}). Use an http(s) URL or a schemeless host such as localhost:5173. With preview_open, omit url when creating a new tab to open a blank tab."
+    )
 }
 
 impl Error {
