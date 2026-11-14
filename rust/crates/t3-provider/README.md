@@ -1,9 +1,10 @@
 # t3-provider
 
-Native provider services, independent of transports and provider adapters. This
-is an **incomplete port**: every driver with unfinished checklist behavior is
-listed below. It is not a replacement for the TypeScript provider host yet.
-It does not implement or redefine `t3-orchestration::provider::ProviderAdapter`.
+Native provider configuration, discovery, catalogs, auth, usage, installation and
+maintenance services. The checklist distinguishes implemented service behavior
+from the host/native bridges still required for production integration.
+This crate does not implement or redefine
+`t3-orchestration::provider::ProviderAdapter` and does not target WebAssembly.
 
 ## Public API
 
@@ -21,7 +22,33 @@ It does not implement or redefine `t3-orchestration::provider::ProviderAdapter`.
   Claude discovery; initialize/account/model/config/skills/usage controls only.
   `account_usage`, `probe_models`, `claude_catalog` and `modes` provide the
   account, usage, option, version-filter and runtime-policy transformations.
-  Host integration and the remaining provider RPC services are being completed.
+  Direct and managed Codex and CLI-owned Claude login keep separate credential
+  paths; Claude intentionally has no in-app login controller.
+- `service::ProviderService`: snapshot subscriptions, refresh, update coordination,
+  reset-credit consumption and text-generator model listing. `ProviderHost`
+  reconciles typed settings, secret changes and policy through `InstanceRegistry`,
+  retiring sessions before replacements. `NativeProviderFactory` constructs
+  direct Codex/Claude instances; `ManagedCodexProvider` supplies the managed path.
+- `managed_provider::ManagedProvider`: deferred startup, demand/interval checks,
+  serialized probes, transient-failure deferral, authoritative auth/usage updates,
+  coalesced usage refresh and cancellable enrichment/manifest subscriptions.
+  `status_cache::ProviderStatusCache` owns bounded atomic snapshot persistence.
+- `CursorProvider`, `GrokProvider`, `OpenCodeProvider`, `KiroProvider`, `PiProvider`,
+  `MuseProvider` and `FxInstance` implement `ProviderInstanceService` in their
+  corresponding modules. Constructors take explicit instance settings, paths,
+  environment and dependencies; `into_managed` adds the common lifecycle.
+  `ProcessPiProbe` runs only the fixed, prompt-free inventory controls.
+- `antigravity_provider::AntigravityProvider` and
+  `host::AntigravityProviderFactory`: lazy private profiles, no-spawn installation
+  health checks, explicit metadata-only model refresh, per-model thinking levels,
+  commands/skills, Google auth/logout and scoped quota reads.
+  `AntigravityInstallation` supplies managed installs and executable leases;
+  `ProcessAntigravityFactory` owns disposable ACP children and cleanup.
+- `acp_service::AcpRegistryService`: all eleven registry RPC operations through
+  `RegistryAgentCatalog`, the native manager and `AcpApplicationHost`.
+  `text_generators::TextGenerators` lists configured OpenAI/Anthropic-compatible
+  endpoints with resolved secrets. `catalog::list_capability_models` applies
+  visibility/order/pinning/search and source catalog limits for MCP callers.
 
 ## Provider RPC service mapping
 
@@ -40,7 +67,7 @@ It does not implement or redefine `t3-orchestration::provider::ProviderAdapter`.
 | `server.updateProvider` | `service::ProviderService::update_provider` | Coordination, current-version precheck, ownership recheck and terminal verification implemented; native Codex/Claude maintenance injected with `with_maintenance` |
 | `server.listTextGeneratorModels` | `service::ProviderService::list_text_generator_models` / `text_generators::TextGenerators::list_models` | Implemented; attach with `set_text_generators` |
 | `provider.chatgpt.handoff.subscribe` | `handoff::HandoffService::subscribe` | Isolated in-memory stream; verified export and disconnect cancellation tested |
-| `provider.install.start` | `installations::ProviderInstallations::start` | Codex installer implemented |
+| `provider.install.start` | `installations::ProviderInstallations::start` | Codex and Antigravity installers; register each driver with the router |
 | `provider.install.cancel` | `installations::ProviderInstallations::cancel` | Implemented |
 | `provider.install.subscribe` | `installations::ProviderInstallations::subscribe` | Implemented |
 | `provider.install.remove` | `installations::ProviderInstallations::remove` | Managed guards and protected executable/router tests pass |
@@ -49,8 +76,8 @@ It does not implement or redefine `t3-orchestration::provider::ProviderAdapter`.
 | `server.prepareAcpRegistryAgent` | `acp_service::AcpRegistryService::prepare` | `registry_service::RegistryAgentCatalog`; binary and package backends implemented |
 | `server.uninstallAcpRegistryManagedBinary` | `acp_service::AcpRegistryService::uninstall_managed_binary` | `registry_service::RegistryAgentCatalog`; binary and package backends implemented |
 | `server.acceptAcpRegistryUrlAuth` | `acp_service::AcpRegistryService::accept_url_authentication` | Coordinator tests pass |
-| `server.listAcpRegistrySessions` | `acp_service::AcpRegistryService::list_sessions` | Mapping through injected native manager and host |
-| `server.importAcpRegistrySession` | `acp_service::AcpRegistryService::import_session` | Serialized launch/history repair through host |
+| `server.listAcpRegistrySessions` | `acp_service::AcpRegistryService::list_sessions` | Mapping through injected native manager and host; at most 16 reads, source order retained |
+| `server.importAcpRegistrySession` | `acp_service::AcpRegistryService::import_session` | Serialized launch/history repair through host; `ImportLaunch.created_by` is `User` |
 | `server.deleteAcpRegistrySession` | `acp_service::AcpRegistryService::delete_session` | Capability and imported-thread guard |
 | `server.listAcpRegistryProviders` | `acp_service::AcpRegistryService::list_providers` | Advertised capability guard |
 | `server.setAcpRegistryProvider` | `acp_service::AcpRegistryService::set_provider` | Header/API validation and stop-before-write |
@@ -82,7 +109,8 @@ Returning an unsupported in-app auth operation preserves that source contract.
   through `t3-process`, bounded version-only probes, localized Windows missing
   command detection, provider timeout overrides, Pi/OpenCode minimum versions,
   and native version parsers. Cursor SDK, Antigravity managed ACP and ACP
-  Registry discovery explicitly return `Error::NotPorted` from this CLI API.
+  Registry discovery explicitly return `Error::NotPorted` from this generic CLI
+  API; their provider-specific SDK/installation/registry services handle discovery.
   `probe_opencode_server` uses `/api/info`, then `/global/health`, JSON identity
   checks and UTF-8 Basic credentials. `managed_release` never downgrades installs.
 - `catalog::{Manifest, ModelManifest, apply_catalog, custom_models,
@@ -123,32 +151,36 @@ Returning an unsupported in-app auth operation preserves that source contract.
   Windows ARM emulation fallback, distribution preference, ranked search,
   cached network reads/fallback, archive path/checksum validation, install-root
   derivation, managed npm/uv install descriptions and executable override launch
-  descriptions. **Descriptions and validation do not install an agent.**
+  descriptions. `registry_service`, `registry_installation` and
+  `registry_packages` execute the validated binary/npm/uv recipes with receipts,
+  staged publication, cancellation, protected paths and safe uninstall.
 - `usage`: sparse usage-window merging, clamping, no-op snapshot identity,
   preservation of reset metadata and fresh live limits after older probes.
-  Finite percentages use the contracts' `wire::JsNumber`; non-finite values
-  clamp to zero. JavaScript numeric equality keeps integer/float no-ops stable.
+  Finite percentages use `speech::SpeechNumber::Finite(wire::JsNumber)`;
+  non-finite values clamp to zero. JavaScript numeric equality keeps
+  integer/float no-ops stable.
 
 ## Driver checklist
 
 “CLI” below is an executable/version check, not an authenticated readiness probe.
-“Input” means a pure conversion of data supplied by another service. Common
-instance/environment/secret/policy support applies to every row. **All rows
-remain unfinished as complete driver integrations.**
+Common instance/environment/secret/policy support applies to every row.
+“Remaining” names host/native integration outside the provider-service boundary,
+including a missing OpenCode process-service dependency. Live integrations and
+POSIX execution have not been verified on this Windows machine.
 
 | Driver kind | Discovery ported | Version gate ported | Models ported | Options ported | Modes ported | Auth ported | Remaining |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `codex` | PATH/custom CLI; managed/local packages | Manifest compatibility and per-model minimums | Native app-server and managed account catalog; bundled/custom models | Reasoning, configured service tiers/cyber, defaults | Four runtime modes, explicit override precedence | ChatGPT OAuth/PKCE/JWT, transfer, renewable scoped tokens, revocation, private broker | Final integration review; server supplies settings/background streams and adapter lifecycle |
-| `claudeAgent` | PATH/custom CLI; Windows entry resolution; prompt-free native probe | Manifest compatibility; model min/max filtering | Bundled/reported/custom models; runtime suffix/context resolution | Effort cap sources, Ultracode migration | Permission/plan/sandbox precedence and bypass availability | CLI-owned login guidance; account/usage probes and five-minute cache with one-use fallback; isolated homes | Final integration review; server supplies settings/background streams; maintenance requires injected resolver |
-| `cursor` | Shipped SDK HTTP catalog; no CLI invented | Manifest compatibility | Cached per-key HTTP models, strict SDK schema and custom models | Parameter ordering, defaults, booleans, effort/context/fast mapping | Windows auto-review/sandbox precedence and agent/plan mapping | T3 credential store, legacy migration, scoped browser login via narrow SDK trait, configured-key precedence, verified atomic commit and logout | SDK browser-login transport bridge supplied by host; host lifecycle wiring |
-| `grok` | PATH/custom CLI; updater-disabled probes; initialize-only metadata and CLI skill inventory | Manifest compatibility | CLI fallback and ACP catalogs, defaults and custom models | Reasoning metadata/default/order conversion | Supervised/Auto/Full-access argv and credential selection | CLI login verdict/recheck, API-key precedence, CLI-owned login guidance, official-account billing with custom-deployment refusal | Text-generation/adapter attachment; final integration review |
-| `opencode` | PATH/custom CLI, external HTTP identity, owned server/cache/idle lifetime | Minimum 1.14.19; generation classification; manifest compatibility | v1 connected-provider and v2 settling catalogs; independent workspace models, skills and commands | Variant/agent/default/family legacy mapping | v1 approval/sandbox rules and v2 runtime/plan ordering | Read-only upstream readiness and private UTF-8 Basic transport; auth remains CLI-owned | Registered-service handoff backend/AgentScope supplied by host; POSIX orphan ledger; adapter/text-generation attachment |
-| `antigravity` | Leased managed/external ACP runtimes; paired harness/PATH discovery | Official CLI target/digest validation and compatibility | Live model/config callbacks; learned thinking options and workspace skills | Per-model observations, default aliases and duplicate labels | Permission and CLI-mode mapping | Client-owned Google flow, callback binding, profile isolation, safe browser helper and token/quota probe | Native runtime fixtures, session/temp cleanup, archive/withdrawal hardening, final host assembly |
-| `kiro` | CLI version/whoami; auth-gated model/template probes | Manifest compatibility | Live list/default aliases and custom models | Static efforts and live agent template | Autopilot mapping; approval/full modes | First-line whoami verdict; no login inference from API-key settings | Adapter attachment; manual-only maintenance matches source |
-| `pi` | CLI version and owned offline ephemeral RPC inventory | Minimum 0.80.5; manifest compatibility | Reported provider/id pairs, defaults, custom models, text-generation exclusions | Thinking opt-ins/clamped defaults and service tiers | Launch validation, extension/tool restrictions and runtime MCP environment | Inventory-derived readiness; no-refresh auth-check refinement | Adapter/injected extension attachment; maintenance/cancellation hardening |
-| `muse` | CLI version and read-only MSP catalog seam; updater/key isolation | Revision parser/comparison and manifest compatibility | Validated meta catalog and custom models | Unknown/empty/reported efforts and defaults | Explicit ask/unrestricted permissions and serve args | Ready catalogs retain unknown auth; login/setup guidance | Native MSP transport supplied by host; adapter attachment |
-| `fx` | Complete CLI status/models; managed lifecycle and workspace skills | Manifest compatibility | Live CLI/default/custom list | Effort descriptor and common inheritance | Ask/auto mapping, advertised auto/code compatibility | Status parsing and CLI-owned login guidance | Adapter attachment; manual-only maintenance matches source |
-| `acpRegistry` | Offline local/index inspection, managed binary/package install and receipts, validated cache, safe uninstall | Exact-version package rules and versioned probe cache | Background ACP catalogs, current/default/custom models and learned per-model options | ACP config controls and legacy session modes | Advertised config and mode descriptors; adapter policy remains external | Agent/browser consent, env-var verification, optional terminal host, persisted confirmation binding, logout | Host PTY/session-import assembly; Windows ARM archive-tool selection; cancellation and cross-platform hardening |
+| `codex` | PATH/custom CLI; managed/local packages | Manifest compatibility and per-model minimums | Native app-server and managed account catalog; bundled/custom models | Reasoning, configured service tiers/cyber, defaults | Four runtime modes, explicit override precedence | ChatGPT OAuth/PKCE/JWT, transfer, renewable scoped tokens, revocation, private broker | `t3-server` package G wires settings/background streams; `t3-orchestration` owns adapter lifecycle |
+| `claudeAgent` | PATH/custom CLI; Windows entry resolution; prompt-free native probe | Manifest compatibility; model min/max filtering | Bundled/reported/custom models; runtime suffix/context resolution | Effort cap sources, Ultracode migration | Permission/plan/sandbox precedence and bypass availability | CLI-owned login guidance; account/usage probes and five-minute cache with one-use fallback; isolated homes | `t3-server` package G wires settings/background streams and injects `NativeMaintenance`; `t3-orchestration` owns adapter lifecycle |
+| `cursor` | Shipped SDK HTTP catalog; no CLI invented | Manifest compatibility | Cached per-key HTTP models, strict SDK schema and custom models | Parameter ordering, defaults, booleans, effort/context/fast mapping | Windows auto-review/sandbox precedence and agent/plan mapping | T3 credential store, legacy migration, scoped browser login via narrow SDK trait, configured-key precedence, verified atomic commit and logout | `t3-server` package G supplies the narrow `CursorLogin` SDK bridge and host wiring |
+| `grok` | PATH/custom CLI; updater-disabled probes; initialize-only metadata and CLI skill inventory | Manifest compatibility | CLI fallback and ACP catalogs, defaults and custom models | Reasoning metadata/default/order conversion | Supervised/Auto/Full-access argv and credential selection | CLI login verdict/recheck, API-key precedence, CLI-owned login guidance, official-account billing with custom-deployment refusal | `t3-orchestration` supplies adapter/text-generation attachment; `t3-server` package G wires lifecycle |
+| `opencode` | PATH/custom CLI, external HTTP identity, owned server/cache/idle lifetime | Minimum 1.14.19; generation classification; manifest compatibility | v1 connected-provider and v2 settling catalogs; independent workspace models, skills and commands | Variant/agent/default/family legacy mapping | v1 approval/sandbox rules and v2 runtime/plan ordering | Read-only upstream readiness and private UTF-8 Basic transport; auth remains CLI-owned | `t3-server` package G supplies `OpenCodeServiceBackend`; `t3-process` lacks AgentScope/provider-process identity support for the POSIX orphan ledger; `t3-orchestration` attaches adapters |
+| `antigravity` | Leased managed/external ACP runtimes; paired harness/PATH discovery | Official CLI target/digest validation and compatibility | Explicit catalog refresh and live config callbacks; learned thinking options and workspace skills | Per-model observations, default aliases and duplicate labels | Permission and CLI-mode mapping | Client-owned Google flow, callback binding, profile isolation, safe browser helper and token/quota probe | `t3-server` package G wires the supplied factory/browser helper/installer; `t3-orchestration` forwards adapter catalog events |
+| `kiro` | CLI version/whoami; auth-gated model/template probes | Manifest compatibility | Live list/default aliases and custom models | Static efforts and live agent template | Autopilot mapping; approval/full modes | First-line whoami verdict; no login inference from API-key settings | `t3-orchestration` adapter attachment; manual-only maintenance matches source |
+| `pi` | CLI version and owned offline ephemeral RPC inventory | Minimum 0.80.5; manifest compatibility | Reported provider/id pairs, defaults, custom models, text-generation exclusions | Thinking opt-ins/clamped defaults and service tiers | Launch validation, extension/tool restrictions and runtime MCP environment | Inventory-derived readiness; no-refresh auth-check refinement | `t3-orchestration` attaches the adapter and materializes its runtime MCP extension |
+| `muse` | CLI version and read-only MSP catalog seam; updater/key isolation | Revision parser/comparison and manifest compatibility | Validated meta catalog and custom models | Unknown/empty/reported efforts and defaults | Explicit ask/unrestricted permissions and serve args | Ready catalogs retain unknown auth; login/setup guidance | Native MSP protocol bridge implementing `MuseCatalog` remains external (server package G/native-client owner); `t3-orchestration` attaches the adapter |
+| `fx` | Complete CLI status/models; managed lifecycle and workspace skills | Manifest compatibility | Live CLI/default/custom list | Effort descriptor and common inheritance | Ask/auto mapping, advertised auto/code compatibility | Status parsing and CLI-owned login guidance | `t3-orchestration` adapter attachment; manual-only maintenance matches source |
+| `acpRegistry` | Offline local/index inspection, managed binary/package install and receipts, validated cache, safe uninstall | Exact-version package rules and versioned probe cache | Background ACP catalogs, current/default/custom models and learned per-model options | ACP config controls and legacy session modes | Advertised config and mode descriptors; adapter policy remains external | Agent/browser consent, env-var verification, optional terminal host, persisted confirmation binding, logout | `t3-server` package G supplies PTY, projections/import-history and thread launch via `AcpApplicationHost`; `t3-orchestration` attaches the adapter |
 
 ## Source coverage and remaining shared work
 
@@ -174,20 +206,46 @@ Ported behavior and test cases come from:
   and ACP runtime model/config parsing. `acp_service::AcpRegistryService` exposes
   all eleven application RPC operations; `AcpNativeServices` uses `t3-acp` for
   read-only probes and management, without sending prompts.
-- `packages/provider-fx/src/server/{status,acpSupport}.ts`, provider Cursor/Kiro/Grok
-  `server/status.ts`, Muse `server/{modelCatalog,maintenance}.ts` and OpenCode
-  `server/versionProbe.ts`. Only the behavior identified above is ported.
+- `packages/provider-{fx,cursor,grok,opencode,kiro,pi,muse}/src/server/` status,
+  discovery, catalog, usage, skills and maintenance helpers, and their
+  `apps/server/src/provider/Drivers/*Driver.ts` construction/mode rules.
+- `apps/server/src/provider/{AntigravityInstallation,AntigravityProvider}.ts`,
+  `AntigravityAuth.ts`, `Drivers/Antigravity{Driver,Usage,Skills}.ts` and
+  `acp/Antigravity*.ts` helpers:
+  installation/release validation, runtime setup/filtering, auth callbacks,
+  model observations, private profiles, skills, quota and temporary-session files.
+- `apps/server/src/mcp/OrchestratorMcpService.ts::listCapabilityModels`:
+  hidden/custom/pinned models, stable preference order, provider/model search
+  terms and bounded/full catalogs; the corresponding source listing cases are
+  covered in `tests/catalog.rs`.
 
-Shared services still being completed: remaining driver runtime construction,
-adapter attachment/teardown, registry workspace
-projection rules, settings stream wiring, `ProviderAuthService`
-integration of the implemented auth ownership/session/callback/secret-delivery flows,
-`providerMaintenanceRunner` command coordination and notifications,
-`ProviderUsageLimitsIngestion`, per-driver usage readers, model visibility/order
-and complete `orchestrator_capabilities` integration. Other provider-core helpers
-(attachments, failures, text generation, MCP/session/continuation services, native
-logging, instructions and projections) have not been ported into this crate.
-Native protocols and per-provider adapters remain with their assigned owners.
+The supplied services cover the requested configuration/discovery/catalog/mode/
+auth/setup/policy/RPC boundary. The application still needs the bridges below;
+they must not be mistaken for verified end-to-end provider support:
+
+- **`t3-server`, provider handlers package G:** connect settings/demand streams,
+  register driver factories/installers, implement session retirement and the ACP
+  application host, expose the token broker/helper commands and Cursor SDK login,
+  and attach native MSP catalog support for Muse. `ImportLaunch.created_by` must
+  be passed to thread launch, alongside its native-history metadata.
+- **`t3-orchestration`, provider adapters:** adapter lifecycle, provider turns,
+  runtime MCP extension materialization, text-generation execution and live
+  callbacks/usage ingestion. This crate exposes mode/catalog transforms and
+  callback methods; it does not replace the existing adapter trait.
+- **`t3-process`, process-service owner:** `agentScope.ts` and
+  `providerProcesses.ts` are explicitly absent in that crate's README. OpenCode's
+  POSIX orphan ledger cannot safely adopt/terminate recorded processes through
+  its current API. `OpenCodeServiceReplacement` has a tested host-backend seam;
+  this crate does not terminate an arbitrary recorded PID.
+- **MCP handler owner:** call `catalog::list_capability_models` with preferences,
+  normalized search terms and favorite/inherited/custom pinning. Project scopes,
+  permission grants and the final `orchestrator_capabilities` response remain
+  application concerns.
+
+Source helpers for attachments, failure rendering, native logging, prompts,
+instructions, continuation/session execution and orchestration projections were
+not copied here; they cross the adapter/application boundary. No provider turns
+were implemented or exercised as part of this port.
 
 ## Differences and verification limits
 
@@ -208,91 +266,61 @@ Native protocols and per-provider adapters remain with their assigned owners.
   handling follow `t3-process`; its documented native differences also apply.
 - Registry fetch uses one 30-second request/body deadline; TypeScript permits
   separate 30-second header/body deadlines. Registry disk caching, staged
-  publication and per-install locks are implemented. Windows ARM archive-tool
-  selection and hostile archive-member fixtures remain to verify.
+  publication and per-install locks are implemented. Windows ARM selection,
+  System32 archive-tool resolution and hostile archive members have fixtures.
+- Pi's discovery stdout cap is 8 MiB (the source RPC client permits larger
+  frames); an oversized catalog fails with a fixed, payload-free error.
+- The current `t3-contracts` usage window duration is `Option<u64>`. Muse accepts
+  positive finite fractional minutes in TypeScript, so fractional reports cannot
+  be represented faithfully here and are rejected. The `t3-contracts` owner must
+  widen that field before exact parity is possible; percentages already use
+  `JsNumber` through the current contract.
 - POSIX process behavior, permissions, real installations, live provider SDKs,
   browser/device OAuth and real update endpoints were not exercised on Windows.
 
-Run from `rust/` with
-`CARGO_TARGET_DIR=D:\t3code-rust-target\server-e` and the configured two Cargo jobs:
+Run from `rust/`, setting `CARGO_BUILD_JOBS=2` and
+`CARGO_TARGET_DIR=D:\t3code-rust-target\server-e` for every Cargo command:
 
 ```text
-cargo fmt -p t3-provider
-cargo clippy -p t3-provider --all-targets -- -D warnings
-cargo test -p t3-provider
+cargo fmt -p t3-provider --check
+cargo clippy --offline -p t3-provider --all-targets -- -D warnings
+cargo test --offline -p t3-provider
 ```
 
-Tests use temporary files, actual `t3-process` fixture executables, a local HTTP
-fixture and paused Tokio clocks/channels. They never start a provider turn.
-The installed-Codex version probe is opt-in and ignored by default.
+Tests use temporary files, owned `t3-process` fixture executables, recorded
+responses, ephemeral loopback HTTP and Tokio clocks/channels. They never start a
+provider turn or call a provider endpoint. The installed-Codex version probe is
+opt-in and ignored by default. Secret-bearing requests, credentials, callbacks,
+profiles, native launches, release URLs and errors have formatting assertions.
 
-## Current continuation checkpoint
+## Verification and integration hand-off
 
-Builds use two jobs and `D:\t3code-rust-target\server-e`. The last full crate
-run passed 197 tests with one installed-binary probe ignored. Since that run,
-Claude skills (5), instance reconciliation (9), host reconciliation (1),
-status cache (2), and managed lifecycle (7) pass
-in focused runs. Strict no-deps Clippy passed after the Grok additions. Strict dependency Clippy previously failed in
-`t3-codex-app-server` (`result_large_err` / `large_enum_variant`); owner files are
-untouched. Formatting passes.
+The final full crate run passed **242 tests, zero failed, one opt-in ignored**
+across 61 test binaries/doc-test summaries. `cargo fmt -p t3-provider --check`
+and strict `cargo clippy --all-targets --no-deps -- -D warnings` pass.
+Dependency-inclusive Clippy remains blocked in `t3-codex-app-server` with 57
+`result_large_err` / `large_enum_variant` findings in its `Error`/event types.
+That owner's files are untouched. Logs are in
+`D:\t3code-rust-target\server-e\provider-{tests,clippy}.log`.
 
-`managed_provider::ManagedProvider` supplies deferred startup, demand/interval
-control, one deferred transient failure, serialized probes, usage merging and
-label clearing, generation guards, cancellable background enrichment, coalesced usage refresh
-and cancellation-safe ownership. Seven lifecycle tests pass. Native Codex/Claude expose pure placeholders
-and `into_managed`; managed Codex also subscribes to auth transitions. Claude's
-real fixture verifies cache invalidation for explicit usage refresh. The synced
-plugin, worktree/backlink and declared symlink-boundary cases pass on Windows.
+Focused regressions cover ACP's 16-read mapping bound/order and import actor,
+Antigravity catalog refresh/per-model thinking/retirement/no-spawn health,
+withdrawal during validation, Windows protected paths and capability listing.
+The full run exposed a concurrent Pi fixture-log interleave; complete JSON records
+now append in one write, and the subsequent focused and full suites pass.
+Integration order: attach Codex/Claude first through the services and RPC mapping
+above, then Cursor/OpenCode and the remaining drivers. The missing native/host
+bridges and the contract/process-service limitations have named owners above;
+there is no provider-service work hidden behind an unimplemented RPC method.
+No live credentials, provider servers, real turns, product servers or git
+mutations were used. Only `rust/crates/t3-provider` was edited intentionally;
+Cargo updates the shared lockfile when resolving this crate's dependencies.
 
-`host::ProviderHost` reconciles typed settings through `InstanceRegistry`, stops
-retired sessions before activating replacements, retries retirement failures,
-registers initial snapshots/auth controllers and publishes unavailable rows.
-`NativeProviderFactory` assembles direct Codex/Claude runtimes; managed Codex
-runtime dependencies remain supplied through the existing factory seam. The host
-fixture proves retirement/drop/create ordering and retained state after failure.
-Policy changes now retire unchanged live configurations; unavailable-reason Debug
-redacts configuration/vault detail. Both fixes passed red/green regressions.
-
-ACP catalog (2), auth (4), snapshots (2), native wrappers (1) and connection (2)
-passed. Discovery never proves login; confirmation writes retain the persistence
-lock through cancellation. Provider service (4) and usage (3) pass, including live
-snapshot precedence and `zeroSpendCap` retention. ACP probes delete empty sessions
-and close owned children. No fixture permits a provider turn.
-
-`status_cache` validates identities, merges current custom models with cached
-built-ins, and atomically persists machine rows without update/workspace state.
-Only managed placeholders hydrate; completed checks stay authoritative. Registry
-secret reloads retain working instances on failure and carry checked values
-without rereading other live credentials. Host methods apply these changes under
-the same retirement/activation lock. Unsafe cache file names are rejected instead
-of allowing paths outside the cache directory.
-
-Codex/Claude background enrichment and automatic manifest rechecks passed the
-full suite. Cursor and OpenCode expose pure placeholders and managed lifecycle
-construction; Cursor (10) and OpenCode (12) focused suites pass.
-`opencode_service::OpenCodeServiceReplacement` implements address/version guards,
-configured environment rules and an uninterruptible handoff/start pair through
-`OpenCodeServiceBackend`. Its three fake-backend tests pass, including RPC
-cancellation during stop. The host supplies the native Service/AgentScope backend;
-this crate does not stop an arbitrary registered PID.
-
-Grok status/catalog/skills/modes (3), account usage (3), and maintenance (7) focused
-suites pass. ACP initialization sends extension metadata and never authenticates,
-creates a session or prompts. Model login text is retried only when signed out
-without an API key. Billing reads only the official credential scope, refuses
-custom auth/endpoints/config sections, and redacts requests and refusal errors.
-`windowDurationMins` is emitted as the current contract's integer type; a failed
-fixture caught the lenient decoder dropping a float-valued window. Timestamp
-validation matches the source's strict casing. Grok native updates retain
-mise/Nix/Homebrew ownership and allow only its package's postinstall.
-
-Kiro status/model/template and model parsing tests pass. fx metadata/roots/workspace refresh tests pass; workspace skill refresh performs no CLI probes. Muse status/readiness, launcher guidance, deadlines and key isolation pass three focused tests; strict optional catalog parsing passes its regression. Muse launcher/channel maintenance passes its focused test. Muse usage ingestion rejects stale reports and clamps source windows; four Muse tests pass. Pi offline RPC catalog, launch validation and thinking/service-tier fixtures pass (3). Strict no-deps Clippy passed before the Antigravity additions.
-
-Antigravity official release parsing, Google callback validation/loopback forwarding and private profile/browser-helper verification pass (3); quota summary/model fallback, official endpoint precedence and token-cache fixtures pass (2). Antigravity installer publication/reuse/cancellation/lease protection and PATH pair discovery pass (3); provider/auth callbacks, invalid callback retry, client privacy, managed usage clearing on sign-out and late-health revision guards pass (2). Native runtime transport compiles but still needs fixture verification. Next finish native runtime/session cleanup, archive hardening and host construction, then rerun the crate checks. No live provider calls were made.
-
-Next finish the remaining Pi, Muse and Antigravity checklist rows, then
-perform final scoped verification. Cursor SDK browser login and ACP PTY execution
-remain host-injected effects. OpenCode's POSIX orphan ledger remains absent.
-`t3-process::SpawnedProcess::wait` releases detached Windows helpers after leader
-exit; explicit close/forget is covered. No other owner's files were changed.
-No live provider requests, real credentials, provider turns or git mutations.
+Already present at takeover: instance/environment/policy/catalog helpers,
+partial CLI discovery, secret and registry parsing, modes/usage helpers and
+focused tests. Those implementations were retained where source behavior matched.
+Replaced from the interrupted work: `usage.rs`'s obsolete finite-number
+construction with the current `SpeechNumber::Finite(JsNumber)` contract and
+partial generic status paths with provider-specific services. Subsequent
+regressions fixed Windows managed-install protection, Antigravity no-spawn health
+and concurrent fixture logging; all pass in the final suite.

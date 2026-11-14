@@ -785,3 +785,106 @@ impl ModelManifest {
         }))
     }
 }
+
+pub struct CapabilityModels<'a> {
+    pub listed: Vec<&'a ServerProviderModel>,
+    pub omitted: usize,
+}
+pub fn list_capability_models<'a>(
+    provider: &'a t3_contracts::server::ServerProvider,
+    preferences: Option<&t3_contracts::settings::ProviderModelPreferencesValueValue>,
+    search_terms: &[String],
+    is_pinned: impl Fn(&ServerProviderModel) -> bool,
+) -> CapabilityModels<'a> {
+    let rank = preferences
+        .into_iter()
+        .flat_map(|preferences| preferences.model_order.iter().enumerate())
+        .map(|(index, slug)| (slug.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut visible = provider
+        .models
+        .iter()
+        .filter(|model| {
+            model.is_custom
+                || !preferences
+                    .is_some_and(|preferences| preferences.hidden_models.contains(&model.slug.0))
+        })
+        .collect::<Vec<_>>();
+    visible.sort_by_key(|model| {
+        rank.get(model.slug.0.as_str())
+            .copied()
+            .unwrap_or(rank.len())
+    });
+    let provider_text = format!(
+        "{} {} {}",
+        provider.instance_id.0,
+        provider.driver.0,
+        provider
+            .display_name
+            .as_ref()
+            .and_then(Option::as_ref)
+            .map_or("", |name| name.0.as_str())
+    )
+    .to_lowercase();
+    let provider_words = provider_text
+        .split_whitespace()
+        .chain(provider_text.split(|character: char| !character.is_alphanumeric()))
+        .collect::<BTreeSet<_>>();
+    let model_text = |model: &ServerProviderModel| {
+        format!(
+            "{} {} {}",
+            model.slug.0,
+            model.name.0,
+            model
+                .sub_provider
+                .as_ref()
+                .and_then(Option::as_ref)
+                .map_or("", |name| name.0.as_str())
+        )
+        .to_lowercase()
+    };
+    let terms = search_terms
+        .iter()
+        .filter(|term| {
+            !provider_words.contains(term.as_str())
+                && (!provider_text.contains(term.as_str())
+                    || visible
+                        .iter()
+                        .any(|model| model_text(model).contains(term.as_str())))
+        })
+        .collect::<Vec<_>>();
+    if !terms.is_empty() {
+        let matches = visible
+            .into_iter()
+            .filter(|model| {
+                let text = model_text(model);
+                terms.iter().all(|term| text.contains(term.as_str()))
+            })
+            .collect::<Vec<_>>();
+        let omitted = matches.len().saturating_sub(8);
+        return CapabilityModels {
+            listed: matches.into_iter().take(8).collect(),
+            omitted,
+        };
+    }
+    let full = matches!(
+        provider.driver.0.as_str(),
+        "codex" | "claudeAgent" | "muse" | "grok"
+    );
+    let mut current = 0;
+    let count = visible.len();
+    let listed = visible
+        .into_iter()
+        .filter(|model| {
+            let shown = model.is_legacy != Some(Some(true)) && (full || current < 8);
+            if model.is_legacy != Some(Some(true)) {
+                current += 1;
+            }
+            is_pinned(model) || shown
+        })
+        .collect::<Vec<_>>();
+    CapabilityModels {
+        omitted: count - listed.len(),
+        listed,
+    }
+}

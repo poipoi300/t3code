@@ -308,3 +308,106 @@ fn provider_release_tags_and_muse_revision_comparison_follow_typescript() {
     );
     assert!(parse_codex_version("wrapper1.2.3").is_none());
 }
+
+#[test]
+fn capability_listing_keeps_custom_and_pinned_models_with_stable_preferences_and_search() {
+    let mut provider: ServerProvider = serde_json::from_value(json!({"instanceId":"opencode-work","driver":"opencode","displayName":"Work","enabled":true,"installed":true,"version":"1.0.0","status":"ready","auth":{"status":"authenticated"},"checkedAt":"2026-04-10T00:00:00.000Z","models":[],"skills":[],"slashCommands":[]})).unwrap();
+    provider.models = (1..=12)
+        .map(|index| {
+            let mut model = model(
+                &format!("oc/m{index:02}"),
+                &format!("Model {index:02}"),
+                None,
+            );
+            model.is_legacy = (index == 3).then_some(Some(true));
+            model
+        })
+        .collect();
+    let mut custom = model("custom", "Custom", None);
+    custom.is_custom = true;
+    custom.is_legacy = Some(Some(true));
+    provider.models.push(custom);
+    let preferences =
+        serde_json::from_value(json!({"hiddenModels":["oc/m02","custom"],"modelOrder":["oc/m12"]}))
+            .unwrap();
+    let pinned = |model: &ServerProviderModel| model.is_custom || model.slug.0 == "oc/m10";
+    let slugs = |listing: CapabilityModels<'_>| {
+        (
+            listing
+                .listed
+                .iter()
+                .map(|model| model.slug.0.clone())
+                .collect::<Vec<_>>(),
+            listing.omitted,
+        )
+    };
+    assert_eq!(
+        slugs(list_capability_models(
+            &provider,
+            Some(&preferences),
+            &[],
+            pinned
+        )),
+        (
+            [
+                "oc/m12", "oc/m01", "oc/m04", "oc/m05", "oc/m06", "oc/m07", "oc/m08", "oc/m09",
+                "oc/m10", "custom"
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            2
+        )
+    );
+    assert_eq!(
+        slugs(list_capability_models(
+            &provider,
+            Some(&preferences),
+            &["oc/m".into()],
+            pinned
+        )),
+        (
+            [
+                "oc/m12", "oc/m01", "oc/m03", "oc/m04", "oc/m05", "oc/m06", "oc/m07", "oc/m08"
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            3
+        )
+    );
+    assert_eq!(
+        slugs(list_capability_models(
+            &provider,
+            Some(&preferences),
+            &["open".into()],
+            pinned
+        )),
+        slugs(list_capability_models(
+            &provider,
+            Some(&preferences),
+            &[],
+            pinned
+        ))
+    );
+    assert_eq!(
+        slugs(list_capability_models(
+            &provider,
+            Some(&preferences),
+            &["work".into(), "03".into()],
+            pinned
+        )),
+        (vec!["oc/m03".into()], 0)
+    );
+    provider.driver = "codex".into();
+    assert_eq!(
+        list_capability_models(&provider, Some(&preferences), &[], pinned).omitted,
+        1
+    );
+    let duplicate =
+        serde_json::from_value(json!({"modelOrder":["oc/m01","oc/m12","oc/m01"]})).unwrap();
+    assert_eq!(
+        list_capability_models(&provider, Some(&duplicate), &[], pinned).listed[0]
+            .slug
+            .0,
+        "oc/m12"
+    );
+}

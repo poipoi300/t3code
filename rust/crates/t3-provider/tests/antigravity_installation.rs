@@ -320,3 +320,77 @@ async fn legacy_zip_contains_only_the_two_pinned_regular_members_and_never_extra
         }
     }
 }
+
+#[tokio::test]
+async fn a_manifest_withdrawal_during_validation_cannot_publish_or_launch_the_release() {
+    use t3_provider::{catalog::ModelManifest, transport::ProviderClock};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let temp = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut withdrawn = serde_json::to_value(Manifest::bundled().unwrap()).unwrap();
+    withdrawn["updatedAt"] = serde_json::json!("2099-01-01T00:00:00.000Z");
+    withdrawn["compatibility"] = serde_json::json!([{"driver":"antigravity","t3CodeRange":">=0.0.42","ranges":[{"range":">=1.5.3","status":"broken"}]}]);
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = [0; 8192];
+        assert_ne!(socket.read(&mut bytes).await.unwrap(), 0);
+        let body = serde_json::to_vec(&withdrawn).unwrap();
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        socket.write_all(headers.as_bytes()).await.unwrap();
+        socket.write_all(&body).await.unwrap();
+    });
+    let manifest = Arc::new(
+        ModelManifest::new(reqwest::Client::new(), None)
+            .unwrap()
+            .with_url(format!("http://{address}/manifest")),
+    );
+    struct Withdraw(Arc<ModelManifest>);
+    #[async_trait]
+    impl AntigravityValidator for Withdraw {
+        async fn validate(&self, _: &AntigravityExecutable, _: &str) -> ServiceResult<()> {
+            self.0
+                .refresh(SystemClock.now_ms(), true, true, true)
+                .await
+                .map_err(|_| ServiceError::Maintenance)?;
+            Ok(())
+        }
+    }
+    let bytes = b"native runtime".to_vec();
+    let releases = Arc::new(Releases {
+        asset: release(&bytes),
+        bytes,
+        downloads: AtomicUsize::new(0),
+        block: None,
+    });
+    let installation = AntigravityInstallation::new(
+        InstallationOptions {
+            base: temp.path().into(),
+            platform: Platform::current(),
+            architecture: "x64".into(),
+            musl: false,
+            environment: Environment::new(),
+            manifest: manifest.clone().into(),
+            server_version: "1".into(),
+            pin: None,
+            update_checks: true,
+        },
+        releases,
+        Arc::new(Withdraw(manifest)),
+        Arc::new(SystemClock),
+    );
+    installation.start().await.unwrap();
+    assert_eq!(settled(&installation).await, ProviderInstallPhase::Failed);
+    assert!(!installation.directory().join("active.json").exists());
+    assert!(
+        installation
+            .resolve(None, &Environment::new())
+            .await
+            .is_err()
+    );
+    assert!(installation.start().await.is_err());
+    server.await.unwrap();
+}

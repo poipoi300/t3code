@@ -4,6 +4,17 @@ use std::{
     io::Write,
 };
 
+fn append_record(path: &str, value: Value) -> Result<(), Box<dyn std::error::Error>> {
+    let mut record = serde_json::to_vec(&value)?;
+    record.push(b'\n');
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?
+        .write_all(&record)?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let path = std::env::var_os("T3_PROVIDER_FIXTURE").ok_or("missing fixture path")?;
@@ -18,11 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if let Some(log) = config["log"].as_str() {
-        writeln!(
-            OpenOptions::new().create(true).append(true).open(log)?,
-            "{}",
-            json!(args)
-        )?;
+        append_record(log, json!(args))?;
     }
     if config["protocol"] == "opencode" && args.first().is_some_and(|argument| argument == "serve")
     {
@@ -170,11 +177,7 @@ fn pi_protocol(config: &Value, args: &[String]) -> Result<(), Box<dyn std::error
         let request: Value = serde_json::from_str(&line?)?;
         let command = request["type"].as_str().ok_or("missing request type")?;
         if let Some(log) = config["rpcLog"].as_str() {
-            writeln!(
-                OpenOptions::new().create(true).append(true).open(log)?,
-                "{}",
-                json!({"method":command,"textGeneration":text})
-            )?;
+            append_record(log, json!({"method":command,"textGeneration":text}))?;
         }
         let data = match command {
             "get_state" => config.get("piState").cloned().unwrap_or(json!({})),
@@ -207,11 +210,7 @@ fn acp_protocol(config: &Value) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         };
         if let Some(log) = config["log"].as_str() {
-            writeln!(
-                OpenOptions::new().create(true).append(true).open(log)?,
-                "{}",
-                json!([method])
-            )?;
+            append_record(log, json!([method]))?;
         }
         if matches!(method, "session/prompt" | "prompt") {
             return Err("fixture forbids turns".into());
@@ -278,11 +277,7 @@ fn protocol(config: &Value) -> Result<(), Box<dyn std::error::Error>> {
         }
         .ok_or("fixture received an unrecognized protocol frame")?;
         if let Some(log) = config["log"].as_str() {
-            writeln!(
-                OpenOptions::new().create(true).append(true).open(log)?,
-                "{}",
-                json!([method])
-            )?;
+            append_record(log, json!([method]))?;
         }
         let response=match method {
             "initialized"=>continue,
