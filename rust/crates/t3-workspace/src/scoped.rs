@@ -50,7 +50,7 @@ pub(crate) fn final_path(file: &File, expected: &Path) -> Result<PathBuf> {
         ))
     }
 }
-fn options(directory: bool) -> OpenOptions {
+pub(crate) fn options(directory: bool) -> OpenOptions {
     let mut options = OpenOptions::new();
     options
         .read(true)
@@ -129,7 +129,7 @@ impl ScopedDir {
         paths::validate_host_path(&path)?;
         Ok(path)
     }
-    fn walk(&self, relative: &Path, create: bool) -> Result<Vec<Dir>> {
+    pub(crate) fn walk(&self, relative: &Path, create: bool) -> Result<Vec<Dir>> {
         let mut dirs = vec![
             self.dir
                 .try_clone()

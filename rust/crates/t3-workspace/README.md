@@ -25,6 +25,15 @@ directories supplied by the caller. This crate never opens an application databa
 - `ProjectFiles` validates roots and reads project records supplied as plain
   `Project` data. `load_project_file`/`parse_project_file` decode JSON with comments
   and trailing commas through `t3-contracts::t3_project_file`.
+- `contained_files::ContainedFiles` reads one file under a fixed root for the server's
+  `getWorkflowScript` (TypeScript `readContainedWorkflowFile`): `realpath` is `paths::canonicalize`;
+  `open` walks from the pinned root one component at a time without following links (the
+  `ScopedDir` walk, `O_NONBLOCK` on Unix), so a link swapped into the leaf or any ancestor after
+  resolution is refused and reads go through that handle; `stat` reports the opened handle's
+  device/inode (Windows volume serial number and file index, read by `cap-std` from the handle);
+  `lstat_identity` is the path's own identity (Windows: the link object, opened with
+  `FILE_FLAG_OPEN_REPARSE_POINT`). There is no `unsafe`: `windows-sys` supplies only those
+  flag constants. Type and size bounds stay with the caller, as in TypeScript.
 - `FaviconResolver` implements explicit override, t3.json, known-path and source
   metadata precedence, positive/negative TTLs and invalidation.
 - `ScriptRunner::run_for_thread` executes setup/settle scripts using

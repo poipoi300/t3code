@@ -2,6 +2,7 @@
 
 pub mod assets;
 pub mod attachments;
+pub mod contained_files;
 pub mod entries;
 pub mod filesystem;
 pub mod ignore_patterns;
