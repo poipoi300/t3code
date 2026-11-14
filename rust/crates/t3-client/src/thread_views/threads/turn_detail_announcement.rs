@@ -92,7 +92,7 @@ fn entry_run_id(entry: &TimelineEntry) -> Option<String> {
     let run = match &entry.content {
         TimelineContent::Message { message, .. } => {
             return (message.role == "assistant")
-                .then(|| message.run_id.as_ref().map(|run| id_text(run)))
+                .then(|| message.run_id.as_ref().map(id_text))
                 .flatten();
         }
         TimelineContent::ProposedPlan { proposed_plan } => {
@@ -104,7 +104,7 @@ fn entry_run_id(entry: &TimelineEntry) -> Option<String> {
         TimelineContent::Work { entry } => entry.run_id.as_ref(),
         TimelineContent::Event { .. } => None,
     };
-    run.map(|run| id_text(run))
+    run.map(id_text)
 }
 
 /// `timelineEntryStartsResponse`: a user's prompt (not a steer) or a notification.
@@ -266,7 +266,7 @@ pub fn turn_detail(
                 }
                 mark(
                     entry,
-                    work.run_id.as_ref().map(|run| id_text(run)),
+                    work.run_id.as_ref().map(id_text),
                     &mut continued_runs,
                     &mut continued_attempts,
                 );

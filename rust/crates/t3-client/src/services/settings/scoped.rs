@@ -1059,6 +1059,14 @@ mod tests {
         );
         assert_eq!(plan.server_writes.len(), 1);
         assert_eq!(plan.server_writes[0].environment_id.0, "a");
+        // A field that is absent by default is still a server key (`Struct.keys`).
+        let optional = plan_scoped_settings_patch(
+            &all,
+            &environments,
+            &patch(json!({"defaultThreadEnvMode": "worktree"})),
+            false,
+        );
+        assert_eq!(optional.server_writes.len(), 1);
         environments[0].phase = Phase::Offline;
         let none = plan_scoped_settings_patch(
             &all,

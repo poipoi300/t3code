@@ -104,7 +104,6 @@ impl LinkRequestDisplay {
 /// `linkRequestDefaultAccess`: the agent's suggestion, else supervised.
 pub fn link_request_default_access(item: &TurnItemLinkRequest) -> AuthMcpClientAccess {
     item.requested_access
-        .clone()
         .flatten()
         .unwrap_or(AuthMcpClientAccess::ApprovalRequired)
 }
@@ -252,7 +251,7 @@ pub fn link_request_initial_machine(
     let best = rank_machines_by_hint(machines.to_vec(), Some(&hint))
         .into_iter()
         .next()?;
-    (hint_rank(&best.label, &hint) < NO_MATCH).then(|| best.environment_id.0)
+    (hint_rank(&best.label, &hint) < NO_MATCH).then_some(best.environment_id.0)
 }
 
 /// The machine choice for linking by an address typed in.
@@ -439,7 +438,7 @@ pub fn link_request_display(
                 .clone()
                 .flatten()
                 .or_else(|| link_request_target_name(item)),
-            access: item.linked_access.clone().flatten(),
+            access: item.linked_access.flatten(),
         },
         S::Declined => LinkRequestDisplay::Declined,
         S::Failed => LinkRequestDisplay::Failed {

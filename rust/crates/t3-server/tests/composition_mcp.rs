@@ -1116,3 +1116,228 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
 
     runtime.shutdown().await.unwrap();
 }
+
+/// Delegation end to end over `/mcp`: a live parent (the holding stand-in) delegates to Replay
+/// (dev); the child thread runs; `task_status` reports the result and acknowledges it once. The
+/// refusals: a child broader than its parent, a caller with no live run, another thread's task.
+#[cfg(feature = "mcp-delegation")]
+#[tokio::test]
+async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
+    const PARENT: &str = "thread:mcp-parent";
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    std::fs::create_dir_all(home.join("userdata")).unwrap();
+    // TypeScript's dev seed (`seedDevReplayInstance`) configures Replay (dev) as a local ACP agent,
+    // which is what makes its provider status installed; the Rust seed does not yet (requested).
+    // The command only has to exist: the Replay that runs is the in-process one.
+    let settings = json!({"providerInstances":{
+        "replay":{"driver":"replay","enabled":true},
+        "devReplay":{"driver":"acpRegistry","displayName":"Replay (dev)","enabled":true,
+            "config":{"source":"local","commandPath":std::env::current_exe().unwrap(),"commandArgs":["--list"]}}
+    }});
+    std::fs::write(
+        home.join("userdata").join("settings.json"),
+        settings.to_string(),
+    )
+    .unwrap();
+    let workspace = home.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let sessions = Arc::new(McpSessions::default());
+    let seen = Arc::new(Seen::default());
+    let (changed, mut changes) = watch::channel(0_u64);
+    let adapter = HoldingAdapter {
+        instance: ProviderInstanceId("replay".into()),
+        capabilities: serde_json::from_value(
+            sample("OrchestrationV2ProviderSession")["capabilities"].clone(),
+        )
+        .unwrap(),
+        sessions: sessions.clone(),
+        seen: seen.clone(),
+        changed,
+    };
+    let runtime = t3_server::runtime::start_with(
+        inputs(home),
+        StartOptions {
+            providers: vec![Arc::new(adapter)],
+            dev_replay: true,
+            mcp_sessions: Some(sessions.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let origin = format!("http://{}", runtime.address);
+    let http = reqwest::Client::new();
+    let mcp = Mcp {
+        http: http.clone(),
+        url: format!("{origin}/mcp"),
+    };
+    let layout = t3_config::home::HomeLayout {
+        base_dir: home.into(),
+        state_dir: home.join("userdata"),
+    };
+    t3_persistence::rusqlite::Connection::open(layout.database())
+        .unwrap()
+        .execute(
+            "INSERT INTO projection_projects
+             (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+             VALUES ('project:mcp', 'MCP', ?1, '[]', '2026-11-14T12:00:00.000Z', '2026-11-14T12:00:00.000Z')",
+            [workspace.to_string_lossy()],
+        )
+        .unwrap();
+    let cookie = http
+        .post(format!("{origin}/api/auth/browser-session"))
+        .json(&json!({"credential": runtime.pairing_credential}))
+        .send()
+        .await
+        .unwrap()
+        .headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let ticket: Value = http
+        .post(format!("{origin}/api/auth/websocket-ticket/rpc"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{}/ws?orchestrationProtocol=2&wsTicket={}",
+        runtime.address,
+        ticket["ticket"].as_str().unwrap()
+    ))
+    .await
+    .unwrap();
+    let mut client = Client::new(0, Default::default());
+    command(&mut socket, &mut client, json!({"type":"thread.create","commandId":"create:parent","threadId":PARENT,"projectId":"project:mcp","title":"Parent","modelSelection":{"instanceId":"replay","model":"replay-model"},"runtimeMode":"approval-required","interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"})).await;
+    command(&mut socket, &mut client, json!({"type":"message.dispatch","commandId":"command:parent","threadId":PARENT,"messageId":"message:parent","text":"Delegate","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"})).await;
+    changes
+        .wait_for(|_| seen.turns.lock().unwrap().iter().any(|t| t.0 == PARENT))
+        .await
+        .unwrap();
+    let token = sessions
+        .read(&ThreadId(PARENT.into()))
+        .expect("the parent session's credential")
+        .authorization_header;
+
+    // A child broader than its parent is refused before anything starts.
+    let broader = mcp
+        .call(
+            &token,
+            "delegate_task",
+            json!({"task":"Summarise","target":{"providerInstanceId":"devReplay","model":"multi-turn"},"runtimeMode":"full-access"}),
+        )
+        .await;
+    assert!(
+        is_error(&broader)
+            && broader.to_string().contains("runtime_mode_escalation_denied")
+            && broader.to_string().contains(
+                "Child runtime mode full-access is broader than parent mode approval-required."
+            ),
+        "{broader}"
+    );
+
+    // Delegated: the task, its child thread on Replay (dev), still running.
+    let delegated = mcp
+        .call(
+            &token,
+            "delegate_task",
+            json!({"task":"Summarise the workspace","target":{"providerInstanceId":"devReplay","model":"multi-turn"},"clientRequestId":"delegate-1"}),
+        )
+        .await;
+    assert!(!is_error(&delegated), "{delegated}");
+    let task = delegated["result"]["structuredContent"].clone();
+    let task_id = task["taskId"].as_str().unwrap().to_owned();
+    let child = task["childThreadId"].as_str().unwrap().to_owned();
+    assert_eq!(task["providerInstanceId"], "devReplay", "{task}");
+    // The same request again is the same task (stable command id), not a second child.
+    let again = mcp
+        .call(
+            &token,
+            "delegate_task",
+            json!({"task":"Summarise the workspace","target":{"providerInstanceId":"devReplay","model":"multi-turn"},"clientRequestId":"delegate-1"}),
+        )
+        .await;
+    assert_eq!(again["result"]["structuredContent"]["taskId"], task_id.as_str(), "{again}");
+
+    // The child runs to completion on Replay.
+    let watched = client
+        .start(
+            "orchestration.subscribeThread",
+            json!({"threadId": child}),
+            CallKind::Stream,
+        )
+        .unwrap();
+    loop {
+        match event(&mut socket, &mut client).await {
+            CallEvent::Chunk { id, values } if id == watched => {
+                client.acknowledge(id);
+                let text = Value::Array(values).to_string();
+                if text.contains("\"run.updated\"") && text.contains("\"completed\"") {
+                    break;
+                }
+            }
+            CallEvent::Exit { id, .. } if id == watched => panic!("child stream ended"),
+            _ => {}
+        }
+    }
+
+    // task_status: the result, read by the owner, acknowledged once.
+    let status = mcp
+        .call(&token, "task_status", json!({"taskId": task_id}))
+        .await;
+    assert!(!is_error(&status), "{status}");
+    let status = &status["result"]["structuredContent"];
+    assert_eq!(status["status"], "completed", "{status}");
+    assert_eq!(status["workState"], "result_available", "{status}");
+    assert!(status["summary"].is_string(), "{status}");
+    assert!(status.get("next").is_none(), "{status}");
+    let parent_records = mcp
+        .call(&token, "t3_thread_read", json!({"threadId": PARENT, "view": "activity"}))
+        .await;
+    assert!(!is_error(&parent_records), "{parent_records}");
+
+    // Another thread's credential cannot read this task.
+    let stranger = sessions
+        .registry()
+        .unwrap()
+        .issue(CredentialRequest::new(
+            ThreadId(child.clone()),
+            ProviderInstanceId("devReplay".into()),
+        ))
+        .unwrap();
+    let foreign = mcp
+        .call(
+            &stranger.authorization_header,
+            "task_status",
+            json!({"taskId": task_id}),
+        )
+        .await;
+    assert!(
+        is_error(&foreign)
+            && foreign.to_string().contains("task_not_found")
+            && foreign
+                .to_string()
+                .contains(&format!("Delegated task {task_id} does not belong to thread {child}.")),
+        "{foreign}"
+    );
+    // A caller with no live run cannot delegate.
+    let idle = mcp
+        .call(
+            &stranger.authorization_header,
+            "delegate_task",
+            json!({"task":"More","target":{"providerInstanceId":"devReplay","model":"multi-turn"}}),
+        )
+        .await;
+    assert!(
+        is_error(&idle) && idle.to_string().contains("parent_not_active"),
+        "{idle}"
+    );
+    runtime.shutdown().await.unwrap();
+}
