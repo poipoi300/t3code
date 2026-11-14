@@ -253,34 +253,143 @@ async fn discovered_existing_file_launches_with_position_as_discrete_arguments()
     );
 }
 
-#[test]
-fn windows_reveal_encodes_literal_paths_instead_of_shell_arguments() {
-    use base64::Engine;
-    let target = "C:\\project\\O'Connor & $file.txt";
-    let command = windows_reveal_command("powershell.exe".into(), target, "C:\\project");
-    assert_eq!(
-        &command.args[..5],
-        [
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-EncodedCommand"
-        ]
-    );
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(&command.args[5])
-        .unwrap();
-    let units = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|p| u16::from_le_bytes([p[0], p[1]]))
-        .collect::<Vec<_>>();
-    let source = String::from_utf16(&units).unwrap();
-    assert!(source.contains("O''Connor & $file.txt"));
-    assert!(source.contains("Invoke-Item -LiteralPath 'C:\\project'"));
-    assert!(source.contains("Registry::HKEY_CLASSES_ROOT\\Directory\\shell"));
+/// Names a shell, PowerShell, `cmd` or a script would read as code: every PowerShell quote
+/// (`'` and U+2018–U+201B), command separators, substitutions and an option-like leading dash.
+fn hostile_names() -> Vec<&'static str> {
+    let mut names = vec![
+        "single'quote.txt",
+        "left\u{2018}quote.txt",
+        "right\u{2019}quote.txt",
+        "low\u{201A}quote.txt",
+        "reversed\u{201B}quote.txt",
+        "x\u{2019}; Start-Process calc; \u{2019}y.txt",
+        "semi;colon.txt",
+        "amp&ersand.txt",
+        "back`tick.txt",
+        "dollar$(whoami).txt",
+        "-leading-dash.txt",
+        "comma,name.txt",
+        "percent%PATH%.txt",
+    ];
+    // NTFS forbids `|`; newlines are refused below on every platform.
+    if cfg!(unix) {
+        names.push("pipe|bar.txt");
+    }
+    names
+}
+
+/// Records every launch; nothing is ever started.
+struct Recording {
+    root: PathBuf,
+    editors: Vec<DiscoveredEditor>,
+    commands: tokio::sync::Mutex<Vec<EditorCommand>>,
+}
+#[async_trait]
+impl EditorDiscovery for Recording {
+    async fn discover(&self) -> Result<DiscoveredEditors> {
+        Ok(DiscoveredEditors {
+            roots: vec![self.root.clone()],
+            editors: self.editors.clone(),
+        })
+    }
+    async fn launch(&self, c: EditorCommand) -> Result<()> {
+        self.commands.lock().await.push(c);
+        Ok(())
+    }
+}
+
+/// "Reveal in File Explorer" and "Open" pass a file name as data: no shell, PowerShell or script
+/// ever parses it, so a name such as `x’; Start-Process calc; ’y.txt` starts nothing else.
+#[tokio::test]
+async fn hostile_file_names_reach_the_file_manager_and_editors_as_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let file_manager = if cfg!(windows) {
+        PathBuf::from("C:\\Windows\\explorer.exe")
+    } else if cfg!(target_os = "macos") {
+        PathBuf::from("/usr/bin/open")
+    } else {
+        PathBuf::from("/usr/bin/xdg-open")
+    };
+    let d = Arc::new(Recording {
+        root: root.clone(),
+        editors: vec![
+            DiscoveredEditor {
+                id: EditorId::FileManager,
+                command: file_manager.clone(),
+                base_args: vec![],
+                style: EditorLaunchStyle::DirectPath,
+            },
+            DiscoveredEditor {
+                id: EditorId::Vscode,
+                command: "trusted/code".into(),
+                base_args: vec![],
+                style: EditorLaunchStyle::Goto,
+            },
+        ],
+        commands: tokio::sync::Mutex::new(vec![]),
+    });
+    let s = ExternalLauncher::new(d.clone());
+    for name in hostile_names() {
+        let file = root.join(name);
+        std::fs::write(&file, "x").unwrap();
+        let real = dunce::canonicalize(&file)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let launch = |editor, reveal| LaunchEditorInput {
+            cwd: file.to_string_lossy().into_owned().into(),
+            editor,
+            project_root: None,
+            reveal,
+        };
+        // Linux reveal first asks the desktop's file manager over D-Bus; not run here.
+        if !cfg!(target_os = "linux") {
+            s.launch_editor(&launch(EditorId::FileManager, Some(Some(true))))
+                .await
+                .unwrap();
+            let reveal = d.commands.lock().await.pop().unwrap();
+            assert_eq!(reveal.command, file_manager, "{name}");
+            if cfg!(windows) {
+                // Explorer's own `/select,"<path>"` syntax, verbatim: NTFS names cannot hold `"`.
+                assert_eq!(reveal.args, vec![format!("/select,\"{real}\"")], "{name}");
+                assert!(reveal.verbatim, "{name}");
+            } else {
+                assert_eq!(reveal.args, vec!["-R".to_string(), real.clone()], "{name}");
+                assert!(!reveal.verbatim);
+            }
+        }
+        s.launch_editor(&launch(EditorId::FileManager, None))
+            .await
+            .unwrap();
+        let open = d.commands.lock().await.pop().unwrap();
+        assert_eq!(open.command, file_manager, "{name}");
+        if cfg!(windows) {
+            assert_eq!(open.args, vec![format!("\"{real}\"")], "{name}");
+            assert!(open.verbatim, "{name}");
+        } else {
+            assert_eq!(open.args, vec![real.clone()], "{name}");
+        }
+        s.launch_editor(&launch(EditorId::Vscode, None))
+            .await
+            .unwrap();
+        let editor = d.commands.lock().await.pop().unwrap();
+        assert_eq!(editor.command, PathBuf::from("trusted/code"));
+        assert_eq!(editor.args, vec![real.clone()], "{name}");
+        assert!(!editor.verbatim);
+    }
+    // A newline never reaches a file manager or an editor.
+    for editor in [EditorId::FileManager, EditorId::Vscode] {
+        let input = LaunchEditorInput {
+            cwd: format!("{}\nStart-Process calc", root.join("a.txt").display()).into(),
+            editor,
+            project_root: None,
+            reveal: Some(Some(true)),
+        };
+        assert!(s.launch_editor(&input).await.is_err());
+    }
+    assert!(d.commands.lock().await.is_empty());
 }
 
 #[tokio::test]

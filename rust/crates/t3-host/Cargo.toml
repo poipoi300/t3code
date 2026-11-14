@@ -14,6 +14,7 @@ thiserror = "2"
 chrono = "0.4"
 t3-config = { path = "../t3-config" }
 t3-process = { path = "../t3-process" }
+t3-workspace = { path = "../t3-workspace" }
 t3-git = { path = "../t3-git" }
 t3-provider = { path = "../t3-provider" }
 t3-cloud = { path = "../t3-cloud" }

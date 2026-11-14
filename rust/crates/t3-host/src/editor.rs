@@ -20,6 +20,9 @@ pub struct DiscoveredEditors {
 pub struct EditorCommand {
     pub command: PathBuf,
     pub args: Vec<String>,
+    /// On Windows the arguments are already in the program's own syntax (Explorer's
+    /// `/select,"<path>"`) and go onto its command line unchanged; elsewhere ignored.
+    pub verbatim: bool,
 }
 #[async_trait]
 pub trait EditorDiscovery: Send + Sync {
@@ -347,8 +350,11 @@ impl ExternalLauncher {
                 target.push_str(c);
             }
         }
-        let mut command = editor.command.clone();
+        let command = editor.command.clone();
         let mut args = editor_arguments(editor, &target, path.is_dir(), project_root.as_deref());
+        // Explorer reads its own command line (`/select,"<path>"`, split at commas outside
+        // quotes); the path goes there unchanged, never through a shell or PowerShell.
+        let mut verbatim = false;
         if input.editor == EditorId::FileManager {
             let distro = if cfg!(target_os = "linux")
                 && editor
@@ -367,42 +373,26 @@ impl ExternalLauncher {
                 );
                 args = vec![target.clone()];
             }
+            let explorer = cfg!(windows) && distro.is_none();
+            if explorer && target.chars().any(|c| c == '"' || c.is_control()) {
+                return Err(unsupported());
+            }
             if input.reveal == Some(Some(true)) {
                 if cfg!(target_os = "macos") {
                     args = vec!["-R".into(), target.clone()];
-                } else if cfg!(windows) || distro.is_some() {
-                    let parent = if let Some(distro) = &distro {
-                        format!(
-                            "\\\\wsl.localhost\\{distro}{}",
-                            path.parent()
-                                .ok_or_else(unsupported)?
-                                .to_string_lossy()
-                                .replace('/', "\\")
-                        )
-                    } else {
+                } else if explorer {
+                    args = vec![format!("/select,\"{target}\"")];
+                    verbatim = true;
+                } else if let Some(distro) = &distro {
+                    // WSL interop re-quotes arguments, so Explorer's selection syntax cannot be
+                    // passed intact: open the containing folder instead.
+                    args = vec![format!(
+                        "\\\\wsl.localhost\\{distro}{}",
                         path.parent()
                             .ok_or_else(unsupported)?
                             .to_string_lossy()
-                            .into_owned()
-                    };
-                    let powershell = if cfg!(windows) {
-                        let system_root = std::env::var_os("SYSTEMROOT")
-                            .or_else(|| std::env::var_os("windir"))
-                            .unwrap_or_else(|| "C:\\Windows".into());
-                        Some(
-                            PathBuf::from(system_root)
-                                .join("System32/WindowsPowerShell/v1.0/powershell.exe"),
-                        )
-                    } else {
-                        find_command("powershell.exe")
-                    };
-                    if let Some(powershell) = powershell {
-                        let reveal = windows_reveal_command(powershell, &target, &parent);
-                        command = reveal.command;
-                        args = reveal.args;
-                    } else {
-                        args = vec![parent];
-                    }
+                            .replace('/', "\\")
+                    )];
                 } else {
                     if try_reveal_linux(&path).await {
                         return Ok(());
@@ -414,6 +404,9 @@ impl ExternalLauncher {
                             .into_owned(),
                     ];
                 }
+            } else if explorer {
+                args = vec![format!("\"{target}\"")];
+                verbatim = true;
             }
         }
         let shim = editor.command.extension().is_some_and(|e| {
@@ -432,6 +425,7 @@ impl ExternalLauncher {
             .launch(EditorCommand {
                 command: command.clone(),
                 args: args.clone(),
+                verbatim,
             })
             .await
             .map_err(|_| {
@@ -457,6 +451,17 @@ fn contains(root: &Path, path: &Path) -> bool {
     #[cfg(not(windows))]
     path.starts_with(root)
 }
+/// The real path, refusing remote drives, links to network shares (before they are followed),
+/// device names and stream suffixes: one rule with the workspace authority.
+fn resolve_local(path: &Path) -> Result<PathBuf> {
+    t3_workspace::paths::canonicalize(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            Error::Refused("network or unsafe path")
+        } else {
+            Error::Io
+        }
+    })
+}
 fn checked_path(raw: &str, roots: &[PathBuf]) -> Result<PathBuf> {
     let path = Path::new(raw);
     if raw.chars().any(|c| c.is_control())
@@ -466,10 +471,10 @@ fn checked_path(raw: &str, roots: &[PathBuf]) -> Result<PathBuf> {
     {
         return Err(Error::Invalid);
     }
-    let real = dunce::canonicalize(path).map_err(|_| Error::Io)?;
+    let real = resolve_local(path)?;
     if !roots
         .iter()
-        .filter_map(|r| dunce::canonicalize(r).ok())
+        .filter_map(|r| resolve_local(r).ok())
         .any(|r| contains(&r, &real))
     {
         return Err(Error::Refused("target was not discovered"));
@@ -726,30 +731,6 @@ fn wsl_distribution() -> Option<String> {
         .ok()
         .filter(|s| !s.trim().is_empty())
 }
-pub fn windows_reveal_command(powershell: PathBuf, target: &str, parent: &str) -> EditorCommand {
-    use base64::Engine;
-    let literal = |value: &str| format!("'{}'", value.replace("'", "''"));
-    let source = format!(
-        "$ProgressPreference = 'SilentlyContinue'; $folderVerb = (Get-ItemProperty -LiteralPath 'Registry::HKEY_CLASSES_ROOT\\Directory\\shell' -ErrorAction SilentlyContinue).'(default)'; if ($folderVerb -and $folderVerb -ne 'none') {{ Invoke-Item -LiteralPath {} }} else {{ Start-Process 'explorer.exe' -ArgumentList ('/select,\"' + {} + '\"') }}",
-        literal(parent),
-        literal(target)
-    );
-    let bytes = source
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-    EditorCommand {
-        command: powershell,
-        args: vec![
-            "-NoProfile".into(),
-            "-NonInteractive".into(),
-            "-ExecutionPolicy".into(),
-            "Bypass".into(),
-            "-EncodedCommand".into(),
-            base64::engine::general_purpose::STANDARD.encode(bytes),
-        ],
-    }
-}
 pub async fn graphical_session_env() -> std::collections::BTreeMap<String, String> {
     let mut env = std::collections::BTreeMap::new();
     if !cfg!(target_os = "linux")
@@ -799,7 +780,8 @@ async fn try_reveal_linux(path: &Path) -> bool {
         "/org/freedesktop/FileManager1",
         "--method",
         "org.freedesktop.FileManager1.ShowItems",
-        &format!("[\"{uri}\"]"),
+        // A GVariant text literal is data; with backslashes encoded the URI holds no escape.
+        &format!("[\"{}\"]", uri.as_str().replace('\\', "%5C")),
         "",
     ]);
     options.timeout = Some(std::time::Duration::from_secs(2));
@@ -807,4 +789,31 @@ async fn try_reveal_linux(path: &Path) -> bool {
     t3_process::run(options)
         .await
         .is_ok_and(|r| r.code == Some(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A link inside a workspace whose target is a network share is refused before it is
+    /// followed (`t3_workspace::paths::canonicalize`), so resolving the target never contacts a
+    /// share. The share name does not exist and nothing is contacted.
+    #[test]
+    fn a_link_to_a_network_share_is_refused_before_it_is_followed() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("workspace");
+        std::fs::create_dir(&root).expect("root");
+        let link = root.join("share");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(r"\nonexistent.invalid\share", &link)
+            .expect("directory symlinks need Developer Mode or the symlink privilege");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("//nonexistent.invalid/share", &link).expect("symlink");
+        let target = link.join("notes.md");
+        let result = checked_path(&target.to_string_lossy(), &[root]);
+        assert!(
+            matches!(result, Err(Error::Refused(_))),
+            "expected a refusal before resolution, got {result:?}"
+        );
+    }
 }
