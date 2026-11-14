@@ -187,10 +187,10 @@ impl LocalServices {
         secret_references: bool,
     ) -> Result<ServerSettings, Box<ServerSettingsError>> {
         let updated = match &payload.provider_instance_mutation {
-            None => self.settings.update(&payload.patch).await,
+            None => self.settings.update(&payload.patch.0).await,
             Some(mutation) => {
                 self.settings
-                    .update_provider_instance(mutation, &payload.patch)
+                    .update_provider_instance(mutation, &payload.patch.0)
                     .await
             }
         }

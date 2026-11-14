@@ -47,7 +47,6 @@ pub fn register(registry: &mut HandlerRegistry) -> crate::Result<()> {
     registry.unimplemented::<WsServerPrepareTriageRpc>()?;
     registry.unimplemented::<WsCloudGetRelayClientStatusRpc>()?;
     registry.unimplemented::<WsCloudInstallRelayClientRpc>()?;
-    registry.unimplemented::<WsServerReportClientActivityRpc>()?;
     registry.unimplemented::<WsPullRequestsListRpc>()?;
     registry.unimplemented::<WsPullRequestsListStatsRpc>()?;
     registry.unimplemented::<WsPullRequestsFilterOptionsRpc>()?;

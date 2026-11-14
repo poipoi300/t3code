@@ -59,6 +59,14 @@ struct State {
     pauses: BTreeMap<String, i64>,
     close_commands: BTreeMap<ThreadId, BTreeSet<String>>,
 }
+struct SyncSweep<'a> {
+    groups: &'a BTreeMap<String, Vec<Entry>>,
+    now: &'a t3_contracts::base_schemas::IsoDateTime,
+    now_ms: i64,
+    linked: Mutex<BTreeSet<String>>,
+    stacks: Mutex<BTreeMap<String, Option<ThreadPullRequestStack>>>,
+    persistence: Mutex<()>,
+}
 struct Context {
     services: PullRequestSyncServices,
     state: Mutex<State>,
@@ -437,11 +445,9 @@ impl PullRequestSyncReactor {
                                 .iter()
                                 .any(|link| json!(link.watch).get("checksPending").is_some())
                         });
-                    if answered {
-                        if let Err(error) = self.context.services.commands.dispatch(serde_json::from_value(json!({"type":"thread.pull-request-watch.checks-reopen","commandId":format!("server:pr-push-checks:{}:{item}",id.0),"threadId":id}))?).await {
+                    if answered && let Err(error) = self.context.services.commands.dispatch(serde_json::from_value(json!({"type":"thread.pull-request-watch.checks-reopen","commandId":format!("server:pr-push-checks:{}:{item}",id.0),"threadId":id}))?).await {
                             if matches!(error,Error::Cancelled) {return Err(error);}
                             eprintln!("reopening watch checks failed: {error}");
-                        }
                     }
                 }
                 if observation.closes {
@@ -532,18 +538,19 @@ impl Context {
         drop(state);
         let batched = Arc::new(Semaphore::new(100));
         let unbatched = Arc::new(Semaphore::new(25));
-        let linked = Mutex::new(BTreeSet::new());
-        let stacks = Mutex::new(BTreeMap::new());
-        let persistence = Mutex::new(());
+        let sweep = SyncSweep {
+            groups: &groups,
+            now: &now,
+            now_ms,
+            linked: Mutex::new(BTreeSet::new()),
+            stacks: Mutex::new(BTreeMap::new()),
+            persistence: Mutex::new(()),
+        };
         let mut reads: Vec<Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>> = Vec::new();
         for (host, host_groups) in hosts {
             let batched = batched.clone();
             let unbatched = unbatched.clone();
-            let groups = &groups;
-            let now = &now;
-            let linked = &linked;
-            let stacks = &stacks;
-            let persistence = &persistence;
+            let sweep = &sweep;
             reads.push(Box::pin(async move {
                 let state = self.state.lock().await;
                 if state.pauses.get(&host).is_some_and(|until| *until > now_ms)
@@ -575,19 +582,7 @@ impl Context {
                             return Ok(());
                         }
                         drop(state);
-                        if let Err(error) = self
-                            .sync_group(
-                                key,
-                                entries,
-                                groups,
-                                now,
-                                now_ms,
-                                linked,
-                                stacks,
-                                persistence,
-                            )
-                            .await
-                        {
+                        if let Err(error) = self.sync_group(key, entries, sweep).await {
                             if matches!(error, Error::Cancelled) {
                                 return Err(error);
                             }
@@ -611,17 +606,13 @@ impl Context {
         }
         join_thread_reads(reads).await
     }
-    async fn sync_group(
-        &self,
-        key: &str,
-        entries: &[Entry],
-        groups: &BTreeMap<String, Vec<Entry>>,
-        now: &t3_contracts::base_schemas::IsoDateTime,
-        now_ms: i64,
-        linked: &Mutex<BTreeSet<String>>,
-        stacks: &Mutex<BTreeMap<String, Option<ThreadPullRequestStack>>>,
-        persistence: &Mutex<()>,
-    ) -> Result<()> {
+    async fn sync_group(&self, key: &str, entries: &[Entry], sweep: &SyncSweep<'_>) -> Result<()> {
+        let groups = sweep.groups;
+        let now = sweep.now;
+        let now_ms = sweep.now_ms;
+        let linked = &sweep.linked;
+        let stacks = &sweep.stacks;
+        let persistence = &sweep.persistence;
         let reference = reference(&entries[0])?;
         let state = self.state.lock().await;
         let requested = state.requested.contains(key);

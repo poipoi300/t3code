@@ -300,8 +300,6 @@ async fn a_dispatched_message_runs_a_turn_seen_on_subscribe_thread_and_http_read
 }
 
 #[tokio::test]
-#[ignore = "t3-orchestration: Replay in the composed runtime fails to start the turn with \
-            'ACP provider thread has no native session ID' (orchestration integrator)"]
 async fn a_dispatched_message_runs_a_replay_turn_over_the_socket() {
     turn_over_the_socket(
         r#"{"providerInstances":{"devReplay":{"driver":"acpRegistry","displayName":"Replay (dev)","enabled":true}}}"#,
@@ -505,4 +503,188 @@ async fn turn_over_the_socket(settings: &str, options: StartOptions, model_selec
         .unwrap();
     assert_eq!(missing.status(), 404);
     runtime.shutdown().await.unwrap();
+}
+
+fn dev_inputs(home: &std::path::Path) -> ConfigInputs {
+    ConfigInputs {
+        flags: ServerFlags {
+            base_dir: Some(home.to_string_lossy().into_owned()),
+            host: Some("127.0.0.1".into()),
+            port: Some(0),
+            dev_url: Some("http://127.0.0.1:5733".into()),
+            ..Default::default()
+        },
+        env: Default::default(),
+        home: home.into(),
+        process_cwd: home.into(),
+        bootstrap: None,
+        headless: true,
+        force_auto_bootstrap: Some(false),
+        service_managed: false,
+        cli_log_level: None,
+        automatic_port: None,
+        persisted_observability: Default::default(),
+        static_dir: None,
+    }
+}
+
+/// `--dev-url` is TypeScript's dev mode: it seeds the free `devReplay` instance ("Replay (dev)",
+/// driver `acpRegistry`) and keeps a user's later edit to it.
+#[tokio::test]
+async fn dev_mode_seeds_replay_dev_and_keeps_user_edits() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let settings_path = home.join("userdata").join("settings.json");
+    let read =
+        || -> Value { serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap() };
+    let server = t3_server::runtime::start(dev_inputs(home)).await.unwrap();
+    let seeded = read();
+    let instance = &seeded["providerInstances"]["devReplay"];
+    assert_eq!(instance["driver"], "acpRegistry", "{seeded}");
+    assert_eq!(instance["displayName"], "Replay (dev)", "{seeded}");
+    server.shutdown().await.unwrap();
+
+    // The user turns it off; a restart in dev mode keeps that.
+    let mut edited = read();
+    edited["providerInstances"]["devReplay"]["enabled"] = json!(false);
+    std::fs::write(&settings_path, edited.to_string()).unwrap();
+    let server = t3_server::runtime::start(dev_inputs(home)).await.unwrap();
+    assert_eq!(read()["providerInstances"]["devReplay"]["enabled"], false);
+    server.shutdown().await.unwrap();
+}
+
+/// The round's milestone: the server in dev mode (`--dev-url`), as `vp run dev` starts it, runs
+/// a turn a client can watch, using only what a client does. Pair, get the scratch project,
+/// create a Replay (dev) thread in it, send a message and see the turn complete live. An
+/// unserved method answers exactly as Effect's RpcServer does for an unknown request tag.
+#[tokio::test]
+async fn dev_mode_scratch_project_thread_and_replay_turn_over_the_socket() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let server = t3_server::runtime::start(dev_inputs(home)).await.unwrap();
+    let origin = format!("http://{}", server.address);
+    let http = reqwest::Client::new();
+    let cookie = http
+        .post(format!("{origin}/api/auth/browser-session"))
+        .json(&json!({"credential": server.pairing_credential}))
+        .send()
+        .await
+        .unwrap()
+        .headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let ticket: Value = http
+        .post(format!("{origin}/api/auth/websocket-ticket/rpc"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{}/ws?orchestrationProtocol=2&wsTicket={}",
+        server.address,
+        ticket["ticket"].as_str().unwrap()
+    ))
+    .await
+    .unwrap();
+    let mut client = Client::new(0, Default::default());
+    let unary = async |client: &mut Client, socket: &mut Socket, tag: &str, payload: Value| {
+        let id = client.start(tag, payload, CallKind::Unary).unwrap();
+        loop {
+            match event(socket, client).await {
+                CallEvent::Exit { id: done, exit } if done == id => return exit,
+                CallEvent::Chunk { id, .. } => client.acknowledge(id),
+                _ => {}
+            }
+        }
+    };
+
+    // The scratch project is created once and returned again on the next call.
+    let scratch = ok(unary(
+        &mut client,
+        &mut socket,
+        "projects.ensureScratch",
+        json!({}),
+    )
+    .await);
+    let project = scratch["projectId"].as_str().unwrap().to_owned();
+    let again = ok(unary(
+        &mut client,
+        &mut socket,
+        "projects.ensureScratch",
+        json!({}),
+    )
+    .await);
+    assert_eq!(again["projectId"], project.as_str());
+
+    // An unserved method: Effect's answer for an unknown request tag, never a structured defect.
+    let unserved = unary(
+        &mut client,
+        &mut socket,
+        "server.runStorageCleanup",
+        json!({}),
+    )
+    .await;
+    let unserved = serde_json::to_value(unserved).unwrap();
+    assert_eq!(
+        unserved["cause"][0]["defect"], "Unknown request tag: server.runStorageCleanup",
+        "{unserved}"
+    );
+
+    let thread = "thread:dev-milestone";
+    ok(unary(
+        &mut client,
+        &mut socket,
+        "orchestration.dispatchCommand",
+        json!({"type":"thread.create","commandId":"command:dev-thread","threadId":thread,"projectId":project,"title":"Dev milestone","modelSelection":{"instanceId":"devReplay","model":"multi-turn"},"runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"}),
+    )
+    .await);
+    let subscription = client
+        .start(
+            "orchestration.subscribeThread",
+            json!({"threadId": thread}),
+            CallKind::Stream,
+        )
+        .unwrap();
+    let dispatch = client
+        .start(
+            "orchestration.dispatchCommand",
+            json!({"type":"message.dispatch","commandId":"command:dev-message","threadId":thread,"messageId":"message:dev","text":"Hello","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"}),
+            CallKind::Unary,
+        )
+        .unwrap();
+    let (mut dispatched, mut reply, mut completed) = (false, false, false);
+    while !(dispatched && reply && completed) {
+        match event(&mut socket, &mut client).await {
+            CallEvent::Exit { id, exit } if id == dispatch => {
+                ok(exit);
+                dispatched = true;
+            }
+            CallEvent::Chunk { id, values } if id == subscription => {
+                client.acknowledge(id);
+                let text = Value::Array(values).to_string();
+                assert!(
+                    !text.contains("\"status\":\"failed\""),
+                    "the turn failed: {text}"
+                );
+                reply |= text.contains("\"message.updated\"") && text.contains("\"assistant\"");
+                completed |= text.contains("\"run.updated\"") && text.contains("\"completed\"");
+            }
+            CallEvent::Exit { id, exit } if id == subscription => {
+                panic!(
+                    "subscription ended: {}",
+                    serde_json::to_value(exit).unwrap()
+                )
+            }
+            CallEvent::Chunk { id, .. } => client.acknowledge(id),
+            _ => {}
+        }
+    }
+    server.shutdown().await.unwrap();
 }

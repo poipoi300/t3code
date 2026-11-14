@@ -203,6 +203,11 @@ impl OrchestrationAdapter {
         }))
     }
 
+    /// The composed runtime, for host services that commit alongside it (projects).
+    pub fn composed(&self) -> Option<&Arc<t3_orchestration::composition::OrchestrationRuntime>> {
+        self.runtime.as_ref()
+    }
+
     fn runtime(&self) -> OrchestrationResult<&t3_orchestration::composition::OrchestrationRuntime> {
         self.runtime
             .as_deref()

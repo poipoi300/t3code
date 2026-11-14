@@ -843,9 +843,10 @@ impl LookupState {
             return Ok(Some(None));
         };
         let mut closed = self.shell_closed.lock().await;
-        let refresh = group.candidates.iter().fold(false, |refresh, candidate| {
-            closed.remove(&ThreadId(candidate.thread.id.0.clone())) || refresh
-        });
+        let mut refresh = false;
+        for candidate in &group.candidates {
+            refresh |= closed.remove(&ThreadId(candidate.thread.id.0.clone()));
+        }
         drop(closed);
         if !refresh && !scheduled {
             return Ok(None);

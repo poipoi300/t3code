@@ -331,8 +331,7 @@ async fn composition_keeps_unassembled_scheduler_commands_unavailable() {
         let cause =
             support::first_cause(support::unary(&mut socket, &mut client, tag, payload).await);
         assert_eq!(cause["_tag"], "Die");
-        assert_eq!(cause["defect"]["_tag"], "NotImplemented");
-        assert_eq!(cause["defect"]["method"], tag);
+        assert_eq!(cause["defect"], format!("Unknown request tag: {tag}"));
     }
     #[cfg(feature = "usage")]
     {
@@ -345,7 +344,10 @@ async fn composition_keeps_unassembled_scheduler_commands_unavailable() {
             )
             .await,
         );
-        assert_eq!(cause["defect"]["_tag"], "NotImplemented");
+        assert_eq!(
+            cause["defect"],
+            "Unknown request tag: server.refreshUsageRates"
+        );
     }
     client
         .start("scheduledTasks.subscribe", json!({}), CallKind::Stream)

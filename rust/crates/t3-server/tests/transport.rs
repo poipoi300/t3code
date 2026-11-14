@@ -416,7 +416,8 @@ async fn real_http_pairing_effect_rpc_scopes_revocation_static_and_shutdown() {
         match event(&mut scoped_socket, &mut scoped_client).await {
             CallEvent::Exit { exit, .. } => assert_eq!(
                 serde_json::to_value(&exit).unwrap()["cause"][0]["error"]["_tag"],
-                "EnvironmentAuthorizationError","{tag}: {exit:?}"
+                "EnvironmentAuthorizationError",
+                "{tag}: {exit:?}"
             ),
             other => panic!("unexpected discard result {other:?}"),
         }
@@ -451,8 +452,8 @@ async fn real_http_pairing_effect_rpc_scopes_revocation_static_and_shutdown() {
     )
     .await;
     assert_eq!(
-        serde_json::to_value(not_implemented).unwrap()["cause"][0]["defect"]["_tag"],
-        "NotImplemented"
+        serde_json::to_value(not_implemented).unwrap()["cause"][0]["defect"],
+        "Unknown request tag: server.refreshProviders"
     );
     let mut request = t3_rpc::Request::new(101u64.into(), "server.refreshProviders", json!({}));
     request.discard = Some(t3_rpc::True);
@@ -461,8 +462,8 @@ async fn real_http_pairing_effect_rpc_scopes_revocation_static_and_shutdown() {
         .unwrap();
     match event(&mut scoped_socket, &mut scoped_client).await {
         CallEvent::Exit { exit, .. } => assert_eq!(
-            serde_json::to_value(exit).unwrap()["cause"][0]["defect"]["_tag"],
-            "NotImplemented"
+            serde_json::to_value(exit).unwrap()["cause"][0]["defect"],
+            "Unknown request tag: server.refreshProviders"
         ),
         other => panic!("unexpected unimplemented discard {other:?}"),
     }

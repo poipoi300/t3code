@@ -252,7 +252,8 @@ async fn reserved_paths_are_not_the_spa_and_other_methods_are_refused() {
     for path in [
         "/api",
         "/api/nope",
-        "/api/orchestration/shell",
+        // The transcript export has no Rust service yet; the shell read is a real route now.
+        "/api/orchestration/threads/x/transcript",
         "/oauth/nope",
         "/.well-known/nope",
         "/mcp",

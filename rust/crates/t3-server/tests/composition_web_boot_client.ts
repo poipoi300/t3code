@@ -91,6 +91,8 @@ const describeCause = (cause: Cause.Cause<unknown>): { notImplemented: boolean; 
   const reasons = (cause as any).reasons as ReadonlyArray<any> | undefined;
   for (const reason of reasons ?? []) {
     const value = reason._tag === "Die" ? reason.defect : reason.error;
+    if (typeof value === "string" && value.startsWith("Unknown request tag: "))
+      return { notImplemented: true, text: value };
     if (value?._tag === "NotImplemented") return { notImplemented: true, text: `NotImplemented ${value.method}` };
     const status = value?.status ?? value?.response?.status ?? value?.cause?.response?.status;
     if (status === 404) return { notImplemented: true, text: "HTTP 404 (route not served)" };

@@ -26,7 +26,11 @@ use t3_server::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-const SERVED: [&str; 7] = [
+const SERVED: [&str; 11] = [
+    "orchestration.dispatchCommand",
+    "orchestration.stopWorkflow",
+    "orchestration.forceStopThread",
+    "orchestration.subscribeShell",
     "orchestration.subscribeThread",
     "orchestration.getThreadProjection",
     "orchestration.getTurnItem",
@@ -214,6 +218,9 @@ fn served_methods_are_registered_and_the_rest_stay_unimplemented_with_or_without
                     && !matches!(
                         *tag,
                         "projects.searchEntries"
+                            // projects.ensureScratch and projects.mutate: t3-project (package A).
+                            | "projects.ensureScratch"
+                            | "projects.mutate"
                             | "projects.searchContents"
                             | "projects.listEntries"
                             | "projects.listIgnoredFiles"
@@ -224,7 +231,7 @@ fn served_methods_are_registered_and_the_rest_stay_unimplemented_with_or_without
                 || *tag == "subscribeProjectClones"
         })
         .collect();
-    assert_eq!(owned.len(), 33, "{owned:?}");
+    assert_eq!(owned.len(), 31, "{owned:?}");
     for tag in owned {
         assert_eq!(
             without.disposition(tag),

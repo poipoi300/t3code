@@ -8,14 +8,14 @@ import * as Module from "node:module";
 import { pathToFileURL } from "node:url";
 import { Effect } from "../../../tools/export/effect.ts";
 import * as NodeSqlite from "../../../../packages/shared/src/nodeSqliteClient.ts";
-import { runMigrations } from "../../../../apps/server/src/persistence/Migrations.ts";
+import { migrationManifest, runMigrations } from "../../../../apps/server/src/persistence/Migrations.ts";
 const require = Module.createRequire(
   new URL("../../../../apps/server/package.json", import.meta.url),
 );
 const SqlClient = await import(pathToFileURL(require.resolve("effect/sql/SqlClient")).href);
 const directory = await FS.mkdtemp(Path.join(OS.tmpdir(), "t3-persistence-baseline-"));
 try {
-  for (const head of Array.from({ length: 21 }, (_, index) => 69 + index)) {
+  for (const [head] of migrationManifest.filter(([id]) => id >= 69)) {
     const sql = await Effect.runPromise(
       Effect.gen(function* () {
         const db = yield* SqlClient.SqlClient;

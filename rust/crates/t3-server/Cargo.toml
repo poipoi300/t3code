@@ -9,7 +9,7 @@ publish.workspace = true
 workspace = true
 [features]
 # The assembled domain services the `t3` binary serves.
-default = ["local-services", "workspace", "terminal", "git", "scheduler", "usage", "orchestration"]
+default = ["local-services", "workspace", "terminal", "git", "scheduler", "usage", "orchestration", "host", "project"]
 local-services = [
     "dep:t3-auth",
     "dep:t3-config",
@@ -27,6 +27,8 @@ forge = ["dep:t3-forge"]
 terminal = ["dep:t3-terminal"]
 scheduler = ["dep:t3-scheduler", "dep:async-trait"]
 usage = ["dep:t3-usage", "dep:sysinfo"]
+host = ["dep:t3-host"]
+project = ["dep:t3-project", "orchestration", "workspace", "dep:t3-process", "dep:async-trait"]
 providers = ["dep:t3-process", "dep:t3-acp", "dep:t3-codex-app-server", "dep:t3-claude-cli"]
 [dependencies]
 t3-contracts = { path = "../t3-contracts" }
@@ -42,6 +44,8 @@ t3-forge = { path = "../t3-forge", optional = true }
 t3-terminal = { path = "../t3-terminal", optional = true }
 t3-scheduler = { path = "../t3-scheduler", optional = true }
 t3-usage = { path = "../t3-usage", optional = true }
+t3-host = { path = "../t3-host", optional = true }
+t3-project = { path = "../t3-project", optional = true }
 t3-process = { path = "../t3-process", optional = true }
 t3-acp = { path = "../t3-acp", optional = true }
 t3-codex-app-server = { path = "../t3-codex-app-server", optional = true }

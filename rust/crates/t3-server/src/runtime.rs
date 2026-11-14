@@ -114,10 +114,9 @@ async fn start_configured(
     if config.private_network_only
         || config.bootstrap_fd.is_some()
         || config.tailscale_serve_enabled
-        || config.dev_url.is_some()
     {
         return Err(crate::Error::Service(
-            "LAN fencing, bootstrap-fd, dev proxy and Tailscale are not yet ported".into(),
+            "LAN fencing, bootstrap-fd and Tailscale are not yet ported".into(),
         ));
     }
     let host = config.host.clone().unwrap_or_else(|| "0.0.0.0".into());
@@ -133,6 +132,17 @@ async fn start_configured(
     let address = listener.local_addr()?;
     let (account_home, environment) = (inputs.home.clone(), inputs.env.clone());
     let local = LocalServices::open(config, address.port()).await?;
+    // Dev mode is `--dev-url` / `VITE_DEV_SERVER_URL`, as in TypeScript; it keeps the free
+    // Replay (dev) provider (`seedDevReplayInstance` in ProviderInstanceRegistryHydration.ts).
+    #[cfg(feature = "orchestration")]
+    let options = {
+        let mut options = options;
+        options.dev_replay |= local.config.dev_url.is_some();
+        if options.dev_replay {
+            seed_dev_replay_instance(&local).await;
+        }
+        options
+    };
     let shutdown = CancellationToken::new();
     let mut domains = Domains::default();
     let prepared = async {
@@ -262,6 +272,48 @@ async fn follow_peer_links_setting(services: &Arc<ServiceRegistry>) {
 /// Domain services in TypeScript's dependency order (`server.ts`): git and terminal under the
 /// stores, usage beside providers, orchestration, then the scheduler that dispatches into it.
 /// Each `start` returns after its own recovery; shutdown runs in reverse.
+/// Adds the `devReplay` instance to settings unless one exists, so a user's edits (such as
+/// turning it off) survive restarts. TypeScript also writes its agent script path; the Rust
+/// Replay provider runs in-process and needs none.
+#[cfg(feature = "orchestration")]
+async fn seed_dev_replay_instance(local: &LocalServices) {
+    const INSTANCE: &str = "devReplay";
+    let existing = match local.settings.snapshot().await {
+        Ok(settings) => serde_json::to_value(&settings)
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer(&format!("/providerInstances/{INSTANCE}"))
+                    .cloned()
+            })
+            .is_some_and(|entry| !entry.is_null()),
+        Err(error) => {
+            tracing::warn!(%error, "cannot read settings; Replay (dev) is not seeded");
+            return;
+        }
+    };
+    if existing {
+        return;
+    }
+    let mutation = serde_json::from_value(serde_json::json!({
+        "operation": "upsert",
+        "instanceId": INSTANCE,
+        "instance": {"driver": "acpRegistry", "displayName": "Replay (dev)"},
+    }));
+    let seeded = match mutation {
+        Ok(mutation) => local
+            .settings
+            .update_provider_instance(&mutation, &Default::default())
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    if let Err(error) = seeded {
+        tracing::warn!(%error, "cannot seed the Replay (dev) provider instance");
+    }
+}
+
 async fn start_domains(
     local: &LocalServices,
     shutdown: &CancellationToken,
@@ -282,6 +334,8 @@ async fn start_domains(
         crate::adapters::telemetry::TelemetryAdapter::start(&context, install_global_tracing)
             .await?,
     )?;
+    #[cfg(feature = "host")]
+    domains.insert(crate::adapters::host::HostAdapter::start()?)?;
     #[cfg(feature = "workspace")]
     let workspaces = crate::workspaces::EnvironmentWorkspaces::new(&context);
     #[cfg(all(feature = "git", feature = "workspace"))]
@@ -309,6 +363,15 @@ async fn start_domains(
         )
         .await?,
     )?;
+    #[cfg(feature = "project")]
+    if let Some(orchestration) =
+        domains.get::<crate::adapters::orchestration::OrchestrationAdapter>()
+    {
+        domains.insert(crate::adapters::project::ProjectAdapter::start(
+            &context,
+            &orchestration,
+        )?)?;
+    }
     #[cfg(feature = "scheduler")]
     domains.insert_runtime(crate::adapters::scheduler::SchedulerAdapter::start(&context).await?)?;
     let _ = (&context, domains, options);

@@ -69,9 +69,8 @@ const program = Effect.gen(function* () {
     `unsupported unary must be a single defect: ${JSON.stringify(unaryReasons)}`,
   );
   expect(
-    unaryReasons[0].value?._tag === "NotImplemented" &&
-      unaryReasons[0].value?.method === "server.runStorageCleanup",
-    `defect must carry NotImplemented and the method: ${JSON.stringify(unaryReasons[0])}`,
+    unaryReasons[0].value === "Unknown request tag: server.runStorageCleanup",
+    `defect must be Effect's unknown-request-tag answer: ${JSON.stringify(unaryReasons[0])}`,
   );
 
   // The session survives it.
@@ -87,8 +86,8 @@ const program = Effect.gen(function* () {
   expect(
     streamReasons.length === 1 &&
       streamReasons[0]._tag === "Die" &&
-      streamReasons[0].value?._tag === "NotImplemented",
-    `unsupported stream must be a NotImplemented defect: ${JSON.stringify(streamReasons)}`,
+      streamReasons[0].value === "Unknown request tag: server.getStorageCleanupReport",
+    `unsupported stream must be the unknown-request-tag defect: ${JSON.stringify(streamReasons)}`,
   );
 
   yield* probe();

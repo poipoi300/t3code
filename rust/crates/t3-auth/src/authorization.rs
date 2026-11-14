@@ -172,8 +172,11 @@ pub fn required_scopes_for_rpc_call(method: &str, input: &Value) -> Result<Vec<S
             .get("patch")
             .and_then(Value::as_object)
             .ok_or_else(|| Error::InvalidPayload("patch is required".into()))?;
+        let changes_access = patch.contains_key(CONNECT_DEVICE_APPROVAL_KEY);
         let changes_providers = patch.keys().any(|k| provider_key(k));
-        let changes_settings = patch.keys().any(|k| !provider_key(k))
+        let changes_settings = patch
+            .keys()
+            .any(|k| !provider_key(k) && k != CONNECT_DEVICE_APPROVAL_KEY)
             || patch
                 .get("secretProviders")
                 .and_then(Value::as_object)
@@ -183,11 +186,14 @@ pub fn required_scopes_for_rpc_call(method: &str, input: &Value) -> Result<Vec<S
             return Ok(vec![Scope::ProvidersManage]);
         }
         let mut scopes = Vec::new();
-        if changes_settings || !changes_providers {
+        if changes_settings || (!changes_providers && !changes_access) {
             scopes.push(Scope::SettingsWrite);
         }
         if changes_providers || mutation {
             scopes.push(Scope::ProvidersManage);
+        }
+        if changes_access {
+            scopes.push(Scope::AccessWrite);
         }
         return Ok(scopes);
     }
@@ -208,6 +214,8 @@ pub fn required_scopes_for_rpc_call(method: &str, input: &Value) -> Result<Vec<S
     }
     Ok(vec![base])
 }
+/// The settings key that turns T3 Connect device approval on or off (`access:write`).
+const CONNECT_DEVICE_APPROVAL_KEY: &str = "requireConnectDeviceApproval";
 fn provider_key(key: &str) -> bool {
     matches!(
         key,

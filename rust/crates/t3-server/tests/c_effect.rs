@@ -34,8 +34,8 @@ async fn the_real_effect_client_handles_unsupported_methods_without_breaking_the
     );
     assert_eq!(report["unsupportedUnary"]["reasons"][0]["_tag"], "Die");
     assert_eq!(
-        report["unsupportedUnary"]["reasons"][0]["value"]["_tag"],
-        "NotImplemented"
+        report["unsupportedUnary"]["reasons"][0]["value"],
+        "Unknown request tag: server.runStorageCleanup"
     );
     assert_eq!(report["unsupportedStream"]["reasons"][0]["_tag"], "Die");
     for step in [

@@ -273,8 +273,10 @@ async fn scopes_guard_every_method_including_discarded_and_unsupported_calls() {
         .await,
     );
     assert_eq!(cause["_tag"], "Die", "{cause}");
-    assert_eq!(cause["defect"]["_tag"], "NotImplemented");
-    assert_eq!(cause["defect"]["method"], "server.runStorageCleanup");
+    assert_eq!(
+        cause["defect"],
+        "Unknown request tag: server.runStorageCleanup"
+    );
     // A discarded unsupported call still completes with that defect once it passes the guard.
     let mut request = Request::new(101u64.into(), "server.runStorageCleanup", json!({}));
     request.discard = Some(t3_rpc::True);
@@ -283,7 +285,10 @@ async fn scopes_guard_every_method_including_discarded_and_unsupported_calls() {
         .unwrap();
     match event(&mut write_socket, &mut write_client).await {
         CallEvent::Exit { exit, .. } => {
-            assert_eq!(first_cause(exit)["defect"]["_tag"], "NotImplemented");
+            assert_eq!(
+                first_cause(exit)["defect"],
+                "Unknown request tag: server.runStorageCleanup"
+            );
         }
         other => panic!("unexpected {other:?}"),
     }
@@ -300,7 +305,10 @@ async fn scopes_guard_every_method_including_discarded_and_unsupported_calls() {
         CallEvent::Exit { exit, .. } => {
             let cause = first_cause(exit);
             assert_eq!(cause["_tag"], "Die", "{cause}");
-            assert_eq!(cause["defect"]["_tag"], "NotImplemented");
+            assert_eq!(
+                cause["defect"],
+                "Unknown request tag: server.getStorageCleanupReport"
+            );
         }
         other => panic!("unexpected {other:?}"),
     }

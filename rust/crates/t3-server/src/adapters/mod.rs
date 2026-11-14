@@ -8,12 +8,16 @@ pub mod config;
 pub mod forge;
 #[cfg(feature = "git")]
 pub mod git;
+#[cfg(feature = "host")]
+pub mod host;
 #[cfg(feature = "orchestration")]
 pub mod orchestration;
 #[cfg(feature = "local-services")]
 pub mod persistence;
 #[cfg(feature = "providers")]
 pub mod process;
+#[cfg(feature = "project")]
+pub mod project;
 #[cfg(feature = "providers")]
 pub mod providers;
 #[cfg(feature = "scheduler")]

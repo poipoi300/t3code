@@ -35,8 +35,6 @@ fn register_pending(registry: &mut HandlerRegistry) -> crate::Result<()> {
     registry.unimplemented::<WsProjectCloneRetryRpc>()?;
     registry.unimplemented::<WsSubscribeProjectClonesRpc>()?;
     // ProjectService::{mutate, ensure_scratch, create_new, create_from_thread}.
-    registry.unimplemented::<WsProjectsMutateRpc>()?;
-    registry.unimplemented::<WsProjectsEnsureScratchRpc>()?;
     registry.unimplemented::<WsProjectsCreateNewRpc>()?;
     registry.unimplemented::<WsProjectsCreateFromThreadRpc>()?;
     // AgentSessionScanner::scan, AgentSessionImporter::import_recent_agent_threads.

@@ -114,6 +114,8 @@ async fn run(
         secret_references,
         call: crate::registry::CallScope::socket(crate::registry::SocketScope::new()),
     };
+    #[cfg(feature = "host")]
+    let socket_id = context.call.socket_id();
     // A panic anywhere in the loop must still reach mark_disconnected below.
     let end = AssertUnwindSafe(async {
         tokio::select! {
@@ -136,6 +138,11 @@ async fn run(
         close_socket(&mut socket, close).await;
     }
     drop(socket);
+    // TypeScript removes the RPC client's activity leases when its socket closes.
+    #[cfg(feature = "host")]
+    if let (Some(host), Some(id)) = (s.domain::<crate::adapters::host::HostAdapter>(), socket_id) {
+        host.socket_closed(&session.session_id, id).await;
+    }
     s.local.auth.disconnected(&session.session_id).await;
 }
 

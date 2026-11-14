@@ -121,9 +121,18 @@ pub enum ServerDefect {
 }
 impl ServerDefect {
     pub fn exit(self) -> Exit {
-        Exit::die(serde_json::to_value(self).unwrap_or(Value::Null))
+        match self {
+            // Effect's RpcServer answers a method it has no handler for exactly so; TypeScript
+            // clients already read it as a server that does not serve the method.
+            Self::NotImplemented { method } => {
+                Exit::die(Value::String(format!("{UNKNOWN_REQUEST_TAG}{method}")))
+            }
+            defect => Exit::die(serde_json::to_value(defect).unwrap_or(Value::Null)),
+        }
     }
 }
+/// Prefix of the defect Effect's RpcServer sends for a request tag it has no handler for.
+pub const UNKNOWN_REQUEST_TAG: &str = "Unknown request tag: ";
 pub enum Failure<E> {
     Typed(E),
     Defect(ServerDefect),

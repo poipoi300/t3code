@@ -284,6 +284,22 @@ fn settings_guards_separate_provider_mutations_and_secret_provider_removal() {
         .unwrap(),
         vec![S::SettingsWrite]
     );
+    // Upstream a2edd281df: a settings grant cannot turn off T3 Connect device approval.
+    let approval = payload::<WsServerUpdateSettingsRpc>(
+        json!({"patch":{"requireConnectDeviceApproval":false}}),
+    );
+    assert!(authorize_rpc(&[S::SettingsWrite], "server.updateSettings", &approval).is_err());
+    assert!(authorize_rpc(&[S::AccessWrite], "server.updateSettings", &approval).is_ok());
+    assert_eq!(
+        required_scopes_for_rpc_call(
+            "server.updateSettings",
+            &payload::<WsServerUpdateSettingsRpc>(
+                json!({"patch":{"requireConnectDeviceApproval":true,"defaultRuntimeMode":"full-access"}})
+            )
+        )
+        .unwrap(),
+        vec![S::SettingsWrite, S::AccessWrite]
+    );
     assert_eq!(
         required_scopes_for_rpc_call(
             "projects.mutate",
