@@ -370,7 +370,12 @@ async fn imports_run_in_the_projects_default_mode_under_a_policy_ceiling() {
     };
     assert_eq!(mode(store("none", "approval-required", None)).await, None);
     assert_eq!(
-        mode(store("above", "full-access", Some(RuntimeMode::ApprovalRequired))).await,
+        mode(store(
+            "above",
+            "full-access",
+            Some(RuntimeMode::ApprovalRequired)
+        ))
+        .await,
         Some(RuntimeMode::ApprovalRequired)
     );
     assert_eq!(

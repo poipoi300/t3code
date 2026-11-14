@@ -66,24 +66,28 @@ const CODEX_STATE_QUERY_DEADLINE: Duration = Duration::from_secs(5);
 // ---------------------------------------------------------------------------------------------
 // Paths
 
-/// A path on this machine's own disks: absolute, never two leading separators in any mix
-/// (`//host`, `\\?\`, `/\host`), and on Windows no prefix but a drive letter. Checked before any
-/// filesystem call on a path taken from file content, so a UNC path never makes Windows
-/// authenticate to a remote host.
+/// A path on this machine's own disks, decided before any filesystem call on a path taken from
+/// file content so a UNC path never makes Windows authenticate to a remote host: absolute, not a
+/// network path by the workspace crate's rule, and on Windows a plain or verbatim drive.
 pub fn local_absolute(path: &str) -> bool {
-    let mut chars = path.chars();
-    let separator = |c: Option<char>| matches!(c, Some('/' | '\\'));
-    if path.contains('\0') || (separator(chars.next()) && separator(chars.next())) {
+    if path.contains('\0') || t3_workspace::paths::is_network_path(path) {
         return false;
     }
     let path = Path::new(path);
-    if !path.is_absolute() {
-        return false;
-    }
-    match path.components().next() {
-        Some(Component::Prefix(prefix)) => matches!(prefix.kind(), Prefix::Disk(_)),
-        _ => true,
-    }
+    path.is_absolute()
+        && match path.components().next() {
+            Some(Component::Prefix(prefix)) => {
+                matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+            }
+            _ => true,
+        }
+}
+
+/// A candidate directory from a session's recorded cwd: lexical only, so a refused cwd never
+/// reaches the filesystem.
+fn content_directory(cwd: &str, home: &Path) -> Option<PathBuf> {
+    let expanded = expand_home(cwd.trim(), home);
+    local_absolute(&expanded).then(|| resolve(Path::new(&expanded)))
 }
 
 /// `path.resolve`: absolute and lexically normalised, without touching the filesystem.
@@ -1535,13 +1539,8 @@ impl NativeSessionInventory {
         Ok(collected)
     }
 
-    /// A candidate directory from session content: local, absolute and not excluded.
     fn candidate_directory(&self, cwd: &str) -> Option<PathBuf> {
-        let expanded = expand_home(cwd.trim(), &self.paths.home);
-        if !local_absolute(&expanded) {
-            return None;
-        }
-        Some(resolve(Path::new(&expanded)))
+        content_directory(cwd, &self.paths.home)
     }
 
     /// `projectDirectoryStats`: an existing, non-excluded directory whose real path is not excluded.
@@ -1757,7 +1756,10 @@ impl NativeSessionInventory {
         .await
         .unwrap_or_default();
         // Git identities are read below the resolved directory, never through a link.
-        let present: Vec<PathBuf> = existing.iter().filter_map(|(_, real)| real.clone()).collect();
+        let present: Vec<PathBuf> = existing
+            .iter()
+            .filter_map(|(_, real)| real.clone())
+            .collect();
         let identities = self.git_identities(&present).await;
         let mut projects = HashMap::new();
         for (directory, real) in existing {
@@ -2426,7 +2428,11 @@ mod tests {
         }
         lines.push(b"\n");
         assert_eq!(lines.next_line().map(|l| l.len()), Some(128 * 8 * 1024 + 1));
-        assert!(lines.examined <= 128 * 8 * 1024 + 1, "examined {}", lines.examined);
+        assert!(
+            lines.examined <= 128 * 8 * 1024 + 1,
+            "examined {}",
+            lines.examined
+        );
     }
 
     /// A transcript is opened without following a link: the handle is the link itself, never
@@ -2455,7 +2461,10 @@ mod tests {
         let path = temp.path().join("pi.jsonl");
         let payload = "x".repeat(12 * 1024 * 1024);
         let mut text = String::new();
-        text.push_str(&format!("{}\n", json!({"type": "session", "id": "pi", "cwd": "/w"})));
+        text.push_str(&format!(
+            "{}\n",
+            json!({"type": "session", "id": "pi", "cwd": "/w"})
+        ));
         text.push_str(&format!("{}\n", json!({"type": "message", "id": "u", "parentId": null, "message": {"role": "user", "content": "hi"}})));
         for index in 0..3 {
             text.push_str(&format!(
@@ -2464,14 +2473,30 @@ mod tests {
             ));
         }
         // An invalid record whose links are huge.
-        text.push_str(&format!("{}\n", json!({"type": "message", "id": payload, "parentId": "u", "message": {"role": 7}})));
+        text.push_str(&format!(
+            "{}\n",
+            json!({"type": "message", "id": payload, "parentId": "u", "message": {"role": 7}})
+        ));
         std::fs::write(&path, text).expect("pi");
         let (_, identity) = open_regular(&path).expect("regular");
-        let held = |snapshot: &Snapshot| serde_json::to_string(&snapshot.records).expect("json").len();
-        match read_transcript(&path.to_string_lossy(), &identity, &AgentSessionSource::Pi, None) {
+        let held = |snapshot: &Snapshot| {
+            serde_json::to_string(&snapshot.records)
+                .expect("json")
+                .len()
+        };
+        match read_transcript(
+            &path.to_string_lossy(),
+            &identity,
+            &AgentSessionSource::Pi,
+            None,
+        ) {
             None => {}
             Some(snapshot) => {
-                assert!(held(&snapshot) <= MAX_IMPORT_HISTORY_BYTES, "held {}", held(&snapshot));
+                assert!(
+                    held(&snapshot) <= MAX_IMPORT_HISTORY_BYTES,
+                    "held {}",
+                    held(&snapshot)
+                );
                 assert!(snapshot.history_bytes >= held(&snapshot) / 2);
             }
         }
@@ -2483,7 +2508,6 @@ mod tests {
             "//host/share",
             r"\\host\share",
             r"/\host\share",
-            r"\\?\C:\x",
             r"\\.\pipe\x",
             "relative/path",
             "",
@@ -2491,9 +2515,55 @@ mod tests {
             assert!(!local_absolute(refused), "{refused}");
         }
         #[cfg(windows)]
-        assert!(local_absolute(r"C:\Users\me\project"));
+        {
+            assert!(local_absolute(r"C:\Users\me\project"));
+            assert!(!local_absolute(r"C:relative"));
+            // A verbatim drive path is local exactly when the workspace classifier says so.
+            let verbatim = r"\\?\C:\Users\me\project";
+            assert_eq!(
+                local_absolute(verbatim),
+                !t3_workspace::paths::is_network_path(verbatim)
+            );
+        }
         #[cfg(unix)]
         assert!(local_absolute("/home/me/project"));
+    }
+
+    /// The gate is lexical: a refused cwd returns before any filesystem call, so these hosts are
+    /// never looked up. Every spelling stays network or device under the workspace rule, with or
+    /// without a verbatim-drive exception.
+    #[test]
+    fn network_and_device_cwds_stop_at_the_lexical_gate() {
+        let home = Path::new(if cfg!(windows) {
+            r"C:\Users\me"
+        } else {
+            "/home/me"
+        });
+        for cwd in [
+            r"\\nonexistent.invalid\share\repo",
+            "//nonexistent.invalid/share/repo",
+            r"/\nonexistent.invalid\share\repo",
+            r"\/nonexistent.invalid/share/repo",
+            r"\\?\UNC\nonexistent.invalid\share\repo",
+            "//?/UNC/nonexistent.invalid/share/repo",
+            r"\\.\UNC\nonexistent.invalid\share\repo",
+            r"\\.\C:\Users\me\repo",
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\repo",
+            r"  \\nonexistent.invalid\share\repo  ",
+            "~/../../\0/repo",
+        ] {
+            assert_eq!(content_directory(cwd, home), None, "{cwd:?}");
+        }
+        let local = if cfg!(windows) {
+            r"C:\Users\me\repo"
+        } else {
+            "/home/me/repo"
+        };
+        assert_eq!(
+            content_directory("~/repo", home),
+            Some(PathBuf::from(local))
+        );
+        assert_eq!(content_directory(local, home), Some(PathBuf::from(local)));
     }
 
     #[test]

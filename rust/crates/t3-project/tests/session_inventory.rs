@@ -639,15 +639,17 @@ async fn links_out_of_the_store_are_not_followed() {
 async fn a_session_naming_a_network_cwd_is_never_resolved() {
     let f = Fixture::new();
     let workspace = f.workspace("real");
-    // `\\?\<workspace>` names the real fixture folder: without the local-disk check it would
-    // resolve and be offered. The other spellings name a host.
-    let verbatim = format!(r"\\?\{}", workspace.display());
+    // `\\.\<workspace>` is a device spelling of the real fixture folder: the gate and the
+    // hardened resolver both refuse it, and a plain `canonicalize` would offer it. The others name
+    // a host; the lexical gate stops them before any lookup
+    // (`network_and_device_cwds_stop_at_the_lexical_gate`).
+    let device = format!(r"\\.\{}", workspace.display());
     for (index, cwd) in [
-        verbatim.as_str(),
-        r"\\attacker.invalid\share\repo",
-        "//attacker.invalid/share/repo",
-        r"/\attacker.invalid\share",
-        r"\\?\UNC\attacker.invalid\share",
+        device.as_str(),
+        r"\\nonexistent.invalid\share\repo",
+        "//nonexistent.invalid/share/repo",
+        r"/\nonexistent.invalid\share",
+        r"\\?\UNC\nonexistent.invalid\share",
     ]
     .iter()
     .enumerate()
@@ -670,9 +672,12 @@ async fn a_session_naming_a_network_cwd_is_never_resolved() {
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(same(&found[0].0, &workspace));
     assert_eq!(found[0].2, 1, "only the plain session counts");
-    // The same verbatim spelling as an import root reads nothing.
-    assert!(recent(&inventory, Path::new(&verbatim), &[]).await.is_empty());
-    assert_eq!(importable(&recent(&inventory, &workspace, &[]).await).len(), 1);
+    // The same device spelling as an import root reads nothing.
+    assert!(recent(&inventory, Path::new(&device), &[]).await.is_empty());
+    assert_eq!(
+        importable(&recent(&inventory, &workspace, &[]).await).len(),
+        1
+    );
 }
 
 /// Concurrent scans share one collection: a second caller waits for the first one's result.
@@ -700,7 +705,11 @@ async fn concurrent_scans_share_one_collection() {
     }
     let f = Fixture::new();
     let workspace = f.workspace("shared-scan");
-    write(&f.claude.join("projects/s/a.jsonl"), claude_line(&workspace), ms(NOW) - DAY);
+    write(
+        &f.claude.join("projects/s/a.jsonl"),
+        claude_line(&workspace),
+        ms(NOW) - DAY,
+    );
     let (release, gate) = tokio::sync::watch::channel(false);
     let host = Arc::new(Gated {
         settings: f.settings(),
@@ -710,9 +719,10 @@ async fn concurrent_scans_share_one_collection() {
     let inventory = f.inventory_with(host.clone());
     // `join!` polls in order: the first scan reaches the gate, the second queues, then the gate
     // opens.
-    let (first, second, ()) = futures_util::join!(inventory.candidates(), inventory.candidates(), async {
-        release.send_replace(true);
-    });
+    let (first, second, ()) =
+        futures_util::join!(inventory.candidates(), inventory.candidates(), async {
+            release.send_replace(true);
+        });
     assert_eq!(first.unwrap().candidates.len(), 1);
     assert_eq!(second.unwrap().candidates.len(), 1);
     assert_eq!(host.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -726,7 +736,11 @@ async fn a_codex_state_database_names_the_project_of_a_scratch_chat() {
     let id = "019a0000-0000-7000-8000-0000000000bb";
     // The rollout's own cwd is the home, which is never offered: the database names the project.
     write(
-        &rollout(&f.codex, "2026-08-24", &format!("rollout-2026-08-24T10-00-00-{id}.jsonl")),
+        &rollout(
+            &f.codex,
+            "2026-08-24",
+            &format!("rollout-2026-08-24T10-00-00-{id}.jsonl"),
+        ),
         codex_transcript(&f.root.join("home"), id),
         ms(NOW) - DAY,
     );
@@ -750,7 +764,11 @@ async fn a_codex_state_database_names_the_project_of_a_scratch_chat() {
 async fn a_hostile_codex_state_database_cannot_stall_the_scan() {
     let f = Fixture::new();
     let workspace = f.workspace("codex-hostile");
-    write(&rollout(&f.codex, "2026-08-24", "rollout-x.jsonl"), codex_line(&workspace), ms(NOW) - DAY);
+    write(
+        &rollout(&f.codex, "2026-08-24", "rollout-x.jsonl"),
+        codex_line(&workspace),
+        ms(NOW) - DAY,
+    );
     let db = t3_persistence::rusqlite::Connection::open(f.codex.join("state_5.sqlite")).unwrap();
     db.execute_batch(
         "CREATE TABLE threads(id TEXT, project_id INTEGER);
@@ -775,8 +793,16 @@ async fn links_in_a_session_cwd_are_resolved_before_they_are_followed() {
     let real = f.workspace("real");
     let alias = f.root.join("work").join("alias");
     std::os::windows::fs::symlink_dir(format!("{}.", real.display()), &alias).unwrap();
-    write(&f.claude.join("projects/l/a.jsonl"), claude_line(&alias), ms(NOW) - DAY);
-    assert!(candidates(&f.inventory(f.settings(), vec![])).await.is_empty());
+    write(
+        &f.claude.join("projects/l/a.jsonl"),
+        claude_line(&alias),
+        ms(NOW) - DAY,
+    );
+    assert!(
+        candidates(&f.inventory(f.settings(), vec![]))
+            .await
+            .is_empty()
+    );
 }
 
 /// zstd frames asking for a window above 2^27 are refused; a 2^27 window is read.
@@ -790,8 +816,16 @@ async fn compressed_rollouts_with_oversized_windows_are_refused() {
         encoder.finish().unwrap()
     };
     let (small, large) = (f.workspace("window-27"), f.workspace("window-28"));
-    write(&rollout(&f.codex, "2026-08-24", "rollout-27.jsonl.zst"), compress(27, &small), ms(NOW) - DAY);
-    write(&rollout(&f.codex, "2026-08-24", "rollout-28.jsonl.zst"), compress(28, &large), ms(NOW) - DAY);
+    write(
+        &rollout(&f.codex, "2026-08-24", "rollout-27.jsonl.zst"),
+        compress(27, &small),
+        ms(NOW) - DAY,
+    );
+    write(
+        &rollout(&f.codex, "2026-08-24", "rollout-28.jsonl.zst"),
+        compress(28, &large),
+        ms(NOW) - DAY,
+    );
     let found = candidates(&f.inventory(f.settings(), vec![])).await;
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(same(&found[0].0, &small));
