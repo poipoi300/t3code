@@ -21,7 +21,9 @@ use t3_contracts::settings::{
     SnoozePresetSettingMember1Kind, SnoozePresetSettingMember2, TimestampFormat,
 };
 
-use super::shell::{RowReset, SettingsContext, SettingsRowProps, settings_row, settings_select};
+use super::shell::{
+    RowReset, SettingsContext, SettingsRowProps, region, settings_row, settings_select,
+};
 use crate::i18n::{Text, Value, t, tr};
 use crate::theme::{palette, tw};
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
@@ -370,24 +372,25 @@ fn snooze_preset_row(
         .child(
             view()
                 .app_class(tw("ml-auto flex min-w-0 flex-row items-center gap-2"))
-                .child(dynamic(move || {
-                    // Client labels with counts and formatted times: content.
-                    match previews.with(|(previews, _)| previews.get(index.get()).cloned()) {
-                        Some(Preview::Menu { label, when }) => {
-                            view()
+                .child(region(
+                    move || previews.with(|(previews, _)| previews.get(index.get()).cloned()),
+                    move |preview| {
+                        // Client labels with counts and formatted times: content.
+                        match preview {
+                            Some(Preview::Menu { label, when }) => view()
                                 .app_class(tw("flex min-w-0 flex-row truncate text-xs"))
                                 .child(text(label).app_class(tw("text-xs text-foreground")))
                                 .child(text(when).app_class(tw(
                                     "ps-2 text-xs tabular-nums text-muted-foreground",
                                 )))
-                                .into_element()
+                                .into_element(),
+                            Some(Preview::Muted(key)) => text(t(key))
+                                .app_class(tw("truncate text-xs text-muted-foreground"))
+                                .into_element(),
+                            None => view().into_element(),
                         }
-                        Some(Preview::Muted(key)) => text(t(key))
-                            .app_class(tw("truncate text-xs text-muted-foreground"))
-                            .into_element(),
-                        None => view().into_element(),
-                    }
-                }))
+                    },
+                ))
                 .child(button(
                     ButtonContent::Icon {
                         icon: Icon::X,

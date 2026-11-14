@@ -161,8 +161,8 @@ pub fn settings_search_field(
                     &[],
                 )),
         )
-        .child(dynamic(move || {
-            if search.is_searching() {
+        .child(super::shell::region(move || search.is_searching(), move |searching| {
+            if searching {
                 // UI-BUTTON has no icon-micro size; its 20px ghost-muted look is written here.
                 nsh_base::button()
                     .accessibility_label(t("Clear settings search"))
@@ -197,19 +197,21 @@ pub fn settings_search_results(
                 ))
             },
         ))
-        .child(dynamic(move || {
-            let results = search.results.get();
-            let mut list = view()
-                .app_class(tw("flex w-full min-w-0 flex-col gap-1"))
-                .when(!results.is_empty(), |list| {
-                    list.role(AccessibilityRole::List)
-                        .label(t("Settings search results"))
-                });
-            for (index, item) in results.into_iter().enumerate() {
-                list = list.child(search_result_row(search, index, item, pick.clone()));
-            }
-            list.into_element()
-        }))
+        .child(super::shell::region(
+            move || search.results.get(),
+            move |results| {
+                let mut list = view()
+                    .app_class(tw("flex w-full min-w-0 flex-col gap-1"))
+                    .when(!results.is_empty(), |list| {
+                        list.role(AccessibilityRole::List)
+                            .label(t("Settings search results"))
+                    });
+                for (index, item) in results.into_iter().enumerate() {
+                    list = list.child(search_result_row(search, index, item, pick.clone()));
+                }
+                list.into_element()
+            },
+        ))
 }
 
 fn search_result_row(

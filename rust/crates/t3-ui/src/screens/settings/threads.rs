@@ -388,88 +388,96 @@ fn text_generation_control(
         let resolved = text_generation_selection(&next, &targets.providers);
         context.update(json!({ "textGenerationModelSelection": resolved }));
     };
-    dynamic(move || {
-        if !has_server_targets() {
-            return text(t(
-                "Connect an environment to choose its text generation model.",
-            ))
-            .app_class(tw("text-sm text-muted-foreground"))
-            .into_element();
-        }
-        if !state.with(|(_, _, _, has_provider, _)| *has_provider) {
-            return text(t("No text generation providers available."))
+    super::shell::region(
+        move || {
+            (
+                has_server_targets(),
+                state.with(|(_, _, _, has_provider, _)| *has_provider),
+            )
+        },
+        move |(targets, has_provider)| {
+            if !targets {
+                return text(t(
+                    "Connect an environment to choose its text generation model.",
+                ))
                 .app_class(tw("text-sm text-muted-foreground"))
                 .into_element();
-        }
-        untracked(|| {
-            let data = computed(move || {
-                let (targets, settings, project, _, selection) = state.get();
-                Rc::new(PickerData::from_catalog(
-                    &targets.providers,
-                    &settings,
-                    project.as_ref(),
-                    &selection,
-                ))
-            });
-            let traits = computed(move || {
-                let (targets, _, _, _, selection) = state.get();
-                let view = selection_traits(&targets.providers, &selection);
-                TraitsView {
-                    model: Some(ModelKey::from(&selection)),
-                    reasoning: view.reasoning,
-                    others: view.others,
-                    speed: view.speed,
-                    ultracode: view.ultracode,
-                    summary: Some(view.summary),
-                    disabled_reason: None,
-                    unavailable: view.unavailable,
-                }
-            });
-            let mut props =
-                PickerProps::new(Prop::bind(move || data.get()), move |key: ModelKey| {
-                    save(ModelSelection {
-                        instance_id: key.instance_id,
-                        model: key.model,
-                        options: None,
-                    });
+            }
+            if !has_provider {
+                return text(t("No text generation providers available."))
+                    .app_class(tw("text-sm text-muted-foreground"))
+                    .into_element();
+            }
+            untracked(|| {
+                let data = computed(move || {
+                    let (targets, settings, project, _, selection) = state.get();
+                    Rc::new(PickerData::from_catalog(
+                        &targets.providers,
+                        &settings,
+                        project.as_ref(),
+                        &selection,
+                    ))
                 });
-            props.traits = Prop::bind(move || traits.get());
-            props.docked = false;
-            props.trigger_label = Prop::bind(move || {
-                context
-                    .mixed(&["textGenerationModelSelection"])
-                    .then(|| t("Mixed"))
-            });
-            // The web also passes the instance (`instanceId`); the Providers page reads its own.
-            props.on_open_provider_setup = Some(Rc::new(move |_instance| {
-                let machine = state
-                    .get_untracked()
-                    .0
-                    .environment
-                    .as_ref()
-                    .map(|e| e.0.clone());
-                context.open_page(
-                    SettingsPage::Providers,
-                    t3_client::services::settings::scope::SettingsScopeSearch {
-                        machine,
-                        ..Default::default()
-                    },
-                );
-            }));
-            props.on_option_pick = Some(Rc::new(move |key: ModelKey, option| {
-                let (_, _, _, _, selection) = state.get_untracked();
-                if selection.instance_id == key.instance_id && selection.model == key.model {
-                    save(with_option(&selection, option));
-                }
-            }));
-            view()
-                .app_class(tw(
-                    "flex flex-row flex-wrap items-center justify-end gap-1.5",
-                ))
-                .child(provider_model_picker(props))
-                .into_element()
-        })
-    })
+                let traits = computed(move || {
+                    let (targets, _, _, _, selection) = state.get();
+                    let view = selection_traits(&targets.providers, &selection);
+                    TraitsView {
+                        model: Some(ModelKey::from(&selection)),
+                        reasoning: view.reasoning,
+                        others: view.others,
+                        speed: view.speed,
+                        ultracode: view.ultracode,
+                        summary: Some(view.summary),
+                        disabled_reason: None,
+                        unavailable: view.unavailable,
+                    }
+                });
+                let mut props =
+                    PickerProps::new(Prop::bind(move || data.get()), move |key: ModelKey| {
+                        save(ModelSelection {
+                            instance_id: key.instance_id,
+                            model: key.model,
+                            options: None,
+                        });
+                    });
+                props.traits = Prop::bind(move || traits.get());
+                props.docked = false;
+                props.trigger_label = Prop::bind(move || {
+                    context
+                        .mixed(&["textGenerationModelSelection"])
+                        .then(|| t("Mixed"))
+                });
+                // The web also passes the instance (`instanceId`); the Providers page reads its own.
+                props.on_open_provider_setup = Some(Rc::new(move |_instance| {
+                    let machine = state
+                        .get_untracked()
+                        .0
+                        .environment
+                        .as_ref()
+                        .map(|e| e.0.clone());
+                    context.open_page(
+                        SettingsPage::Providers,
+                        t3_client::services::settings::scope::SettingsScopeSearch {
+                            machine,
+                            ..Default::default()
+                        },
+                    );
+                }));
+                props.on_option_pick = Some(Rc::new(move |key: ModelKey, option| {
+                    let (_, _, _, _, selection) = state.get_untracked();
+                    if selection.instance_id == key.instance_id && selection.model == key.model {
+                        save(with_option(&selection, option));
+                    }
+                }));
+                view()
+                    .app_class(tw(
+                        "flex flex-row flex-wrap items-center justify-end gap-1.5",
+                    ))
+                    .child(provider_model_picker(props))
+                    .into_element()
+            })
+        },
+    )
 }
 
 /// Port of ThreadTitleInstructionsSettings.tsx: saved on blur when edited.
@@ -599,46 +607,49 @@ fn settings_model_picker(
         _ => TraitsView::default(),
     });
     let present = computed(move || data.with(Option::is_some));
-    dynamic(move || {
-        if !present.get() {
-            return text(empty())
-                .app_class(tw("text-sm text-muted-foreground"))
-                .into_element();
-        }
-        let save = save.clone();
-        let pick = save.clone();
-        let trigger_label = trigger_label.clone();
-        untracked(|| {
-            let initial = data.get().expect("present");
-            let mut props = PickerProps::new(
-                Prop::bind(move || data.get().unwrap_or_else(|| initial.clone())),
-                move |key: ModelKey| {
-                    pick(ModelSelection {
-                        instance_id: key.instance_id,
-                        model: key.model,
-                        options: None,
-                    })
-                },
-            );
-            props.traits = Prop::bind(move || traits.get());
-            props.docked = false;
-            props.trigger_label = Prop::bind(move || trigger_label());
-            props.on_option_pick = Some(Rc::new(move |key: ModelKey, option| {
-                if let Some(current) = selection.get_untracked()
-                    && current.instance_id == key.instance_id
-                    && current.model == key.model
-                {
-                    save(with_option(&current, option));
-                }
-            }));
-            view()
-                .app_class(tw(
-                    "flex flex-row flex-wrap items-center justify-end gap-1.5",
-                ))
-                .child(provider_model_picker(props))
-                .into_element()
-        })
-    })
+    super::shell::region(
+        move || present.get(),
+        move |present| {
+            if !present {
+                return text(empty())
+                    .app_class(tw("text-sm text-muted-foreground"))
+                    .into_element();
+            }
+            let save = save.clone();
+            let pick = save.clone();
+            let trigger_label = trigger_label.clone();
+            untracked(|| {
+                let initial = data.get().expect("present");
+                let mut props = PickerProps::new(
+                    Prop::bind(move || data.get().unwrap_or_else(|| initial.clone())),
+                    move |key: ModelKey| {
+                        pick(ModelSelection {
+                            instance_id: key.instance_id,
+                            model: key.model,
+                            options: None,
+                        })
+                    },
+                );
+                props.traits = Prop::bind(move || traits.get());
+                props.docked = false;
+                props.trigger_label = Prop::bind(move || trigger_label());
+                props.on_option_pick = Some(Rc::new(move |key: ModelKey, option| {
+                    if let Some(current) = selection.get_untracked()
+                        && current.instance_id == key.instance_id
+                        && current.model == key.model
+                    {
+                        save(with_option(&current, option));
+                    }
+                }));
+                view()
+                    .app_class(tw(
+                        "flex flex-row flex-wrap items-center justify-end gap-1.5",
+                    ))
+                    .child(provider_model_picker(props))
+                    .into_element()
+            })
+        },
+    )
 }
 
 fn model_not_saved(

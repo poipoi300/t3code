@@ -229,6 +229,23 @@ pub struct SettingsContext {
     tasks: crate::runtime::tasks::TaskOwner,
 }
 
+/// A region rebuilt only when `input` changes (or the UI language does), its content built
+/// untracked. Markup reads the theme tokens (`tw`) and other state as it is built; tracking those
+/// would rebuild the region mid-flush, and a select built by the replaced run then reads disposed
+/// props (an engine panic).
+pub fn region<T: PartialEq + Clone + 'static, E: IntoElements>(
+    input: impl Fn() -> T + 'static,
+    build: impl Fn(T) -> E + 'static,
+) -> AnyElement {
+    let input = computed(input);
+    dynamic(move || {
+        let value = input.get();
+        // Subscribes to the UI language: the content's labels are translated as it is built.
+        let _ = t("");
+        untracked(|| build(value))
+    })
+}
+
 pub fn use_settings() -> SettingsContext {
     use_context::<SettingsContext>().expect("the settings shell provides its context")
 }
@@ -758,20 +775,23 @@ fn settings_scope_boundary(context: SettingsContext) -> impl IntoElement {
             t3_client::services::settings::search::search_target_notice(&view, &target)
         })
     });
-    dynamic(move || {
-        if let Some(notice) = notice.get() {
-            return untracked(|| settings_scope_notice(context, notice).into_element());
-        }
-        match blocked.get() {
-            Some(message) => settings_page_container_plain(
-                text(message)
-                    .app_class(tw("text-sm text-muted-foreground"))
-                    .into_element(),
-            )
-            .into_element(),
-            None => untracked(|| page_content(page)),
-        }
-    })
+    region(
+        move || (notice.get(), blocked.get()),
+        move |(notice, blocked)| {
+            if let Some(notice) = notice {
+                return settings_scope_notice(context, notice).into_element();
+            }
+            match blocked {
+                Some(message) => settings_page_container_plain(
+                    text(message)
+                        .app_class(tw("text-sm text-muted-foreground"))
+                        .into_element(),
+                )
+                .into_element(),
+                None => page_content(page),
+            }
+        },
+    )
 }
 
 /// Port of SettingsScopeNotice.tsx: the scopes that own a search target, as a page.
@@ -838,28 +858,30 @@ fn restore_device_defaults_button(context: SettingsContext) -> impl IntoElement 
         ))
     });
     let narrow = move || crate::state::layout::layout_class().is_compact();
-    dynamic(move || {
-        let disabled = labels.with(Vec::is_empty);
-        let label = t("Restore device defaults");
-        button(
-            if narrow() {
-                ButtonContent::Icon {
-                    icon: Icon::RotateCcw,
-                    label,
-                }
-            } else {
-                ButtonContent::IconLabel {
-                    icon: Icon::RotateCcw,
-                    label,
-                }
-            },
-            ButtonVariant::Ghost,
-            ButtonSize::Xs,
-            move || disabled,
-            move || restore_defaults(context, labels.get_untracked()),
-        )
-        .into_element()
-    })
+    region(
+        move || (labels.with(Vec::is_empty), narrow()),
+        move |(disabled, narrow)| {
+            let label = t("Restore device defaults");
+            button(
+                if narrow {
+                    ButtonContent::Icon {
+                        icon: Icon::RotateCcw,
+                        label,
+                    }
+                } else {
+                    ButtonContent::IconLabel {
+                        icon: Icon::RotateCcw,
+                        label,
+                    }
+                },
+                ButtonVariant::Ghost,
+                ButtonSize::Xs,
+                move || disabled,
+                move || restore_defaults(context, labels.get_untracked()),
+            )
+            .into_element()
+        },
+    )
 }
 
 fn restore_defaults(context: SettingsContext, labels: Vec<&'static str>) {
@@ -1421,6 +1443,13 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
         })
     };
     let locked = move || managed.with(|m| m.is_some()) || managed_by.with(Option::is_some);
+    // Regions rebuild their control only when it turns inert or back: connecting changes the
+    // reason several times in one flush, and a select rebuilt mid-flush reads disposed props.
+    let inert_reason = computed(inert_message);
+    let control_inert = computed(move || inert_reason.with(Option::is_some));
+    let children_inert = computed(move || {
+        server_scoped && state.with(|(access, ..)| *access != SettingsWriteAccess::Writable)
+    });
     let reset = reset.map(Rc::new);
     let title_text = title.clone();
     let (target, highlighted) = search_target(context, id);
@@ -1459,10 +1488,15 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
                                         .role(AccessibilityRole::Header)
                                         .app_class(tw("text-sm font-medium text-foreground")),
                                 )
-                                .child(dynamic(move || {
-                                    let inheritance = inheritance.get()?;
+                                .child(region(
+                                    move || {
+                                        let can_clear = context.write_access()
+                                            == SettingsWriteAccess::Writable;
+                                        (inheritance.get(), can_clear)
+                                    },
+                                    move |(inheritance, can_clear)| {
+                                    let inheritance = inheritance?;
                                     let quiet = inheritance.quiet;
-                                    let can_clear = context.write_access() == SettingsWriteAccess::Writable;
                                     Some(
                                         view()
                                             .app_class(tw(&cn([
@@ -1473,17 +1507,31 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
                                             .child(setting_inheritance(context, inheritance, setting_keys, can_clear))
                                             .into_element(),
                                     )
-                                }))
+                                    },
+                                ))
                                 .child(
                                     view()
                                         .app_class(tw("inline-flex h-5 w-5 shrink-0 items-center justify-center"))
-                                        .child(dynamic({
+                                        .child(region(
+                                            {
+                                                let reset = reset.clone();
+                                                move || {
+                                                    let (access, _, project_scope, source) =
+                                                        state.get();
+                                                    let writable = access
+                                                        == SettingsWriteAccess::Writable
+                                                        && !locked();
+                                                    let visible = writable
+                                                        && reset.as_ref().is_some_and(|r| (r.visible)());
+                                                    (writable, project_scope, source, visible)
+                                                }
+                                            },
+                                            {
                                             let reset = reset.clone();
                                             let scoped_keys = scoped_keys.clone();
                                             let title = title.clone();
-                                            move || {
-                                                let (access, _, project_scope, source) = state.get();
-                                                if access != SettingsWriteAccess::Writable || locked() {
+                                            move |(writable, project_scope, source, visible)| {
+                                                if !writable {
                                                     return None;
                                                 }
                                                 if project_scope && !scoped_keys.is_empty() {
@@ -1503,7 +1551,7 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
                                                     });
                                                 }
                                                 let reset = reset.clone()?;
-                                                (reset.visible)().then(|| {
+                                                visible.then(|| {
                                                     let on_reset = reset.on_reset.clone();
                                                     setting_reset_button(
                                                         t(reset.label),
@@ -1513,7 +1561,8 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
                                                     .into_element()
                                                 })
                                             }
-                                        })),
+                                            },
+                                        )),
                                 ),
                         )
                         .child(description.map(|description| {
@@ -1522,12 +1571,16 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
                         }))
                         .child(status.map(|status| {
                             let status = Rc::new(status);
-                            dynamic(move || {
-                                status().map(|line| {
-                                    text(line.resolve())
-                                        .app_class(tw("pt-0.5 text-xs text-muted-foreground"))
-                                })
-                            })
+                            region(
+                                move || status(),
+                                |line: Option<Text>| {
+                                    line.map(|line| {
+                                        text(line.resolve()).app_class(tw(
+                                            "pt-0.5 text-xs text-muted-foreground",
+                                        ))
+                                    })
+                                },
+                            )
                         })),
                 )
                 .child(control.map(|control| {
@@ -1540,20 +1593,22 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
                                 "flex w-full min-w-0 shrink-0 flex-row items-center gap-2"
                             }))
                         })
-                        .child(dynamic(move || {
-                            let control = control.clone();
-                            match inert_message() {
-                                Some(message) => inert_control(message, untracked(|| control())).into_element(),
-                                None => untracked(|| control()),
-                            }
-                        }))
+                        .child(region(
+                            move || control_inert.get(),
+                            move |inert| {
+                                if inert {
+                                    let reason = move || inert_reason.get().unwrap_or_default();
+                                    inert_control(reason, control()).into_element()
+                                } else {
+                                    control()
+                                }
+                            },
+                        ))
                 })),
         )
         .child(children.map(|children| {
-            dynamic(move || {
-                let inert = server_scoped && state.with(|(access, ..)| *access != SettingsWriteAccess::Writable);
-                let children = children.clone();
-                let content = untracked(|| children());
+            region(move || children_inert.get(), move |inert| {
+                let content = children();
                 if inert {
                     // The web's `inert`: one accessibility element, nothing inside reachable.
                     view()
@@ -1570,15 +1625,18 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
 }
 
 /// `inertControl`: the control dimmed and unreachable, with the reason as a tooltip.
-fn inert_control(message: String, control: AnyElement) -> impl IntoElement {
+fn inert_control(
+    message: impl Fn() -> String + Copy + 'static,
+    control: AnyElement,
+) -> impl IntoElement {
     let handle = tooltip_create_handle();
     // The web's `inert` subtree: one accessibility element named by the reason, so the control
     // inside is neither announced nor pressable.
     view()
         .focusable(true)
         .accessible(true)
-        .label(message.clone())
-        .tooltip(tooltip(handle, TooltipOptions::default(), text(message)))
+        .label(move || SharedString::from(message()))
+        .tooltip(tooltip(handle, TooltipOptions::default(), text(move || SharedString::from(message()))))
         .app_class(tw("flex w-full flex-row items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
         .child(
             view()
@@ -1623,162 +1681,166 @@ struct ScopeOption {
 
 /// `SettingsScopeSentence`: "Applying settings for <project> across <environment> in <checkout>".
 fn settings_scope_sentence(context: SettingsContext) -> impl IntoElement {
-    dynamic(move || {
-        let scope_view = context.view()?;
-        if scope_view.device_only {
-            return None;
-        }
-        let search = scope_view.search.clone();
-        let environments = scope_view.all_environments.clone();
-        let groups = scope_view.groups.clone();
-        // ProjectScopeMenu.
-        let selected_project = groups
-            .iter()
-            .find(|g| Some(&g.project_key) == search.project.as_ref());
-        let menu_groups = project_scope_menu_groups(&groups, &search);
-        let machines: Vec<(String, String)> = menu_groups
-            .iter()
-            .map(|g| {
-                (
-                    g.project_key.clone(),
-                    settings_scope_project_machines(g, &environments, true).join(", "),
-                )
-            })
-            .collect();
-        let project_options: Vec<ScopeOption> = menu_groups
-            .iter()
-            .map(|group| {
-                let mine = machines
-                    .iter()
-                    .find(|(k, _)| *k == group.project_key)
-                    .map(|(_, m)| m.clone())
-                    .unwrap_or_default();
-                let root = group
-                    .members
-                    .first()
-                    .map(|m| m.workspace_root.clone())
-                    .unwrap_or_default();
-                let same_name: Vec<_> = machines
-                    .iter()
-                    .filter(|(key, _)| {
-                        *key != group.project_key
-                            && menu_groups.iter().any(|g| {
-                                &g.project_key == key && g.display_name == group.display_name
-                            })
-                    })
-                    .collect();
-                let secondary = if same_name.is_empty() {
-                    if environments.len() > 1 {
-                        root
+    region(
+        move || context.view(),
+        move |scope_view| {
+            let scope_view = scope_view?;
+            if scope_view.device_only {
+                return None;
+            }
+            let search = scope_view.search.clone();
+            let environments = scope_view.all_environments.clone();
+            let groups = scope_view.groups.clone();
+            // ProjectScopeMenu.
+            let selected_project = groups
+                .iter()
+                .find(|g| Some(&g.project_key) == search.project.as_ref());
+            let menu_groups = project_scope_menu_groups(&groups, &search);
+            let machines: Vec<(String, String)> = menu_groups
+                .iter()
+                .map(|g| {
+                    (
+                        g.project_key.clone(),
+                        settings_scope_project_machines(g, &environments, true).join(", "),
+                    )
+                })
+                .collect();
+            let project_options: Vec<ScopeOption> = menu_groups
+                .iter()
+                .map(|group| {
+                    let mine = machines
+                        .iter()
+                        .find(|(k, _)| *k == group.project_key)
+                        .map(|(_, m)| m.clone())
+                        .unwrap_or_default();
+                    let root = group
+                        .members
+                        .first()
+                        .map(|m| m.workspace_root.clone())
+                        .unwrap_or_default();
+                    let same_name: Vec<_> = machines
+                        .iter()
+                        .filter(|(key, _)| {
+                            *key != group.project_key
+                                && menu_groups.iter().any(|g| {
+                                    &g.project_key == key && g.display_name == group.display_name
+                                })
+                        })
+                        .collect();
+                    let secondary = if same_name.is_empty() {
+                        if environments.len() > 1 {
+                            root
+                        } else {
+                            String::new()
+                        }
+                    } else if same_name.iter().any(|(_, m)| *m == mine) {
+                        format!("{mine} · {root}")
                     } else {
-                        String::new()
+                        mine
+                    };
+                    ScopeOption {
+                        value: group.project_key.clone(),
+                        label: group.display_name.clone(),
+                        secondary,
+                        offline: false,
                     }
-                } else if same_name.iter().any(|(_, m)| *m == mine) {
-                    format!("{mine} · {root}")
-                } else {
-                    mine
-                };
-                ScopeOption {
-                    value: group.project_key.clone(),
-                    label: group.display_name.clone(),
-                    secondary,
-                    offline: false,
-                }
-            })
-            .collect();
-        let project_label = selected_project
-            .map(|g| g.display_name.clone())
-            .unwrap_or_else(|| {
-                if search.project.is_some() {
-                    t("Unavailable project")
-                } else {
-                    t("All projects")
-                }
-            });
-        // EnvironmentScopeMenu.
-        let checkout_environment = match &scope_view.scope.kind {
-            t3_client::services::settings::scope::ScopeKind::Checkout {
-                environment_id, ..
-            } => Some(environment_id.0.clone()),
-            _ => None,
-        };
-        let environment_value = environment_axis_value(&search, checkout_environment.as_deref());
-        let selected_environment = environments
-            .iter()
-            .find(|e| e.environment_id.0 == environment_value);
-        let member_ids: Option<Vec<_>> =
-            selected_project.map(|g| g.members.iter().map(|m| m.environment_id.clone()).collect());
-        let environment_options: Vec<ScopeOption> = environments
-            .iter()
-            .filter(|e| {
-                member_ids
-                    .as_ref()
-                    .is_none_or(|ids| ids.contains(&e.environment_id))
-            })
-            .map(|environment| {
-                let (primary, secondary) =
-                    settings_scope_environment_labels(environment, &environments);
-                ScopeOption {
-                    value: environment.environment_id.0.clone(),
-                    label: primary,
-                    secondary: if environments.len() <= 1 {
-                        String::new()
-                    } else if secondary.is_empty() {
-                        settings_scope_environment_address(environment)
+                })
+                .collect();
+            let project_label = selected_project
+                .map(|g| g.display_name.clone())
+                .unwrap_or_else(|| {
+                    if search.project.is_some() {
+                        t("Unavailable project")
                     } else {
-                        secondary
-                    },
-                    offline: environment.phase != t3_client::connection::Phase::Connected,
-                }
-            })
-            .collect();
-        let environment_label = match selected_environment {
-            Some(environment) => settings_scope_environment_label(environment, &environments),
-            None if environment_value != ALL_VALUE => t("Unavailable environment"),
-            None if scope_view.single_environment => t("No environments"),
-            None => t("All environments"),
-        };
-        // CheckoutScopeMenu.
-        let checkouts: Vec<_> = selected_project
-            .map(|g| {
-                settings_scope_checkout_choices(g, &search)
-                    .into_iter()
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        let checkout_refs: Vec<_> = checkouts.iter().collect();
-        let checkout_label = checkouts
-            .iter()
-            .find(|m| Some(&m.physical_project_key) == search.checkout.as_ref())
-            .map(|m| settings_scope_checkout_label(m, &checkout_refs))
-            .unwrap_or_else(|| {
-                if search.checkout.is_some() {
-                    t("Unavailable checkout")
-                } else {
-                    t("All checkouts")
-                }
-            });
-        let checkout_options: Vec<ScopeOption> = checkouts
-            .iter()
-            .map(|m| ScopeOption {
-                value: m.physical_project_key.clone(),
-                label: file_basename(&m.workspace_root).to_owned(),
-                secondary: m.workspace_root.clone(),
-                offline: false,
-            })
-            .collect();
-        let preposition = if search.machine.is_some()
-            || scope_view.scope.kind_name() == ScopeKindName::Checkout
-        {
-            t("on")
-        } else {
-            t("across")
-        };
-        let project_search = search.clone();
-        let environment_search = search.clone();
-        let checkout_search = search.clone();
-        let sentence = view()
+                        t("All projects")
+                    }
+                });
+            // EnvironmentScopeMenu.
+            let checkout_environment = match &scope_view.scope.kind {
+                t3_client::services::settings::scope::ScopeKind::Checkout {
+                    environment_id,
+                    ..
+                } => Some(environment_id.0.clone()),
+                _ => None,
+            };
+            let environment_value =
+                environment_axis_value(&search, checkout_environment.as_deref());
+            let selected_environment = environments
+                .iter()
+                .find(|e| e.environment_id.0 == environment_value);
+            let member_ids: Option<Vec<_>> = selected_project
+                .map(|g| g.members.iter().map(|m| m.environment_id.clone()).collect());
+            let environment_options: Vec<ScopeOption> = environments
+                .iter()
+                .filter(|e| {
+                    member_ids
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&e.environment_id))
+                })
+                .map(|environment| {
+                    let (primary, secondary) =
+                        settings_scope_environment_labels(environment, &environments);
+                    ScopeOption {
+                        value: environment.environment_id.0.clone(),
+                        label: primary,
+                        secondary: if environments.len() <= 1 {
+                            String::new()
+                        } else if secondary.is_empty() {
+                            settings_scope_environment_address(environment)
+                        } else {
+                            secondary
+                        },
+                        offline: environment.phase != t3_client::connection::Phase::Connected,
+                    }
+                })
+                .collect();
+            let environment_label = match selected_environment {
+                Some(environment) => settings_scope_environment_label(environment, &environments),
+                None if environment_value != ALL_VALUE => t("Unavailable environment"),
+                None if scope_view.single_environment => t("No environments"),
+                None => t("All environments"),
+            };
+            // CheckoutScopeMenu.
+            let checkouts: Vec<_> = selected_project
+                .map(|g| {
+                    settings_scope_checkout_choices(g, &search)
+                        .into_iter()
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            let checkout_refs: Vec<_> = checkouts.iter().collect();
+            let checkout_label = checkouts
+                .iter()
+                .find(|m| Some(&m.physical_project_key) == search.checkout.as_ref())
+                .map(|m| settings_scope_checkout_label(m, &checkout_refs))
+                .unwrap_or_else(|| {
+                    if search.checkout.is_some() {
+                        t("Unavailable checkout")
+                    } else {
+                        t("All checkouts")
+                    }
+                });
+            let checkout_options: Vec<ScopeOption> = checkouts
+                .iter()
+                .map(|m| ScopeOption {
+                    value: m.physical_project_key.clone(),
+                    label: file_basename(&m.workspace_root).to_owned(),
+                    secondary: m.workspace_root.clone(),
+                    offline: false,
+                })
+                .collect();
+            let preposition = if search.machine.is_some()
+                || scope_view.scope.kind_name() == ScopeKindName::Checkout
+            {
+                t("on")
+            } else {
+                t("across")
+            };
+            let project_search = search.clone();
+            let environment_search = search.clone();
+            let checkout_search = search.clone();
+            let sentence = view()
             .app_class(tw("flex min-w-0 flex-row flex-wrap items-center gap-x-1.5 gap-y-1 px-3 text-sm text-muted-foreground sm:px-4"))
             .child(
                 view()
@@ -1828,8 +1890,9 @@ fn settings_scope_sentence(context: SettingsContext) -> impl IntoElement {
                         },
                     ))
             }));
-        Some(sentence.into_element())
-    })
+            Some(sentence.into_element())
+        },
+    )
 }
 
 /// `ScopeMenu`. The web switches to a searchable combobox above six options; NSH's menu takes
