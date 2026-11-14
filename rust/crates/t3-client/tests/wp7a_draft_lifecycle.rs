@@ -72,7 +72,9 @@ fn new_task_lifecycle_loads_saved_drafts_before_retarget_and_flushes_environment
             .await
             .expect("read")
             .expect("saved");
-        let saved: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        let document = t3_client::thread_views::drafts::SavedDraftDocument::decode_mobile(&bytes)
+            .expect("saved record");
+        let saved = document.raw();
         assert!(saved["drafts"].get(&key).is_none());
         assert_eq!(saved["drafts"]["other:t"]["text"], "other");
     });

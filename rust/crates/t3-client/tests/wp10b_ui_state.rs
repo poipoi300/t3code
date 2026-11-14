@@ -102,3 +102,61 @@ fn grouped_reorder_expansion_and_changed_files() {
     s.set_changed_files_expanded("e:t", "r", false);
     assert!(!s.thread_changed_files_expanded_by_id["e:t"]["r"]);
 }
+
+#[test]
+fn preferences_round_trip_and_fall_back_to_legacy_records_without_deleting_them() {
+    use futures::executor::block_on;
+    use t3_client::platform::{Storage, StorageArea, StorageKey, StorageWrite};
+    let storage = t3_client::testing::FakePlatform::default();
+    let key = |record: &str| StorageKey {
+        namespace: PREFERENCES_NAMESPACE.into(),
+        environment: None,
+        record: record.into(),
+    };
+    block_on(async {
+        assert_eq!(
+            UiPreferences::load(&storage).await.unwrap(),
+            UiPreferences::default()
+        );
+        storage
+            .write(
+                StorageArea::Ordinary,
+                vec![StorageWrite {
+                    key: key("t3code:renderer-state:v8"),
+                    value: Some(br#"{"projectOrder":["a"]}"#.to_vec()),
+                }],
+            )
+            .await
+            .unwrap();
+        let mut preferences = UiPreferences::load(&storage).await.unwrap();
+        assert_eq!(preferences.state.project_order, vec!["a".to_owned()]);
+        preferences.working_shelf_expanded = true;
+        preferences.sidebar_width = Some(320.5);
+        preferences.save(&storage).await.unwrap();
+        let loaded = UiPreferences::load(&storage).await.unwrap();
+        assert_eq!(loaded, preferences);
+        assert!(
+            storage
+                .get(StorageArea::Ordinary, key("t3code:renderer-state:v8"))
+                .await
+                .unwrap()
+                .is_some(),
+            "the legacy record stays for older clients"
+        );
+        storage
+            .write(
+                StorageArea::Ordinary,
+                vec![StorageWrite {
+                    key: key(STORAGE_KEY),
+                    value: Some(b"{not json".to_vec()),
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            UiPreferences::load(&storage).await.unwrap().state,
+            UiState::default(),
+            "an unreadable record reads as defaults"
+        );
+    });
+}

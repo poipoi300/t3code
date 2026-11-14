@@ -211,3 +211,41 @@ fn terminal_normalization_deduplicates_and_repairs_groups() {
     assert_eq!(state.active_terminal_id, "a");
     assert_eq!(state.terminal_height, 280.0);
 }
+
+#[test]
+fn route_render_state_reads_the_shell_and_the_threads_own_detail_from_the_store() {
+    let store = t3_client::ClientStore::default();
+    let environment = EnvironmentId("e".into());
+    let session = store.begin_session(environment.clone());
+    let route = key("e", "new");
+    let state = |draft| route_render_state(&store.snapshot(), &route, draft);
+    assert_eq!(state(false), RenderState::Loading, "no shell yet");
+    assert_eq!(state(true), RenderState::Ready, "a draft renders at once");
+    store.apply_shell(
+        &environment,
+        session,
+        vec![
+            serde_json::from_value(json!({"kind":"snapshot","snapshot":{"schemaVersion":1,"snapshotSequence":1,"threads":[],"archivedThreads":[],"projects":[]}})).unwrap(),
+        ],
+    );
+    assert_eq!(
+        state(false),
+        RenderState::Loading,
+        "a synchronizing shell is not authoritative"
+    );
+    store.apply_shell(
+        &environment,
+        session,
+        vec![serde_json::from_value(json!({"kind":"synchronized"})).unwrap()],
+    );
+    assert_eq!(
+        state(false),
+        RenderState::Loading,
+        "not listed yet, no detail: wait for it"
+    );
+    store.update_thread(&route, session, |thread| {
+        thread.status = SyncStatus::Deleted;
+        true
+    });
+    assert_eq!(state(false), RenderState::Missing);
+}

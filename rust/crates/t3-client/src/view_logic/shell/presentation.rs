@@ -402,3 +402,132 @@ pub fn present_sidebar<'a>(
         next_snooze_wake: next_wake,
     }
 }
+
+/// One sidebar row as the UI holds it: the store's shared shell row plus the row's decisions.
+#[derive(Debug, Clone)]
+pub struct SidebarRow {
+    pub key: ThreadKey,
+    pub thread: std::rc::Rc<t3_contracts::orchestration_v2::OrchestrationV2ThreadShell>,
+    pub section: Section,
+    pub status: status::Status,
+    pub pill: Option<status::Pill>,
+    pub unread: bool,
+    pub woke: bool,
+    pub active: bool,
+    pub selected: bool,
+    pub receded: bool,
+}
+impl PartialEq for SidebarRow {
+    fn eq(&self, other: &Self) -> bool {
+        std::rc::Rc::ptr_eq(&self.thread, &other.thread)
+            && (
+                &self.key,
+                self.section,
+                self.status,
+                self.pill,
+                self.unread,
+                self.woke,
+                self.active,
+                self.selected,
+                self.receded,
+            ) == (
+                &other.key,
+                other.section,
+                other.status,
+                other.pill,
+                other.unread,
+                other.woke,
+                other.active,
+                other.selected,
+                other.receded,
+            )
+    }
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct SidebarFolder {
+    pub group: SidebarProjectSnapshot,
+    /// Indices into `SidebarRows.rows`, in their shelf and order sequence.
+    pub rows: Vec<usize>,
+    pub dot: Option<&'static str>,
+}
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SidebarRows {
+    /// Pinned, Active, Working, Snoozed, Settled, in that order.
+    pub rows: Vec<std::rc::Rc<SidebarRow>>,
+    pub folders: Vec<SidebarFolder>,
+    /// The only timer the sidebar needs: re-run the selector then.
+    pub next_snooze_wake: Option<i64>,
+}
+
+/// The sidebar of one environment from the store's shared shell: `present_sidebar` over
+/// `present_thread_shell`, with the working shelf, inbox order and folders. Rows whose thread
+/// and decisions did not change keep their `Rc` from `previous`, so per-row memos stay quiet.
+/// `groups` are WP8's logical project groups (`workspace::sidebar::build_sidebar_snapshots`);
+/// pass none for a flat list.
+pub fn sidebar_rows(
+    environment: &crate::types::EnvironmentId,
+    shell: &crate::state::sharing::SharedShellSnapshot,
+    groups: &[SidebarProjectSnapshot],
+    options: &Options<'_>,
+    previous: Option<&SidebarRows>,
+) -> SidebarRows {
+    let parse = |value: &str| crate::time::epoch_ms(value);
+    let views: Vec<_> = shell
+        .threads
+        .iter()
+        .map(|thread| {
+            crate::services::models::present_thread_shell(environment.clone(), thread.clone(), None)
+        })
+        .collect();
+    let inputs: Vec<_> = views
+        .iter()
+        .map(|view| ThreadInput::from_environment_shell(view, None, &parse))
+        .collect();
+    let sidebar = present_sidebar(groups, &inputs, options, &parse, |_| false);
+    let shared: BTreeMap<_, _> = shell
+        .threads
+        .iter()
+        .map(|thread| (thread.id.clone(), thread))
+        .collect();
+    let prior: BTreeMap<_, _> = previous
+        .into_iter()
+        .flat_map(|previous| previous.rows.iter())
+        .map(|row| (row.key.clone(), row))
+        .collect();
+    let rows = sidebar
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let key = row.source.thread.key.clone();
+            let next = SidebarRow {
+                thread: (*shared.get(&key.thread)?).clone(),
+                key,
+                section: row.section,
+                status: row.status,
+                pill: row.pill,
+                unread: row.unread,
+                woke: row.woke,
+                active: row.active,
+                selected: row.selected,
+                receded: row.receded,
+            };
+            Some(match prior.get(&next.key) {
+                Some(old) if old.as_ref() == &next => (*old).clone(),
+                _ => std::rc::Rc::new(next),
+            })
+        })
+        .collect();
+    SidebarRows {
+        rows,
+        folders: sidebar
+            .folders
+            .iter()
+            .map(|folder| SidebarFolder {
+                group: folder.group.clone(),
+                rows: folder.rows.clone(),
+                dot: folder.dot,
+            })
+            .collect(),
+        next_snooze_wake: sidebar.next_snooze_wake,
+    }
+}

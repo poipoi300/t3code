@@ -86,6 +86,9 @@ struct Operations<I> {
     busy: BTreeSet<CommandId>,
     next_ordinal: u64,
     lanes: BTreeMap<(&'static str, String), Weak<RefCell<SerialLane>>>,
+    /// Commands restored from storage. Projection lineages restart with each run, so their
+    /// saved lineage proves nothing; they revalidate on their projection's next observation.
+    from_earlier_run: BTreeSet<CommandId>,
 }
 /// What [`OperationQueue::observe_store`] last saw of the store.
 #[derive(Debug, Default)]
@@ -110,6 +113,7 @@ impl<I: Clone + Serialize + DeserializeOwned> OperationQueue<I> {
                 busy: BTreeSet::new(),
                 next_ordinal: 0,
                 lanes: BTreeMap::new(),
+                from_earlier_run: BTreeSet::new(),
             })),
         }
     }
@@ -417,17 +421,19 @@ impl<I: Clone + Serialize + DeserializeOwned> OperationQueue<I> {
     /// authoritative rows reach their receipt; a new lineage (an authoritative snapshot) resets
     /// it so pending commands revalidate; a new store session marks deliveries uncertain.
     pub fn observe_store(&self, store: &crate::ClientStore, progress: &mut StoreProgress) {
-        let keys: BTreeMap<ProjectionKey, BTreeSet<u64>> = self
-            .inner
-            .borrow()
-            .records
-            .values()
-            .fold(BTreeMap::new(), |mut keys, record| {
-                keys.entry(record.projection.clone())
-                    .or_default()
-                    .insert(record.generation);
-                keys
-            });
+        let keys: BTreeMap<ProjectionKey, (BTreeSet<u64>, bool)> = {
+            let inner = self.inner.borrow();
+            inner
+                .records
+                .values()
+                .fold(BTreeMap::new(), |mut keys, record| {
+                    let entry: &mut (BTreeSet<u64>, bool) =
+                        keys.entry(record.projection.clone()).or_default();
+                    entry.0.insert(record.generation);
+                    entry.1 |= inner.from_earlier_run.contains(&record.command);
+                    keys
+                })
+        };
         let snapshot = store.snapshot();
         let Some(environment) = snapshot.environments.get(&self.environment) else {
             return;
@@ -439,7 +445,7 @@ impl<I: Clone + Serialize + DeserializeOwned> OperationQueue<I> {
         {
             self.disconnect();
         }
-        for (key, enqueued) in keys {
+        for (key, (enqueued, earlier_run)) in keys {
             let state = match &key.thread {
                 None => environment
                     .shell
@@ -461,8 +467,19 @@ impl<I: Clone + Serialize + DeserializeOwned> OperationQueue<I> {
                 Some(previous) => previous != lineage,
                 None => enqueued.iter().any(|generation| *generation != lineage),
             };
-            if moved {
+            if moved || earlier_run {
                 self.reset(&key, lineage, sequence);
+                let mut inner = self.inner.borrow_mut();
+                let Operations {
+                    records,
+                    from_earlier_run,
+                    ..
+                } = &mut *inner;
+                from_earlier_run.retain(|command| {
+                    records
+                        .get(command)
+                        .is_none_or(|record| record.projection != key)
+                });
             } else {
                 self.observe(&key, lineage, sequence);
             }
@@ -472,7 +489,7 @@ impl<I: Clone + Serialize + DeserializeOwned> OperationQueue<I> {
     /// this future beside the queue and drops it with the queue.
     pub async fn follow_store(&self, store: crate::ClientStore) {
         use futures::StreamExt;
-        let mut changes = store.subscribe();
+        let mut changes = store.subscribe_environment(&self.environment);
         let mut progress = StoreProgress::default();
         while changes.next().await.is_some() {
             self.observe_store(&store, &mut progress);
@@ -790,6 +807,7 @@ impl<I: Clone + Serialize + DeserializeOwned> OperationQueue<I> {
                     pending.status = record.status.clone();
                 }
             }
+            inner.from_earlier_run.insert(record.command.clone());
             inner.records.insert(record.command.clone(), record);
             count += 1;
         }
@@ -2382,6 +2400,20 @@ mod tests {
                 queue.status(&CommandId("e".into())),
                 Some(CommandStatus::UnknownDelivery)
             );
+
+            // A restart: lineage numbers restart too, so a command saved by an earlier run
+            // revalidates on its first observation even when the saved number matches.
+            let restarted = OperationQueue::<i32>::new(env());
+            restarted.restore_available(&storage).await.unwrap();
+            let current = store.snapshot().environments[&env()].shell.generation;
+            let mut progress = StoreProgress::default();
+            progress.lineages.insert(key(), current);
+            restarted.observe_store(&store, &mut progress);
+            assert_eq!(
+                restarted.status(&CommandId("d".into())),
+                Some(CommandStatus::UnknownDelivery)
+            );
+            assert!(restarted.inner.borrow().from_earlier_run.is_empty());
         });
     }
     #[test]

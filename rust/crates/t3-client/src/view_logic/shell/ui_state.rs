@@ -253,3 +253,125 @@ impl UiState {
     }
 }
 pub use super::sidebar::resolve_project_expanded;
+
+/// The sidebar shelves' expanded state and the sidebar width, each its own record as in the web
+/// app (`Sidebar.tsx`, `threadSidebarWidth.ts`).
+pub const SETTLED_SHELF_EXPANDED_KEY: &str = "t3code:sidebar:settled-expanded";
+pub const SNOOZED_SHELF_EXPANDED_KEY: &str = "t3code:sidebar:snoozed-expanded";
+pub const WORKING_SHELF_EXPANDED_KEY: &str = "t3code:sidebar:working-expanded";
+pub const SIDEBAR_WIDTH_KEY: &str = "chat_thread_sidebar_width";
+/// Records live in ordinary storage under this namespace, keyed by their web storage key.
+pub const PREFERENCES_NAMESPACE: &str = "ui-preferences";
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UiPreferences {
+    pub state: UiState,
+    pub settled_shelf_expanded: bool,
+    pub snoozed_shelf_expanded: bool,
+    pub working_shelf_expanded: bool,
+    pub sidebar_width: Option<f64>,
+}
+
+fn preference_key(record: &str) -> crate::platform::StorageKey {
+    crate::platform::StorageKey {
+        namespace: PREFERENCES_NAMESPACE.into(),
+        environment: None,
+        record: record.into(),
+    }
+}
+
+impl UiPreferences {
+    /// Reads the v1 record, else the newest legacy record, like `readPersistedState`. Unreadable
+    /// records read as defaults and stay in storage untouched.
+    pub async fn load(
+        storage: &(impl crate::platform::Storage + ?Sized),
+    ) -> Result<Self, crate::platform::PlatformError> {
+        use crate::platform::StorageArea::Ordinary;
+        let parse = |value: &str| crate::time::epoch_ms(value);
+        let mut state = None;
+        for record in std::iter::once(STORAGE_KEY).chain(LEGACY_STORAGE_KEYS.iter().copied()) {
+            if let Some(bytes) = storage.get(Ordinary, preference_key(record)).await? {
+                state = Some(
+                    std::str::from_utf8(&bytes)
+                        .ok()
+                        .and_then(|raw| UiState::decode(raw, &parse).ok())
+                        .unwrap_or_default(),
+                );
+                break;
+            }
+        }
+        let flag = |bytes: Option<Vec<u8>>| {
+            bytes
+                .and_then(|bytes| serde_json::from_slice::<bool>(&bytes).ok())
+                .unwrap_or(false)
+        };
+        Ok(Self {
+            state: state.unwrap_or_default(),
+            settled_shelf_expanded: flag(
+                storage
+                    .get(Ordinary, preference_key(SETTLED_SHELF_EXPANDED_KEY))
+                    .await?,
+            ),
+            snoozed_shelf_expanded: flag(
+                storage
+                    .get(Ordinary, preference_key(SNOOZED_SHELF_EXPANDED_KEY))
+                    .await?,
+            ),
+            working_shelf_expanded: flag(
+                storage
+                    .get(Ordinary, preference_key(WORKING_SHELF_EXPANDED_KEY))
+                    .await?,
+            ),
+            sidebar_width: storage
+                .get(Ordinary, preference_key(SIDEBAR_WIDTH_KEY))
+                .await?
+                .and_then(|bytes| serde_json::from_slice::<f64>(&bytes).ok())
+                .filter(|width| width.is_finite()),
+        })
+    }
+
+    /// Writes every record in one atomic write. Legacy records are left for older clients.
+    pub async fn save(
+        &self,
+        storage: &(impl crate::platform::Storage + ?Sized),
+    ) -> Result<(), crate::platform::PlatformError> {
+        let invalid = |error: serde_json::Error| {
+            crate::platform::PlatformError::InvalidData(error.to_string())
+        };
+        let write = |record: &str, value: Option<Vec<u8>>| crate::platform::StorageWrite {
+            key: preference_key(record),
+            value,
+        };
+        storage
+            .write(
+                crate::platform::StorageArea::Ordinary,
+                vec![
+                    write(
+                        STORAGE_KEY,
+                        Some(self.state.encode().map_err(invalid)?.into_bytes()),
+                    ),
+                    write(
+                        SETTLED_SHELF_EXPANDED_KEY,
+                        Some(serde_json::to_vec(&self.settled_shelf_expanded).map_err(invalid)?),
+                    ),
+                    write(
+                        SNOOZED_SHELF_EXPANDED_KEY,
+                        Some(serde_json::to_vec(&self.snoozed_shelf_expanded).map_err(invalid)?),
+                    ),
+                    write(
+                        WORKING_SHELF_EXPANDED_KEY,
+                        Some(serde_json::to_vec(&self.working_shelf_expanded).map_err(invalid)?),
+                    ),
+                    write(
+                        SIDEBAR_WIDTH_KEY,
+                        self.sidebar_width
+                            .filter(|width| width.is_finite())
+                            .map(|width| serde_json::to_vec(&width))
+                            .transpose()
+                            .map_err(invalid)?,
+                    ),
+                ],
+            )
+            .await
+    }
+}

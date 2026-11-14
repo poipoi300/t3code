@@ -119,7 +119,7 @@ impl Ownership {
             && self.store.owns_sync(&self.scope, self.owner)
     }
     async fn run<F: std::future::Future>(&self, operation: F) -> Option<F::Output> {
-        let mut changes = self.store.subscribe();
+        let mut changes = self.store.subscribe_environment(&self.environment);
         futures::pin_mut!(operation);
         loop {
             if !self.active() {
@@ -435,7 +435,7 @@ impl<P: Platform, R: RpcEndpoint, L: SnapshotSource> ShellSync<P, R, L> {
                 self.remember();
                 let fill = loaded.links.map(|mut links| {
                     async move {
-                        let mut changes = self.store.subscribe();
+                        let mut changes = self.store.subscribe_environment(&self.environment);
                         let links = loop {
                             if self.pending_links.get() != Some(load)
                                 || self.current().map(|state| state.generation) != generation

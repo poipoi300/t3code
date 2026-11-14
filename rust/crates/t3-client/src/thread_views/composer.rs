@@ -7,6 +7,7 @@ pub mod code_pairs;
 pub mod delivery_policy;
 pub mod direction;
 pub mod editor;
+pub mod input_rules;
 pub mod markdown_source;
 pub mod mobile_attachments;
 pub mod mobile_content;

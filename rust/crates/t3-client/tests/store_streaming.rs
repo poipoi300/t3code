@@ -14,7 +14,8 @@ use t3_contracts::orchestration_v2::*;
 
 const THREADS: usize = 2_000;
 const ROWS: u64 = 3_000;
-const DELTAS: u64 = 3_000;
+/// Debug builds stream fewer deltas so the suite stays quick; measure with `--release`.
+const DELTAS: u64 = if cfg!(debug_assertions) { 300 } else { 3_000 };
 const NOW: &str = "2026-06-20T00:00:00.000Z";
 
 fn thread_json(id: &str) -> Value {
@@ -209,7 +210,14 @@ fn streaming_copies_neither_the_store_nor_the_thread() {
 
     // The UI pattern (t3-ui `StoreSignals::thread`): a memo keeps the latest shared view.
     let mut held = None;
-    let (copies, micros) = stream(false, |store, key| held = store.shared_thread(key));
+    let mut checks = 0;
+    let (copies, micros) = stream(false, |store, key| {
+        held = store.shared_thread(key);
+        checks += 1;
+        if checks % 100 == 0 {
+            assert!(store.pinned().is_empty(), "a held shared view pins nothing");
+        }
+    });
     report("thread deltas, UI holds shared_thread", &copies, micros);
     assert!(held.is_some());
     assert_eq!(copies.projections, 0, "a held view must not force a copy");
@@ -228,6 +236,7 @@ fn streaming_copies_neither_the_store_nor_the_thread() {
     // What the views cost before they linked to the store weakly: a held strong `Rc` to the
     // projection or the shell snapshot, so every delta deep-copied the rows.
     let mut pinned = None;
+    let mut checks = 0;
     let (copies, micros) = stream(false, |store, key| {
         pinned = selectors::thread(&store.snapshot(), key).and_then(|t| t.projection.clone());
     });
@@ -246,7 +255,14 @@ fn streaming_copies_neither_the_store_nor_the_thread() {
     // A reader that keeps a whole store snapshot between deltas pays for everything it pins:
     // the environment's thread map (one entry per thread) and the hot projection's rows.
     let mut pinned = None;
-    let (copies, micros) = stream(false, |store, _| pinned = Some(store.snapshot()));
+    let (copies, micros) = stream(false, |store, key| {
+        pinned = Some(store.snapshot());
+        checks += 1;
+        if checks % 100 == 0 {
+            // The helper a UI test uses to catch a screen keeping a snapshot.
+            assert!(store.pinned().environments.contains(&key.environment));
+        }
+    });
     report("thread deltas, reader pins snapshot()", &copies, micros);
     assert!(pinned.is_some());
     assert_eq!(copies.environments, DELTAS - 1);

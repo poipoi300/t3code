@@ -24,6 +24,8 @@ pub mod palette;
 pub mod panels;
 #[path = "shell/preview_state.rs"]
 pub mod preview_state;
+#[path = "shell/request_latency.rs"]
+pub mod request_latency;
 #[path = "shell/search.rs"]
 pub mod search;
 #[path = "shell/shortcuts.rs"]

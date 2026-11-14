@@ -1284,3 +1284,68 @@ fn project_activity_is_scoped_and_ignores_archived_and_hidden_rows() {
         groups[0].group.key
     );
 }
+
+#[test]
+fn store_sidebar_rows_share_unchanged_rows_and_follow_the_shell() {
+    use t3_client::{ClientStore, state::sharing::SharedShellSnapshot};
+    let environment = EnvironmentId("a".into());
+    let store = ClientStore::default();
+    let session = store.begin_session(environment.clone());
+    let mut pinned = shell("pinned");
+    pinned.pinned_at = Some(Some(t3_contracts::wire::WireDateTime(
+        "1970-01-01T00:00:01.000Z".into(),
+    )));
+    let snapshot = json!({"kind":"snapshot","snapshot":{"schemaVersion":1,"snapshotSequence":1,"threads":[pinned, shell("active")],"archivedThreads":[],"projects":[]}});
+    store.apply_shell(
+        &environment,
+        session,
+        vec![serde_json::from_value(snapshot).unwrap()],
+    );
+    let empty = BTreeSet::new();
+    let options = Options {
+        now: 0,
+        scope: None,
+        delegated_under_parent: &empty,
+        selected: &empty,
+        route: None,
+        working_shelf: true,
+        active_order: ActiveOrder::Manual,
+        inbox: None,
+    };
+    let rows = |previous: Option<&SidebarRows>| {
+        let shared: Rc<SharedShellSnapshot> = store.shared_shell(&environment).unwrap();
+        sidebar_rows(&environment, &shared, &[], &options, previous)
+    };
+    let first = rows(None);
+    assert_eq!(
+        first
+            .rows
+            .iter()
+            .map(|row| (row.key.thread.0.as_str(), row.section))
+            .collect::<Vec<_>>(),
+        vec![("pinned", Section::Pinned), ("active", Section::Active)]
+    );
+    let again = rows(Some(&first));
+    assert!(Rc::ptr_eq(&first.rows[0], &again.rows[0]));
+    assert!(Rc::ptr_eq(&first.rows[1], &again.rows[1]));
+
+    let mut renamed = shell("active");
+    renamed.title = "Renamed".into();
+    store.apply_shell(
+        &environment,
+        session,
+        vec![
+            serde_json::from_value(
+                json!({"kind":"thread.updated","sequence":2,"location":"active","thread":renamed}),
+            )
+            .unwrap(),
+        ],
+    );
+    let next = rows(Some(&again));
+    assert!(
+        Rc::ptr_eq(&again.rows[0], &next.rows[0]),
+        "untouched row kept"
+    );
+    assert!(!Rc::ptr_eq(&again.rows[1], &next.rows[1]));
+    assert_eq!(next.rows[1].thread.title, "Renamed");
+}

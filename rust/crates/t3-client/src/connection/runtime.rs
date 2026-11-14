@@ -13,8 +13,11 @@ use crate::{
     persistence::EnvironmentCacheStore,
     platform::PlatformError,
     rpc::{RpcEndpoint, SessionEndpoint},
-    state::{http::HttpSnapshotSource, sync::ShellSync},
-    types::SyncStatus,
+    state::{
+        http::HttpSnapshotSource,
+        sync::{ShellSync, ThreadSync},
+    },
+    types::{SyncStatus, ThreadId, ThreadKey},
 };
 use futures::{
     FutureExt, StreamExt,
@@ -40,6 +43,7 @@ struct Owner {
     events: mpsc::UnboundedSender<ConnectionEvent>,
     endpoint: RefCell<Option<SessionEndpoint>>,
     store_session: Cell<Option<Generation>>,
+    threads: Rc<super::threads::ThreadDemand>,
     abort: AbortHandle,
 }
 impl Drop for Owner {
@@ -79,6 +83,12 @@ impl ConnectedClient {
     pub fn reconnect(&self) -> Result<(), ClientError> {
         self.send(ConnectionEvent::Restart)
     }
+    /// Follows `thread` (snapshot, then live events, into the store) while the lease is held and
+    /// the connection has a session; every new session follows it again. Leases for one thread
+    /// share one follow.
+    pub fn open_thread(&self, thread: ThreadId) -> super::ThreadLease {
+        self.owner.threads.lease(thread)
+    }
     pub fn close(&self) -> Result<(), ClientError> {
         self.send(ConnectionEvent::Disconnect)
     }
@@ -92,7 +102,7 @@ impl ConnectedClient {
         self.wait_ready(true).await
     }
     async fn wait_ready(&self, require_live: bool) -> Result<(), ClientError> {
-        let mut changes = self.store().subscribe();
+        let mut changes = self.store().subscribe_environment(self.environment());
         loop {
             let state = self.state();
             if state.phase == Phase::Blocked {
@@ -129,6 +139,16 @@ impl ConnectedClient {
 /// and reconnects; dropping it releases its sockets, timers and subscriptions.
 pub async fn connect<P: Platform + Clone + 'static>(
     platform: P,
+    origin: &str,
+    credential: ServerCredential,
+) -> Result<(ConnectedClient, ConnectionTask), ClientError> {
+    connect_into(platform, ClientStore::default(), origin, credential).await
+}
+
+/// [`connect`] into an existing store, so several environments share the app's one store.
+pub async fn connect_into<P: Platform + Clone + 'static>(
+    platform: P,
+    store: ClientStore,
     origin: &str,
     credential: ServerCredential,
 ) -> Result<(ConnectedClient, ConnectionTask), ClientError> {
@@ -222,16 +242,17 @@ pub async fn connect<P: Platform + Clone + 'static>(
                 0.0,
             ),
     );
-    let store = ClientStore::default();
     let (events, receiver) = mpsc::unbounded();
     let (frames, frame_receiver) = mpsc::channel(1);
     let (abort, registration) = AbortHandle::new_pair();
+    let (threads, thread_changes) = super::threads::ThreadDemand::new();
     let owner = Rc::new(Owner {
         environment: environment.clone(),
         store: store.clone(),
         events: events.clone(),
         endpoint: RefCell::new(None),
         store_session: Cell::new(None),
+        threads: threads.clone(),
         abort,
     });
     let runtime = Runtime {
@@ -251,6 +272,9 @@ pub async fn connect<P: Platform + Clone + 'static>(
         aborts: BTreeMap::new(),
         context: None,
         host_closed: false,
+        threads,
+        thread_changes,
+        follows: Default::default(),
     };
     runtime.publish();
     let mut task: ConnectionTask = async move {
@@ -299,6 +323,7 @@ enum Key {
     Probe(u64),
     Host(u64),
     Routes(u64),
+    Thread(u64),
 }
 enum Outcome {
     Established(Result<Box<EnvironmentConnectionLease<PlatformSession>>, ConnectionFailure>),
@@ -335,6 +360,9 @@ struct Runtime<P: Platform + Clone + 'static> {
     jobs: FuturesUnordered<Job>,
     aborts: BTreeMap<Key, AbortHandle>,
     context: Option<Context<P>>,
+    threads: Rc<super::threads::ThreadDemand>,
+    thread_changes: mpsc::UnboundedReceiver<()>,
+    follows: super::threads::ThreadFollows,
 }
 impl<P: Platform + Clone + 'static> Drop for Runtime<P> {
     fn drop(&mut self) {
@@ -391,6 +419,9 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
         }
     }
     fn release(&mut self) {
+        for slot in self.follows.clear() {
+            self.cancel(Key::Thread(slot));
+        }
         if let Some(context) = self.context.take() {
             context.session.invalidate();
             self.store
@@ -433,18 +464,66 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
             store_session,
             Rc::new(EnvironmentCacheStore::new(self.platform.clone())),
             Rc::new(session.clone()),
-            Rc::new(HttpSnapshotSource {
-                platform: Rc::new(self.platform.clone()),
-                client: crate::permissions::EnvironmentHttpClient::new(
-                    Rc::new(self.platform.clone()),
-                    prepared.clone(),
-                    None,
-                    None,
-                    false,
-                ),
-            }),
+            self.snapshot_source(prepared),
             None,
         ))
+    }
+    fn snapshot_source(
+        &self,
+        prepared: &crate::authorization::AuthorizedEnvironment,
+    ) -> Rc<HttpSnapshotSource<P>> {
+        Rc::new(HttpSnapshotSource {
+            platform: Rc::new(self.platform.clone()),
+            client: crate::permissions::EnvironmentHttpClient::new(
+                Rc::new(self.platform.clone()),
+                prepared.clone(),
+                None,
+                None,
+                false,
+            ),
+        })
+    }
+    /// Follows the leased threads in the current session context; without one, nothing runs and
+    /// the leases are read again when the next context starts.
+    fn follow_threads(&mut self) {
+        let Some(context) = &self.context else {
+            return;
+        };
+        let plan = self.follows.reconcile(&self.threads.open());
+        let jobs: Vec<_> = plan
+            .start
+            .into_iter()
+            .map(|(thread, slot)| {
+                let sync = Rc::new(ThreadSync::new(
+                    self.store.clone(),
+                    ThreadKey {
+                        environment: self.environment.clone(),
+                        thread,
+                    },
+                    context.store_session,
+                    Rc::new(EnvironmentCacheStore::new(self.platform.clone())),
+                    Rc::new(context.session.clone()),
+                    self.snapshot_source(&context.prepared),
+                    true,
+                ));
+                if let Some(config) = context.session.config() {
+                    sync.configure(&config);
+                }
+                let job = async move {
+                    let (result, _) =
+                        futures::future::join(sync.follow(), sync.persist_changes()).await;
+                    Outcome::Ended(result)
+                }
+                .boxed_local();
+                (slot, job)
+            })
+            .collect();
+        for slot in plan.stop {
+            self.cancel(Key::Thread(slot));
+        }
+        for (slot, job) in jobs {
+            self.schedule(Key::Thread(slot), job);
+        }
     }
     fn follow_shell(&mut self) {
         let Some(context) = &self.context else {
@@ -570,6 +649,7 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
         }
         self.feed(ConnectionEvent::ConfigReady { generation })?;
         self.follow_shell();
+        self.follow_threads();
         Ok(())
     }
     fn action(&mut self, action: ConnectionAction) -> Result<(), ClientError> {
@@ -695,6 +775,10 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
                         context.sync = sync;
                     }
                     self.follow_shell();
+                    for slot in self.follows.clear() {
+                        self.cancel(Key::Thread(slot));
+                    }
+                    self.follow_threads();
                 }
             }
         }
@@ -784,6 +868,7 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
                 Event(Option<ConnectionEvent>),
                 Host(Option<PlatformEvent>),
                 Job(Option<(Key, Option<Outcome>)>),
+                Threads,
                 Timer,
             }
             let deadline = self
@@ -812,8 +897,10 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
                 .fuse();
                 let event = self.receiver.next().fuse();
                 let frame = self.frames.next().fuse();
-                futures::pin_mut!(timer, host, job, event, frame);
-                futures::select_biased! { event = event => Input::Event(event), job = job => Input::Job(job), frame = frame => Input::Event(frame), host = host => Input::Host(host), _ = timer => Input::Timer }
+                // The client keeps the sender alive, so this ends only after the client dropped.
+                let threads = self.thread_changes.next().fuse();
+                futures::pin_mut!(timer, host, job, event, frame, threads);
+                futures::select_biased! { event = event => Input::Event(event), job = job => Input::Job(job), frame = frame => Input::Event(frame), _ = threads => Input::Threads, host = host => Input::Host(host), _ = timer => Input::Timer }
             };
             match input {
                 Input::Event(Some(event)) => self.feed(event)?,
@@ -835,6 +922,7 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
                     self.finish_job(key, outcome)?;
                 }
                 Input::Job(None) => {}
+                Input::Threads => self.follow_threads(),
             }
         }
     }
@@ -869,6 +957,9 @@ mod tests {
             aborts: BTreeMap::new(),
             context: None,
             host_closed: false,
+            threads: super::super::threads::ThreadDemand::new().0,
+            thread_changes: mpsc::unbounded().1,
+            follows: Default::default(),
         };
         let key = Key::Shell(1);
         runtime.schedule(key, futures::future::pending().boxed_local());

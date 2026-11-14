@@ -24,7 +24,9 @@ use url::{Host, Url};
 
 pub mod runtime;
 pub mod socket;
-pub use runtime::{ConnectedClient, ConnectionTask, ServerCredential, connect};
+pub mod threads;
+pub use runtime::{ConnectedClient, ConnectionTask, ServerCredential, connect, connect_into};
+pub use threads::ThreadLease;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionMode {
     Local,
@@ -751,7 +753,10 @@ pub fn present_connection_diagnosis(input: DiagnosisInput<'_>) -> Option<Connect
         "Attempts",
         (input.state.attempt > 0).then(|| input.state.attempt.to_string()),
     );
-    add("Next retry", input.state.retry_at.map(epoch_iso));
+    add(
+        "Next retry",
+        input.state.retry_at.map(crate::time::iso_from_epoch_ms),
+    );
     add(
         "Route",
         Some(if relay_path { "T3 Connect" } else { "Direct" }.into()),
@@ -797,31 +802,6 @@ pub fn connection_diagnosis_text(host: &str, diagnosis: &ConnectionDiagnosis) ->
         lines.push(format!("More info: {url}"));
     }
     lines.join("\n")
-}
-fn epoch_iso(epoch_ms: u64) -> String {
-    let z = (epoch_ms / 86_400_000) as i64 + 719_468;
-    let era = z / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let mut year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    year += i64::from(month <= 2);
-    let year = if year <= 9999 {
-        format!("{year:04}")
-    } else {
-        format!("+{year:06}")
-    };
-    let seconds = epoch_ms / 1000;
-    format!(
-        "{year}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
-        seconds / 3600 % 24,
-        seconds / 60 % 60,
-        seconds % 60,
-        epoch_ms % 1000
-    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

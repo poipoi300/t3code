@@ -1355,3 +1355,39 @@ fn unknown_shell_delivery_does_not_consume_cursor_or_block_later_known_events()
     assert!(shell.snapshot.as_ref().unwrap().threads.is_empty());
     Ok(())
 }
+
+#[test]
+fn environment_subscriptions_wake_only_for_their_environment() {
+    use futures::{FutureExt, StreamExt};
+    let store = ClientStore::default();
+    let a = EnvironmentId("a".into());
+    let b = EnvironmentId("b".into());
+    let mut only_a = store.subscribe_environment(&a);
+    let mut everything = store.subscribe();
+    assert!(
+        only_a.next().now_or_never().flatten().is_some(),
+        "initial revision"
+    );
+    assert!(everything.next().now_or_never().flatten().is_some());
+    let session = store.begin_session(b.clone());
+    store.update_thread(
+        &ThreadKey {
+            environment: b.clone(),
+            thread: ThreadId("t".into()),
+        },
+        session,
+        |_| true,
+    );
+    assert!(
+        only_a.next().now_or_never().is_none(),
+        "b's changes do not wake a"
+    );
+    assert!(everything.next().now_or_never().flatten().is_some());
+    store.begin_session(a.clone());
+    let change = only_a.next().now_or_never().flatten().unwrap();
+    assert!(
+        change
+            .scopes
+            .contains(&t3_client::store::Scope::Environment(a))
+    );
+}

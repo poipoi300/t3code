@@ -33,6 +33,85 @@ pub struct Rewrite {
     pub selection: Selection,
     pub revealed: Vec<Range>,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorSelection {
+    Text(Selection),
+    Node(usize),
+    All,
+}
+impl EditorSelection {
+    pub fn range(self, document: &Value) -> Selection {
+        match self {
+            Self::Text(selection) => selection,
+            Self::Node(position) => Selection {
+                anchor: position,
+                head: position + node_at(document, position).map_or(0, node_size),
+            },
+            Self::All => Selection {
+                anchor: 0,
+                head: children(document).iter().map(node_size).sum(),
+            },
+        }
+    }
+}
+fn node_at(document: &Value, position: usize) -> Option<&Value> {
+    let mut start = 0;
+    for child in children(document) {
+        let end = start + node_size(child);
+        if start == position {
+            return Some(child);
+        }
+        if position > start && position < end {
+            return node_at(child, position - start - 1);
+        }
+        start = end;
+    }
+    None
+}
+pub struct SelectedRewrite {
+    pub document: Value,
+    pub selection: EditorSelection,
+    pub revealed: Vec<Range>,
+}
+pub fn normalize_selection(
+    document: &Value,
+    selection: EditorSelection,
+    typed: bool,
+    takes_before: bool,
+) -> SelectedRewrite {
+    let collapsed = collapse(document, selection.range(document), true);
+    let range = match selection {
+        EditorSelection::All => EditorSelection::All.range(&collapsed.document),
+        EditorSelection::Node(_) => {
+            EditorSelection::Node(collapsed.selection.from()).range(&collapsed.document)
+        }
+        EditorSelection::Text(_) => collapsed.selection,
+    };
+    let next = reveal_kind(
+        &collapsed.document,
+        range,
+        typed,
+        takes_before,
+        matches!(selection, EditorSelection::Node(_)),
+    );
+    let selection = match selection {
+        EditorSelection::All => EditorSelection::All,
+        EditorSelection::Node(_) => {
+            if node_at(&next.document, next.selection.anchor).is_some() {
+                EditorSelection::Node(next.selection.anchor)
+            } else {
+                EditorSelection::Text(next.selection)
+            }
+        }
+        EditorSelection::Text(_) => EditorSelection::Text(next.selection),
+    };
+    let revealed = source_regions(&next.document);
+    SelectedRewrite {
+        document: next.document,
+        selection,
+        revealed,
+    }
+}
 
 fn has_source(node: &Value) -> bool {
     node.get("marks")
@@ -246,6 +325,15 @@ fn faithful(document: &Value, styled: &StyledRange) -> bool {
 
 /// A typed caret stays inside its active markers; an arriving caret stays outside.
 pub fn reveal(document: &Value, selection: Selection, typed: bool, takes_before: bool) -> Rewrite {
+    reveal_kind(document, selection, typed, takes_before, false)
+}
+fn reveal_kind(
+    document: &Value,
+    selection: Selection,
+    typed: bool,
+    takes_before: bool,
+    node_selection: bool,
+) -> Rewrite {
     let ranges: Vec<_> = styled_ranges(document)
         .into_iter()
         .filter(|range| range.range.touches(selection) && faithful(document, range))
@@ -286,7 +374,7 @@ pub fn reveal(document: &Value, selection: Selection, typed: bool, takes_before:
                     } else {
                         !takes_before
                     };
-                *at < pos || (*at == pos && *closing != inside)
+                *at < pos || (*at == pos && (node_selection || *closing != inside))
             })
             .map(|(_, length, _)| length)
             .sum::<usize>()

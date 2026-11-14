@@ -135,3 +135,28 @@ impl HistoryAvailability {
         }
     }
 }
+
+/// [`render_state`] read from the store, as `ThreadRouteView` derives its inputs: the shell is
+/// authoritative only once live, its rows decide membership, and the thread's own detail decides
+/// a thread the shell does not list yet (shell membership can lag a new thread).
+pub fn route_render_state(
+    snapshot: &crate::store::StoreSnapshot,
+    key: &ThreadKey,
+    draft_exists: bool,
+) -> RenderState {
+    let shell = crate::state::selectors::shell(snapshot, &key.environment);
+    let row = shell.and_then(|shell| crate::state::selectors::thread_shell(shell, &key.thread));
+    let detail = crate::state::selectors::thread(snapshot, key);
+    render_state(
+        snapshot_authoritative(shell.map(|shell| shell.status)),
+        row.is_some(),
+        row.is_some_and(|row| row.deleted_at.is_some()),
+        detail.map_or(SyncStatus::Empty, |detail| detail.status),
+        detail
+            .and_then(|detail| detail.projection.as_ref())
+            .map(|projection| {
+                projection.thread.deleted_at.is_some() || projection.thread.archived_at.is_some()
+            }),
+        draft_exists,
+    )
+}

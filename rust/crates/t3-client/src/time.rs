@@ -90,6 +90,33 @@ pub fn epoch_ms(value: &str) -> Option<i64> {
     Some(((days * 24 + hour) * 60 + minute - offset) * 60_000 + second * 1_000 + millis)
 }
 
+/// `new Date(epoch_ms).toISOString()`: always UTC, milliseconds, six-digit years past 9999.
+pub fn iso_from_epoch_ms(epoch_ms: u64) -> String {
+    let z = (epoch_ms / 86_400_000) as i64 + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    let year = if year <= 9999 {
+        format!("{year:04}")
+    } else {
+        format!("+{year:06}")
+    };
+    let seconds = epoch_ms / 1000;
+    format!(
+        "{year}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        seconds / 3600 % 24,
+        seconds / 60 % 60,
+        seconds % 60,
+        epoch_ms % 1000
+    )
+}
+
 /// Days since 1970-01-01 of a proleptic Gregorian date; days past the month's end roll over.
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = year - i64::from(month <= 2);
@@ -158,6 +185,24 @@ mod tests {
             ("", None),
         ] {
             assert_eq!(epoch_ms(input), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn formats_like_javascript_to_iso_string() {
+        use super::iso_from_epoch_ms;
+        // `new Date(ms).toISOString()` in Node 22.
+        assert_eq!(iso_from_epoch_ms(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(
+            iso_from_epoch_ms(1_772_496_000_123),
+            "2026-03-03T00:00:00.123Z"
+        );
+        assert_eq!(
+            iso_from_epoch_ms(317_337_091_200_000),
+            "+012026-01-05T00:00:00.000Z"
+        );
+        for ms in [0, 1_709_164_800_000, 1_767_571_200_123, 253_402_300_799_999] {
+            assert_eq!(epoch_ms(&iso_from_epoch_ms(ms)), Some(ms as i64));
         }
     }
 }

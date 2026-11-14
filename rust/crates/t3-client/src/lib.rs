@@ -3,6 +3,7 @@
 
 pub mod archive;
 pub mod authorization;
+pub mod composition;
 pub mod connection;
 pub mod device;
 pub mod environment;

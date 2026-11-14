@@ -27,6 +27,17 @@ pub struct StoreSnapshot {
     pub revision: u64,
     pub environments: BTreeMap<EnvironmentId, Rc<EnvironmentState>>,
 }
+/// See [`ClientStore::pinned`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Pinned {
+    pub environments: Vec<EnvironmentId>,
+    pub threads: Vec<ThreadKey>,
+}
+impl Pinned {
+    pub fn is_empty(&self) -> bool {
+        self.environments.is_empty() && self.threads.is_empty()
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Scope {
     All,
@@ -43,6 +54,18 @@ pub struct ChangeSet {
 struct Slot {
     pending: Option<ChangeSet>,
     waker: Option<Waker>,
+    /// Only changes to this environment's scopes reach the subscriber.
+    environment: Option<EnvironmentId>,
+}
+
+impl Scope {
+    fn concerns(&self, environment: &EnvironmentId) -> bool {
+        match self {
+            Scope::All => true,
+            Scope::Shell(id) | Scope::Environment(id) => id == environment,
+            Scope::Thread(key) => &key.environment == environment,
+        }
+    }
 }
 #[derive(Default)]
 struct Inner {
@@ -299,10 +322,45 @@ impl ClientStore {
         inner.thread_views.insert(key.clone(), next.clone());
         Some(next)
     }
+    /// What is held outside the store right now: environments and threads whose state a
+    /// `StoreSnapshot` (or an `Rc` taken from one) still references. Anything listed here is
+    /// copied whole by the next change to it. For tests: after a UI frame settles this should be
+    /// empty; a screen that keeps a snapshot shows up here.
+    pub fn pinned(&self) -> Pinned {
+        let inner = self.inner.borrow();
+        let mut pinned = Pinned::default();
+        for (id, environment) in &inner.snapshot.environments {
+            if Rc::strong_count(environment) > 1 {
+                pinned.environments.push(id.clone());
+            }
+            for (thread, state) in &environment.threads {
+                let projection = state
+                    .projection
+                    .as_ref()
+                    .is_some_and(|projection| Rc::strong_count(projection) > 1);
+                if Rc::strong_count(state) > 1 || projection {
+                    pinned.threads.push(ThreadKey {
+                        environment: id.clone(),
+                        thread: thread.clone(),
+                    });
+                }
+            }
+        }
+        pinned
+    }
     pub fn snapshot(&self) -> StoreSnapshot {
         self.inner.borrow().snapshot.clone()
     }
     pub fn subscribe(&self) -> Subscription {
+        self.subscribe_to(None)
+    }
+    /// Like [`Self::subscribe`], woken only by changes to `environment`'s scopes (and
+    /// `Scope::All`). Sync work for one environment waits on this, so streaming into one
+    /// environment does not wake every other environment's in-flight requests.
+    pub fn subscribe_environment(&self, environment: &EnvironmentId) -> Subscription {
+        self.subscribe_to(Some(environment.clone()))
+    }
+    fn subscribe_to(&self, environment: Option<EnvironmentId>) -> Subscription {
         let mut inner = self.inner.borrow_mut();
         let slot = Rc::new(RefCell::new(Slot {
             pending: Some(ChangeSet {
@@ -310,6 +368,7 @@ impl ClientStore {
                 scopes: BTreeSet::from([Scope::All]),
             }),
             waker: None,
+            environment,
         }));
         inner.subscribers.push(Rc::downgrade(&slot));
         Subscription {
@@ -347,6 +406,11 @@ impl ClientStore {
                     return false;
                 };
                 let mut slot = slot.borrow_mut();
+                if let Some(environment) = &slot.environment
+                    && !scopes.iter().any(|scope| scope.concerns(environment))
+                {
+                    return true;
+                }
                 if let Some(change) = &mut slot.pending {
                     change.revision = revision;
                     change.scopes.extend(scopes.clone());
@@ -365,6 +429,30 @@ impl ClientStore {
         for waker in wake {
             waker.wake();
         }
+    }
+    /// Forgets an environment that was removed: its rows, views and sync ownership. Every sync
+    /// still running for it stops at its next check, since no session of it is current.
+    pub fn remove_environment(&self, environment: &EnvironmentId) {
+        {
+            let mut inner = self.inner.borrow_mut();
+            if inner.snapshot.environments.remove(environment).is_none() {
+                return;
+            }
+            inner.shell_views.remove(environment);
+            inner.shell_changes.remove(environment);
+            inner
+                .thread_views
+                .retain(|key, _| &key.environment != environment);
+            inner
+                .replacements
+                .retain(|key, _| &key.environment != environment);
+            inner.sync_owners.retain(|scope, _| match scope {
+                Scope::Shell(id) | Scope::Environment(id) => id != environment,
+                Scope::Thread(key) => &key.environment != environment,
+                Scope::All => true,
+            });
+        }
+        self.publish(BTreeSet::from([Scope::Environment(environment.clone())]));
     }
     pub fn begin_session(&self, environment: EnvironmentId) -> Generation {
         let generation = {
