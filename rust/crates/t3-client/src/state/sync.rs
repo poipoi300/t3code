@@ -592,11 +592,9 @@ impl<P: Platform, R: RpcEndpoint, L: SnapshotSource> ShellSync<P, R, L> {
                         }
                     }
                 }
-                if !events.is_empty() {
-                    if self.apply(events) == SyncAction::ReloadSnapshot {
-                        reload = true;
-                        break;
-                    }
+                if !events.is_empty() && self.apply(events) == SyncAction::ReloadSnapshot {
+                    reload = true;
+                    break;
                 }
                 if let Some(error) = failure {
                     self.store

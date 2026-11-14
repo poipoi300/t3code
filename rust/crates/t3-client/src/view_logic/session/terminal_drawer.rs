@@ -143,7 +143,10 @@ pub fn resolve_terminal_session_label(terminal_id: &str, label: Option<&str>) ->
 
 /// Append a UUID when metadata is unavailable to avoid reusing unseen host sessions.
 pub fn next_terminal_id(existing: &[String], unique_suffix: Option<&str>) -> String {
-    let used: BTreeSet<_> = existing.iter().filter_map(|id| terminal_number(id)).collect();
+    let used: BTreeSet<_> = existing
+        .iter()
+        .filter_map(|id| terminal_number(id))
+        .collect();
     let mut next = 1u64;
     while used.contains(next.to_string().as_str()) {
         next += 1;
@@ -512,7 +515,10 @@ pub trait TerminalSurfaceSink {
     fn clear_selection(&mut self);
 }
 
-pub fn write_terminal_output_update(sink: &mut impl TerminalSurfaceSink, update: &TerminalOutputUpdate) {
+pub fn write_terminal_output_update(
+    sink: &mut impl TerminalSurfaceSink,
+    update: &TerminalOutputUpdate,
+) {
     match update {
         TerminalOutputUpdate::Reset { data, .. } => sink.reset_and_write(data),
         TerminalOutputUpdate::Append { data, .. } => sink.write(data),
@@ -698,9 +704,17 @@ mod tests {
             &mut generations,
         );
         sink.resets.clear();
-        synchronize_terminal_output(&mut sink, &observed.output, observed.version, observed_cursor);
+        synchronize_terminal_output(
+            &mut sink,
+            &observed.output,
+            observed.version,
+            observed_cursor,
+        );
         assert!(sink.resets.is_empty());
-        assert_eq!(sink.writes.last().map(String::as_str), Some("\u{1b}[H\u{1b}[2J\u{1b}[3J"));
+        assert_eq!(
+            sink.writes.last().map(String::as_str),
+            Some("\u{1b}[H\u{1b}[2J\u{1b}[3J")
+        );
     }
 
     #[test]
@@ -763,14 +777,26 @@ mod tests {
 
     #[test]
     fn labels_and_ids_follow_the_shared_rules() {
-        assert_eq!(terminal_label("term-3"), TerminalLabel::Numbered("3".into()));
-        assert_eq!(terminal_label("Terminal-12"), TerminalLabel::Numbered("12".into()));
+        assert_eq!(
+            terminal_label("term-3"),
+            TerminalLabel::Numbered("3".into())
+        );
+        assert_eq!(
+            terminal_label("Terminal-12"),
+            TerminalLabel::Numbered("12".into())
+        );
         assert_eq!(
             terminal_label("term-2-0a1b2c3d-0000-4000-8000-0123456789ab"),
             TerminalLabel::Numbered("2".into())
         );
-        assert_eq!(terminal_label("term-2-x"), TerminalLabel::Text("term-2-x".into()));
-        assert_eq!(terminal_label("script-1"), TerminalLabel::Text("script-1".into()));
+        assert_eq!(
+            terminal_label("term-2-x"),
+            TerminalLabel::Text("term-2-x".into())
+        );
+        assert_eq!(
+            terminal_label("script-1"),
+            TerminalLabel::Text("script-1".into())
+        );
         assert_eq!(
             resolve_terminal_session_label("term-1", Some("  dev server ")),
             TerminalLabel::Text("dev server".into())
@@ -780,10 +806,19 @@ mod tests {
             TerminalLabel::Numbered("1".into())
         );
         let ids = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        assert_eq!(next_terminal_id(&ids(&["term-1", "term-3"]), None), "term-2");
+        assert_eq!(
+            next_terminal_id(&ids(&["term-1", "term-3"]), None),
+            "term-2"
+        );
         assert_eq!(next_terminal_id(&ids(&[]), Some("u")), "term-1-u");
         assert_eq!(
-            allocate_terminal_id(Some(&ids(&["term-1"])), &ids(&["term-2"]), &[], true, || "u".into()),
+            allocate_terminal_id(
+                Some(&ids(&["term-1"])),
+                &ids(&["term-2"]),
+                &[],
+                true,
+                || "u".into()
+            ),
             "term-3"
         );
         // Without readable metadata, a suffix keeps unseen host sessions apart.
@@ -816,9 +851,21 @@ mod tests {
         assert_eq!(
             resolved,
             vec![
-                ResolvedGroup { id: "group-a".into(), terminal_ids: vec!["a".into()], vertical: false },
-                ResolvedGroup { id: "g-2".into(), terminal_ids: vec!["b".into()], vertical: false },
-                ResolvedGroup { id: "g".into(), terminal_ids: vec!["d".into(), "c".into()], vertical: true },
+                ResolvedGroup {
+                    id: "group-a".into(),
+                    terminal_ids: vec!["a".into()],
+                    vertical: false
+                },
+                ResolvedGroup {
+                    id: "g-2".into(),
+                    terminal_ids: vec!["b".into()],
+                    vertical: false
+                },
+                ResolvedGroup {
+                    id: "g".into(),
+                    terminal_ids: vec!["d".into(), "c".into()],
+                    vertical: true
+                },
             ]
         );
         assert_eq!(resolved[2].kind(), GroupKind::Stacked);
@@ -849,7 +896,10 @@ mod tests {
         };
         assert_eq!(resolve_terminal_drawer_max_height(&column), 330.0);
         assert_eq!(
-            resolve_terminal_drawer_max_height(&DrawerLayout { viewport_height: 100.0, ..Default::default() }),
+            resolve_terminal_drawer_max_height(&DrawerLayout {
+                viewport_height: 100.0,
+                ..Default::default()
+            }),
             MIN_DRAWER_HEIGHT
         );
         assert_eq!(clamp_drawer_height(f64::NAN, 600.0), DEFAULT_HEIGHT);
@@ -876,10 +926,16 @@ mod tests {
     #[test]
     fn reconciliation_skips_equal_sets_and_lagging_server_subsets() {
         let v = |s: &[&str]| s.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        assert!(!should_reconcile_terminal_ids(&v(&["b", "a"]), &v(&["a", "b"])));
+        assert!(!should_reconcile_terminal_ids(
+            &v(&["b", "a"]),
+            &v(&["a", "b"])
+        ));
         assert!(!should_reconcile_terminal_ids(&v(&["a"]), &v(&["a", "b"])));
         assert!(should_reconcile_terminal_ids(&v(&[]), &v(&[])) == false);
-        assert!(should_reconcile_terminal_ids(&v(&["a", "c"]), &v(&["a", "b"])));
+        assert!(should_reconcile_terminal_ids(
+            &v(&["a", "c"]),
+            &v(&["a", "b"])
+        ));
         assert!(should_reconcile_terminal_ids(&v(&["a", "b"]), &v(&["a"])));
         assert!(should_reconcile_terminal_ids(&v(&["a"]), &v(&[])));
     }

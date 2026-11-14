@@ -41,6 +41,7 @@ use std::{
     rc::{Rc, Weak},
 };
 use t3_contracts::{
+    auth::AuthEnvironmentScope,
     base_schemas::TrimmedNonEmptyString,
     rpc::{
         Empty, WsSubscribeTerminalMetadataRpc, WsTerminalAttachRpc, WsTerminalClearRpc,
@@ -92,6 +93,8 @@ struct UiState {
     dirty: bool,
 }
 
+type ResizeSlots = Rc<RefCell<BTreeMap<(ThreadKey, String), Option<TerminalGrid>>>>;
+
 /// Shared by every [`TerminalSessions`] handle of one runtime.
 #[derive(Default)]
 pub struct TerminalSessionsState {
@@ -102,7 +105,7 @@ pub struct TerminalSessionsState {
     sessions: RefCell<BTreeMap<String, Weak<SessionShared>>>,
     generations: Rc<RefCell<AttachGenerations>>,
     lifecycle: RefCell<BTreeMap<ThreadKey, Rc<Mutex<()>>>>,
-    resizes: Rc<RefCell<BTreeMap<(ThreadKey, String), Option<TerminalGrid>>>>,
+    resizes: ResizeSlots,
 }
 
 /// Where a new terminal starts. Without one, the thread's project and worktree.
@@ -254,8 +257,11 @@ impl TerminalSessionLease {
         read(&self.shared.buffer.borrow().output)
     }
     pub fn changes(&self) -> LocalBoxStream<'static, ()> {
-        futures::stream::select(self.shared.changes.subscribe(), self.shared.metadata.changes())
-            .boxed_local()
+        futures::stream::select(
+            self.shared.changes.subscribe(),
+            self.shared.metadata.changes(),
+        )
+        .boxed_local()
     }
 }
 
@@ -347,21 +353,18 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
             .ok_or(ClientError::Disconnected)
     }
 
-    /// The environment's current operate grant (`terminal:operate`), read at each use.
+    /// The environment's current operate grant (`terminal:operate`), read at each use. The
+    /// terminal methods carry no client-side guard (the server enforces them), so the web gates
+    /// on the session's grants, as here.
     pub fn can_operate(&self, environment: &EnvironmentId) -> bool {
-        self.endpoint(environment).is_ok_and(|endpoint| {
-            endpoint.available::<WsTerminalWriteRpc>(&TerminalWriteInput {
-                thread_id: text("availability"),
-                terminal_id: text("availability"),
-                data: String::new(),
-            })
-        })
+        self.endpoint(environment)
+            .is_ok_and(|endpoint| grants(&endpoint, AuthEnvironmentScope::TerminalOperate))
     }
 
     /// The environment's current read grant (`terminal:read`, implied by operate).
     pub fn can_read(&self, environment: &EnvironmentId) -> bool {
         self.endpoint(environment)
-            .is_ok_and(|endpoint| endpoint.available::<WsSubscribeTerminalMetadataRpc>(&Empty {}))
+            .is_ok_and(|endpoint| grants(&endpoint, AuthEnvironmentScope::TerminalRead))
     }
 
     // ---- Tabs and groups (terminalUiStateStore) ----
@@ -570,7 +573,7 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
                     &platform,
                     <Method as RpcMethod>::NAME,
                     move |session: &ServiceSession<SessionEndpoint>| {
-                        if session.endpoint.available::<Method>(&Empty {}) {
+                        if grants(&session.endpoint, AuthEnvironmentScope::TerminalRead) {
                             return session.endpoint.subscribe::<Method>(Empty {});
                         }
                         if let Some(shared) = unreadable.upgrade()
@@ -612,7 +615,11 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
     }
 
     /// The attach input of a shown terminal, as the drawer's viewport builds it.
-    pub fn attach_input(key: &ThreadKey, terminal: &str, launch: &TerminalLaunch) -> TerminalAttachInput {
+    pub fn attach_input(
+        key: &ThreadKey,
+        terminal: &str,
+        launch: &TerminalLaunch,
+    ) -> TerminalAttachInput {
         TerminalAttachInput {
             thread_id: text(&key.thread.0),
             terminal_id: text(terminal),
@@ -631,7 +638,11 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
 
     /// One shown terminal's session. The mode follows each session's grants: attached with
     /// operate, observed with read only, idle (empty) with neither.
-    pub fn session(&self, environment: &EnvironmentId, input: TerminalAttachInput) -> TerminalSessionLease {
+    pub fn session(
+        &self,
+        environment: &EnvironmentId,
+        input: TerminalAttachInput,
+    ) -> TerminalSessionLease {
         let identity = format!(
             "{}\u{0}{}",
             environment.0,
@@ -681,9 +692,9 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
                     <WsTerminalAttachRpc as RpcMethod>::NAME,
                     move |session: &ServiceSession<SessionEndpoint>| {
                         let endpoint = &session.endpoint;
-                        let mode = if endpoint.available::<WsTerminalAttachRpc>(&input) {
+                        let mode = if grants(endpoint, AuthEnvironmentScope::TerminalOperate) {
                             SessionMode::Attached
-                        } else if endpoint.available::<WsTerminalObserveRpc>(&observe) {
+                        } else if grants(endpoint, AuthEnvironmentScope::TerminalRead) {
                             SessionMode::Observing
                         } else {
                             SessionMode::Idle
@@ -747,7 +758,11 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
 
     // ---- Commands ----
 
-    fn guarded<M>(&self, environment: &EnvironmentId, input: M::Input) -> LocalBoxFuture<'static, Result<M::Output, ClientError>>
+    fn guarded<M>(
+        &self,
+        environment: &EnvironmentId,
+        input: M::Input,
+    ) -> LocalBoxFuture<'static, Result<M::Output, ClientError>>
     where
         M: RpcMethod + 'static,
         M::Input: 'static,
@@ -755,7 +770,14 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
     {
         let endpoint = self.endpoint(environment);
         async move {
-            endpoint?
+            let endpoint = endpoint?;
+            // Read right before the command, so revoking operate stops it at once.
+            if !grants(&endpoint, AuthEnvironmentScope::TerminalOperate) {
+                return Err(ClientError::PermissionDenied {
+                    method: <M as RpcMethod>::NAME.into(),
+                });
+            }
+            endpoint
                 .command::<M>(input)
                 .await
                 .map_err(RpcCallError::into_client_error)
@@ -764,7 +786,11 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
     }
 
     /// `terminal.open`, `terminal.clear` and `terminal.close` of one thread run one at a time.
-    fn lifecycle<M>(&self, key: &ThreadKey, input: M::Input) -> LocalBoxFuture<'static, Result<M::Output, ClientError>>
+    fn lifecycle<M>(
+        &self,
+        key: &ThreadKey,
+        input: M::Input,
+    ) -> LocalBoxFuture<'static, Result<M::Output, ClientError>>
     where
         M: RpcMethod + 'static,
         M::Input: 'static,
@@ -784,11 +810,20 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
         .boxed_local()
     }
 
-    pub fn open(&self, key: &ThreadKey, input: TerminalOpenInput) -> LocalBoxFuture<'static, Result<TerminalSessionSnapshot, ClientError>> {
+    pub fn open(
+        &self,
+        key: &ThreadKey,
+        input: TerminalOpenInput,
+    ) -> LocalBoxFuture<'static, Result<TerminalSessionSnapshot, ClientError>> {
         self.lifecycle::<WsTerminalOpenRpc>(key, input)
     }
 
-    pub fn write(&self, key: &ThreadKey, terminal: &str, data: String) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    pub fn write(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+        data: String,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         self.guarded::<WsTerminalWriteRpc>(
             &key.environment,
             TerminalWriteInput {
@@ -799,7 +834,11 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
         )
     }
 
-    pub fn clear(&self, key: &ThreadKey, terminal: &str) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    pub fn clear(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         self.lifecycle::<WsTerminalClearRpc>(
             key,
             TerminalSessionInput {
@@ -809,7 +848,12 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
         )
     }
 
-    pub fn close(&self, key: &ThreadKey, terminal: &str, delete_history: bool) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    pub fn close(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+        delete_history: bool,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         self.lifecycle::<WsTerminalCloseRpc>(
             key,
             TerminalCloseInput {
@@ -822,7 +866,12 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
 
     /// Resizes a terminal. While one resize of it is in flight, only the latest next grid is
     /// sent after it.
-    pub fn resize(&self, key: &ThreadKey, terminal: &str, grid: TerminalGrid) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    pub fn resize(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+        grid: TerminalGrid,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         let slot = (key.clone(), terminal.to_owned());
         {
             let mut slots = self.state.resizes.borrow_mut();
@@ -832,7 +881,7 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
             }
             slots.insert(slot.clone(), None);
         }
-        struct Release(Rc<RefCell<BTreeMap<(ThreadKey, String), Option<TerminalGrid>>>>, (ThreadKey, String));
+        struct Release(ResizeSlots, (ThreadKey, String));
         impl Drop for Release {
             fn drop(&mut self) {
                 self.0.borrow_mut().remove(&self.1);
@@ -891,7 +940,10 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
 
     fn project(&self, key: &ThreadKey) -> Option<(String, Option<String>)> {
         let context = self.runtime.git_panel().workspace_context(key, None)?;
-        Some((context.project.workspace_root.0.clone(), context.worktree_path))
+        Some((
+            context.project.workspace_root.0.clone(),
+            context.worktree_path,
+        ))
     }
 
     pub fn default_launch_location(&self, key: &ThreadKey) -> Option<LaunchLocation> {
@@ -940,7 +992,10 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
         place: impl FnOnce(&str),
         location: Option<LaunchLocation>,
         extra_env: Option<&BTreeMap<String, String>>,
-    ) -> Option<(String, LocalBoxFuture<'static, Result<TerminalSessionSnapshot, ClientError>>)> {
+    ) -> Option<(
+        String,
+        LocalBoxFuture<'static, Result<TerminalSessionSnapshot, ClientError>>,
+    )> {
         if !self.can_operate(&key.environment) {
             return None;
         }
@@ -954,7 +1009,10 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
                 thread_id: text(&key.thread.0),
                 terminal_id: text(&terminal),
                 cwd: text(&location.cwd),
-                worktree_path: location.worktree_path.as_deref().map(|path| Some(text(path))),
+                worktree_path: location
+                    .worktree_path
+                    .as_deref()
+                    .map(|path| Some(text(path))),
                 cols: None,
                 rows: None,
                 env: Some(Some(project_script_runtime_env(
@@ -975,14 +1033,26 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
         key: &ThreadKey,
         placement: Placement,
         location: Option<LaunchLocation>,
-    ) -> Option<(String, LocalBoxFuture<'static, Result<TerminalSessionSnapshot, ClientError>>)> {
+    ) -> Option<(
+        String,
+        LocalBoxFuture<'static, Result<TerminalSessionSnapshot, ClientError>>,
+    )> {
         let service = self.clone();
         let target = key.clone();
-        self.launch(key, move |terminal| service.place(&target, terminal, placement), location, None)
+        self.launch(
+            key,
+            move |terminal| service.place(&target, terminal, placement),
+            location,
+            None,
+        )
     }
 
     /// Closes a drawer tab: its session ends and its history goes.
-    pub fn close_drawer_terminal(&self, key: &ThreadKey, terminal: &str) -> Option<LocalBoxFuture<'static, ()>> {
+    pub fn close_drawer_terminal(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+    ) -> Option<LocalBoxFuture<'static, ()>> {
         if !self.can_operate(&key.environment) {
             return None;
         }
@@ -991,7 +1061,12 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
         Some(closing)
     }
 
-    fn drawer_view(&self, key: &ThreadKey, metadata: &TerminalMetadataLease, launch: Option<&LaunchLocation>) -> TerminalDrawerView {
+    fn drawer_view(
+        &self,
+        key: &ThreadKey,
+        metadata: &TerminalMetadataLease,
+        launch: Option<&LaunchLocation>,
+    ) -> TerminalDrawerView {
         let ui = self.ui_state(key);
         let can_operate = self.can_operate(&key.environment);
         let project = self.project(key);
@@ -1011,7 +1086,8 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
                 launches.insert(
                     summary.terminal_id.clone(),
                     TerminalLaunch {
-                        cwd: launch.map_or_else(|| summary.cwd.clone(), |launch| launch.cwd.clone()),
+                        cwd: launch
+                            .map_or_else(|| summary.cwd.clone(), |launch| launch.cwd.clone()),
                         env: project_script_runtime_env(root, worktree.as_deref(), None),
                         worktree_path: worktree,
                     },
@@ -1124,7 +1200,15 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
     }
 }
 
-fn apply(shared: &SessionShared, event: &TerminalAttachStreamEvent, generations: &RefCell<AttachGenerations>) {
+fn grants(endpoint: &SessionEndpoint, scope: AuthEnvironmentScope) -> bool {
+    endpoint.grants_scope(scope) == Some(true)
+}
+
+fn apply(
+    shared: &SessionShared,
+    event: &TerminalAttachStreamEvent,
+    generations: &RefCell<AttachGenerations>,
+) {
     shared.buffer.borrow_mut().apply(
         event,
         DEFAULT_MAX_TERMINAL_BUFFER_BYTES,

@@ -135,9 +135,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                             .and_then(|entry| entry.config.as_ref());
                         let capabilities = Capabilities {
                             known: config.is_some(),
-                            uploads: config.is_some_and(|config| {
-                                config.environment.capabilities.file_attachments.is_some()
-                            }),
+                            uploads: config.is_some(),
                             max_file_bytes: config
                                 .and_then(|config| {
                                     config.environment.capabilities.file_attachments.as_ref()

@@ -1339,6 +1339,17 @@ fn persisted_file_verification_marks_expiry_and_retains_ids_after_transient_fail
             .as_deref()
             .unwrap()
             .clone();
+        config.environment.capabilities.file_attachments = None;
+        runtime.store().set_config(&id, generation, config.clone());
+        let image_only = runtime
+            .composer_attachments(&ComposerTarget::Draft {
+                draft_id: "image-only-server".into(),
+                environment_id: Some(id.clone()),
+            })
+            .unwrap();
+        h.settle();
+        assert!(image_only.capabilities().known);
+        assert!(image_only.capabilities().uploads);
         config.environment.capabilities.file_attachments = Some(
             t3_contracts::environment::ExecutionEnvironmentCapabilitiesFileAttachments {
                 max_upload_bytes: 10_000,

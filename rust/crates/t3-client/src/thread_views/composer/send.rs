@@ -934,11 +934,11 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             .await;
         let outcome = match result {
             Ok(DeliveryResult::Accepted(sequence)) => {
+                self.link_checkout_pull_request(&message).await;
                 self.set_state(&message.message_id, SendState::Accepted { sequence });
                 self.inner.prepared.borrow_mut().remove(&message.message_id);
                 self.inner.attempts.borrow_mut().remove(&message.message_id);
                 self.inner.launches.borrow_mut().remove(&message.message_id);
-                self.link_checkout_pull_request(&message).await;
                 DeliveryResult::Accepted(sequence)
             }
             Ok(result) => result,

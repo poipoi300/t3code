@@ -12,7 +12,7 @@ use crate::{
     },
     persistence::EnvironmentCacheStore,
     platform::PlatformError,
-    rpc::{RpcEndpoint, SessionEndpoint},
+    rpc::SessionEndpoint,
     state::{
         http::HttpSnapshotSource,
         sync::{ShellSync, ThreadSync},

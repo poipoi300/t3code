@@ -162,7 +162,7 @@ fn base64_image_syntax(base64: &str) -> bool {
     base64.len() - body.len() <= 2
         && body.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
         && base64.len() % 4 != 1
-        && (!base64.ends_with('=') || base64.len() % 4 == 0)
+        && (!base64.ends_with('=') || base64.len().is_multiple_of(4))
 }
 
 /// `openNotebook`: version 4 notebooks of up to 500 cells and 100 outputs per cell. Saved

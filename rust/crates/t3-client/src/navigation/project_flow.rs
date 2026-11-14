@@ -1069,7 +1069,7 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
                     messages: &[],
                 },
                 order,
-                &|date| crate::time::epoch_ms(date).map(|value| value as i64),
+                &crate::time::epoch_ms,
             )
         };
         let latest = shell.as_ref().and_then(|s| {

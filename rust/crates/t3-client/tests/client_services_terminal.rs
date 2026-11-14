@@ -22,7 +22,11 @@ use t3_client::{
 use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
 use t3_rpc::{Exit, HandlerOutput};
 
-const OPERATE: &[&str] = &["orchestration:read", "orchestration:operate", "terminal:operate"];
+const OPERATE: &[&str] = &[
+    "orchestration:read",
+    "orchestration:operate",
+    "terminal:operate",
+];
 const READ: &[&str] = &["orchestration:read", "terminal:read"];
 
 /// The terminal methods the Rust server serves, and a scripted answer for each request.
@@ -68,8 +72,10 @@ fn setup(h: &mut Harness, scopes: &[&str]) -> (ClientRuntime<TestPlatform>, Rc<T
                 .push((tag.to_owned(), request.payload.clone()));
             if handler.failing.borrow().contains(&tag) {
                 return Some(HandlerOutput::Unary(
-                    async { Exit::fail(json!({"_tag":"TerminalError","message":"no such terminal"})) }
-                        .boxed_local(),
+                    async {
+                        Exit::fail(json!({"_tag":"TerminalError","message":"no such terminal"}))
+                    }
+                    .boxed_local(),
                 ));
             }
             Some(match tag {
@@ -118,6 +124,24 @@ fn setup(h: &mut Harness, scopes: &[&str]) -> (ClientRuntime<TestPlatform>, Rc<T
     }))
     .unwrap();
     h.settle();
+    // Grants as the session states them; operate implies read, as the server's grants do.
+    runtime
+        .client(&environment("env"))
+        .unwrap()
+        .session()
+        .unwrap()
+        .update_grants(t3_client::permissions::SessionGrants {
+            valid: true,
+            scopes: scopes
+                .iter()
+                .map(|s| (*s).to_owned())
+                .chain(
+                    scopes
+                        .contains(&"terminal:operate")
+                        .then(|| "terminal:read".to_owned()),
+                )
+                .collect(),
+        });
     (runtime, terminal)
 }
 
@@ -166,7 +190,11 @@ fn launch() -> TerminalLaunch {
     TerminalLaunch {
         cwd: "/workspace/project".into(),
         worktree_path: None,
-        env: [("T3CODE_PROJECT_ROOT".to_owned(), "/workspace/project".to_owned())].into(),
+        env: [(
+            "T3CODE_PROJECT_ROOT".to_owned(),
+            "/workspace/project".to_owned(),
+        )]
+        .into(),
     }
 }
 
@@ -193,7 +221,10 @@ fn tabs_persist_and_a_new_runtime_restores_them() {
     assert_eq!(state.terminal_ids, ["term-1", "term-2"]);
     assert_eq!(state.active_terminal_id, "term-2");
     assert_eq!(state.terminal_groups.len(), 1);
-    assert_eq!(state.terminal_groups[0].split_direction.as_deref(), Some("vertical"));
+    assert_eq!(
+        state.terminal_groups[0].split_direction.as_deref(),
+        Some("vertical")
+    );
     assert_eq!(terminals.open_threads(), [key()]);
 
     let restored = ClientRuntime::new(
@@ -242,13 +273,19 @@ fn launching_places_the_tab_then_opens_the_shell_in_the_project() {
         .unwrap();
     assert_eq!(id, "term-2", "allocated against the known sessions");
     // Placed before the open resolves.
-    assert_eq!(terminals.ui_state(&key()).terminal_ids, ["term-1", "term-2"]);
+    assert_eq!(
+        terminals.ui_state(&key()).terminal_ids,
+        ["term-1", "term-2"]
+    );
     h.run(opened).unwrap();
     let open = requests(&terminal, "terminal.open");
     assert_eq!(open.len(), 1);
     assert_eq!(open[0]["terminalId"], "term-2");
     assert_eq!(open[0]["cwd"], "/workspace/project");
-    assert_eq!(open[0]["env"], json!({"T3CODE_PROJECT_ROOT":"/workspace/project"}));
+    assert_eq!(
+        open[0]["env"],
+        json!({"T3CODE_PROJECT_ROOT":"/workspace/project"})
+    );
     assert!(open[0].get("worktreePath").is_none());
 
     // The server still lags the new tab: the subset does not discard it.
@@ -257,7 +294,10 @@ fn launching_places_the_tab_then_opens_the_shell_in_the_project() {
     h.settle();
     let view = drawer.view();
     assert_eq!(view.terminal_ids, ["term-1", "term-2"]);
-    assert_eq!(view.label("term-1"), TerminalLabel::Text("dev server".into()));
+    assert_eq!(
+        view.label("term-1"),
+        TerminalLabel::Text("dev server".into())
+    );
     assert_eq!(view.label("term-2"), TerminalLabel::Numbered("2".into()));
     assert_eq!(view.launch("term-1").unwrap().cwd, "/workspace/project/sub");
     assert_eq!(view.launch("term-2").unwrap().cwd, "/workspace/project");
@@ -276,7 +316,11 @@ fn without_operate_nothing_launches_or_closes_and_the_server_order_shows() {
     h.settle();
     assert!(!terminals.can_operate(&environment("env")));
     assert!(terminals.can_read(&environment("env")));
-    assert!(terminals.launch_drawer_terminal(&key(), Placement::New, None).is_none());
+    assert!(
+        terminals
+            .launch_drawer_terminal(&key(), Placement::New, None)
+            .is_none()
+    );
     assert!(terminals.close_drawer_terminal(&key(), "term-1").is_none());
     let view = drawer.view();
     assert!(!view.can_operate);
@@ -301,8 +345,14 @@ fn attach_replays_output_and_a_reconnect_resumes_without_blanking_it() {
     assert_eq!(lease.view().mode, SessionMode::Attached);
     let attach = requests(&terminal, "terminal.attach");
     assert_eq!(attach.len(), 1);
-    assert!(attach[0].get("resume").is_none(), "the first attach opens the shell");
-    assert_eq!(attach[0]["maxHistoryBytes"], 2_097_152);
+    assert!(
+        attach[0].get("resume").is_none(),
+        "the first attach opens the shell"
+    );
+    assert_eq!(
+        attach[0]["maxHistoryBytes"],
+        t3_client::services::terminal::DEFAULT_MAX_TERMINAL_BUFFER_BYTES as u64
+    );
     assert_eq!(attach[0]["cwd"], "/workspace/project");
 
     first
@@ -313,14 +363,20 @@ fn attach_replays_output_and_a_reconnect_resumes_without_blanking_it() {
     let view = lease.view();
     assert_eq!(view.status, TerminalStatus::Running);
     let mut cursor = TerminalOutputCursor::default();
-    assert!(matches!(read_all(&lease, &mut cursor), TerminalOutputUpdate::Reset { data, .. } if data == "host output"));
+    assert!(
+        matches!(read_all(&lease, &mut cursor), TerminalOutputUpdate::Reset { data, .. } if data == "host output")
+    );
     for chunk in ["a", "b"] {
         first
-            .unbounded_send(json!({"type":"output","threadId":"t1","terminalId":"term-1","data":chunk}))
+            .unbounded_send(
+                json!({"type":"output","threadId":"t1","terminalId":"term-1","data":chunk}),
+            )
             .unwrap();
     }
     h.settle();
-    assert!(matches!(read_all(&lease, &mut cursor), TerminalOutputUpdate::Append { data, .. } if data == "ab"));
+    assert!(
+        matches!(read_all(&lease, &mut cursor), TerminalOutputUpdate::Append { data, .. } if data == "ab")
+    );
 
     // The connection drops: the shown output stays until the new snapshot replays it.
     let second = stream(&terminal);
@@ -330,13 +386,20 @@ fn attach_replays_output_and_a_reconnect_resumes_without_blanking_it() {
     let attach = requests(&terminal, "terminal.attach");
     assert_eq!(attach.len(), 2);
     assert_eq!(attach[1]["resume"], true);
-    assert!(matches!(read_all(&lease, &mut cursor), TerminalOutputUpdate::None(_)));
+    assert!(matches!(
+        read_all(&lease, &mut cursor),
+        TerminalOutputUpdate::None(_)
+    ));
     second
-        .unbounded_send(json!({"type":"snapshot","snapshot":snapshot("term-1","host outputab more")}))
+        .unbounded_send(
+            json!({"type":"snapshot","snapshot":snapshot("term-1","host outputab more")}),
+        )
         .unwrap();
     h.settle();
     assert!(lease.view().generation > view.generation);
-    assert!(matches!(read_all(&lease, &mut cursor), TerminalOutputUpdate::Reset { data, .. } if data == "host outputab more"));
+    assert!(
+        matches!(read_all(&lease, &mut cursor), TerminalOutputUpdate::Reset { data, .. } if data == "host outputab more")
+    );
 
     // Exit is reported through the status.
     second
@@ -382,7 +445,10 @@ fn a_read_only_viewer_observes_and_a_failure_shows_as_an_error() {
     assert_eq!(view.error.as_deref(), Some("Shell failed to start"));
     // Writing is refused before anything is sent.
     let refused = h.run(terminals.write(&key(), "term-1", "ls\r".into()));
-    assert!(matches!(refused, Err(ClientError::PermissionDenied { .. })), "{refused:?}");
+    assert!(
+        matches!(refused, Err(ClientError::PermissionDenied { .. })),
+        "{refused:?}"
+    );
     assert!(requests(&terminal, "terminal.write").is_empty());
 }
 
@@ -431,8 +497,10 @@ fn resizes_send_only_the_latest_grid_after_the_one_in_flight() {
         *slot.borrow_mut() = Some(first.await);
     });
     h.settle();
-    h.run(terminals.resize(&key(), "term-1", grid(100, 30))).unwrap();
-    h.run(terminals.resize(&key(), "term-1", grid(120, 40))).unwrap();
+    h.run(terminals.resize(&key(), "term-1", grid(100, 30)))
+        .unwrap();
+    h.run(terminals.resize(&key(), "term-1", grid(120, 40)))
+        .unwrap();
     // Another terminal is not held behind this one.
     let other = terminals.resize(&key(), "term-2", grid(90, 20));
     h.spawn(async move {
@@ -447,7 +515,10 @@ fn resizes_send_only_the_latest_grid_after_the_one_in_flight() {
     h.settle();
     let resizes = requests(&terminal, "terminal.resize");
     assert_eq!(resizes.len(), 3, "{resizes:?}");
-    assert_eq!(resizes[2], json!({"threadId":"t1","terminalId":"term-1","cols":120,"rows":40}));
+    assert_eq!(
+        resizes[2],
+        json!({"threadId":"t1","terminalId":"term-1","cols":120,"rows":40})
+    );
     for sender in terminal.held_resizes.borrow_mut().drain(..) {
         let _ = sender.send(());
     }

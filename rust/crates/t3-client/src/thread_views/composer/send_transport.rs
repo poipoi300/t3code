@@ -171,15 +171,17 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         };
         {
             let mut links = self.inner.checkout_links.borrow_mut();
-            if links.contains_key(&message.message_id) {
-                return;
+            match links.entry(message.message_id.clone()) {
+                std::collections::btree_map::Entry::Occupied(_) => return,
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(None);
+                }
             }
-            links.insert(message.message_id.clone(), None);
         }
         let weak = Rc::downgrade(&self.inner);
         let message_id = message.message_id.clone();
         let thread_id = message.thread_id.clone();
-        let task = async move {
+        let mut task = async move {
             let Some(inner) = weak.upgrade() else {
                 return;
             };
@@ -198,7 +200,9 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         .boxed_local();
         let spawn = self.inner.background_spawn.borrow().clone();
         if let Some(spawn) = spawn {
-            spawn(task);
+            if futures::poll!(task.as_mut()).is_pending() {
+                spawn(task);
+            }
         } else {
             task.await;
         }
