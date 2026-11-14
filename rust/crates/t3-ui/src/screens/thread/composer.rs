@@ -431,9 +431,25 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
     // CMP-ATTACH: one client session for this draft.
     let attachments_disabled = signal(false);
     effect(move || attachments_disabled.set(drafts.disabled() || busy.get()));
-    let attachments = bindings::composer_attachments(&client, &target)
-        .ok()
-        .map(|session| ComposerAttachments::new(session, attachments_disabled));
+    // The client opens a draft's attachment session only once drafts are writable, which can be
+    // after the composer mounts (a cold start); open it then, under the composer's owner.
+    let attachments = signal(None::<ComposerAttachments>);
+    {
+        let client = client.clone();
+        let target = target.clone();
+        effect(move || {
+            if drafts.disabled() || attachments.with_untracked(Option::is_some) {
+                return;
+            }
+            untracked(|| {
+                if let Ok(session) = bindings::composer_attachments(&client, &target) {
+                    let opened =
+                        owner.run(|| ComposerAttachments::new(session, attachments_disabled));
+                    attachments.set(Some(opened));
+                }
+            });
+        });
+    }
 
     // CMP-STASH.
     let stash = PromptStash::attach(bindings::prompt_stash(&client, target.clone()), {
@@ -557,7 +573,9 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
                     return true;
                 }
                 if snapshot.value.trim().is_empty()
-                    && attachments.is_none_or(|attachments| attachments.items().is_empty())
+                    && attachments
+                        .get_untracked()
+                        .is_none_or(|attachments| attachments.items().is_empty())
                 {
                     return false;
                 }
@@ -673,7 +691,7 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
     };
     let prompt =
         composer_prompt_editor_with_chips(editor.clone(), props, chips, on_change, move |paste| {
-            if let Some(attachments) = attachments {
+            if let Some(attachments) = attachments.get_untracked() {
                 attachments.paste_files(paste);
             }
         });
@@ -738,7 +756,11 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
             anchor_width_memo,
             list_id,
         ))
-        .child(attachments.map(composer_attachment_strip))
+        .child(dynamic(move || {
+            attachments
+                .get()
+                .map(|attachments| untracked(|| composer_attachment_strip(attachments)))
+        }))
         .child(
             view()
                 .element_ref(&editor_boundary)
@@ -752,7 +774,7 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
             .get()
             .or_else(|| drafts.failure())
             .or_else(|| questions.error.get())
-            .or_else(|| attachments.and_then(ComposerAttachments::error))
+            .or_else(|| attachments.get().and_then(ComposerAttachments::error))
             .map(|message| {
                 text(move || message.resolve())
                     .role(AccessibilityRole::Alert)
@@ -841,14 +863,25 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
         .into_element()
     }));
 
-    let attach = attachments.map(|attachments| {
+    let attach = {
         let editor = editor.clone();
-        view()
-            .app_class(tw("me-2"))
-            .child(composer_attach_button(attachments, move || {
-                let _ = editor.focus_at_end();
-            }))
-    });
+        dynamic(move || {
+            let attachments = attachments
+                .get()
+                .filter(|attachments| attachments.picker_available());
+            attachments.map(|attachments| {
+                let editor = editor.clone();
+                untracked(|| {
+                    view().app_class(tw("me-2")).child(composer_attach_button(
+                        attachments,
+                        move || {
+                            let _ = editor.focus_at_end();
+                        },
+                    ))
+                })
+            })
+        })
+    };
     let footer = view()
         .app_class(move || {
             tw(&cn([

@@ -165,7 +165,28 @@ impl ReviewGuideGenerator {
         let identity = cached
             .or(fresh)
             .map(|identity| serde_json::to_value(identity).unwrap_or_default())
-            .ok_or_else(|| failed(&format!("Guides are written from this project's checkout, and this pull request is in another repository. Write it from a project that is a checkout of that repository. [diagnostic root={workspace_root}]")))?;
+            ;
+        let identity = match identity {
+            Some(identity) => identity,
+            None => {
+                let git = t3_git::Git::new(workspace_root);
+                let top = git
+                    .execute(&["rev-parse", "--show-toplevel"], ExecuteOptions { allow_nonzero: true, ..Default::default() })
+                    .await
+                    .map(|out| format!("{:?} {}", out.code, out.stdout_text().trim()))
+                    .map_err(|e| e.to_string());
+                let remotes = git
+                    .execute(&["remote", "-v"], ExecuteOptions { allow_nonzero: true, ..Default::default() })
+                    .await
+                    .map(|out| format!("{:?} {}", out.code, out.stdout_text().trim()))
+                    .map_err(|e| e.to_string());
+                let normalized = t3_workspace::paths::normalize_root(workspace_root, std::path::Path::new(workspace_root), false)
+                    .await
+                    .map(|p| p.display().to_string())
+                    .map_err(|e| e.to_string());
+                return Err(failed(&format!("Guides are written from this project's checkout, and this pull request is in another repository. Write it from a project that is a checkout of that repository. [diagnostic root={workspace_root} top={top:?} remotes={remotes:?} normalized={normalized:?}]")));
+            }
+        };
         let locator = &identity["locator"];
         Ok((
             locator["remoteName"]

@@ -490,3 +490,19 @@ fn the_send_button_sends_once_and_the_composer_settles() {
         assert!(app.screen().shows("Dispatches 1"), "sent once");
     }
 }
+
+/// A host without a file picker (the fake platform answers Unsupported) hides Attach files and
+/// never shows the host's error text.
+#[test]
+fn attach_on_a_host_without_a_picker_hides_the_control_without_an_error() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = start(window, true, false);
+        app.press("role:button[Attach files]").expect("attach");
+        app.wait_for_gone("role:button[Attach files]", Duration::from_secs(5))
+            .expect("the control is hidden");
+        assert!(
+            !app.screen().shows("unsupported host capability"),
+            "no raw host error"
+        );
+    }
+}

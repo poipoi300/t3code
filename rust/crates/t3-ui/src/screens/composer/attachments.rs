@@ -31,6 +31,18 @@ pub struct ComposerAttachments {
     error: Signal<Option<UiText>>,
     preview: Signal<Option<AttachmentItem>>,
     preview_open: Signal<bool>,
+    /// False once the host reported it has no file picker; the control is then hidden, as the
+    /// web hides it when attaching is unavailable.
+    picker: Signal<bool>,
+    /// Tasks started from presses run under the composer's owner, not a row a change disposes.
+    owner: Owner,
+}
+
+/// One handle per session: equal when they are the same handle (its signals are).
+impl PartialEq for ComposerAttachments {
+    fn eq(&self, other: &Self) -> bool {
+        self.items == other.items
+    }
 }
 
 impl ComposerAttachments {
@@ -53,7 +65,20 @@ impl ComposerAttachments {
             error: signal(None),
             preview: signal(None),
             preview_open: signal(false),
+            picker: signal(true),
+            owner: Owner::current(),
         }
+    }
+
+    /// Whether this host can pick files (false after it answered that it cannot).
+    pub fn picker_available(self) -> bool {
+        self.picker.get()
+    }
+
+    fn spawn(self, task: impl std::future::Future<Output = ()> + 'static) {
+        self.owner.run(move || {
+            spawn(task);
+        });
     }
 
     pub fn items(self) -> Rc<Vec<AttachmentItem>> {
@@ -90,9 +115,15 @@ impl ComposerAttachments {
         }
         let client = self.client.get();
         self.error.set(None);
-        spawn(async move {
+        self.spawn(async move {
             let files = match client.pick_resources().await {
                 Ok(files) => files,
+                // No native picker on this host: hide the control rather than show the host's
+                // error text.
+                Err(ClientError::Platform(t3_client::platform::PlatformError::Unsupported(_))) => {
+                    self.picker.set(false);
+                    return;
+                }
                 Err(error) => {
                     self.report(Err(error));
                     return;
@@ -203,7 +234,7 @@ impl ComposerAttachments {
     fn intake(self, files: Vec<IncomingFile>, resources: Vec<HostResource>) {
         let client = self.client.get();
         self.error.set(None);
-        spawn(async move {
+        self.spawn(async move {
             self.report(client.intake_bytes(files).await);
             self.report(client.intake(resources).await);
             client.save_images().await;
@@ -228,7 +259,7 @@ impl ComposerAttachments {
             tr("Remove {name} from the message?\nIt is referenced in your text; removing it also removes every reference.", &[("name", Value::Text(name))]),
             Some(ConfirmDialogOptions { variant: ConfirmDialogVariant::Destructive, ..Default::default() }),
         ));
-        spawn(async move {
+        self.spawn(async move {
             if let Some(confirmation) = confirmation {
                 // The native confirm host treats an unmounted host as cancellation.
                 if !match confirmation {
@@ -256,7 +287,7 @@ impl ComposerAttachments {
             return;
         }
         let client = self.client.get();
-        spawn(async move {
+        self.spawn(async move {
             self.report(client.upload(&id).await);
         });
     }

@@ -257,6 +257,25 @@ fn the_terminal_drawer_follows_the_clients_drawer_record() {
     );
 }
 
+/// The header's toggle (integration 4 saw it highlight without a drawer on desktop).
+#[test]
+fn the_header_toggle_opens_and_closes_the_terminal_drawer() {
+    let mut app = workspace(DESKTOP, false);
+    app.press("role:button[Toggle terminal drawer]")
+        .expect("the toggle is enabled for a thread with a project");
+    app.wait_for("id:thread-terminal-drawer")
+        .expect("pressing it opens the drawer");
+    app.press("role:button[Toggle terminal drawer]")
+        .expect("toggle again");
+    app.settle();
+    assert!(
+        !app.screen()
+            .matches("id:thread-terminal-drawer")
+            .expect("valid selector"),
+        "pressing it again closes the drawer"
+    );
+}
+
 #[test]
 fn the_details_card_reads_project_scripts_from_the_client() {
     let mut app = workspace(DESKTOP, false);

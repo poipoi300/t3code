@@ -146,6 +146,7 @@ fn pending_secret_request_form(
             })
         }
     };
+    let opener = crate::runtime::services::links::link_opener_here();
     let link = secret_request_link(item.url.clone().flatten().as_deref(), &item.reason);
     let placeholder = item
         .placeholder
@@ -192,12 +193,7 @@ fn pending_secret_request_form(
                     ButtonVariant::Outline,
                     ButtonSize::Sm,
                     || false,
-                    move || {
-                        let href = href.clone();
-                        spawn(async move {
-                            let _ = open_url(href).await;
-                        });
-                    },
+                    move || opener.open(href.clone()),
                 ))
                 // A link found in the reason is already shown there.
                 .child(url.clone().map(|url| {
