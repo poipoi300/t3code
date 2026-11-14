@@ -274,7 +274,6 @@ pub async fn connect_into<P: Platform + Clone + 'static>(
         store,
         registry,
         environment,
-        shared,
         authorization,
         actions,
         None,
@@ -306,7 +305,6 @@ pub async fn supervise_saved<P: Platform + Clone + 'static>(
     environment: &EnvironmentId,
     learn: Option<LearnRoutes>,
 ) -> Result<(ConnectedClient, ConnectionTask), ClientError> {
-    let shared: Rc<dyn Platform> = Rc::new(platform.clone());
     let mut registry = EnvironmentRegistry::load(
         &platform,
         NetworkStatus::Unknown,
@@ -340,7 +338,6 @@ pub async fn supervise_saved<P: Platform + Clone + 'static>(
         store,
         registry,
         environment.clone(),
-        shared,
         authorization,
         actions,
         learn,
@@ -352,11 +349,11 @@ fn start<P: Platform + Clone + 'static>(
     store: ClientStore,
     registry: EnvironmentRegistry<PlatformSession>,
     environment: EnvironmentId,
-    shared: Rc<dyn Platform>,
     authorization: RemoteAuthorization,
     actions: VecDeque<ConnectionAction>,
     learn: Option<LearnRoutes>,
 ) -> (ConnectedClient, ConnectionTask) {
+    let shared: Rc<dyn Platform> = Rc::new(platform.clone());
     let (events, receiver) = mpsc::unbounded();
     let (learned, learned_routes) = mpsc::unbounded();
     let (frames, frame_receiver) = mpsc::channel(1);
@@ -420,7 +417,7 @@ fn reported_endpoints(
             .iter()
             .map(|endpoint| ReportedEndpoint {
                 http_base_url: endpoint.http_base_url.0.clone(),
-                kind: serde_json::to_value(&endpoint.kind)
+                kind: serde_json::to_value(endpoint.kind)
                     .ok()
                     .and_then(|kind| kind.as_str().map(str::to_owned)),
             })

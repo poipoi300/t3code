@@ -155,13 +155,13 @@ pub fn resolve_approval_decision(
         .one_click_access
         .as_ref()
         .is_some_and(|levels| levels.contains(&access))
-        .then(|| {
-            AuthMcpApprovalDecision::AuthMcpApprovalBrowserSession(AuthMcpApprovalBrowserSession {
+        .then_some(AuthMcpApprovalDecision::AuthMcpApprovalBrowserSession(
+            AuthMcpApprovalBrowserSession {
                 _tag: AuthMcpApprovalBrowserSessionTag::BrowserSession,
                 access,
                 csrf_token,
-            })
-        })
+            },
+        ))
 }
 
 /// The decision Deny sends.
