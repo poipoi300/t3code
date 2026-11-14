@@ -2,6 +2,12 @@ use std::io::{Read, Write};
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.iter().any(|arg| arg == "--version")
+        && let Ok(version) = std::env::var("T3_GIT_VERSION_OVERRIDE")
+    {
+        println!("{version}");
+        return Ok(());
+    }
     let mut input = Vec::new();
     std::io::stdin().read_to_end(&mut input)?;
     let command_gate = std::env::var("T3_GIT_GATE_COMMAND").ok();
