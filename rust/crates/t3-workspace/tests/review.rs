@@ -580,6 +580,7 @@ async fn containment_matrix_covers_every_workspace_and_attachment_entry_point() 
         if let Ok(result) = folders
             .list_ignored_files(ProjectListIgnoredFilesInput {
                 cwd: text(&hostile_cwd),
+                query: None,
             })
             .await
         {

@@ -124,7 +124,10 @@ async fn immediate_listing_ignored_empty_directories_and_metadata_hidden() {
         );
     }
     let ignored = service
-        .list_ignored_files(ProjectListIgnoredFilesInput { cwd: text(root) })
+        .list_ignored_files(ProjectListIgnoredFilesInput {
+            cwd: text(root),
+            query: None,
+        })
         .await
         .expect("test fixture");
     assert_eq!(ignored.files.len(), 1);
