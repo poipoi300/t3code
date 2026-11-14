@@ -253,10 +253,7 @@ impl SessionImportStore for RuntimeImportStore {
                     operation: "read-settings",
                     detail: "unavailable".into(),
                 })?;
-        let mode = resolved
-            .settings
-            .default_runtime_mode
-            .unwrap_or(RuntimeMode::FullAccess);
+        let mode = resolved.settings.default_runtime_mode;
         Ok(Some(
             if t3_orchestration::ports::decisions::dispatch_mode_limit::is_runtime_mode_above(
                 mode, ceiling,

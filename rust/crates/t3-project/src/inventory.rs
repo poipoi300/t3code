@@ -10,7 +10,7 @@
 //! path before any filesystem call. File contents never reach a log or an error.
 use crate::{
     Error, Result,
-    session_json::{JsonPathPart, read_projected_json, select_transcript_path},
+    session_json::{read_projected_json, select_transcript_path},
     sessions::{
         RecentSession, RecentThreads, SessionCandidate, SessionCandidates, SessionInventory,
         SessionWorktree, same_transcript_identity,
@@ -564,7 +564,7 @@ pub mod git_config {
     }
     /// `gitConfigLines`: joins continued lines and drops lines inside an open quote.
     fn lines(text: &str) -> Vec<String> {
-        static TOKEN: LazyLock<Regex> = LazyLock::new(|| regex(r#"\\[\s\S]?|["#;]"#));
+        static TOKEN: LazyLock<Regex> = LazyLock::new(|| regex(r##"\\[\s\S]?|["#;]"##));
         let mut out = vec![];
         let mut pending = String::new();
         let mut quoted = false;
@@ -1132,7 +1132,7 @@ impl NativeSessionInventory {
         if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) {
             return roots;
         }
-        let read = || -> t3_persistence::rusqlite::Result<()> {
+        let mut read = || -> t3_persistence::rusqlite::Result<()> {
             let connection = Connection::open_with_flags(
                 &path,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -1144,11 +1144,12 @@ impl NativeSessionInventory {
                  FROM threads JOIN project_roots ON project_roots.project_id = threads.project_id
                  ORDER BY threads.rowid DESC, project_roots.position LIMIT ?1",
             )?;
+            use t3_persistence::rusqlite::types::Value as Sql;
             let rows = statement.query_map([MAX_CODEX_PROJECT_ROOT_ROWS], |row| {
-                Ok((row.get::<_, Value>(0)?, row.get::<_, Value>(1)?))
+                Ok((row.get::<_, Sql>(0)?, row.get::<_, Sql>(1)?))
             });
             for row in rows?.flatten() {
-                let (Value::String(id), Value::String(path)) = row else { continue };
+                let (Sql::Text(id), Sql::Text(path)) = row else { continue };
                 if path.trim().is_empty() {
                     continue;
                 }
