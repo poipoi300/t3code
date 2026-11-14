@@ -758,10 +758,13 @@ async fn legacy_storage_without_a_shell_source_is_unsupported() {
     ));
 }
 
+/// How a saved key reads back: its bytes changed, or an error.
+type Damage = fn(Vec<u8>) -> Result<Vec<u8>, t3_platform::SecretStoreError>;
+
 /// A key store whose saved key reads back damaged, until something stores a new one.
 struct DamagedSecrets {
     inner: Arc<EphemeralSecretStore>,
-    damage: std::sync::Mutex<Option<fn(Vec<u8>) -> Result<Vec<u8>, t3_platform::SecretStoreError>>>,
+    damage: std::sync::Mutex<Option<Damage>>,
 }
 impl t3_platform::SecretKeyStore for DamagedSecrets {
     fn load(
@@ -785,7 +788,7 @@ impl t3_platform::SecretKeyStore for DamagedSecrets {
 #[tokio::test]
 async fn an_unreadable_or_wrong_length_storage_key_is_replaced_instead_of_failing_every_launch() {
     // Platform review M1. A truncated Android wrapped key reads as `Corrupt`.
-    let damages: [fn(Vec<u8>) -> Result<Vec<u8>, t3_platform::SecretStoreError>; 2] = [
+    let damages: [Damage; 2] = [
         |secret| Ok(secret[..16].to_vec()),
         |_| Err(t3_platform::SecretStoreError::Corrupt),
     ];
