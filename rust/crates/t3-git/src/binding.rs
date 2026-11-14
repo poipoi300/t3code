@@ -232,7 +232,13 @@ impl Git {
                 .filter_map(|path| bindings.remove(path))
                 .map(|bound| bound.identity.clone())
                 .collect();
-            bindings.retain(|_, bound| !forgotten.contains(&bound.identity));
+            // Other scopes are forgotten only when this is the repository's own top-level, where
+            // they all named the replaced repository; a trusted subfolder leaves its parent pinned.
+            bindings.retain(|_, bound| {
+                !forgotten
+                    .iter()
+                    .any(|identity| *identity == bound.identity && identity.top_level == resolved)
+            });
         }
         let mut fresh = self.clone();
         fresh.bound_repository = None;

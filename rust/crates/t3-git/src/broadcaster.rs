@@ -800,7 +800,8 @@ impl VcsStatusBroadcaster {
             return Ok(checkout);
         }
         let workflow = match &self.inner.factory {
-            Some(factory) => factory.for_checkout(&path).await?,
+            // The caller's spelling: saved bindings are keyed by the folder as recorded.
+            Some(factory) => factory.for_checkout(cwd).await?,
             None => self.inner.workflow.at(&path),
         }
         .without_fsmonitor();
@@ -1002,6 +1003,38 @@ impl VcsStatusBroadcaster {
                 )
             })
     }
+    /// Drops the shared checkout for `cwd`: its subscriptions end and its workers stop, and the
+    /// next read builds it again through the factory. For a repository the user just trusted
+    /// again, whose cached handle is still pinned to the identity it replaced.
+    pub async fn forget_checkout(&self, cwd: &Path) {
+        let path = crate::core::physical_path(cwd);
+        let removed = self
+            .inner
+            .checkouts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&path);
+        if let Some(checkout) = removed {
+            Self::stop_checkout(&checkout).await;
+        }
+    }
+    async fn stop_checkout(checkout: &Checkout) {
+        {
+            let mut listeners = checkout.listeners();
+            listeners.branches.clear();
+            listeners.statuses.clear();
+            listeners.remote_demand.clear();
+            if let Some(worker) = listeners.head.take() {
+                worker.cancel();
+                listeners.retiring.push(worker);
+            }
+            if let Some(worker) = listeners.poller.take() {
+                worker.cancel();
+                listeners.retiring.push(worker);
+            }
+        }
+        checkout.drain_retired().await;
+    }
     pub async fn shutdown(&self) {
         self.inner
             .branch_changes
@@ -1018,21 +1051,7 @@ impl VcsStatusBroadcaster {
             .cloned()
             .collect();
         for checkout in checkouts {
-            {
-                let mut listeners = checkout.listeners();
-                listeners.branches.clear();
-                listeners.statuses.clear();
-                listeners.remote_demand.clear();
-                if let Some(worker) = listeners.head.take() {
-                    worker.cancel();
-                    listeners.retiring.push(worker);
-                }
-                if let Some(worker) = listeners.poller.take() {
-                    worker.cancel();
-                    listeners.retiring.push(worker);
-                }
-            }
-            checkout.drain_retired().await;
+            Self::stop_checkout(&checkout).await;
         }
     }
 }

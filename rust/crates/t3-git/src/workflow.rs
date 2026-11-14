@@ -528,6 +528,15 @@ impl GitWorkflowService {
             ..self.clone()
         }
     }
+    /// This workflow with its Git handle pinned to a saved repository binding
+    /// ([`Git::with_repository_binding`]): every command it runs refuses a changed repository.
+    pub async fn with_repository_binding(
+        mut self,
+        binding: crate::RepositoryBinding,
+    ) -> Result<Self, GitError> {
+        self.git = self.git.with_repository_binding(binding).await?;
+        Ok(self)
+    }
     pub fn with_cancellation(mut self, cancellation: crate::CancellationToken) -> Self {
         self.git.operation_scope = Some(Arc::new(crate::actions::OperationScope::default()));
         self.git.status_fetch_scope = Some(cancellation.clone());

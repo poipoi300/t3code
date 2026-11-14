@@ -161,6 +161,13 @@ async fn registry_invalidates_removed_and_nested_repositories_and_rejects_jj() -
         .at(&nested)
         .execute(&["init"], Default::default())
         .await?;
+    // A repository created inside a bound folder is not picked up silently (re-review 3 H-1,
+    // re-review 4 F3): refused until trusted, then detected.
+    assert!(matches!(
+        registry.detect(&nested, VcsSelection::Auto).await,
+        Err(t3_git::GitError::RepositoryChanged { .. })
+    ));
+    repo.git.at(&nested).rebind_repository().await?;
     let child = registry
         .detect(&nested, VcsSelection::Auto)
         .await?
@@ -168,6 +175,12 @@ async fn registry_invalidates_removed_and_nested_repositories_and_rejects_jj() -
     assert!(child.root_path.0.ends_with("nested"));
     assert!(registry.get(VcsDriverKind::Jj).is_err());
     std::fs::remove_dir_all(nested.join(".git"))?;
+    // Removing it is a change too; once trusted, the parent repository is detected again.
+    assert!(matches!(
+        registry.detect(&nested, VcsSelection::Auto).await,
+        Err(t3_git::GitError::RepositoryChanged { .. })
+    ));
+    repo.git.at(&nested).rebind_repository().await?;
     assert!(
         registry
             .detect(&nested, VcsSelection::Auto)
