@@ -12,7 +12,9 @@ use t3_contracts::{
     orchestrator_mcp::*,
     thread_metadata_mcp::ThreadMetadataMcpUpdateResult,
 };
+use t3_orchestration::composition::CommandCaller;
 use t3_orchestration::ports::runs_ingestion::restart_background_note::run_outcome;
+use t3_orchestration::ports::runs_ingestion::thread_message_intake::ThreadMessageIntake;
 use t3_orchestration::{
     api::*,
     ports::{
@@ -27,10 +29,95 @@ use t3_orchestration::{
 };
 
 pub struct OrchestrationAdapter {
+    pub reader: Arc<dyn ProjectionReader>,
+    pub database: t3_orchestration::stores::StoreDatabase,
+    pub commands: Arc<dyn CallerCommandSource>,
+}
+
+/// One MCP caller's way into orchestration: every write goes through a dispatcher that checks the
+/// caller's authority (mode limit, requested escalation, link fence) under the command lock.
+pub trait CallerCommandSource: Send + Sync {
+    fn threads(&self, caller: CommandCaller) -> ThreadManagementService;
+    fn dispatcher(&self, caller: CommandCaller) -> Arc<dyn CommandDispatcher>;
+    /// Sends with attachments; `None` where no attachment backend is bound.
+    fn intake(&self, caller: CommandCaller) -> Option<ThreadMessageIntake>;
+    fn stop(&self) -> Option<&ThreadStopService>;
+}
+
+/// The composed runtime: `commands_for`, behind the admission gate client commands pass.
+impl CallerCommandSource for t3_orchestration::composition::OrchestrationRuntime {
+    fn threads(&self, caller: CommandCaller) -> ThreadManagementService {
+        self.commands_for(caller).threads()
+    }
+    fn dispatcher(&self, caller: CommandCaller) -> Arc<dyn CommandDispatcher> {
+        Arc::new(self.commands_for(caller))
+    }
+    fn intake(&self, caller: CommandCaller) -> Option<ThreadMessageIntake> {
+        Some(self.commands_for(caller).intake())
+    }
+    fn stop(&self) -> Option<&ThreadStopService> {
+        Some(&self.stop)
+    }
+}
+
+/// A bare dispatcher limited per call (`dispatch_with_limit`), for hosts and tests without the
+/// composed runtime. It checks the mode limit but not the link fence.
+pub struct LimitedCommands {
     pub services: Arc<ThreadManagementServices>,
     pub dispatcher: Dispatcher,
     pub stop: Option<Arc<ThreadStopService>>,
     pub attachments: Option<Arc<dyn AttachmentBackend>>,
+}
+impl CallerCommandSource for LimitedCommands {
+    fn threads(&self, caller: CommandCaller) -> ThreadManagementService {
+        let s = &self.services;
+        ThreadManagementService::new(ThreadManagementServices {
+            reader: s.reader.clone(),
+            dispatcher: self.dispatcher(caller),
+            committer: s.committer.clone(),
+            database: s.database.clone(),
+            settings: s.settings.clone(),
+            hydrator: s.hydrator.clone(),
+            worktree_restore: s.worktree_restore.clone(),
+            signals: s.signals.clone(),
+            clock: s.clock.clone(),
+        })
+    }
+    fn dispatcher(&self, caller: CommandCaller) -> Arc<dyn CommandDispatcher> {
+        Arc::new(LimitedDispatcher {
+            dispatcher: self.dispatcher.clone(),
+            limit: caller.limit,
+        })
+    }
+    fn intake(&self, caller: CommandCaller) -> Option<ThreadMessageIntake> {
+        Some(ThreadMessageIntake {
+            threads: self.threads(caller),
+            launches: None,
+            attachments: self.attachments.clone()?,
+            projections: self.services.reader.clone(),
+        })
+    }
+    fn stop(&self) -> Option<&ThreadStopService> {
+        self.stop.as_deref()
+    }
+}
+
+/// `CommandCaller` for this call: the calling thread, its limits, and the link that fences it
+/// (only a link paired below full access fences).
+pub fn command_caller(context: &CallContext) -> Result<CommandCaller> {
+    let link_fence = context
+        .link_origin
+        .as_ref()
+        .filter(|origin| origin.access != ClientAccess::FullAccess)
+        .map(|origin| {
+            decoded(json!({"sessionId": origin.session_id, "label": origin.label, "access": origin.access}))
+        })
+        .transpose()?;
+    Ok(CommandCaller {
+        thread_id: context.scope.thread.as_ref().map(|t| t.thread_id.clone()),
+        limit: modes(context),
+        link_fence,
+    })
 }
 
 #[async_trait]
@@ -40,16 +127,16 @@ impl crate::services::AttachmentService for OrchestrationAdapter {
         context: CallContext,
         input: DecodedInput,
     ) -> Result<Value> {
-        use t3_orchestration::ports::runs_ingestion::{
-            attachment_claims::attachment_is_pending_upload,
-            thread_message_intake::ThreadMessageIntake,
-        };
-        let backend = self.attachments.as_ref().ok_or_else(|| {
-            not_available(
-                "t3_thread_send_attachments",
-                "AttachmentBackend::claim_pending",
-            )
-        })?;
+        use t3_orchestration::ports::runs_ingestion::attachment_claims::attachment_is_pending_upload;
+        let intake = self
+            .commands
+            .intake(command_caller(&context)?)
+            .ok_or_else(|| {
+                not_available(
+                    "t3_thread_send_attachments",
+                    "AttachmentBackend::claim_pending",
+                )
+            })?;
         let input = input.into_value();
         let thread = target(&context, &input)?;
         let records = self
@@ -77,12 +164,6 @@ impl crate::services::AttachmentService for OrchestrationAdapter {
             *attachment=stored.iter().rev().find(|a|a["id"]==value["id"]).cloned().cloned().map(decoded).transpose()?.ok_or_else(||McpError::failure("invalid_request","Attachments must be pending uploads or already belong to the target thread."))?;
         }
         let id = command_id();
-        let intake = ThreadMessageIntake {
-            threads: self.management(&context),
-            launches: None,
-            attachments: backend.clone(),
-            projections: self.services.reader.clone(),
-        };
         let result = intake
             .send_to_thread(SendInput {
                 project_id: decoded(records["thread"]["projectId"].clone())?,
@@ -119,7 +200,29 @@ fn failure(error: t3_orchestration::error::Error) -> McpError {
         t3_orchestration::error::Error::Rejected { reason, .. } => {
             McpError::failure("orchestration_error", reason)
         }
+        t3_orchestration::error::Error::CallerRefused { refusal, .. } => caller_refused(&refusal),
         _ => McpError::unavailable(),
+    }
+}
+
+/// TypeScript's codes and texts for a refusal under the command lock: a target that rose above the
+/// caller while the call ran is `escalationDenied` (McpToolAccess.ts); the rest keep the
+/// runtime's text.
+fn caller_refused(refusal: &t3_orchestration::error::CallerRefusal) -> McpError {
+    match refusal {
+        t3_orchestration::error::CallerRefusal::AboveModeLimit {
+            thread_id,
+            runtime_mode,
+            interaction_mode,
+            ..
+        } => McpError::failure(
+            refusal.code(),
+            format!(
+                "Thread {} now runs in {runtime_mode}/{interaction_mode} mode, above this caller's. Its user changed it while this call ran.",
+                thread_id.0
+            ),
+        ),
+        refusal => McpError::failure(refusal.code(), refusal.to_string()),
     }
 }
 fn command_id() -> CommandId {
@@ -180,6 +283,33 @@ fn link(context: &CallContext, id: &ThreadId, title: &str) -> String {
     )
 }
 
+/// A bare `dispatch_with_limit` reports a target that rose above the limit as text; the composed
+/// runtime returns the typed `CallerRefused`, which `failure` maps.
+fn legacy_mode_refusal(context: &CallContext, error: t3_orchestration::error::Error) -> McpError {
+    if let t3_orchestration::error::Error::Rejected { reason, .. } = &error
+        && let Some(rest) = reason.split(" now runs in ").nth(1)
+        && let Some((runtime, interaction)) = rest
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.trim_end_matches(',').split_once('/'))
+        && let (Ok(runtime_mode), Ok(interaction_mode)) = (
+            serde_json::from_value(json!(runtime)),
+            serde_json::from_value(json!(interaction)),
+        )
+    {
+        return crate::access::check_modes(
+            context.limits,
+            Modes {
+                runtime_mode,
+                interaction_mode,
+            },
+        )
+        .err()
+        .unwrap_or_else(|| failure(error));
+    }
+    failure(error)
+}
+
 struct LimitedDispatcher {
     dispatcher: Dispatcher,
     limit: DispatchModes,
@@ -204,26 +334,11 @@ impl CommandDispatcher for LimitedDispatcher {
 }
 
 impl OrchestrationAdapter {
-    fn management(&self, context: &CallContext) -> ThreadManagementService {
-        let s = &self.services;
-        ThreadManagementService::new(ThreadManagementServices {
-            reader: s.reader.clone(),
-            dispatcher: Arc::new(LimitedDispatcher {
-                dispatcher: self.dispatcher.clone(),
-                limit: modes(context),
-            }),
-            committer: s.committer.clone(),
-            database: s.database.clone(),
-            settings: s.settings.clone(),
-            hydrator: s.hydrator.clone(),
-            worktree_restore: s.worktree_restore.clone(),
-            signals: s.signals.clone(),
-            clock: s.clock.clone(),
-        })
+    fn management(&self, context: &CallContext) -> Result<ThreadManagementService> {
+        Ok(self.commands.threads(command_caller(context)?))
     }
     pub async fn shell(&self, id: ThreadId) -> Result<Value> {
         let shell = self
-            .services
             .reader
             .shell(id)
             .await
@@ -239,7 +354,7 @@ impl OrchestrationAdapter {
         fields: Vec<RecordKind>,
     ) -> Result<Value> {
         encoded(
-            self.management(context)
+            self.management(context)?
                 .records(target(context, input)?, fields, RecordFilter::default())
                 .await
                 .map_err(failure)?,
@@ -250,33 +365,11 @@ impl OrchestrationAdapter {
             command["commandId"] = encoded(command_id())?;
         }
         let receipt = self
-            .dispatcher
-            .dispatch_with_limit(decoded(command)?, Some(modes(context)))
+            .commands
+            .dispatcher(command_caller(context)?)
+            .dispatch(decoded(command)?)
             .await
-            .map_err(|error| {
-                if let t3_orchestration::error::Error::Rejected { reason, .. } = &error
-                    && let Some(rest) = reason.split(" now runs in ").nth(1)
-                    && let Some((runtime, interaction)) = rest
-                        .split_whitespace()
-                        .next()
-                        .and_then(|v| v.trim_end_matches(',').split_once('/'))
-                    && let (Ok(runtime_mode), Ok(interaction_mode)) = (
-                        serde_json::from_value(json!(runtime)),
-                        serde_json::from_value(json!(interaction)),
-                    )
-                {
-                    return crate::access::check_modes(
-                        context.limits,
-                        Modes {
-                            runtime_mode,
-                            interaction_mode,
-                        },
-                    )
-                    .err()
-                    .unwrap_or_else(|| failure(error));
-                }
-                failure(error)
-            })?;
+            .map_err(|error| legacy_mode_refusal(context, error))?;
         Ok(json!({"sequence":receipt.result_sequence}))
     }
     pub fn install(self: Arc<Self>, services: &mut Services) {
@@ -289,7 +382,7 @@ impl OrchestrationAdapter {
 #[async_trait]
 impl AccessStore for OrchestrationAdapter {
     async fn thread_shell(&self, id: &ThreadId) -> Result<Option<ThreadShell>> {
-        projection_shell(self.services.reader.as_ref(), id).await
+        projection_shell(self.reader.as_ref(), id).await
     }
 }
 
@@ -366,7 +459,7 @@ impl OrchestratorService for OrchestrationAdapter {
             component(&key)
         ));
         let result = self
-            .management(&context)
+            .management(&context)?
             .send_to_thread(SendInput {
                 project_id: decoded(shell["projectId"].clone())?,
                 command_id: command.clone(),
@@ -412,7 +505,7 @@ impl OrchestratorService for OrchestrationAdapter {
             .unwrap_or(600_000.0)
             .clamp(1.0, 3_600_000.0);
         let result = self
-            .management(&context)
+            .management(&context)?
             .wait_for_thread(
                 WaitInput {
                     project_id: decoded(shell["projectId"].clone())?,
@@ -455,7 +548,7 @@ impl OrchestratorService for OrchestrationAdapter {
             |reason| format!("Stopped by an agent: {reason}"),
         );
         if input["stop"] == true {
-            let management = self.management(&context);
+            let management = self.management(&context)?;
             management
                 .stop_thread(id.clone(), thread.clone(), Some(reason.clone()), true)
                 .await
@@ -466,7 +559,6 @@ impl OrchestratorService for OrchestrationAdapter {
                 .map_err(failure)?;
             let target = thread.clone();
             let events = self
-                .services
                 .database
                 .read(move |db| {
                     t3_orchestration::stores::event_store::EventStore::new().read(
@@ -500,7 +592,7 @@ impl OrchestratorService for OrchestrationAdapter {
             );
         }
         let result = self
-            .management(&context)
+            .management(&context)?
             .interrupt_thread(
                 decoded(shell["projectId"].clone())?,
                 thread.clone(),
@@ -546,8 +638,8 @@ impl OrchestratorService for OrchestrationAdapter {
     }
     async fn t3_workflow_stop(&self, context: CallContext, input: DecodedInput) -> Result<Value> {
         let stop = self
-            .stop
-            .as_ref()
+            .commands
+            .stop()
             .ok_or_else(|| not_available("t3_workflow_stop", "ThreadStopService::stop_workflow"))?;
         let mut input = input.into_value();
         input["threadId"] = encoded(target(&context, &input)?)?;
@@ -558,7 +650,7 @@ impl OrchestratorService for OrchestrationAdapter {
         Ok(json!({}))
     }
     async fn t3_background_wait(&self, context: CallContext, input: DecodedInput) -> Result<Value> {
-        let stop = self.stop.as_ref().ok_or_else(|| {
+        let stop = self.commands.stop().ok_or_else(|| {
             not_available(
                 "t3_background_wait",
                 "ThreadStopService::await_background_tasks",
@@ -696,7 +788,7 @@ impl ThreadService for OrchestrationAdapter {
         let action = input["action"].as_str().ok_or(McpError::Internal)?;
         if matches!(action, "list" | "read") {
             let projection = self
-                .management(&context)
+                .management(&context)?
                 .records(
                     target(&context, &input)?,
                     vec![RecordKind::Runs, RecordKind::Messages],
@@ -779,7 +871,6 @@ impl ProjectService for OrchestrationAdapter {
     async fn t3_project_read(&self, _context: CallContext, input: DecodedInput) -> Result<Value> {
         let id: ProjectId = decoded(required(input.value(), "projectId")?)?;
         let project = self
-            .services
             .database
             .read(move |db| t3_orchestration::stores::projects::get(db, &id, false))
             .await
@@ -789,7 +880,6 @@ impl ProjectService for OrchestrationAdapter {
     }
     async fn t3_project_list(&self, _context: CallContext, input: DecodedInput) -> Result<Value> {
         let projects = self
-            .services
             .database
             .read(|db| t3_orchestration::stores::projects::list(db, None, false))
             .await

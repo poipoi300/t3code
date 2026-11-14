@@ -74,28 +74,42 @@ fn adapter() -> Arc<OrchestrationAdapter> {
         },
         None,
     );
+    let store = database.stores.clone();
     Arc::new(OrchestrationAdapter {
-        services: Arc::new(ThreadManagementServices {
-            reader,
-            dispatcher: Arc::new(dispatcher.clone()),
-            committer: sink.clone(),
-            database: database.stores,
-            settings: Arc::new(FakeSettingsService::default()),
-            hydrator: Arc::new(NoLegacyTranscript),
-            worktree_restore: Arc::new(
-                t3_orchestration::testing::FakeThreadWorktreeRestore::default(),
-            ),
-            signals: sink.signals(),
-            clock,
+        reader: reader.clone(),
+        database: store,
+        commands: Arc::new(t3_mcp::adapters::orchestration::LimitedCommands {
+            services: Arc::new(ThreadManagementServices {
+                reader,
+                dispatcher: Arc::new(dispatcher.clone()),
+                committer: sink.clone(),
+                database: database.stores,
+                settings: Arc::new(FakeSettingsService::default()),
+                hydrator: Arc::new(NoLegacyTranscript),
+                worktree_restore: Arc::new(
+                    t3_orchestration::testing::FakeThreadWorktreeRestore::default(),
+                ),
+                signals: sink.signals(),
+                clock,
+            }),
+            dispatcher,
+            stop: None,
+            attachments: None,
         }),
-        dispatcher,
-        stop: None,
-        attachments: None,
     })
 }
 async fn dispatch(adapter: &OrchestrationAdapter, value: Value) {
+    // Setup acts as a full-access user, so no mode limit applies.
     adapter
-        .dispatcher
+        .commands
+        .dispatcher(t3_orchestration::composition::CommandCaller {
+            thread_id: None,
+            limit: t3_orchestration::ports::decisions::dispatch_mode_limit::DispatchModes {
+                runtime_mode: t3_contracts::provider_policy::RuntimeMode::FullAccess,
+                interaction_mode: t3_contracts::provider_policy::ProviderInteractionMode::Default,
+            },
+            link_fence: None,
+        })
         .dispatch(serde_json::from_value(value).unwrap())
         .await
         .unwrap();
@@ -225,7 +239,7 @@ async fn management_rename_refuses_runtime_and_interaction_raises_after_admissio
 async fn native_project_rows_are_mapped_to_public_project_contracts() {
     let adapter = adapter();
     create(&adapter, "caller").await;
-    adapter.services.database.transaction(|db| {
+    adapter.database.transaction(|db| {
         let row=serde_json::from_value(json!({"projectId":"project","title":"Project","hasCustomTitle":true,"workspaceRoot":"C:/workspace","defaultModelSelection":null,"defaultThreadEnvMode":null,"autoPull":false,"faviconPath":null,"projectIcon":null,"scripts":[],"pinnedAt":null,"archivedAt":null,"createdAt":TEST_TIME,"updatedAt":TEST_TIME,"deletedAt":null}))?;
         t3_orchestration::stores::projects::upsert(db,&row)
     }).await.unwrap();

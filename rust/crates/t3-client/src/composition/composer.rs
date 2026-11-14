@@ -195,6 +195,35 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         ComposerActionsSession::new(self.clone(), key.clone())
     }
 
+    pub fn composer_thread_flags(
+        &self,
+    ) -> Rc<crate::thread_views::composer::thread_flags::ComposerThreadFlags> {
+        self.inner.composer_thread_flags.clone()
+    }
+
+    pub fn creation_source(&self) -> t3_contracts::orchestration_v2::OrchestrationV2CreationSource {
+        self.inner.source.clone()
+    }
+
+    pub(crate) fn now_epoch_ms(&self) -> u64 {
+        self.inner.platform.now_epoch_ms()
+    }
+
+    /// `useComposerResume.onResume` (thread_views/composer/resume.rs).
+    pub fn resume_thread(&self, key: &ThreadKey) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        let runtime = self.clone();
+        let key = key.clone();
+        async move {
+            crate::thread_views::composer::resume::resume_thread(
+                &runtime,
+                &runtime.inner.platform,
+                &key,
+            )
+            .await
+        }
+        .boxed_local()
+    }
+
     pub fn interrupt_thread(
         &self,
         key: &ThreadKey,

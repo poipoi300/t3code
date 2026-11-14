@@ -29,7 +29,6 @@ impl WorktreeService for WorktreeAdapter {
         let project_id = decoded(shell["projectId"].clone())?;
         let project = self
             .orchestration
-            .services
             .database
             .read(move |db| t3_orchestration::stores::projects::get(db, &project_id, false))
             .await
