@@ -49,6 +49,11 @@ pub struct OpenReport {
     /// `client-storage.sqlite.corrupt-<seconds>`, deleted by the next open) and a new one
     /// started.
     pub recreated_database: bool,
+    /// Secure records sealed under a key the OS store could not give back (missing, or
+    /// unreadable); kept unreadable under that key's id, and reopened when it reads again.
+    pub retained_secure_records: usize,
+    /// Records kept that way on an earlier open, reopened now that their key read again.
+    pub recovered_secure_records: usize,
 }
 
 /// SQLite reports a file that is damaged rather than busy or unreachable.

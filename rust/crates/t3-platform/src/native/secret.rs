@@ -23,6 +23,10 @@ pub enum SecretStoreError {
 pub trait SecretKeyStore: Send + Sync + 'static {
     fn load(&self, id: &str) -> Result<Option<Zeroizing<Vec<u8>>>, SecretStoreError>;
     fn store(&self, id: &str, secret: &[u8]) -> Result<(), SecretStoreError>;
+    /// Removes the key stored under `id`; an id with no key is success.
+    fn delete(&self, _id: &str) -> Result<(), SecretStoreError> {
+        Ok(())
+    }
     /// Sets aside a key that `load` reported `Corrupt`, before a new one is stored under the
     /// same id, so a misread key is kept rather than overwritten.
     fn retire(&self, _id: &str) -> Result<(), SecretStoreError> {

@@ -29,6 +29,9 @@ impl t3_platform::SecretKeyStore for SharedSecrets {
     fn store(&self, id: &str, secret: &[u8]) -> Result<(), t3_platform::SecretStoreError> {
         self.0.store(id, secret)
     }
+    fn delete(&self, id: &str) -> Result<(), t3_platform::SecretStoreError> {
+        self.0.delete(id)
+    }
 }
 
 fn config(dir: &std::path::Path, secrets: &Arc<EphemeralSecretStore>) -> NativeConfig {
@@ -932,13 +935,11 @@ async fn damage_past_the_file_header_is_moved_aside_too() {
     );
 }
 
-/// A key store that fails once with `Unavailable`, or reports its key unreadable, and records
-/// what it was asked to retire.
+/// A key store that fails once with `Unavailable`, or reports its key unreadable once.
 struct FlakySecrets {
     inner: Arc<EphemeralSecretStore>,
     unavailable_once: std::sync::atomic::AtomicBool,
     corrupt_once: std::sync::atomic::AtomicBool,
-    retired: Arc<std::sync::Mutex<Vec<String>>>,
 }
 impl t3_platform::SecretKeyStore for FlakySecrets {
     fn load(
@@ -947,9 +948,7 @@ impl t3_platform::SecretKeyStore for FlakySecrets {
     ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, t3_platform::SecretStoreError> {
         use std::sync::atomic::Ordering::SeqCst;
         if self.unavailable_once.swap(false, SeqCst) {
-            return Err(t3_platform::SecretStoreError::Unavailable(
-                "keystore busy".into(),
-            ));
+            return Err(t3_platform::SecretStoreError::Unavailable("keystore busy".into()));
         }
         if self.corrupt_once.swap(false, SeqCst) {
             return Err(t3_platform::SecretStoreError::Corrupt);
@@ -959,9 +958,8 @@ impl t3_platform::SecretKeyStore for FlakySecrets {
     fn store(&self, id: &str, secret: &[u8]) -> Result<(), t3_platform::SecretStoreError> {
         self.inner.store(id, secret)
     }
-    fn retire(&self, id: &str) -> Result<(), t3_platform::SecretStoreError> {
-        self.retired.lock().unwrap().push(id.to_owned());
-        Ok(())
+    fn delete(&self, id: &str) -> Result<(), t3_platform::SecretStoreError> {
+        self.inner.delete(id)
     }
 }
 
@@ -975,13 +973,11 @@ async fn a_key_store_that_is_unavailable_once_keeps_every_record_for_the_next_op
         .await
         .unwrap();
     drop(platform);
-    let retired = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut flaky = config(dir.path(), &secrets);
     flaky.secrets = Box::new(FlakySecrets {
         inner: secrets.clone(),
         unavailable_once: true.into(),
         corrupt_once: false.into(),
-        retired: retired.clone(),
     });
     assert!(
         NativePlatform::open(flaky).await.is_err(),
@@ -999,24 +995,263 @@ async fn a_key_store_that_is_unavailable_once_keeps_every_record_for_the_next_op
             .as_deref(),
         Some(&b"token"[..])
     );
-    assert!(retired.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn an_unreadable_key_is_set_aside_before_a_new_one_replaces_it() {
+async fn an_unreadable_key_keeps_its_records_until_it_reads_again() {
+    // Second re-review A2/C1: a misread key (a transient Keystore error classed as permanent)
+    // must not cost the records; its entry is never overwritten, and its rows come back.
     let (platform, dir, secrets) = platform().await;
+    let secure = key("connection-credential", "c");
+    platform
+        .write(StorageArea::Secure, vec![put(&secure, b"token")])
+        .await
+        .unwrap();
     drop(platform);
-    let retired = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut damaged = config(dir.path(), &secrets);
     damaged.secrets = Box::new(FlakySecrets {
         inner: secrets.clone(),
         unavailable_once: false.into(),
         corrupt_once: true.into(),
-        retired: retired.clone(),
     });
-    let reopened = NativePlatform::open(damaged).await.unwrap();
-    assert!(reopened.open_report().replaced_unreadable_key);
-    assert_eq!(retired.lock().unwrap().len(), 1, "retired, not overwritten");
+    let rekeyed = NativePlatform::open(damaged).await.unwrap();
+    let report = rekeyed.open_report();
+    assert!(report.replaced_unreadable_key);
+    assert_eq!(report.retained_secure_records, 1);
+    assert_eq!(report.discarded_secure_records, 0);
+    assert_eq!(rekeyed.get(StorageArea::Secure, secure.clone()).await.unwrap(), None);
+    drop(rekeyed);
+    let reopened = NativePlatform::open(config(dir.path(), &secrets))
+        .await
+        .unwrap();
+    assert_eq!(reopened.open_report().recovered_secure_records, 1);
+    assert_eq!(
+        reopened
+            .get(StorageArea::Secure, secure)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(&b"token"[..])
+    );
+}
+
+/// Hides the keys it is told to, as a roaming credential or a locked collection does.
+struct HidingSecrets {
+    inner: Arc<EphemeralSecretStore>,
+    hidden: Arc<std::sync::Mutex<Vec<String>>>,
+    deleted: Arc<std::sync::Mutex<Vec<String>>>,
+}
+impl t3_platform::SecretKeyStore for HidingSecrets {
+    fn load(
+        &self,
+        id: &str,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, t3_platform::SecretStoreError> {
+        if self.hidden.lock().unwrap().iter().any(|hidden| hidden == id) {
+            return Ok(None);
+        }
+        self.inner.load(id)
+    }
+    fn store(&self, id: &str, secret: &[u8]) -> Result<(), t3_platform::SecretStoreError> {
+        self.inner.store(id, secret)
+    }
+    fn delete(&self, id: &str) -> Result<(), t3_platform::SecretStoreError> {
+        self.deleted.lock().unwrap().push(id.to_owned());
+        self.inner.delete(id)
+    }
+}
+
+#[tokio::test]
+async fn a_missing_key_keeps_its_records_for_when_it_returns() {
+    // Second re-review C1: a key that is missing now (a roaming credential, a collection still
+    // unlocking) is not proof it is gone; its records wait under a new key's id.
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(EphemeralSecretStore::default());
+    let hidden = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let deleted = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hiding = || -> NativeConfig {
+        let mut config = config(dir.path(), &secrets);
+        config.secrets = Box::new(HidingSecrets {
+            inner: secrets.clone(),
+            hidden: hidden.clone(),
+            deleted: deleted.clone(),
+        });
+        config
+    };
+    let secure = key("connection-credential", "c");
+    let platform = NativePlatform::open(hiding()).await.unwrap();
+    platform
+        .write(StorageArea::Secure, vec![put(&secure, b"token")])
+        .await
+        .unwrap();
+    drop(platform);
+    let first_id = {
+        let connection =
+            rusqlite::Connection::open(dir.path().join("client-storage.sqlite")).unwrap();
+        connection
+            .query_row("SELECT value FROM meta WHERE name = 'secure-key-id'", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+    };
+    hidden.lock().unwrap().push(first_id.clone());
+    let while_missing = NativePlatform::open(hiding()).await.unwrap();
+    assert_eq!(while_missing.open_report().retained_secure_records, 1);
+    assert_eq!(
+        while_missing.get(StorageArea::Secure, secure.clone()).await.unwrap(),
+        None
+    );
+    let newer = key("connection-credential", "d");
+    while_missing
+        .write(StorageArea::Secure, vec![put(&newer, b"newer")])
+        .await
+        .unwrap();
+    drop(while_missing);
+    assert!(secrets.load(&first_id).unwrap().is_some(), "never overwritten");
+    hidden.lock().unwrap().clear();
+    let returned = NativePlatform::open(hiding()).await.unwrap();
+    assert_eq!(returned.open_report().recovered_secure_records, 1);
+    for (record, value) in [(secure, &b"token"[..]), (newer, &b"newer"[..])] {
+        assert_eq!(
+            returned
+                .get(StorageArea::Secure, record)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(value)
+        );
+    }
+    assert_eq!(*deleted.lock().unwrap(), vec![first_id], "the recovered entry goes");
+}
+
+#[tokio::test]
+async fn two_instances_opening_a_new_directory_share_one_key() {
+    // Second re-review A4: both read "no key" unlocked; only one may create it.
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(EphemeralSecretStore::default());
+    let reads = Arc::new(std::sync::Barrier::new(2));
+    let opened = Arc::new(std::sync::Barrier::new(2));
+    let threads: Vec<_> = ["a", "b"]
+        .into_iter()
+        .map(|name| {
+            let (dir, secrets) = (dir.path().to_owned(), secrets.clone());
+            let (reads, opened) = (reads.clone(), opened.clone());
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async move {
+                    let mut config = config(&dir, &secrets);
+                    config.secrets = Box::new(BarrierSecrets {
+                        inner: secrets.clone(),
+                        first_read: Some(reads).into(),
+                    });
+                    let platform = NativePlatform::open(config).await.unwrap();
+                    opened.wait();
+                    platform
+                        .write(
+                            StorageArea::Secure,
+                            vec![put(&key("connection-credential", name), name.as_bytes())],
+                        )
+                        .await
+                        .unwrap();
+                });
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    let platform = NativePlatform::open(config(dir.path(), &secrets))
+        .await
+        .unwrap();
+    for name in ["a", "b"] {
+        assert_eq!(
+            platform
+                .get(StorageArea::Secure, key("connection-credential", name))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(name.as_bytes()),
+            "{name}'s credential"
+        );
+    }
+}
+
+/// Holds each instance's first key read until both have read, as two instances started together.
+struct BarrierSecrets {
+    inner: Arc<EphemeralSecretStore>,
+    first_read: std::sync::Mutex<Option<Arc<std::sync::Barrier>>>,
+}
+impl t3_platform::SecretKeyStore for BarrierSecrets {
+    fn load(
+        &self,
+        id: &str,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, t3_platform::SecretStoreError> {
+        let loaded = self.inner.load(id);
+        if let Some(barrier) = self.first_read.lock().unwrap().take() {
+            barrier.wait();
+        }
+        loaded
+    }
+    fn store(&self, id: &str, secret: &[u8]) -> Result<(), t3_platform::SecretStoreError> {
+        self.inner.store(id, secret)
+    }
+}
+
+#[tokio::test]
+async fn a_leftover_that_cannot_be_deleted_does_not_stop_the_open() {
+    // Second re-review C3: a directory of that name, or a file another program holds.
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(EphemeralSecretStore::default());
+    std::fs::create_dir(dir.path().join("client-storage.sqlite.corrupt-1")).unwrap();
+    assert!(NativePlatform::open(config(dir.path(), &secrets)).await.is_ok());
+}
+
+#[tokio::test]
+async fn deleting_a_moved_aside_database_deletes_its_key_too() {
+    // Second re-review N6: each recreate otherwise leaves one more entry in the OS store.
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(EphemeralSecretStore::default());
+    let deleted = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tracked = || -> NativeConfig {
+        let mut config = config(dir.path(), &secrets);
+        config.secrets = Box::new(HidingSecrets {
+            inner: secrets.clone(),
+            hidden: Default::default(),
+            deleted: deleted.clone(),
+        });
+        config
+    };
+    let platform = NativePlatform::open(tracked()).await.unwrap();
+    let writes = (0..200)
+        .map(|index| put(&key("thread", &format!("t{index}")), &[7_u8; 1024]))
+        .collect();
+    platform.write(StorageArea::Ordinary, writes).await.unwrap();
+    drop(platform);
+    let path = dir.path().join("client-storage.sqlite");
+    let old_id = {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        connection
+            .query_row("SELECT value FROM meta WHERE name = 'secure-key-id'", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+    };
+    // Damage the records' pages at the end of the file; the key id stays readable.
+    let mut bytes = std::fs::read(&path).unwrap();
+    let length = bytes.len();
+    bytes[length - 4096 * 4..].fill(0xA5);
+    std::fs::write(&path, bytes).unwrap();
+    let recreated = NativePlatform::open(tracked()).await.unwrap();
+    assert!(recreated.open_report().recreated_database);
+    assert!(deleted.lock().unwrap().is_empty(), "kept while its copy exists");
+    drop(recreated);
+    drop(NativePlatform::open(tracked()).await.unwrap());
+    assert_eq!(*deleted.lock().unwrap(), vec![old_id]);
 }
 
 #[tokio::test]
@@ -1073,17 +1308,20 @@ impl t3_platform::SecretKeyStore for RecordingSecrets {
         &self,
         id: &str,
     ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, t3_platform::SecretStoreError> {
-        self.inner.load(id)
-    }
-    fn store(&self, id: &str, secret: &[u8]) -> Result<(), t3_platform::SecretStoreError> {
-        self.stored_ids.lock().unwrap().push(id.to_owned());
-        if let Some(path) = &self.database {
-            // Another process taking the write lock while the OS store may be prompting.
+        // The first read of each open: another process taking the write lock while the OS
+        // store may be prompting.
+        if let Some(path) = &self.database
+            && self.lock_free.lock().unwrap().is_none()
+        {
             let other = rusqlite::Connection::open(path).unwrap();
             other.busy_timeout(Duration::from_millis(0)).unwrap();
             let free = other.execute_batch("BEGIN IMMEDIATE; COMMIT;").is_ok();
             *self.lock_free.lock().unwrap() = Some(free);
         }
+        self.inner.load(id)
+    }
+    fn store(&self, id: &str, secret: &[u8]) -> Result<(), t3_platform::SecretStoreError> {
+        self.stored_ids.lock().unwrap().push(id.to_owned());
         if self
             .fail_first_store
             .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -1097,7 +1335,7 @@ impl t3_platform::SecretKeyStore for RecordingSecrets {
 }
 
 #[tokio::test]
-async fn a_failed_first_open_reuses_its_key_id_and_the_os_store_runs_without_the_database_lock() {
+async fn a_failed_first_open_reuses_its_key_id_and_the_os_store_is_read_without_the_database_lock() {
     // L7: the key id is committed before the secret is stored, and no prompt holds the lock.
     let dir = tempfile::tempdir().unwrap();
     let secrets = Arc::new(EphemeralSecretStore::default());
@@ -1116,7 +1354,7 @@ async fn a_failed_first_open_reuses_its_key_id_and_the_os_store_runs_without_the
     assert_eq!(
         *lock_free.lock().unwrap(),
         Some(true),
-        "no write lock during the OS store"
+        "no write lock while the OS store is read"
     );
     let mut second = config(dir.path(), &secrets);
     second.secrets = Box::new(recording(false));
