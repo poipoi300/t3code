@@ -35,7 +35,7 @@ fn on_a_desktop_the_sidebar_stays_beside_the_thread_and_a_sent_message_streams_a
     );
     app.type_text("id:composer-editor", "Ship it everywhere")
         .expect("type");
-    app.press("role:button[Send message]").expect("send");
+    app.press("role:button[Submit message]").expect("send");
     app.wait_for("Ship it everywhere")
         .expect("user message in the timeline");
     app.wait_for(REPLY_TAIL).expect("streamed reply completes");
