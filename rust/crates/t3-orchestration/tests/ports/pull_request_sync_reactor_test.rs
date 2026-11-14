@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use super::{
     orchestrator_receipt_race_test::Harness,
     thread_management_service_test::{Recorder, sample},
@@ -382,12 +384,13 @@ async fn sync_stack_failure_retries_and_links_siblings_before_snapshot_without_r
         json!({"kind":"native","id":"stack","number":1,"url":"https://github.com/owner/repo/stack/1","base":"main","layers":[{"number":42,"headBranch":"feature","state":"open"},{"number":43,"headBranch":"dismissed","state":"open"},{"number":44,"headBranch":"new","state":"open"}]}),
     )?);
     reactor.sweep().await?;
-    let commands = recorder.commands.lock().unwrap();
-    assert_eq!(commands.len(), 2);
-    assert_eq!(commands[0]["type"], "thread.pull-request.link");
-    assert_eq!(commands[0]["number"], 44);
-    assert_eq!(commands[1]["type"], "thread.pull-request-link.sync");
-    drop(commands);
+    {
+        let commands = recorder.commands.lock().unwrap();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0]["type"], "thread.pull-request.link");
+        assert_eq!(commands[0]["number"], 44);
+        assert_eq!(commands[1]["type"], "thread.pull-request-link.sync");
+    }
     assert_eq!(host.calls.load(Ordering::SeqCst), 2);
     assert_eq!(host.stack_calls.load(Ordering::SeqCst), 2);
     assert_eq!(host.invalidations.load(Ordering::SeqCst), 1);
@@ -444,20 +447,21 @@ async fn sync_command_observations_use_stable_receipts_reopen_checks_and_refresh
     }
     reactor.drain().await;
     assert_eq!(host.calls.load(Ordering::SeqCst), 1);
-    let commands = recorder.commands.lock().unwrap();
-    let creates: Vec<_> = commands
-        .iter()
-        .filter(|cmd| cmd["source"] == "created")
-        .collect();
-    assert_eq!(creates.len(), 2);
-    assert_eq!(creates[0]["commandId"], creates[1]["commandId"]);
-    let pushes: Vec<_> = commands
-        .iter()
-        .filter(|cmd| cmd["type"] == "thread.pull-request-watch.checks-reopen")
-        .collect();
-    assert_eq!(pushes.len(), 2);
-    assert_eq!(pushes[0]["commandId"], pushes[1]["commandId"]);
-    drop(commands);
+    {
+        let commands = recorder.commands.lock().unwrap();
+        let creates: Vec<_> = commands
+            .iter()
+            .filter(|cmd| cmd["source"] == "created")
+            .collect();
+        assert_eq!(creates.len(), 2);
+        assert_eq!(creates[0]["commandId"], creates[1]["commandId"]);
+        let pushes: Vec<_> = commands
+            .iter()
+            .filter(|cmd| cmd["type"] == "thread.pull-request-watch.checks-reopen")
+            .collect();
+        assert_eq!(pushes.len(), 2);
+        assert_eq!(pushes[0]["commandId"], pushes[1]["commandId"]);
+    }
     let mut run = super::thread_management_service_test::run("run", 1, "completed");
     run["status"] = json!("completed");
     let event = serde_json::from_value(

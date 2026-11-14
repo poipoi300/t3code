@@ -333,7 +333,31 @@ impl PureDecisionEngine {
             CommandDecision::Create => plan.create()?,
             CommandDecision::GuestShare => plan.guest_share(command)?,
             CommandDecision::ThreadMutation => plan.thread_mutation(&kind)?,
-            CommandDecision::SelectionMutation => plan.selection_mutation(&kind)?,
+            CommandDecision::SelectionMutation => {
+                let continuation =
+                    crate::ports::decisions::orchestrator::metadata_update_continuation(command)?;
+                if continuation.is_some() {
+                    plan.refuse_native_message()?;
+                }
+                plan.selection_mutation(&kind)?;
+                if let Some(continuation) = continuation {
+                    if let Some(thread) = plan
+                        .decision
+                        .events
+                        .iter()
+                        .rev()
+                        .map(stored_value)
+                        .collect::<std::result::Result<Vec<_>, _>>()?
+                        .into_iter()
+                        .find(|event| event["type"] == "thread.metadata-updated")
+                        .map(|event| event["payload"].clone())
+                    {
+                        plan.projection["thread"] = thread;
+                    }
+                    plan.command = stored_value(&continuation)?;
+                    plan.message()?;
+                }
+            }
             CommandDecision::Settlement => plan.settlement(&kind)?,
             CommandDecision::Detach => plan.detach()?,
             CommandDecision::QueueReorder => plan.queue_reorder()?,
@@ -396,6 +420,11 @@ impl PureDecisionEngine {
 pub fn required_records(
     command: &OrchestrationV2ServerCommand,
 ) -> Result<(Vec<RecordKind>, RecordFilter)> {
+    if let Some(continuation) =
+        crate::ports::decisions::orchestrator::metadata_update_continuation(command)?
+    {
+        return required_records(&continuation);
+    }
     let (_, kind, _) = command_identity(command)?;
     let value = stored_value(command)?;
     let mut filter = RecordFilter::default();
@@ -1147,7 +1176,7 @@ impl Plan<'_> {
     ) -> Result<()> {
         use crate::ports::{
             decisions::orchestrator::delegated_task_progress,
-            runs_ingestion::restart_background_note::{delegated_task_result_run, run_outcome},
+            runs_ingestion::restart_background_note::run_outcome,
         };
         let child_value = stored_value(child)?;
         if child_value["thread"]["lineage"]["relationshipToParent"] != "subagent"
@@ -1186,18 +1215,16 @@ impl Plan<'_> {
                 continue;
             }
             let task_id: NodeId = serde_json::from_value(task["id"].clone())?;
-            let own_runs: Vec<_> = child
-                .runs
-                .iter()
-                .filter(|run| {
-                    stored_value(&run.delegated_task_id).ok().as_ref() == Some(&task["id"])
-                })
-                .cloned()
-                .collect();
+            let own_runs =
+                crate::ports::runs_ingestion::restart_background_note::delegated_task_runs(
+                    &child.runs,
+                    &child.messages,
+                    &task_id,
+                )?;
             let run = if own_runs.is_empty() {
                 if original { progress.result_run } else { None }
             } else {
-                delegated_task_result_run(&own_runs, &task_id)
+                crate::ports::runs_ingestion::restart_background_note::delegated_task_result_run_from(&own_runs)
             };
             let Some(run) = run else {
                 continue;
@@ -1212,6 +1239,17 @@ impl Plan<'_> {
                 }
                 _ => continue,
             };
+            if crate::ports::runs_ingestion::restart_background_note::delegated_task_awaits_work(
+                &own_runs,
+                &child.subagents,
+                if cancelled {
+                    &[]
+                } else {
+                    &child.provider_threads
+                },
+            ) {
+                continue;
+            }
             let source_runs = if own_runs.is_empty() {
                 &child.runs
             } else {
@@ -1507,6 +1545,10 @@ impl Plan<'_> {
                 PullRequestWatchWakeState::Unchanged => {}
             }
         }
+        if crate::ports::decisions::orchestrator::follows_current_conversation(&message) {
+            run["modelSelection"] = thread["modelSelection"].clone();
+            run["providerInstanceId"] = thread["modelSelection"]["instanceId"].clone();
+        }
         let mut root = self
             .records("nodes")
             .iter()
@@ -1541,6 +1583,43 @@ impl Plan<'_> {
                     .map(|(_, metadata)| metadata)
             })
             .ok_or(Error::Unsupported("queued start requires adapter metadata"))?;
+        self.native_goal(&message, &run["providerInstanceId"])?;
+        let follows = crate::ports::decisions::orchestrator::follows_current_conversation(&message);
+        let fresh = run["freshContext"] == true;
+        if follows && !fresh {
+            if let Some(current) = self
+                .records("providerThreads")
+                .iter()
+                .find(|candidate| {
+                    candidate["id"] == thread["activeProviderThreadId"]
+                        && candidate["providerInstanceId"] == run["providerInstanceId"]
+                })
+                .or_else(|| {
+                    self.records("providerThreads")
+                        .iter()
+                        .rev()
+                        .find(|candidate| {
+                            candidate["ownerNodeId"].is_null()
+                                && candidate["providerInstanceId"] == run["providerInstanceId"]
+                        })
+                })
+            {
+                owner = current.clone();
+            }
+        }
+        if owner["providerInstanceId"] != run["providerInstanceId"]
+            || fresh && (!owner["firstRunOrdinal"].is_null() || !owner["nativeThreadRef"].is_null())
+        {
+            let provider_thread_id = self.allocate(IdKind::ProviderThread)?;
+            owner = self.new_provider_thread(
+                &provider_thread_id,
+                &metadata.driver.0,
+                &run["modelSelection"],
+                Value::Null,
+                None,
+            );
+        }
+        run["providerThreadId"] = owner["id"].clone();
         let automatic = !self.command["endedRunId"].is_null();
         if self.usage_limit_holds_queue(
             &run["providerInstanceId"],
@@ -1989,7 +2068,12 @@ impl Plan<'_> {
                 "Automatic completion deliveries cannot be promoted to Steer.",
             ));
         }
-        let goal = self.native_goal(&message, &queued["providerInstanceId"])?;
+        let selected = crate::ports::decisions::orchestrator::queued_run_model_selection(
+            self.context.projection.as_ref().ok_or(Error::Stale)?,
+            &serde_json::from_value(queued.clone())?,
+        )?;
+        let selected = stored_value(selected)?;
+        let goal = self.native_goal(&message, &selected["instanceId"])?;
         let target = self
             .records("runs")
             .iter()
@@ -2082,7 +2166,7 @@ impl Plan<'_> {
         self.command = steer;
         let result = self.steer_message(
             &json!({"type":"steer_active","targetRunId":original["targetRunId"]}),
-            &queued["modelSelection"],
+            &selected,
         );
         self.command = original;
         result
@@ -3694,6 +3778,7 @@ impl Plan<'_> {
                     None
                 }
             });
+        let had_target = target.is_some();
         let mut interrupted = false;
         if let Some(run) = &target {
             let saved_command = self.command.clone();
@@ -3733,6 +3818,36 @@ impl Plan<'_> {
                     item["type"] == "run_interrupt_request" && item["runId"] == run["id"]
                 }) {
                     self.signal(&run, None, false, false)?;
+                }
+            }
+            if !had_target {
+                let stale: Vec<_> = self
+                    .records("subagents")
+                    .iter()
+                    .filter(|task| {
+                        task["origin"] == "provider_native"
+                            && !task["runId"].is_null()
+                            && matches!(
+                                task["status"].as_str(),
+                                Some("pending" | "running" | "waiting")
+                            )
+                            && !self.records("turnItems").iter().any(|item| {
+                                item["type"] == "subagent" && item["subagentId"] == task["id"]
+                            })
+                    })
+                    .cloned()
+                    .collect();
+                for task in stale {
+                    self.end_native_task(
+                        &task["id"],
+                        &json!("interrupted"),
+                        &json!(self.context.now),
+                        None,
+                    )?;
+                    self.cascade_native_children(
+                        &task["childThreadId"],
+                        &task["providerInstanceId"],
+                    )?;
                 }
             }
             self.hold_stopped()?;
@@ -4649,6 +4764,7 @@ impl Plan<'_> {
         }
         let starts = if !self.command["notification"].is_null() {
             self.command["notification"]["source"]["kind"] != "monitor"
+                || self.command["notification"]["outcome"] != "updated"
         } else {
             self.command["createdBy"] == "user"
                 || self.command["creationSource"] == "mcp"
@@ -4734,6 +4850,32 @@ impl Plan<'_> {
         }) else {
             return Ok(());
         };
+        if !self.command["notification"].is_null() {
+            let latest = self
+                .records("runs")
+                .iter()
+                .filter(|candidate| {
+                    candidate["id"] != run["id"] && !candidate["delegatedTaskId"].is_null()
+                })
+                .max_by_key(|candidate| candidate["ordinal"].as_u64());
+            if let Some(task) = latest.and_then(|latest| {
+                parent_value["subagents"].as_array()?.iter().find(|task| {
+                    task["id"] == latest["delegatedTaskId"]
+                        && task["origin"] == "app_owned"
+                        && task["childThreadId"] == child["id"]
+                        && task.get("cancelledRunId").is_none()
+                        && task["result"].is_null()
+                })
+            }) {
+                run["delegatedTaskId"] = task["id"].clone();
+                return self.write_record(
+                    "runs",
+                    "run.updated",
+                    run.clone(),
+                    &Self::run_scope(&run),
+                );
+            }
+        }
         let Some(owner) =
             crate::ports::decisions::command_policy::follow_up_owner_run(&parent.runs)
         else {
@@ -4837,11 +4979,8 @@ impl Plan<'_> {
         result
     }
 
-    fn message_inner(&mut self) -> Result<()> {
-        use crate::ports::decisions::command_policy::{
-            is_native_maintenance_command, resolve_message_dispatch_intent,
-        };
-        let mut thread = self.thread()?;
+    fn refuse_native_message(&self) -> Result<()> {
+        let thread = &self.projection["thread"];
         if thread["lineage"]["relationshipToParent"] == "subagent"
             && thread["creationSource"] == "provider"
         {
@@ -4850,6 +4989,15 @@ impl Plan<'_> {
                 "This subagent is run by its provider and cannot take messages. Message the parent thread instead.",
             ));
         }
+        Ok(())
+    }
+
+    fn message_inner(&mut self) -> Result<()> {
+        use crate::ports::decisions::command_policy::{
+            is_native_maintenance_command, resolve_message_dispatch_intent,
+        };
+        let mut thread = self.thread()?;
+        self.refuse_native_message()?;
         if let Some(id) = self.command.get("guestMessageId").cloned() {
             let sent = guest_share_decider::decide_guest_message_send(
                 &serde_json::from_value(thread.clone())?,
@@ -5196,9 +5344,11 @@ impl Plan<'_> {
         if queued
             && self.command.get("modelSelection").is_none()
             && self.command["notification"].is_null()
-            && let Some(tail) = queued_runs_in_delivery_order(projection).last()
+            && !crate::ports::decisions::orchestrator::dispatch_follows_current(&self.command)
         {
-            selection = stored_value(&tail.model_selection)?;
+            selection = stored_value(
+                crate::ports::decisions::orchestrator::queue_tail_model_selection(projection)?,
+            )?;
         }
         let instance: ProviderInstanceId = serde_json::from_value(selection["instanceId"].clone())?;
         let selected = self
@@ -5349,7 +5499,15 @@ impl Plan<'_> {
         } else {
             json!(self.allocate(IdKind::ProviderSession)?)
         };
-        let mut provider = existing.clone().unwrap_or_else(|| json!({"id":provider_thread_id,"driver":driver,"providerInstanceId":selection["instanceId"],"providerSessionId":session_id,"appThreadId":self.thread_id,"ownerNodeId":null,"nativeThreadRef":null,"nativeConversationHeadRef":null,"status":"not_loaded","firstRunOrdinal":if queued {Value::Null} else {json!(ordinal)},"lastRunOrdinal":if queued {Value::Null} else {json!(ordinal)},"handoffIds":[],"forkedFrom":null,"createdAt":self.context.now,"updatedAt":self.context.now}));
+        let mut provider = existing.clone().unwrap_or_else(|| {
+            self.new_provider_thread(
+                &provider_thread_id,
+                &driver,
+                &selection,
+                session_id.clone(),
+                (!queued).then_some(ordinal),
+            )
+        });
         if !queued {
             provider["providerSessionId"] = session_id;
             if provider["firstRunOrdinal"].is_null() {
@@ -5579,6 +5737,13 @@ impl Plan<'_> {
             if let Some(value) = self.command.get(field) {
                 message[field] = value.clone();
             }
+        }
+        if self.command["followsThreadSelection"] == true
+            || self.command["type"] == "message.dispatch"
+                && !self.command["scheduledTaskId"].is_null()
+                && self.command.get("modelSelection").is_none()
+        {
+            message["followsThreadSelection"] = json!(true);
         }
         self.emit("message.updated", message.clone(), Some(scope))?;
         if create_item {
@@ -7012,6 +7177,17 @@ impl Plan<'_> {
         )
     }
 
+    fn new_provider_thread(
+        &self,
+        id: &str,
+        driver: &str,
+        selection: &Value,
+        session: Value,
+        ordinal: Option<u64>,
+    ) -> Value {
+        json!({"id":id,"driver":driver,"providerInstanceId":selection["instanceId"],"providerSessionId":session,"appThreadId":self.thread_id,"ownerNodeId":null,"nativeThreadRef":null,"nativeConversationHeadRef":null,"status":"not_loaded","firstRunOrdinal":ordinal,"lastRunOrdinal":ordinal,"handoffIds":[],"forkedFrom":null,"createdAt":self.context.now,"updatedAt":self.context.now})
+    }
+
     fn root_scope(&self, run: &Value, node: &Value, provider_thread: &Value) -> Result<Value> {
         use crate::ports::checkpoints_forks::checkpoint_service::{
             PrepareRootScope, prepare_root_run_scope,
@@ -7097,14 +7273,9 @@ impl Plan<'_> {
                     .records("messages")
                     .iter()
                     .find(|message| message["id"] == run["userMessageId"]);
-                let follows = message.is_some_and(|message| {
-                    !message["delegatedCompletion"].is_null()
-                        || (message["notification"]["source"]["kind"] == "monitor"
-                            && !(message["createdBy"] == "agent"
-                                && message["creationSource"] == "provider"
-                                && !message["notification"].is_null()
-                                && message["delegatedCompletion"].is_null()))
-                });
+                let follows = message.is_some_and(
+                    crate::ports::decisions::orchestrator::follows_current_conversation,
+                );
                 if follows {
                     thread["modelSelection"]["instanceId"].clone()
                 } else {
@@ -7920,14 +8091,27 @@ impl Plan<'_> {
                         format!("Thread {id} has a pending approval and cannot be snoozed."),
                     ));
                 }
-                if self.records("runs").iter().any(|run| {
-                    run["status"] == "queued"
-                        && !self.records("messages").iter().any(|message| {
-                            message["id"] == run["userMessageId"]
-                                && (message.get("notification").is_some()
-                                    || message.get("delegatedCompletion").is_some())
-                        })
-                }) {
+                let user_runs: Vec<_> = self
+                    .records("runs")
+                    .iter()
+                    .filter(|run| {
+                        run["status"] == "queued"
+                            && !self.records("messages").iter().any(|message| {
+                                message["id"] == run["userMessageId"]
+                                    && (message.get("notification").is_some()
+                                        || message.get("delegatedCompletion").is_some())
+                            })
+                    })
+                    .collect();
+                let latest = crate::ports::decisions::model_switch::latest_executed_run(
+                    &self.context.projection.as_ref().ok_or(Error::Stale)?.runs,
+                );
+                let mut held =
+                    latest.is_some_and(|run| run.status == OrchestrationV2RunStatus::Failed);
+                for run in &user_runs {
+                    held &= self.usage_limit_holds_queue(&run["providerInstanceId"], None)?;
+                }
+                if !user_runs.is_empty() && !held {
                     return Err(rejection(
                         &self.command,
                         format!("Thread {id} has a queued run and cannot be snoozed."),
@@ -8082,24 +8266,25 @@ impl Plan<'_> {
                             ),
                         )
                     })?;
-                if thread["lastVisitedAt"]
+                let forward = thread["lastVisitedAt"]
                     .as_str()
                     .and_then(epoch_millis)
-                    .is_none_or(|previous| visited > previous)
-                {
-                    thread["lastVisitedAt"] = self.command["visitedAt"].clone();
+                    .is_none_or(|previous| visited > previous);
+                if !forward && self.command["opened"] != true {
+                    return Ok(());
                 }
+                let mut payload = json!({"lastVisitedAt":if forward {self.command["visitedAt"].clone()}else{thread["lastVisitedAt"].clone()}});
                 if self.command["opened"] == true {
                     let picked = crate::ports::decisions::orchestrator::picked_search_query(
                         self.command["searchQuery"].as_str().unwrap_or_default(),
                     )?;
-                    thread["opens"] = crate::ports::decisions::orchestrator::record_thread_open(
+                    payload["opens"] = crate::ports::decisions::orchestrator::record_thread_open(
                         &thread["opens"],
                         epoch_millis(&self.context.now.0).ok_or(Error::Stale)?,
                         &picked,
                     );
                 }
-                "thread.visited"
+                return self.emit("thread.visit-recorded", payload, None);
             }
             "thread.title.regeneration.complete" => {
                 if thread["titleRegeneration"]["requestId"] == self.command["requestId"] {
@@ -9033,7 +9218,11 @@ impl Plan<'_> {
         if goal_message.get("attachments").is_none() {
             goal_message["attachments"] = message["attachments"].clone();
         }
-        self.native_goal(&goal_message, &run["providerInstanceId"])?;
+        let selected = crate::ports::decisions::orchestrator::queued_run_model_selection(
+            self.context.projection.as_ref().ok_or(Error::Stale)?,
+            &serde_json::from_value(run.clone())?,
+        )?;
+        self.native_goal(&goal_message, &json!(selected.instance_id))?;
         let item = self
             .records("turnItems")
             .iter()

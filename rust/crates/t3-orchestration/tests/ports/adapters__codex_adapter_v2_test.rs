@@ -154,6 +154,380 @@ fn value(event: &ProviderEvent) -> Option<Value> {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn unconfirmed_stop_keeps_the_turn_open_until_late_completion_or_unload() {
+    for ending in [
+        "late completion",
+        "unload",
+        "session deadline",
+        "failed second Stop",
+        "slow terminal cleanup",
+    ] {
+        let mut h = kit::Harness::open().await.unwrap();
+        h.start("unconfirmed-turn").await.unwrap();
+        if ending == "slow terminal cleanup" {
+            h.peer.write(&json!({"method":"item/started","params":{"threadId":"native-thread","turnId":"unconfirmed-turn","item":native_background_command("slow-command","inProgress")}})).await.unwrap();
+            h.collect_until(|event| {
+                value(event).is_some_and(|item| {
+                    item["type"] == "command_execution" && item["status"] == "running"
+                })
+            })
+            .await
+            .unwrap();
+        }
+        let input = InterruptInput {
+            provider_thread: kit::thread("native-thread").unwrap(),
+            provider_turn_id: ProviderTurnId(mapping::derived(
+                "provider-turn",
+                "native-turn",
+                "unconfirmed-turn",
+            )),
+            request_runtime_restart: false,
+        };
+        let runtime = h.runtime.clone();
+        let stop_input = input.clone();
+        let stopping = tokio::spawn(async move {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                runtime.interrupt_turn(stop_input),
+            )
+            .await
+        });
+        let interrupt = h.peer.read().await.unwrap();
+        assert_eq!(interrupt["method"], "turn/interrupt");
+        assert_eq!(
+            interrupt["params"],
+            json!({"threadId":"native-thread","turnId":"unconfirmed-turn"})
+        );
+        let usage = |used| json!({"method":"thread/tokenUsage/updated","params":{"threadId":"native-thread","turnId":"unconfirmed-turn","tokenUsage":{"total":{"totalTokens":used,"inputTokens":10,"cachedInputTokens":2,"outputTokens":5,"reasoningOutputTokens":1},"last":{"totalTokens":used,"inputTokens":10,"cachedInputTokens":2,"outputTokens":5,"reasoningOutputTokens":1},"modelContextWindow":200000}}});
+        h.peer.write(&usage(15)).await.unwrap();
+        let first=h.collect_until(|event|matches!(&event.kind,ProviderEventKind::Turn{provider_turn,..} if serde_json::to_value(provider_turn).unwrap()["tokenUsage"]["usedTokens"]==15)).await.unwrap();
+        assert!(
+            !first
+                .iter()
+                .any(|event| matches!(event.kind, ProviderEventKind::Terminal { .. }))
+        );
+        if ending == "session deadline" {
+            tokio::time::advance(std::time::Duration::from_secs(6)).await;
+        }
+        h.peer.respond(&interrupt, json!({})).await.unwrap();
+        if ending == "slow terminal cleanup" {
+            let terminate = h.peer.read().await.unwrap();
+            assert_eq!(terminate["method"], "thread/backgroundTerminals/terminate");
+            tokio::time::advance(std::time::Duration::from_secs(6)).await;
+            h.peer
+                .respond(&terminate, json!({"terminated":true}))
+                .await
+                .unwrap();
+        }
+        let stopped = stopping.await.unwrap();
+        if ending == "session deadline" {
+            assert!(stopped.is_err());
+        } else {
+            assert!(
+                matches!(&stopped,Ok(Err(ProviderError::InterruptTimeout {turn_id,timeout_ms:10000})) if turn_id==&input.provider_turn_id),
+                "{ending}: {stopped:?}"
+            );
+        }
+        h.peer.write(&usage(16)).await.unwrap();
+        let pending=h.collect_until(|event|matches!(&event.kind,ProviderEventKind::Turn{provider_turn,..} if serde_json::to_value(provider_turn).unwrap()["tokenUsage"]["usedTokens"]==16)).await.unwrap();
+        assert!(
+            !pending
+                .iter()
+                .any(|event| matches!(event.kind, ProviderEventKind::Terminal { .. })),
+            "{ending}"
+        );
+        if ending == "failed second Stop" {
+            let runtime = h.runtime.clone();
+            let second = async {
+                let retry = h.peer.read().await.unwrap();
+                assert_eq!(retry["method"], "turn/interrupt");
+                assert_eq!(retry["params"], interrupt["params"]);
+                h.peer.write(&json!({"id":retry["id"],"error":{"code":-32603,"message":"internal error"}})).await.unwrap();
+            };
+            let (result, _) = tokio::join!(runtime.interrupt_turn(input.clone()), second);
+            assert!(result.is_err());
+        }
+        if ending == "unload" {
+            let runtime = h.runtime.clone();
+            let server = async {
+                let unsubscribe = h.peer.read().await.unwrap();
+                assert_eq!(unsubscribe["method"], "thread/unsubscribe");
+                h.peer
+                    .respond(&unsubscribe, json!({"status":"unsubscribed"}))
+                    .await
+                    .unwrap();
+            };
+            let (result, _) = tokio::join!(
+                runtime
+                    .extensions()
+                    .unwrap()
+                    .unload(input.provider_thread, false),
+                server
+            );
+            result.unwrap();
+        } else {
+            tokio::time::advance(std::time::Duration::from_secs(20)).await;
+            h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":kit::native_turn("unconfirmed-turn","completed")}})).await.unwrap();
+        }
+        let events = h
+            .collect_until(|event| matches!(event.kind, ProviderEventKind::Terminal { .. }))
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.kind,
+                    ProviderEventKind::Terminal {
+                        outcome: TerminalOutcome::Interrupted { .. },
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "{ending}"
+        );
+        h.runtime.close().await.unwrap();
+        assert!(h.peer.read().await.is_err());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn stop_timeout_names_the_latest_goal_continuation() {
+    let mut h = kit::Harness::open().await.unwrap();
+    h.start("original-goal-turn").await.unwrap();
+    let mut goal = json!({"objective":"ship it","status":"active","tokensUsed":5,"timeUsedSeconds":1,"threadId":"native-thread","createdAt":1,"updatedAt":1});
+    h.peer.write(&json!({"method":"thread/goal/updated","params":{"threadId":"native-thread","goal":goal}})).await.unwrap();
+    h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":kit::native_turn("original-goal-turn","completed")}})).await.unwrap();
+    h.peer.write(&json!({"method":"turn/started","params":{"threadId":"native-thread","turn":kit::native_turn("continued-goal-turn","inProgress")}})).await.unwrap();
+    h.collect_until(|event|matches!(&event.kind,ProviderEventKind::Turn{provider_turn,..} if provider_turn.ordinal==2)).await.unwrap();
+    let runtime = h.runtime.clone();
+    let server = async {
+        let pause = h.peer.read().await.unwrap();
+        assert_eq!(pause["method"], "thread/goal/set");
+        goal["status"] = json!("paused");
+        h.peer.respond(&pause, json!({"goal":goal})).await.unwrap();
+        let interrupt = h.peer.read().await.unwrap();
+        assert_eq!(interrupt["method"], "turn/interrupt");
+        assert_eq!(interrupt["params"]["turnId"], "continued-goal-turn");
+        h.peer.respond(&interrupt, json!({})).await.unwrap();
+    };
+    let (stopped, _) = tokio::join!(
+        runtime.interrupt_turn(InterruptInput {
+            provider_thread: kit::thread("native-thread").unwrap(),
+            provider_turn_id: ProviderTurnId(mapping::derived(
+                "provider-turn",
+                "native-turn",
+                "original-goal-turn",
+            )),
+            request_runtime_restart: false,
+        }),
+        server
+    );
+    let expected = ProviderTurnId(mapping::derived(
+        "provider-turn",
+        "native-turn",
+        "continued-goal-turn",
+    ));
+    assert!(
+        matches!(&stopped,Err(ProviderError::InterruptTimeout {turn_id,timeout_ms:10000}) if turn_id==&expected),
+        "{stopped:?}"
+    );
+    h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":kit::native_turn("continued-goal-turn","completed")}})).await.unwrap();
+    h.collect_until(|event| {
+        matches!(
+            event.kind,
+            ProviderEventKind::Terminal {
+                outcome: TerminalOutcome::Interrupted { .. },
+                ..
+            }
+        )
+    })
+    .await
+    .unwrap();
+    h.runtime.close().await.unwrap();
+    assert!(h.peer.read().await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_stops_share_confirmation_without_stranding_the_first_waiter() {
+    let mut h = kit::Harness::open().await.unwrap();
+    h.start("shared-stop").await.unwrap();
+    let input = InterruptInput {
+        provider_thread: kit::thread("native-thread").unwrap(),
+        provider_turn_id: ProviderTurnId(mapping::derived(
+            "provider-turn",
+            "native-turn",
+            "shared-stop",
+        )),
+        request_runtime_restart: false,
+    };
+    let runtime = h.runtime.clone();
+    let first_input = input.clone();
+    let first = tokio::spawn(async move { runtime.interrupt_turn(first_input).await });
+    let request = h.peer.read().await.unwrap();
+    assert_eq!(request["method"], "turn/interrupt");
+    h.peer.respond(&request, json!({})).await.unwrap();
+    let runtime = h.runtime.clone();
+    let second = tokio::spawn(async move { runtime.interrupt_turn(input).await });
+    let retry = h.peer.read().await.unwrap();
+    assert_eq!(retry["method"], "turn/interrupt");
+    assert_eq!(retry["params"], request["params"]);
+    h.peer.respond(&retry, json!({})).await.unwrap();
+    h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":kit::native_turn("shared-stop","completed")}})).await.unwrap();
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+    let events = h
+        .collect_until(|event| matches!(event.kind, ProviderEventKind::Terminal { .. }))
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event.kind,
+                ProviderEventKind::Terminal {
+                    outcome: TerminalOutcome::Interrupted { .. },
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    h.runtime.close().await.unwrap();
+    assert!(h.peer.read().await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn confirmed_root_does_not_skip_the_child_interrupt_still_being_sent() {
+    let mut h = kit::Harness::open().await.unwrap();
+    h.start("0-root").await.unwrap();
+    h.peer.write(&json!({"method":"item/completed","params":{"threadId":"native-thread","turnId":"0-root","item":{"type":"collabAgentToolCall","id":"spawn","tool":"spawnAgent","status":"completed","receiverThreadIds":["child"],"model":"child-model","prompt":"work","agentsStates":{}}}})).await.unwrap();
+    h.peer.write(&json!({"method":"turn/started","params":{"threadId":"child","turn":kit::native_turn("1-child","inProgress")}})).await.unwrap();
+    h.collect_until(|event|matches!(&event.kind,ProviderEventKind::Turn{provider_turn,..} if serde_json::to_value(provider_turn).unwrap()["nativeTurnRef"]["nativeId"]=="1-child")).await.unwrap();
+    let runtime = h.runtime.clone();
+    let mut stopping = tokio::spawn(async move {
+        runtime
+            .interrupt_turn(InterruptInput {
+                provider_thread: kit::thread("native-thread").unwrap(),
+                provider_turn_id: ProviderTurnId(mapping::derived(
+                    "provider-turn",
+                    "native-turn",
+                    "0-root",
+                )),
+                request_runtime_restart: false,
+            })
+            .await
+    });
+    let root = h.peer.read().await.unwrap();
+    assert_eq!(root["params"]["turnId"], "0-root");
+    h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":kit::native_turn("0-root","completed")}})).await.unwrap();
+    h.peer.respond(&root, json!({})).await.unwrap();
+    let child = tokio::select! {request=h.peer.read()=>request.unwrap(),result=&mut stopping=>panic!("Stop settled before sending the child interrupt: {result:?}")};
+    assert_eq!(child["method"], "turn/interrupt");
+    assert_eq!(
+        child["params"],
+        json!({"threadId":"child","turnId":"1-child"})
+    );
+    h.peer.respond(&child, json!({})).await.unwrap();
+    h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"child","turn":kit::native_turn("1-child","interrupted")}})).await.unwrap();
+    stopping.await.unwrap().unwrap();
+    let events = h
+        .collect_until(|event| matches!(event.kind, ProviderEventKind::Terminal { .. }))
+        .await
+        .unwrap();
+    assert!(matches!(
+        events.last().unwrap().kind,
+        ProviderEventKind::Terminal {
+            outcome: TerminalOutcome::Interrupted { .. },
+            ..
+        }
+    ));
+    h.runtime.close().await.unwrap();
+    assert!(h.peer.read().await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_stop_confirmation_settles_the_child_lineage_after_the_caller_leaves() {
+    for ending in ["complete", "unsubscribe", "archive"] {
+        let mut h = kit::Harness::open().await.unwrap();
+        h.start("0-root").await.unwrap();
+        h.peer.write(&json!({"method":"item/completed","params":{"threadId":"native-thread","turnId":"0-root","item":{"type":"collabAgentToolCall","id":"spawn","tool":"spawnAgent","status":"completed","receiverThreadIds":["child"],"model":"child-model","prompt":"work","agentsStates":{}}}})).await.unwrap();
+        h.peer.write(&json!({"method":"turn/started","params":{"threadId":"child","turn":kit::native_turn("1-child","inProgress")}})).await.unwrap();
+        h.collect_until(|event|matches!(&event.kind,ProviderEventKind::Turn{provider_turn,..} if serde_json::to_value(provider_turn).unwrap()["nativeTurnRef"]["nativeId"]=="1-child")).await.unwrap();
+        let runtime = h.runtime.clone();
+        let stopping = tokio::spawn(async move {
+            runtime
+                .interrupt_turn(InterruptInput {
+                    provider_thread: kit::thread("native-thread").unwrap(),
+                    provider_turn_id: ProviderTurnId(mapping::derived(
+                        "provider-turn",
+                        "native-turn",
+                        "0-root",
+                    )),
+                    request_runtime_restart: false,
+                })
+                .await
+        });
+        for target in ["0-root", "1-child"] {
+            let interrupt = h.peer.read().await.unwrap();
+            assert_eq!(interrupt["method"], "turn/interrupt");
+            assert_eq!(interrupt["params"]["turnId"], target);
+            h.peer.respond(&interrupt, json!({})).await.unwrap();
+        }
+        assert!(matches!(
+            stopping.await.unwrap(),
+            Err(ProviderError::InterruptTimeout {
+                timeout_ms: 10000,
+                ..
+            })
+        ));
+        if ending != "complete" {
+            let runtime = h.runtime.clone();
+            let server = async {
+                let request = h.peer.read().await.unwrap();
+                assert_eq!(
+                    request["method"],
+                    if ending == "archive" {
+                        "thread/archive"
+                    } else {
+                        "thread/unsubscribe"
+                    }
+                );
+                h.peer
+                    .respond(&request, json!({"status":"unsubscribed"}))
+                    .await
+                    .unwrap();
+            };
+            let (result, _) = tokio::join!(
+                runtime
+                    .extensions()
+                    .unwrap()
+                    .unload(kit::thread("native-thread").unwrap(), ending == "archive"),
+                server
+            );
+            result.unwrap();
+        } else {
+            h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":kit::native_turn("0-root","completed")}})).await.unwrap();
+        }
+        let events = h
+            .collect_until(|event| matches!(event.kind, ProviderEventKind::Terminal { .. }))
+            .await
+            .unwrap();
+        assert!(events.iter().any(|event|matches!(&event.kind,ProviderEventKind::Turn{provider_turn,..} if serde_json::to_value(provider_turn).unwrap()["nativeTurnRef"]["nativeId"]=="1-child" && serde_json::to_value(provider_turn).unwrap()["status"]=="interrupted")));
+        assert!(matches!(
+            events.last().unwrap().kind,
+            ProviderEventKind::Terminal {
+                outcome: TerminalOutcome::Interrupted { .. },
+                ..
+            }
+        ));
+        h.runtime.close().await.unwrap();
+        assert!(h.peer.read().await.is_err());
+    }
+}
+
 #[test]
 fn decoded_protocol_logs_route_both_request_directions_and_redact_nested_credentials() {
     let mut logger = mapping::CodexProtocolLogger::new(ProviderSessionId("session".into()));

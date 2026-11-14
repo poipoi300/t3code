@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use super::{
     orchestrator_receipt_race_test::Harness,
     thread_management_service_test::{Recorder, run, sample},
@@ -42,6 +44,7 @@ pub(super) fn branch(state: &str) -> GitBranchPullRequest {
     GitBranchPullRequest { pull_request:serde_json::from_value(json!({"number":42,"title":"Review","url":"https://github.com/owner/repo/pull/42","baseRef":"main","headRef":"feature","state":state})) .unwrap(),repository_key:Some("github.com/owner/repo".into()),updated_at:None,closed_at:None,merged_at:None,head_sha:None }
 }
 pub(super) struct Workspace {
+    pub(super) gate_branch: Option<String>,
     pub(super) queries: Mutex<Vec<BranchPullRequestQuery>>,
     identity_refresh: Mutex<Vec<bool>>,
     pub(super) detected: Mutex<Option<GitBranchPullRequest>>,
@@ -54,6 +57,7 @@ pub(super) struct Workspace {
 impl Workspace {
     pub(super) fn new() -> Self {
         Self {
+            gate_branch: None,
             queries: Mutex::new(Vec::new()),
             identity_refresh: Mutex::new(Vec::new()),
             detected: Mutex::new(Some(branch("open"))),
@@ -84,6 +88,10 @@ impl WorkspaceBackend for Workspace {
     ) -> Result<Option<GitBranchPullRequest>> {
         self.queries.lock().unwrap().push(input.clone());
         if !input.fresh_git_state
+            && self
+                .gate_branch
+                .as_ref()
+                .is_none_or(|branch| branch == &input.branch)
             && let Some((entered, gate)) = &self.gate
         {
             entered.send(()).unwrap();
@@ -221,6 +229,56 @@ fn refresh(thread: Option<&str>, backfill: bool) -> PullRequestRefresh {
 }
 fn reference() -> Value {
     json!({"projectId":"project","repository":"owner/repo","number":42,"url":"https://github.com/owner/repo/pull/42"})
+}
+
+#[tokio::test]
+async fn discovery_coalesces_queued_turn_end_refreshes_and_preserves_a_refresh_during_lookup()
+-> Result<()> {
+    let harness = Harness::new(None, false);
+    project(&harness, "C:/repo").await?;
+    thread(&harness, "thread", json!({})).await?;
+    let (entered, mut calls) = mpsc::unbounded_channel();
+    let gate = Arc::new(Semaphore::new(0));
+    let mut workspace = Workspace::new();
+    workspace.gate = Some((entered, gate.clone()));
+    *workspace.detected.lock().unwrap() = None;
+    let workspace = Arc::new(workspace);
+    let (service, _, _, _) = service(
+        &harness,
+        workspace.clone(),
+        false,
+        LinkedThreadsChange::None,
+    );
+    service.enqueue(refresh(None, false)).await?;
+    calls.recv().await.unwrap();
+    for update in [false, true, true] {
+        let mut request = refresh(Some("thread"), false);
+        request.refresh = update;
+        service.enqueue(request).await?;
+    }
+    gate.add_permits(1);
+    calls.recv().await.unwrap();
+    for update in [true, false] {
+        let mut request = refresh(Some("thread"), false);
+        request.refresh = update;
+        service.enqueue(request).await?;
+    }
+    gate.add_permits(1);
+    calls.recv().await.unwrap();
+    gate.add_permits(1);
+    service.drain().await;
+    assert_eq!(
+        workspace
+            .queries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|query| query.refresh)
+            .collect::<Vec<_>>(),
+        [false, true, true]
+    );
+    service.shutdown().await;
+    Ok(())
 }
 
 #[tokio::test]

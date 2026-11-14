@@ -1567,7 +1567,11 @@ async fn ingestion_failure_stops_the_native_turn_and_repairs_its_last_observed_s
                 }
             })
             .unwrap();
-        assert!(failure.failure.message.0.contains("SQLITE_CANTOPEN"));
+        assert!(
+            failure.failure.message.0.contains("SQLITE_CANTOPEN"),
+            "{status}: {:?}",
+            failure.failure
+        );
     }
     Ok(())
 }
@@ -1780,6 +1784,429 @@ async fn workspace_handoff_completes_the_run_unless_a_persisted_stop_request_tak
             assert_eq!(result.message, "Stopped by user");
         }
         service.execution.shutdown().await?;
+    }
+    Ok(())
+}
+
+struct BaselineGate {
+    started: tokio::sync::mpsc::UnboundedSender<()>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+    captures: std::sync::atomic::AtomicUsize,
+    failure: Option<&'static str>,
+}
+#[async_trait::async_trait]
+impl CheckpointBackend for BaselineGate {
+    async fn capture(
+        &self,
+        input: CaptureCheckpoint,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<CheckpointRef> {
+        assert_eq!(input.ordinal, 0);
+        self.captures
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.started.send(()).unwrap();
+        if let Some(failure) = self.failure {
+            return Err(if failure == "cancelled" {
+                t3_orchestration::error::Error::Cancelled
+            } else {
+                t3_orchestration::error::Error::Unsupported("fixture baseline failure")
+            });
+        }
+        tokio::select! {
+            _ = cancellation.cancelled() => Err(t3_orchestration::error::Error::Cancelled),
+            _ = self.release.notified() => Ok(CheckpointRef("refs/t3/baseline".into())),
+        }
+    }
+    async fn lookup(
+        &self,
+        _scope: OrchestrationV2CheckpointScope,
+        _ordinal: u64,
+    ) -> Result<Option<CheckpointRef>> {
+        Ok(None)
+    }
+    async fn diff(
+        &self,
+        _cwd: std::path::PathBuf,
+        _from: CheckpointRef,
+        _to: CheckpointRef,
+    ) -> Result<CheckpointDiff> {
+        unreachable!()
+    }
+    async fn restore(
+        &self,
+        _scope: OrchestrationV2CheckpointScope,
+        _ordinal: u64,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        unreachable!()
+    }
+    async fn prune(
+        &self,
+        _scope: OrchestrationV2CheckpointScope,
+        _preserve: Vec<u64>,
+    ) -> Result<()> {
+        unreachable!()
+    }
+}
+
+#[tokio::test]
+async fn forked_baseline_overlaps_session_open_but_provider_prompt_waits_for_capture() -> Result<()>
+{
+    use super::provider_turn_start_service_test::{Sessions, finish, policy, seed, service};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::sync::{Notify, mpsc};
+    use tokio_util::sync::CancellationToken;
+    let h = super::provider_event_ingestor_test::Harness::new().await?;
+    seed(&h).await?;
+    let (adapter, mut calls) = h.fake();
+    let adapter = Arc::new(adapter);
+    let (started, mut capturing) = mpsc::unbounded_channel();
+    let release = Arc::new(Notify::new());
+    let checkpoint = Arc::new(BaselineGate {
+        started,
+        release: release.clone(),
+        captures: AtomicUsize::new(0),
+        failure: None,
+    });
+    let (opening, mut opened) = mpsc::unbounded_channel();
+    let resume_open = Arc::new(Notify::new());
+    let mut start = service(
+        &h,
+        Arc::new(Sessions {
+            adapter: adapter.clone(),
+            failure: None,
+            opening: Some(opening),
+            resume_open: Some(resume_open.clone()),
+        }),
+    );
+    Arc::get_mut(&mut start.execution).unwrap().checkpoints = Some(checkpoint.clone());
+    let start = Arc::new(start);
+    let startup = {
+        let start = start.clone();
+        tokio::spawn(async move {
+            start
+                .start(
+                    ThreadId("thread:test".into()),
+                    RunId("run:test".into()),
+                    policy(),
+                    false,
+                    CancellationToken::new(),
+                )
+                .await
+        })
+    };
+    tokio::select! {
+        biased;
+        result=capturing.recv()=>assert_eq!(result,Some(())),
+        _=opened.recv()=>panic!("session preparation began before the baseline was forked"),
+    }
+    assert_eq!(opened.recv().await, Some(()));
+    resume_open.notify_one();
+    // The committed running run proves session preparation finished while capture is held.
+    let mut events = h.sink.subscribe();
+    loop {
+        if let t3_contracts::application_event::ApplicationStoredEvent::Orchestration(event) =
+            events.recv().await.unwrap()
+            && let OrchestrationV2DomainEvent::RunUpdated(event) = event.event
+            && event.payload.status == OrchestrationV2RunStatus::Running
+        {
+            break;
+        }
+    }
+    while let Ok(call) = calls.try_recv() {
+        assert!(!matches!(
+            call,
+            t3_orchestration::testing::FakeCall::Start(_)
+        ));
+    }
+    release.notify_one();
+    let handle = startup.await.unwrap()?.unwrap();
+    assert_eq!(checkpoint.captures.load(Ordering::SeqCst), 1);
+    finish(&adapter, &h, handle).await?;
+    start.execution.shutdown().await
+}
+
+struct StreamSession {
+    inner: std::sync::Arc<t3_orchestration::testing::FakeSessionRuntime>,
+    events: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<ProviderResult<ProviderEvent>>>>,
+}
+#[async_trait::async_trait]
+impl SessionRuntime for StreamSession {
+    fn session(&self) -> &OrchestrationV2ProviderSession {
+        self.inner.session()
+    }
+    fn can_resume_after_restart(&self) -> bool {
+        self.inner.can_resume_after_restart()
+    }
+    fn background_tasks_end_with_process(&self) -> bool {
+        true
+    }
+    async fn subscribe(&self) -> ProviderResult<EventSubscription> {
+        Ok(EventSubscription {
+            events: self.events.lock().unwrap().take().unwrap(),
+            cancellation: tokio_util::sync::CancellationToken::new(),
+        })
+    }
+    async fn close(&self) -> ProviderResult<()> {
+        self.inner.close().await
+    }
+    async fn ensure_thread(
+        &self,
+        input: EnsureThread,
+    ) -> ProviderResult<OrchestrationV2ProviderThread> {
+        self.inner.ensure_thread(input).await
+    }
+    async fn resume_thread(
+        &self,
+        input: ResumeThread,
+    ) -> ProviderResult<OrchestrationV2ProviderThread> {
+        self.inner.resume_thread(input).await
+    }
+    async fn start_turn(&self, input: TurnInput) -> ProviderResult<()> {
+        self.inner.start_turn(input).await
+    }
+    async fn steer_turn(&self, input: SteerInput) -> ProviderResult<()> {
+        self.inner.steer_turn(input).await
+    }
+    async fn interrupt_turn(&self, input: InterruptInput) -> ProviderResult<()> {
+        self.inner.interrupt_turn(input).await
+    }
+    async fn respond(&self, input: RuntimeResponse) -> ProviderResult<()> {
+        self.inner.respond(input).await
+    }
+    async fn snapshot(
+        &self,
+        input: OrchestrationV2ProviderThread,
+    ) -> ProviderResult<ThreadSnapshot> {
+        self.inner.snapshot(input).await
+    }
+    async fn rollback(&self, input: RollbackInput) -> ProviderResult<ThreadSnapshot> {
+        self.inner.rollback(input).await
+    }
+    async fn fork(&self, input: ForkInput) -> ProviderResult<OrchestrationV2ProviderThread> {
+        self.inner.fork(input).await
+    }
+}
+struct StreamDirectory(std::sync::Arc<StreamSession>);
+#[async_trait::async_trait]
+impl SessionDirectory for StreamDirectory {
+    async fn get(
+        &self,
+        _id: ProviderSessionId,
+    ) -> Result<Option<std::sync::Arc<dyn SessionRuntime>>> {
+        Ok(Some(self.0.clone()))
+    }
+    async fn attach(
+        &self,
+        _instance: t3_contracts::provider_instance::ProviderInstanceId,
+        _input: OpenSession,
+    ) -> Result<std::sync::Arc<dyn SessionRuntime>> {
+        Ok(self.0.clone())
+    }
+    async fn detach(&self, _id: ProviderSessionId, _revoke: bool) -> Result<()> {
+        self.0.close().await?;
+        Ok(())
+    }
+    async fn shutdown(&self) -> Result<()> {
+        self.0.close().await?;
+        Ok(())
+    }
+}
+struct ProvedDetach;
+impl ProviderStreamContext for ProvedDetach {
+    fn detached_thread_id(&self, error: &ProviderError) -> Option<ThreadId> {
+        if let ProviderError::Protocol {
+            payload: Some(payload),
+            ..
+        } = error
+        {
+            payload["detachedThreadId"]
+                .as_str()
+                .map(|id| ThreadId(id.into()))
+        } else {
+            None
+        }
+    }
+}
+#[tokio::test]
+async fn detached_workspace_handoff_settles_without_interrupt_but_unmarked_stream_loss_still_fails()
+-> Result<()> {
+    use super::provider_turn_start_service_test::{policy, seed, service};
+    use std::sync::{Arc, Mutex};
+    use tokio_util::sync::CancellationToken;
+    for mode in [
+        "detached-moved",
+        "wrong-thread",
+        "unmarked",
+        "ordinary-eof",
+        "unchanged",
+    ] {
+        let h = super::provider_event_ingestor_test::Harness::new().await?;
+        seed(&h).await?;
+        let (adapter, mut calls) = h.fake();
+        let (sender, events) = tokio::sync::mpsc::channel(8);
+        let runtime = Arc::new(StreamSession {
+            inner: adapter.runtime.clone(),
+            events: Mutex::new(Some(events)),
+        });
+        let mut start = service(&h, Arc::new(StreamDirectory(runtime)));
+        start.execution = Arc::new(
+            (*start.execution)
+                .clone()
+                .with_stream_context(Arc::new(ProvedDetach)),
+        );
+        let handle = start
+            .start(
+                ThreadId("thread:test".into()),
+                RunId("run:test".into()),
+                policy(),
+                false,
+                CancellationToken::new(),
+            )
+            .await?
+            .unwrap();
+        let mut published = h.sink.subscribe();
+        sender
+            .send(Ok(ProviderEvent {
+                driver: adapter.driver(),
+                kind: turn("pt:test", Some("attempt:test"), "turn:test"),
+            }))
+            .await
+            .unwrap();
+        loop {
+            if let t3_contracts::application_event::ApplicationStoredEvent::Orchestration(stored) =
+                published.recv().await.unwrap()
+                && let OrchestrationV2DomainEvent::ProviderTurnUpdated(event) = stored.event
+                && event.payload.status == ProviderTurnStatus::Running
+            {
+                break;
+            }
+        }
+        if mode != "unchanged" {
+            let mut thread = h
+                .reader
+                .thread(ThreadId("thread:test".into()))
+                .await?
+                .unwrap();
+            thread.worktree_path = Some(t3_contracts::base_schemas::TrimmedNonEmptyString(
+                "C:/handoff".into(),
+            ));
+            h.write(
+                "thread.metadata-updated",
+                t3_contracts::stored::to_value(&thread)?,
+            )
+            .await?;
+        }
+        if mode != "ordinary-eof" {
+            sender.send(Err(ProviderError::Protocol {reason:None,detail:"Session closed during detach".into(),payload:if mode=="unmarked" {None} else {Some(json!({"detachedThreadId":if mode=="wrong-thread" {"thread:other"} else {"thread:test"}}))}})).await.unwrap();
+        }
+        drop(sender);
+        handle.settled().await?;
+        let projection = h
+            .reader
+            .projection(ThreadId("thread:test".into()))
+            .await?
+            .unwrap();
+        let handed_off = mode == "detached-moved";
+        assert_eq!(
+            projection.runs[0].status,
+            if handed_off {
+                OrchestrationV2RunStatus::Waiting
+            } else {
+                OrchestrationV2RunStatus::Failed
+            },
+            "{mode}"
+        );
+        assert_eq!(
+            projection.provider_turns[0].status,
+            ProviderTurnStatus::Interrupted,
+            "{mode}"
+        );
+        if handed_off {
+            assert!(!projection.turn_items.iter().any(|item| matches!(
+                item,
+                OrchestrationV2TurnItem::Error(_) | OrchestrationV2TurnItem::RunInterruptResult(_)
+            )));
+        }
+        let mut interrupted = false;
+        while let Ok(call) = calls.try_recv() {
+            interrupted |= matches!(call, t3_orchestration::testing::FakeCall::Interrupt(_));
+        }
+        assert_eq!(interrupted, !handed_off, "{mode}");
+        start.execution.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn forked_baselines_skip_side_chats_continue_after_capture_failure_and_propagate_interruption()
+-> Result<()> {
+    use super::provider_turn_start_service_test::{finish, policy, seed, service, sessions};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio_util::sync::CancellationToken;
+    for mode in ["failure", "side-chat", "cancelled"] {
+        let h = super::provider_event_ingestor_test::Harness::new().await?;
+        seed(&h).await?;
+        if mode == "side-chat" {
+            let mut thread = h
+                .reader
+                .thread(ThreadId("thread:test".into()))
+                .await?
+                .unwrap();
+            thread.lineage.side_chat = Some(Some(true));
+            h.write(
+                "thread.metadata-updated",
+                t3_contracts::stored::to_value(&thread)?,
+            )
+            .await?;
+        }
+        let (adapter, mut calls) = h.fake();
+        let adapter = Arc::new(adapter);
+        let (started, _capturing) = tokio::sync::mpsc::unbounded_channel();
+        let checkpoint = Arc::new(BaselineGate {
+            started,
+            release: Arc::new(tokio::sync::Notify::new()),
+            captures: AtomicUsize::new(0),
+            failure: Some(mode),
+        });
+        let mut start = service(&h, sessions(adapter.clone()));
+        Arc::get_mut(&mut start.execution).unwrap().checkpoints = Some(checkpoint.clone());
+        let result = start
+            .start(
+                ThreadId("thread:test".into()),
+                RunId("run:test".into()),
+                policy(),
+                false,
+                CancellationToken::new(),
+            )
+            .await;
+        if mode == "cancelled" {
+            assert!(matches!(
+                result,
+                Err(t3_orchestration::error::Error::Cancelled)
+            ));
+        } else {
+            finish(&adapter, &h, result?.unwrap()).await?;
+        }
+        let mut prompts = 0;
+        while let Ok(call) = calls.try_recv() {
+            prompts += usize::from(matches!(
+                call,
+                t3_orchestration::testing::FakeCall::Start(_)
+            ));
+        }
+        assert_eq!(prompts, usize::from(mode != "cancelled"));
+        assert_eq!(
+            checkpoint.captures.load(Ordering::SeqCst),
+            usize::from(mode != "side-chat")
+        );
+        start.execution.shutdown().await?;
     }
     Ok(())
 }

@@ -40,6 +40,12 @@ impl CommandDispatcher for Dispatch {
                 reason: "already rejected".into(),
             });
         }
+        if self.mode == "worktree" {
+            return Err(Error::Service {
+                operation: "ThreadManagementWorktreeRestoreError",
+                detail: "Missing checkout could not be restored".into(),
+            });
+        }
         if self.mode == "ambiguous" {
             return Err(Error::Service {
                 operation: "dispatch",
@@ -129,7 +135,7 @@ async fn queued_attachment_edits_resolve_the_message_from_the_run_id() -> Result
 #[tokio::test]
 async fn question_paths_are_readable_and_ambiguous_dispatch_keeps_copies_while_rejections_release_them()
 -> Result<()> {
-    for mode in ["ambiguous", "reject"] {
+    for mode in ["ambiguous", "reject", "worktree"] {
         let h = Harness::new().await?;
         let directory = tempfile::tempdir()?;
         let upload = upload(directory.path());

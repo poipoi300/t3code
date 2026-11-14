@@ -232,12 +232,11 @@ factory still has no implementation, so a complete ACP provider cannot yet be
 integrated. The basic Git fixture host is available. The authoritative ANSI fold
 remains package 09's dependency; no second implementation is added.
 
-The real-socket Replay test passed on retry (1 passed, 0 failed) using
---ignored --exact. It remains ignored in
-t3-server/tests/composition_orchestration.rs, owned by package A/composition;
-that owner can now remove its ignore. The initial build exhausted machine
-commit memory, but the retry completed successfully. The orchestration runtime
-Replay/restart test already passes enabled.
+The real-socket Replay test passed in the previous round using --ignored
+--exact (1 passed, 0 failed). Its package-A/composition owner has since enabled
+it in t3-server/tests/composition_orchestration.rs. Package 12 did not edit
+that file. The initial memory failure was overcome on retry. Both orchestration
+runtime tests pass again after this upstream merge.
 
 No live provider, live profile, dev server, commit, manifest or frozen seam edit
 is used. All types added here are test/harness interfaces rather than replacement

@@ -38,6 +38,21 @@ async fn running() -> (Arc<dyn SessionRuntime>, EventSubscription, Peer) {
 async fn running_with_host(
     host: ClaudeHostOptions,
 ) -> (Arc<dyn SessionRuntime>, EventSubscription, Peer) {
+    running_with_input(
+        host,
+        LaunchOptions {
+            cli_path: Some("fixture-claude".into()),
+            ..Default::default()
+        },
+        fixture_turn_input().unwrap(),
+    )
+    .await
+}
+async fn running_with_input(
+    host: ClaudeHostOptions,
+    launch: LaunchOptions,
+    input: TurnInput,
+) -> (Arc<dyn SessionRuntime>, EventSubscription, Peer) {
     let (client, server) = tokio::io::duplex(65536);
     let (read, write) = tokio::io::split(client);
     let (peer_read, peer_write) = tokio::io::split(server);
@@ -46,13 +61,9 @@ async fn running_with_host(
         write,
         SessionOptions::default(),
     )));
-    let input = fixture_turn_input().unwrap();
     let adapter = ClaudeAdapterV2::new(ClaudeAdapterOptions {
         instance_id: ProviderInstanceId("claudeAgent".into()),
-        launch: LaunchOptions {
-            cli_path: Some("fixture-claude".into()),
-            ..LaunchOptions::default()
-        },
+        launch,
         connector,
         clock: Arc::new(ManualClock::new(FIXTURE_DATE)),
         ids: Arc::new(SequenceIds::new("runtime")),
@@ -96,6 +107,152 @@ async fn running_with_host(
     assert_eq!(user["type"], "user");
     start.await.unwrap().unwrap();
     (runtime, subscription, peer)
+}
+
+#[tokio::test]
+async fn auto_compact_threshold_respects_disabled_settings_and_environment_after_compaction() {
+    use t3_claude_cli::launch::Settings;
+    for (user, environment, launch_settings, expected) in [
+        (
+            json!({"autoCompactWindow":400000,"autoCompactEnabled":false}),
+            json!({}),
+            json!({}),
+            Value::Null,
+        ),
+        (
+            json!({"autoCompactWindow":400000}),
+            json!({"DISABLE_AUTO_COMPACT":"1"}),
+            json!({}),
+            Value::Null,
+        ),
+        (
+            json!({"autoCompactWindow":400000}),
+            json!({"DISABLE_AUTO_COMPACT":" True "}),
+            json!({}),
+            Value::Null,
+        ),
+        (
+            json!({"autoCompactWindow":400000}),
+            json!({"DISABLE_COMPACT":"yes"}),
+            json!({}),
+            Value::Null,
+        ),
+        (
+            json!({"autoCompactWindow":400000}),
+            json!({"DISABLE_AUTO_COMPACT":"0"}),
+            json!({}),
+            json!(367000),
+        ),
+        (
+            json!({"autoCompactWindow":400000}),
+            json!({"DISABLE_AUTO_COMPACT":"1"}),
+            json!({"env":{"DISABLE_AUTO_COMPACT":"0"}}),
+            json!(367000),
+        ),
+        (
+            json!({"autoCompactWindow":400000,"autoCompactEnabled":false}),
+            json!({}),
+            json!({"autoCompactEnabled":true}),
+            json!(367000),
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("settings.json"),
+            serde_json::to_vec(&user).unwrap(),
+        )
+        .unwrap();
+        let host = ClaudeHostOptions {
+            settings_directory: Some(directory.path().to_owned()),
+            auto_compact_window: Some("400000".into()),
+            ..Default::default()
+        };
+        let mut input = fixture_turn_input().unwrap();
+        input.model_selection.model = "claude-opus-5-5".into();
+        input.runtime_policy.cwd = Some(directory.path().join("workspace"));
+        let launch = LaunchOptions {
+            cli_path: Some("fixture-claude".into()),
+            env: environment
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| (key.clone(), value.as_str().unwrap().into()))
+                .collect(),
+            settings: Some(Settings::Json(launch_settings)),
+            ..Default::default()
+        };
+        let (runtime, mut events, mut peer) = running_with_input(host, launch, input).await;
+        for (id, input_tokens) in [("before", 100), ("after", 20)] {
+            if id == "after" {
+                peer.send(json!({"type":"system","subtype":"compact_boundary","uuid":"compact","compact_metadata":{"trigger":"manual","pre_tokens":110}})).await;
+            }
+            peer.send(json!({"type":"assistant","uuid":id,"parent_tool_use_id":null,"message":{"id":id,"model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":id}],"usage":{"input_tokens":input_tokens,"output_tokens":10}}})).await;
+        }
+        peer.send(json!({"type":"result","subtype":"success","uuid":"complete","result":"after","is_error":false,"num_turns":1,"duration_ms":1,"duration_api_ms":1,"total_cost_usd":0,"usage":{"input_tokens":20,"output_tokens":10}})).await;
+        let mut thresholds = Vec::new();
+        loop {
+            match events.events.recv().await.unwrap().unwrap().kind {
+                ProviderEventKind::Turn { provider_turn, .. } => {
+                    let turn = serde_json::to_value(provider_turn).unwrap();
+                    if turn["tokenUsage"].is_object() {
+                        thresholds.push(turn["tokenUsage"]["autoCompactThreshold"].clone());
+                    }
+                }
+                ProviderEventKind::Terminal { .. } => break,
+                _ => {}
+            }
+        }
+        runtime.close().await.unwrap();
+        assert!(
+            thresholds.len() >= 2,
+            "usage snapshots must be emitted across compaction"
+        );
+        assert!(
+            thresholds.iter().all(|value| value == &expected),
+            "user {user}, environment {environment}: {thresholds:?}, expected {expected}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn process_connector_enters_cwd_in_the_child_and_missing_cwd_exits_125() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let cli = directory.path().join("fake-claude");
+    std::fs::write(&cli, "#!/bin/sh\npwd -P > \"$0.cwd\"\n").unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let workspace = directory.path().join("work space");
+    std::fs::create_dir(&workspace).unwrap();
+    let linked = directory.path().join("linked-workspace");
+    std::os::unix::fs::symlink(&workspace, &linked).unwrap();
+    for (cwd, expected) in [(linked, 0), (directory.path().join("missing"), 125)] {
+        let options = LaunchOptions {
+            cli_path: Some(cli.to_string_lossy().into_owned()),
+            cwd: Some(cwd),
+            ..Default::default()
+        };
+        let mut connection = ProcessConnector
+            .connect(&options, CancellationToken::new())
+            .await
+            .expect("missing cwd must fail in the child, not at spawn");
+        assert_eq!(
+            connection
+                .process
+                .as_mut()
+                .unwrap()
+                .wait()
+                .await
+                .unwrap()
+                .code(),
+            Some(expected)
+        );
+        connection.session.shutdown().await.unwrap();
+    }
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("fake-claude.cwd")).unwrap(),
+        format!("{}\n", std::fs::canonicalize(workspace).unwrap().display())
+    );
 }
 
 #[tokio::test]
@@ -187,6 +344,176 @@ async fn native_background_wake_waits_for_an_app_run_and_never_offers_a_second_p
         peer.read.next_line().await.unwrap().is_none(),
         "native wake must not send another user prompt"
     );
+}
+
+#[tokio::test]
+async fn monitor_progress_wakes_keep_later_wakes_separate_with_owned_or_absorbed_results() {
+    use t3_contracts::orchestration_v2::{OrchestrationV2Actor, OrchestrationV2CreationSource};
+    fn result(id: &str, text: &str) -> Value {
+        json!({"type":"result","subtype":"success","uuid":id,"result":text,"is_error":false,"num_turns":1,"duration_ms":1,"duration_api_ms":1,"total_cost_usd":0,"usage":{"input_tokens":1,"output_tokens":1}})
+    }
+    fn input(ordinal: u64, provider: bool) -> TurnInput {
+        let mut input = fixture_turn_input().unwrap();
+        input.run_id = RunId(format!("monitor-run-{ordinal}"));
+        input.attempt_id = RunAttemptId(format!("monitor-attempt-{ordinal}"));
+        input.root_node_id = NodeId(format!("monitor-root-{ordinal}"));
+        input.run_ordinal = ordinal;
+        input.provider_turn_ordinal = ordinal;
+        input.message.message_id =
+            MessageId(format!("00000000-0000-4000-8000-{:012}", 100 + ordinal));
+        input.message.text = if provider {
+            "Background task completed."
+        } else {
+            "Any survivors yet?"
+        }
+        .into();
+        if provider {
+            input.message.created_by = OrchestrationV2Actor::Agent;
+            input.message.creation_source = Some(OrchestrationV2CreationSource::Provider);
+        }
+        input
+    }
+    async fn terminal(events: &mut EventSubscription, ordinal: u64) {
+        loop {
+            if let ProviderEventKind::Terminal { run_ordinal, .. } =
+                events.events.recv().await.unwrap().unwrap().kind
+            {
+                assert_eq!(run_ordinal, ordinal);
+                return;
+            }
+        }
+    }
+    fn buffered_terminal(events: &mut EventSubscription, ordinal: u64) -> Vec<String> {
+        let mut texts = Vec::new();
+        while let Ok(event) = events.events.try_recv() {
+            match event.unwrap().kind {
+                ProviderEventKind::Message(message)
+                    if serde_json::to_value(&message.role).unwrap() == "assistant" =>
+                {
+                    texts.push(message.text)
+                }
+                ProviderEventKind::Terminal {
+                    run_ordinal,
+                    outcome,
+                    ..
+                } => {
+                    assert_eq!(run_ordinal, ordinal);
+                    assert!(matches!(outcome, TerminalOutcome::Completed { .. }));
+                    return texts;
+                }
+                _ => {}
+            }
+        }
+        panic!("a buffered or absorbed wake must settle before start_turn returns");
+    }
+    async fn barrier(peer: &mut Peer) {
+        peer.send(control("monitor-barrier", "Bash", json!({"command":"pwd"})))
+            .await;
+        assert_eq!(
+            peer.read().await["response"]["request_id"],
+            "monitor-barrier"
+        );
+    }
+    for (monitor_absorbed, later_absorbed, scheduled) in [
+        (false, false, false),
+        (false, true, false),
+        (true, true, false),
+        (false, false, true),
+    ] {
+        let (sender, mut requests) = tokio::sync::mpsc::channel(4);
+        let (runtime, mut events, mut peer) = running_with_host(ClaudeHostOptions {
+            continuation_requests: Some(sender),
+            ..Default::default()
+        })
+        .await;
+        peer.send(json!({"type":"assistant","uuid":"launch-monitor","message":{"id":"launch-monitor","role":"assistant","content":[{"type":"tool_use","id":"monitor-call","name":"Monitor","input":{"description":"line monitor","command":"./mutate.sh"}}]}})).await;
+        peer.send(json!({"type":"system","subtype":"task_started","task_id":"monitor-task","tool_use_id":"monitor-call","description":"line monitor","task_type":"local_bash","is_backgrounded":true})).await;
+        peer.send(json!({"type":"user","uuid":"monitor-started","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"monitor-call","content":"Monitor started. You will be notified on each event."}]},"tool_use_result":{"taskId":"monitor-task","persistent":false}})).await;
+        if scheduled {
+            peer.send(json!({"type":"assistant","uuid":"schedule","message":{"id":"schedule","role":"assistant","content":[{"type":"tool_use","id":"schedule-call","name":"ScheduleWakeup","input":{"seconds":0}}]}})).await;
+            let due = t3_orchestration::ports::decisions::orchestrator::epoch_millis(FIXTURE_DATE)
+                .unwrap();
+            peer.send(json!({"type":"user","uuid":"scheduled","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"schedule-call","content":"Scheduled"}]},"tool_use_result":{"scheduledFor":due}})).await;
+        }
+        peer.send(result("root-end", "STARTED")).await;
+        terminal(&mut events, 1).await;
+        peer.send(json!({"type":"system","subtype":"init","uuid":"monitor-start"}))
+            .await;
+        peer.send(json!({"type":"assistant","uuid":"monitor-progress","message":{"id":"monitor-progress","role":"assistant","content":[{"type":"text","text":"Covered. Waiting for the rest."}]}})).await;
+        barrier(&mut peer).await;
+        let first = requests
+            .try_recv()
+            .expect("Monitor event must offer a continuation");
+        let notification = serde_json::to_value(first.notification).unwrap();
+        if scheduled {
+            assert!(
+                notification.is_null(),
+                "a due scheduled wake is not Monitor progress"
+            );
+            runtime.close().await.unwrap();
+            continue;
+        }
+        assert_eq!(notification["source"]["kind"], "monitor");
+        assert_eq!(notification["outcome"], "updated");
+        assert_eq!(notification["summary"], "Monitor reported new output");
+        let mut settled = 1;
+        if monitor_absorbed {
+            settled += 1;
+            runtime.start_turn(input(settled, false)).await.unwrap();
+            assert_eq!(peer.read().await["type"], "user");
+            peer.send(result("monitor-absorbed", "Covered. Waiting for the rest."))
+                .await;
+            terminal(&mut events, settled).await;
+        } else {
+            let mut end = result("monitor-own-end", "Covered. Waiting for the rest.");
+            end["origin"] = json!({"kind":"task-notification"});
+            peer.send(end).await;
+            barrier(&mut peer).await;
+        }
+        peer.send(json!({"type":"system","subtype":"init","uuid":"later-start"}))
+            .await;
+        peer.send(json!({"type":"assistant","uuid":"scheduled-answer","message":{"id":"scheduled-answer","role":"assistant","content":[{"type":"text","text":"Scheduled answer."}]}})).await;
+        barrier(&mut peer).await;
+        if later_absorbed {
+            settled += 1;
+            runtime.start_turn(input(settled, false)).await.unwrap();
+            assert_eq!(peer.read().await["type"], "user");
+            peer.send(result("later-absorbed", "No survivors yet."))
+                .await;
+            terminal(&mut events, settled).await;
+        } else {
+            peer.send(result("later-own-end", "Scheduled answer."))
+                .await;
+            barrier(&mut peer).await;
+        }
+        runtime.start_turn(input(settled + 1, true)).await.unwrap();
+        let texts = buffered_terminal(&mut events, settled + 1);
+        assert!(!texts.iter().any(|text| text == "Scheduled answer."));
+        let second = requests
+            .try_recv()
+            .expect("later wake needs its own continuation");
+        let notification = serde_json::to_value(second.notification).unwrap();
+        assert_eq!(
+            notification["source"]["kind"],
+            if later_absorbed {
+                json!("monitor")
+            } else {
+                Value::Null
+            }
+        );
+        runtime.start_turn(input(settled + 2, true)).await.unwrap();
+        assert!(
+            buffered_terminal(&mut events, settled + 2)
+                .iter()
+                .any(|text| text == "Scheduled answer.")
+        );
+        assert!(requests.try_recv().is_err());
+        runtime.close().await.unwrap();
+        assert!(
+            peer.read.next_line().await.unwrap().is_none(),
+            "provider continuations must not send a new prompt"
+        );
+    }
 }
 async fn request(subscription: &mut EventSubscription) -> RuntimeRequestId {
     loop {
@@ -685,7 +1012,7 @@ async fn mcp_servers_keep_each_app_threads_context_and_session_lifetime() {
         ) -> ProviderResult<BTreeMap<String, Arc<dyn McpServer>>> {
             self.0.lock().unwrap().push(cancellation);
             Ok(BTreeMap::from([(
-                "t3".into(),
+                "t3-code".into(),
                 Arc::new(BoundServer(input.thread_id.clone())) as Arc<dyn McpServer>,
             )]))
         }
@@ -694,9 +1021,21 @@ async fn mcp_servers_keep_each_app_threads_context_and_session_lifetime() {
     impl ClaudeConnector for Pipes {
         fn connect<'a>(
             &'a self,
-            _: &'a LaunchOptions,
+            options: &'a LaunchOptions,
             _: CancellationToken,
         ) -> Pin<Box<dyn Future<Output = ProviderResult<ClaudeConnection>> + Send + 'a>> {
+            for name in ["mcp__t3-code__send_to_user", "mcp__t3-code__t3_theme_read"] {
+                assert!(
+                    options.allowed_tools.iter().any(|tool| tool == name),
+                    "read-only/plan native options omit {name}"
+                );
+            }
+            assert!(
+                !options
+                    .allowed_tools
+                    .iter()
+                    .any(|tool| tool == "mcp__t3-code__t3_theme_set")
+            );
             let session = self.0.lock().unwrap().pop_front();
             Box::pin(async move {
                 Ok(ClaudeConnection {
@@ -740,6 +1079,12 @@ async fn mcp_servers_keep_each_app_threads_context_and_session_lifetime() {
     let mut runtimes = Vec::new();
     for (index, peer) in peers.iter_mut().enumerate() {
         let mut input = fixture_turn_input().unwrap();
+        input.runtime_policy.sandbox_policy =
+            Some(json!({"type":"readOnly","access":{"type":"restricted"}}));
+        if index == 1 {
+            input.runtime_policy.interaction_mode =
+                t3_contracts::provider_policy::ProviderInteractionMode::Plan;
+        }
         input.thread_id = ThreadId(format!("thread-{index}"));
         input.app_thread.id = IdOrIndex::Id(input.thread_id.clone());
         input.provider_thread.app_thread_id = Some(IdOrIndex::Id(input.thread_id.clone()));
@@ -762,16 +1107,38 @@ async fn mcp_servers_keep_each_app_threads_context_and_session_lifetime() {
             .await
             .unwrap();
         let handle = runtime.clone();
-        let start = tokio::spawn(async move { handle.start_turn(input).await });
-        let initialize = peer.read().await;
-        assert_eq!(initialize["request"]["sdkMcpServers"], json!(["t3"]));
+        let mut start = tokio::spawn(async move { handle.start_turn(input).await });
+        let initialize = tokio::select! {
+            result = &mut start => panic!("native query ended before initialize: {result:?}"),
+            frame = peer.read() => frame,
+        };
+        assert_eq!(initialize["request"]["sdkMcpServers"], json!(["t3-code"]));
+        let upstream = include_str!(
+            "../../../../../apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts"
+        );
+        let guidance = upstream
+            .split("const CLAUDE_SEND_TO_USER_INSTRUCTIONS = `")
+            .nth(1)
+            .unwrap()
+            .split("`;")
+            .next()
+            .unwrap()
+            .replace("\\`", "`")
+            .replace("\r\n", "\n");
+        assert!(
+            initialize["request"]["appendSystemPrompt"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(&guidance),
+            "native query must carry the exact upstream send_to_user instructions"
+        );
         peer.send(json!({"type":"control_response","response":{"subtype":"success","request_id":initialize["request_id"],"response":{}}})).await;
         assert_eq!(peer.read().await["type"], "user");
         start.await.unwrap().unwrap();
         runtimes.push(runtime);
     }
     for (index, peer) in peers.iter_mut().enumerate() {
-        peer.send(json!({"type":"control_request","request_id":"mcp","request":{"subtype":"mcp_message","server_name":"t3","message":{"jsonrpc":"2.0","id":"context","method":"tools/call","params":{"name":"thread-context","arguments":{}}}}})).await;
+        peer.send(json!({"type":"control_request","request_id":"mcp","request":{"subtype":"mcp_message","server_name":"t3-code","message":{"jsonrpc":"2.0","id":"context","method":"tools/call","params":{"name":"thread-context","arguments":{}}}}})).await;
         let response = peer.read().await;
         assert_eq!(response["response"]["request_id"], "mcp");
         assert_eq!(
@@ -786,7 +1153,7 @@ async fn mcp_servers_keep_each_app_threads_context_and_session_lifetime() {
         assert!(tokens[0].is_cancelled());
         assert!(!tokens[1].is_cancelled());
     }
-    peers[1].send(json!({"type":"control_request","request_id":"after-close","request":{"subtype":"mcp_message","server_name":"t3","message":{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"thread-context","arguments":{}}}}})).await;
+    peers[1].send(json!({"type":"control_request","request_id":"after-close","request":{"subtype":"mcp_message","server_name":"t3-code","message":{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"thread-context","arguments":{}}}}})).await;
     assert_eq!(
         peers[1].read().await["response"]["response"]["mcp_response"]["result"]["threadId"],
         "thread-1"

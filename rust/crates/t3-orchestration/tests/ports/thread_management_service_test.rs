@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use super::orchestrator_receipt_race_test::Harness;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -319,7 +321,7 @@ async fn waits_for_restart_successor_and_wakes_when_continuation_is_declined() -
                 outbox::cancel_unsettled(
                     tx,
                     &ThreadId("thread".into()),
-                    &["provider-runtime.continue".into()],
+                    &["provider-runtime.continue"],
                     "declined",
                     TEST_TIME,
                 )?;
@@ -695,6 +697,7 @@ async fn settle_after_run_rechecks_guarded_dispatch_races_and_followup_provenanc
         ("completed", "held-notification", true),
         ("completed", "user", false),
         ("completed", "steered-notification", false),
+        ("completed", "new-watch", false),
     ] {
         let harness = Harness::new(None, false);
         harness.create("thread").await?;
@@ -747,7 +750,7 @@ async fn settle_after_run_rechecks_guarded_dispatch_races_and_followup_provenanc
             let first = attempts.recv().await.unwrap();
             assert_eq!(first["expectedLatestRunId"], "original");
             let mut message = json!(super::command_policy_test::message("followup"));
-            if followup.ends_with("notification") {
+            if followup.ends_with("notification") || followup == "new-watch" {
                 message["notification"] = json!({"source":{"kind":"monitor"},"outcome":"updated","summary":"Check finished"});
             }
             if followup == "delegated" {
@@ -766,6 +769,17 @@ async fn settle_after_run_rechecks_guarded_dispatch_races_and_followup_provenanc
                 let mut steer = json!(super::command_policy_test::message("followup"));
                 steer["id"] = json!("user-steer");
                 emit(&harness, "steer", "message.updated", steer).await?;
+            }
+            if followup == "new-watch" {
+                let mut thread = json!(
+                    harness
+                        .reader
+                        .thread(ThreadId("thread".into()))
+                        .await?
+                        .unwrap()
+                );
+                thread["pullRequests"] = json!([{"host":"github.com","repository":"owner/repo","number":42,"url":"https://github.com/owner/repo/pull/42","source":"manual","linkedAt":TEST_TIME,"snapshot":null,"stack":null,"watch":{"startedAt":TEST_TIME,"headSha":null,"failedChecks":[],"passedChecks":[],"passed":false,"remarksThrough":TEST_TIME,"remarkIds":[],"conflicting":false,"wakes":0}}]);
+                emit(&harness, "new-watch", "thread.metadata-updated", thread).await?;
             }
             dispatcher.release.add_permits(1);
             if followup == "rejected-notification" {
@@ -791,6 +805,108 @@ async fn settle_after_run_rechecks_guarded_dispatch_races_and_followup_provenanc
             );
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn settle_after_run_preserves_a_durable_rejection_and_uses_a_new_event_sequence() -> Result<()>
+{
+    struct Observed {
+        downstream: Arc<dyn CommandDispatcher>,
+        attempts: mpsc::UnboundedSender<(Value, bool)>,
+    }
+    #[async_trait]
+    impl CommandDispatcher for Observed {
+        async fn dispatch(&self, command: OrchestrationV2ServerCommand) -> Result<CommandReceipt> {
+            let value = json!(command);
+            let result = self.downstream.dispatch(command).await;
+            self.attempts.send((value, result.is_ok())).unwrap();
+            result
+        }
+    }
+    let harness = Harness::new(None, false);
+    harness.create("thread").await?;
+    let completed = run("original", 1, "completed");
+    emit(&harness, "original", "run.created", completed.clone()).await?;
+    let sequence = harness
+        .sink
+        .latest_sequence(Some(ThreadId("thread".into())))
+        .await?;
+    let rejected_id = CommandId(format!("server:settle-after-run:original:{sequence}"));
+    let rejected = CommandReceipt {
+        command_id: rejected_id.clone(),
+        aggregate: AggregateId::Thread(ThreadId("thread".into())),
+        command_type: "thread.settle".into(),
+        accepted_at: TEST_TIME.into(),
+        result_sequence: sequence as i64,
+        status: ReceiptStatus::Rejected,
+        error: Some("Thread is still running".into()),
+    };
+    let stored = rejected.clone();
+    harness
+        .database
+        .stores
+        .transaction(move |db| receipts::upsert(db, &stored))
+        .await?;
+    let (attempts, mut attempted) = mpsc::unbounded_channel();
+    let (hydration, _) = mpsc::unbounded_channel();
+    let service = ThreadManagementService::new(ThreadManagementServices {
+        reader: harness.reader.clone(),
+        dispatcher: Arc::new(Observed {
+            downstream: Arc::new(harness.dispatcher.clone()),
+            attempts,
+        }),
+        committer: harness.sink.clone(),
+        database: harness.database.stores.clone(),
+        settings: settings(json!({})),
+        hydrator: Arc::new(Hydration(hydration)),
+        signals: harness.sink.signals(),
+        clock: harness.clock.clone(),
+    });
+    let settling = tokio::spawn(async move {
+        service
+            .settle_after_run(
+                ProjectId("project".into()),
+                ThreadId("thread".into()),
+                RunId("original".into()),
+                CancellationToken::new(),
+            )
+            .await
+    });
+    let (first, accepted) = attempted.recv().await.unwrap();
+    assert!(!accepted);
+    assert_eq!(first["commandId"], json!(rejected_id));
+    assert!(matches!(
+        harness
+            .dispatcher
+            .dispatch(serde_json::from_value(first)?)
+            .await,
+        Err(Error::Rejected { .. })
+    ));
+    emit(&harness, "completed-again", "run.updated", completed).await?;
+    let (next, accepted) = attempted.recv().await.unwrap();
+    assert!(accepted);
+    assert_ne!(next["commandId"], json!(rejected_id));
+    settling.await.unwrap()?;
+    assert_eq!(
+        harness
+            .database
+            .stores
+            .read(move |db| receipts::get(db, &rejected_id))
+            .await?,
+        Some(rejected)
+    );
+    assert_eq!(
+        json!(
+            harness
+                .reader
+                .thread(ThreadId("thread".into()))
+                .await?
+                .unwrap()
+                .settled_override
+        ),
+        "settled"
+    );
     Ok(())
 }
 

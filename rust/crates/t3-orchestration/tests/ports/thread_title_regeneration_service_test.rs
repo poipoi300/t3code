@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use super::{
     orchestrator_receipt_race_test::Harness,
     thread_management_service_test::{emit, run, service, settings},

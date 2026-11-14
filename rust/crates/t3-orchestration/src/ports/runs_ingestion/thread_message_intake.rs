@@ -40,7 +40,16 @@ pub trait AttachmentReferenceResolver: Send + Sync {
     async fn reference(&self, attachment: &ChatAttachment) -> Result<AttachmentReference>;
 }
 fn not_accepted(error: &Error) -> bool {
-    matches!(error, Error::Rejected { .. } | Error::ThreadNotFound(_))
+    // seam-shim: owner08 preserves this pre-acceptance tag until Error has a typed restore variant.
+    matches!(
+        error,
+        Error::Rejected { .. }
+            | Error::ThreadNotFound(_)
+            | Error::Service {
+                operation: "ThreadManagementWorktreeRestoreError",
+                ..
+            }
+    )
 }
 fn intake_error(detail: impl Into<String>) -> Error {
     Error::Service {

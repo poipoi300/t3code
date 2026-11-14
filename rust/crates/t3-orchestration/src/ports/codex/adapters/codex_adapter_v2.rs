@@ -836,6 +836,26 @@ pub type Mutation =
     Box<dyn FnOnce(&mut Projection) -> (Vec<ProviderEvent>, Box<dyn FnOnce() + Send>) + Send>;
 pub type InterruptTargets = Vec<(String, String)>;
 
+pub(crate) struct InterruptConfirmation {
+    pub turn_id: ProviderTurnId,
+    pub roots: Vec<String>,
+    pub joined: bool,
+    waiters: Vec<tokio::sync::watch::Receiver<bool>>,
+    _lease: Arc<()>,
+}
+impl InterruptConfirmation {
+    pub async fn wait(&mut self) -> ProviderResult<()> {
+        for waiter in &mut self.waiters {
+            while !*waiter.borrow_and_update() {
+                if waiter.changed().await.is_err() && !*waiter.borrow() {
+                    return Err(ProviderError::SessionStopped);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 struct Context {
     input: Arc<TurnInput>,
@@ -1387,6 +1407,9 @@ pub struct Projection {
     containment: BTreeSet<(String, String)>,
     native_started: BTreeSet<String>,
     start_waiters: BTreeMap<String, Vec<tokio::sync::oneshot::Sender<()>>>,
+    interrupt_waiters: BTreeMap<String, tokio::sync::watch::Sender<bool>>,
+    // Active callers still owe child interrupts; departed callers leave confirmed lineage cleanup to the actor.
+    interrupt_roots: BTreeMap<String, Vec<std::sync::Weak<()>>>,
     deferred_terminals: BTreeMap<String, ProviderEvent>,
     usage_policy: Option<Arc<dyn crate::adapters::codex::CodexUsagePolicy>>,
     rate_limit_snapshot: Option<Value>,
@@ -1449,6 +1472,8 @@ impl Projection {
             containment: BTreeSet::new(),
             native_started: BTreeSet::new(),
             start_waiters: BTreeMap::new(),
+            interrupt_waiters: BTreeMap::new(),
+            interrupt_roots: BTreeMap::new(),
             deferred_terminals: BTreeMap::new(),
             usage_policy: None,
             rate_limit_snapshot: None,
@@ -1992,6 +2017,14 @@ impl Projection {
         id: &ProviderTurnId,
         thread: Option<&str>,
     ) -> ProviderResult<(InterruptTargets, Vec<ProviderEvent>)> {
+        let (_, selected) = self.interrupt_selection(id, thread)?;
+        self.interrupt_selected(selected)
+    }
+    fn interrupt_selection(
+        &self,
+        id: &ProviderTurnId,
+        thread: Option<&str>,
+    ) -> ProviderResult<(Vec<String>, BTreeSet<String>)> {
         let native = self.latest_target(&native_turn_id(id)?);
         let mut selected = BTreeSet::from([native]);
         if let Some(thread) = thread {
@@ -2007,6 +2040,7 @@ impl Projection {
                     .map(|(id, _)| id.clone()),
             );
         }
+        let roots = selected.iter().cloned().collect();
         loop {
             let prior = selected.len();
             for (id, context) in &self.turns {
@@ -2022,6 +2056,66 @@ impl Projection {
                 break;
             }
         }
+        Ok((roots, selected))
+    }
+    pub(crate) fn prepare_confirmed_interrupt(
+        &mut self,
+        id: &ProviderTurnId,
+        thread: &str,
+    ) -> ProviderResult<(
+        (InterruptTargets, InterruptConfirmation),
+        Vec<ProviderEvent>,
+    )> {
+        let (roots, selected) = self.interrupt_selection(id, Some(thread))?;
+        let turn_id = ProviderTurnId(derived(
+            "provider-turn",
+            "native-turn",
+            &self.latest_target(&native_turn_id(id)?),
+        ));
+        let mut waiters = vec![];
+        let mut joined = false;
+        let lease = Arc::new(());
+        for root in &roots {
+            if self.turns.contains_key(root) {
+                let callers = self.interrupt_roots.entry(root.clone()).or_default();
+                callers.retain(|caller| caller.strong_count() > 0);
+                callers.push(Arc::downgrade(&lease));
+            }
+        }
+        for target in &selected {
+            if self
+                .turns
+                .get(target)
+                .is_some_and(|context| !context.settled)
+            {
+                joined |= self.interrupt_waiters.contains_key(target);
+                waiters.push(
+                    self.interrupt_waiters
+                        .entry(target.clone())
+                        .or_insert_with(|| tokio::sync::watch::channel(false).0)
+                        .subscribe(),
+                );
+            }
+        }
+        let (targets, events) = self.interrupt_selected(selected)?;
+        Ok((
+            (
+                targets,
+                InterruptConfirmation {
+                    turn_id,
+                    roots,
+                    joined,
+                    waiters,
+                    _lease: lease,
+                },
+            ),
+            events,
+        ))
+    }
+    fn interrupt_selected(
+        &mut self,
+        selected: BTreeSet<String>,
+    ) -> ProviderResult<(InterruptTargets, Vec<ProviderEvent>)> {
         let mut interrupts = vec![];
         let mut events = vec![];
         for id in &selected {
@@ -2298,6 +2392,7 @@ impl Projection {
                 closing.send_replace(true);
             }
             events.extend(self.terminalize_commands(thread, None)?.1);
+            events.extend(self.confirm_unload(thread)?.1);
             return Ok(events);
         }
         if method == "mcpServer/startupStatus/updated" {
@@ -3662,6 +3757,18 @@ impl Projection {
                 .insert(id.into(), events.remove(index));
         }
         self.turns.insert(id.into(), context);
+        if !continuing {
+            if let Some(waiter) = self.interrupt_waiters.remove(id) {
+                waiter.send_replace(true);
+            }
+            if self
+                .interrupt_roots
+                .get(id)
+                .is_some_and(|callers| !callers.iter().any(|caller| caller.strong_count() > 0))
+            {
+                events.extend(self.settle_interrupt_roots(&[id.into()], false)?.1);
+            }
+        }
         let ready: Vec<_> = self
             .deferred_terminals
             .keys()
@@ -3811,6 +3918,18 @@ impl Projection {
             .map(|(id, _)| id.clone())
             .collect();
         let mut events = vec![];
+        let confirmed: Vec<_> = self
+            .interrupt_roots
+            .iter()
+            .filter(|(id, callers)| {
+                !callers.iter().any(|caller| caller.strong_count() > 0)
+                    && self.turns.get(*id).is_none_or(|context| context.settled)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if !confirmed.is_empty() {
+            events.extend(self.settle_interrupt_roots(&confirmed, false)?.1);
+        }
         for id in stalled {
             let context = self
                 .turns
@@ -4185,6 +4304,59 @@ impl Projection {
             .entry(thread)
             .or_insert_with(|| tokio::sync::watch::channel(false).0);
         Ok(((), vec![]))
+    }
+    pub(crate) fn settle_interrupt_roots(
+        &mut self,
+        roots: &[String],
+        force: bool,
+    ) -> ProviderResult<(bool, Vec<ProviderEvent>)> {
+        if !force
+            && roots
+                .iter()
+                .any(|root| self.turns.get(root).is_some_and(|context| !context.settled))
+        {
+            return Ok((false, vec![]));
+        }
+        for root in roots {
+            self.interrupt_roots.remove(root);
+        }
+        let pending: Vec<_> = self
+            .turns
+            .iter()
+            .filter(|(id, context)| {
+                !context.settled
+                    && roots
+                        .iter()
+                        .any(|root| *id == root || self.is_descendant(context, root))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut events = vec![];
+        for id in pending {
+            if let Some(context) = self.turns.get_mut(&id) {
+                context.interrupted = true;
+            }
+            events.extend(self.complete_mode(&id, &json!({"status":"interrupted"}), false)?);
+        }
+        Ok((true, events))
+    }
+    pub(crate) fn confirm_unload(
+        &mut self,
+        thread: &str,
+    ) -> ProviderResult<((), Vec<ProviderEvent>)> {
+        let pending: Vec<_> = self
+            .turns
+            .iter()
+            .filter(|(_, context)| {
+                context.native_thread == thread && context.interrupted && !context.settled
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut events = vec![];
+        for id in pending {
+            events.extend(self.complete_mode(&id, &json!({"status":"interrupted"}), false)?);
+        }
+        Ok(((), events))
     }
     pub fn wait_thread_closed(
         &mut self,

@@ -273,6 +273,42 @@ mod tests {
     use super::{ThreadProjectWorker, date_ms};
 
     #[test]
+    fn pull_request_keys_use_matching_url_authority_and_registry_aliases() {
+        use crate::projections::write::{ParsedPullRequestKey, PullRequestIdentityRegistry};
+        use serde_json::json;
+        struct Registry;
+        impl PullRequestIdentityRegistry for Registry {
+            fn parse_change_request_url(&self, url: &str) -> Option<ParsedPullRequestKey> {
+                Some(ParsedPullRequestKey {
+                    key: serde_json::from_value(json!({"host":"forge.test","repository":if url=="different-repository" {"other/repo"} else {"owner/repo"},"number":if url=="different-number" {43} else {42}})).unwrap(),
+                    authority: Some("forge.test:8443".into()),
+                })
+            }
+            fn canonical_repository_key(&self, key: &str) -> String {
+                key.replace("alias.test/", "forge.test/")
+            }
+            fn contains_repository(&self, _: &str) -> bool {
+                true
+            }
+        }
+        let original = serde_json::from_value(
+            json!({"host":"Alias.Test","repository":"OWNER/Repo","number":42}),
+        )
+        .unwrap();
+        for (url, host) in [
+            (None, "forge.test"),
+            (Some("matching"), "forge.test:8443"),
+            (Some("different-number"), "forge.test"),
+            (Some("different-repository"), "forge.test"),
+        ] {
+            let normalized = super::normalize_pull_request_key(&Registry, &original, url).unwrap();
+            assert_eq!(normalized.host.0, host);
+            assert_eq!(normalized.repository.0, "owner/repo");
+            assert_eq!(normalized.number, 42);
+        }
+    }
+
+    #[test]
     fn dates_compare_across_offsets_leap_days_and_the_epoch() {
         for (date, expected) in [
             ("1970-01-01T00:00:00.000Z", 0),

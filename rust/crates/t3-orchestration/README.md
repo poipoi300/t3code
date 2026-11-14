@@ -45,10 +45,8 @@ run execution subscribes before starting and ingests run events with run/attempt
 guards. This split is necessary for requests arriving before a run and prevents
 duplicate ingestion. Session metadata is persisted by the manager. Inject the
 same ingestor and dispatcher's `Arc<KeyedLanes>` into `RunExecutionService`.
-The composition's `ProviderSessionManager::with_options` must pass
-`Some(ingestor.clone())`: `None` leaves idle requests/recovered commands without
-a consumer before run execution subscribes. This wiring is still required in
-the integrator-owned `src/composition.rs`; no second event pump is needed.
+The composition passes `Some(ingestor.clone())`; omitting it leaves idle
+requests/recovered commands without a consumer before run execution subscribes.
 
 Construct `ProviderRuntimeRecoveryService::new(database, reader, sink, sessions,
 clock, ids, signals)` with the same manager and sink. `with_restart_settings(settings)`
@@ -73,6 +71,18 @@ Cleanup callbacks use the raw dispatcher after external admission closes. Native
 close has a configurable 30-second default bound; failed/timed-out closes keep
 their writer reservation for a subsequent cleanup retry. Shutdown closes independent
 sessions concurrently.
+
+An intentional exclusive-session detach fails subscribers after queued events
+with the detached app-thread ID. Pooled detach keeps the shared stream open.
+The frozen provider error currently carries a marked compatibility payload:
+`Protocol.payload._tag = "ProviderAdapterEventStreamError"` and
+`detachedThreadId`. The manager implements package 06's `ProviderStreamContext`;
+bind `execution.with_stream_context(Arc::new(sessions.clone()))` so run execution
+can check this identity and persisted workspace movement before completing a
+handoff. Detail text alone is insufficient. The requested native `EventStream`
+error variant belongs to the seam integrator. Subscriber cancellation is separate
+from the producer's lifetime so failure signals drain; server shutdown explicitly
+cancels subscribers.
 
 MCP hosts override `SessionCredentials::prepare_reserved` and return
 `PreparedSessionCredential::with_reservation(metadata, reservation)`. The boxed
@@ -150,6 +160,14 @@ its settle-script token and joins completion observers. The backend must honor
 that token and join its own script processes. An accepted SQLite commit can
 outlive its canceled caller, so the sink must still drain. Pure project/deletion
 planners and the injected deletion cleanup runner own no background tasks.
+
+Package 08 verification: 138 tests pass in the normal all-feature build, one
+test per process: management 12, stop 9, title 9, settlement 27, watch 53, PR sync
+9, discovery 8, project 5, deletion/cleanup 3, runtime 3. This is partial source
+assertion coverage. Production PR persistence still requires prepared host
+identities in the decision inputs; the current engine shim returns unsupported.
+The native command/URL policy, linked-reader detector, global change-feed bridge
+and shared project-read scope remain integration requirements.
 
 Native orchestration server core over canonical `t3-contracts` types and migrated
 `t3-persistence` SQLite. Twelve packages are implemented concurrently; ownership

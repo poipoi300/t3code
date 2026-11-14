@@ -747,6 +747,17 @@ impl ProviderSessionManager {
         reason: ReleaseReason,
         detail: Option<String>,
     ) -> Result<()> {
+        self.close_reason_with_detach(session, reason, detail, None)
+            .await
+    }
+
+    async fn close_reason_with_detach(
+        &self,
+        session: &ProviderSessionId,
+        reason: ReleaseReason,
+        detail: Option<String>,
+        detached_thread: Option<ThreadId>,
+    ) -> Result<()> {
         let entry = self
             .inner
             .state
@@ -765,6 +776,11 @@ impl ProviderSessionManager {
             .as_ref()
             .map(|p| p.clock.now());
         let roster = self.release_roster(&entry, reason).await;
+        if reason == ReleaseReason::ServerShutdown {
+            for (_, cancellation) in &entry.subscribers {
+                cancellation.cancel();
+            }
+        }
         entry.cancellation.cancel();
         let closed = self.close_native(&entry.runtime).await;
         let ingested = if let Some(ingestion) = entry.ingestion.take() {
@@ -778,6 +794,28 @@ impl ProviderSessionManager {
         } else {
             Ok(())
         };
+        if let Some(thread) = detached_thread {
+            for (sender, cancellation) in std::mem::take(&mut entry.subscribers) {
+                // MARKED SHIM: frozen ProviderError lacks EventStream's detached_thread_id.
+                let error = ProviderError::Protocol {
+                    reason: None,
+                    detail: detail
+                        .clone()
+                        .unwrap_or_else(|| "Provider session released: manual_shutdown.".into()),
+                    payload: Some(serde_json::json!({
+                        "_tag": "ProviderAdapterEventStreamError",
+                        "driver": entry.runtime.session().driver,
+                        "providerSessionId": session,
+                        "detachedThreadId": thread,
+                    })),
+                };
+                tokio::select! {
+                    _ = cancellation.cancelled() => {},
+                    _ = self.inner.cancellation.cancelled() => {},
+                    _ = sender.send(Err(error)) => {},
+                }
+            }
+        }
         if let Err(error) = closed {
             self.inner
                 .state
@@ -1278,10 +1316,15 @@ impl ProviderSessionManager {
                 .sessions
                 .get_mut(&session)
             {
-                entry.threads.insert(thread);
+                entry.threads.insert(thread.clone());
             }
             return self
-                .close_reason(&session, ReleaseReason::ManualShutdown, detail)
+                .close_reason_with_detach(
+                    &session,
+                    ReleaseReason::ManualShutdown,
+                    detail,
+                    Some(thread),
+                )
                 .await;
         }
         if let Some(loaded) = detached.2
@@ -1419,7 +1462,7 @@ impl ProviderSessionManager {
         runtime: &Arc<dyn SessionRuntime>,
         event: ProviderEvent,
     ) {
-        let subscribers = {
+        let (subscribers, released) = {
             let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = state
                 .sessions
@@ -1431,10 +1474,10 @@ impl ProviderSessionManager {
             entry
                 .subscribers
                 .retain(|(send, token)| !send.is_closed() && !token.is_cancelled());
-            entry.subscribers.clone()
+            (entry.subscribers.clone(), entry.cancellation.clone())
         };
         for (sender, cancellation) in subscribers {
-            tokio::select! { _ = cancellation.cancelled() => {}, _ = self.inner.cancellation.cancelled() => {}, _ = sender.send(Ok(event.clone())) => {} }
+            tokio::select! { _ = cancellation.cancelled() => {}, _ = released.cancelled() => {}, _ = self.inner.cancellation.cancelled() => {}, _ = sender.send(Ok(event.clone())) => {} }
         }
     }
 
@@ -2883,7 +2926,8 @@ impl SessionRuntime for ManagedRuntime {
             .filter(|entry| Arc::ptr_eq(&entry.runtime, &self.runtime))
             .ok_or(ProviderError::SessionStopped)?;
         let (send, events) = mpsc::channel(64);
-        let cancellation = entry.cancellation.child_token();
+        // Subscribers drain terminal signals after the producer has stopped.
+        let cancellation = CancellationToken::new();
         entry.subscribers.push((send, cancellation.clone()));
         Ok(EventSubscription {
             events,
@@ -3124,6 +3168,25 @@ impl SessionExtensions for ManagedRuntime {
         uri: String,
     ) -> ProviderResult<Vec<serde_json::Value>> {
         self.extension()?.read_resource(thread, server, uri).await
+    }
+}
+
+impl crate::ports::runs_ingestion::run_execution_service::ProviderStreamContext
+    for ProviderSessionManager
+{
+    fn detached_thread_id(&self, error: &ProviderError) -> Option<ThreadId> {
+        let ProviderError::Protocol {
+            payload: Some(payload),
+            ..
+        } = error
+        else {
+            return None;
+        };
+        // MARKED SHIM: only the manager's tagged stream error proves intentional detach.
+        if payload["_tag"] != "ProviderAdapterEventStreamError" {
+            return None;
+        }
+        serde_json::from_value(payload.get("detachedThreadId")?.clone()).ok()
     }
 }
 

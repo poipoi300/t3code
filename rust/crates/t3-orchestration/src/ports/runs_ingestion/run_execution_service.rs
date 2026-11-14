@@ -70,7 +70,32 @@ pub trait RunExecutionHost: Send + Sync {
     async fn refresh_after_turn(&self, project: ProjectId) -> Result<()>;
 }
 
+// seam-shim: session owner supplies proved intentional-detach identity until the typed stream error lands.
+pub trait ProviderStreamContext: Send + Sync {
+    fn detached_thread_id(&self, error: &ProviderError) -> Option<ThreadId>;
+}
+
+pub struct RunBaseline {
+    completion: oneshot::Receiver<Result<()>>,
+    cancellation: CancelBaseline,
+}
+impl RunBaseline {
+    async fn wait(self) -> Result<()> {
+        let mut completion = self.completion;
+        // Keep the cancellation owner alive until the capture has completed.
+        let _cancellation = self.cancellation;
+        (&mut completion).await.map_err(|_| Error::Cancelled)?
+    }
+}
+struct CancelBaseline(CancellationToken);
+impl Drop for CancelBaseline {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 struct StartOptions {
+    baseline: Option<RunBaseline>,
     policy: crate::provider::RuntimePolicyOptions,
     preparation: Option<Arc<dyn RootTurnPreparation>>,
     streaming: AssistantStreamingFilter,
@@ -160,6 +185,9 @@ pub struct RunExecutionService {
     host: Option<Arc<dyn RunExecutionHost>>,
     settings: Option<Arc<dyn SettingsService>>,
     batches: Option<ProviderCommitBatch>,
+    stream_context: Option<Arc<dyn ProviderStreamContext>>,
+    baseline_checkpoints:
+        Option<Arc<crate::ports::checkpoints_forks::checkpoint_service::CheckpointService>>,
 }
 
 struct CancelStartup(Option<CancellationToken>);
@@ -182,6 +210,8 @@ impl RunExecutionService {
             host: None,
             settings: None,
             batches: None,
+            stream_context: None,
+            baseline_checkpoints: None,
             scope: Arc::new(ExecutionScope {
                 tasks: TaskTracker::new(),
                 cancellation: CancellationToken::new(),
@@ -202,6 +232,19 @@ impl RunExecutionService {
 
     pub fn with_batches(mut self, batches: ProviderCommitBatch) -> Self {
         self.batches = Some(batches);
+        self
+    }
+
+    pub fn with_baseline_checkpoints(
+        mut self,
+        checkpoints: Arc<crate::ports::checkpoints_forks::checkpoint_service::CheckpointService>,
+    ) -> Self {
+        self.baseline_checkpoints = Some(checkpoints);
+        self
+    }
+
+    pub fn with_stream_context(mut self, context: Arc<dyn ProviderStreamContext>) -> Self {
+        self.stream_context = Some(context);
         self
     }
 
@@ -234,10 +277,23 @@ impl RunExecutionService {
         preparation: Option<Arc<dyn RootTurnPreparation>>,
         cancellation: CancellationToken,
     ) -> Result<RunExecutionHandle> {
+        self.start_root_run_with_baseline(input, policy_options, preparation, None, cancellation)
+            .await
+    }
+
+    pub async fn start_root_run_with_baseline(
+        &self,
+        input: StartRootRun,
+        policy_options: crate::provider::RuntimePolicyOptions,
+        preparation: Option<Arc<dyn RootTurnPreparation>>,
+        baseline: Option<RunBaseline>,
+        cancellation: CancellationToken,
+    ) -> Result<RunExecutionHandle> {
         let result = self
             .prepare_and_start(
                 input.clone(),
                 StartOptions {
+                    baseline,
                     policy: policy_options,
                     preparation,
                     streaming: AssistantStreamingFilter::new(false, 800),
@@ -258,6 +314,94 @@ impl RunExecutionService {
         result
     }
 
+    pub async fn fork_baseline(
+        &self,
+        thread: OrchestrationV2AppThread,
+        state: RootRunState,
+        cancellation: CancellationToken,
+    ) -> Result<RunBaseline> {
+        let capture_cancellation = cancellation.child_token();
+        let (reply, completion) = oneshot::channel();
+        let (entered, entering) = oneshot::channel();
+        {
+            let closed = self
+                .scope
+                .closed
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if *closed {
+                return Err(Error::Cancelled);
+            }
+            let service = self.clone();
+            let token = capture_cancellation.clone();
+            self.scope.tasks.spawn(async move {
+                let capture = service.capture_run_baseline(thread, state, token);
+                tokio::pin!(capture);
+                let mut entered = Some(entered);
+                let result = std::future::poll_fn(|cx| {
+                    let result = capture.as_mut().poll(cx);
+                    if let Some(entered) = entered.take() {
+                        let _ = entered.send(());
+                    }
+                    result
+                })
+                .await;
+                let _ = reply.send(result);
+            });
+        }
+        let baseline = RunBaseline {
+            completion,
+            cancellation: CancelBaseline(capture_cancellation),
+        };
+        entering.await.map_err(|_| Error::Cancelled)?;
+        Ok(baseline)
+    }
+
+    async fn capture_run_baseline(
+        &self,
+        thread: OrchestrationV2AppThread,
+        state: RootRunState,
+        cancellation: CancellationToken,
+    ) -> Result<()> {
+        if thread.lineage.side_chat == Some(Some(true)) {
+            return Ok(());
+        }
+        let capture = async {
+            if let Some(checkpoints) = &self.baseline_checkpoints {
+                checkpoints
+                    .capture_baseline(
+                        state.checkpoint_scope,
+                        state.run.ordinal.saturating_sub(1),
+                        cancellation.clone(),
+                    )
+                    .await
+            } else if let Some(checkpoints) = &self.checkpoints {
+                checkpoints
+                    .capture(
+                        CaptureCheckpoint {
+                            scope: state.checkpoint_scope,
+                            ordinal: state.run.ordinal.saturating_sub(1),
+                            message: format!("Baseline for run {}", expanded_id(&state.run.id)?.0),
+                        },
+                        cancellation.clone(),
+                    )
+                    .await
+                    .map(|_| ())
+            } else {
+                Ok(())
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = self.scope.cancellation.cancelled() => return Err(Error::Cancelled),
+            _ = cancellation.cancelled() => return Err(Error::Cancelled),
+            result=capture=>{
+                if matches!(result,Err(Error::Cancelled | Error::Provider(ProviderError::Cancelled))){return Err(Error::Cancelled);}
+            }
+        }
+        Ok(())
+    }
+
     async fn prepare_and_start(
         &self,
         mut input: StartRootRun,
@@ -276,27 +420,20 @@ impl RunExecutionService {
                 .unwrap_or(&settings["responseStreamingMode"]);
             options.streaming = AssistantStreamingFilter::new(mode == "turn", 800);
         }
-        if input.turn.app_thread.lineage.side_chat != Some(Some(true))
-            && let Some(checkpoints) = &self.checkpoints
-        {
-            let capture = checkpoints.capture(
-                CaptureCheckpoint {
-                    scope: input.state.checkpoint_scope.clone(),
-                    ordinal: input.state.run.ordinal.saturating_sub(1),
-                    message: format!("Baseline for run {}", expanded_id(&input.state.run.id)?.0),
-                },
-                cancellation.clone(),
-            );
+        if let Some(baseline) = options.baseline.take() {
             tokio::select! {
                 biased;
                 _ = self.scope.cancellation.cancelled() => return Err(Error::Cancelled),
                 _ = cancellation.cancelled() => return Err(Error::Cancelled),
-                result = capture => {
-                    if matches!(result, Err(Error::Cancelled | Error::Provider(ProviderError::Cancelled))) {
-                        return Err(Error::Cancelled);
-                    }
-                }
+                result = baseline.wait() => result?,
             }
+        } else {
+            self.capture_run_baseline(
+                input.turn.app_thread.clone(),
+                input.state.clone(),
+                cancellation.clone(),
+            )
+            .await?;
         }
         if !self.is_current(&input.state).await? {
             return Err(Error::Stale);
@@ -445,6 +582,7 @@ impl RunExecutionService {
             policy,
             preparation,
             streaming,
+            baseline: _,
         } = options;
         let mut accepted = Some(accepted);
         let session = input.session.clone();
@@ -535,6 +673,7 @@ impl RunExecutionService {
         let mut started = false;
         let mut stream_done = false;
         let mut failure = None;
+        let mut stream_failed = false;
         let owner = ConsumerOwner::default();
         let mut pending: VecDeque<PendingProviderCommit> = VecDeque::new();
         loop {
@@ -605,7 +744,13 @@ impl RunExecutionService {
                             Ok(done) => stream_done = done,
                             Err(error) => { failure = Some(error); break; }
                         },
-                        Some(Err(error)) => { failure = Some(error.into()); break; }
+                        Some(Err(error)) => {
+                            match flush_pending(&mut pending).await {
+                                Ok(()) => {stream_failed=true;failure=Some(error.into());}
+                                Err(error) => failure=Some(error),
+                            }
+                            break;
+                        }
                         None if state.finalized => {
                             match flush_pending(&mut pending).await {Ok(())=>stream_done=true,Err(error)=>{failure=Some(error);break;}}
                         },
@@ -633,6 +778,18 @@ impl RunExecutionService {
                     let _ = sender.send(Err(Error::Cancelled));
                 }
                 return Err(Error::Cancelled);
+            }
+            if stream_failed
+                && !state.finalized
+                && self
+                    .settle_detached_workspace(&mut state, &error)
+                    .await
+                    .unwrap_or(false)
+            {
+                if let Some(sender) = accepted.take() {
+                    let _ = sender.send(Ok(()));
+                }
+                return Ok(());
             }
             if !state.finalized {
                 let abandoned = self.interrupt_abandoned(&state).await;
@@ -662,6 +819,62 @@ impl RunExecutionService {
             }
         }
         Ok(())
+    }
+
+    async fn settle_detached_workspace(
+        &self,
+        state: &mut ExecutionState,
+        error: &Error,
+    ) -> Result<bool> {
+        let Error::Provider(error) = error else {
+            return Ok(false);
+        };
+        if self
+            .stream_context
+            .as_ref()
+            .and_then(|context| context.detached_thread_id(error))
+            .as_ref()
+            != Some(&state.identity.thread_id)
+        {
+            return Ok(false);
+        }
+        let Some(current) = self
+            .ingestor
+            .projections
+            .thread(state.identity.thread_id.clone())
+            .await?
+        else {
+            return Ok(false);
+        };
+        if current.worktree_path == state.input.turn.app_thread.worktree_path {
+            return Ok(false);
+        }
+        let mut terminal = state.failed_terminal(&Error::Cancelled)?;
+        if let ProviderEventKind::Terminal {
+            outcome,
+            disposition,
+            ..
+        } = &mut terminal.kind
+        {
+            *outcome = TerminalOutcome::Interrupted { reason: None };
+            *disposition = ThreadDisposition::Reusable;
+        }
+        let abandoned = state
+            .latest_root_turn
+            .clone()
+            .filter(|turn| {
+                matches!(
+                    turn.status,
+                    ProviderTurnStatus::Running | ProviderTurnStatus::Pending
+                )
+            })
+            .map(|mut turn| {
+                turn.status = ProviderTurnStatus::Interrupted;
+                turn.completed_at = Some(self.ingestor.clock.now());
+                turn
+            });
+        self.finalize(state, terminal, false, abandoned).await?;
+        Ok(state.finalized)
     }
 
     async fn consume(&self, state: &mut ExecutionState, event: ProviderEvent) -> Result<bool> {
@@ -953,6 +1166,9 @@ impl RunExecutionService {
                 }
             }
         }
+        let abandoned_event=abandoned.map(|turn|crate::ports::checkpoints_forks::checkpoint_capture_service::domain_event(
+            self.ingestor.ids.as_ref(), &state.identity.thread_id, &now, "provider-turn.updated", turn,
+            serde_json::json!({"runId":state.identity.run_id,"nodeId":state.input.state.root_node.id,"providerInstanceId":state.input.state.run.provider_instance_id}))).transpose()?;
         if matches!(
             &terminal.kind,
             ProviderEventKind::Terminal {
@@ -980,6 +1196,9 @@ impl RunExecutionService {
                 self.ingestor.ids.as_ref(),
                 persisted_failure,
             )?;
+            if let Some(event) = &abandoned_event {
+                decision.events.insert(0, event.clone());
+            }
             decision.events.splice(
                 0..0,
                 cascade_terminalize_run_owned_subagents(
@@ -1040,10 +1259,8 @@ impl RunExecutionService {
             self.ingestor.ids.as_ref(),
             persisted_failure,
         )?;
-        if let Some(turn) = abandoned {
-            decision.events.insert(0, crate::ports::checkpoints_forks::checkpoint_capture_service::domain_event(
-                self.ingestor.ids.as_ref(), &state.identity.thread_id, &now, "provider-turn.updated", turn,
-                serde_json::json!({"runId":state.identity.run_id,"nodeId":state.input.state.root_node.id,"providerInstanceId":state.input.state.run.provider_instance_id}))?);
+        if let Some(event) = abandoned_event {
+            decision.events.insert(0, event);
         }
         let result = self
             .ingestor

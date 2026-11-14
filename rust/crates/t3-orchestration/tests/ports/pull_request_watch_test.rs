@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use serde_json::{Value, json};
 use t3_contracts::{orchestration_v2::*, pull_request::*};
 use t3_orchestration::{
@@ -888,16 +890,17 @@ mod reactor {
             *backend.invalidations.lock().unwrap(),
             vec![false, true, false]
         );
-        let recorded = commands.commands.lock().unwrap();
-        assert_eq!(recorded.len(), before + 1);
-        assert_eq!(
-            recorded
-                .iter()
-                .filter(|command| command.get("wake").is_some())
-                .count(),
-            1
-        );
-        drop(recorded);
+        {
+            let recorded = commands.commands.lock().unwrap();
+            assert_eq!(recorded.len(), before + 1);
+            assert_eq!(
+                recorded
+                    .iter()
+                    .filter(|command| command.get("wake").is_some())
+                    .count(),
+                1
+            );
+        }
         reactor.shutdown().await;
         let before = backend.detail_calls.load(Ordering::SeqCst);
         backend.change_tick.send_replace(2);

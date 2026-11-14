@@ -210,19 +210,124 @@ pub fn never_started(run: &OrchestrationV2Run) -> bool {
 pub fn cancelled_before_start(run: &OrchestrationV2Run) -> bool {
     run.status == OrchestrationV2RunStatus::Cancelled && never_started(run)
 }
+pub fn delegated_task_runs(
+    runs: &[OrchestrationV2Run],
+    messages: &[OrchestrationV2ConversationMessage],
+    task_id: &NodeId,
+) -> Result<Vec<OrchestrationV2Run>> {
+    use super::provider_event_ingestor::expanded_id;
+    use t3_contracts::orchestration_v2_id_table::IdOrIndex;
+    let mut owned = runs
+        .iter()
+        .filter(|run| {
+            run.delegated_task_id.as_ref().and_then(Option::as_ref)
+                == Some(&IdOrIndex::Id(task_id.clone()))
+        })
+        .map(|run| expanded_id(&run.id))
+        .collect::<Result<HashSet<_>>>()?;
+    let untagged = runs
+        .iter()
+        .filter(|run| run.delegated_task_id.is_none())
+        .map(|run| expanded_id(&run.id))
+        .collect::<Result<HashSet<_>>>()?;
+    if owned.is_empty() {
+        return Ok(Vec::new());
+    }
+    loop {
+        let before = owned.len();
+        for message in messages {
+            let Some(run) = message.run_id.as_ref().map(expanded_id).transpose()? else {
+                continue;
+            };
+            let Some(completion) = message
+                .delegated_completion
+                .as_ref()
+                .and_then(Option::as_ref)
+            else {
+                continue;
+            };
+            if untagged.contains(&run)
+                && !owned.contains(&run)
+                && owned.contains(&completion.parent_run_id)
+            {
+                owned.insert(run);
+            }
+        }
+        if before == owned.len() {
+            break;
+        }
+    }
+    runs.iter()
+        .filter_map(|run| match expanded_id(&run.id) {
+            Ok(id) if owned.contains(&id) => Some(Ok(run.clone())),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+pub fn delegated_task_awaits_work(
+    runs: &[OrchestrationV2Run],
+    subagents: &[OrchestrationV2Subagent],
+    provider_threads: &[OrchestrationV2ProviderThread],
+) -> bool {
+    subagents.iter().any(|task| {
+        runs.iter().any(|run| task.run_id.as_ref() == Some(&run.id))
+            && (matches!(
+                task.status,
+                OrchestrationV2TurnItemStatus::Pending
+                    | OrchestrationV2TurnItemStatus::Running
+                    | OrchestrationV2TurnItemStatus::Waiting
+            ) || task.status != OrchestrationV2TurnItemStatus::Idle
+                && task
+                    .completion_delivery
+                    .as_ref()
+                    .and_then(Option::as_ref)
+                    .is_some_and(|delivery| {
+                        matches!(
+                            delivery.state,
+                            OrchestrationV2DelegatedCompletionTaskDeliveryState::Pending
+                                | OrchestrationV2DelegatedCompletionTaskDeliveryState::Claimed
+                        )
+                    }))
+    }) || provider_threads.iter().any(|thread| {
+        thread
+            .pending_background_tasks
+            .as_ref()
+            .and_then(Option::as_deref)
+            .unwrap_or_default()
+            .iter()
+            .any(|task| match task {
+                OrchestrationV2PendingBackgroundTask::Subagent(_)
+                | OrchestrationV2PendingBackgroundTask::BackgroundTask(_) => true,
+                OrchestrationV2PendingBackgroundTask::Command(task)
+                | OrchestrationV2PendingBackgroundTask::Monitor(task) => {
+                    task.awaited.as_ref().and_then(Option::as_ref).is_some()
+                }
+            })
+    })
+}
+
+pub fn delegated_task_result_run_from(runs: &[OrchestrationV2Run]) -> Option<&OrchestrationV2Run> {
+    select_task_result(runs.iter())
+}
+
 pub fn delegated_task_result_run<'a>(
     runs: &'a [OrchestrationV2Run],
     task_id: &NodeId,
 ) -> Option<&'a OrchestrationV2Run> {
-    let mut tasks = runs
-        .iter()
-        .filter(|run| {
-            run.delegated_task_id.as_ref().and_then(Option::as_ref)
-                == Some(&t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(
-                    task_id.clone(),
-                ))
-        })
-        .collect::<Vec<_>>();
+    select_task_result(runs.iter().filter(|run| {
+        run.delegated_task_id.as_ref().and_then(Option::as_ref)
+            == Some(&t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(
+                task_id.clone(),
+            ))
+    }))
+}
+
+fn select_task_result<'a>(
+    runs: impl Iterator<Item = &'a OrchestrationV2Run>,
+) -> Option<&'a OrchestrationV2Run> {
+    let mut tasks = runs.collect::<Vec<_>>();
     tasks.sort_by_key(|run| std::cmp::Reverse(run.ordinal));
     let awaited = tasks
         .iter()
@@ -254,6 +359,7 @@ pub fn delegated_task_result_run<'a>(
         .or_else(|| awaited.first().copied())
         .or_else(|| tasks.first().copied())
 }
+
 pub fn continuation_failed_before_prompt(
     run: &OrchestrationV2Run,
     turns: &[OrchestrationV2ProviderTurn],

@@ -1070,3 +1070,69 @@ pub fn current_pull_request_watch_wake(
     message["notification"] = notification;
     Ok(PullRequestWatchWakeState::Updated(message))
 }
+
+pub fn metadata_update_continuation(
+    command: &OrchestrationV2ServerCommand,
+) -> Result<Option<OrchestrationV2ServerCommand>> {
+    let value = t3_contracts::stored::to_value(command)?;
+    if value["type"] != "thread.metadata.update" || value.get("continuation").is_none() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_value(
+        serde_json::json!({"type":"message.dispatch","commandId":value["commandId"],"threadId":value["threadId"],"messageId":value["continuation"]["messageId"],"text":value["continuation"]["text"],"attachments":[],"dispatchMode":{"type":"queue_after_active"},"createdBy":"agent","creationSource":"mcp"}),
+    )?))
+}
+
+pub fn follows_current_conversation(message: &Value) -> bool {
+    !message["delegatedCompletion"].is_null()
+        || message["followsThreadSelection"] == true
+        || message["notification"]["source"]["kind"] == "monitor"
+            && !(message["createdBy"] == "agent"
+                && message["creationSource"] == "provider"
+                && !message["notification"].is_null()
+                && message["delegatedCompletion"].is_null())
+}
+
+pub fn dispatch_follows_current(command: &Value) -> bool {
+    follows_current_conversation(command)
+        || !command["scheduledTaskId"].is_null() && command.get("modelSelection").is_none()
+}
+
+pub fn queued_run_model_selection(
+    projection: &OrchestrationV2ThreadProjection,
+    run: &OrchestrationV2Run,
+) -> Result<t3_contracts::model_selection::ModelSelection> {
+    let follows = projection
+        .messages
+        .iter()
+        .find(|message| message.id == run.user_message_id)
+        .map(t3_contracts::stored::to_value)
+        .transpose()?
+        .is_some_and(|message| follows_current_conversation(&message));
+    Ok(if follows {
+        &projection.thread.model_selection
+    } else {
+        &run.model_selection
+    }
+    .clone())
+}
+
+pub fn queue_tail_model_selection(
+    projection: &OrchestrationV2ThreadProjection,
+) -> Result<t3_contracts::model_selection::ModelSelection> {
+    for run in super::queued_run_order::queued_runs_in_delivery_order(projection)
+        .into_iter()
+        .rev()
+    {
+        let message = projection
+            .messages
+            .iter()
+            .find(|message| message.id == run.user_message_id)
+            .map(t3_contracts::stored::to_value)
+            .transpose()?;
+        if !message.as_ref().is_some_and(follows_current_conversation) {
+            return Ok(run.model_selection.clone());
+        }
+    }
+    Ok(projection.thread.model_selection.clone())
+}

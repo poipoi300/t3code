@@ -1455,6 +1455,128 @@ async fn only_a_provider_announced_stop_ends_the_stream_without_a_failure() -> R
     Ok(())
 }
 
+#[tokio::test]
+async fn exclusive_release_drains_queued_events_and_only_intentional_detach_names_its_thread()
+-> Result<()> {
+    use t3_orchestration::ports::runs_ingestion::run_execution_service::ProviderStreamContext;
+    for release in ["detach", "stream failure", "provider stop", "early close"] {
+        let (adapter, mut calls, input) = fake()?;
+        let manager = ProviderSessionManager::new(
+            Arc::new(AdapterRegistry::from_adapters(vec![adapter.clone()])),
+            None,
+        );
+        let runtime = manager
+            .attach(input.model_selection.instance_id.clone(), input.clone())
+            .await?;
+        assert!(matches!(calls.recv().await, Some(FakeCall::Open(_))));
+        assert!(matches!(calls.recv().await, Some(FakeCall::Subscribe)));
+        let mut subscription = runtime.subscribe().await?;
+        let mut observed = runtime.subscribe().await?;
+        let queued = ProviderEvent {
+            driver: ProviderDriverKind("codex".into()),
+            kind: ProviderEventKind::BackgroundWork {
+                provider_turn_id: ProviderTurnId("queued-before-release".into()),
+                pending: false,
+            },
+        };
+        adapter.runtime.emit(queued.clone()).await?;
+        assert_eq!(observed.events.recv().await.unwrap()?, queued);
+        observed.close();
+        if release == "early close" {
+            assert_eq!(subscription.events.recv().await.unwrap()?, queued);
+            subscription.close();
+        }
+        if release == "detach" || release == "early close" {
+            SessionDirectory::detach_thread(
+                &manager,
+                DetachSession {
+                    provider_session_id: input.provider_session_id.clone(),
+                    thread_id: input.thread_id.clone(),
+                    detail: Some("Workspace changed.".into()),
+                    revoke_credential: false,
+                },
+            )
+            .await?;
+            if release == "detach" {
+                assert!(
+                    !subscription.cancellation.is_cancelled(),
+                    "detach must let the subscriber consume its queued failure"
+                );
+            }
+        } else {
+            if release == "provider stop" {
+                let mut session = runtime.session().clone();
+                session.status = ProviderSessionStatus::Stopped;
+                adapter
+                    .runtime
+                    .emit(ProviderEvent {
+                        driver: ProviderDriverKind("codex".into()),
+                        kind: ProviderEventKind::Session(Box::new(session)),
+                    })
+                    .await?;
+            }
+            adapter.runtime.close().await?;
+        }
+        if release != "early close" {
+            assert_eq!(subscription.events.recv().await.unwrap()?, queued);
+            if release == "provider stop" {
+                assert!(matches!(
+                    subscription.events.recv().await,
+                    Some(Ok(ProviderEvent {
+                        kind: ProviderEventKind::Session(_),
+                        ..
+                    }))
+                ));
+            }
+            let terminal = subscription.events.recv().await;
+            if release == "provider stop" {
+                assert!(terminal.is_none());
+            } else {
+                let error = terminal
+                    .unwrap_or_else(|| {
+                        panic!("{release}: release must fail the subscriber after queued events")
+                    })
+                    .expect_err("release must not fabricate a provider terminal");
+                assert_eq!(
+                    manager.detached_thread_id(&error),
+                    (release == "detach").then(|| input.thread_id.clone())
+                );
+                let detached = match error {
+                    ProviderError::Protocol {
+                        payload: Some(payload),
+                        ..
+                    } if payload["_tag"] == "ProviderAdapterEventStreamError" => {
+                        assert_eq!(
+                            payload["providerSessionId"],
+                            json!(input.provider_session_id)
+                        );
+                        payload.get("detachedThreadId").cloned()
+                    }
+                    _ => None,
+                };
+                assert_eq!(
+                    detached,
+                    (release == "detach").then(|| json!(input.thread_id)),
+                    "{release}"
+                );
+                assert!(subscription.events.recv().await.is_none());
+            }
+        }
+        manager.shutdown().await?;
+        assert!(!manager.is_live(&input.provider_session_id));
+        assert!(
+            manager
+                .detached_thread_id(&ProviderError::Protocol {
+                    reason: None,
+                    detail: "Unmarked provider error".into(),
+                    payload: Some(json!({"detachedThreadId":input.thread_id})),
+                })
+                .is_none()
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn sample<T: DeserializeOwned>(name: &str) -> Result<T> {
     let data = match name {
         "OrchestrationV2ProviderSession" => {
@@ -2034,7 +2156,7 @@ async fn failed_ingestion_releases_the_session_as_error_instead_of_manual_stop()
 async fn pooled_attachment_reuses_process_and_detaching_one_thread_keeps_the_other() -> Result<()> {
     let (adapter, mut calls, input) = fake_with_pool(true)?;
     let manager = ProviderSessionManager::new(
-        Arc::new(AdapterRegistry::from_adapters(vec![adapter])),
+        Arc::new(AdapterRegistry::from_adapters(vec![adapter.clone()])),
         None,
     );
     let first = manager
@@ -2049,11 +2171,21 @@ async fn pooled_attachment_reuses_process_and_detaching_one_thread_keeps_the_oth
     assert!(matches!(calls.recv().await, Some(FakeCall::Open(_))));
     assert!(matches!(calls.recv().await, Some(FakeCall::Subscribe)));
     assert!(calls.try_recv().is_err());
+    let mut subscription = second.subscribe().await?;
     manager
         .detach_thread(input.provider_session_id.clone(), input.thread_id, false)
         .await?;
     assert!(manager.is_live(&input.provider_session_id));
     assert!(calls.try_recv().is_err());
+    let event = ProviderEvent {
+        driver: ProviderDriverKind("codex".into()),
+        kind: ProviderEventKind::BackgroundWork {
+            provider_turn_id: ProviderTurnId("other-owner".into()),
+            pending: false,
+        },
+    };
+    adapter.runtime.emit(event.clone()).await?;
+    assert_eq!(subscription.events.recv().await.unwrap()?, event);
     manager.shutdown().await?;
     assert!(matches!(calls.recv().await, Some(FakeCall::Close)));
     Ok(())
@@ -2440,11 +2572,14 @@ async fn concurrent_attaches_open_once_and_shutdown_awaits_native_close() -> Res
         manager.attach(input.model_selection.instance_id.clone(), input.clone()),
         manager.attach(input.model_selection.instance_id.clone(), input.clone())
     );
-    assert!(Arc::ptr_eq(&first?, &second?));
+    let first = first?;
+    assert!(Arc::ptr_eq(&first, &second?));
     assert!(matches!(calls.recv().await, Some(FakeCall::Open(_))));
     assert!(matches!(calls.recv().await, Some(FakeCall::Subscribe)));
     assert!(calls.try_recv().is_err());
+    let subscription = first.subscribe().await?;
     manager.shutdown().await?;
+    assert!(subscription.cancellation.is_cancelled());
     assert!(matches!(calls.recv().await, Some(FakeCall::Close)));
     assert!(!manager.is_live(&input.provider_session_id));
     assert!(

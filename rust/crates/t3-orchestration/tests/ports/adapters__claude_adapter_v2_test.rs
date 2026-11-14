@@ -414,6 +414,27 @@ fn native_fork_publishes_in_original_project_and_rejects_overwrite() {
 
 #[test]
 fn permission_policy_matrix_preserves_runtime_sandbox_and_explicit_approval() {
+    let upstream =
+        include_str!("../../../../../apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts");
+    let expected = upstream
+        .split("export const CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS: ReadonlyArray<string> = [")
+        .nth(1)
+        .unwrap()
+        .split("];")
+        .next()
+        .unwrap();
+    let mut expected = expected
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix('"')
+                .and_then(|line| line.split('"').next())
+        })
+        .collect::<Vec<_>>();
+    let mut actual = CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS.to_vec();
+    expected.sort_unstable();
+    actual.sort_unstable();
+    assert_eq!(actual, expected);
     let base = fixture_turn_input().unwrap().runtime_policy;
     for (mode, expected) in [
         (RuntimeMode::ApprovalRequired, PermissionMode::Default),

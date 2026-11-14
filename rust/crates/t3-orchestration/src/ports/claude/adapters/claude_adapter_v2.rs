@@ -18,6 +18,11 @@ pub const CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL: &str =
     "Claude provider query ended before the turn could start.";
 pub const CLAUDE_READ_ONLY_ALLOWED_TOOLS: &[&str] = &["Read", "Glob", "Grep"];
 pub const CLAUDE_T3_MCP_TOOL_TIMEOUT_MS: u64 = 65 * 60 * 1_000;
+pub const CLAUDE_SEND_TO_USER_INSTRUCTIONS: &str = r#"
+### Text the user must read mid-turn
+
+Text you write before a tool call may reach the user only as a one-line summary. When the user must read something in full before your turn ends, such as a draft, a code block, or what a question you're about to ask refers to, send it with `send_to_user`. Put everything else in your final reply.
+"#;
 pub const CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS: &[&str] = &[
     "mcp__t3-code__orchestrator_capabilities",
     "mcp__t3-code__list_scheduled_tasks",
@@ -32,8 +37,10 @@ pub const CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS: &[&str] = &[
     "mcp__t3-code__t3_preview_list",
     "mcp__t3-code__t3_environment_read",
     "mcp__t3-code__t3_environment_links",
+    "mcp__t3-code__t3_theme_read",
     "mcp__t3-code__html_preview",
     "mcp__t3-code__html_render",
+    "mcp__t3-code__send_to_user",
 ];
 
 pub(crate) fn decode<T: DeserializeOwned>(value: Value) -> ProviderResult<T> {
@@ -702,6 +709,7 @@ pub struct ClaudeProjection {
     owed_background: BTreeMap<String, Value>,
     completed_background: BTreeSet<String>,
     background_calls: BTreeMap<String, (String, Value)>,
+    running_monitors: BTreeSet<String>,
     steers: BTreeMap<String, SteerInput>,
     instance_id: ProviderInstanceId,
     session_id: ProviderSessionId,
@@ -746,6 +754,7 @@ impl ClaudeProjection {
             owed_background: BTreeMap::new(),
             completed_background: BTreeSet::new(),
             background_calls: BTreeMap::new(),
+            running_monitors: BTreeSet::new(),
             steers: BTreeMap::new(),
             instance_id,
             session_id,
@@ -770,6 +779,7 @@ impl ClaudeProjection {
     }
     pub fn pending_background_work(&self, include_subagents: bool) -> bool {
         !self.background.is_empty()
+            || self.has_running_monitor()
             || (include_subagents
                 && self.tasks.values().any(|v| {
                     matches!(
@@ -778,6 +788,9 @@ impl ClaudeProjection {
                     )
                 }))
     }
+    pub fn has_running_monitor(&self) -> bool {
+        !self.running_monitors.is_empty()
+    }
     pub fn has_unconsumed_native_wake(&self) -> bool {
         !self.owed_background.is_empty()
     }
@@ -785,10 +798,11 @@ impl ClaudeProjection {
         self.active.is_none()
             && (self.pending_background_work(true) || self.has_unconsumed_native_wake())
             && frame["parent_tool_use_id"].is_null()
-            && matches!(
-                frame["type"].as_str(),
-                Some("assistant" | "stream_event" | "user" | "result")
-            )
+            && (frame["type"] == "system" && frame["subtype"] == "init"
+                || matches!(
+                    frame["type"].as_str(),
+                    Some("assistant" | "stream_event" | "user" | "result")
+                ))
     }
     pub fn native_wake_notification(
         &self,
@@ -911,6 +925,7 @@ impl ClaudeProjection {
         self.owed_background.clear();
         self.completed_background.clear();
         self.background_calls.clear();
+        self.running_monitors.clear();
         self.steers.clear();
     }
     pub fn begin(&mut self, input: TurnInput) -> ProviderResult<Vec<ProviderEvent>> {
@@ -1921,12 +1936,16 @@ impl ClaudeProjection {
                     .as_ref()
                     .and_then(|id| self.background_calls.get(id))
                     .is_some_and(|(name, _)| name == "Monitor");
+                if monitor {
+                    self.running_monitors.insert(id.into());
+                }
                 let entry = json!({"taskId":id,"kind":if monitor {"monitor"}else{"command"},"nativeKind":kind,"description":frame["description"].as_str().unwrap_or("Background task")});
                 if frame["is_backgrounded"] != false {
                     self.background.insert(id.into(), entry.clone());
                 }
                 self.known_background.insert(id.into(), entry);
             } else if subtype == "task_notification" {
+                self.running_monitors.remove(id);
                 self.background.remove(id);
                 if !self.completed_background.contains(id)
                     && self
@@ -2285,11 +2304,25 @@ impl ClaudeProjection {
         events.extend(result?);
         Ok(events)
     }
+    pub fn complete_absorbed_wake(&mut self) -> ProviderResult<Vec<ProviderEvent>> {
+        let mut events = Vec::new();
+        self.finish_result(&Value::Null, &self.clock.now().0, &mut events, true)?;
+        Ok(events)
+    }
     pub fn finish(
         &mut self,
         result: &Value,
         now: &str,
         events: &mut Vec<ProviderEvent>,
+    ) -> ProviderResult<()> {
+        self.finish_result(result, now, events, false)
+    }
+    fn finish_result(
+        &mut self,
+        result: &Value,
+        now: &str,
+        events: &mut Vec<ProviderEvent>,
+        absorbed: bool,
     ) -> ProviderResult<()> {
         let Some(context) = self.active.as_ref() else {
             return Ok(());
@@ -2325,6 +2358,8 @@ impl ClaudeProjection {
         let hint = context.failure_hint.clone();
         let status = if context.interrupted {
             "interrupted"
+        } else if absorbed {
+            "completed"
         } else {
             terminal_status_from_result(result, hint.as_deref())
         };

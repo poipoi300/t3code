@@ -100,6 +100,18 @@ pub fn expanded_id<T: Clone>(id: &IdOrIndex<T>) -> Result<T> {
     }
 }
 
+// seam-shim: server binds instance snapshot endpoint and the shared proxy-hub reset resolver.
+#[async_trait]
+pub trait UsageLimitResets: Send + Sync {
+    async fn endpoint(&self, instance: ProviderInstanceId) -> Result<Option<String>>;
+    async fn reset_at(
+        &self,
+        driver: t3_contracts::provider_instance::ProviderDriverKind,
+        endpoint: String,
+        model: Option<String>,
+    ) -> Result<Option<IsoDateTime>>;
+}
+
 pub struct ProviderEventIngestor {
     pub projections: Arc<dyn ProjectionReader>,
     pub committer: Arc<dyn EventCommitter>,
@@ -109,6 +121,7 @@ pub struct ProviderEventIngestor {
     pub workspace: Option<Arc<dyn WorkspaceBackend>>,
     pub agent_scope: Option<Arc<dyn AgentScope>>,
     pub telemetry: Option<Arc<dyn ProviderTelemetry>>,
+    pub usage_limit_resets: Option<Arc<dyn UsageLimitResets>>,
     completed_turns: Mutex<CompletedTurns>,
     telemetry_tasks: TaskTracker,
     telemetry_cancellation: CancellationToken,
@@ -248,6 +261,7 @@ impl ProviderEventIngestor {
             workspace: None,
             agent_scope: None,
             telemetry: None,
+            usage_limit_resets: None,
             completed_turns: Mutex::new(CompletedTurns::default()),
             telemetry_tasks: TaskTracker::new(),
             telemetry_cancellation: CancellationToken::new(),
@@ -502,6 +516,39 @@ impl ProviderEventIngestor {
                     failure.code = Some(t3_contracts::base_schemas::TrimmedNonEmptyString(
                         "oom_kill".into(),
                     ));
+                }
+                if let ProviderEventKind::Terminal {
+                    outcome: TerminalOutcome::Failed { failure, .. },
+                    ..
+                } = &mut terminal.kind
+                    && failure.class == OrchestrationV2ProviderFailureClass::UsageLimit
+                    && failure.reset_at.as_ref().and_then(Option::as_ref).is_none()
+                    && let Some(resets) = &self.usage_limit_resets
+                    && let Some(endpoint) = resets.endpoint(input.instance_id.clone()).await?
+                {
+                    let model = async {
+                        if let Some(run_id) = &input.run_id
+                            && let Some(run) = self
+                                .projections
+                                .run(input.thread_id.clone(), run_id.clone())
+                                .await?
+                        {
+                            return Ok::<_, Error>(Some(run.model_selection.model));
+                        }
+                        Ok(self
+                            .projections
+                            .thread(input.thread_id.clone())
+                            .await?
+                            .map(|thread| thread.model_selection.model))
+                    }
+                    .await
+                    .unwrap_or(None);
+                    if let Some(reset) = resets
+                        .reset_at(input.event.driver.clone(), endpoint, model)
+                        .await?
+                    {
+                        failure.reset_at = Some(Some(reset));
+                    }
                 }
                 let Some(item) = terminal_failure_item(
                     &terminal,

@@ -380,3 +380,33 @@ fn goal_parser_matches_whitespace_controls_and_attachment_exclusion() {
         assert_eq!(goal_command_type(text, count), expected, "{text}");
     }
 }
+
+#[cfg(feature = "acp-adapter")]
+#[tokio::test]
+async fn drift_grok_followups_queue_without_cancelling_the_running_tool() {
+    use std::sync::Arc;
+    use t3_orchestration::{
+        adapters::acp::AcpAdapter,
+        provider::ProviderAdapter,
+        testing::{ManualClock, SequenceIds},
+    };
+    let mut adapter = AcpAdapter::replay(
+        ProviderInstanceId("grok".into()),
+        Arc::new(ManualClock::new(TEST_TIME)),
+        Arc::new(SequenceIds::new("grok-policy")),
+        false,
+    );
+    adapter.driver = t3_contracts::provider_instance::ProviderDriverKind("grok".into());
+    let caps = adapter.capabilities().await.unwrap();
+    assert!(!caps.turns.supports_steering_by_interrupt_restart);
+    for intent in ["auto", "steer"] {
+        assert_eq!(
+            resolved(
+                &active_projection(caps.clone()),
+                json!({"type":"start_immediately"}),
+                Some(intent)
+            )["type"],
+            "queue_after_active"
+        );
+    }
+}

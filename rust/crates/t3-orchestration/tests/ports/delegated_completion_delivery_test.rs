@@ -234,3 +234,158 @@ async fn parent_settlement_catches_up_the_child_question_and_resolution_cancels_
     assert_eq!(commands[1]["runId"], "wake");
     Ok(())
 }
+
+#[test]
+fn followup_owns_transitive_untagged_descendant_wakes_and_waits_for_their_results()
+-> t3_orchestration::error::Result<()> {
+    use t3_orchestration::ports::runs_ingestion::restart_background_note::*;
+    let mut runs = Vec::new();
+    for ordinal in 1..=6 {
+        let mut run = fixture("OrchestrationV2Run");
+        run["id"] = format!("run:{ordinal}").into();
+        run["ordinal"] = ordinal.into();
+        run["status"] = "completed".into();
+        run.as_object_mut().unwrap().remove("delegatedTaskId");
+        if ordinal == 1 {
+            run["delegatedTaskId"] = "task:followup".into();
+        }
+        if ordinal == 5 {
+            run["delegatedTaskId"] = "task:other".into();
+        }
+        if ordinal == 6 {
+            run["delegatedTaskId"] = serde_json::Value::Null;
+        }
+        if ordinal == 2 {
+            run["status"] = "queued".into();
+            run["queueHeld"] = false.into();
+        }
+        if ordinal == 3 {
+            run["status"] = "running".into();
+        }
+        runs.push(decode::<OrchestrationV2Run>(run));
+    }
+    let mut messages = Vec::new();
+    for (ordinal, parent) in [(3, 2), (6, 1), (5, 1), (2, 1)] {
+        let mut message = fixture("OrchestrationV2ConversationMessage");
+        message["id"] = format!("wake:{ordinal}").into();
+        message["runId"] = format!("run:{ordinal}").into();
+        message["delegatedCompletion"] =
+            json!({"parentRunId":format!("run:{parent}"),"generation":1,"taskIds":[]});
+        messages.push(decode(message));
+    }
+    let mut child: OrchestrationV2ThreadProjection =
+        decode(fixture("OrchestrationV2ThreadProjection"));
+    child.runs = runs;
+    child.messages = messages;
+    let mut owned = delegated_task_runs(
+        &child.runs,
+        &child.messages,
+        &NodeId("task:followup".into()),
+    )?;
+    assert_eq!(
+        owned
+            .iter()
+            .map(|run| t3_contracts::stored::to_value(&run.id).unwrap())
+            .collect::<Vec<_>>(),
+        vec![json!("run:1"), json!("run:2"), json!("run:3")]
+    );
+    assert_eq!(
+        delegated_task_result_run_from(&owned).unwrap().id,
+        owned[2].id
+    );
+    owned[2].status = OrchestrationV2RunStatus::Completed;
+    assert_eq!(
+        delegated_task_result_run_from(&owned).unwrap().id,
+        owned[1].id,
+        "an awaited wake still in the queue holds completion"
+    );
+    owned[1].status = OrchestrationV2RunStatus::Completed;
+    assert_eq!(
+        delegated_task_result_run_from(&owned).unwrap().id,
+        owned[2].id
+    );
+    assert!(
+        delegated_task_runs(&child.runs, &child.messages, &NodeId("absent".into()))?.is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn followup_waits_for_its_subagent_delivery_and_awaited_provider_work()
+-> t3_orchestration::error::Result<()> {
+    use t3_orchestration::ports::runs_ingestion::restart_background_note::*;
+    let run: OrchestrationV2Run = decode(fixture("OrchestrationV2Run"));
+    let mut child: OrchestrationV2ThreadProjection =
+        decode(fixture("OrchestrationV2ThreadProjection"));
+    child.subagents.clear();
+    child.provider_threads.clear();
+    let mut subagent = fixture("OrchestrationV2Subagent");
+    subagent["runId"] = t3_contracts::stored::to_value(&run.id)?;
+    for (status, delivery, expected) in [
+        ("running", None, true),
+        ("completed", Some("pending"), true),
+        ("completed", Some("claimed"), true),
+        ("completed", Some("acknowledged"), false),
+        ("idle", Some("pending"), false),
+    ] {
+        subagent["status"] = status.into();
+        subagent
+            .as_object_mut()
+            .unwrap()
+            .remove("completionDelivery");
+        if let Some(delivery) = delivery {
+            subagent["completionDelivery"] = json!({"state":delivery,"observedByRunId":null});
+        }
+        child.subagents = vec![decode(subagent.clone())];
+        assert_eq!(
+            delegated_task_awaits_work(
+                std::slice::from_ref(&run),
+                &child.subagents,
+                &child.provider_threads
+            ),
+            expected,
+            "{status}/{delivery:?}"
+        );
+    }
+    subagent["status"] = "running".into();
+    subagent["runId"] = "unrelated".into();
+    child.subagents = vec![decode(subagent)];
+    assert!(!delegated_task_awaits_work(
+        std::slice::from_ref(&run),
+        &child.subagents,
+        &child.provider_threads
+    ));
+    child.subagents.clear();
+    for (kind, awaited, expected) in [
+        ("command", false, false),
+        ("command", true, true),
+        ("monitor", false, false),
+        ("monitor", true, true),
+        ("subagent", false, true),
+        ("background_task", false, true),
+    ] {
+        let mut thread = fixture("OrchestrationV2ProviderThread");
+        let mut task = json!({"kind":kind,"taskId":"native:work"});
+        if awaited {
+            task["awaited"] = true.into();
+        }
+        thread["pendingBackgroundTasks"] = json!([task]);
+        child.provider_threads = vec![decode(thread)];
+        assert_eq!(
+            delegated_task_awaits_work(
+                std::slice::from_ref(&run),
+                &child.subagents,
+                &child.provider_threads
+            ),
+            expected,
+            "{kind}/{awaited}"
+        );
+    }
+    child.provider_threads.clear();
+    assert!(!delegated_task_awaits_work(
+        &[run],
+        &child.subagents,
+        &child.provider_threads
+    ));
+    Ok(())
+}

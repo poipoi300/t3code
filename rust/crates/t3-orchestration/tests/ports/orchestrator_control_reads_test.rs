@@ -48,7 +48,19 @@ async fn visits_move_forward_only_and_do_not_change_activity_time_or_load_histor
                 .0
                 .is_empty()
         );
-        harness.dispatch(visit).await.unwrap();
+        let receipt = harness.dispatch(visit).await.unwrap();
+        let events = harness
+            .sink
+            .events_by_command(receipt.command_id)
+            .await
+            .unwrap();
+        if id == "backwards" {
+            assert!(events.is_empty());
+        } else {
+            let event = t3_contracts::stored::to_value(&events[0].event).unwrap();
+            assert_eq!(event["type"], "thread.visit-recorded");
+            assert_eq!(event["payload"], json!({"lastVisitedAt":visited}));
+        }
     }
     let thread = harness
         .reader
@@ -3686,4 +3698,595 @@ async fn a_user_message_keeps_run_one_while_its_lineage_read_yields_to_a_later_a
             .unwrap()
             .clone()
     );
+}
+
+#[test]
+fn drift_awaited_background_holds_followup_until_wake_or_cancellation() {
+    for cancelled in [false, true] {
+        let (mut prepared, mut child) = recovery_pair();
+        child.thread = change(
+            &child.thread,
+            json!({"forkedFrom":{"type":"node","threadId":"thread","nodeId":"original"}}),
+        );
+        child.runs[0] = change(&child.runs[0], json!({"delegatedTaskId":"task"}));
+        let provider = prepared_projection().provider_threads[0].clone();
+        child.provider_threads = vec![change(
+            &provider,
+            json!({"appThreadId":"child","pendingBackgroundTasks":[{"taskId":"check","kind":"command","awaited":true}]}),
+        )];
+        assert!(
+            PureDecisionEngine
+                .decide_delegated_recovery(&prepared, Some(&child), None, None, &[])
+                .unwrap()
+                .events
+                .is_empty(),
+            "interim reply closed the follow-up"
+        );
+        if cancelled {
+            let parent = prepared.context.projection.as_mut().unwrap();
+            parent.subagents[0] =
+                change(&parent.subagents[0], json!({"cancelledRunId":"child-run"}));
+        } else {
+            child.provider_threads[0] = change(
+                &child.provider_threads[0],
+                json!({"pendingBackgroundTasks":[]}),
+            );
+            child.runs.push(change(
+                &child.runs[0],
+                json!({"id":"wake","ordinal":2,"userMessageId":"message:wake"}),
+            ));
+            child.messages.push(change(
+                &child.messages[0],
+                json!({"id":"message:wake-result","runId":"wake","text":"FINAL CHECK-OK"}),
+            ));
+        }
+        let decision = PureDecisionEngine
+            .decide_delegated_recovery(&prepared, Some(&child), None, None, &[])
+            .unwrap();
+        let task = decision
+            .events
+            .iter()
+            .map(|e| t3_contracts::stored::to_value(e).unwrap())
+            .find(|e| e["type"] == "subagent.updated")
+            .unwrap();
+        assert_eq!(
+            task["payload"]["status"],
+            if cancelled {
+                "interrupted"
+            } else {
+                "completed"
+            }
+        );
+        if !cancelled {
+            assert_eq!(task["payload"]["result"], "FINAL CHECK-OK");
+        }
+    }
+}
+
+fn drift_followup_context() -> PreparedDecisionContext {
+    let (mut prepared, mut child) = recovery_pair();
+    let mut parent = prepared.context.projection.take().unwrap();
+    parent.subagents[0] = change(
+        &parent.subagents[0],
+        json!({"result":"Original complete","status":"completed"}),
+    );
+    child.thread = change(&child.thread, json!({"worktreePath":"C:/work/child"}));
+    prepared = prepared_with_adapter(child, "codex");
+    prepared.inputs.related_projections.push(parent);
+    prepared
+        .inputs
+        .next_item_ordinals
+        .push((ThreadId("thread".into()), None, 42));
+    prepared
+}
+
+#[test]
+fn drift_wake_reuses_the_latest_open_followup_instead_of_creating_another_task() {
+    let mut prepared = drift_followup_context();
+    let parent = &mut prepared.inputs.related_projections[0];
+    parent.subagents.push(change(
+        &parent.subagents[0],
+        json!({"id":"followup","result":null,"status":"running"}),
+    ));
+    let child = prepared.context.projection.as_mut().unwrap();
+    child.runs[0] = change(&child.runs[0], json!({"delegatedTaskId":"followup"}));
+    let request = command(
+        json!({"type":"message.dispatch","commandId":"wake","threadId":"child","messageId":"wake-input","text":"Background activity updated","notification":{"source":{"kind":"command"},"outcome":"completed","summary":"Check finished"},"attachments":[],"dispatchMode":{"type":"queue_after_active"},"createdBy":"agent","creationSource":"server"}),
+    );
+    let decision = PureDecisionEngine
+        .decide_prepared(&prepared, &request)
+        .unwrap();
+    let events: Vec<_> = decision
+        .events
+        .iter()
+        .map(|e| t3_contracts::stored::to_value(e).unwrap())
+        .collect();
+    assert!(!events.iter().any(|e| e["type"] == "subagent.updated"));
+    assert!(
+        events
+            .iter()
+            .any(|e| e["type"] == "run.updated" && e["payload"]["delegatedTaskId"] == "followup")
+    );
+}
+
+#[test]
+fn drift_monitor_completion_can_start_a_followup_but_line_progress_cannot() {
+    for outcome in ["updated", "completed"] {
+        let prepared = drift_followup_context();
+        let request = command(
+            json!({"type":"message.dispatch","commandId":"monitor","threadId":"child","messageId":"monitor-input","text":"Monitor activity","notification":{"source":{"kind":"monitor"},"outcome":outcome,"summary":"Monitor activity"},"attachments":[],"dispatchMode":{"type":"queue_after_active"},"createdBy":"agent","creationSource":"server"}),
+        );
+        let decision = PureDecisionEngine
+            .decide_prepared(&prepared, &request)
+            .unwrap();
+        assert_eq!(
+            decision
+                .events
+                .iter()
+                .any(|e| t3_contracts::stored::to_value(e).unwrap()["type"] == "subagent.updated"),
+            outcome == "completed"
+        );
+    }
+}
+
+#[tokio::test]
+async fn drift_workspace_binding_and_continuation_share_one_command_commit_and_replay() {
+    let harness = message_harness().await;
+    harness.dispatch(json!({"type":"message.dispatch","commandId":"handoff-first","threadId":"thread","messageId":"handoff-input","text":"Move workspace","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"})).await.unwrap();
+    let command = json!({"type":"thread.metadata.update","commandId":"atomic-handoff","threadId":"thread","branch":"handoff","worktreePath":"C:/new-worktree","continuation":{"messageId":"handoff-continuation","text":"Continue in worktree"}});
+    let receipt = harness.dispatch(command.clone()).await.unwrap();
+    let events: Vec<_> = harness
+        .sink
+        .events_by_command(receipt.command_id.clone())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| t3_contracts::stored::to_value(&e.event).unwrap())
+        .collect();
+    assert!(events.iter().any(|e| e["type"] == "thread.metadata-updated"
+        && e["payload"]["worktreePath"] == "C:/new-worktree"));
+    assert!(
+        events
+            .iter()
+            .any(|e| e["type"] == "run.created" && e["payload"]["status"] == "queued")
+    );
+    assert!(events.iter().any(|e| e["type"] == "message.updated"
+        && e["payload"]["id"] == "handoff-continuation"
+        && e["payload"]["createdBy"] == "agent"
+        && e["payload"]["creationSource"] == "mcp"));
+    let before = harness.count_events().await;
+    assert_eq!(harness.dispatch(command).await.unwrap(), receipt);
+    assert_eq!(harness.count_events().await, before);
+}
+
+#[test]
+fn drift_native_subagent_refuses_atomic_continuation_before_metadata_can_change() {
+    let mut projection = prepared_projection();
+    projection.thread = change(
+        &projection.thread,
+        json!({"creationSource":"provider","lineage":{"parentThreadId":"parent","relationshipToParent":"subagent","rootThreadId":"parent"}}),
+    );
+    let request = command(
+        json!({"type":"thread.metadata.update","commandId":"native-handoff","threadId":"thread","worktreePath":"C:/new-worktree","continuation":{"messageId":"native-input","text":"Continue"}}),
+    );
+    assert!(
+        PureDecisionEngine
+            .decide(&context(Some(projection)), &request)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot take messages")
+    );
+}
+
+#[test]
+fn drift_stop_ends_a_stale_native_tree_without_replacing_completed_run_results() {
+    let mut parent = prepared_projection();
+    parent.runs[0] = change(
+        &parent.runs[0],
+        json!({"status":"completed","startedAt":TEST_TIME,"completedAt":TEST_TIME}),
+    );
+    parent.turn_items.clear();
+    parent.subagents = vec![change(
+        &task_projection().subagents[0],
+        json!({"id":"stale","runId":"prepared","origin":"provider_native","status":"running","childThreadId":"native","result":"Preserve result"}),
+    )];
+    let mut native = prepared_projection();
+    native.thread = change(&native.thread, json!({"id":"native"}));
+    native.runs.clear();
+    native.turn_items.clear();
+    native.nodes[0] = change(
+        &native.nodes[0],
+        json!({"threadId":"native","id":"native-root","rootNodeId":"native-root","runId":null,"status":"running","countsForRun":false}),
+    );
+    native.subagents = vec![change(
+        &parent.subagents[0],
+        json!({"id":"nested","threadId":"native","runId":null,"parentNodeId":"native-root","childThreadId":"nested-thread"}),
+    )];
+    let mut nested = native.clone();
+    nested.thread = change(&nested.thread, json!({"id":"nested-thread"}));
+    nested.subagents.clear();
+    nested.nodes[0] = change(
+        &nested.nodes[0],
+        json!({"threadId":"nested-thread","id":"nested-root","rootNodeId":"nested-root"}),
+    );
+    let mut prepared = context(Some(parent)).with_inputs(DecisionInputs::default());
+    prepared.inputs.related_projections = vec![native, nested];
+    let decision=PureDecisionEngine.decide_prepared(&prepared,&command(json!({"type":"thread.stop","commandId":"stale-stop","threadId":"thread","stopDelegatedTasks":false}))).unwrap();
+    let events: Vec<_> = decision
+        .events
+        .iter()
+        .map(|e| t3_contracts::stored::to_value(e).unwrap())
+        .collect();
+    for id in ["stale", "nested"] {
+        assert!(
+            events.iter().any(|e| e["type"] == "subagent.updated"
+                && e["payload"]["id"] == id
+                && e["payload"]["status"] == "interrupted"),
+            "missing {id}"
+        );
+    }
+    for id in ["native-root", "nested-root"] {
+        assert!(
+            events.iter().any(|e| e["type"] == "node.updated"
+                && e["payload"]["id"] == id
+                && e["payload"]["status"] == "interrupted"),
+            "missing {id}"
+        );
+    }
+    assert!(!events.iter().any(|e| e["type"] == "run.updated"
+        && e["payload"]["id"] == "prepared"
+        && e["payload"]["status"] != "completed"));
+    assert_eq!(
+        events
+            .iter()
+            .find(|e| e["type"] == "subagent.updated" && e["payload"]["id"] == "stale")
+            .unwrap()["payload"]["result"],
+        "Preserve result"
+    );
+}
+
+#[test]
+fn drift_snooze_allows_user_work_held_by_a_usage_limit_with_no_reset_time() {
+    let mut projection = prepared_projection();
+    projection.runs[0] = change(
+        &projection.runs[0],
+        json!({"status":"failed","completedAt":TEST_TIME}),
+    );
+    projection.runs.push(run("queued", 2, "queued"));
+    projection.messages = vec![super::command_policy_test::message("queued")];
+    projection.provider_sessions[0] =
+        change(&projection.provider_sessions[0], json!({"lastError":null}));
+    projection.turn_items=vec![serde_json::from_value(json!({"id":"usage-error","threadId":"thread","runId":"prepared","nodeId":"node","providerThreadId":"provider-thread","providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":2,"status":"failed","title":"Usage limit","startedAt":TEST_TIME,"completedAt":TEST_TIME,"updatedAt":TEST_TIME,"type":"error","failure":{"class":"usage_limit","message":"Limit reached","code":"api_error_429","retryable":true,"resetAt":null}})).unwrap()];
+    let snooze = command(
+        json!({"type":"thread.snooze","commandId":"snooze-limited","threadId":"thread","snoozedUntil":"2026-09-07T00:00:00.000Z"}),
+    );
+    assert!(
+        PureDecisionEngine
+            .decide(&context(Some(projection.clone())), &snooze)
+            .is_ok()
+    );
+    projection.runs[1] = change(
+        &projection.runs[1],
+        json!({"providerInstanceId":"other","modelSelection":{"instanceId":"other","model":"b"}}),
+    );
+    assert!(
+        PureDecisionEngine
+            .decide(&context(Some(projection)), &snooze)
+            .unwrap_err()
+            .to_string()
+            .contains("queued run")
+    );
+}
+
+#[test]
+fn drift_followup_waits_for_descendants_and_their_transitive_untagged_wakes() {
+    let (prepared, mut child) = recovery_pair();
+    child.thread = change(
+        &child.thread,
+        json!({"forkedFrom":{"type":"node","threadId":"thread","nodeId":"original"}}),
+    );
+    child.runs[0] = change(&child.runs[0], json!({"delegatedTaskId":"task"}));
+    child.subagents = vec![change(
+        &task_projection().subagents[0],
+        json!({"id":"grandchild","threadId":"child","runId":"child-run","status":"running"}),
+    )];
+    assert!(
+        PureDecisionEngine
+            .decide_delegated_recovery(&prepared, Some(&child), None, None, &[])
+            .unwrap()
+            .events
+            .is_empty()
+    );
+    child.subagents[0] = change(
+        &child.subagents[0],
+        json!({"status":"completed","result":"Done","completionDelivery":{"state":"pending","observedByRunId":null}}),
+    );
+    assert!(
+        PureDecisionEngine
+            .decide_delegated_recovery(&prepared, Some(&child), None, None, &[])
+            .unwrap()
+            .events
+            .is_empty()
+    );
+    child.subagents[0] = change(
+        &child.subagents[0],
+        json!({"completionDelivery":{"state":"acknowledged","observedByRunId":"wake"}}),
+    );
+    child.runs.push(change(
+        &run("wake", 2, "completed"),
+        json!({"threadId":"child","startedAt":TEST_TIME,"completedAt":TEST_TIME}),
+    ));
+    child.runs.push(change(
+        &run("wake-two", 3, "running"),
+        json!({"threadId":"child","startedAt":TEST_TIME}),
+    ));
+    for (name, owner) in [("wake", "child-run"), ("wake-two", "wake")] {
+        child.messages.push(change(&super::command_policy_test::message(name),json!({"threadId":"child","delegatedCompletion":{"parentRunId":owner,"generation":1,"taskIds":["grandchild"]}})));
+    }
+    assert!(
+        PureDecisionEngine
+            .decide_delegated_recovery(&prepared, Some(&child), None, None, &[])
+            .unwrap()
+            .events
+            .is_empty()
+    );
+    child.runs[2] = change(
+        &child.runs[2],
+        json!({"status":"completed","completedAt":TEST_TIME}),
+    );
+    child.messages.push(change(
+        &child.messages[0],
+        json!({"id":"final","runId":"wake-two","text":"FINAL GRANDCHILD-OK"}),
+    ));
+    let decision = PureDecisionEngine
+        .decide_delegated_recovery(&prepared, Some(&child), None, None, &[])
+        .unwrap();
+    let task = decision
+        .events
+        .iter()
+        .map(|e| t3_contracts::stored::to_value(e).unwrap())
+        .find(|e| e["type"] == "subagent.updated")
+        .unwrap();
+    assert_eq!(task["payload"]["result"], "FINAL GRANDCHILD-OK");
+}
+
+#[test]
+fn drift_scheduled_deliveries_record_follow_selection_only_when_unpinned() {
+    for pinned in [false, true] {
+        let prepared = prepared_with_adapter(running_projection(), "codex");
+        let mut send = json!({"type":"message.dispatch","commandId":"schedule","threadId":"thread","messageId":"scheduled","text":"Scheduled prompt","scheduledTaskId":"task:scheduled","attachments":[],"dispatchMode":{"type":"queue_after_active"},"createdBy":"user","creationSource":"web"});
+        if pinned {
+            send["modelSelection"] = json!({"instanceId":"codex","model":"pin"});
+        }
+        let decision = PureDecisionEngine
+            .decide_prepared(&prepared, &command(send))
+            .unwrap();
+        let message = decision
+            .events
+            .iter()
+            .map(|e| t3_contracts::stored::to_value(e).unwrap())
+            .find(|e| e["type"] == "message.updated")
+            .unwrap()["payload"]
+            .clone();
+        assert_eq!(
+            message.get("followsThreadSelection"),
+            if pinned { None } else { Some(&json!(true)) }
+        );
+    }
+}
+
+fn drift_queued_schedule(
+    selection: serde_json::Value,
+    follows: bool,
+    fresh: bool,
+) -> PreparedDecisionContext {
+    let mut projection = prepared_projection();
+    projection.thread = change(
+        &projection.thread,
+        json!({"worktreePath":"C:/work/thread","providerInstanceId":selection["instanceId"],"modelSelection":selection,"activeProviderThreadId":null}),
+    );
+    projection.runs[0] = change(
+        &projection.runs[0],
+        json!({"status":"queued","freshContext":fresh,"workspacePreparation":null}),
+    );
+    projection.provider_sessions.clear();
+    projection.provider_threads[0] = change(
+        &projection.provider_threads[0],
+        json!({"nativeThreadRef":null,"providerSessionId":null,"firstRunOrdinal":null,"lastRunOrdinal":null}),
+    );
+    let mut message =
+        t3_contracts::stored::to_value(&super::command_policy_test::message("prepared")).unwrap();
+    message["scheduledTaskId"] = json!("scheduled-task");
+    if follows {
+        message["followsThreadSelection"] = json!(true);
+    }
+    projection.messages = vec![serde_json::from_value(message).unwrap()];
+    let mut prepared = prepared_with_adapter(projection, "codex");
+    if selection["instanceId"] != "codex" {
+        let metadata = prepared.inputs.provider_metadata[0].1.clone();
+        prepared.inputs.provider_metadata.push((
+            serde_json::from_value(selection["instanceId"].clone()).unwrap(),
+            metadata,
+        ));
+    }
+    prepared
+}
+
+#[test]
+fn drift_scheduled_start_uses_current_options_or_provider_while_pins_and_reservations_survive() {
+    for (selection, follows, fresh) in [
+        (
+            json!({"instanceId":"codex","model":"new","options":[{"id":"reasoningEffort","value":"high"}]}),
+            true,
+            false,
+        ),
+        (json!({"instanceId":"other","model":"new"}), true, false),
+        (json!({"instanceId":"other","model":"new"}), true, true),
+        (json!({"instanceId":"other","model":"new"}), false, false),
+    ] {
+        let prepared = drift_queued_schedule(selection.clone(), follows, fresh);
+        let decision = PureDecisionEngine
+            .decide_queued_start(&prepared, &RunId("prepared".into()))
+            .unwrap();
+        let events: Vec<_> = decision
+            .events
+            .iter()
+            .map(|e| t3_contracts::stored::to_value(e).unwrap())
+            .collect();
+        let run = &events
+            .iter()
+            .find(|e| e["type"] == "run.updated" && e["payload"]["id"] == "prepared")
+            .unwrap()["payload"];
+        let expected = if follows {
+            selection
+        } else {
+            json!({"instanceId":"codex","model":"a"})
+        };
+        assert_eq!(run["modelSelection"], expected);
+        assert_eq!(
+            events
+                .iter()
+                .find(|e| e["type"] == "run-attempt.updated")
+                .unwrap()["payload"]["providerInstanceId"],
+            expected["instanceId"]
+        );
+        if fresh && follows {
+            assert_ne!(run["providerThreadId"], "provider-thread");
+            assert!(
+                !events.iter().any(|e| e["type"] == "provider-thread.updated"
+                    && e["payload"]["id"] == "provider-thread")
+            );
+        }
+    }
+}
+
+#[test]
+fn drift_scheduled_goal_validation_uses_current_provider_at_start_edit_and_promotion() {
+    for operation in ["start", "edit", "promote"] {
+        let mut prepared = drift_queued_schedule(
+            json!({"instanceId":"claudeAgent","model":"claude"}),
+            true,
+            false,
+        );
+        prepared.inputs.provider_metadata[1].1.driver =
+            t3_contracts::provider_instance::ProviderDriverKind("claudeAgent".into());
+        let projection = prepared.context.projection.as_mut().unwrap();
+        projection.messages[0] = change(
+            &projection.messages[0],
+            json!({"text":if operation=="edit" {"scheduled"}else{"/goal pause"}}),
+        );
+        let result=match operation {
+            "start"=>PureDecisionEngine.decide_queued_start(&prepared,&RunId("prepared".into())),
+            "edit"=>PureDecisionEngine.decide_prepared(&prepared,&command(json!({"type":"queued-run.edit","commandId":"edit-current-goal","threadId":"thread","runId":"prepared","text":"/goal pause"}))),
+            _=>PureDecisionEngine.decide_prepared(&prepared,&command(json!({"type":"queued-message.promote-to-steer","commandId":"promote-current-goal","threadId":"thread","queuedRunId":"prepared","targetRunId":"active"})))
+        };
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Claude goals cannot be paused or resumed"),
+            "{operation}"
+        );
+    }
+}
+
+#[test]
+fn drift_compact_visit_keeps_a_forward_watermark_when_opening_with_an_older_clock() {
+    let mut projection = projection();
+    projection.thread = change(
+        &projection.thread,
+        json!({"lastVisitedAt":"2026-09-05T00:00:00.000Z"}),
+    );
+    let request = command(
+        json!({"type":"thread.visit","commandId":"opened-old-clock","threadId":"thread","visitedAt":TEST_TIME,"opened":true,"searchQuery":"parser"}),
+    );
+    let decision = PureDecisionEngine
+        .decide(&context(Some(projection)), &request)
+        .unwrap();
+    let event = t3_contracts::stored::to_value(&decision.events[0]).unwrap();
+    assert_eq!(event["type"], "thread.visit-recorded");
+    assert_eq!(
+        event["payload"]["lastVisitedAt"],
+        "2026-09-05T00:00:00.000Z"
+    );
+    assert_eq!(event["payload"].as_object().unwrap().len(), 2);
+    assert_eq!(
+        event["payload"]["opens"]["openedAt"],
+        epoch_millis(TEST_TIME).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn drift_scheduled_queue_resolution_reaches_sqlite_execution_without_losing_pins() {
+    for pinned in [false,true] {
+        let harness=message_harness().await;
+        harness.dispatch(json!({"type":"message.dispatch","commandId":"schedule-first","threadId":"thread","messageId":"schedule-first-input","text":"Busy","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"})).await.unwrap();
+        let mut send=json!({"type":"message.dispatch","commandId":"scheduled-send","threadId":"thread","messageId":"scheduled-input","scheduledTaskId":"scheduled-task","text":"Scheduled","attachments":[],"dispatchMode":{"type":"queue_after_active"},"createdBy":"user","creationSource":"web"});
+        let pin=json!({"instanceId":"codex","model":"pinned","options":[{"id":"reasoningEffort","value":"low"}]});
+        if pinned {send["modelSelection"]=pin.clone();}
+        harness.dispatch(send).await.unwrap();
+        let newer=json!({"instanceId":"codex","model":"new","options":[{"id":"reasoningEffort","value":"high"}]});
+        harness.dispatch(json!({"type":"thread.model-selection.set","commandId":"schedule-new-selection","threadId":"thread","modelSelection":newer})).await.unwrap();
+        let before=harness.reader.projection(ThreadId("thread".into())).await.unwrap().unwrap();
+        let run=change(&before.runs[0],json!({"status":"completed","completedAt":TEST_TIME}));
+        let event:OrchestrationV2DomainEvent=serde_json::from_value(json!({"id":"scheduled-first-ended","threadId":"thread","type":"run.updated","runId":run.id,"occurredAt":TEST_TIME,"payload":t3_contracts::stored::to_value(&run).unwrap()})).unwrap();
+        harness.sink.commit(CommitRequest{receipt:None,guard:CommitGuard::None,decision:Decision{events:vec![event.clone()],..Default::default()}}).await.unwrap();
+        harness.dispatcher.handle_run_update(&OrchestrationV2StoredEvent{sequence:1,command_id:Some(CommandId("scheduled-provider-end".into())),event}).await.unwrap();
+        let after=harness.reader.projection(ThreadId("thread".into())).await.unwrap().unwrap();
+        let delivered=after.runs.iter().find(|run|t3_contracts::stored::to_value(&run.user_message_id).unwrap()=="scheduled-input").unwrap();
+        assert_eq!(delivered.status,OrchestrationV2RunStatus::Starting);
+        assert_eq!(t3_contracts::stored::to_value(&delivered.model_selection).unwrap(),if pinned {pin}else{newer});
+        assert_eq!(after.thread.model_selection,delivered.model_selection);
+    }
+}
+
+#[test]
+fn drift_promoted_schedule_steers_with_current_model_options() {
+    let mut projection=running_projection();
+    let selected=json!({"instanceId":"codex","model":"next","options":[{"id":"reasoningEffort","value":"high"}]});
+    projection.thread=change(&projection.thread,json!({"modelSelection":selected}));
+    projection.runs.push(change(&run("queued",2,"queued"),json!({"rootNodeId":"queued-node","activeAttemptId":"queued-attempt"})));
+    projection.messages.push(change(&super::command_policy_test::message("queued"),json!({"scheduledTaskId":"scheduled-task","followsThreadSelection":true})));
+    projection.nodes.push(change(&projection.nodes[0],json!({"id":"queued-node","rootNodeId":"queued-node","runId":"queued","status":"pending"})));
+    projection.attempts.push(change(&projection.attempts[0],json!({"id":"queued-attempt","runId":"queued","rootNodeId":"queued-node","status":"pending"})));
+    let prepared=prepared_with_adapter(projection,"codex");
+    let result=PureDecisionEngine.decide_prepared(&prepared,&command(json!({"type":"queued-message.promote-to-steer","commandId":"scheduled-promote","threadId":"thread","queuedRunId":"queued","targetRunId":"prepared"}))).unwrap();
+    let selection=result.effects.iter().find_map(|effect| match &effect.request {t3_orchestration::effects::EffectRequest::Steer{model_selection,..}=>model_selection.as_ref(), _=>None}).unwrap();
+    assert_eq!(t3_contracts::stored::to_value(selection).unwrap(),selected);
+}
+
+#[tokio::test]
+async fn drift_usage_limited_snooze_loads_only_the_failed_runs_error_evidence() {
+    let harness=message_harness().await;
+    for index in [0,1] {
+        harness.dispatch(json!({"type":"message.dispatch","commandId":format!("limit-send-{index}"),"threadId":"thread","messageId":format!("limit-input-{index}"),"text":"Work","attachments":[],"dispatchMode":{"type":if index==0 {"start_immediately"}else{"queue_after_active"}},"createdBy":"user","creationSource":"web"})).await.unwrap();
+    }
+    let before=harness.reader.projection(ThreadId("thread".into())).await.unwrap().unwrap();
+    let run=change(&before.runs[0],json!({"status":"failed","completedAt":TEST_TIME}));
+    let error=json!({"id":"limited-error","threadId":"thread","runId":run.id,"nodeId":run.root_node_id,"providerThreadId":run.provider_thread_id,"providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":50,"status":"failed","title":"Usage limit","startedAt":TEST_TIME,"completedAt":TEST_TIME,"updatedAt":TEST_TIME,"type":"error","failure":{"class":"usage_limit","message":"Limit","code":"api_error_429","retryable":true,"resetAt":null}});
+    harness.sink.commit(CommitRequest{receipt:None,guard:CommitGuard::None,decision:Decision{events:vec![serde_json::from_value(json!({"id":"limited-run","threadId":"thread","type":"run.updated","runId":run.id,"occurredAt":TEST_TIME,"payload":t3_contracts::stored::to_value(&run).unwrap()})).unwrap(),serde_json::from_value(json!({"id":"limited-item","threadId":"thread","type":"turn-item.updated","runId":run.id,"occurredAt":TEST_TIME,"payload":error})).unwrap()],..Default::default()}}).await.unwrap();
+    harness.database.stores.transaction(|db| {db.execute("INSERT INTO orchestration_v2_projection_turn_items(turn_item_id,thread_id,run_id,ordinal,type,status,updated_at,payload_json) VALUES('old-invalid-error','thread','old-run',99,'error','failed',?1,'{}')",[TEST_TIME])?;Ok(())}).await.unwrap();
+    harness.dispatch(json!({"type":"thread.snooze","commandId":"snooze-limited-sql","threadId":"thread","snoozedUntil":"2026-09-07T00:00:00.000Z"})).await.unwrap();
+    assert_eq!(harness.reader.thread(ThreadId("thread".into())).await.unwrap().unwrap().snoozed_until.flatten().unwrap().0,"2026-09-07T00:00:00.000Z");
+}
+
+#[test]
+fn drift_cancellation_marks_completed_followup_when_awaited_work_keeps_it_open() {
+    use t3_orchestration::ports::decisions::orchestrator::delegated_cancellation_marker;
+    let (parent,mut child)=recovery_pair();
+    child.thread=change(&child.thread,json!({"forkedFrom":{"type":"node","threadId":"thread","nodeId":"original"}}));
+    child.runs[0]=change(&child.runs[0],json!({"delegatedTaskId":"task"}));
+    child.provider_threads=vec![change(&prepared_projection().provider_threads[0],json!({"appThreadId":"child","pendingBackgroundTasks":[{"kind":"command","taskId":"check","awaited":true}]}))];
+    let task=&parent.context.projection.as_ref().unwrap().subagents[0];
+    let marker=delegated_cancellation_marker(&child,&child,task,&parent.context.now).unwrap().unwrap();
+    assert_eq!(t3_contracts::stored::to_value(&marker).unwrap()["cancelledRunId"],"child-run");
+    let stop=command(json!({"type":"thread.stop","commandId":"cancel-held-followup","threadId":"child","stopDelegatedTasks":false}));
+    let child_context=context(Some(child.clone())).with_inputs(DecisionInputs::default());
+    let decision=PureDecisionEngine.decide_cancelled_delegated_stop(&child_context,&stop,Some(&marker)).unwrap();
+    let events:Vec<_>=decision.events.iter().map(|event|t3_contracts::stored::to_value(event).unwrap()).collect();
+    assert_eq!(events[0]["threadId"],"thread");
+    assert_eq!(events[0]["payload"]["cancelledRunId"],"child-run");
+    assert!(events.iter().any(|event|event["threadId"]=="child"&&event["payload"]["type"]=="run_interrupt_request"));
+    child.provider_threads[0]=change(&child.provider_threads[0],json!({"pendingBackgroundTasks":[]}));
+    assert!(delegated_cancellation_marker(&child,&child,task,&parent.context.now).unwrap().is_none());
 }

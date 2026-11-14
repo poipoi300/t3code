@@ -467,6 +467,14 @@ impl ProviderTurnStartService {
         if cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
+        let baseline = self
+            .execution
+            .fork_baseline(
+                projection.thread.clone(),
+                state.clone(),
+                cancellation.clone(),
+            )
+            .await?;
         let opened = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err(Error::Cancelled),
@@ -797,7 +805,7 @@ impl ProviderTurnStartService {
             .checked_add(1)
             .ok_or_else(|| start_error(&run_id, "Provider turn ordinal overflow."))?;
         self.execution
-            .start_root_run_with_preparation(
+            .start_root_run_with_baseline(
                 StartRootRun {
                     state: running.clone(),
                     turn: TurnInput {
@@ -829,6 +837,7 @@ impl ProviderTurnStartService {
                 },
                 policy_options,
                 preparation,
+                Some(baseline),
                 cancellation,
             )
             .await

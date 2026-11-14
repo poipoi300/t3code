@@ -1,7 +1,10 @@
 use super::provider_runtime_recovery_service_test::{projection, seed, service, sink};
 use async_trait::async_trait;
 use std::sync::Arc;
-use t3_contracts::orchestration_v2::OrchestrationV2ServerCommand;
+use t3_contracts::orchestration_v2::{
+    OrchestrationV2ServerCommand, OrchestrationV2ThreadProjection,
+};
+use t3_contracts::orchestration_v2_id_table::IdOrIndex::Id;
 use t3_orchestration::{
     api::*,
     effects::*,
@@ -11,6 +14,384 @@ use t3_orchestration::{
     testing::*,
 };
 use tokio::sync::mpsc;
+
+struct DriftRuntime {
+    database: TestDatabase,
+    events: Arc<t3_orchestration::runtime::commit::EventSink>,
+    reader: Arc<t3_orchestration::projections::store::ProjectionStore>,
+    commands: t3_orchestration::runtime::dispatch::Dispatcher,
+}
+
+impl DriftRuntime {
+    async fn new() -> Result<Self> {
+        use t3_orchestration::{
+            decision::engine::PureDecisionEngine, provider::*, runtime::dispatch::*,
+        };
+        let database = TestDatabase::memory()?;
+        let reader = Arc::new(t3_orchestration::projections::store::ProjectionStore::new(
+            database.stores.clone(),
+        ));
+        let events = Arc::new(sink(database.stores.clone()));
+        let (adapter, _calls, _) = super::provider_session_manager_test::fake()?;
+        let provider = projection()?.provider_threads.remove(0);
+        let (alternate, _calls) = FakeProviderAdapter::new(
+            t3_contracts::provider_instance::ProviderInstanceId("alternate".into()),
+            t3_contracts::provider_instance::ProviderDriverKind("codex".into()),
+            adapter.runtime.session().capabilities.clone(),
+            adapter.runtime.session().clone(),
+            ThreadSnapshot {
+                provider_thread: provider,
+                provider_turns: vec![],
+                messages: vec![],
+                reasoning_message_ids: None,
+                runtime_requests: vec![],
+                provider_payload: None,
+            },
+        );
+        let clock = Arc::new(ManualClock::new(TEST_TIME));
+        let inputs = Arc::new(ProjectionCommandInputs {
+            reader: reader.clone(),
+            providers: Arc::new(AdapterRegistry::from_adapters(vec![
+                adapter,
+                Arc::new(alternate),
+            ])),
+            clock: clock.clone(),
+            ids: Arc::new(SequenceIds::new("drift")),
+        });
+        let commands = t3_orchestration::runtime::dispatch::Dispatcher::new(
+            DispatchServices {
+                database: database.stores.clone(),
+                inputs,
+                engine: Arc::new(PureDecisionEngine),
+                committer: events.clone(),
+                recovery: Arc::new(service(database.stores.clone())),
+                clock,
+            },
+            None,
+        );
+        let runtime = Self {
+            database,
+            events,
+            reader,
+            commands,
+        };
+        runtime.dispatch(serde_json::json!({"type":"thread.create","commandId":"create","threadId":"thread:test","projectId":"project:test","title":"Drift","modelSelection":{"instanceId":"codex","model":"test"},"runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":"/isolated/drift","createdBy":"user","creationSource":"web"})).await?;
+        Ok(runtime)
+    }
+    async fn dispatch(&self, command: serde_json::Value) -> Result<CommandReceipt> {
+        self.commands
+            .dispatch(serde_json::from_value(command)?)
+            .await
+    }
+    async fn projection(&self) -> Result<OrchestrationV2ThreadProjection> {
+        self.reader
+            .projection(ThreadId("thread:test".into()))
+            .await?
+            .ok_or(Error::Stale)
+    }
+    async fn message(&self, id: &str, queued: bool, extra: serde_json::Value) -> Result<()> {
+        let mut command = serde_json::json!({"type":"message.dispatch","commandId":id,"threadId":"thread:test","messageId":id,"text":"Scheduled prompt","attachments":[],"dispatchMode":{"type":if queued {"queue_after_active"} else {"start_immediately"}},"createdBy":"user","creationSource":"web"});
+        command
+            .as_object_mut()
+            .expect("command")
+            .extend(extra.as_object().expect("extra fields").clone());
+        self.dispatch(command).await?;
+        Ok(())
+    }
+}
+
+async fn queued_scheduled_case(
+    newer: serde_json::Value,
+    pin: Option<serde_json::Value>,
+    fresh: bool,
+) -> Result<()> {
+    use serde_json::json;
+    use t3_contracts::orchestration_v2::*;
+    let runtime = DriftRuntime::new().await?;
+    runtime.message("active", false, json!({})).await?;
+    let active = runtime.projection().await?.runs[0].clone();
+    let mut extra = json!({"scheduledTaskId":"task:test","freshContext":fresh});
+    if let Some(pin) = &pin {
+        extra["modelSelection"] = pin.clone();
+    }
+    runtime.message("scheduled", true, extra).await?;
+    let queued = runtime.projection().await?;
+    let scheduled = queued
+        .runs
+        .iter()
+        .find(|run| run.user_message_id == Id(MessageId("scheduled".into())))
+        .expect("queued scheduled run");
+    assert_eq!(scheduled.status, OrchestrationV2RunStatus::Queued);
+    let reserved = scheduled.provider_thread_id.clone();
+    if fresh {
+        let provider = queued
+            .provider_threads
+            .iter()
+            .find(|provider| Some(&provider.id) == reserved.as_ref())
+            .expect("fresh queue reserves a provider thread");
+        assert_eq!(
+            serde_json::to_value(&provider.provider_instance_id)?,
+            "codex"
+        );
+        assert!(provider.first_run_ordinal.is_none());
+        assert!(provider.native_thread_ref.is_none());
+    }
+    runtime.dispatch(json!({"type":"run.interrupt","commandId":"stop","threadId":"thread:test","runId":active.id,"holdQueue":true})).await?;
+    runtime.dispatch(json!({"type":"thread.model-selection.set","commandId":"select","threadId":"thread:test","modelSelection":newer})).await?;
+    runtime
+        .dispatch(json!({"type":"queue.resume","commandId":"resume","threadId":"thread:test"}))
+        .await?;
+    runtime
+        .commands
+        .resume_queue(ThreadId("thread:test".into()), None)
+        .await?;
+    let after = runtime.projection().await?;
+    let delivered = after
+        .runs
+        .iter()
+        .find(|run| run.user_message_id == Id(MessageId("scheduled".into())))
+        .expect("delivered scheduled run");
+    let expected = pin.clone().unwrap_or(newer);
+    assert_eq!(delivered.status, OrchestrationV2RunStatus::Starting);
+    assert_eq!(serde_json::to_value(&delivered.model_selection)?, expected);
+    assert_eq!(
+        serde_json::to_value(&after.thread.model_selection)?,
+        expected
+    );
+    assert_eq!(
+        serde_json::to_value(
+            &after
+                .attempts
+                .iter()
+                .find(|attempt| Some(&attempt.id) == delivered.active_attempt_id.as_ref())
+                .expect("started run attempt")
+                .provider_instance_id
+        )?,
+        expected["instanceId"]
+    );
+    let message = after
+        .messages
+        .iter()
+        .find(|message| message.id == Id(MessageId("scheduled".into())))
+        .expect("scheduled message");
+    assert_eq!(
+        serde_json::to_value(message)?.get("followsThreadSelection"),
+        pin.is_none().then_some(&json!(true))
+    );
+    if fresh {
+        assert_ne!(delivered.provider_thread_id, reserved);
+        let old = after
+            .provider_threads
+            .iter()
+            .find(|provider| Some(&provider.id) == reserved.as_ref())
+            .expect("original reservation is retained");
+        assert_eq!(serde_json::to_value(&old.provider_instance_id)?, "codex");
+        let new = after
+            .provider_threads
+            .iter()
+            .find(|provider| Some(&provider.id) == delivered.provider_thread_id.as_ref())
+            .expect("replacement provider thread");
+        assert_eq!(
+            serde_json::to_value(&new.provider_instance_id)?,
+            "alternate"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn drift_queued_scheduled_delivery_uses_current_model_and_options() -> Result<()> {
+    queued_scheduled_case(serde_json::json!({"instanceId":"codex","model":"new","options":[{"id":"reasoningEffort","value":"high"}]}), None, false).await
+}
+
+#[tokio::test]
+async fn drift_queued_scheduled_delivery_uses_current_provider() -> Result<()> {
+    queued_scheduled_case(
+        serde_json::json!({"instanceId":"alternate","model":"new"}),
+        None,
+        false,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn drift_queued_scheduled_delivery_preserves_explicit_model_pin() -> Result<()> {
+    queued_scheduled_case(
+        serde_json::json!({"instanceId":"alternate","model":"new"}),
+        Some(serde_json::json!({"instanceId":"codex","model":"pinned"})),
+        false,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn drift_fresh_scheduled_delivery_replaces_the_old_instances_reserved_thread() -> Result<()> {
+    queued_scheduled_case(
+        serde_json::json!({"instanceId":"alternate","model":"new"}),
+        None,
+        true,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn drift_visits_persist_only_read_state_and_stale_visits_persist_nothing() -> Result<()> {
+    use serde_json::{Value, json};
+    let runtime = DriftRuntime::new().await?;
+    let before = runtime.projection().await?.thread;
+    runtime.dispatch(json!({"type":"thread.visit","commandId":"visit","threadId":"thread:test","visitedAt":"2026-11-13T12:00:00.000Z"})).await?;
+    let visited = runtime.projection().await?.thread;
+    assert_eq!(visited.updated_at, before.updated_at);
+    assert_eq!(
+        serde_json::to_value(&visited)?["lastVisitedAt"],
+        "2026-11-13T12:00:00.000Z"
+    );
+    runtime
+        .database
+        .stores
+        .read(|db| {
+            let (kind, payload): (String, String) = db.query_row(
+                "SELECT event_type,payload_json FROM orchestration_events WHERE command_id='visit'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(kind, "thread.visit-recorded");
+            let value: Value = serde_json::from_str(&payload)?;
+            assert!(
+                value
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .all(|key| matches!(key.as_str(), "lastVisitedAt" | "opens" | "threadId"))
+            );
+            Ok(())
+        })
+        .await?;
+    runtime.dispatch(json!({"type":"thread.visit","commandId":"stale-visit","threadId":"thread:test","visitedAt":"2026-11-13T11:00:00.000Z"})).await?;
+    runtime
+        .database
+        .stores
+        .read(|db| {
+            assert_eq!(
+                db.query_row(
+                    "SELECT COUNT(*) FROM orchestration_events WHERE command_id='stale-visit'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                0
+            );
+            Ok(())
+        })
+        .await?;
+    assert_eq!(
+        runtime.projection().await?.thread.last_visited_at,
+        visited.last_visited_at
+    );
+    let shell = runtime
+        .reader
+        .shell(ThreadId("thread:test".into()))
+        .await?
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(shell)?["lastVisitedAt"],
+        "2026-11-13T12:00:00.000Z"
+    );
+    Ok(())
+}
+
+async fn snooze_queued_case(kind: &str) -> Result<()> {
+    use serde_json::json;
+    let runtime = DriftRuntime::new().await?;
+    let mut state = projection()?;
+    let mut active = serde_json::to_value(&state.runs[0])?;
+    active["status"] = json!(if kind == "limited-user" {
+        "failed"
+    } else {
+        "cancelled"
+    });
+    active["completedAt"] = json!(TEST_TIME);
+    let mut queued = active.clone();
+    queued["id"] = json!("queued");
+    queued["status"] = json!("queued");
+    queued["ordinal"] = json!(2);
+    queued["userMessageId"] = json!("scheduled");
+    queued["queueHeld"] = json!(kind != "limited-user");
+    queued["completedAt"] = serde_json::Value::Null;
+    let mut message: serde_json::Value = serde_json::from_str(
+        include_str!("../../../../fixtures/samples/OrchestrationV2ConversationMessage.jsonl")
+            .lines()
+            .next()
+            .expect("message fixture"),
+    )?;
+    message["id"] = json!("scheduled");
+    message["threadId"] = json!("thread:test");
+    message["runId"] = json!("queued");
+    message["createdBy"] = json!(if kind == "user" || kind == "limited-user" {
+        "user"
+    } else {
+        "agent"
+    });
+    message["creationSource"] = json!(if kind == "user" || kind == "limited-user" {
+        "web"
+    } else {
+        "server"
+    });
+    if kind == "notification" {
+        message["notification"] = json!({"source":{"kind":"background_task"},"outcome":"updated","summary":"Background updated"});
+    }
+    if kind == "delegated-completion" {
+        message["delegatedCompletion"] =
+            json!({"parentRunId":active["id"],"generation":1,"taskIds":["task:test"]});
+    }
+    state.runs = vec![
+        serde_json::from_value(active)?,
+        serde_json::from_value(queued)?,
+    ];
+    state.messages = vec![serde_json::from_value(message)?];
+    if kind == "limited-user" {
+        state.provider_sessions.clear();
+        let mut item = super::provider_runtime_recovery_service_test::item("limit", "error");
+        item["status"] = json!("failed");
+        item["completedAt"] = json!(TEST_TIME);
+        item["failure"] = json!({"class":"usage_limit","message":"Claude API rate limit reached. Try again later.","code":"api_error_429","retryable":true,"resetAt":null});
+        state.turn_items = vec![serde_json::from_value(item)?];
+    }
+    seed(&runtime.events, &state).await?;
+    let result = runtime.dispatch(json!({"type":"thread.snooze","commandId":"snooze","threadId":"thread:test","snoozedUntil":"2099-07-25T09:00:00.000Z"})).await;
+    if kind == "user" {
+        assert!(
+            matches!(result, Err(Error::Rejected { reason, .. }) if reason.contains("queued run"))
+        );
+    } else {
+        result?;
+        assert!(
+            runtime.projection().await?.thread.snoozed_until.is_some(),
+            "{kind}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn drift_snooze_allows_queued_notifications() -> Result<()> {
+    snooze_queued_case("notification").await
+}
+
+#[tokio::test]
+async fn drift_snooze_allows_queued_delegated_completions() -> Result<()> {
+    snooze_queued_case("delegated-completion").await
+}
+
+#[tokio::test]
+async fn drift_snooze_refuses_a_queued_user_message() -> Result<()> {
+    snooze_queued_case("user").await
+}
+
+#[tokio::test]
+async fn drift_snooze_allows_a_queued_user_message_held_by_usage_limit_without_reset() -> Result<()>
+{
+    snooze_queued_case("limited-user").await
+}
 
 #[tokio::test]
 async fn managed_stream_completes_a_turn_and_recovers_its_interrupted_successor_after_reopen()

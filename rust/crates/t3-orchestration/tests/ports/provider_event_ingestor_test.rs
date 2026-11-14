@@ -56,6 +56,126 @@ impl ProviderTelemetry for Telemetry {
     }
 }
 
+#[derive(Default)]
+struct HubResets {
+    calls: Mutex<Vec<(String, String, Option<String>)>>,
+    endpoints: Mutex<Vec<ProviderInstanceId>>,
+}
+#[async_trait]
+impl UsageLimitResets for HubResets {
+    async fn endpoint(&self, instance: ProviderInstanceId) -> Result<Option<String>> {
+        self.endpoints.lock().unwrap().push(instance);
+        Ok(Some("http://hub.test:8317".into()))
+    }
+    async fn reset_at(
+        &self,
+        driver: t3_contracts::provider_instance::ProviderDriverKind,
+        endpoint: String,
+        model: Option<String>,
+    ) -> Result<Option<IsoDateTime>> {
+        self.calls.lock().unwrap().push((driver.0, endpoint, model));
+        Ok(Some(t3_contracts::wire::WireDateTime(
+            "2026-11-13T18:00:00.000Z".into(),
+        )))
+    }
+}
+
+#[tokio::test]
+async fn usage_limit_uses_the_failed_run_model_and_matching_hub_before_committed_refresh()
+-> Result<()> {
+    for mode in ["absent", "null", "reported", "validation", "missing-run"] {
+        let mut h = Harness::new().await?;
+        super::provider_turn_start_service_test::seed(&h).await?;
+        let mut thread = h
+            .reader
+            .thread(ThreadId("thread:test".into()))
+            .await?
+            .unwrap();
+        thread.model_selection.model = "current-selection".into();
+        h.write(
+            "thread.metadata-updated",
+            t3_contracts::stored::to_value(&thread)?,
+        )
+        .await?;
+        let hub = Arc::new(HubResets::default());
+        h.ingestor.usage_limit_resets = Some(hub.clone());
+        let telemetry = Arc::new(Telemetry::default());
+        h.ingestor.telemetry = Some(telemetry.clone());
+        let mut failure =
+            json!({"class":"usage_limit","message":"limited","code":null,"retryable":null});
+        if mode == "null" {
+            failure["resetAt"] = Value::Null;
+        }
+        if mode == "reported" {
+            failure["resetAt"] = "2026-11-13T19:00:00.000Z".into();
+        }
+        if mode == "validation" {
+            failure["class"] = "validation_error".into();
+        }
+        let mut input = h.input(ProviderEventKind::Terminal {
+            provider_thread_id: ProviderThreadId("pt:test".into()),
+            provider_turn_id: ProviderTurnId("turn:test".into()),
+            run_ordinal: 1,
+            disposition: ThreadDisposition::Reusable,
+            outcome: TerminalOutcome::Failed {
+                failure: Box::new(decode(failure)),
+                failure_item_ordinal: 101,
+                retry: None,
+                retry_started_at: None,
+                child_turns_continue: false,
+            },
+        });
+        input.event.driver = decode(json!("cursor"));
+        if mode == "missing-run" {
+            input.run_id = None;
+        }
+        let stored = h
+            .ingestor
+            .ingest_normalized(&input, CommitGuard::None)
+            .await?;
+        let event = t3_contracts::stored::to_value(&stored.last().unwrap().event)?;
+        let expected = if mode == "reported" {
+            json!("2026-11-13T19:00:00.000Z")
+        } else if mode == "validation" {
+            Value::Null
+        } else {
+            json!("2026-11-13T18:00:00.000Z")
+        };
+        assert_eq!(event["payload"]["failure"]["resetAt"], expected, "{mode}");
+        if mode == "reported" || mode == "validation" {
+            assert!(hub.calls.lock().unwrap().is_empty());
+            assert!(hub.endpoints.lock().unwrap().is_empty());
+        } else {
+            assert_eq!(
+                *hub.endpoints.lock().unwrap(),
+                vec![ProviderInstanceId("codex".into())]
+            );
+            assert_eq!(
+                *hub.calls.lock().unwrap(),
+                vec![(
+                    "cursor".into(),
+                    "http://hub.test:8317".into(),
+                    Some(
+                        if mode == "missing-run" {
+                            "current-selection"
+                        } else {
+                            "model:test"
+                        }
+                        .into()
+                    )
+                )]
+            );
+        }
+        if mode != "validation" {
+            telemetry.refresh.notified().await;
+        } else {
+            assert!(telemetry.cancellation.lock().unwrap().is_none());
+        }
+        h.ingestor.shutdown().await;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn out_of_memory_failures_override_display_and_usage_refresh_starts_only_after_commit()
 -> Result<()> {

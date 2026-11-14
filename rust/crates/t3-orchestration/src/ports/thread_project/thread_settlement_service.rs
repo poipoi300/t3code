@@ -839,8 +839,11 @@ impl LookupState {
             }
             return Ok(Some(Some(terminal)));
         }
-        let (Some(branch), Some(cwd)) = (&thread.branch, &group.cwd) else {
+        let Some(branch) = &thread.branch else {
             return Ok(Some(None));
+        };
+        let Some(cwd) = &group.cwd else {
+            return Err(Error::Unsupported("thread project not found"));
         };
         let mut closed = self.shell_closed.lock().await;
         let mut refresh = false;
@@ -1002,43 +1005,43 @@ impl LookupState {
             reads.retain(|key, _| groups.contains_key(key));
         }
         // Scoped futures borrow the snapshot; dropping the sweep cancels every group read.
-        for batch in groups.into_iter().collect::<Vec<_>>().chunks(8) {
-            let mut reads: Vec<
-                std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>>,
-            > = Vec::new();
-            for (key, group) in batch {
-                reads.push(Box::pin(async {
-                    let result = self
-                        .lookup(
-                            services,
-                            group,
-                            &projects,
-                            key,
-                            immediate || scheduled.contains(key),
-                        )
-                        .await;
-                    match result {
-                        Ok(Some(pr)) => {
-                            for candidate in &group.candidates {
-                                if let Err(error) = settle(services, candidate, pr.as_ref()).await {
-                                    if matches!(error, Error::Cancelled) {
-                                        return Err(error);
-                                    }
-                                    eprintln!("automatic thread settlement skipped: {error}");
+        let slots = tokio::sync::Semaphore::new(8);
+        let mut reads: Vec<
+            std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>>,
+        > = Vec::new();
+        for (key, group) in &groups {
+            reads.push(Box::pin(async {
+                let _permit = slots.acquire().await.map_err(|_| Error::Cancelled)?;
+                let result = self
+                    .lookup(
+                        services,
+                        group,
+                        &projects,
+                        key,
+                        immediate || scheduled.contains(key),
+                    )
+                    .await;
+                match result {
+                    Ok(Some(pr)) => {
+                        for candidate in &group.candidates {
+                            if let Err(error) = settle(services, candidate, pr.as_ref()).await {
+                                if matches!(error, Error::Cancelled) {
+                                    return Err(error);
                                 }
+                                eprintln!("automatic thread settlement skipped: {error}");
                             }
                         }
-                        Ok(None) => {}
-                        Err(Error::Cancelled) => return Err(Error::Cancelled),
-                        Err(error) => {
-                            eprintln!("automatic thread settlement lookup failed: {error}")
-                        }
                     }
-                    Ok(())
-                }));
-            }
-            join_thread_reads(reads).await?;
+                    Ok(None) => {}
+                    Err(Error::Cancelled) => return Err(Error::Cancelled),
+                    Err(error) => {
+                        eprintln!("automatic thread settlement lookup failed: {error}")
+                    }
+                }
+                Ok(())
+            }));
         }
+        join_thread_reads(reads).await?;
         Ok(())
     }
 

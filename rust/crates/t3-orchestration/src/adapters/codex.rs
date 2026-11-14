@@ -28,6 +28,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+const CODEX_STOP_CONFIRM_TIMEOUT_MS: u64 = 10_000;
+
 #[derive(Clone, Debug)]
 pub struct ResolvedCodexAttachment {
     pub path: PathBuf,
@@ -1273,10 +1275,10 @@ impl SessionRuntime for CodexSessionRuntime {
                 .await?;
         }
         let native_thread = thread.clone();
-        let (interrupts, tracked) = self
+        let (interrupts, tracked, mut confirmation) = self
             .mutate(move |state| {
-                let (interrupts, events) =
-                    state.prepare_interrupt_for_thread(&target, Some(&native_thread))?;
+                let ((interrupts, confirmation), events) =
+                    state.prepare_confirmed_interrupt(&target, &native_thread)?;
                 let tracked = state
                     .lineage_threads(&native_thread)
                     .into_iter()
@@ -1287,40 +1289,89 @@ impl SessionRuntime for CodexSessionRuntime {
                             .map(move |process| (thread.clone(), process))
                     })
                     .collect::<std::collections::BTreeSet<_>>();
-                Ok(((interrupts, tracked), events))
+                Ok(((interrupts, tracked, confirmation), events))
             })
             .await?;
-        for (thread_id, turn_id) in interrupts {
-            let target = turn_id.clone();
-            let ready = self
-                .mutate(move |state| state.wait_native_start(&target))
-                .await?;
-            match tokio::time::timeout(Duration::from_secs(10), ready).await {
-                Ok(Ok(())) => {}
-                _ => {
-                    return Err(protocol(
-                        "Codex did not start the queued turn within 10 seconds; Stop could not be delivered.",
-                    ));
+        let result = async {
+            for (thread_id, turn_id) in interrupts {
+                let target = turn_id.clone();
+                let ready = self
+                    .mutate(move |state| state.wait_native_start(&target))
+                    .await?;
+                match tokio::time::timeout(Duration::from_secs(10), ready).await {
+                    Ok(Ok(())) => {}
+                    _ => {
+                        return Err(protocol(
+                            "Codex did not start the queued turn within 10 seconds; Stop could not be delivered.",
+                        ));
+                    }
+                }
+                let target = turn_id.clone();
+                if !self
+                    .mutate(move |state| Ok((state.needs_interrupt(&target), vec![])))
+                    .await?
+                {
+                    continue;
+                }
+                let _: Value = self
+                    .rpc(
+                        "turn/interrupt",
+                        &json!({"threadId":thread_id,"turnId":turn_id}),
+                    )
+                    .await?;
+            }
+            let cleanup = async {
+                let mut failure = None;
+                for (thread, process) in tracked {
+                    let result = self.terminate_background_process(&thread, &process).await;
+                    if failure.is_none() {
+                        failure = result.err();
+                    }
+                }
+                failure
+            };
+            let (cleanup_error, confirmed) = tokio::join!(
+                cleanup,
+                tokio::time::timeout(
+                    Duration::from_millis(CODEX_STOP_CONFIRM_TIMEOUT_MS),
+                    confirmation.wait()
+                )
+            );
+            match confirmed {
+                Ok(result) => result?,
+                Err(_) => {
+                    let roots = confirmation.roots.clone();
+                    let confirmed = self
+                        .mutate(move |state| state.settle_interrupt_roots(&roots, false))
+                        .await?;
+                    if !confirmed {
+                        return Err(ProviderError::InterruptTimeout {
+                            turn_id: confirmation.turn_id.clone(),
+                            timeout_ms: CODEX_STOP_CONFIRM_TIMEOUT_MS,
+                        });
+                    }
                 }
             }
-            let target = turn_id.clone();
-            if !self
-                .mutate(move |state| Ok((state.needs_interrupt(&target), vec![])))
-                .await?
-            {
-                continue;
+            if let Some(error) = cleanup_error {
+                return Err(error);
             }
-            let _: Value = self
-                .rpc(
-                    "turn/interrupt",
-                    &json!({"threadId":thread_id,"turnId":turn_id}),
-                )
-                .await?;
+            Ok(())
         }
-        for (thread, process) in tracked {
-            self.terminate_background_process(&thread, &process).await?;
+        .await;
+        if result.is_err()
+            && !confirmation.joined
+            && !matches!(result, Err(ProviderError::InterruptTimeout { .. }))
+        {
+            let roots = confirmation.roots;
+            match self
+                .mutate(move |state| state.settle_interrupt_roots(&roots, true))
+                .await
+            {
+                Ok(_) | Err(ProviderError::SessionStopped | ProviderError::Cancelled) => {}
+                Err(error) => return Err(error),
+            }
         }
-        Ok(())
+        result
     }
     async fn respond(&self, input: RuntimeResponse) -> ProviderResult<()> {
         let request_id = input.request_id.clone();
@@ -1682,7 +1733,9 @@ impl SessionExtensions for CodexSessionRuntime {
         archive: bool,
     ) -> ProviderResult<()> {
         let native = native_thread(&thread)?.to_owned();
-        self.mutate(move |state| state.begin_unload(native)).await?;
+        let closing = native.clone();
+        self.mutate(move |state| state.begin_unload(closing))
+            .await?;
         let _: Value = self
             .rpc(
                 if archive {
@@ -1692,6 +1745,8 @@ impl SessionExtensions for CodexSessionRuntime {
                 },
                 &json!({"threadId":native_thread(&thread)?}),
             )
+            .await?;
+        self.mutate(move |state| state.confirm_unload(&native))
             .await?;
         Ok(())
     }

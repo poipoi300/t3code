@@ -9,7 +9,7 @@ use crate::{
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     path::PathBuf,
     pin::Pin,
@@ -596,8 +596,36 @@ impl ClaudeConnector for ProcessConnector {
                 .collect();
             process_options.cancellation = cancellation;
             process_options.timeout = None;
-            let mut process = t3_process::spawn(&process_options)
-                .map_err(|_| operation(ProviderOperation::Open, "Could not spawn Claude Code"))?;
+            #[cfg(unix)]
+            {
+                // Enter a possibly stalled mount in the child; t3-process owns its process group.
+                let cwd = process_options
+                    .cwd
+                    .take()
+                    .unwrap_or_else(|| PathBuf::from("."));
+                let cwd = if cwd.is_absolute() {
+                    cwd
+                } else {
+                    PathBuf::from(".").join(cwd)
+                };
+                let program = std::mem::replace(&mut process_options.program, "/bin/sh".into());
+                let arguments = std::mem::take(&mut process_options.args);
+                process_options.args = vec![
+                    "-c".into(),
+                    "cd -P -- \"$1\" || exit 125\nshift\nexec \"$@\"".into(),
+                    "t3-claude".into(),
+                    cwd.into_os_string(),
+                    program,
+                ];
+                process_options.args.extend(arguments);
+            }
+            let mut process =
+                tokio::task::spawn_blocking(move || t3_process::spawn(&process_options))
+                    .await
+                    .map_err(|_| operation(ProviderOperation::Open, "Claude process spawn failed"))?
+                    .map_err(|_| {
+                        operation(ProviderOperation::Open, "Could not spawn Claude Code")
+                    })?;
             let stdout = process
                 .stdout
                 .take()
@@ -678,6 +706,142 @@ pub struct PreparedClaudeLaunch {
     pub options: LaunchOptions,
     pub policy: ClaudeRuntimeQueryPolicy,
     pub model: ClaudeCompiledModel,
+    pub auto_compact_window: Option<u64>,
+}
+
+fn claude_local_settings_directory(cwd: &std::path::Path, _host: &ClaudeHostOptions) -> PathBuf {
+    #[cfg(unix)]
+    for directory in cwd.ancestors() {
+        let git = directory.join(".git");
+        if !git.exists() {
+            continue;
+        }
+        let root = if git.is_file() {
+            std::fs::read_to_string(&git)
+                .ok()
+                .and_then(|text| {
+                    text.trim()
+                        .strip_prefix("gitdir:")
+                        .map(str::trim)
+                        .map(str::to_owned)
+                })
+                .map(|git_dir| directory.join(git_dir))
+                .and_then(|git_dir| {
+                    let common = std::fs::read_to_string(git_dir.join("commondir")).ok()?;
+                    let common = std::fs::canonicalize(git_dir.join(common.trim())).ok()?;
+                    (common.file_name()? == ".git")
+                        .then(|| common.parent().map(std::path::Path::to_owned))
+                        .flatten()
+                })
+                .unwrap_or_else(|| directory.to_owned())
+        } else {
+            directory.to_owned()
+        };
+        return if _host.home_directory.as_deref() == Some(root.as_path()) {
+            cwd.to_owned()
+        } else {
+            root
+        };
+    }
+    cwd.to_owned()
+}
+
+fn claude_settings_files(cwd: Option<&std::path::Path>, host: &ClaudeHostOptions) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Some(cwd) = cwd {
+        let local = claude_local_settings_directory(cwd, host);
+        files.push(local.join(".claude/settings.local.json"));
+        if local != cwd {
+            files.push(cwd.join(".claude/settings.local.json"));
+        }
+        files.push(cwd.join(".claude/settings.json"));
+    }
+    if let Some(home) = &host.settings_directory {
+        files.push(home.join("settings.json"));
+    }
+    files
+}
+
+fn resolve_claude_auto_compact_window(
+    options: &LaunchOptions,
+    host: &ClaudeHostOptions,
+    launch: &Value,
+    model: &str,
+) -> Option<u64> {
+    let settings = claude_settings_files(options.cwd.as_deref(), host)
+        .into_iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .map(|text| {
+            (
+                parse_claude_settings(&text).unwrap_or(Value::Null),
+                serde_json::from_str::<Value>(&text).unwrap_or(Value::Null),
+            )
+        })
+        .collect::<Vec<_>>();
+    let environment = |name: &str| {
+        launch["env"][name]
+            .as_str()
+            .or_else(|| {
+                settings
+                    .iter()
+                    .find_map(|(lenient, _)| lenient["env"][name].as_str())
+            })
+            .or_else(|| options.env.get(name).map(String::as_str))
+            .map(str::to_owned)
+    };
+    for name in ["DISABLE_COMPACT", "DISABLE_AUTO_COMPACT"] {
+        if environment(name).is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        }) {
+            return None;
+        }
+    }
+    let enabled = launch["autoCompactEnabled"].as_bool().or_else(|| {
+        settings
+            .iter()
+            .find_map(|(_, strict)| strict["autoCompactEnabled"].as_bool())
+    });
+    if enabled == Some(false) {
+        return None;
+    }
+    if let Some(window) = host
+        .auto_compact_window
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
+        return window.parse::<u64>().ok().filter(|value| *value > 0);
+    }
+    let valid = |value: &Value| {
+        value
+            .as_f64()
+            .filter(|value| value.fract() == 0.0 && (100_000.0..=1_000_000.0).contains(value))
+            .map(|value| value as u64)
+    };
+    if let Some(window) = environment("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .and_then(|value| valid(&json!(value)))
+    {
+        return Some(window);
+    }
+    let model = model
+        .strip_suffix("[1m]")
+        .or_else(|| model.strip_suffix("[1M]"))
+        .unwrap_or(model);
+    let window_from = |settings: &Value| {
+        let scoped = &settings["modelSettings"][model]["autoCompactWindow"];
+        if scoped == "auto" {
+            return Some(None);
+        }
+        valid(scoped)
+            .or_else(|| valid(&settings["autoCompactWindow"]))
+            .map(Some)
+    };
+    window_from(launch)
+        .or_else(|| settings.iter().find_map(|(_, strict)| window_from(strict)))
+        .flatten()
 }
 
 fn parse_claude_settings(text: &str) -> ProviderResult<Value> {
@@ -834,17 +998,89 @@ pub fn prepare_claude_launch(
     policy_options: &RuntimePolicyOptions,
     host: &ClaudeHostOptions,
 ) -> ProviderResult<PreparedClaudeLaunch> {
+    let settings = prepare_claude_launch_settings(base, input, policy_options, host)?;
+    let append = read_claude_append_files(base, input.runtime_policy.cwd.as_deref(), host)?;
+    Ok(finish_claude_launch(settings, append))
+}
+
+struct PreparedClaudeSettings {
+    launch: PreparedClaudeLaunch,
+    append_before_files: Vec<String>,
+    append_after_files: Vec<String>,
+}
+
+fn finish_claude_launch(
+    mut settings: PreparedClaudeSettings,
+    files: Vec<String>,
+) -> PreparedClaudeLaunch {
+    if !matches!(
+        settings.launch.options.system_prompt,
+        SystemPrompt::Custom(_)
+    ) {
+        settings.append_before_files.extend(files);
+        settings
+            .append_before_files
+            .extend(settings.append_after_files);
+        settings.launch.options.system_prompt = SystemPrompt::ClaudeCode {
+            append: (!settings.append_before_files.is_empty())
+                .then(|| settings.append_before_files.join("\n\n")),
+        };
+    }
+    settings.launch
+}
+
+fn read_claude_append_files(
+    base: &LaunchOptions,
+    cwd: Option<&std::path::Path>,
+    host: &ClaudeHostOptions,
+) -> ProviderResult<Vec<String>> {
+    base.extra_args
+        .iter()
+        .filter(|(key, _)| key == "append-system-prompt-file")
+        .filter_map(|(_, file)| {
+            let result = (|| {
+                let file = file.as_deref().ok_or_else(|| {
+                    operation(ProviderOperation::Open, "Missing Claude append prompt file")
+                })?;
+                let path = claude_flag_path(file, cwd, host.home_directory.as_deref())?;
+                let mut text = std::fs::read_to_string(path).map_err(|_| {
+                    operation(
+                        ProviderOperation::Open,
+                        "Could not read Claude append prompt file",
+                    )
+                })?;
+                if text.ends_with('\n') {
+                    text.pop();
+                    if text.ends_with('\r') {
+                        text.pop();
+                    }
+                }
+                Ok(text)
+            })();
+            match result {
+                Ok(text) if text.is_empty() => None,
+                result => Some(result),
+            }
+        })
+        .collect()
+}
+
+fn prepare_claude_launch_settings(
+    base: &LaunchOptions,
+    input: &TurnInput,
+    policy_options: &RuntimePolicyOptions,
+    host: &ClaudeHostOptions,
+) -> ProviderResult<PreparedClaudeSettings> {
     use t3_claude_cli::launch::{Settings, Thinking};
     let cwd = input.runtime_policy.cwd.as_deref();
     let mut options = base.clone();
     options.cwd = input.runtime_policy.cwd.clone();
     let mut inline = Vec::new();
-    let mut files = Vec::new();
     let mut settings = options.settings.take();
     options.extra_args.retain(|(name, value)| {
         match name.as_str() {
             "append-system-prompt" => inline.push(value.clone()),
-            "append-system-prompt-file" => files.push(value.clone()),
+            "append-system-prompt-file" => {}
             "settings" => {
                 settings = value
                     .clone()
@@ -982,33 +1218,6 @@ pub fn prepare_claude_launch(
     if let SystemPrompt::ClaudeCode { append: Some(text) } = &base.system_prompt {
         append.push(text.clone());
     }
-    for file in files {
-        let file = file.ok_or_else(|| {
-            operation(ProviderOperation::Open, "Missing Claude append prompt file")
-        })?;
-        let path = claude_flag_path(&file, cwd, host.home_directory.as_deref())?;
-        let mut text = std::fs::read_to_string(path).map_err(|_| {
-            operation(
-                ProviderOperation::Open,
-                "Could not read Claude append prompt file",
-            )
-        })?;
-        if text.ends_with('\n') {
-            text.pop();
-            if text.ends_with('\r') {
-                text.pop();
-            }
-        }
-        if !text.is_empty() {
-            append.push(text);
-        }
-    }
-    append.extend(inline.into_iter().flatten().filter(|s| !s.is_empty()));
-    if !matches!(base.system_prompt, SystemPrompt::Custom(_)) {
-        options.system_prompt = SystemPrompt::ClaudeCode {
-            append: (!append.is_empty()).then(|| append.join("\n\n")),
-        };
-    }
     if let Some(cwd) = cwd {
         options
             .additional_directories
@@ -1026,10 +1235,28 @@ pub fn prepare_claude_launch(
     let policy = runtime_query_policy(&input.runtime_policy, availability);
     options.permission_mode = Some(policy.permission_mode);
     options.allow_dangerously_skip_permissions = policy.allow_dangerously_skip_permissions;
-    Ok(PreparedClaudeLaunch {
-        options,
-        policy,
-        model,
+    let auto_compact_window = resolve_claude_auto_compact_window(
+        &options,
+        host,
+        match &options.settings {
+            Some(Settings::Json(value)) => value,
+            _ => &Value::Null,
+        },
+        &model.model,
+    );
+    Ok(PreparedClaudeSettings {
+        launch: PreparedClaudeLaunch {
+            options,
+            policy,
+            model,
+            auto_compact_window,
+        },
+        append_before_files: append,
+        append_after_files: inline
+            .into_iter()
+            .flatten()
+            .filter(|text| !text.is_empty())
+            .collect(),
     })
 }
 pub struct ClaudeAdapterV2 {
@@ -1119,6 +1346,7 @@ impl ProviderAdapter for ClaudeAdapterV2 {
                 attachments: Mutex::new(AttachmentBudget::default()),
                 wake: Mutex::new(NativeWake::default()),
                 continuation_requests: self.options.host.continuation_requests.clone(),
+                clock: self.options.clock.clone(),
                 cancellation: session_cancellation,
             }),
             options: self.options.clone(),
@@ -1165,6 +1393,7 @@ struct RuntimeInner {
     attachments: Mutex<AttachmentBudget>,
     wake: Mutex<NativeWake>,
     continuation_requests: Option<mpsc::Sender<ContinuationRequest>>,
+    clock: Arc<dyn Clock>,
     cancellation: CancellationToken,
 }
 #[derive(Default)]
@@ -1179,6 +1408,102 @@ struct NativeWake {
     detail: Option<String>,
     ambiguous_user_turn: bool,
     candidate_frames: Vec<Value>,
+    monitor_event: bool,
+    own_end: Option<usize>,
+    absorbed_ends: BTreeSet<usize>,
+    next_notification: Option<OrchestrationV2Notification>,
+    next_detail: Option<String>,
+    scheduled_calls: BTreeSet<String>,
+    scheduled_at: Option<f64>,
+    early_scheduled_wake: bool,
+}
+impl NativeWake {
+    fn root_start(frame: &Value) -> bool {
+        frame["type"] == "system" && frame["subtype"] == "init"
+    }
+    fn root_frame(frame: &Value) -> bool {
+        Self::root_start(frame)
+            || frame["parent_tool_use_id"].is_null()
+                && matches!(
+                    frame["type"].as_str(),
+                    Some("assistant" | "user" | "stream_event")
+                )
+    }
+    fn observe_schedule(&mut self, frame: &Value, now: i64, idle: bool) -> bool {
+        if Self::root_start(frame) {
+            if let Some(scheduled) = self.scheduled_at {
+                let possible = now as f64 >= scheduled - 120_000.0;
+                if now as f64 >= scheduled {
+                    self.scheduled_at = None;
+                } else if idle && possible {
+                    self.early_scheduled_wake = true;
+                }
+                return possible;
+            }
+        } else if frame["type"] == "result" {
+            if std::mem::take(&mut self.early_scheduled_wake)
+                && frame["origin"]["kind"] != "task-notification"
+            {
+                self.scheduled_at = None;
+            }
+        } else if frame["type"] == "assistant" {
+            for block in frame["message"]["content"].as_array().into_iter().flatten() {
+                if block["type"] == "tool_use" && block["name"] == "ScheduleWakeup" {
+                    if let Some(id) = block["id"].as_str() {
+                        self.scheduled_calls.insert(id.into());
+                    }
+                }
+            }
+        } else if frame["type"] == "user" {
+            let returned = frame["message"]["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|block| {
+                    (block["type"] == "tool_result")
+                        .then(|| block["tool_use_id"].as_str())
+                        .flatten()
+                })
+                .filter(|id| self.scheduled_calls.remove(*id))
+                .count();
+            if returned > 0 {
+                self.early_scheduled_wake = false;
+                self.scheduled_at = if returned == 1 {
+                    frame["tool_use_result"]["scheduledFor"]
+                        .as_f64()
+                        .filter(|value| value.is_finite() && *value > 0.0)
+                } else {
+                    None
+                };
+            }
+        }
+        false
+    }
+    fn is_monitor_event(&self) -> bool {
+        self.frames
+            .iter()
+            .find(|frame| Self::root_start(frame))
+            .is_some_and(|frame| frame["_t3_monitor_event_start"] == true)
+            && self
+                .frames
+                .iter()
+                .find(|frame| frame["type"] == "result")
+                .is_none_or(|frame| frame["origin"]["kind"] == "task-notification")
+    }
+    fn absorb_open_tail(&mut self) {
+        if self.offered
+            && !self.frames.is_empty()
+            && self
+                .frames
+                .last()
+                .is_some_and(|frame| frame["type"] != "result")
+        {
+            let end = self.frames.len();
+            if self.absorbed_ends.insert(end) && self.monitor_event && self.own_end.is_none() {
+                self.own_end = Some(end);
+            }
+        }
+    }
 }
 struct WakeCallbacks {
     inner: std::sync::Weak<RuntimeInner>,
@@ -1191,6 +1516,11 @@ impl ContinuationCallbacks for WakeCallbacks {
             let mut wake = lock(&inner.wake);
             if wake.generation == self.generation && wake.offered {
                 wake.frames.clear();
+                wake.absorbed_ends.clear();
+                wake.monitor_event = false;
+                wake.own_end = None;
+                wake.next_notification = None;
+                wake.next_detail = None;
                 wake.notification = None;
                 wake.detail = None;
                 wake.retired = true;
@@ -1230,6 +1560,26 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 impl RuntimeInner {
     async fn buffer_native_wake(self: &Arc<Self>, frame: &Value) -> ProviderResult<bool> {
+        let (idle, monitor) = {
+            let projection = lock(&self.projection);
+            (
+                projection.active_turn_id().is_none(),
+                projection.has_running_monitor(),
+            )
+        };
+        let now = if NativeWake::root_start(frame) {
+            crate::ports::decisions::orchestrator::epoch_millis(&self.clock.now().0).ok_or_else(
+                || operation(ProviderOperation::Stream, "Invalid Claude wake timestamp"),
+            )?
+        } else {
+            0
+        };
+        let possible_scheduled = lock(&self.wake).observe_schedule(frame, now, idle);
+        let mut frame = frame.clone();
+        if NativeWake::root_start(&frame) {
+            frame["_t3_monitor_event_start"] = json!(idle && monitor && !possible_scheduled);
+        }
+        let frame = &frame;
         if frame["type"] == "result"
             && frame["origin"]["kind"] == "task-notification"
             && frame["num_turns"] == 0
@@ -1239,15 +1589,11 @@ impl RuntimeInner {
         {
             return Ok(true);
         }
-        let root_frame = frame["parent_tool_use_id"].is_null()
-            && matches!(
-                frame["type"].as_str(),
-                Some("assistant" | "user" | "stream_event" | "result")
-            );
+        let root_frame = NativeWake::root_frame(frame)
+            || frame["parent_tool_use_id"].is_null() && frame["type"] == "result";
         if !root_frame {
             return Ok(false);
         }
-        let idle = lock(&self.projection).active_turn_id().is_none();
         if !idle {
             let active_message = lock(&self.projection)
                 .active_input()
@@ -1275,6 +1621,12 @@ impl RuntimeInner {
                         } else {
                             flush = std::mem::take(&mut wake.candidate_frames);
                             wake.ambiguous_user_turn = false;
+                            if wake
+                                .own_end
+                                .is_some_and(|end| wake.absorbed_ends.contains(&end))
+                            {
+                                wake.ended = true;
+                            }
                         }
                     } else if matches!(frame["type"].as_str(), Some("assistant" | "stream_event")) {
                         if wake.candidate_frames.len() >= 4096 {
@@ -1305,7 +1657,8 @@ impl RuntimeInner {
                 return Ok(true);
             }
         }
-        let should_buffer = lock(&self.projection).idle_native_wake_frame(frame);
+        let should_buffer =
+            lock(&self.projection).idle_native_wake_frame(frame) || idle && possible_scheduled;
         let (buffered, retired_ended) = {
             let mut wake = lock(&self.wake);
             if wake.retired && wake.offered {
@@ -1326,11 +1679,11 @@ impl RuntimeInner {
                     ));
                 }
                 wake.frames.push(frame.clone());
-                wake.opened |= matches!(
-                    frame["type"].as_str(),
-                    Some("assistant" | "stream_event" | "user")
-                );
+                wake.opened |= NativeWake::root_frame(frame);
                 wake.ended |= frame["type"] == "result";
+                if wake.monitor_event && wake.own_end.is_none() && frame["type"] == "result" {
+                    wake.own_end = Some(wake.frames.len());
+                }
                 (true, false)
             } else {
                 (false, false)
@@ -1353,11 +1706,27 @@ impl RuntimeInner {
         };
         let (generation, notification, detail) = {
             let mut wake = lock(&self.wake);
+            if wake.offered {
+                if notification.is_some() && wake.monitor_event {
+                    wake.next_notification = notification;
+                    wake.next_detail = wake.detail.take();
+                }
+                return Ok(());
+            }
             if let Some(notification) = notification {
                 wake.notification = Some(notification);
             }
-            if wake.offered {
-                return Ok(());
+            wake.monitor_event = wake.notification.is_none() && wake.is_monitor_event();
+            if wake.monitor_event {
+                wake.own_end = wake
+                    .frames
+                    .iter()
+                    .position(|frame| frame["type"] == "result")
+                    .map(|index| index + 1)
+                    .or_else(|| wake.absorbed_ends.first().copied());
+                wake.notification = Some(decode(
+                    json!({"source":{"kind":"monitor"},"outcome":"updated","summary":"Monitor reported new output"}),
+                )?);
             }
             let child_notification = wake
                 .notification
@@ -1365,7 +1734,11 @@ impl RuntimeInner {
                 .map(serde_json::to_value)
                 .transpose()
                 .map_err(|_| operation(ProviderOperation::Stream, "Invalid wake notification"))?
-                .is_some_and(|notification| notification["source"]["kind"] == "subagent");
+                .is_some_and(|notification| {
+                    notification["source"]["kind"] == "subagent"
+                        || notification["source"]["kind"] == "background_task"
+                            && notification["source"]["work"] == "subagent"
+                });
             if !wake.opened && !wake.ended && !child_notification {
                 return Ok(());
             }
@@ -1750,19 +2123,68 @@ impl ClaudeSessionRuntime {
             },
         ))
     }
-    async fn launch(
+    async fn prepare_launch(
         &self,
         input: &TurnInput,
         policy_options: &RuntimePolicyOptions,
-    ) -> ProviderResult<Client> {
+    ) -> ProviderResult<PreparedClaudeLaunch> {
         let base = self.options.clone();
         let owned_input = input.clone();
         let owned_policy = policy_options.clone();
-        let prepared = tokio::task::spawn_blocking(move || {
-            prepare_claude_launch(&base.launch, &owned_input, &owned_policy, &base.host)
-        })
-        .await
-        .map_err(|_| operation(ProviderOperation::Open, "Claude launch settings failed"))??;
+        let settings = tokio::task::spawn_blocking(move || {
+            prepare_claude_launch_settings(&base.launch, &owned_input, &owned_policy, &base.host)
+        });
+        let base = self.options.clone();
+        let cwd = input.runtime_policy.cwd.clone();
+        let append = tokio::task::spawn_blocking(move || {
+            read_claude_append_files(&base.launch, cwd.as_deref(), &base.host)
+        });
+        let (settings, append) = tokio::join!(settings, append);
+        let settings = settings
+            .map_err(|_| operation(ProviderOperation::Open, "Claude launch settings failed"))??;
+        let append = append.map_err(|_| {
+            operation(
+                ProviderOperation::Open,
+                "Claude append prompt preparation failed",
+            )
+        })??;
+        Ok(finish_claude_launch(settings, append))
+    }
+    async fn launch(
+        &self,
+        input: &TurnInput,
+        mut prepared: PreparedClaudeLaunch,
+    ) -> ProviderResult<Client> {
+        lock(&self.inner.projection).auto_compact_window = prepared.auto_compact_window;
+        if self.mcp_servers.contains_key("t3-code")
+            || prepared.options.mcp_servers.contains_key("t3-code")
+        {
+            let allowed: &[&str] = if input
+                .runtime_policy
+                .sandbox_policy
+                .as_ref()
+                .is_some_and(|policy| policy["type"] == "readOnly")
+            {
+                CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS
+            } else {
+                &["mcp__t3-code__*"]
+            };
+            for tool in allowed {
+                if !prepared
+                    .policy
+                    .allowed_tools
+                    .iter()
+                    .any(|existing| existing == tool)
+                {
+                    prepared.policy.allowed_tools.push((*tool).into());
+                }
+            }
+            if let SystemPrompt::ClaudeCode { append } = &mut prepared.options.system_prompt {
+                append
+                    .get_or_insert_default()
+                    .push_str(CLAUDE_SEND_TO_USER_INSTRUCTIONS);
+            }
+        }
         let policy = prepared.policy;
         let model = prepared.model;
         let native = input
@@ -1838,6 +2260,12 @@ impl ClaudeSessionRuntime {
         let description = describe_spawn(&options).map_err(protocol)?;
         let cancellation = self.inner.cancellation.child_token();
         lock(&self.inner.projection).reset_process_usage();
+        {
+            let mut wake = lock(&self.inner.wake);
+            wake.scheduled_calls.clear();
+            wake.scheduled_at = None;
+            wake.early_scheduled_wake = false;
+        }
         let connection = self
             .options
             .connector
@@ -2143,27 +2571,52 @@ impl SessionRuntime for ClaudeSessionRuntime {
                 && input.message.created_by == OrchestrationV2Actor::Agent
                 && input.message.creation_source == Some(OrchestrationV2CreationSource::Provider)
             {
+                let monitor = wake.monitor_event;
+                let end = if monitor {
+                    wake.own_end.filter(|end| {
+                        wake.frames
+                            .get(*end..)
+                            .is_some_and(|frames| frames.iter().any(NativeWake::root_frame))
+                    })
+                } else {
+                    None
+                }
+                .unwrap_or(wake.frames.len());
+                let absorbed = wake.absorbed_ends.contains(&end);
+                let frames = wake.frames.drain(..end).collect::<Vec<_>>();
+                wake.absorbed_ends = std::mem::take(&mut wake.absorbed_ends)
+                    .into_iter()
+                    .filter_map(|offset| offset.checked_sub(end).filter(|offset| *offset > 0))
+                    .collect();
                 wake.offered = false;
                 wake.retired = false;
-                wake.opened = false;
-                wake.ended = false;
-                wake.notification = None;
-                wake.detail = None;
-                Some(std::mem::take(&mut wake.frames))
+                wake.opened = wake.frames.iter().any(NativeWake::root_frame);
+                wake.ended = wake.frames.iter().any(|frame| frame["type"] == "result");
+                wake.notification = wake.next_notification.take();
+                wake.detail = wake.next_detail.take();
+                wake.monitor_event = false;
+                wake.own_end = None;
+                Some((frames, absorbed, monitor))
             } else {
                 None
             }
         };
-        if let Some(frames) = wake_frames {
+        if let Some((frames, absorbed, monitor)) = wake_frames {
             let mut events = lock(&self.inner.projection).begin(input)?;
             {
                 let mut projection = lock(&self.inner.projection);
-                events.extend(projection.consume_native_wake()?);
+                if !monitor {
+                    events.extend(projection.consume_native_wake()?);
+                }
                 for frame in frames {
                     events.extend(projection.handle_frame(&frame)?);
                 }
+                if absorbed {
+                    events.extend(projection.complete_absorbed_wake()?);
+                }
             }
-            return self.inner.emit(events).await;
+            self.inner.emit(events).await?;
+            return self.inner.offer_wake(None).await;
         }
         let ambiguous = {
             let projection = lock(&self.inner.projection);
@@ -2171,11 +2624,13 @@ impl SessionRuntime for ClaudeSessionRuntime {
         };
         lock(&self.inner.wake).ambiguous_user_turn = ambiguous;
         let (message, reservation) = self.prepare_message(&input.message, None).await?;
-        let client = self.launch(&input, &options).await?;
+        let prepared = self.prepare_launch(&input, &options).await?;
+        let client = self.launch(&input, prepared).await?;
         *lock(&self.policy_options) = options;
         let events = lock(&self.inner.projection).begin(input)?;
         self.inner.emit(events).await?;
         client.send_user(message).await.map_err(protocol)?;
+        lock(&self.inner.wake).absorb_open_tail();
         reservation.commit();
         self.inner.persist_attachment_usage().await
     }
@@ -2513,14 +2968,16 @@ impl SessionExtensions for ClaudeSessionRuntime {
         }
         let pending = projection.pending_background_work(include_subagents);
         drop(projection);
+        let wake = lock(&self.inner.wake);
         Ok(pending
             || (thread.is_none()
-                && lock(&self.inner.wake).frames.iter().any(|frame| {
-                    matches!(
-                        frame["type"].as_str(),
-                        Some("user" | "assistant" | "result")
-                    )
-                })))
+                && (wake.scheduled_at.is_some()
+                    || wake.frames.iter().any(|frame| {
+                        matches!(
+                            frame["type"].as_str(),
+                            Some("user" | "assistant" | "result")
+                        )
+                    }))))
     }
     async fn model_context_window(
         &self,

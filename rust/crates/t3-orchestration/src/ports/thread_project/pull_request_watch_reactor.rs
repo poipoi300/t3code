@@ -63,12 +63,60 @@ struct ThreadTails {
     visible_through: i64,
     tails: BTreeMap<String, Tail>,
 }
+struct WatchLife {
+    thread_id: Value,
+    pull_request: String,
+    started_at: i64,
+    head_sha: Option<String>,
+    pushed_at: i64,
+    longest_quiet_ms: i64,
+    wakes: u64,
+    reads: u64,
+}
+impl WatchLife {
+    fn new(target: &Target) -> Self {
+        let started_at = date_ms(&target.watch.started_at.0).unwrap_or_default();
+        Self {
+            thread_id: json!(target.thread.id),
+            pull_request: key(&target.link),
+            started_at,
+            head_sha: target.watch.head_sha.as_ref().map(|sha| sha.0.clone()),
+            pushed_at: started_at,
+            longest_quiet_ms: 0,
+            wakes: 0,
+            reads: 0,
+        }
+    }
+    fn read(&mut self, head: Option<&str>, now: i64) {
+        let head = head.map(str::to_owned).or_else(|| self.head_sha.clone());
+        if self.head_sha.is_some() && self.head_sha != head {
+            self.longest_quiet_ms = self.longest_quiet_ms.max(now - self.pushed_at);
+            self.pushed_at = now;
+        }
+        self.head_sha = head;
+        self.reads += 1;
+    }
+    fn ended(&self, reason: &str, now: i64, booted: i64) -> Value {
+        let minutes = |ms: i64| (ms.max(0) + 30_000) / 60_000;
+        let quiet = now - self.pushed_at;
+        json!({"threadId":self.thread_id,"pullRequest":self.pull_request,"reason":reason,"minutes":minutes(now-self.started_at),"quietMinutes":minutes(quiet),"longestQuietMinutes":minutes(self.longest_quiet_ms.max(quiet)),"wakes":self.wakes,"reads":self.reads,"partial":self.started_at<booted})
+    }
+}
+fn life_key(target: &Target) -> String {
+    format!(
+        "{} {} {}",
+        json!(target.thread.id),
+        key(&target.link),
+        target.watch.started_at.0
+    )
+}
 #[derive(Default)]
 struct Cache {
     reads: BTreeMap<String, LastRead>,
     tails: BTreeMap<String, ThreadTails>,
     failures: BTreeMap<String, u32>,
     groups: BTreeMap<String, PullRequestRef>,
+    lives: BTreeMap<String, WatchLife>,
 }
 struct HeldWake {
     key: String,
@@ -77,6 +125,7 @@ struct HeldWake {
     ended: Option<ThreadPullRequestWatch>,
     wake: PullRequestWatchWake,
     remarks: bool,
+    reason: Option<&'static str>,
 }
 
 pub struct PullRequestWatchReactor {
@@ -88,6 +137,7 @@ pub struct PullRequestWatchReactor {
     started: AtomicBool,
     feeds: Mutex<BTreeMap<String, CancellationToken>>,
     identities: Option<Arc<dyn PullRequestIdentityRegistry>>,
+    booted_at: i64,
 }
 
 fn key(link: &ThreadPullRequestLink) -> String {
@@ -198,8 +248,10 @@ fn watches_equal(left: &ThreadPullRequestWatch, right: &ThreadPullRequestWatch) 
 
 impl PullRequestWatchReactor {
     pub fn new(services: PullRequestWatchServices) -> Self {
+        let booted_at = date_ms(&services.clock.now().0).unwrap_or_default();
         Self {
             services,
+            booted_at,
             cache: Mutex::new(Cache::default()),
             passes: Mutex::new(()),
             scope: ThreadServiceScope::default(),
@@ -337,6 +389,7 @@ impl PullRequestWatchReactor {
         let cancellation = self.scope.cancellation();
         let _cancel_children = cancellation.clone().drop_guard();
         let mut groups: BTreeMap<String, Vec<Target>> = BTreeMap::new();
+        let mut present = BTreeSet::new();
         for thread in self
             .services
             .projections
@@ -375,6 +428,14 @@ impl PullRequestWatchReactor {
                     link,
                     watch,
                 };
+                let life = life_key(&target);
+                present.insert(life.clone());
+                self.cache
+                    .lock()
+                    .await
+                    .lives
+                    .entry(life)
+                    .or_insert_with(|| WatchLife::new(&target));
                 let group_key = format!("{} {}", json!(thread.project_id), key(&target.link));
                 let state = json!(thread.settled_override);
                 if target
@@ -391,6 +452,20 @@ impl PullRequestWatchReactor {
                             return Err(error);
                         }
                         eprintln!("pull request watch stop failed: {error}");
+                    } else {
+                        let reason = if target
+                            .link
+                            .snapshot
+                            .as_ref()
+                            .is_some_and(|snapshot| snapshot.state == PullRequestState::Merged)
+                        {
+                            "merged"
+                        } else if state == "settled" || thread.settled_at.is_some() {
+                            "settled"
+                        } else {
+                            "subagent"
+                        };
+                        self.end(&target, reason).await;
                     }
                     continue;
                 }
@@ -399,6 +474,24 @@ impl PullRequestWatchReactor {
         }
         if changed.is_none() {
             let mut cache = self.cache.lock().await;
+            let stale: Vec<_> = cache
+                .lives
+                .keys()
+                .filter(|key| !present.contains(*key))
+                .cloned()
+                .collect();
+            for key in stale {
+                if let Some(life) = cache.lives.remove(&key) {
+                    eprintln!(
+                        "pull request watch ended: {}",
+                        life.ended(
+                            "stopped",
+                            date_ms(&self.services.clock.now().0).unwrap_or_default(),
+                            self.booted_at
+                        )
+                    );
+                }
+            }
             cache.reads.retain(|key, _| groups.contains_key(key));
             cache.tails.retain(|key, _| groups.contains_key(key));
             cache.failures.retain(|key, _| groups.contains_key(key));
@@ -469,6 +562,32 @@ impl PullRequestWatchReactor {
         self.send_held(held).await
     }
 
+    async fn woke(&self, target: &Target) {
+        self.cache
+            .lock()
+            .await
+            .lives
+            .entry(life_key(target))
+            .or_insert_with(|| WatchLife::new(target))
+            .wakes += 1;
+    }
+    async fn end(&self, target: &Target, reason: &str) {
+        let life = self
+            .cache
+            .lock()
+            .await
+            .lives
+            .remove(&life_key(target))
+            .unwrap_or_else(|| WatchLife::new(target));
+        eprintln!(
+            "pull request watch ended: {}",
+            life.ended(
+                reason,
+                date_ms(&self.services.clock.now().0).unwrap_or_default(),
+                self.booted_at
+            )
+        );
+    }
     async fn invalidate(&self, target: &Target, notify: bool) -> Result<()> {
         self.services
             .pull_requests
@@ -506,10 +625,16 @@ impl PullRequestWatchReactor {
             let number = target.link.number;
             let wake = json!({"text":format!("T3 Code stopped watching pull request #{number} ({}) because it failed to read it from the host 8 times in a row. Check it yourself, and call watch_pull_request only if it is still open.",target.link.url.0),"notification":{"source":{"kind":"monitor"},"outcome":"failed","summary":format!("#{number}: stopped watching, could not read it")}});
             let result = match self.record(target, None, Some(wake), None).await {
-                Ok(()) => Ok(()),
+                Ok(()) => {
+                    self.woke(target).await;
+                    Ok(())
+                }
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
                 Err(_) => self.record(target, None, None, None).await,
             };
+            if result.is_ok() {
+                self.end(target, "unreadable").await;
+            }
             if let Err(error) = result {
                 if matches!(error, Error::Cancelled) {
                     return Err(error);
@@ -574,6 +699,23 @@ impl PullRequestWatchReactor {
             Ok(detail) => detail,
             Err(error) => return self.read_failed(&group, error).await,
         };
+        if detail.state != PullRequestState::Open || activity.is_ok() {
+            let mut cache = self.cache.lock().await;
+            for target in &group.targets {
+                cache
+                    .lives
+                    .entry(life_key(target))
+                    .or_insert_with(|| WatchLife::new(target))
+                    .read(
+                        detail
+                            .head_sha
+                            .as_ref()
+                            .and_then(Option::as_ref)
+                            .map(|sha| sha.0.as_str()),
+                        now_ms,
+                    );
+            }
+        }
         if detail.state != PullRequestState::Open {
             let mut cache = self.cache.lock().await;
             cache.reads.remove(&group.key);
@@ -587,6 +729,8 @@ impl PullRequestWatchReactor {
                             return Err(error);
                         }
                         eprintln!("pull request watch stop failed: {error}");
+                    } else {
+                        self.end(&target, "merged").await;
                     }
                 } else {
                     let number = target.link.number;
@@ -606,6 +750,7 @@ impl PullRequestWatchReactor {
                         ended: None,
                         wake,
                         remarks: false,
+                        reason: Some("closed"),
                     });
                 }
             }
@@ -695,6 +840,7 @@ impl PullRequestWatchReactor {
                     ended: report.exhausted.then_some(report.next),
                     wake,
                     remarks,
+                    reason: report.exhausted.then_some("comment-limit"),
                 });
             }
         }
@@ -905,6 +1051,11 @@ impl PullRequestWatchReactor {
                     }
                     self.cache.lock().await.reads.remove(&item.key);
                     eprintln!("pull request watch update failed: {error}");
+                } else {
+                    self.woke(&item.target).await;
+                    if let Some(reason) = item.reason {
+                        self.end(&item.target, reason).await;
+                    }
                 }
             }
         }
@@ -948,6 +1099,39 @@ impl PullRequestWatchReactor {
             .commands
             .dispatch(serde_json::from_value(command)?)
             .await?;
+        for item in items {
+            self.woke(&item.target).await;
+            if let Some(reason) = item.reason {
+                self.end(&item.target, reason).await;
+            }
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod diagnostics {
+    use super::*;
+    #[test]
+    fn watch_lifetime_tracks_reads_pushes_quiet_time_and_successful_wakes() {
+        let mut life = WatchLife {
+            thread_id: json!("thread"),
+            pull_request: "host/owner/repo#42".into(),
+            started_at: 0,
+            head_sha: Some("a".into()),
+            pushed_at: 0,
+            longest_quiet_ms: 0,
+            wakes: 0,
+            reads: 0,
+        };
+        life.read(None, 60_000);
+        life.read(Some("b"), 180_000);
+        life.read(Some("c"), 240_000);
+        life.wakes += 1;
+        assert_eq!(
+            life.ended("merged", 300_000, 1),
+            json!({"threadId":"thread","pullRequest":"host/owner/repo#42","reason":"merged","minutes":5,"quietMinutes":1,"longestQuietMinutes":3,"wakes":1,"reads":3,"partial":true})
+        );
+        assert_eq!(life.ended("stopped", 0, 0)["partial"], false);
     }
 }

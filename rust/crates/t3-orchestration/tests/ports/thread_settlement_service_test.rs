@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use serde_json::{Value, json};
 use t3_orchestration::{error::Result, ports::thread_project::thread_settlement_service::*};
 // Pure decision cases from ThreadSettlementService.test.ts; background workers remain unported.
@@ -178,7 +180,7 @@ mod lookups {
     use async_trait::async_trait;
     use std::sync::{
         Mutex as StdMutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     use t3_contracts::{pull_request::*, thread_pull_request::*};
     use t3_orchestration::error::Error;
@@ -190,6 +192,9 @@ mod lookups {
         scripts: AtomicUsize,
         completion: StdMutex<Option<tokio::sync::oneshot::Sender<Result<()>>>>,
         summary: StdMutex<Option<PullRequestSummary>>,
+        reengage: StdMutex<Option<(Arc<dyn EventCommitter>, OrchestrationV2DomainEvent)>>,
+        fail_script: AtomicBool,
+        inputs: StdMutex<Vec<SettleScriptInput>>,
     }
     #[async_trait]
     impl ResourceCleanup for Backends {
@@ -198,13 +203,33 @@ mod lookups {
         }
         async fn close_on_settle(&self, _: ThreadId) -> Result<()> {
             self.closes.fetch_add(1, Ordering::SeqCst);
+            let reengage = self.reengage.lock().unwrap().take();
+            if let Some((sink, event)) = reengage {
+                sink.commit(CommitRequest {
+                    receipt: None,
+                    decision: Decision {
+                        events: vec![event],
+                        ..Default::default()
+                    },
+                    guard: CommitGuard::None,
+                })
+                .await?;
+            }
             Ok(())
         }
     }
     #[async_trait]
     impl SettleScriptRunner for Backends {
-        async fn run(&self, _: SettleScriptInput, _: CancellationToken) -> Result<SettleScriptRun> {
+        async fn run(
+            &self,
+            input: SettleScriptInput,
+            _: CancellationToken,
+        ) -> Result<SettleScriptRun> {
             self.scripts.fetch_add(1, Ordering::SeqCst);
+            self.inputs.lock().unwrap().push(input);
+            if self.fail_script.load(Ordering::SeqCst) {
+                return Err(Error::Unsupported("start failed"));
+            }
             let (tx, rx) = tokio::sync::oneshot::channel();
             *self.completion.lock().unwrap() = Some(tx);
             Ok(SettleScriptRun::Started { completion: rx })
@@ -287,12 +312,13 @@ mod lookups {
                 Some(Some(if reopened { branch("open") } else { terminal }));
             let service = service(&harness, workspace.clone(), Arc::new(Backends::default()));
             service.sweep(Some(ThreadId("thread".into()))).await?;
-            let queries = workspace.queries.lock().unwrap();
-            assert_eq!(queries.len(), 2);
-            assert_eq!(queries[0].cwd, std::path::PathBuf::from("C:/repo"));
-            assert!(!queries[0].confirm_terminal && !queries[0].fresh_git_state);
-            assert!(queries[1].confirm_terminal && queries[1].fresh_git_state);
-            drop(queries);
+            {
+                let queries = workspace.queries.lock().unwrap();
+                assert_eq!(queries.len(), 2);
+                assert_eq!(queries[0].cwd, std::path::PathBuf::from("C:/repo"));
+                assert!(!queries[0].confirm_terminal && !queries[0].fresh_git_state);
+                assert!(queries[1].confirm_terminal && queries[1].fresh_git_state);
+            }
             assert_eq!(
                 harness
                     .reader
@@ -368,6 +394,24 @@ mod lookups {
         service.process_event(&event).await?;
         assert_eq!(backends.closes.load(Ordering::SeqCst), 2);
         assert_eq!(backends.scripts.load(Ordering::SeqCst), 1);
+        assert_eq!(backends.inputs.lock().unwrap()[0].worktree_path, path);
+        let mut next = json!(
+            harness
+                .reader
+                .thread(ThreadId("thread".into()))
+                .await?
+                .unwrap()
+        );
+        next["settledAt"] = json!("2026-09-04T00:00:00.000Z");
+        emit(&harness, "resettled", "thread.metadata-updated", next).await?;
+        backends.fail_script.store(true, Ordering::SeqCst);
+        service.process_event(&event).await?;
+        assert_eq!(backends.scripts.load(Ordering::SeqCst), 2);
+        backends.fail_script.store(false, Ordering::SeqCst);
+        service.process_event(&event).await?;
+        service.process_event(&event).await?;
+        assert_eq!(backends.scripts.load(Ordering::SeqCst), 3);
+
         service.shutdown().await;
         assert!(
             backends
@@ -384,6 +428,175 @@ mod lookups {
             Err(Error::Cancelled)
         ));
         std::fs::remove_dir(path)?;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn settlement_cleanup_rechecks_reengagement_and_skips_shared_parent_worktree()
+    -> Result<()> {
+        for mode in ["before", "during", "parent", "root", "missing"] {
+            let harness = Harness::new(None, false);
+            settlement_thread(&harness, "thread").await?;
+            let path = std::env::temp_dir().join(format!(
+                "orch-d-settle-guards-{}-{mode}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path)?;
+            let mut thread = json!(
+                harness
+                    .reader
+                    .thread(ThreadId("thread".into()))
+                    .await?
+                    .unwrap()
+            );
+            thread["worktreePath"] = if mode == "root" {
+                Value::Null
+            } else if mode == "missing" {
+                json!(path.join("absent"))
+            } else {
+                json!(path)
+            };
+            thread["settledOverride"] = if mode == "before" {
+                Value::Null
+            } else {
+                json!("settled")
+            };
+            thread["settledAt"] = json!(TEST_TIME);
+            if mode == "parent" {
+                harness.create("parent").await?;
+                let mut parent = json!(
+                    harness
+                        .reader
+                        .thread(ThreadId("parent".into()))
+                        .await?
+                        .unwrap()
+                );
+                parent["worktreePath"] = json!(path);
+                harness.sink.commit(CommitRequest{receipt:None,decision:Decision{events:vec![serde_json::from_value(json!({"id":"parent-path","threadId":"parent","type":"thread.metadata-updated","occurredAt":TEST_TIME,"payload":parent}))?],..Default::default()},guard:CommitGuard::None}).await?;
+                thread["lineage"]["relationshipToParent"] = json!("subagent");
+                thread["lineage"]["parentThreadId"] = json!("parent");
+            }
+            emit(
+                &harness,
+                "cleanup-state",
+                "thread.metadata-updated",
+                thread.clone(),
+            )
+            .await?;
+            let backends = Arc::new(Backends::default());
+            if mode == "during" {
+                thread["settledOverride"] = Value::Null;
+                thread["settledAt"] = Value::Null;
+                *backends.reengage.lock().unwrap() = Some((
+                    harness.sink.clone(),
+                    serde_json::from_value(
+                        json!({"id":"reengaged","threadId":"thread","type":"thread.metadata-updated","occurredAt":TEST_TIME,"payload":thread}),
+                    )?,
+                ));
+            }
+            let service = service(&harness, Arc::new(Workspace::new()), backends.clone());
+            let event = serde_json::from_value(
+                json!({"id":"settled-event","threadId":"thread","type":"thread.settled","occurredAt":TEST_TIME,"payload":json!(harness.reader.thread(ThreadId("thread".into())).await?.unwrap())}),
+            )?;
+            service.process_event(&event).await?;
+            assert_eq!(
+                backends.closes.load(Ordering::SeqCst),
+                usize::from(mode != "before"),
+                "{mode}"
+            );
+            assert_eq!(backends.scripts.load(Ordering::SeqCst), 0, "{mode}");
+            service.shutdown().await;
+            std::fs::remove_dir(path)?;
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn settlement_starts_the_ninth_group_while_a_slow_first_group_keeps_its_slot()
+    -> Result<()> {
+        struct Observed {
+            inner: Arc<dyn CommandDispatcher>,
+            settled: tokio::sync::mpsc::UnboundedSender<()>,
+        }
+        #[async_trait]
+        impl CommandDispatcher for Observed {
+            async fn dispatch(
+                &self,
+                command: OrchestrationV2ServerCommand,
+            ) -> Result<t3_orchestration::stores::receipts::CommandReceipt> {
+                let result = self.inner.dispatch(command).await?;
+                self.settled.send(()).unwrap();
+                Ok(result)
+            }
+        }
+        let harness = Harness::new(None, false);
+        project(&harness, "C:/repo").await?;
+        for number in 0..9 {
+            let id = format!("thread-{number}");
+            settlement_thread(&harness, &id).await?;
+            let mut thread = json!(harness.reader.thread(ThreadId(id.clone())).await?.unwrap());
+            thread["branch"] = json!(format!("branch-{number}"));
+            thread["linkedPullRequest"] = json!({"projectId":"project","repository":"owner/repo","number":42,"url":"https://github.com/owner/repo/pull/42"});
+            harness.sink.commit(CommitRequest{receipt:None,decision:Decision{events:vec![serde_json::from_value(json!({"id":format!("branch-{number}"),"threadId":id,"type":"thread.metadata-updated","occurredAt":TEST_TIME,"payload":thread}))?],..Default::default()},guard:CommitGuard::None}).await?;
+        }
+        let (entered, mut slow) = tokio::sync::mpsc::unbounded_channel();
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut workspace = Workspace::new();
+        workspace.gate = Some((entered, gate.clone()));
+        workspace.gate_branch = Some("branch-0".into());
+        let mut terminal = branch("merged");
+        terminal.merged_at = Some(serde_json::from_value(json!(TEST_TIME))?);
+        *workspace.detected.lock().unwrap() = Some(terminal);
+        let workspace = Arc::new(workspace);
+        let backends = Arc::new(Backends::default());
+        let mut summary =
+            super::super::thread_management_service_test::sample("PullRequestSummary");
+        summary["state"] = json!("merged");
+        summary["mergedAt"] = json!(TEST_TIME);
+        *backends.summary.lock().unwrap() = Some(serde_json::from_value(summary)?);
+        let (settled, mut settlements) = tokio::sync::mpsc::unbounded_channel();
+        let service = Arc::new(ThreadSettlementService::with_backends(
+            ThreadSettlementServices {
+                projections: harness.reader.clone(),
+                dispatcher: Arc::new(Observed {
+                    inner: Arc::new(harness.dispatcher.clone()),
+                    settled,
+                }),
+                committer: harness.sink.clone(),
+                settings: settings(
+                    json!({"sidebarAutoSettleAfterDays":null,"sidebarAutoSettleOnMerge":true}),
+                ),
+                clock: harness.clock.clone(),
+                ids: Arc::new(SequenceIds::new("settle-slots")),
+            },
+            ThreadSettlementBackends {
+                workspaces: workspace.clone(),
+                pull_requests: backends.clone(),
+                identities: Arc::new(Registry),
+                resources: backends.clone(),
+                scripts: backends,
+                closes_pull_request: Arc::new(|_| false),
+            },
+        ));
+        let sweep = {
+            let service = service.clone();
+            tokio::spawn(async move { service.sweep(None).await })
+        };
+        slow.recv().await.unwrap();
+        for _ in 0..7 {
+            settlements.recv().await.unwrap();
+        }
+        let ninth_started = workspace
+            .queries
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|query| query.branch == "branch-8");
+        gate.add_permits(1);
+        sweep.await.unwrap()?;
+        service.shutdown().await;
+        assert!(
+            ninth_started,
+            "completed groups must release slots for later groups while the first lookup stays blocked"
+        );
         Ok(())
     }
 }

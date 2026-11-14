@@ -87,7 +87,12 @@ impl CommandInputs for ContextCommandInputs {
     }
     async fn prepare(&self, command: &OrchestrationV2ServerCommand) -> Result<PreparedCommand> {
         let mut prepared = self.base.prepare(command).await?;
-        let context = self.preparer.prepare(&prepared.context, command).await?;
+        let continuation =
+            crate::ports::decisions::orchestrator::metadata_update_continuation(command)?;
+        let context = self
+            .preparer
+            .prepare(&prepared.context, continuation.as_ref().unwrap_or(command))
+            .await?;
         prepared.context.inputs.message_context = context;
         Ok(prepared)
     }
@@ -238,19 +243,28 @@ impl CommandInputs for RuntimeCommandInputs {
     async fn prepare(&self, command: &OrchestrationV2ServerCommand) -> Result<PreparedCommand> {
         let mut prepared = self.base.prepare(command).await?;
         let (_, kind, _) = command_identity(command)?;
+        let continuation =
+            crate::ports::decisions::orchestrator::metadata_update_continuation(command)?;
         if let Some(projection) = &prepared.context.context.projection {
             if matches!(
                 kind.as_str(),
                 "message.dispatch" | "prepared-run.release" | "checkpoint.rollback"
-            ) {
-                let value = crate::decision::engine::stored_value(command)?;
+            ) || continuation.is_some()
+            {
+                let value = crate::decision::engine::stored_value(
+                    continuation.as_ref().unwrap_or(command),
+                )?;
                 let selection =
                     effective_selection(&value, Some(projection))?.ok_or(Error::Stale)?;
-                prepared.context.inputs.runtime_policy = Some(
-                    self.policy
-                        .resolve(projection.thread.clone(), selection)
-                        .await?,
-                );
+                let mut thread = projection.thread.clone();
+                if continuation.is_some() {
+                    let metadata = crate::decision::engine::stored_value(command)?;
+                    if let Some(path) = metadata.get("worktreePath") {
+                        thread.worktree_path = serde_json::from_value(path.clone())?;
+                    }
+                }
+                prepared.context.inputs.runtime_policy =
+                    Some(self.policy.resolve(thread, selection).await?);
             }
             let mut sessions = std::collections::BTreeMap::new();
             for provider in &projection.provider_threads {
@@ -566,6 +580,9 @@ impl CommandInputs for ProjectionCommandInputs {
     }
 
     async fn lock_keys(&self, command: &OrchestrationV2ServerCommand) -> Result<Vec<ThreadId>> {
+        let continuation =
+            crate::ports::decisions::orchestrator::metadata_update_continuation(command)?;
+        let command = continuation.as_ref().unwrap_or(command);
         let (_, kind, thread_id) = command_identity(command)?;
         let value = crate::decision::engine::stored_value(command)?;
         let mut keys = Vec::new();
@@ -657,6 +674,9 @@ impl CommandInputs for ProjectionCommandInputs {
     }
 
     async fn prepare(&self, command: &OrchestrationV2ServerCommand) -> Result<PreparedCommand> {
+        let continuation =
+            crate::ports::decisions::orchestrator::metadata_update_continuation(command)?;
+        let command = continuation.as_ref().unwrap_or(command);
         let (_, kind, thread_id) = command_identity(command)?;
         let value = crate::decision::engine::stored_value(command)?;
         let runtime_response = matches!(
@@ -800,6 +820,31 @@ impl CommandInputs for ProjectionCommandInputs {
             };
             Some(projection_from_records(records))
         };
+        if kind == "thread.snooze"
+            && let Some(current) = projection.as_mut()
+            && let Some(latest) =
+                crate::ports::decisions::model_switch::latest_executed_run(&current.runs)
+                    .filter(|run| run.status == OrchestrationV2RunStatus::Failed)
+        {
+            let id = crate::ports::checkpoints_forks::checkpoint_restore_safety::expanded_id(
+                &latest.id,
+            )?;
+            let evidence = projection_from_records(
+                self.reader
+                    .records(
+                        thread_id.clone(),
+                        vec![RecordKind::TurnItems, RecordKind::ProviderSessions],
+                        RecordFilter {
+                            turn_item_types: Some(vec!["error".into()]),
+                            turn_item_run_ids: Some(vec![Some(id)]),
+                            ..Default::default()
+                        },
+                    )
+                    .await?,
+            );
+            current.turn_items.extend(evidence.turn_items);
+            current.provider_sessions.extend(evidence.provider_sessions);
+        }
         if matches!(
             kind.as_str(),
             "message.dispatch" | "runtime-request.respond"
@@ -817,6 +862,23 @@ impl CommandInputs for ProjectionCommandInputs {
             } else {
                 Vec::new()
             });
+            if !value["notification"].is_null()
+                && let Some(task) = child
+                    .runs
+                    .iter()
+                    .filter(|run| {
+                        run.delegated_task_id
+                            .as_ref()
+                            .and_then(Option::as_ref)
+                            .is_some()
+                    })
+                    .max_by_key(|run| run.ordinal)
+                    .and_then(|run| run.delegated_task_id.as_ref().and_then(Option::as_ref))
+            {
+                filter.subagent_ids.as_mut().ok_or(Error::Stale)?.push(
+                    crate::ports::checkpoints_forks::checkpoint_restore_safety::expanded_id(task)?,
+                );
+            }
             inputs.related_projections.push(projection_from_records(
                 self.reader
                     .records(
@@ -1112,7 +1174,8 @@ fn effective_selection(
             .ok()
             .is_some_and(|id| id == value["runId"] || id == value["queuedRunId"])
     }) {
-        return Ok(Some(run.model_selection.clone()));
+        return crate::ports::decisions::orchestrator::queued_run_model_selection(projection, run)
+            .map(Some);
     }
     if value["type"] == "message.dispatch"
         && value["notification"].is_null()
@@ -1125,11 +1188,10 @@ fn effective_selection(
                     | OrchestrationV2RunStatus::Waiting
             )
         })
-        && let Some(tail) =
-            crate::ports::decisions::queued_run_order::queued_runs_in_delivery_order(projection)
-                .last()
+        && !crate::ports::decisions::orchestrator::dispatch_follows_current(value)
     {
-        return Ok(Some(tail.model_selection.clone()));
+        return crate::ports::decisions::orchestrator::queue_tail_model_selection(projection)
+            .map(Some);
     }
     Ok(Some(projection.thread.model_selection.clone()))
 }
@@ -1597,7 +1659,10 @@ impl Dispatcher {
     ) -> Result<CommandReceipt> {
         let inner = self.0.clone();
         let (_, command_type, thread_id) = command_identity(&command)?;
-        let intake = if command_type == "message.dispatch" {
+        let intake = if command_type == "message.dispatch"
+            || crate::ports::decisions::orchestrator::metadata_update_continuation(&command)?
+                .is_some()
+        {
             inner.intake.acquire([thread_id.0]).await
         } else {
             Vec::new()
@@ -2391,8 +2456,12 @@ impl Inner {
             }
             let run_id =
                 crate::ports::checkpoints_forks::checkpoint_restore_safety::expanded_id(&run.id)?;
+            let selection = crate::ports::decisions::orchestrator::queued_run_model_selection(
+                &projection,
+                run,
+            )?;
             let command = serde_json::from_value(
-                serde_json::json!({"type":"message.dispatch","commandId":format!("command:system:start-queued:{}",run_id.0),"threadId":thread_id,"messageId":run.user_message_id,"text":"queued start","attachments":[],"modelSelection":run.model_selection,"dispatchMode":{"type":"start_immediately"},"createdBy":"agent","creationSource":"server"}),
+                serde_json::json!({"type":"message.dispatch","commandId":format!("command:system:start-queued:{}",run_id.0),"threadId":thread_id,"messageId":run.user_message_id,"text":"queued start","attachments":[],"modelSelection":selection,"dispatchMode":{"type":"start_immediately"},"createdBy":"agent","creationSource":"server"}),
             )?;
             let mut prepared = match self.services.inputs.prepare(&command).await {
                 Ok(prepared) => prepared,
@@ -2543,6 +2612,9 @@ impl Inner {
         replay: bool,
         claimed: bool,
     ) -> Result<()> {
+        let continuation =
+            crate::ports::decisions::orchestrator::metadata_update_continuation(command)?;
+        let command = continuation.as_ref().unwrap_or(command);
         let (_, kind, thread) = command_identity(command)?;
         let value = crate::decision::engine::stored_value(command)?;
         if matches!(kind.as_str(), "queue.resume" | "queued-run.start")
@@ -2682,8 +2754,7 @@ impl Inner {
                 | "link_request.record"
                 | "thread.pull-request-watch.sync"
                 | "runtime-request.respond"
-        ) && let Some(projection) = &prepared.context.context.projection
-        {
+        ) || crate::ports::decisions::orchestrator::metadata_update_continuation(&command)?.is_some() { if let Some(projection) = &prepared.context.context.projection {
             let project_id =
                 crate::ports::checkpoints_forks::checkpoint_restore_safety::expanded_id(
                     &projection.thread.project_id,
@@ -2700,7 +2771,7 @@ impl Inner {
                 .read(move |db| crate::stores::projects::list(db, Some(&project_ids), true))
                 .await?;
             prepared.context.inputs.projects.extend(projects);
-        }
+        } }
         if command_type == "checkpoint.rollback"
             && crate::decision::engine::stored_value(&command)?["restoreFiles"] != false
             && let Some(projection) = &prepared.context.context.projection
@@ -2919,6 +2990,7 @@ fn allows_empty_decision(
     Ok(matches!(
         command_type,
         "thread.background-work.settle"
+            | "thread.visit"
             | "thread.pull-request-watch.checks-reopen"
             | "thread.interrupt.unresponsive"
             | "thread.stop"
