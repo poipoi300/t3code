@@ -3876,6 +3876,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
+dependencies = [
+ "bitflags 2.13.2",
+ "memchr",
+ "unicase",
+]
+
+[[package]]
 name = "qrcodegen"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5076,6 +5087,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hmac",
  "httpdate",
+ "p256",
  "percent-encoding",
  "reqwest",
  "serde",
@@ -5424,6 +5436,7 @@ dependencies = [
 name = "t3-process"
 version = "0.1.0"
 dependencies = [
+ "nix 0.29.0",
  "process-wrap",
  "tempfile",
  "thiserror 2.0.21",
@@ -5484,6 +5497,7 @@ dependencies = [
  "t3-contracts",
  "t3-persistence",
  "t3-process",
+ "t3-usage",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -5609,6 +5623,20 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "t3-shared"
+version = "0.0.0"
+dependencies = [
+ "pulldown-cmark",
+ "regex",
+ "serde",
+ "serde_json",
+ "t3-contracts",
+ "thiserror 2.0.21",
+ "unicode-general-category",
+ "unicode-normalization",
 ]
 
 [[package]]
