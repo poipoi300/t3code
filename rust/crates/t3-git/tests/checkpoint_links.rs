@@ -98,6 +98,7 @@ async fn assert_safe_capture(
     reference: &str,
     link: &str,
     outside: &Path,
+    restore_allowed: bool,
 ) -> TestResult {
     let index = repo.index()?;
     git.capture_checkpoint(reference).await?;
@@ -116,11 +117,15 @@ async fn assert_safe_capture(
     let marker = std::fs::read(outside.join("marker"))?;
     std::fs::write(outside.join("later"), b"preserve later\0")?;
     let result = git.restore_checkpoint(reference, false).await;
-    assert!(
-        matches!(result, Err(GitError::UnsafeRestore(_))),
-        "{result:?}"
-    );
-    assert_eq!(repo.index()?, index);
+    if restore_allowed {
+        assert!(matches!(result, Ok(true)), "{result:?}");
+    } else {
+        assert!(
+            matches!(result, Err(GitError::UnsafeRestore(_))),
+            "{result:?}"
+        );
+        assert_eq!(repo.index()?, index);
+    }
     assert_eq!(std::fs::read(outside.join("marker"))?, marker);
     assert_eq!(std::fs::read(outside.join("later"))?, b"preserve later\0");
     assert_eq!(std::fs::read_dir(outside)?.count(), 2);
@@ -169,9 +174,18 @@ async fn ignored_links_use_all_git_ignore_sources_without_exposing_targets() -> 
             let target = outside(&repo)?;
             kind.create(&target, &repo.root().join(link)).await?;
             let result =
-                assert_safe_capture(&repo, &git, &checkpoint_ref(layout, 0), link, &target).await;
-            kind.remove(&repo.root().join(link))?;
+                assert_safe_capture(&repo, &git, &checkpoint_ref(layout, 0), link, &target, true)
+                    .await;
             assert!(result.is_ok(), "{kind:?} {layout}: {result:?}");
+            let cleanup = kind.remove(&repo.root().join(link));
+            // Git may safely unlink a directory symlink while cleaning its empty parent.
+            assert!(
+                cleanup.is_ok()
+                    || cleanup
+                        .as_ref()
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+                "{kind:?} {layout}: {cleanup:?}"
+            );
         }
     }
     Ok(())
@@ -213,7 +227,8 @@ async fn tracked_link_replacements_work_in_nested_and_sparse_scopes() -> TestRes
                 kind.create(&target, &path).await?;
                 let scoped = repo.git.at(repo.root().join("scope"));
                 let reference = checkpoint_ref("tracked-ignored-link", 0);
-                let result = assert_safe_capture(&repo, &scoped, &reference, link, &target).await;
+                let result =
+                    assert_safe_capture(&repo, &scoped, &reference, link, &target, false).await;
                 kind.remove(&path)?;
                 result?;
                 assert_eq!(repo.show(&reference, "scope/keep").await?, "working\n");
@@ -224,6 +239,78 @@ async fn tracked_link_replacements_work_in_nested_and_sparse_scopes() -> TestRes
             }
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn capture_prunes_a_large_ignored_tree_beside_a_visible_unsafe_link() -> TestResult {
+    let repo = Repository::new().await?;
+    repo.write("safe", "base\n")?;
+    repo.write(".gitignore", "ignored/\n")?;
+    repo.commit("base").await?;
+    let mut directory = repo.root().join("ignored");
+    for n in 0..16 {
+        directory.push(format!("{n:02}{}", "x".repeat(178)));
+    }
+    std::fs::create_dir_all(&directory)?;
+    for n in 0..6000 {
+        std::fs::write(directory.join(format!("file-{n:05}")), b"x")?;
+    }
+    let target = outside(&repo)?;
+    #[cfg(windows)]
+    let kind = LinkKind::Junction;
+    #[cfg(unix)]
+    let kind = LinkKind::Directory;
+    let link = repo.root().join("visible-link");
+    kind.create(&target, &link).await?;
+    let reference = checkpoint_ref("large-ignored", 0);
+    let captured = repo.git.capture_checkpoint(&reference).await;
+    kind.remove(&link)?;
+    captured?;
+    assert_eq!(repo.show(&reference, "safe").await?, "base\n");
+    assert!(
+        repo.command(&[
+            "ls-tree",
+            "-r",
+            "--name-only",
+            &reference,
+            "--",
+            "ignored",
+            "visible-link"
+        ])
+        .await?
+        .is_empty()
+    );
+    assert_marker_not_hashed(&repo, &target).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn restore_refuses_an_untracked_nonignored_external_link() -> TestResult {
+    let repo = Repository::new().await?;
+    repo.write("safe", "base\n")?;
+    repo.commit("base").await?;
+    let reference = checkpoint_ref("visible-unsafe", 0);
+    repo.git.capture_checkpoint(&reference).await?;
+    let target = outside(&repo)?;
+    #[cfg(windows)]
+    let kind = LinkKind::Junction;
+    #[cfg(unix)]
+    let kind = LinkKind::Directory;
+    for name in ["visible-link", "nested/visible-link"] {
+        let link = repo.root().join(name);
+        kind.create(&target, &link).await?;
+        let result = repo.git.restore_checkpoint(&reference, false).await;
+        kind.remove(&link)?;
+        assert!(
+            matches!(result, Err(GitError::UnsafeRestore(_))),
+            "{name}: {result:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(target.join("marker"))?,
+        b"external marker must never be hashed\0\xff"
+    );
     Ok(())
 }
 
@@ -267,7 +354,7 @@ async fn changing_link_ignore_rules_before_add_never_exposes_targets() -> TestRe
             assert!(
                 !staged["args"].as_array().expect("args").iter().any(|arg| {
                     let arg = arg.as_str().expect("argument");
-                    arg == "link" || arg.ends_with(")link")
+                    arg == "link" || arg.ends_with(")link") && !arg.starts_with(":(top,exclude,")
                 }),
                 "unsafe pathspec: {arguments}"
             );
@@ -350,7 +437,8 @@ async fn link_safe_staging_preserves_deletions_literals_and_nested_repositories(
     let link = repo.root().join("node_modules");
     kind.create(&target, &link).await?;
     let reference = checkpoint_ref("safe-file-semantics", 0);
-    let result = assert_safe_capture(&repo, &repo.git, &reference, "node_modules", &target).await;
+    let result =
+        assert_safe_capture(&repo, &repo.git, &reference, "node_modules", &target, true).await;
     kind.remove(&link)?;
     result?;
     for path in ["[literal]", "-leading", "with spaces", "é"] {

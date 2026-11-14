@@ -154,7 +154,12 @@ async fn automatic_worktree_paths_are_stable_bounded_and_collision_safe() -> Tes
         directory: Some(repo.temp.path().join("trees")),
         submodules: Default::default(),
     };
-    let target = repo.git.add_worktree(options.clone()).await?;
+    std::fs::create_dir(repo.root().join("child"))?;
+    let target = repo
+        .git
+        .at(repo.root().join("child/.."))
+        .add_worktree(options.clone())
+        .await?;
     let name = target.file_name().expect("basename").to_string_lossy();
     assert!(name.len() <= 40);
     assert!(name.starts_with("feature-a-long-topic-wi-"));

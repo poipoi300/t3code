@@ -153,7 +153,7 @@ impl Git {
                 }
                 prefix.push(character);
             }
-            let cwd = std::path::absolute(&self.cwd)?;
+            let cwd = crate::safety::lexical_absolute(&self.cwd)?;
             let name = cwd
                 .file_name()
                 .ok_or_else(|| GitError::InvalidArgument("repository has no basename".into()))?;

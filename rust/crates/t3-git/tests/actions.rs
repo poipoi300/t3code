@@ -495,6 +495,10 @@ async fn config_keys_cannot_turn_a_write_into_an_unset() -> TestResult {
             .await
             .is_err()
     );
+    for key in ["--get", "--unset-all", "-z"] {
+        assert!(repo.git.write_config_value(key, "t3.keep").await.is_err());
+        assert!(repo.git.read_config_value(key).await.is_err());
+    }
     assert_eq!(
         repo.git.read_config_value("t3.keep").await?.as_deref(),
         Some("untouched")
@@ -579,6 +583,26 @@ async fn internal_indexes_do_not_run_post_index_change_hooks() -> TestResult {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
     }
+    #[cfg(windows)]
+    {
+        let path = repo
+            .git
+            .execute(
+                &["config", "--get", "core.hooksPath"],
+                t3_git::ExecuteOptions {
+                    capture: true,
+                    ..Default::default()
+                },
+            )
+            .await?
+            .stdout_text();
+        let path = std::path::Path::new(path.trim());
+        assert!(
+            path.is_dir(),
+            "disabled hooks path must be a server-owned directory: {path:?}"
+        );
+        assert!(std::fs::read_dir(path)?.next().is_none());
+    }
     repo.git.prepare_commit_context(None, true).await?;
     assert!(
         !repo.root().join("hook-ran").exists(),
@@ -595,20 +619,97 @@ async fn internal_indexes_do_not_run_post_index_change_hooks() -> TestResult {
 }
 
 #[tokio::test]
-async fn automated_git_commands_disable_interactive_helpers() -> TestResult {
+async fn user_push_honors_configured_ssh_transport() -> TestResult {
     let repo = Repository::new().await?;
-    let script = "!test \"$GIT_TERMINAL_PROMPT\" = 0 && test \"$GCM_INTERACTIVE\" = never && test \"$GIT_EDITOR\" = true && test \"$GIT_SEQUENCE_EDITOR\" = true && test \"$GIT_PAGER\" = cat && test \"$SSH_ASKPASS_REQUIRE\" = never && test \"$GIT_SSH_COMMAND\" = 'ssh -oBatchMode=yes' && echo noninteractive";
+    let head = repo.commit("base").await?;
+    let bare = repo.temp.path().join("remote.git");
+    repo.command(&["init", "--bare", &bare.to_string_lossy()])
+        .await?;
+    let script = repo.temp.path().join("ssh.sh");
+    let marker = repo.temp.path().join("ssh-used");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf configured > '{}'\nexec git-receive-pack '{}'\n",
+            marker.to_string_lossy().replace('\\', "/"),
+            bare.to_string_lossy().replace('\\', "/")
+        ),
+    )?;
+    repo.command(&[
+        "config",
+        "core.sshCommand",
+        &format!("sh '{}'", script.to_string_lossy().replace('\\', "/")),
+    ])
+    .await?;
+    repo.command(&["config", "ssh.variant", "ssh"]).await?;
+    repo.command(&[
+        "remote",
+        "add",
+        "origin",
+        "ssh://test@127.0.0.1:1/repository",
+    ])
+    .await?;
+    let pushed = repo.git.push_current_branch(Some("main"), None).await?;
+    assert_eq!(pushed.status, t3_contracts::git::GitPushStepStatus::Pushed);
+    assert_eq!(std::fs::read_to_string(marker)?, "configured");
     assert_eq!(
-        repo.git
-            .execute(
-                &["-c", &format!("alias.t3-probe={script}"), "t3-probe"],
-                t3_git::ExecuteOptions::default()
-            )
-            .await?
-            .stdout_text()
-            .trim(),
-        "noninteractive"
+        repo.command(&[
+            "--git-dir",
+            &bare.to_string_lossy(),
+            "rev-parse",
+            "refs/heads/main"
+        ])
+        .await?
+        .trim(),
+        head
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn background_fetch_is_noninteractive_and_preserves_configured_ssh_transport() -> TestResult {
+    let repo = Repository::new().await?;
+    let head = repo.commit("base").await?;
+    let bare = repo.temp.path().join("remote.git");
+    repo.command(&[
+        "init",
+        "--bare",
+        "--initial-branch=main",
+        &bare.to_string_lossy(),
+    ])
+    .await?;
+    repo.command(&["push", &bare.to_string_lossy(), "main"])
+        .await?;
+    let script = repo.temp.path().join("fetch-ssh.sh");
+    let marker = repo.temp.path().join("fetch-env");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s|%s|%s|%s|%s' \"$GIT_TERMINAL_PROMPT\" \"$GCM_INTERACTIVE\" \"$GIT_ASKPASS\" \"$SSH_ASKPASS\" \"$SSH_ASKPASS_REQUIRE\" > '{}'\nexec git-upload-pack '{}'\n",
+            marker.to_string_lossy().replace('\\', "/"),
+            bare.to_string_lossy().replace('\\', "/")
+        ),
+    )?;
+    repo.command(&[
+        "config",
+        "core.sshCommand",
+        &format!("sh '{}'", script.to_string_lossy().replace('\\', "/")),
+    ])
+    .await?;
+    repo.command(&["config", "ssh.variant", "ssh"]).await?;
+    repo.command(&[
+        "remote",
+        "add",
+        "origin",
+        "ssh://test@127.0.0.1:1/repository",
+    ])
+    .await?;
+    repo.command(&["update-ref", "refs/remotes/origin/main", &head])
+        .await?;
+    repo.command(&["branch", "--set-upstream-to=origin/main", "main"])
+        .await?;
+    repo.git.status_details_remote(true).await?;
+    assert_eq!(std::fs::read_to_string(marker)?, "0|never|||never");
     Ok(())
 }
 
@@ -664,5 +765,50 @@ async fn refreshing_a_checkout_never_interprets_a_revision_as_a_reset_option() -
             .is_err()
     );
     assert_eq!(repo.command(&["rev-parse", "HEAD"]).await?.trim(), head);
+    Ok(())
+}
+
+#[tokio::test]
+async fn option_like_branch_names_are_rejected_without_mutation_and_remote_names_are_literal()
+-> TestResult {
+    let repo = Repository::new().await?;
+    repo.write("a", "base\n")?;
+    let head = repo.commit("base").await?;
+    repo.write("a", "dirty\n")?;
+    let index = repo.index()?;
+    for name in ["--help", "--delete", "-D"] {
+        assert!(repo.git.create_branch(name, "HEAD").await.is_err());
+        assert!(repo.git.create_branch("safe", name).await.is_err());
+        assert!(repo.git.create_ref(name, false).await.is_err());
+        assert!(repo.git.rename_branch("main", name, true).await.is_err());
+        assert!(repo.git.rename_branch(name, "safe", true).await.is_err());
+        assert!(repo.git.delete_local_branch(name, true).await.is_err());
+        assert!(repo.git.switch_ref(name).await.is_err());
+    }
+    assert_eq!(repo.git.list_local_branch_names().await?, vec!["main"]);
+    assert_eq!(repo.command(&["rev-parse", "HEAD"]).await?.trim(), head);
+    assert_eq!(repo.index()?, index);
+    assert_eq!(std::fs::read_to_string(repo.root().join("a"))?, "dirty\n");
+    let bare = repo.temp.path().join("remote.git");
+    repo.command(&["init", "--bare", &bare.to_string_lossy()])
+        .await?;
+    for remote in ["-mirror", "--receive-pack"] {
+        repo.command(&["remote", "add", "--", remote, &bare.to_string_lossy()])
+            .await?;
+        repo.git
+            .push_current_branch(Some("main"), Some(remote))
+            .await?;
+        repo.git.fetch_remote(remote, Some("main")).await?;
+        assert_eq!(
+            repo.command(&[
+                "rev-parse",
+                "--verify",
+                &format!("refs/remotes/{remote}/main")
+            ])
+            .await?
+            .trim(),
+            head
+        );
+    }
     Ok(())
 }

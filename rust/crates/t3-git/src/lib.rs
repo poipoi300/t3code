@@ -208,17 +208,15 @@ impl Git {
         if path.starts_with("/dev/fd") {
             return true;
         }
-        self.internal_paths
-            .as_ref()
-            .is_some_and(|(state, secrets)| {
-                let state = std::fs::canonicalize(state).unwrap_or_else(|_| state.clone());
-                let secrets = std::fs::canonicalize(secrets).unwrap_or_else(|_| secrets.clone());
-                path.starts_with(secrets)
-                    || path.parent() == Some(state.as_path())
-                        && path
-                            .file_name()
-                            .is_some_and(|name| name.to_string_lossy().contains(".sqlite"))
-            })
+        self.internal_paths.as_ref().is_none_or(|(state, secrets)| {
+            let state = std::fs::canonicalize(state).unwrap_or_else(|_| state.clone());
+            let secrets = std::fs::canonicalize(secrets).unwrap_or_else(|_| secrets.clone());
+            path.starts_with(secrets)
+                || path.parent() == Some(state.as_path())
+                    && path
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().contains(".sqlite"))
+        })
     }
     pub fn at(&self, cwd: impl Into<PathBuf>) -> Self {
         Self {
@@ -237,6 +235,26 @@ impl Git {
     pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
         self.cancellation = cancellation;
         self
+    }
+
+    fn disabled_hooks_path(&self) -> Result<String, GitError> {
+        #[cfg(windows)]
+        {
+            if self.core.disabled_hooks.get().is_none() {
+                let directory = tempfile::Builder::new()
+                    .prefix("t3-git-no-hooks-")
+                    .tempdir()?;
+                let _ = self.core.disabled_hooks.set(directory);
+            }
+            let directory = self.core.disabled_hooks.get().ok_or_else(|| {
+                GitError::Unavailable("Disabled hooks directory is unavailable.".into())
+            })?;
+            Ok(directory.path().to_string_lossy().into_owned())
+        }
+        #[cfg(not(windows))]
+        {
+            Ok("/dev/null".into())
+        }
     }
 
     pub async fn execute(
@@ -258,6 +276,12 @@ impl Git {
         };
         #[allow(unused_mut)]
         let mut args: Vec<OsString> = args.iter().map(|arg| arg.as_ref().to_owned()).collect();
+        #[cfg(windows)]
+        for index in 1..args.len() {
+            if args[index - 1] == "-c" && args[index] == "core.hooksPath=/dev/null" {
+                args[index] = format!("core.hooksPath={}", self.disabled_hooks_path()?).into();
+            }
+        }
         let mut retries = 0;
         #[cfg(target_os = "macos")]
         let mut fsync_fallback = false;
@@ -279,7 +303,11 @@ impl Git {
                     .is_some_and(Option::is_some)
             {
                 // Scratch-index and checkpoint writes must not invoke user index/ref hooks.
-                append_config_env(&mut process.env, "core.hooksPath", "/dev/null");
+                append_config_env(
+                    &mut process.env,
+                    "core.hooksPath",
+                    &self.disabled_hooks_path()?,
+                );
             }
             if cfg!(windows) || options.long_paths {
                 append_config_env(&mut process.env, "core.longpaths", "true");
@@ -563,15 +591,7 @@ fn git_environment_from(
         })
         .map(|(key, _)| (key.clone(), None))
         .collect();
-    result.extend(env(&[
-        ("LANGUAGE", "C"),
-        ("LC_ALL", "C"),
-        ("GIT_PAGER", "cat"),
-        ("GIT_EDITOR", "true"),
-        ("GIT_SEQUENCE_EDITOR", "true"),
-        ("GIT_SSH_COMMAND", "ssh -oBatchMode=yes"),
-    ]));
-    result.extend(env(core::NONINTERACTIVE));
+    result.extend(env(&[("LANGUAGE", "C")]));
     merge_environment(&mut result, base);
     merge_environment(&mut result, command);
     for (key, value) in &result {
@@ -725,6 +745,37 @@ fn parse_config_count(value: &str) -> Option<usize> {
 #[cfg(test)]
 mod execution_tests {
     use super::*;
+
+    #[test]
+    fn command_defaults_preserve_inherited_locale_and_transport_choices() {
+        let inherited = [
+            ("LC_ALL", "user-locale"),
+            ("LC_CTYPE", "user-ctype"),
+            ("GIT_SSH_COMMAND", "user-ssh"),
+            ("GIT_TERMINAL_PROMPT", "1"),
+            ("GCM_INTERACTIVE", "auto"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+        let patch = git_environment_from(inherited, &Environment::new(), &Environment::new());
+        assert_eq!(
+            patch.get(std::ffi::OsStr::new("LANGUAGE")),
+            Some(&Some("C".into()))
+        );
+        for key in [
+            "LC_ALL",
+            "LC_CTYPE",
+            "GIT_SSH_COMMAND",
+            "GIT_TERMINAL_PROMPT",
+            "GCM_INTERACTIVE",
+        ] {
+            assert!(
+                !patch.contains_key(std::ffi::OsStr::new(key)),
+                "overrode {key}"
+            );
+        }
+    }
 
     #[test]
     fn inherited_namespace_pathspec_and_trace_overrides_do_not_escape_the_service() {

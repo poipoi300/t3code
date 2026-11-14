@@ -332,29 +332,36 @@ async fn file_expansion_checks_binary_size_traversal_and_internal_state() -> Tes
             json!({"cwd":repo.root(),"sourceKind":"working-tree","changeType":kind,"baseRef":null,"headRef":null,"oldPath":path,"newPath":path}),
         )
     };
-    let result = repo
+    assert!(
+        repo.git
+            .review_diff_file_contents(&input("a", "change")?)
+            .await
+            .is_err(),
+        "unconfigured working-file access must fail closed"
+    );
+    let git = repo
         .git
+        .clone()
+        .with_internal_paths(repo.root().join("state"), repo.root().join("secrets"));
+    let result = git
         .review_diff_file_contents(&input("a", "change")?)
         .await?;
     assert_eq!(result.old_contents, "before\n");
     assert_eq!(result.new_contents, "after\n");
     repo.write("binary", [0, 3])?;
     assert!(
-        repo.git
-            .review_diff_file_contents(&input("binary", "new")?)
+        git.review_diff_file_contents(&input("binary", "new")?)
             .await
             .is_err()
     );
     repo.write("large", vec![b'a'; 1024 * 1024 + 1])?;
     assert!(
-        repo.git
-            .review_diff_file_contents(&input("large", "new")?)
+        git.review_diff_file_contents(&input("large", "new")?)
             .await
             .is_err()
     );
     assert!(
-        repo.git
-            .review_diff_file_contents(&input("../outside", "new")?)
+        git.review_diff_file_contents(&input("../outside", "new")?)
             .await
             .is_err()
     );

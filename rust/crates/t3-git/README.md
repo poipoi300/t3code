@@ -179,3 +179,17 @@ specified TypeScript directories; none was invented. `git-filter-fixture` and
 forwarding to real Git). The ported tests run real Git in isolated temporary
 repositories, including supplied messages, staging, merge protection,
 push targets, fetch/pull, cached status/branches, review budgets/files and aborts.
+
+Review hardening (2026-11-14): working-tree file expansion fails closed until
+`with_internal_paths(state_dir, secrets_dir)` is configured. Construct one root
+Git handle with the server environment and internal paths and derive checkout
+handles with `.at()` so locks, caches and invalidation are shared. On Windows,
+scratch-index and checkpoint commands disable hooks through a private empty
+temporary directory retained by that root handle; this hardens the TypeScript
+`/dev/null` convention. User commit hooks still run. Windows containment uses
+`std::fs::read_link`'s SYMLINK/MOUNT_POINT reparse-tag decoder, propagating I/O
+failures and allowing unsupported non-link tags. Ignored directories are pruned
+before walking; restore retains exclusions for those directories even if its
+`.gitignore` changes. Action subscriptions retain at most 128 events, evicting
+old hook output first while preserving terminal events; this bound is stricter
+than TypeScript's currently unbounded callback stream.

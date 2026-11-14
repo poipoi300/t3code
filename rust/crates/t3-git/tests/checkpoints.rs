@@ -571,10 +571,11 @@ async fn restore_preserves_ignored_files_and_nested_repositories_and_bounds_clea
     repo.write(&format!("{path}.gitignore"), "hidden.txt\n")?;
     repo.write(&format!("{path}hidden.txt"), "still hidden\n")?;
     repo.write("checkpoint.txt", "later\n")?;
-    assert!(matches!(
-        repo.git.restore_checkpoint(&reference, false).await,
-        Err(GitError::Unavailable(_))
-    ));
+    let restored = repo.git.restore_checkpoint(&reference, false).await;
+    assert!(
+        matches!(restored, Err(GitError::Unavailable(_))),
+        "{restored:?}"
+    );
     assert_eq!(
         std::fs::read_to_string(repo.root().join("checkpoint.txt"))?,
         "baseline\n"
@@ -956,6 +957,11 @@ async fn checkpoint_ref_writes_and_prunes_never_follow_symbolic_refs() -> TestRe
         .await?;
     assert!(repo.git.has_checkpoint(&foreign).await?);
     assert!(!repo.git.has_checkpoint(&alias).await?);
+    let lock = repo.root().join(format!(".git/{foreign}.lock"));
+    std::fs::write(&lock, "owned test lock")?;
+    repo.git.delete_checkpoint_refs(&[&foreign, &reference]).await?;
+    assert!(repo.git.has_checkpoint(&foreign).await?);
+    assert!(!repo.git.has_checkpoint(&reference).await?, "a locked ref must not prevent pruning other refs");
     Ok(())
 }
 
@@ -985,5 +991,69 @@ async fn internal_file_symlinks_keep_git_symlink_semantics() -> TestResult {
     assert!(repo.git.restore_checkpoint(&reference, false).await?);
     assert_eq!(std::fs::read_link(&link)?, std::path::Path::new("target"));
     assert_eq!(std::fs::read(repo.root().join("target"))?, b"inside\n");
+    Ok(())
+}
+
+#[tokio::test]
+async fn ref_pruning_uses_one_process_and_sparse_help_is_cached_per_program() -> TestResult {
+    let repo = Repository::new().await?;
+    repo.write("included/a", "base\n")?;
+    repo.write("excluded/b", "keep\n")?;
+    repo.commit("base").await?;
+    repo.command(&[
+        "sparse-checkout",
+        "set",
+        "--cone",
+        "--sparse-index",
+        "included",
+    ])
+    .await?;
+    let executable = repo.temp.path().join(if cfg!(windows) {
+        "unique-git.exe"
+    } else {
+        "unique-git"
+    });
+    std::fs::copy(env!("CARGO_BIN_EXE_git-gate-fixture"), &executable)?;
+    let trace = repo.temp.path().join("trace.json");
+    let git = repo.git.clone().with_program(executable).with_environment(
+        [(
+            "GIT_TRACE2_EVENT".into(),
+            Some(trace.as_os_str().to_owned()),
+        )]
+        .into(),
+    );
+    let references = [
+        checkpoint_ref("process-counts", 0),
+        checkpoint_ref("process-counts", 1),
+    ];
+    for reference in &references {
+        git.capture_checkpoint(reference).await?;
+    }
+    let starts = |text: &str| -> Vec<Vec<String>> {
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|event| event["event"] == "start")
+            .filter_map(|event| serde_json::from_value(event["argv"].clone()).ok())
+            .collect()
+    };
+    let commands = starts(&std::fs::read_to_string(&trace)?);
+    let probes = commands
+        .iter()
+        .filter(|args| args.windows(2).any(|args| args == ["add", "-h"]))
+        .count();
+    std::fs::write(&trace, "")?;
+    git.delete_checkpoint_refs(&references).await?;
+    assert_eq!(
+        starts(&std::fs::read_to_string(&trace)?).len(),
+        1,
+        "ref deletion must use one Git process"
+    );
+    assert_eq!(
+        probes, 1,
+        "sparse capability must be probed once per program"
+    );
+    for reference in &references {
+        assert!(!repo.git.has_checkpoint(reference).await?);
+    }
     Ok(())
 }

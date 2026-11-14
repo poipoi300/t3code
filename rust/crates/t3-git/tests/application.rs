@@ -45,6 +45,13 @@ async fn rpc_service_creates_worktree_records_base_and_streams_stacked_actions()
     let broadcaster = VcsStatusBroadcaster::new(workflow.clone());
     let service =
         GitApplicationService::new(workflow, broadcaster.clone(), WorktreeSetupTracker::new());
+    for (reference, new_reference) in [("--detach", "safe"), ("main", "--orphan")] {
+        let invalid = serde_json::from_value(
+            json!({"cwd":repo.root(),"refName":reference,"newRefName":new_reference,"baseRefName":"main","path":null}),
+        )?;
+        assert!(service.create_worktree(&invalid).await.is_err());
+    }
+    assert_eq!(repo.git.list_local_branch_names().await?, vec!["main"]);
     let input = serde_json::from_value(
         json!({"cwd":repo.root(),"refName":"main","newRefName":"feature","baseRefName":"main","path":null}),
     )?;

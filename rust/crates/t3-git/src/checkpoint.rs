@@ -370,10 +370,11 @@ impl Git {
         exclusions: &[String],
         commit_env: &Environment,
         tracked_only: bool,
+        files: &[String],
     ) -> Result<Vec<String>, GitError> {
         let mut paths = std::collections::BTreeSet::new();
         if !tracked_only {
-            paths.extend(crate::safety::checkpoint_files(&self.cwd)?);
+            paths.extend(files.iter().cloned());
         }
         let mut args = INDEX_CONFIG.to_vec();
         args.extend(["ls-files", "--cached", "--full-name", "-v", "-z", "--", "."]);
@@ -455,16 +456,68 @@ impl Git {
         .await
     }
 
+    async fn checkpoint_sparse_enabled(&self) -> Result<bool, GitError> {
+        Ok(self
+            .execute(
+                &["config", "--bool", "core.sparseCheckout"],
+                ExecuteOptions {
+                    capture: true,
+                    allow_nonzero: true,
+                    ..Default::default()
+                },
+            )
+            .await?
+            .stdout_text()
+            .trim()
+            == "true")
+    }
+
+    async fn checkpoint_add_supports_sparse(&self) -> Result<bool, GitError> {
+        type Probe = Arc<tokio::sync::OnceCell<bool>>;
+        static PROBES: std::sync::OnceLock<
+            Mutex<std::collections::BTreeMap<std::ffi::OsString, Probe>>,
+        > = std::sync::OnceLock::new();
+        let probe = PROBES
+            .get_or_init(Mutex::default)
+            .lock()
+            .map_err(|_| GitError::Unavailable("Git capability cache is unavailable.".into()))?
+            .entry(self.program.clone())
+            .or_default()
+            .clone();
+        let supported = probe
+            .get_or_try_init(|| async {
+                let help = self
+                    .execute(
+                        &["add", "-h"],
+                        ExecuteOptions {
+                            capture: true,
+                            allow_nonzero: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                let text = format!("{}{}", help.stdout_text(), help.stderr_text());
+                Ok::<_, GitError>(text.contains("--sparse") || text.contains("--[no-]sparse"))
+            })
+            .await?;
+        Ok(*supported)
+    }
+
     async fn capture_checkpoint_owned(
         &self,
         checkpoint_ref: &str,
         previous: Option<&str>,
     ) -> Result<(), GitError> {
         validate_checkpoint_ref(checkpoint_ref)?;
-        let exclusions = crate::safety::checkpoint_exclusions(&self.cwd)?;
-        let repository = self.capture_repository().await?;
+        let (repository, head_moves, sparse) = tokio::join!(
+            self.capture_repository(),
+            self.read_head_moves(),
+            self.checkpoint_sparse_enabled()
+        );
+        let repository = repository?;
+        let sparse = sparse?;
         let head_moves = if repository.head_oid.is_some() {
-            self.read_head_moves().await
+            head_moves
         } else {
             Vec::new()
         };
@@ -496,35 +549,7 @@ impl Git {
             "GIT_INDEX_FILE".into(),
             Some(scratch.0.as_os_str().to_owned()),
         );
-        let sparse = self
-            .execute(
-                &["config", "--bool", "core.sparseCheckout"],
-                ExecuteOptions {
-                    capture: true,
-                    allow_nonzero: true,
-                    ..Default::default()
-                },
-            )
-            .await?
-            .stdout_text()
-            .trim()
-            == "true";
-        let sparse = if sparse {
-            let help = self
-                .execute(
-                    &["add", "-h"],
-                    ExecuteOptions {
-                        capture: true,
-                        allow_nonzero: true,
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            let text = format!("{}{}", help.stdout_text(), help.stderr_text());
-            text.contains("--sparse") || text.contains("--[no-]sparse")
-        } else {
-            false
-        };
+        let sparse = sparse && self.checkpoint_add_supports_sparse().await?;
         if repository.head {
             let reused = match self
                 .reuse_index(&repository, &scratch, &commit_env, sparse)
@@ -565,6 +590,10 @@ impl Git {
                 self.capture_execute(&args, &commit_env, None).await?;
             }
         }
+        let scan = self
+            .checkpoint_scan(repository.head.then_some("HEAD"), &[], &commit_env)
+            .await?;
+        let exclusions = &scan.exclusions;
         let ignored = if repository.prefix.is_empty() {
             false
         } else {
@@ -700,12 +729,18 @@ impl Git {
             }
         }
         // A fixed file list cannot expose a scanned link when ignore rules change during staging.
-        let stage_paths = if exclusions.is_empty() {
+        let stage_paths = if exclusions.is_empty() && scan.pruned.is_empty() {
             None
         } else {
             Some(
-                self.capture_stage_paths(&repository.prefix, &exclusions, &commit_env, ignored)
-                    .await?,
+                self.capture_stage_paths(
+                    &repository.prefix,
+                    exclusions,
+                    &commit_env,
+                    ignored,
+                    &scan.files,
+                )
+                .await?,
             )
         };
         let mut stage_args = INDEX_CONFIG.to_vec();
@@ -1129,11 +1164,21 @@ impl Git {
             .then(|| output.stdout_text().trim().to_owned()))
     }
     pub async fn delete_checkpoint_refs(&self, refs: &[impl AsRef<str>]) -> Result<(), GitError> {
+        let mut commands = String::new();
+        let mut seen = std::collections::BTreeSet::new();
         for reference in refs {
-            validate_checkpoint_ref(reference.as_ref())?;
+            let reference = reference.as_ref();
+            validate_checkpoint_ref(reference)?;
+            if seen.insert(reference) {
+                commands.push_str(&format!("delete {reference}\n"));
+            }
+        }
+        if !commands.is_empty() {
             self.execute(
-                &["update-ref", "--no-deref", "-d", reference.as_ref()],
+                &["update-ref", "--no-deref", "--stdin"],
                 ExecuteOptions {
+                    capture: true,
+                    stdin: Some(commands.into_bytes()),
                     allow_nonzero: true,
                     ..Default::default()
                 },
@@ -1172,7 +1217,6 @@ impl Git {
         reference: &str,
         fallback_to_head: bool,
     ) -> Result<bool, GitError> {
-        crate::safety::ensure_checkpoint_contained(&self.cwd)?;
         let commit = match self.resolve_checkpoint(reference).await? {
             Some(commit) => Some(commit),
             None if fallback_to_head => self.head_commit().await?,
@@ -1183,8 +1227,25 @@ impl Git {
         };
         let with_tree = format!("--with-tree={commit}");
         let tracked = self
-            .text(&["ls-files", "--cached", &with_tree, "-z", "--", "."])
+            .text(&[
+                "ls-files",
+                "--cached",
+                "--full-name",
+                &with_tree,
+                "-z",
+                "--",
+                ".",
+            ])
             .await?;
+        let tracked_paths: Vec<_> = tracked
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let containment = self
+            .checkpoint_scan(Some(&commit), &tracked_paths, &Environment::new())
+            .await?;
+        containment.recheck(&self.cancellation).await?;
         if !tracked.is_empty() {
             let sparse = self
                 .execute(
@@ -1213,7 +1274,7 @@ impl Git {
                 args.push("--ignore-skip-worktree-bits");
             }
             args.extend(["--", "."]);
-            crate::safety::ensure_checkpoint_contained(&self.cwd)?;
+            containment.recheck(&self.cancellation).await?;
             self.text(&args).await?;
             if sparse {
                 let manual = self.manual_sparse_paths().await.unwrap_or_default();
@@ -1228,7 +1289,7 @@ impl Git {
                         .iter()
                         .flat_map(|path| format!(":(top,literal){path}\0").into_bytes())
                         .collect();
-                    crate::safety::ensure_checkpoint_contained(&self.cwd)?;
+                    containment.recheck(&self.cancellation).await?;
                     self.execute(
                         &args,
                         ExecuteOptions {
@@ -1241,9 +1302,9 @@ impl Git {
             }
         }
         std::fs::create_dir_all(&self.cwd)?;
-        let cleaned = self.clean_checkpoint_workspace().await;
+        let cleaned = self.clean_checkpoint_workspace(&containment).await;
         // Even a failed clean must leave staged state at HEAD.
-        crate::safety::ensure_checkpoint_contained(&self.cwd)?;
+        containment.recheck(&self.cancellation).await?;
         std::fs::create_dir_all(&self.cwd)?;
         let mut args = long_paths().to_vec();
         args.extend([
@@ -1311,11 +1372,16 @@ impl Git {
             .collect())
     }
 
-    async fn clean_checkpoint_workspace(&self) -> Result<(), GitError> {
+    async fn clean_checkpoint_workspace(
+        &self,
+        containment: &crate::safety::CheckpointScan,
+    ) -> Result<(), GitError> {
+        let excluded = containment.excluded_pathspecs();
         let mut args = long_paths().to_vec();
         args.extend(["clean", "-fd", "--", "."]);
+        args.extend(excluded.iter().map(String::as_str));
         for pass in 0..4 {
-            crate::safety::ensure_checkpoint_contained(&self.cwd)?;
+            containment.recheck(&self.cancellation).await?;
             std::fs::create_dir_all(&self.cwd)?;
             let output = self
                 .execute(
@@ -1364,9 +1430,17 @@ impl Git {
                 std::fs::create_dir_all(&self.cwd)?;
                 let mut args = long_paths().to_vec();
                 args.extend(["clean", "-dn", "--", "."]);
+                args.extend(excluded.iter().map(String::as_str));
                 if self
-                    .text(&args)
+                    .execute(
+                        &args,
+                        ExecuteOptions {
+                            env: env(&[("LC_ALL", "C")]),
+                            ..Default::default()
+                        },
+                    )
                     .await?
+                    .stdout_text()
                     .lines()
                     .any(|line| line.starts_with("Would remove "))
                 {
@@ -1428,50 +1502,4 @@ pub(crate) fn validate_config_key(key: &str) -> Result<(), GitError> {
         return Err(GitError::InvalidArgument("Invalid Git config key.".into()));
     }
     Ok(())
-}
-
-#[cfg(all(test, windows))]
-mod containment_tests {
-    use super::*;
-    #[tokio::test]
-    async fn restore_and_clean_refuse_links_before_even_spawning_git()
-    -> Result<(), Box<dyn std::error::Error>> {
-        for symlink in [false, true] {
-            let temp = tempfile::tempdir()?;
-            let root = temp.path().join("repo");
-            let outside = temp.path().join("outside");
-            std::fs::create_dir_all(root.join(".git"))?;
-            std::fs::create_dir(&outside)?;
-            std::fs::write(outside.join("keep"), b"unchanged\0\xff")?;
-            let link = root.join("link");
-            if symlink {
-                match std::os::windows::fs::symlink_dir(&outside, &link) {
-                    Ok(()) => {}
-                    Err(error) if error.raw_os_error() == Some(1314) => {
-                        eprintln!("symlink unavailable: {error}");
-                        continue;
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            } else {
-                junction::create(&outside, &link)?;
-            }
-            let git = Git::new(&root).with_program("nonexistent-git-must-never-spawn");
-            assert!(matches!(
-                git.restore_checkpoint("HEAD", false).await,
-                Err(GitError::UnsafeRestore(_))
-            ));
-            assert!(matches!(
-                git.clean_checkpoint_workspace().await,
-                Err(GitError::UnsafeRestore(_))
-            ));
-            assert_eq!(std::fs::read(outside.join("keep"))?, b"unchanged\0\xff");
-            if symlink {
-                std::fs::remove_dir(link)?;
-            } else {
-                junction::delete(link)?;
-            }
-        }
-        Ok(())
-    }
 }

@@ -5,7 +5,52 @@ use crate::{
 use async_trait::async_trait;
 use std::{path::Path, sync::Arc};
 use t3_contracts::{git::*, worktree_setup::*};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
+
+#[derive(Default)]
+struct ProgressBuffer {
+    events: std::sync::Mutex<std::collections::VecDeque<Result<GitActionProgressEvent, GitError>>>,
+    ready: tokio::sync::Notify,
+}
+impl ProgressBuffer {
+    fn send(&self, event: Result<GitActionProgressEvent, GitError>) {
+        let mut events = self
+            .events
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if events.len() == 128 {
+            // Keep lifecycle/terminal events when chatty hooks outrun the subscriber.
+            if let Some(index) = events
+                .iter()
+                .position(|event| matches!(event, Ok(GitActionProgressEvent::HookOutput(_))))
+            {
+                events.remove(index);
+            } else if matches!(&event, Ok(GitActionProgressEvent::HookOutput(_))) {
+                return;
+            } else {
+                events.pop_front();
+            }
+        }
+        events.push_back(event);
+        self.ready.notify_one();
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    #[test]
+    fn slow_consumers_keep_bounded_output_and_terminal_events() {
+        let queue = ProgressBuffer::default();
+        for index in 0..4096 {
+            queue.send(Ok(serde_json::from_value(serde_json::json!({"actionId":"test","cwd":"repo","action":"commit","kind":"hook_output","hookName":null,"stream":"stdout","text":format!("line {index}")})).unwrap()));
+        }
+        queue.send(Err(GitError::Unavailable("terminal".into())));
+        let events = queue.events.lock().unwrap();
+        assert!(events.len() <= 128, "buffered {} events", events.len());
+        assert!(events.back().unwrap().is_err());
+    }
+}
 
 #[async_trait]
 pub trait GitActionEffects: Send + Sync {
@@ -143,14 +188,15 @@ impl GitApplicationService {
         Ok(result)
     }
     pub fn run_stacked_action(&self, input: GitRunStackedActionInput) -> GitActionSubscription {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let receiver = Arc::new(ProgressBuffer::default());
+        let sender = receiver.clone();
         let service = self.clone();
         let (task, handle) = SetupTask::spawn(move |cancellation| async move {
             let workflow = tokio::select! { _ = cancellation.cancelled() => return, result = service.workflow(Path::new(&input.cwd.0)) => result };
             let workflow = match workflow {
                 Ok(workflow) => workflow.with_cancellation(cancellation.clone()),
                 Err(error) => {
-                    let _ = sender.send(Err(error));
+                    sender.send(Err(error));
                     return;
                 }
             };
@@ -160,7 +206,7 @@ impl GitApplicationService {
                     &input,
                     None,
                     Some(Arc::new(move |event| {
-                        let _ = progress.send(Ok(event));
+                        progress.send(Ok(event));
                     })),
                 )
                 .await;
@@ -172,7 +218,7 @@ impl GitApplicationService {
                 }
                 tokio::select! { _ = cancellation.cancelled() => {}, _ = service.broadcaster.refresh_status(Path::new(&input.cwd.0), false) => {} }
                 if let Err(error) = result {
-                    let _ = sender.send(Err(error));
+                    sender.send(Err(error));
                 }
             }
             workflow.git().drain_operations().await;
@@ -190,13 +236,33 @@ impl GitApplicationService {
     }
 }
 pub struct GitActionSubscription {
-    receiver: mpsc::UnboundedReceiver<Result<GitActionProgressEvent, GitError>>,
+    receiver: Arc<ProgressBuffer>,
     cancellation: CancellationToken,
     finished: watch::Receiver<bool>,
 }
 impl GitActionSubscription {
     pub async fn recv(&mut self) -> Option<Result<GitActionProgressEvent, GitError>> {
-        self.receiver.recv().await
+        loop {
+            let ready = self.receiver.ready.notified();
+            tokio::pin!(ready);
+            ready.as_mut().enable();
+            if let Some(event) = self
+                .receiver
+                .events
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .pop_front()
+            {
+                return Some(event);
+            }
+            if *self.finished.borrow_and_update() {
+                return None;
+            }
+            tokio::select! {
+                _ = ready => {},
+                _ = self.finished.changed() => {},
+            }
+        }
     }
     pub async fn close(self) {
         self.cancellation.cancel();

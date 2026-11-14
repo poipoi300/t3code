@@ -247,6 +247,8 @@ struct RemoteFetch {
     pending: Option<watch::Receiver<Option<bool>>>,
 }
 pub(crate) struct CoreState {
+    #[cfg(windows)]
+    pub disabled_hooks: std::sync::OnceLock<tempfile::TempDir>,
     pub paths: Cache<Option<RepositoryPaths>>,
     paths_refresh: Cache<Option<RepositoryPaths>>,
     defaults: Cache<Option<String>>,
@@ -266,6 +268,8 @@ pub(crate) struct CoreState {
 impl Default for CoreState {
     fn default() -> Self {
         Self {
+            #[cfg(windows)]
+            disabled_hooks: std::sync::OnceLock::new(),
             paths: Cache::new(2048),
             paths_refresh: Cache::new(2048),
             defaults: Cache::new(2048),
