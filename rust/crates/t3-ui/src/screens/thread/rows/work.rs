@@ -1,16 +1,26 @@
 //! Port of apps/web/src/components/chat/TimelineWorkEntryRow.tsx SimpleWorkEntryRow.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use nsh_core::prelude::*;
+use t3_client::thread_views::messages_timeline::work_entry::{
+    action as tool_group_action, plain_output, trim as js_trim,
+};
+use t3_client::thread_views::messages_timeline::{
+    MessagesTimelineRow, MessagesTimelineRowContent, live_work_entry_label,
+    work_entry_display_label, work_entry_is_visible_in_group,
+};
+use t3_client::view_logic::session::timestamps::{
+    CalendarTimestamp, TimestampHost, TimestampPresenter, resolve_hour12,
+};
 use t3_client::view_logic::session::{
     WorkLogEntry, work_entry_display_indicates_tool_failure, work_entry_signals_severe_failure,
     work_log_entry_is_tool_like,
 };
 use t3_client::work_log::{
-    has_question_answer, question_answer_preview, question_answer_text, question_text_preview,
-    resolve_work_entry_tool_presentation, tool_group_action, turn_item_has_detail,
+    has_question_answer, live_thought_line, question_answer_preview, question_answer_text,
+    question_text_preview, resolve_work_entry_tool_presentation, turn_item_has_detail,
     turn_item_needs_detail_fetch, work_entry_viewed_image_path,
 };
 use t3_client::workspace::project_ops::paths::format_workspace_relative_path;
@@ -18,30 +28,42 @@ use t3_contracts::orchestration_v2::{
     OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus, TurnItemError,
 };
 use t3_contracts::provider_policy::UserInputAttachmentAnswerPayload;
+use t3_contracts::settings::TimestampFormat;
+use t3_i18n::{DateFormat, Formats, TimeZone};
 
-use crate::i18n::{Value, t, tr};
+use crate::i18n::{Text as I18nText, Value, t, tr};
 use crate::runtime::Shared;
+use crate::screens::thread::blocks::flatten::{BlockId, BlockKind, MessageFlattener};
+use crate::screens::thread::markdown::base::chat_markdown;
 use crate::theme::{cn, tw};
-use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::{Icon, icon};
+use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
-/// Owned above the virtual list; entry ids retain disclosure state across cell recycling.
+/// Construct above the virtual list; both disclosure and markdown state survive recycling.
 #[derive(Clone, Copy)]
-pub struct WorkRowState(Signal<BTreeSet<String>>);
+pub struct WorkRowState {
+    expanded: Signal<BTreeSet<String>>,
+    reasoning: Stored<BTreeMap<String, ReasoningRender>>,
+    owner: Owner,
+}
 
 impl Default for WorkRowState {
     fn default() -> Self {
-        Self(signal(BTreeSet::new()))
+        Self {
+            expanded: signal(BTreeSet::new()),
+            reasoning: stored(BTreeMap::new()),
+            owner: Owner::current(),
+        }
     }
 }
 
 impl WorkRowState {
     pub fn expanded(self, id: &str) -> bool {
-        self.0.with(|entries| entries.contains(id))
+        self.expanded.with(|entries| entries.contains(id))
     }
 
     pub fn set_expanded(self, id: &str, expanded: bool) {
-        self.0.update(|entries| {
+        self.expanded.update(|entries| {
             if expanded {
                 entries.insert(id.to_owned());
             } else {
@@ -49,13 +71,24 @@ impl WorkRowState {
             }
         });
     }
+
+    fn render_reasoning(self, entry: &Rc<WorkLogEntry>) -> ReasoningHandle {
+        self.owner.run(|| {
+            self.reasoning.with(|states| {
+                let render = states
+                    .entry(entry.id.clone())
+                    .or_insert_with(|| ReasoningRender::new(&entry.id));
+                render.update(entry);
+                render.handle
+            })
+        })
+    }
 }
 
-/// Labels and read output come from MessagesTimeline.logic.ts, owned by the client.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkEntryRow {
     pub entry: Shared<WorkLogEntry>,
-    pub display_label: String,
+    pub display_label: I18nText,
     pub compact_reasoning: Option<String>,
     /// None selects the inspector; Some(None) is a read/skill with no plain output.
     pub plain_output: Option<Option<String>>,
@@ -63,14 +96,12 @@ pub struct WorkEntryRow {
     pub workspace_root: Option<String>,
     pub grouped: bool,
     pub pending_approval: bool,
-    pub retry_workspace_preparation: bool,
-    pub thread_read_label: Option<String>,
-    /// The group's order, shared by the strip and expanded-entry image viewer.
+    pub thread_read_label: Option<I18nText>,
     pub viewed_images: Rc<Vec<String>>,
 }
 
 impl WorkEntryRow {
-    pub fn new(entry: Shared<WorkLogEntry>, display_label: String) -> Self {
+    pub fn new(entry: Shared<WorkLogEntry>, display_label: I18nText) -> Self {
         Self {
             entry,
             display_label,
@@ -80,24 +111,117 @@ impl WorkEntryRow {
             workspace_root: None,
             grouped: false,
             pending_approval: false,
-            retry_workspace_preparation: false,
             thread_read_label: None,
             viewed_images: Rc::default(),
         }
     }
+
+    /// The primary entry; work_timeline_row also mounts every sibling of a grouped Work row.
+    pub fn from_row(row: &MessagesTimelineRow) -> Option<Self> {
+        let entry = match &row.content {
+            MessagesTimelineRowContent::Work {
+                grouped_entries, ..
+            } => grouped_entries.first()?,
+            MessagesTimelineRowContent::WorkLive { entry, .. } => entry,
+            _ => return None,
+        };
+        Some(Self::from_entry(row, entry.clone()))
+    }
+
+    fn from_entry(row: &MessagesTimelineRow, entry: Rc<WorkLogEntry>) -> Self {
+        let (entries, grouped, display, active) = match &row.content {
+            MessagesTimelineRowContent::Work {
+                grouped_entries,
+                is_expanded_tool_group,
+                display_label,
+            } => (
+                grouped_entries.as_slice(),
+                *is_expanded_tool_group,
+                display_label.as_deref(),
+                None,
+            ),
+            MessagesTimelineRowContent::WorkLive {
+                grouped_entries,
+                active,
+                ..
+            } => (grouped_entries.as_slice(), false, None, Some(*active)),
+            _ => (&[][..], false, None, None),
+        };
+        let reasoning = entry.item_type.as_deref() == Some("reasoning");
+        // The compact preview is bounded by the web's UTF-16 limits, even for a live trace.
+        let compact_reasoning = reasoning.then(|| {
+            let prefix = utf16_prefix(entry.detail.as_deref().unwrap_or(&entry.label), 8192);
+            let plain = live_thought_line(prefix);
+            let plain = utf16_prefix(&plain, 2048);
+            if plain.is_empty() {
+                if entry.tool_lifecycle_status.as_deref() == Some("inProgress") {
+                    t("Thinking")
+                } else {
+                    t("Thought")
+                }
+            } else {
+                plain.to_owned()
+            }
+        });
+        let label = if let Some(display) = display {
+            display.to_owned()
+        } else if let Some(preview) = &compact_reasoning {
+            preview.clone()
+        } else if let Some(active) = active {
+            live_work_entry_label(&entry, None, active)
+        } else {
+            work_entry_display_label(&entry, None)
+        };
+        let question_answer = entry
+            .presentation
+            .get("questionAnswer")
+            .filter(|answer| !answer.is_null())
+            .and_then(|answer| serde_json::from_value(answer.clone()).ok());
+        let plain_output = plain_output(&entry, None);
+        let pending_approval = entry.projected_item.as_ref().is_some_and(|item| matches!(
+            &item.item, OrchestrationV2TurnItem::ApprovalRequest(request)
+                if matches!(request.status, OrchestrationV2TurnItemStatus::Pending | OrchestrationV2TurnItemStatus::Waiting)
+        ));
+        Self {
+            entry: Shared(entry),
+            display_label: I18nText::content(label),
+            compact_reasoning,
+            plain_output,
+            question_answer,
+            workspace_root: None,
+            grouped,
+            pending_approval,
+            thread_read_label: None,
+            viewed_images: Rc::new({
+                let mut seen = BTreeSet::new();
+                entries
+                    .iter()
+                    .filter_map(|entry| work_entry_viewed_image_path(entry))
+                    .filter(|path| seen.insert(*path))
+                    .map(str::to_owned)
+                    .collect()
+            }),
+        }
+    }
+}
+
+fn utf16_prefix(source: &str, limit: usize) -> &str {
+    let mut units = 0;
+    for (index, ch) in source.char_indices() {
+        units += ch.len_utf16();
+        if units > limit {
+            return &source[..index];
+        }
+    }
+    source
 }
 
 pub type RowSlot = Rc<dyn Fn(&WorkEntryRow) -> AnyElement>;
-pub type RowAction = Rc<dyn Fn(&WorkEntryRow)>;
 pub type ToggleAction = Rc<dyn Fn(&str, bool)>;
 pub type ContentReady = Rc<dyn Fn(&str)>;
-pub type Inspector = Rc<dyn Fn(&WorkEntryRow, ContentReady) -> AnyElement>;
-pub type ResetTime = Rc<dyn Fn(&str) -> Result<String, String>>;
 pub type IconRenderer = Rc<dyn Fn(&WorkLogEntry, &str, &str) -> AnyElement>;
-
 pub type ViewedImageRenderer = Rc<dyn Fn(t3_client::work_log::ViewedImageAsset) -> AnyElement>;
 
-/// The caller's thread reference is already resolved, never a compact wire-table index.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewedImagesRow {
     pub thread_id: Option<t3_contracts::base_schemas::ThreadId>,
@@ -128,192 +252,348 @@ pub fn viewed_images_timeline_row(
     })
 }
 
-/// The same dependencies as TimelineRowCtx; operations must be permission checked by the client.
+/// Only later-package renderers remain optional; row presentation, markdown and time are owned here.
 #[derive(Clone)]
 pub struct WorkRowContext {
     pub state: WorkRowState,
+    pub timestamp_format: Memo<TimestampFormat>,
     pub on_toggle_entry: Option<ToggleAction>,
     pub on_content_ready: ContentReady,
     pub icon: Option<IconRenderer>,
-    pub timestamp: Option<RowSlot>,
-    pub markdown: Option<RowSlot>,
-    pub inspector: Option<Inspector>,
-    pub fetched_output: Option<Inspector>,
     pub image: Option<RowSlot>,
     pub question_attachments: Option<RowSlot>,
     pub pending_approval: Option<RowSlot>,
     pub subagent_notification: Option<RowSlot>,
     pub thread_read: Option<RowSlot>,
     pub trailing_thread_links: Option<RowSlot>,
-    pub retry_workspace_preparation: Option<RowAction>,
-    /// Formats in the viewer's current zone, including the zone name, on each render.
-    pub reset_time: Option<ResetTime>,
 }
 
 impl WorkRowContext {
     pub fn new(state: WorkRowState) -> Self {
         Self {
             state,
+            timestamp_format: computed(|| TimestampFormat::Locale),
             on_toggle_entry: None,
             on_content_ready: Rc::new(|_| {}),
             icon: None,
-            timestamp: None,
-            markdown: None,
-            inspector: None,
-            fetched_output: None,
             image: None,
             question_attachments: None,
             pending_approval: None,
             subagent_notification: None,
             thread_read: None,
             trailing_thread_links: None,
-            retry_workspace_preparation: None,
-            reset_time: None,
         }
     }
+}
+
+pub fn work_entry_row(
+    row: Memo<Option<Shared<MessagesTimelineRow>>>,
+) -> Memo<Option<WorkEntryRow>> {
+    computed(move || row.with(|row| row.as_ref().and_then(|row| WorkEntryRow::from_row(row))))
+}
+
+/// Mount directly from the client's cell memo; callers never assemble WorkEntryRow fields.
+pub fn work_timeline_row(
+    row: Memo<Option<Shared<MessagesTimelineRow>>>,
+    context: WorkRowContext,
+) -> impl IntoElement {
+    let entries = computed(move || {
+        row.with(|row| match row.as_ref().map(|row| &row.content) {
+            Some(MessagesTimelineRowContent::Work {
+                grouped_entries,
+                is_expanded_tool_group,
+                ..
+            }) => grouped_entries
+                .iter()
+                .filter(|entry| work_entry_is_visible_in_group(entry, *is_expanded_tool_group))
+                .cloned()
+                .collect::<Vec<_>>(),
+            Some(MessagesTimelineRowContent::WorkLive { entry, .. }) => vec![entry.clone()],
+            _ => Vec::new(),
+        })
+    });
+    view().child(each(
+        move || entries.get(),
+        |entry| entry.id.clone(),
+        move |entry, _| {
+            let prepared = computed(move || {
+                row.with(|row| {
+                    row.as_ref()
+                        .map(|row| WorkEntryRow::from_entry(row, entry.get()))
+                })
+            });
+            simple_work_entry_row(prepared, context.clone())
+        },
+    ))
 }
 
 pub fn simple_work_entry_row(
     row: Memo<Option<WorkEntryRow>>,
     context: WorkRowContext,
 ) -> impl IntoElement {
-    dynamic(move || {
-        let row = row.get()?;
-        Some(untracked(|| {
-            if let Some(OrchestrationV2TurnItem::Notification(notification)) =
-                row.entry.projected_item.as_ref().map(|item| &item.item)
-                && t3_client::thread_views::threads::execution_presentation::notification_child_thread_id(
-                    &notification.source,
-                ).is_some()
-                && let Some(render) = &context.subagent_notification
-            {
-                return render(&row);
-            }
-            work_entry_log_row(row, context.clone())
-        }))
+    let shape = computed(move || {
+        row.with(|row| row.as_ref().map(|row| {
+        if row.pending_approval { 1 }
+        else if matches!(row.entry.projected_item.as_ref().map(|item| &item.item), Some(OrchestrationV2TurnItem::Error(error)) if error.status == OrchestrationV2TurnItemStatus::Failed) { 2 }
+        else { 0 }
+    }))
+    });
+    dynamic(move || match shape.get()? {
+        1 => {
+            Some(untracked(|| optional_slot(row, context.pending_approval.clone())).into_element())
+        }
+        2 => Some(
+            untracked(|| {
+                let context = context.clone();
+                dynamic(move || {
+                    row.get().and_then(|row| {
+                        match row.entry.projected_item.as_ref().map(|item| &item.item) {
+                            Some(OrchestrationV2TurnItem::Error(error)) => {
+                                Some(failed_work_entry(&row, error, &context))
+                            }
+                            _ => None,
+                        }
+                    })
+                })
+            })
+            .into_element(),
+        ),
+        _ => Some(untracked(|| work_entry_log_row(row, context.clone())).into_element()),
     })
 }
 
-fn work_entry_log_row(row: WorkEntryRow, context: WorkRowContext) -> AnyElement {
-    if row.pending_approval {
-        return slot_or_unsupported(
-            &context.pending_approval,
-            &row,
-            "Pending approval controls are unavailable.",
-        );
-    }
-    if let Some(OrchestrationV2TurnItem::Error(error)) =
-        row.entry.projected_item.as_ref().map(|item| &item.item)
-        && error.status == OrchestrationV2TurnItemStatus::Failed
-    {
-        return failed_work_entry(&row, error, &context);
-    }
-    let row = Rc::new(row);
-    let state = context.state;
-    let id = row.entry.id.clone();
-    let expanded = computed(move || state.expanded(&id));
-    let rendered = row.clone();
+fn optional_slot(row: Memo<Option<WorkEntryRow>>, slot: Option<RowSlot>) -> impl IntoElement {
     dynamic(move || {
-        let expanded = expanded.get();
-        untracked(|| {
-            let row = rendered.clone();
-            let entry = &row.entry;
-            let warning = entry.source_activity_kind.as_deref() == Some("runtime.warning");
-            let failed = !warning && work_entry_display_indicates_tool_failure(entry);
-            let destructive = !warning && failed
-                && (work_entry_signals_severe_failure(entry) || !work_log_entry_is_tool_like(entry));
-            let reasoning = entry.item_type.as_deref() == Some("reasoning");
-            let question = row.question_answer.as_ref();
-            let question_heading = question.map(question_text_preview).unwrap_or_default();
-            let preview = if reasoning && expanded {
-                t(if entry.tool_lifecycle_status.as_deref() == Some("inProgress") { "Thinking" } else { "Thought" })
-            } else if !question_heading.is_empty() {
-                question_heading
-            } else {
-                t(&row.display_label)
-            };
-            let answer = question.filter(|answer| has_question_answer(answer))
-                .map(question_answer_preview);
-            let accessible = [row.thread_read_label.as_deref().unwrap_or(&preview), answer.as_deref().unwrap_or_default()]
-                .into_iter().filter(|value| !value.is_empty()).collect::<Vec<_>>().join(": ");
-            let accessible = if failed {
-                tr("{preview}, tool call failed", &[("preview", Value::from(accessible))])
-            } else { accessible };
-            let can_expand = can_expand_projected_item(&row, &preview);
-            let heading = if warning { "font-medium text-warning" }
-                else if destructive { "font-medium text-destructive" }
-                else if work_log_entry_is_tool_like(entry) { "text-secondary-label" }
-                else { "text-foreground/80" };
-            let icon_class = if warning { "text-warning" }
-                else if destructive { "text-destructive" }
-                else if failed { "text-tool-error-icon/40" }
-                else if entry.tone == "tool" { "text-icon-muted" }
-                else { work_tone_icon(&entry.tone).1 };
-            let icon_name = if warning || destructive { "circle-alert".to_owned() } else { work_entry_icon_name(entry) };
-            let glyph = context.icon.as_ref().map_or_else(
-                || fallback_icon(&icon_name, icon_class, true),
-                |render| render(entry, &icon_name, icon_class),
-            );
-            let label = if reasoning && !expanded {
-                row.compact_reasoning.as_ref().map_or_else(
-                    || unsupported("Compact reasoning preview is unavailable.").into_element(),
-                    |preview| text(t(preview)).app_class(tw(heading)).number_of_lines(1u32).into_element(),
-                )
-            } else if let Some(label) = &row.thread_read_label {
-                text(t(label)).app_class(tw(heading)).number_of_lines(1u32).into_element()
-            } else {
-                text(preview.clone()).app_class(tw(heading)).number_of_lines(1u32).into_element()
-            };
-            let label = view().app_class(tw("min-w-0 flex-1 overflow-hidden")).child(
-                view().app_class(tw("flex min-w-0 w-full items-baseline gap-1.5 text-sm leading-relaxed"))
-                    .child(view().app_class(tw(&cn([Some("min-w-0 truncate"), answer.is_none().then_some("flex-1")]))).child(label))
-                    .child(answer.map(|answer| text(t(&answer)).number_of_lines(1u32).app_class(tw(&cn([
-                        Some("min-w-0 truncate"), Some(if !expanded { "text-foreground" } else { "text-muted-foreground" }),
-                    ]))))),
-            );
-            let trailing = view().app_class(tw("flex items-center gap-1.5"))
-                .child(can_expand.then(|| view().app_class(tw("flex size-4 shrink-0 items-center justify-center"))
-                    .child(icon(if expanded { Icon::ChevronDown } else { Icon::ChevronRight }, 12.0,
-                        || crate::theme::palette().icon_muted.opacity(0.7)))))
-                .child(context.timestamp.as_ref().map(|render| render(&row)));
-            let line = work_log_line(glyph, label.into_element(), trailing.into_element(), false);
-            // NSH's button owns keyboard activation; details and nested links are siblings so
-            // selecting output or following a link cannot toggle the disclosure.
-            let header = if can_expand {
-                let clicked = row.clone();
-                let toggled = context.on_toggle_entry.clone();
-                nsh_base::button().accessibility_label(Some(SharedString::from(accessible)))
-                    .app_class(tw("w-full cursor-pointer text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"))
-                    .test_id(&format!("work-entry-{}", entry.id))
-                    .on_press(move || {
-                        let next = !state.expanded(&clicked.entry.id);
-                        state.set_expanded(&clicked.entry.id, next);
-                        if let Some(toggle) = &toggled { toggle(&clicked.entry.id, !next); }
-                    }).child(line).into_element()
-            } else { line.into_element() };
-            let mut root = view().app_class(tw(&cn([
-                Some("group/timeline-row relative w-full min-w-0 rounded-md px-0.5 text-left transition-colors"),
-                Some(if row.grouped { "py-0" } else { "py-0.5" }),
-            ]))).child(header)
-                .child(context.trailing_thread_links.as_ref().map(|render| render(&row)))
-                .child(context.trailing_thread_links.is_none().then(|| unavailable_thread_link(&row)).flatten())
-                .child(row.thread_read_label.as_ref().map(|_| slot_or_unsupported(&context.thread_read, &row, "Thread link is unavailable.")));
-            if expanded {
-                if work_entry_viewed_image_path(entry).is_some() {
-                    root = root.child(work_log_details("media", slot_or_unsupported(&context.image, &row, "Image preview is unavailable.")));
-                }
-                if let Some(answer) = question {
-                    root = root.child(question_answer_history(answer, &row, &context));
-                }
-                if reasoning {
-                    root = root.child(reasoning_trace_content(&row, &context));
-                } else if question.is_none() && can_expand {
-                    root = root.child(expanded_tool_content(&row, &context, &preview));
-                }
-            }
-            root.into_element()
+        row.get()
+            .and_then(|row| slot.as_ref().map(|render| render(&row)))
+    })
+}
+
+fn work_entry_log_row(
+    row: Memo<Option<WorkEntryRow>>,
+    context: WorkRowContext,
+) -> impl IntoElement {
+    let state = context.state;
+    let expanded = computed(move || {
+        row.with(|row| {
+            row.as_ref()
+                .is_some_and(|row| state.expanded(&row.entry.id))
         })
-    }).into_element()
+    });
+    let header_context = context.clone();
+    let header = dynamic(move || {
+        let row = row.get()?;
+        let open = expanded.get();
+        Some(untracked(|| work_entry_header(&row, open, &header_context)))
+    });
+    let detail_kind = computed(move || {
+        row.with(|row| {
+            row.as_ref().map(|row| {
+                (
+                    row.entry.id.clone(),
+                    expanded.get(),
+                    row.entry.item_type.as_deref() == Some("reasoning"),
+                )
+            })
+        })
+    });
+    view().app_class(move || row.with(|row| row.as_ref().map(|row| tw(&cn([
+        Some("group/timeline-row relative w-full min-w-0 rounded-md px-0.5 text-left transition-colors"),
+        Some(if row.grouped { "py-0" } else { "py-0.5" }),
+    ]))))).child(header).child(dynamic(move || {
+        let (_, open, reasoning) = detail_kind.get()?;
+        if !open { return None; }
+        Some(untracked(|| {
+            let mut details = view();
+            if reasoning {
+                details = details.child(reasoning_trace_content(row, context.state));
+            } else {
+                let context = context.clone();
+                details = details.child(dynamic(move || row.get().map(|row| {
+                    let mut root = view();
+                    if work_entry_viewed_image_path(&row.entry).is_some() {
+                        root = root.child(context.image.as_ref().map(|render| work_log_details("media", render(&row))));
+                    }
+                    if let Some(answer) = &row.question_answer {
+                        root = root.child(question_answer_history(answer, &row, &context));
+                    } else {
+                        root = root.child(expanded_tool_content(&row));
+                    }
+                    root
+                })));
+            }
+            details
+        }).into_element())
+    }))
+}
+
+fn work_entry_header(row: &WorkEntryRow, expanded: bool, context: &WorkRowContext) -> AnyElement {
+    let entry = &row.entry;
+    let warning = entry.source_activity_kind.as_deref() == Some("runtime.warning");
+    let failed = !warning && work_entry_display_indicates_tool_failure(entry);
+    let destructive = !warning
+        && failed
+        && (work_entry_signals_severe_failure(entry) || !work_log_entry_is_tool_like(entry));
+    let reasoning = entry.item_type.as_deref() == Some("reasoning");
+    let question = row.question_answer.as_ref();
+    let question_heading = question.map(question_text_preview).unwrap_or_default();
+    let preview = if reasoning && expanded {
+        I18nText::from(
+            if entry.tool_lifecycle_status.as_deref() == Some("inProgress") {
+                "Thinking"
+            } else {
+                "Thought"
+            },
+        )
+        .resolve()
+        .to_string()
+    } else if !question_heading.is_empty() {
+        question_heading
+    } else {
+        row.display_label.resolve().to_string()
+    };
+    let answer = question
+        .filter(|answer| has_question_answer(answer))
+        .map(question_answer_preview);
+    let accessible = [
+        row.thread_read_label
+            .as_ref()
+            .map(I18nText::resolve)
+            .map(|label| label.to_string())
+            .unwrap_or(preview.clone()),
+        answer.clone().unwrap_or_default(),
+    ]
+    .into_iter()
+    .filter(|value| !value.is_empty())
+    .collect::<Vec<_>>()
+    .join(": ");
+    let accessible = if failed {
+        tr(
+            "{preview}, tool call failed",
+            &[("preview", Value::from(accessible))],
+        )
+    } else {
+        accessible
+    };
+    let can_expand = can_expand_projected_item(row, &preview);
+    let heading = if warning {
+        "font-medium text-warning"
+    } else if destructive {
+        "font-medium text-destructive"
+    } else if work_log_entry_is_tool_like(entry) {
+        "text-secondary-label"
+    } else {
+        "text-foreground/80"
+    };
+    let icon_class = if warning {
+        "text-warning"
+    } else if destructive {
+        "text-destructive"
+    } else if failed {
+        "text-tool-error-icon/40"
+    } else if entry.tone == "tool" {
+        "text-icon-muted"
+    } else {
+        work_tone_icon(&entry.tone).1
+    };
+    let icon_name = if warning || destructive {
+        "circle-alert".to_owned()
+    } else {
+        work_entry_icon_name(entry)
+    };
+    let glyph = context.icon.as_ref().map_or_else(
+        || fallback_icon(&icon_name, icon_class, true),
+        |render| render(entry, &icon_name, icon_class),
+    );
+    let label = if reasoning && !expanded {
+        row.compact_reasoning
+            .as_deref()
+            .unwrap_or(&preview)
+            .to_owned()
+    } else {
+        preview.clone()
+    };
+    let label = view()
+        .app_class(tw("min-w-0 flex-1 overflow-hidden"))
+        .child(
+            view()
+                .app_class(tw(
+                    "flex min-w-0 w-full items-baseline gap-1.5 text-sm leading-relaxed",
+                ))
+                .child(
+                    text(SharedString::from(label))
+                        .number_of_lines(1u32)
+                        .app_class(tw(&cn([
+                            Some("min-w-0 truncate"),
+                            answer.is_none().then_some("flex-1"),
+                            Some(heading),
+                        ]))),
+                )
+                .child(answer.map(|answer| {
+                    text(SharedString::from(answer))
+                        .number_of_lines(1u32)
+                        .app_class(tw(&cn([
+                            Some("min-w-0 truncate"),
+                            Some(if expanded {
+                                "text-muted-foreground"
+                            } else {
+                                "text-foreground"
+                            }),
+                        ])))
+                })),
+        );
+    let trailing = view()
+        .app_class(tw("flex items-center gap-1.5"))
+        .child(can_expand.then(|| {
+            view()
+                .app_class(tw("flex size-4 shrink-0 items-center justify-center"))
+                .child(icon(
+                    if expanded {
+                        Icon::ChevronDown
+                    } else {
+                        Icon::ChevronRight
+                    },
+                    12.0,
+                    || crate::theme::palette().icon_muted.opacity(0.7),
+                ))
+        }))
+        .child(timeline_row_timestamp(
+            entry.created_at.clone(),
+            context.timestamp_format,
+            false,
+        ));
+    let line = work_log_line(glyph, label.into_element(), trailing.into_element(), false);
+    let header = if can_expand {
+        let entry_id = entry.id.clone();
+        let state = context.state;
+        let toggle = context.on_toggle_entry.clone();
+        nsh_base::button().accessibility_label(Some(SharedString::from(accessible)))
+            .app_class(tw("w-full cursor-pointer text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"))
+            .test_id(&format!("work-entry-{}", entry.id)).on_press(move || {
+                let next = !state.expanded(&entry_id);
+                state.set_expanded(&entry_id, next);
+                if let Some(toggle) = &toggle { toggle(&entry_id, !next); }
+            }).child(line).into_element()
+    } else {
+        line.into_element()
+    };
+    // Native button activation excludes selectable details and independently interactive links.
+    view()
+        .child(header)
+        .child(
+            context
+                .trailing_thread_links
+                .as_ref()
+                .map(|render| render(row)),
+        )
+        .child(
+            context
+                .thread_read
+                .as_ref()
+                .filter(|_| row.thread_read_label.is_some())
+                .map(|render| render(row)),
+        )
+        .into_element()
 }
 
 fn can_expand_projected_item(row: &WorkEntryRow, preview: &str) -> bool {
@@ -331,22 +611,22 @@ fn can_expand_projected_item(row: &WorkEntryRow, preview: &str) -> bool {
             entry
                 .detail
                 .as_ref()
-                .is_some_and(|detail| !detail.trim().is_empty())
+                .is_some_and(|detail| !js_trim(detail).is_empty())
         } else {
             image || row.question_answer.is_some() || turn_item_has_detail(item)
         };
     }
-    !preview.trim().is_empty()
+    !js_trim(preview).is_empty()
         || (entry.item_type.as_deref() == Some("dynamic_tool") && entry.tool_data.is_some())
         || work_entry_raw_command(entry).is_some()
         || entry
             .command
             .as_ref()
-            .is_some_and(|text| !text.trim().is_empty())
+            .is_some_and(|text| !js_trim(text).is_empty())
         || entry
             .detail
             .as_ref()
-            .is_some_and(|text| !text.trim().is_empty())
+            .is_some_and(|text| !js_trim(text).is_empty())
         || entry
             .changed_files
             .as_ref()
@@ -354,63 +634,182 @@ fn can_expand_projected_item(row: &WorkEntryRow, preview: &str) -> bool {
         || image
 }
 
-fn expanded_tool_content(
-    row: &WorkEntryRow,
-    context: &WorkRowContext,
-    preview: &str,
-) -> AnyElement {
+fn expanded_tool_content(row: &WorkEntryRow) -> AnyElement {
+    // TL-OUTPUT's inspector/full output and retry wait for ClientRuntime/Backend U8.
     if row.entry.projected_item.is_some() && row.plain_output.is_none() {
-        return work_log_details(
-            "panel",
-            context.inspector.as_ref().map_or_else(
-                || unsupported("Tool details are unavailable.").into_element(),
-                |render| render(row, context.on_content_ready.clone()),
-            ),
-        )
-        .into_element();
+        return view().into_element();
     }
     let body = row.plain_output.clone().unwrap_or_else(|| {
         build_tool_call_expanded_body(
             &row.entry,
             row.workspace_root.as_deref(),
-            preview,
+            &row.display_label.resolve(),
             work_entry_viewed_image_path(&row.entry),
         )
     });
-    let fetch =
-        row.entry.projected_item.as_ref().is_some_and(|item| {
-            row.plain_output.is_some() && turn_item_needs_detail_fetch(&item.item)
-        });
-    // Timeline rows cannot contain nested scrollers; TL-BLOCKS-3 opens long output in a panel.
-    // NSH cannot parse the CSS var fallback; resolve those same two size tokens explicitly.
-    let content = view()
-        .child(body.map(|body| {
-            text(t(&body))
-                .select_text()
-                .app_class(tw(
-                    "cursor-text font-mono text-secondary-label leading-relaxed select-text",
-                ))
-                .text_size(|| {
-                    let tokens = crate::theme::current_tokens();
-                    px(tokens
-                        .number("font-size-code")
-                        .or_else(|| tokens.number("text-2xs"))
-                        .unwrap_or(11.0))
-                })
-        }))
-        .child(fetch.then(|| {
-            context.fetched_output.as_ref().map_or_else(
-                || unsupported("Tool output retrieval is unavailable.").into_element(),
-                |render| render(row, context.on_content_ready.clone()),
-            )
-        }));
-    work_log_details("panel", content.into_element()).into_element()
+    work_log_details(
+        "panel",
+        view()
+            .child(body.map(|body| {
+                text(SharedString::from(body))
+                    .select_text()
+                    .app_class(tw(
+                        "cursor-text font-mono text-secondary-label leading-relaxed select-text",
+                    ))
+                    .text_size(|| {
+                        let tokens = crate::theme::current_tokens();
+                        px(tokens
+                            .number("font-size-code")
+                            .or_else(|| tokens.number("text-2xs"))
+                            .unwrap_or(11.0))
+                    })
+            }))
+            .into_element(),
+    )
+    .into_element()
 }
 
-pub fn reasoning_trace_content(row: &WorkEntryRow, context: &WorkRowContext) -> impl IntoElement {
+#[derive(Clone, PartialEq)]
+struct ReasoningLeaf {
+    text: Rc<str>,
+    streaming: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ReasoningHandle {
+    keys: Signal<Vec<BlockId>>,
+    slots: Stored<Vec<Signal<Shared<ReasoningLeaf>>>>,
+}
+
+impl PartialEq for ReasoningHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.keys == other.keys
+    }
+}
+
+struct ReasoningRender {
+    flattener: MessageFlattener,
+    handle: ReasoningHandle,
+    last_entry: Option<Rc<WorkLogEntry>>,
+}
+
+impl ReasoningRender {
+    fn new(id: &str) -> Self {
+        Self {
+            flattener: MessageFlattener::new(id),
+            handle: ReasoningHandle {
+                keys: signal(Vec::new()),
+                slots: stored(Vec::new()),
+            },
+            last_entry: None,
+        }
+    }
+
+    fn update(&mut self, entry: &Rc<WorkLogEntry>) {
+        if self
+            .last_entry
+            .as_ref()
+            .is_some_and(|old| Rc::ptr_eq(old, entry))
+        {
+            return;
+        }
+        let source = entry.detail.as_deref().unwrap_or_default();
+        let streaming = entry.tool_lifecycle_status.as_deref() == Some("inProgress");
+        let mut delta = if self
+            .last_entry
+            .as_ref()
+            .is_some_and(|old| old.tool_lifecycle_status.as_deref() != Some("inProgress"))
+            && !streaming
+        {
+            self.flattener.replace(&entry.id, source)
+        } else {
+            self.flattener.ingest(&entry.id, source)
+        };
+        if !streaming && let Some(finished) = self.flattener.finish() {
+            delta = finished;
+        }
+        let count = delta.document.block_count();
+        let old_last = self.handle.slots.with(|slots| slots.len().checked_sub(1));
+        let changed: BTreeSet<_> = delta.rows.iter().map(|block| block.id.index).collect();
+        self.handle.slots.with(|slots| {
+            for block in &delta.rows {
+                let text: Rc<str> = match &block.kind {
+                    BlockKind::Header => Rc::from(""),
+                    BlockKind::Document if streaming => Rc::from(""),
+                    BlockKind::Code(code) => Rc::from(format!(
+                        "\x60\x60\x60{}\n{}\n\x60\x60\x60",
+                        code.language.as_deref().unwrap_or_default(),
+                        code.text
+                    )),
+                    _ => Rc::from(
+                        delta
+                            .document
+                            .source_range(block.source.bytes.clone())
+                            .unwrap_or_default(),
+                    ),
+                };
+                let value = Shared(Rc::new(ReasoningLeaf {
+                    text,
+                    streaming: streaming && block.id.index + 1 == count,
+                }));
+                if block.id.index == slots.len() {
+                    slots.push(signal(value));
+                } else {
+                    slots[block.id.index].set(value);
+                }
+            }
+            slots.truncate(count);
+            if let Some(index) = old_last.filter(|index| *index < count && !changed.contains(index))
+            {
+                let live = streaming && index + 1 == count;
+                slots[index].update(|leaf| {
+                    if leaf.streaming != live {
+                        *leaf = Shared(Rc::new(ReasoningLeaf {
+                            text: leaf.text.clone(),
+                            streaming: live,
+                        }));
+                    }
+                });
+            }
+        });
+        if self.handle.keys.with_untracked(Vec::len) != count {
+            self.handle.keys.set(
+                (0..count)
+                    .filter_map(|index| delta.document.block(index).map(|block| block.id.clone()))
+                    .collect(),
+            );
+        }
+        self.last_entry = Some(entry.clone());
+    }
+}
+
+pub fn reasoning_trace_content(
+    row: Memo<Option<WorkEntryRow>>,
+    state: WorkRowState,
+) -> impl IntoElement {
+    let handle = computed(move || {
+        row.with(|row| row.as_ref().map(|row| state.render_reasoning(&row.entry.0)))
+    });
     work_log_details(
         "text",
-        slot_or_unsupported(&context.markdown, row, "Reasoning markdown is unavailable."),
+        dynamic(move || {
+            handle.get().map(|handle| {
+                untracked(|| {
+                    each(
+                        move || handle.keys.get(),
+                        |id| id.clone(),
+                        move |id, _| {
+                            let slot = handle.slots.with(|slots| slots[id.get_untracked().index]);
+                            chat_markdown(
+                                move || slot.with(|leaf| leaf.text.to_string()),
+                                move || slot.with(|leaf| leaf.streaming),
+                            )
+                        },
+                    )
+                })
+            })
+        })
+        .into_element(),
     )
 }
 
@@ -438,10 +837,12 @@ fn question_answer_history(
             view()
                 .app_class(tw("space-y-1"))
                 .child(question.map(|question| {
-                    text(t(question)).app_class(tw("text-sm text-muted-foreground"))
+                    text(SharedString::from(question.clone()))
+                        .app_class(tw("text-sm text-muted-foreground"))
                 }))
                 .child((!response.is_empty()).then(|| {
-                    text(t(&response)).app_class(tw("ms-3 text-sm text-muted-foreground"))
+                    text(SharedString::from(response))
+                        .app_class(tw("ms-3 text-sm text-muted-foreground"))
                 })),
         );
     }
@@ -450,11 +851,12 @@ fn question_answer_history(
         .values()
         .any(|attachments| !attachments.is_empty())
     {
-        root = root.child(slot_or_unsupported(
-            &context.question_attachments,
-            row,
-            "Answer attachments are unavailable.",
-        ));
+        root = root.child(
+            context
+                .question_attachments
+                .as_ref()
+                .map(|render| render(row)),
+        );
     }
     root
 }
@@ -466,69 +868,138 @@ fn failed_work_entry(
 ) -> AnyElement {
     let warning = error.failure.class
         == t3_contracts::orchestration_v2::OrchestrationV2ProviderFailureClass::UsageLimit;
-    let reset = error
-        .failure
-        .reset_at
-        .as_ref()
-        .and_then(Option::as_ref)
-        .map(|date| date.0.as_str());
-    let mut reset_error = None;
+    let reset = error.failure.reset_at.as_ref().and_then(Option::as_ref);
     let label = if warning {
-        match reset {
-            Some(reset) => match context.reset_time.as_ref().map(|format| format(reset)) {
-                Some(Ok(time)) => tr(
-                    "Usage limit reached. Retry after {time}.",
-                    &[("time", Value::from(time))],
-                ),
-                result => {
-                    reset_error = Some(
-                        result
-                            .and_then(Result::err)
-                            .unwrap_or_else(|| t("Local retry time is unavailable.")),
-                    );
-                    t("Usage limit reached.")
+        let time = reset
+            .map(|reset| {
+                let zone = locale_settings().time_zone.to_string();
+                let label = TimestampPresenter(WorkTimestampHost).day_aware(
+                    &reset.0,
+                    &context.timestamp_format.get(),
+                    nsh_core::time::unix_ms() as i64,
+                    Some(&zone),
+                    true,
+                );
+                if label.is_empty() {
+                    String::new()
+                } else {
+                    format!("{label} ({zone})")
                 }
-            },
+            })
+            .filter(|time| !time.is_empty());
+        match time {
+            Some(time) => tr(
+                "Usage limit reached. Retry after {time}.",
+                &[("time", Value::from(time))],
+            ),
             None => t("Usage limit reached."),
         }
     } else {
-        t(&row.entry.label)
+        I18nText::client_key(row.entry.label.clone())
+            .resolve()
+            .to_string()
     };
     let color = if warning {
         "text-warning"
     } else {
         "text-destructive"
     };
-    let trailing = context.timestamp.as_ref().map(|render| render(row));
-    let mut root = view().app_class(tw("group/timeline-row relative w-full min-w-0 rounded-md px-0.5 py-0.5 text-left transition-colors"))
-        .child(work_log_line(fallback_icon("circle-alert", color, false),
-            text(label).app_class(tw(&cn([Some("text-sm font-medium"), Some(color)]))).into_element(),
-            view().child(trailing).into_element(), true))
-        .child(reset_error.map(|reason| unsupported(&reason).into_element()))
-        .child((!warning).then(|| text(t(&error.failure.message.0)).app_class(tw("ms-7 py-1 text-sm leading-relaxed text-foreground/80"))));
-    if row.retry_workspace_preparation {
-        let action = context.retry_workspace_preparation.clone();
-        let disabled = action.is_none();
-        let row = row.clone();
-        root = root.child(view().app_class(tw("ms-7 pb-1")).child(button(
-            ButtonContent::Label(t("Retry")),
-            ButtonVariant::Outline,
-            ButtonSize::Xs,
-            move || disabled,
-            move || {
-                if let Some(retry) = &action {
-                    retry(&row);
-                }
-            },
-        )));
-        if disabled {
-            root = root.child(unsupported("Workspace preparation retry is unavailable."));
-        }
-    }
-    root.into_element()
+    let detail = (!warning).then(|| {
+        text(SharedString::from(error.failure.message.0.clone()))
+            .app_class(tw("ms-7 py-1 text-sm leading-relaxed text-foreground/80"))
+    });
+    view().app_class(tw("group/timeline-row relative w-full min-w-0 rounded-md px-0.5 py-0.5 text-left transition-colors"))
+        .child(work_log_line(fallback_icon("circle-alert", color, false), text(SharedString::from(label)).app_class(tw(&cn([Some("text-sm font-medium"), Some(color)]))).into_element(),
+            timeline_row_timestamp(row.entry.created_at.clone(), context.timestamp_format, true).into_element(), true))
+        .child(detail).into_element()
 }
 
-/// Port of apps/web/src/components/chat/WorkLog.tsx WorkLogLine (selectors moved to children).
+pub fn timeline_row_timestamp(
+    created_at: String,
+    format: Memo<TimestampFormat>,
+    always_visible: bool,
+) -> impl IntoElement {
+    let tooltip_at = created_at.clone();
+    text(move || SharedString::from(TimestampPresenter(WorkTimestampHost).day_aware(&created_at, &format.get(), nsh_core::time::unix_ms() as i64, None, false)))
+        .app_class(tw(&cn([
+            Some("pointer-events-none absolute me-1 shrink-0 whitespace-nowrap rounded-md text-muted-foreground text-xs tabular-nums opacity-0 group-hover/timeline-row:pointer-events-auto group-hover/timeline-row:static group-hover/timeline-row:opacity-100 group-focus-within/timeline-row:pointer-events-auto group-focus-within/timeline-row:static group-focus-within/timeline-row:opacity-100"),
+            always_visible.then_some("pointer-events-auto static opacity-100"),
+        ])))
+        .tooltip(tooltip(tooltip_create_handle(), TooltipOptions::default(), text(move || SharedString::from(TimestampPresenter(WorkTimestampHost).tooltip(&tooltip_at, &format.get())))))
+}
+
+struct WorkTimestampHost;
+impl WorkTimestampHost {
+    fn zone(zone: Option<&str>) -> TimeZone {
+        let settings = locale_settings();
+        let zone = zone.unwrap_or_else(|| settings.time_zone.as_str());
+        if matches!(zone, "UTC" | "Etc/UTC" | "GMT") {
+            TimeZone::Utc
+        } else {
+            TimeZone::Iana(zone.into())
+        }
+    }
+    fn formats() -> Formats {
+        Formats::new(locale().as_str())
+    }
+    fn hour12(format: &TimestampFormat) -> bool {
+        resolve_hour12(format, locale_settings().hour_cycle.twelve_hour())
+    }
+}
+impl TimestampHost for WorkTimestampHost {
+    fn parse_epoch_ms(&self, iso: &str) -> Option<i64> {
+        WorkTimestampHost::zone(None)
+            .is_known()
+            .then(|| t3_client::time::epoch_ms(iso))
+            .flatten()
+    }
+    fn calendar(&self, epoch_ms: i64, zone: Option<&str>) -> CalendarTimestamp {
+        let day = t3_i18n::format::civil(epoch_ms, &Self::zone(zone)).day;
+        CalendarTimestamp {
+            epoch_ms,
+            day_index: day.index,
+            year: day.year,
+            month: day.month,
+            day: day.day,
+        }
+    }
+    fn short_time(&self, epoch_ms: i64, format: &TimestampFormat, zone: Option<&str>) -> String {
+        Self::formats().date(
+            DateFormat::TimeHm,
+            epoch_ms,
+            &Self::zone(zone),
+            Some(Self::hour12(format)),
+        )
+    }
+    fn numeric_date(&self, epoch_ms: i64, year: bool, zone: Option<&str>) -> String {
+        Self::formats().date(
+            if year {
+                DateFormat::MonthDayYearNumeric
+            } else {
+                DateFormat::MonthDayNumeric
+            },
+            epoch_ms,
+            &Self::zone(zone),
+            None,
+        )
+    }
+    fn full_timestamp(&self, iso: &str, format: &TimestampFormat) -> String {
+        self.parse_epoch_ms(iso)
+            .map(|epoch| {
+                Self::formats().date(
+                    DateFormat::DefaultDateTime,
+                    epoch,
+                    &Self::zone(None),
+                    Some(Self::hour12(format)),
+                )
+            })
+            .unwrap_or_default()
+    }
+    fn locale_hour12(&self) -> bool {
+        locale_settings().hour_cycle.twelve_hour()
+    }
+}
+
 fn work_log_line(
     glyph: AnyElement,
     label: AnyElement,
@@ -546,7 +1017,6 @@ fn work_log_line(
                 .child(
                     view()
                         .app_class(tw("relative w-6 shrink-0 leading-0"))
-                        // NSH has no cap-relative inline baseline; align the fixed icon slot to the row.
                         .child(
                             view().app_class(tw("size-6 overflow-hidden")).child(
                                 view()
@@ -567,8 +1037,8 @@ fn work_log_line(
         .child(trailing)
 }
 
-/// Port of apps/web/src/components/chat/WorkLog.tsx WorkLogDetails, without nested scroll views.
 fn work_log_details(kind: &str, content: AnyElement) -> impl IntoElement {
+    // Native timeline rows never own an inner scroll container; TL-BLOCKS-3 owns virtualization.
     let class = match kind {
         "panel" => "mt-0.5 mb-1.5 pb-2",
         "media" => "mt-1",
@@ -579,31 +1049,12 @@ fn work_log_details(kind: &str, content: AnyElement) -> impl IntoElement {
         .child(content)
 }
 
-fn slot_or_unsupported(slot: &Option<RowSlot>, row: &WorkEntryRow, reason: &str) -> AnyElement {
-    slot.as_ref()
-        .map_or_else(|| unsupported(reason).into_element(), |render| render(row))
-}
-
-fn unsupported(reason: &str) -> impl IntoElement {
-    text(t(reason)).app_class(tw("text-sm text-muted-foreground"))
-}
-
 fn fallback_icon(name: &str, class: &str, muted: bool) -> AnyElement {
-    let glyph = match name {
-        "circle-alert" => Some(Icon::CircleAlert),
-        "check" => Some(Icon::Check),
-        "square-pen" => Some(Icon::SquarePen),
-        "search" => Some(Icon::Search),
-        _ => None,
-    };
-    // UI-ICONS has not supplied the remaining work glyphs; never substitute a different icon.
+    let class = class.to_owned();
+    let glyph = Icon::from_name(name);
     view()
-        .app_class(tw(&cn([
-            Some("flex size-4 items-center justify-center"),
-            Some(class),
-        ])))
+        .app_class(tw("flex size-4 items-center justify-center"))
         .child(glyph.map(|glyph| {
-            let class = class.to_owned();
             icon(glyph, 16.0, move || {
                 let palette = crate::theme::palette();
                 let color = match class.as_str() {
@@ -617,30 +1068,25 @@ fn fallback_icon(name: &str, class: &str, muted: bool) -> AnyElement {
                         .opacity(0.4),
                     _ => palette.icon_muted,
                 };
-                if muted { color.opacity(0.7) } else { color }
+                if !muted {
+                    return color;
+                }
+                // NSH cannot resolve light:brightness-60; apply the same light RGB multiplier.
+                let Rgba { r, g, b, a } = color.light.into();
+                AdaptiveColor {
+                    light: Rgba {
+                        r: r * 0.6,
+                        g: g * 0.6,
+                        b: b * 0.6,
+                        a,
+                    }
+                    .into(),
+                    dark: color.dark,
+                }
+                .opacity(0.7)
             })
         }))
         .into_element()
-}
-
-fn unavailable_thread_link(row: &WorkEntryRow) -> Option<AnyElement> {
-    let label = match row.entry.projected_item.as_ref().map(|item| &item.item) {
-        Some(OrchestrationV2TurnItem::ThreadCreated(_)) => "Open chat",
-        Some(OrchestrationV2TurnItem::Notification(notification))
-            if t3_client::thread_views::threads::execution_presentation::notification_child_thread_id(&notification.source).is_some() => "Open subagent",
-        _ => return None,
-    };
-    Some(
-        view()
-            .child(
-                nsh_base::button()
-                    .disabled(true)
-                    .accessibility_label(Some(SharedString::from(t(label))))
-                    .child(text(t(label))),
-            )
-            .child(unsupported("Thread navigation is unavailable."))
-            .into_element(),
-    )
 }
 
 /// Port of TimelineWorkEntryRow.logic.ts workToneIcon.
@@ -715,9 +1161,9 @@ pub fn work_entry_icon_name(entry: &WorkLogEntry) -> String {
 
 /// Port of TimelineWorkEntryRow.logic.ts workEntryRawCommand.
 pub fn work_entry_raw_command(entry: &WorkLogEntry) -> Option<&str> {
-    let raw = entry.raw_command.as_deref()?.trim();
+    let raw = js_trim(entry.raw_command.as_deref()?);
     let command = entry.command.as_deref()?;
-    (!raw.is_empty() && raw != command.trim()).then_some(raw)
+    (!raw.is_empty() && raw != js_trim(command)).then_some(raw)
 }
 
 /// Port of TimelineWorkEntryRow.logic.ts buildToolCallExpandedBody.
@@ -727,10 +1173,10 @@ pub fn build_tool_call_expanded_body(
     visible: &str,
     viewed_image: Option<&str>,
 ) -> Option<String> {
-    let mut seen = BTreeSet::from([visible.trim().to_owned()]);
+    let mut seen = BTreeSet::from([js_trim(visible).to_owned()]);
     let mut blocks = Vec::new();
     let mut add = |value: &str| {
-        let text = value.trim();
+        let text = js_trim(value);
         if !text.is_empty() && seen.insert(text.to_owned()) {
             blocks.push(text.to_owned());
         }
@@ -746,14 +1192,14 @@ pub fn build_tool_call_expanded_body(
             add(&tr("Tool input\n{input}", &[("input", Value::from(input))]));
         }
     }
-    let command = entry.command.as_deref().map(str::trim);
-    if command != Some(visible.trim())
+    let command = entry.command.as_deref().map(js_trim);
+    if command != Some(js_trim(visible))
         && let Some(command) = work_entry_raw_command(entry).or(command)
     {
         add(command);
     }
-    let detail = entry.detail.as_deref().map(str::trim);
-    if detail != viewed_image.map(str::trim)
+    let detail = entry.detail.as_deref().map(js_trim);
+    if detail != viewed_image.map(js_trim)
         && let Some(detail) = detail
     {
         add(detail);
@@ -762,7 +1208,7 @@ pub fn build_tool_call_expanded_body(
         .into_iter()
         .flat_map(|path| {
             [
-                path.trim().to_owned(),
+                js_trim(path).to_owned(),
                 format_workspace_relative_path(path, workspace),
             ]
         })
@@ -772,7 +1218,7 @@ pub fn build_tool_call_expanded_body(
         let formatted = format_workspace_relative_path(path, workspace);
         if !image_paths.contains(path)
             && !image_paths.contains(&formatted)
-            && Some(path.trim()) != detail
+            && Some(js_trim(path)) != detail
             && Some(formatted.as_str()) != detail
             && !files.contains(&formatted)
         {
@@ -811,6 +1257,7 @@ mod tests {
             (None, Some("raw"), None),
             (Some("shown"), None, None),
             (Some("shown"), Some(" \n"), None),
+            (Some("shown"), Some("\u{feff}"), None),
             (Some(" shown "), Some("shown"), None),
             (Some("shown"), Some(" raw \n"), Some("raw")),
         ] {

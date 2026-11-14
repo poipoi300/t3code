@@ -1,7 +1,8 @@
 //! Port of apps/web/src/components/ComposerPromptEditorTiptap.tsx ComposerPromptEditorTiptap.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use futures::StreamExt;
 use nsh_base::rich_editor::{
@@ -10,7 +11,7 @@ use nsh_base::rich_editor::{
         EditorState, EditorStateConfig, KeyEvent, Plugin, PluginSpec, Selection, StateError,
         TextSelection, Transaction, TransactionOrigin,
     },
-    transform::{Mappable, ReplaceStep},
+    transform::ReplaceStep,
     view::{EditorSession, NodeViews, RichEditorClasses, RichEditorPastedFiles, rich_editor},
 };
 use nsh_core::prelude::*;
@@ -27,12 +28,46 @@ use t3_client::thread_views::{
     undo,
 };
 
-use crate::i18n::t;
 use crate::state::layout::{Pointer, layout_class, pointer};
 use crate::theme::{self, tw};
 
 pub type SkillResolver = Arc<dyn Fn(&str) -> Option<(String, Option<String>)> + Send + Sync>;
 pub type ModelResolver = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+#[derive(Clone)]
+pub struct ComposerSubmitCallback(Rc<dyn Fn(ComposerSnapshot) -> bool>);
+
+impl ComposerSubmitCallback {
+    pub fn new(callback: impl Fn(ComposerSnapshot) -> bool + 'static) -> Self {
+        Self(Rc::new(callback))
+    }
+    pub fn call(&self, snapshot: ComposerSnapshot) -> bool {
+        (self.0)(snapshot)
+    }
+}
+impl PartialEq for ComposerSubmitCallback {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+#[derive(Clone)]
+pub struct ComposerCommandKeyCallback(Rc<dyn Fn(&KeyEvent, bool) -> bool>);
+
+impl ComposerCommandKeyCallback {
+    pub fn new(callback: impl Fn(&KeyEvent, bool) -> bool + 'static) -> Self {
+        Self(Rc::new(callback))
+    }
+    pub fn call(&self, event: &KeyEvent, in_list: bool) -> bool {
+        (self.0)(event, in_list)
+    }
+}
+impl PartialEq for ComposerCommandKeyCallback {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+type SubmitHandler = Arc<dyn Fn(ComposerSnapshot) -> bool + Send + Sync>;
+type CommandKeyHandler = Arc<dyn Fn(&KeyEvent, bool) -> bool + Send + Sync>;
 
 /// Provider metadata is resolved by the owner; unknown skills and models remain editable text.
 #[derive(Clone)]
@@ -306,6 +341,64 @@ struct EditorData {
     projection: Option<DocumentProjection>,
     draft_key: Option<String>,
     controlled_snapshot: Option<ComposerSnapshot>,
+    submit: Option<SubmitHandler>,
+    command_key: Option<CommandKeyHandler>,
+}
+
+/// A key plugin keeps this weak handle rather than owning the session that owns the plugin.
+#[derive(Clone)]
+pub struct ComposerSubmit(Weak<Mutex<EditorData>>);
+
+impl ComposerSubmit {
+    /// Native key dispatch already defers keys while its input method composes.
+    pub fn submit(&self, state: &EditorState) -> bool {
+        let Some(shared) = self.0.upgrade() else {
+            return false;
+        };
+        let callback = {
+            let data = lock(&shared);
+            if data.disabled || data.error.is_some() {
+                return false;
+            }
+            data.submit.clone()
+        };
+        callback.is_some_and(|callback| callback(snapshot_for(&shared, state)))
+    }
+}
+
+fn map_for(shared: &Mutex<EditorData>, state: &EditorState) -> Arc<RichDocMap> {
+    let mut data = lock(shared);
+    let cached = projection(&mut data, state.doc());
+    cached
+        .map
+        .get_or_insert_with(|| Arc::new(document::serialize_document(&cached.json)))
+        .clone()
+}
+
+fn snapshot_for(shared: &Mutex<EditorData>, state: &EditorState) -> ComposerSnapshot {
+    let map = map_for(shared, state);
+    let expanded_cursor = map
+        .flat_to_markdown(map.pm_to_flat(state.selection().from()))
+        .min(utf16_len(&map.value));
+    let literal = lock(shared).mode == EditorMode::Literal;
+    let at = state.selection().resolved_from();
+    let adjacent = [at.node_before(), at.node_after()]
+        .into_iter()
+        .flatten()
+        .any(|node| {
+            node.is_inline() && node.is_atom() && !node.is_text() && node.ty().name() != "hardBreak"
+        });
+    ComposerSnapshot {
+        cursor: source::collapse_cursor(&map.value, expanded_cursor, literal),
+        expanded_cursor,
+        context_ids: if literal {
+            vec![]
+        } else {
+            map.context_ids.clone()
+        },
+        cursor_adjacent_to_mention: literal || at.parent().ty().spec().code || adjacent,
+        value: map.value.clone(),
+    }
 }
 
 /// The shared seam for CMP-EDITOR-2, CMP-CHIPS, CMP-SUGGEST and the composer host.
@@ -359,6 +452,8 @@ impl ComposerEditor {
             projection: None,
             draft_key: None,
             controlled_snapshot: None,
+            submit: None,
+            command_key: None,
         }));
         let initial = lock(&data).source.view().clone();
         let doc = if mode == EditorMode::Rich {
@@ -394,6 +489,25 @@ impl ComposerEditor {
         self.session.clone()
     }
 
+    pub fn submitter(&self) -> ComposerSubmit {
+        ComposerSubmit(Arc::downgrade(&self.data))
+    }
+
+    pub fn submit(&self) -> bool {
+        !self.session.composing()
+            && self.session.is_editable()
+            && self.submitter().submit(&self.session.state())
+    }
+
+    /// `useComposerSend`: clear same-draft content and cursor without remounting its history.
+    pub fn reset_after_send(&self) -> Result<(), StateError> {
+        self.sync("", 0)?;
+        let mut data = lock(&self.data);
+        data.path_query_active = false;
+        *lock(&data.pairs) = CodePairs::default();
+        Ok(())
+    }
+
     /// Shared with Editor-2's caret and composition handlers; input rules use this same tracker.
     pub fn code_pairs(&self) -> Arc<Mutex<CodePairs>> {
         lock(&self.data).pairs.clone()
@@ -422,12 +536,7 @@ impl ComposerEditor {
     }
 
     fn map_for(&self, state: &EditorState) -> Arc<RichDocMap> {
-        let mut data = lock(&self.data);
-        let cached = projection(&mut data, state.doc());
-        cached
-            .map
-            .get_or_insert_with(|| Arc::new(document::serialize_document(&cached.json)))
-            .clone()
+        map_for(&self.data, state)
     }
 
     fn document_json(&self, state: &EditorState) -> Arc<Value> {
@@ -440,32 +549,7 @@ impl ComposerEditor {
     }
 
     fn snapshot_for(&self, state: &EditorState) -> ComposerSnapshot {
-        let map = self.map_for(state);
-        let expanded_cursor = map
-            .flat_to_markdown(map.pm_to_flat(state.selection().from()))
-            .min(utf16_len(&map.value));
-        let literal = self.mode() == EditorMode::Literal;
-        let at = state.selection().resolved_from();
-        let adjacent = [at.node_before(), at.node_after()]
-            .into_iter()
-            .flatten()
-            .any(|node| {
-                node.is_inline()
-                    && node.is_atom()
-                    && !node.is_text()
-                    && node.ty().name() != "hardBreak"
-            });
-        ComposerSnapshot {
-            cursor: source::collapse_cursor(&map.value, expanded_cursor, literal),
-            expanded_cursor,
-            context_ids: if literal {
-                vec![]
-            } else {
-                map.context_ids.clone()
-            },
-            cursor_adjacent_to_mention: literal || at.parent().ty().spec().code || adjacent,
-            value: map.value.clone(),
-        }
+        snapshot_for(&self.data, state)
     }
 
     fn is_controlled_snapshot(&self, snapshot: &ComposerSnapshot) -> bool {
@@ -566,7 +650,7 @@ impl ComposerEditor {
         Ok(())
     }
 
-    /// Controlled rewrites reset history, so undo cannot resurrect another draft or a sent prompt.
+    /// Same-draft `setContent(..., { emitUpdate: false })`; only a new draft/mode remounts history.
     pub fn sync(&self, value: &str, cursor: usize) -> Result<bool, StateError> {
         let snapshot = self.read_snapshot();
         let literal = self.mode() == EditorMode::Literal;
@@ -583,8 +667,26 @@ impl ComposerEditor {
             }
             return Ok(false);
         }
-        let mode = self.mode();
-        self.reset(value, expanded, mode)?;
+        let state = self.session.state();
+        let data = lock(&self.data);
+        let doc = document::build_document(
+            value,
+            data.mode.options(),
+            |name| (data.resolvers.skill)(name),
+            |instance, model| (data.resolvers.model)(instance, model),
+        );
+        drop(data);
+        let map = document::serialize_document(&doc);
+        let pos = map.flat_to_pm(map.markdown_to_flat(expanded));
+        let mut tr = replace_document(&state, &doc, SourceSelection::caret(pos))?;
+        // Web setContent replaces the document, classified as Other even when the new doc is empty.
+        tr.set_meta(
+            "composerInput",
+            json!({"deleted":state.doc().content().size(), "inserted":tr.doc().content().size()}),
+        )
+        .set_meta("composerControlled", json!(true))
+        .set_meta("composerMetadata", json!(true));
+        self.dispatch(tr)?;
         Ok(true)
     }
 
@@ -758,9 +860,7 @@ fn apply_transaction(
 ) -> Result<(), StateError> {
     let old = session.state();
     let composing = session.composing() || tr.get_meta("composition").is_some();
-    if let Some(prepared) = prepare_text_input(&old, &mut lock(shared), &mut tr, composing)? {
-        tr = prepared;
-    }
+    let controlled = tr.get_meta("composerControlled") == Some(&Value::Bool(true));
     if let Some(error) = tr.get_meta("composerError").and_then(Value::as_str) {
         return Err(invalid(error));
     }
@@ -769,6 +869,9 @@ fn apply_transaction(
         && tr.get_meta("composerMetadata") != Some(&Value::Bool(true))
     {
         return Ok(());
+    }
+    if let Some(prepared) = prepare_text_input(&old, &mut lock(shared), &mut tr, composing)? {
+        tr = prepared;
     }
     let history = matches!(tr.origin(), Some(TransactionOrigin::History));
     let clipboard = matches!(
@@ -912,12 +1015,16 @@ fn apply_transaction(
         remember_document(&mut data, state.doc(), normalized_json);
     }
     drop(data);
+    if controlled {
+        let snapshot = snapshot_for(shared, &state);
+        lock(shared).controlled_snapshot = Some(snapshot);
+    }
     session.commit(state, &applied);
     Ok(())
 }
 
 fn tr_pairs_need_mapping(applied: &[Transaction]) -> bool {
-    applied.iter().any(Transaction::doc_changed)
+    applied.iter().any(|tr| tr.doc_changed())
         && !applied
             .iter()
             .any(|tr| tr.get_meta("composerPairsMapped").is_some())
@@ -1119,6 +1226,13 @@ impl PluginSpec for ComposerDocumentPlugin {
         event: &KeyEvent,
         dispatch: &mut dyn FnMut(Transaction),
     ) -> bool {
+        let command = lock(&self.0).command_key.clone();
+        let at = state.selection().resolved_from();
+        let in_list = (1..=at.depth)
+            .any(|depth| matches!(at.node(depth).ty().name(), "listItem" | "taskItem"));
+        if command.is_some_and(|command| command(event, in_list)) {
+            return true;
+        }
         if !event.mod_key || event.alt {
             return false;
         }
@@ -1310,10 +1424,17 @@ impl PluginSpec for ComposerDocumentPlugin {
 #[derive(Clone, Copy, Default)]
 pub struct ComposerPromptEditorProps {
     pub disabled: Prop<bool>,
-    /// English source; translated in the reactive binding.
+    /// Final display text: caller-translated keys or literal content, never translated here.
     pub placeholder: Prop<SharedString>,
+    /// NSH's placeholder part accepts text; rich suffix content needs a native placeholder slot.
+    pub placeholder_suffix: Prop<SharedString>,
+    pub class_name: Prop<SharedString>,
+    pub placeholder_class_name: Prop<SharedString>,
+    pub container_class_name: Prop<SharedString>,
     pub aria_label: Prop<SharedString>,
     pub context_count: Prop<usize>,
+    pub on_submit: Prop<Option<ComposerSubmitCallback>>,
+    pub on_command_key_down: Prop<Option<ComposerCommandKeyCallback>>,
 }
 
 pub fn composer_prompt_editor_tiptap(
@@ -1332,9 +1453,31 @@ fn composer_prompt_editor_tiptap_inner(
     on_paste_files: impl Fn(&RichEditorPastedFiles) + 'static,
 ) -> impl IntoElement {
     let snapshot = signal(editor.read_snapshot());
-    let error = signal(editor.error());
     let handle = editor.clone();
     let session = handle.session();
+    {
+        let mut data = lock(&handle.data);
+        data.submit = Some(Arc::new(move |snapshot| {
+            props
+                .on_submit
+                .get()
+                .is_some_and(|callback| callback.call(snapshot))
+        }));
+        data.command_key = Some(Arc::new(move |event, in_list| {
+            props
+                .on_command_key_down
+                .get()
+                .is_some_and(|callback| callback.call(event, in_list))
+        }));
+    }
+    let callbacks = Arc::downgrade(&handle.data);
+    cleanup(move || {
+        if let Some(shared) = callbacks.upgrade() {
+            let mut data = lock(&shared);
+            data.submit = None;
+            data.command_key = None;
+        }
+    });
     // Synchronizes the controlled read-only state with the imperative editor session.
     effect(move || handle.set_disabled(props.disabled.get()));
     let (sender, mut changes) = futures::channel::mpsc::unbounded();
@@ -1346,7 +1489,6 @@ fn composer_prompt_editor_tiptap_inner(
     spawn(async move {
         while changes.next().await.is_some() {
             let next = editor.read_snapshot();
-            error.set(editor.error());
             if snapshot.get_untracked() != next {
                 snapshot.set(next.clone());
                 if !editor.is_controlled_snapshot(&next) {
@@ -1360,24 +1502,35 @@ fn composer_prompt_editor_tiptap_inner(
         .editable(move || !props.disabled.get())
         .accessibility_label(move || {
             let label = props.aria_label.get();
-            (!label.is_empty()).then(|| SharedString::from(t(label.as_str())))
+            (!label.is_empty()).then_some(label)
         })
         .test_id("composer-editor")
         // `2lh + spacing(2)` follows prompt sizing; native scroll replaces overflow-y-auto.
-        .app_class(tw("relative -m-1 block max-h-52 p-1 bg-transparent leading-relaxed text-foreground focus:outline-none"))
-        .min_h(move || px(prompt_size() * 3.25 + 8.0))
-        .classes(composer_editor_classes())
+        .app_class(move || {
+            let minimum = format!("min-h-[{}px]", prompt_size() * 3.25 + 8.0);
+            tw(&theme::cn([
+                Some("relative -m-1 block max-h-52 p-1 bg-transparent leading-relaxed text-foreground focus:outline-none"),
+                Some(minimum.as_str()),
+                Some(props.class_name.get().as_str()),
+            ]))
+        })
+        .classes(move || composer_editor_classes(props.placeholder_class_name.get().as_str()))
         // Native preedit is outside the document; its placeholder hides itself during IME.
         .placeholder(move || {
             let source = props.placeholder.get();
             (snapshot.with(|value| value.value.is_empty()) && props.context_count.get() == 0 && !source.is_empty())
-                .then(|| SharedString::from(t(source.as_str())))
+                .then(|| SharedString::from(format!("{}{}", source, props.placeholder_suffix.get())))
         })
         .show_only_when_editable(false)
         .on_paste_files(on_paste_files);
     // NSH owns scrolling/wrapping; flow-root has no native meaning. Font fallbacks use tokens.
     view()
-        .app_class(tw("relative"))
+        .app_class(move || {
+            tw(&theme::cn([
+                Some("relative"),
+                Some(props.container_class_name.get().as_str()),
+            ]))
+        })
         .text_size(move || px(prompt_size()))
         .font_family(move || {
             let tokens = theme::current_tokens();
@@ -1389,11 +1542,6 @@ fn composer_prompt_editor_tiptap_inner(
             )
         })
         .child(content)
-        .child(dynamic(move || {
-            error
-                .get()
-                .map(|message| text(t(&message)).app_class(tw("text-sm text-destructive")))
-        }))
 }
 
 fn prompt_size() -> f32 {
@@ -1401,17 +1549,31 @@ fn prompt_size() -> f32 {
         .number("font-size-prompt")
         .unwrap_or(14.0);
     if layout_class().is_compact() && pointer() == Pointer::Coarse {
+        // index.css --font-size-prompt-touch: max(prompt, 16px) prevents iOS focus zoom.
         size.max(16.0)
     } else {
         size
     }
 }
 
-fn composer_editor_classes() -> RichEditorClasses {
+fn composer_editor_classes(placeholder_class_name: &str) -> RichEditorClasses {
+    // index.css uses em units relative to the inline code's own 0.92em font.
+    let code_size = prompt_size() * 0.92;
+    let code_class = format!(
+        "font-mono bg-muted-foreground/12 rounded-[{:.4}px] px-[{:.4}px] py-[{:.4}px] text-[{:.4}px]",
+        code_size * 0.3,
+        code_size * 0.25,
+        code_size * 0.05,
+        code_size,
+    );
     let mut classes = RichEditorClasses::default();
     classes.caret = Some(tw("bg-foreground"));
     classes.selection = Some(tw("bg-primary/20"));
-    classes.placeholder = Some(tw("leading-relaxed text-placeholder"));
+    // NSH places this text part in the empty block; it owns hit testing and preedit visibility.
+    classes.placeholder = Some(tw(&theme::cn([
+        Some("leading-relaxed text-placeholder"),
+        Some(placeholder_class_name),
+    ])));
     classes.selected_node = Some(tw("rounded-md ring-2 ring-inset ring-ring"));
     // `index.css`'s `.composer-tiptap` node and mark selectors, applied to their parts.
     classes.nodes = Some(BTreeMap::from([
@@ -1435,7 +1597,7 @@ fn composer_editor_classes() -> RichEditorClasses {
         ("bold".into(), tw("font-bold").to_string()),
         ("italic".into(), tw("italic").to_string()),
         ("strike".into(), tw("line-through").to_string()),
-        ("code".into(), tw("font-mono bg-muted-foreground/12 rounded-[4.2px] px-[3.5px] py-[0.7px] text-[12.88px]").to_string()),
+        ("code".into(), tw(&code_class).to_string()),
     ]));
     classes
 }
@@ -1825,7 +1987,9 @@ mod tests {
         }
         type_text(&editor, "X");
         assert_eq!(editor.read_snapshot().value, "echo $HOXME now");
-        editor.sync("Draft B", 7).expect("switch drafts");
+        editor
+            .sync_draft("draft-b", "Draft B", 7)
+            .expect("switch drafts");
         assert!(!editor.undo().expect("old draft cannot be restored"));
         assert_eq!(editor.read_snapshot().value, "Draft B");
     }
@@ -2017,6 +2181,61 @@ mod tests {
     }
 
     #[test]
+    fn clearing_a_sent_same_draft_preserves_undo_but_switching_drafts_resets_it() {
+        let editor = editor("");
+        editor
+            .sync_draft("thread-a", "", 0)
+            .expect("draft identity");
+        type_text(&editor, "hello");
+        editor.set_path_query_active(true);
+        editor.set_disabled(true);
+        editor
+            .reset_after_send()
+            .expect("controlled clear while sending");
+        let empty = editor.read_snapshot();
+        assert_eq!(
+            (empty.value.as_str(), empty.cursor, empty.expanded_cursor),
+            ("", 0, 0)
+        );
+        assert!(editor.is_controlled_snapshot(&empty));
+        assert_eq!(lock(&editor.data).draft_key.as_deref(), Some("thread-a"));
+        assert!(!lock(&editor.data).path_query_active);
+        editor.set_disabled(false);
+        assert!(editor.undo().expect("undo controlled setContent"));
+        assert_eq!(editor.read_snapshot().value, "hello");
+        assert!(editor.redo().expect("redo clear"));
+        assert_eq!(editor.read_snapshot().value, "");
+        type_text(&editor, "next");
+        assert!(editor.undo().expect("new typing has its own group"));
+        assert_eq!(editor.read_snapshot().value, "");
+        editor.sync_draft("thread-b", "", 0).expect("new draft");
+        assert!(!editor.undo().expect("new identity has no old history"));
+    }
+
+    #[test]
+    fn submit_reads_current_source_respects_disabled_state_and_does_not_own_the_editor() {
+        let editor = editor("");
+        assert!(!editor.submit());
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        let recorded = submitted.clone();
+        lock(&editor.data).submit = Some(Arc::new(move |snapshot| {
+            lock(&recorded).push(snapshot);
+            true
+        }));
+        type_text(&editor, "latest");
+        editor.set_disabled(true);
+        assert!(!editor.submit());
+        assert!(lock(&submitted).is_empty());
+        editor.set_disabled(false);
+        assert!(editor.submit());
+        assert_eq!(lock(&submitted)[0].value, "latest");
+        let weak = editor.submitter();
+        drop(editor);
+        let other = self::editor("");
+        assert!(!weak.submit(&other.session.state()));
+    }
+
+    #[test]
     fn ordinary_keystrokes_export_the_native_document_once_and_reuse_it_for_snapshots() {
         let mut measurements = Vec::new();
         for length in [8_192, 65_536] {
@@ -2028,6 +2247,7 @@ mod tests {
                 editor.read_snapshot();
                 editor.read_snapshot();
             }
+            assert_eq!(editor.read_snapshot().value, "a".repeat(length + 100));
             let exports = JSON_EXPORTS.with(std::cell::Cell::get);
             measurements.push((length, exports));
         }

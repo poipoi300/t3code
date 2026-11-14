@@ -2,8 +2,9 @@
 //! row frame). Rows are the client's port of `MessagesTimeline.logic.ts`
 //! (`t3_client::thread_views::messages_timeline`), derived from the timeline entries and the
 //! thread's run; each virtual-list cell reads its row through its own memo, so a streamed token
-//! re-renders only the streaming row. Assistant rows are TL-ROWS-ASSISTANT's; user and work rows
-//! keep interim renderers until TL-ROWS-USER and TL-ROWS-WORK-* can be mounted (see
+//! re-renders only the streaming row. User rows are TL-ROWS-USER's; assistant, assistant-meta and
+//! sent-message rows TL-ROWS-ASSISTANT's; the working row TL-ROWS-WORK-1's. Work-log rows keep an
+//! interim renderer until TL-ROWS-WORK-1 and -2 can be mounted (see
 //! `one-change/integration-1/README.md`).
 //!
 //! The block-flattened timeline (TL-BLOCKS-*) replaces the cell body with blocks so long code
@@ -26,8 +27,11 @@ use t3_contracts::orchestration_v2::OrchestrationV2ThreadShell;
 use crate::i18n::t;
 use crate::runtime::{Shared, rt};
 use crate::screens::thread::rows::assistant::{
-    AssistantRowContext, AssistantRowsState, assistant_row, assistant_timeline_row,
+    AssistantRowContext, AssistantRowsState, assistant_meta_timeline_row, assistant_row,
+    assistant_timeline_row, sent_message_timeline_row,
 };
+use crate::screens::thread::rows::user::{UserRowContext, UserRowState, user_message_row};
+use crate::screens::thread::rows::work::working_row;
 use crate::theme::tw;
 use crate::ui::surface::empty_state;
 
@@ -35,6 +39,8 @@ use crate::ui::surface::empty_state;
 enum RowKind {
     User,
     Assistant,
+    AssistantMeta,
+    SentMessage,
     Working,
     Work,
     Other,
@@ -45,10 +51,15 @@ fn kind_of(row: &MessagesTimelineRow) -> RowKind {
     match &row.content {
         C::Message { message, .. } if message.role == "user" => RowKind::User,
         C::Message { .. } => RowKind::Assistant,
+        C::AssistantMeta { .. } => RowKind::AssistantMeta,
+        C::SentMessage { .. } => RowKind::SentMessage,
         C::Working { .. } => RowKind::Working,
-        C::Work { .. } | C::WorkLive { .. } | C::Thinking { .. } | C::WorkToggle { .. } => {
-            RowKind::Work
-        }
+        C::Work { .. }
+        | C::WorkLive { .. }
+        | C::Thinking { .. }
+        | C::WorkToggle { .. }
+        | C::TurnFold { .. }
+        | C::AttemptFold { .. } => RowKind::Work,
         _ => RowKind::Other,
     }
 }
@@ -128,11 +139,12 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
         })
     });
     let state = AssistantRowsState::default();
+    let users = UserRowState::new();
     let list = virtual_list(count, move |at| {
         let row: Memo<Option<Shared<MessagesTimelineRow>>> =
             computed(move || rows.with(|r| r.0.get(at.index()).cloned().map(Shared)));
         let kind = computed(move || row.with(|r| r.as_ref().map(|r| kind_of(&r.0))));
-        cell(row, kind, state)
+        cell(row, kind, state, users)
     })
     .keys(move || keys.get().0.as_ref().clone())
     .alignment(ListAlignment::Bottom)
@@ -158,29 +170,62 @@ fn cell(
     row: Memo<Option<Shared<MessagesTimelineRow>>>,
     kind: Memo<Option<RowKind>>,
     state: AssistantRowsState,
+    users: UserRowState,
 ) -> impl IntoElement {
-    let body = dynamic(move || match kind.get() {
-        Some(RowKind::User) => Some(user_message(move || user_text(row)).into_element()),
-        Some(RowKind::Assistant) => Some(
-            assistant_timeline_row(
-                assistant_row(row),
-                AssistantRowContext::new(state),
-            )
-            .into_element(),
-        ),
-        Some(RowKind::Working) => Some(working_row().into_element()),
-        Some(RowKind::Work) => Some(work_lines(row).into_element()),
-        Some(RowKind::Other) | None => None,
-    });
-    let padding = move || Some(tw(row.with(|r| r.as_ref().map_or("pb-4", |r| padding_of(&r.0)))));
-    view().app_class(tw("w-full px-3 sm:px-12")).child(
-        view()
-            .app_class(tw("mx-auto w-full min-w-0 max-w-(--chat-content-max-width)"))
-            .child(view().app_class(padding).child(body)),
-    )
+    dynamic(move || {
+        let body = match kind.get()? {
+            // WorkingTimelineRow carries its own lane, column and padding.
+            RowKind::Working => return Some(working_row().into_element()),
+            RowKind::User => {
+                let projection = computed(move || row.with(|r| r.as_ref().map(|r| r.0.clone())));
+                user_message_row(projection, UserRowContext::new(users)).into_element()
+            }
+            RowKind::Assistant => {
+                assistant_timeline_row(assistant_row(row), AssistantRowContext::new(state))
+                    .into_element()
+            }
+            RowKind::AssistantMeta => {
+                assistant_meta_timeline_row(assistant_row(row), AssistantRowContext::new(state))
+                    .into_element()
+            }
+            RowKind::SentMessage => {
+                sent_message_timeline_row(sent_text(row), AssistantRowContext::new(state))
+                    .into_element()
+            }
+            RowKind::Work => work_lines(row).into_element(),
+            RowKind::Other => return None,
+        };
+        let frame = move || Some(tw(row.with(|r| r.as_ref().map_or("pb-4", |r| frame_of(&r.0)))));
+        Some(
+            view()
+                .app_class(tw("w-full px-3 sm:px-12"))
+                .child(
+                    view()
+                        .app_class(tw("mx-auto w-full min-w-0 max-w-(--chat-content-max-width)"))
+                        .child(view().app_class(frame).child(body)),
+                )
+                .into_element(),
+        )
+    })
 }
 
-/// The web's per-row bottom padding (MessagesTimeline.tsx, the row's outer `div`).
+/// The row's outer `div` classes in MessagesTimeline.tsx `TimelineRowContent`: the bottom padding
+/// per row kind, and `group/assistant` on assistant messages and their meta row.
+fn frame_of(row: &MessagesTimelineRow) -> &'static str {
+    use MessagesTimelineRowContent as C;
+    let assistant = match &row.content {
+        C::Message { message, .. } => message.role == "assistant",
+        C::AssistantMeta { .. } => true,
+        _ => false,
+    };
+    match (padding_of(row), assistant) {
+        ("pb-1", true) => "pb-1 group/assistant",
+        ("pb-2", true) => "pb-2 group/assistant",
+        ("pb-4", true) => "pb-4 group/assistant",
+        (padding, _) => padding,
+    }
+}
+
 fn padding_of(row: &MessagesTimelineRow) -> &'static str {
     use MessagesTimelineRowContent as C;
     match &row.content {
@@ -198,39 +243,22 @@ fn padding_of(row: &MessagesTimelineRow) -> &'static str {
         C::Event { .. } | C::AttemptFold { .. } | C::HtmlRender { .. } | C::McpApp { .. } => {
             "pb-2"
         }
-        C::ViewedImages { .. } | C::WorktreeSetup { .. } => "pb-2",
+        C::ViewedImages { .. } | C::WorktreeSetup { .. } | C::SentMessage { .. } => "pb-2",
         _ => "pb-4",
     }
 }
 
-fn user_text(row: Memo<Option<Shared<MessagesTimelineRow>>>) -> String {
-    row.with(|r| match r.as_ref().map(|r| &r.0.content) {
-        Some(MessagesTimelineRowContent::Message { message, .. }) => message.text.clone(),
-        _ => String::new(),
+fn sent_text(row: Memo<Option<Shared<MessagesTimelineRow>>>) -> Memo<String> {
+    computed(move || {
+        row.with(|r| match r.as_ref().map(|r| &r.0.content) {
+            Some(MessagesTimelineRowContent::SentMessage { text }) => text.clone(),
+            _ => String::new(),
+        })
     })
 }
 
-/// `TimelineUserMessageRow.tsx` `UserTimelineRow`, a plain message: the bubble. Interim until
-/// TL-ROWS-USER's row can mount (it needs the client's `resolveUserMessagePresentation`): the
-/// body is plain text and the actions row is not built.
-fn user_message(content: impl Fn() -> String + 'static) -> impl IntoElement {
-    view()
-        .app_class(tw("group flex flex-col items-end gap-1"))
-        .child(
-            view()
-                .app_class(tw(
-                    "relative min-w-0 max-w-[80%] rounded-2xl text-message-foreground bg-message p-3",
-                ))
-                .child(
-                    text(move || SharedString::from(content()))
-                        .select_text()
-                        .app_class(tw("text-sm leading-relaxed text-message-foreground")),
-                ),
-        )
-}
-
 /// Interim work rows until TL-ROWS-WORK-1 and -2 mount: one muted line per entry, with the
-/// client's labels (`work_entry_display_label`, the work toggle's summary).
+/// client's labels (`work_entry_display_label`, the work toggle's summary, the fold's label).
 fn work_lines(row: Memo<Option<Shared<MessagesTimelineRow>>>) -> impl IntoElement {
     let labels = computed(move || row.with(|r| r.as_ref().map(|r| work_labels(&r.0)).unwrap_or_default()));
     view().app_class(tw("flex flex-col gap-1 pb-2")).child(dynamic(move || {
@@ -260,22 +288,8 @@ fn work_labels(row: &MessagesTimelineRow) -> Vec<String> {
         C::WorkLive { entry, .. } => vec![work_entry_display_label(entry, None)],
         C::Thinking { label, .. } => vec![label.clone().unwrap_or_else(|| t("Thinking"))],
         C::WorkToggle { summary, .. } => vec![summary.clone()],
+        // The fold's label ("Worked for 5.7s"); expanding it is TL-ROWS-WORK-2's.
+        C::TurnFold { label, .. } | C::AttemptFold { label, .. } => vec![label.clone()],
         _ => Vec::new(),
     }
-}
-
-/// `TimelineWorkGroupRows.tsx` `WorkingTimelineRow`, its label without a run start
-/// ("Working..."): the client's `working` row while the run is active. Owned by the integrator
-/// until TL-ROWS-WORK-1 takes it with the work rows.
-fn working_row() -> impl IntoElement {
-    view().app_class(tw("border-b border-border/60 pb-2 pt-1")).child(
-        view()
-            .app_class(tw(
-                "flex h-6 min-w-0 items-baseline gap-2 px-1 text-sm leading-relaxed text-muted-foreground tabular-nums",
-            ))
-            .child(
-                text(t("Working..."))
-                    .app_class(tw("relative shrink-0 overflow-hidden whitespace-nowrap")),
-            ),
-    )
 }

@@ -1123,4 +1123,6 @@ mod tests {
             "Label\nbold `ticks`\n\"a, \"\"b\"\" c\""
         );
         assert_eq!(serialize_table_to_markdown(&Table::default()), "");
-        assert_eq!(serialize_table_to_csv(&Table::defau
+        assert_eq!(serialize_table_to_csv(&Table::default()), "");
+    }
+}

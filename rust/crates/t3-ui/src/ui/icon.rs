@@ -7697,7 +7697,7 @@ pub fn icon(
 }
 
 /// Lucide with the caller's TSX class list, inheriting currentColor.
-pub fn icon_with_class(which: Icon, class_name: &str) -> impl IntoElement {
+pub fn icon_with_class(which: Icon, class_name: &str) -> impl IntoElement + use<> {
     svg(which.asset())
         .app_class(tw(class_name))
         .accessible(false)
@@ -7857,7 +7857,7 @@ impl ProviderMark {
 }
 
 /// Port of ProviderPackageIcon: preserve path fills and gradients instead of tinting a mask.
-pub fn provider_package_icon(mark: ProviderMark, class_name: &str) -> impl IntoElement {
+pub fn provider_package_icon(mark: ProviderMark, class_name: &str) -> impl IntoElement + use<> {
     // The web's Antigravity SVG embeds a PNG; NSH's vector replay drops image nodes.
     if mark == ProviderMark::Antigravity {
         return image(move || mark.asset(dark()))
@@ -7872,7 +7872,11 @@ pub fn provider_package_icon(mark: ProviderMark, class_name: &str) -> impl IntoE
 }
 
 /// ProviderInstanceIcon's base glyph. Instance badges are composed by its feature owner.
-pub fn provider_icon(driver: &str, display_name: &str, class_name: &str) -> impl IntoElement {
+pub fn provider_icon(
+    driver: &str,
+    display_name: &str,
+    class_name: &str,
+) -> impl IntoElement + use<> {
     let glyph = ProviderMark::for_driver(driver)
         .map(|mark| provider_package_icon(mark, class_name).into_element());
     glyph.unwrap_or_else(|| {

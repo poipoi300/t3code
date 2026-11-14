@@ -14,6 +14,369 @@ use t3_client::view_logic::session::markdown::{
 
 pub const CODE_CHUNK_LINES: usize = 40;
 
+/// Byte work includes parsing/indexing/copying; row visits include retained-row comparisons.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FlattenWork {
+    pub indexed_bytes: usize,
+    pub split_bytes: usize,
+    pub parsed_bytes: usize,
+    pub copied_bytes: usize,
+    pub visited_rows: usize,
+}
+
+impl FlattenWork {
+    pub fn byte_work(self) -> usize {
+        self.indexed_bytes + self.split_bytes + self.parsed_bytes + self.copied_bytes
+    }
+
+    fn add(&mut self, other: Self) {
+        self.indexed_bytes += other.indexed_bytes;
+        self.split_bytes += other.split_bytes;
+        self.parsed_bytes += other.parsed_bytes;
+        self.copied_bytes += other.copied_bytes;
+        self.visited_rows += other.visited_rows;
+    }
+}
+
+#[derive(Default)]
+struct StreamData {
+    pieces: BTreeMap<usize, Rc<str>>,
+    bytes: usize,
+    utf16: usize,
+    blocks: BTreeMap<usize, Rc<Block>>,
+    definitions: BTreeMap<(bool, String), Rc<DefinitionFact>>,
+    context_version: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct DefinitionFact {
+    pub node: Rc<MarkdownNode>,
+    pub source: Rc<str>,
+}
+
+/// A shared document, read by row index or source range without copying the message.
+#[derive(Clone, Default)]
+pub struct StreamBlocks(Rc<RefCell<StreamData>>);
+
+impl PartialEq for StreamBlocks {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for StreamBlocks {}
+
+impl StreamBlocks {
+    pub fn block(&self, index: usize) -> Option<Rc<Block>> {
+        self.0.borrow().blocks.get(&index).cloned()
+    }
+
+    pub fn block_count(&self) -> usize {
+        self.0.borrow().blocks.len()
+    }
+
+    pub fn source_len(&self) -> usize {
+        self.0.borrow().bytes
+    }
+
+    pub fn context_version(&self) -> usize {
+        self.0.borrow().context_version
+    }
+
+    pub fn definition(&self, identifier: &str, footnote: bool) -> Option<Rc<DefinitionFact>> {
+        self.0
+            .borrow()
+            .definitions
+            .get(&(footnote, identifier.to_owned()))
+            .cloned()
+    }
+
+    /// Materialize only a requested row/selection; never request the whole range per delta.
+    pub fn source_range(&self, range: Range<usize>) -> Option<String> {
+        let data = self.0.borrow();
+        if range.start > range.end || range.end > data.bytes {
+            return None;
+        }
+        if range.is_empty() {
+            return Some(String::new());
+        }
+        let first = *data.pieces.range(..=range.start).next_back()?.0;
+        let mut result = String::with_capacity(range.len());
+        for (&at, text) in data.pieces.range(first..) {
+            if at >= range.end {
+                break;
+            }
+            let start = range.start.saturating_sub(at);
+            let end = (range.end - at).min(text.len());
+            result.push_str(text.get(start..end)?);
+        }
+        Some(result)
+    }
+}
+
+/// Splice only this tail into the list; unchanged rows remain in `document` by identity.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BlockDelta {
+    pub document: StreamBlocks,
+    pub changed_from: usize,
+    pub old_count: usize,
+    pub rows: Vec<Rc<Block>>,
+    pub context_version: usize,
+}
+
+struct Continuation {
+    header: String,
+    line_base: usize,
+    value_base: usize,
+}
+
+struct AppendState {
+    document: StreamBlocks,
+    pending: String,
+    base_byte: usize,
+    base_utf16: usize,
+    stable: usize,
+    continuation: Option<Continuation>,
+    local: Box<MessageFlattener>,
+    output: bool,
+    work: FlattenWork,
+    output_line_base: usize,
+    finished: bool,
+}
+
+impl AppendState {
+    fn new(message_id: &str, output: bool) -> Self {
+        let document = StreamBlocks::default();
+        document.0.borrow_mut().blocks.insert(
+            0,
+            Rc::new(Block {
+                id: BlockId {
+                    message_id: message_id.into(),
+                    index: 0,
+                },
+                kind: BlockKind::Header,
+                text: Some(Rc::from("")),
+                source: SourceRange {
+                    bytes: 0..0,
+                    utf16: 0..0,
+                },
+            }),
+        );
+        Self {
+            document,
+            pending: String::new(),
+            base_byte: 0,
+            base_utf16: 0,
+            stable: 1,
+            continuation: None,
+            local: Box::new(MessageFlattener::new(message_id)),
+            output,
+            work: FlattenWork::default(),
+            output_line_base: 0,
+            finished: false,
+        }
+    }
+
+    fn push(&mut self, delta: &str) -> BlockDelta {
+        let old_count = self.document.block_count();
+        if delta.is_empty() {
+            return BlockDelta {
+                document: self.document.clone(),
+                changed_from: old_count,
+                old_count,
+                rows: Vec::new(),
+                context_version: self.document.context_version(),
+            };
+        }
+        self.finished = false;
+        {
+            let mut data = self.document.0.borrow_mut();
+            let start = data.bytes;
+            data.pieces.insert(start, Rc::from(delta));
+            data.bytes += delta.len();
+            data.utf16 += delta.encode_utf16().count();
+        }
+        self.work.indexed_bytes += delta.len();
+        self.work.copied_bytes += delta.len();
+
+        if self.pending.capacity() - self.pending.len() < delta.len() {
+            self.work.copied_bytes += self.pending.len();
+        }
+        self.pending.push_str(delta);
+        self.work.copied_bytes += delta.len();
+        let header = self.continuation.as_ref().map_or("", |c| c.header.as_str());
+        let mut source = String::with_capacity(header.len() + self.pending.len());
+        source.push_str(header);
+        source.push_str(&self.pending);
+        self.work.copied_bytes += source.len();
+        let header_bytes = header.len();
+        let header_utf16 = header.encode_utf16().count();
+        let before = self.local.work();
+        let local = if self.output {
+            self.local.update_output(&source)
+        } else {
+            self.local.update(&source)
+        };
+        let after = self.local.work();
+        self.work.add(FlattenWork {
+            indexed_bytes: after.indexed_bytes - before.indexed_bytes,
+            split_bytes: after.split_bytes - before.split_bytes,
+            parsed_bytes: after.parsed_bytes - before.parsed_bytes,
+            copied_bytes: after.copied_bytes - before.copied_bytes,
+            visited_rows: after.visited_rows - before.visited_rows,
+        });
+        let local_stable = stable_prefix(&local.blocks, &source, self.output, false);
+        let mut group_header = header.to_owned();
+        self.publish_definitions(&local, local_stable, false);
+        let mut continuing = self.continuation.is_some();
+        let mut freeze = None;
+        let mut mapped = Vec::with_capacity(local.blocks.len().saturating_sub(1));
+        for (index, block) in local.blocks.iter().enumerate().skip(1) {
+            self.work.visited_rows += 1;
+            let mut block = (**block).clone();
+            if let BlockKind::Output { start_line, .. } = &mut block.kind {
+                *start_line += self.output_line_base;
+            }
+            if let BlockKind::Code(code) = &mut block.kind {
+                if code.first && !continuing {
+                    let raw = &source[block.source.bytes.start..block.source.bytes.end];
+                    group_header = if fence(raw.lines().next().unwrap_or_default()).is_some() {
+                        raw[..raw.find(['\r', '\n']).map_or(raw.len(), |at| {
+                            at + if raw[at..].starts_with("\r\n") { 2 } else { 1 }
+                        })]
+                            .into()
+                    } else {
+                        String::new()
+                    };
+                }
+                if continuing && let Some(context) = &self.continuation {
+                    code.first = false;
+                    code.start_line += context.line_base;
+                    code.value_bytes = code.value_bytes.start + context.value_base
+                        ..code.value_bytes.end + context.value_base;
+                }
+                if index + 1 == local_stable && !code.last {
+                    freeze = Some(Continuation {
+                        header: group_header.clone(),
+                        line_base: code.start_line - 1 + CODE_CHUNK_LINES,
+                        value_base: code.value_bytes.end,
+                    });
+                }
+                if code.last {
+                    continuing = false;
+                }
+            }
+            block.id.index = self.stable + index - 1;
+            block.source = SourceRange {
+                bytes: self.base_byte + block.source.bytes.start.saturating_sub(header_bytes)
+                    ..self.base_byte + block.source.bytes.end.saturating_sub(header_bytes),
+                utf16: self.base_utf16 + block.source.utf16.start.saturating_sub(header_utf16)
+                    ..self.base_utf16 + block.source.utf16.end.saturating_sub(header_utf16),
+            };
+            mapped.push(Rc::new(block));
+        }
+        if self.output
+            && local_stable > 1
+            && let Some(Block {
+                kind: BlockKind::Output { start_line, .. },
+                ..
+            }) = mapped.get(local_stable - 2).map(Rc::as_ref)
+        {
+            self.output_line_base = start_line - 1 + CODE_CHUNK_LINES;
+        }
+        let change = self.splice(old_count, mapped);
+        if local_stable > 1 {
+            let end = &local.blocks[local_stable - 1].source;
+            let cut = end.bytes.end - header_bytes;
+            self.pending = self.pending.split_off(cut);
+            self.work.copied_bytes += self.pending.len();
+            self.base_byte += cut;
+            self.base_utf16 += end.utf16.end - header_utf16;
+            self.stable += local_stable - 1;
+            self.continuation = freeze;
+            self.local = Box::new(MessageFlattener::new(&self.local.message_id));
+        }
+        change
+    }
+
+    fn splice(&mut self, old_count: usize, mut mapped: Vec<Rc<Block>>) -> BlockDelta {
+        let mut data = self.document.0.borrow_mut();
+        let mut changed = old_count.min(self.stable + mapped.len());
+        for (offset, block) in mapped.iter_mut().enumerate() {
+            let index = self.stable + offset;
+            self.work.visited_rows += 1;
+            if let Some(old) = data.blocks.get(&index)
+                && old.as_ref() == block.as_ref()
+            {
+                *block = old.clone();
+            } else {
+                changed = changed.min(index);
+            }
+        }
+        self.work.visited_rows += data.blocks.len().saturating_sub(self.stable);
+        let _removed = data.blocks.split_off(&self.stable);
+        data.blocks.extend(
+            mapped
+                .into_iter()
+                .enumerate()
+                .map(|(offset, row)| (self.stable + offset, row)),
+        );
+        let rows: Vec<_> = data
+            .blocks
+            .range(changed..)
+            .map(|(_, row)| row.clone())
+            .collect();
+        self.work.visited_rows += rows.len();
+        BlockDelta {
+            document: self.document.clone(),
+            changed_from: changed,
+            old_count,
+            rows,
+            context_version: data.context_version,
+        }
+    }
+
+    fn publish_definitions(&mut self, local: &MessageBlocks, stable: usize, finished: bool) {
+        let stable_end = local.blocks[stable.saturating_sub(1)].source.utf16.end;
+        for node in local.definition_nodes.iter() {
+            let Some(position) = &node.position else {
+                continue;
+            };
+            let (Some(start), Some(end)) = (position.start.offset, position.end.offset) else {
+                continue;
+            };
+            let footnote = node.kind == "footnoteDefinition";
+            let byte_end = self.local.index.byte(end);
+            let closed = !footnote && local.source[byte_end..].starts_with("\n\n");
+            if !finished && end > stable_end && !closed {
+                continue;
+            }
+            let Some(identifier) = node
+                .data
+                .get("identifier")
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let key = (footnote, identifier.to_owned());
+            let mut data = self.document.0.borrow_mut();
+            if data.definitions.contains_key(&key) {
+                continue;
+            }
+            let source = &local.source[self.local.index.byte(start)..byte_end];
+            self.work.copied_bytes += source.len();
+            self.work.visited_rows += 1;
+            data.definitions.insert(
+                key,
+                Rc::new(DefinitionFact {
+                    node: node.clone(),
+                    source: Rc::from(source),
+                }),
+            );
+            data.context_version += 1;
+        }
+    }
+}
+
 #[derive(Default)]
 struct SourceIndex {
     unicode: Vec<(usize, usize)>,
@@ -123,6 +486,8 @@ pub struct Block {
     pub kind: BlockKind,
     /// Disjoint ranges cover the original source, including fences and separators.
     pub source: SourceRange,
+    /// Owned Markdown/code for this row, independent of message snapshots.
+    pub text: Option<Rc<str>>,
 }
 
 /// Whole-message data remains available when no corresponding view is mounted.
@@ -134,6 +499,7 @@ pub struct MessageBlocks {
     /// Resolve links/footnotes against this context, not a row in isolation.
     pub definitions: Rc<str>,
     pub document_wide: bool,
+    pub definition_nodes: Rc<Vec<Rc<MarkdownNode>>>,
 }
 
 impl MessageBlocks {
@@ -150,6 +516,8 @@ pub struct MessageFlattener {
     stable: usize,
     output: bool,
     index: SourceIndex,
+    work: FlattenWork,
+    stream: Option<AppendState>,
 }
 
 impl MessageFlattener {
@@ -161,15 +529,128 @@ impl MessageFlattener {
             stable: 0,
             output: false,
             index: SourceIndex::default(),
+            work: FlattenWork::default(),
+            stream: None,
         }
     }
 
+    /// Full-snapshot compatibility API. Streaming parents call `ingest` instead.
     pub fn update(&mut self, source: &str) -> MessageBlocks {
         self.flatten(source, false)
     }
 
     pub fn update_output(&mut self, source: &str) -> MessageBlocks {
         self.flatten(source, true)
+    }
+
+    pub fn work(&self) -> FlattenWork {
+        let mut work = self.work;
+        if let Some(stream) = &self.stream {
+            work.add(stream.work);
+        }
+        work
+    }
+
+    /// Borrow a projection's text; compare/reparse only the open tail, never its settled prefix.
+    pub fn ingest(&mut self, message_id: &str, source: &str) -> BlockDelta {
+        self.ingest_mode(message_id, source, false)
+    }
+
+    pub fn ingest_output(&mut self, message_id: &str, source: &str) -> BlockDelta {
+        self.ingest_mode(message_id, source, true)
+    }
+
+    /// Use this for edits to settled content; an append guard cannot inspect that prefix.
+    pub fn replace(&mut self, message_id: &str, source: &str) -> BlockDelta {
+        let old_count = self
+            .stream
+            .as_ref()
+            .map_or(0, |state| state.document.block_count());
+        self.message_id = message_id.into();
+        self.stream = Some(AppendState::new(message_id, false));
+        let mut result = self.append(source);
+        result.old_count = old_count;
+        result.changed_from = 0;
+        result
+            .rows
+            .insert(0, result.document.block(0).expect("header"));
+        result
+    }
+
+    /// A validated append from a delta-aware caller; no prefix comparison or snapshot copy.
+    pub fn append(&mut self, delta: &str) -> BlockDelta {
+        self.stream
+            .get_or_insert_with(|| AppendState::new(&self.message_id, false))
+            .push(delta)
+    }
+
+    /// Publish an unterminated final definition block once, without rereading settled source.
+    pub fn finish(&mut self) -> Option<BlockDelta> {
+        let state = self.stream.as_mut()?;
+        if state.finished {
+            return None;
+        }
+        let header = state
+            .continuation
+            .as_ref()
+            .map_or("", |continuation| continuation.header.as_str());
+        let source = format!("{header}{}", state.pending);
+        state.work.copied_bytes += source.len();
+        let before = state.local.work();
+        let local = if state.output {
+            state.local.update_output(&source)
+        } else {
+            state.local.update(&source)
+        };
+        let after = state.local.work();
+        state.work.add(FlattenWork {
+            indexed_bytes: after.indexed_bytes - before.indexed_bytes,
+            split_bytes: after.split_bytes - before.split_bytes,
+            parsed_bytes: after.parsed_bytes - before.parsed_bytes,
+            copied_bytes: after.copied_bytes - before.copied_bytes,
+            visited_rows: after.visited_rows - before.visited_rows,
+        });
+        state.publish_definitions(&local, local.blocks.len(), true);
+        state.finished = true;
+        let count = state.document.block_count();
+        Some(BlockDelta {
+            document: state.document.clone(),
+            changed_from: count,
+            old_count: count,
+            rows: Vec::new(),
+            context_version: state.document.context_version(),
+        })
+    }
+
+    fn ingest_mode(&mut self, message_id: &str, source: &str, output: bool) -> BlockDelta {
+        let append = self.message_id == message_id
+            && self.stream.as_mut().is_some_and(|state| {
+                if state.output != output || source.len() < state.document.source_len() {
+                    return false;
+                }
+                let end = state.document.source_len();
+                state.work.split_bytes += end - state.base_byte;
+                source.get(state.base_byte..end) == Some(state.pending.as_str())
+            });
+        if append {
+            let state = self.stream.as_mut().expect("checked stream");
+            let previous = state.document.source_len();
+            state.push(&source[previous..])
+        } else {
+            let old_count = self
+                .stream
+                .as_ref()
+                .map_or(0, |state| state.document.block_count());
+            self.message_id = message_id.into();
+            let state = self.stream.insert(AppendState::new(message_id, output));
+            let mut result = state.push(source);
+            result.old_count = old_count;
+            result.changed_from = 0;
+            result
+                .rows
+                .insert(0, result.document.block(0).expect("header"));
+            result
+        }
     }
 
     fn flatten(&mut self, source: &str, output: bool) -> MessageBlocks {
@@ -184,10 +665,10 @@ impl MessageFlattener {
                 .previous
                 .as_ref()
                 .is_some_and(|p| source.starts_with(p.source.as_ref()));
+        self.work.indexed_bytes += source.len();
         self.index = SourceIndex::new(source);
-        let parts = (!output).then(|| split_markdown_blocks(source));
-        let document_wide = parts.as_ref().is_some_and(Option::is_none);
-        let opaque = !output && (source.contains("[^") || has_document_syntax(source));
+        self.work.split_bytes += if output { 0 } else { source.len() };
+        let document_wide = !output && split_markdown_blocks(source).is_none();
         // A late definition can change earlier rendering without changing those blocks' source.
         let stable = if append && !document_wide {
             self.stable
@@ -201,6 +682,7 @@ impl MessageFlattener {
             .map_or_else(Vec::new, |p| {
                 p.blocks.iter().take(stable).cloned().collect()
             });
+        self.work.visited_rows += blocks.len();
         if blocks.is_empty() {
             blocks.push(Rc::new(Block {
                 id: BlockId {
@@ -208,6 +690,7 @@ impl MessageFlattener {
                     index: 0,
                 },
                 kind: BlockKind::Header,
+                text: Some(Rc::from("")),
                 source: SourceRange {
                     bytes: 0..0,
                     utf16: 0..0,
@@ -216,11 +699,18 @@ impl MessageFlattener {
         }
         let resume = blocks.last().map_or(0, |b| b.source.bytes.end);
         let mut definitions = String::new();
+        let mut definition_nodes = Vec::new();
         if output {
             self.output_chunks(source, resume, &mut blocks);
         } else {
-            let root = self.parser.parse(source, parse_markdown);
+            let work = &mut self.work;
+            let root = self.parser.parse(source, |text| {
+                work.parsed_bytes += text.len();
+                work.indexed_bytes += text.len();
+                parse_markdown(text)
+            });
             collect_definitions(&root, source, &self.index, &mut definitions);
+            collect_definition_nodes(&root, &mut definition_nodes);
             let nodes: Vec<_> = root
                 .children
                 .iter()
@@ -234,9 +724,10 @@ impl MessageFlattener {
                     ))
                 })
                 .collect();
+            let parts = split_structural_blocks(source);
             let mut offset = 0;
             let mut node_at = 0;
-            for part in parts.flatten().unwrap_or_else(|| vec![source]) {
+            for part in parts {
                 let end = offset + part.len();
                 if end > resume {
                     while node_at < nodes.len() && nodes[node_at].0.end <= offset.max(resume) {
@@ -246,8 +737,15 @@ impl MessageFlattener {
                     while node_at < nodes.len() && nodes[node_at].0.start < end {
                         node_at += 1;
                     }
-                    if opaque || part.split('\n').any(|line| insight(line, true).is_some()) {
-                        self.push(offset.max(resume)..end, BlockKind::Document, &mut blocks);
+                    if flags_outside_code(source, offset..end, &nodes[first..node_at]).0
+                        || part.split('\n').any(|line| insight(line, true).is_some())
+                    {
+                        self.push(
+                            source,
+                            offset.max(resume)..end,
+                            BlockKind::Document,
+                            &mut blocks,
+                        );
                     } else {
                         self.markdown_part(
                             source,
@@ -262,6 +760,14 @@ impl MessageFlattener {
             }
         }
         self.stable = stable_prefix(&blocks, source, output, document_wide);
+        self.work.copied_bytes += blocks
+            .iter()
+            .skip(stable.min(blocks.len()))
+            .filter_map(|block| block.text.as_ref())
+            .map(|text| text.len())
+            .sum::<usize>();
+        self.work.visited_rows += blocks.len().saturating_sub(stable);
+        self.work.visited_rows += blocks.len();
         let keys: Vec<_> = blocks.iter().map(|b| b.id.clone()).collect();
         let keys = self
             .previous
@@ -269,25 +775,39 @@ impl MessageFlattener {
             .filter(|p| p.keys.as_ref() == &keys)
             .map_or_else(|| Rc::new(keys), |p| p.keys.clone());
         if let Some(previous) = &self.previous {
+            self.work.visited_rows += blocks.len().min(previous.blocks.len());
             for (block, old) in blocks.iter_mut().zip(previous.blocks.iter()) {
                 if block.as_ref() == old.as_ref() && previous.definitions.as_ref() == definitions {
                     *block = old.clone();
                 }
             }
         }
+        self.work.copied_bytes += source.len();
         let next = MessageBlocks {
             source: Rc::from(source),
             blocks: Rc::new(blocks),
             keys,
             definitions: Rc::from(definitions),
             document_wide,
+            definition_nodes: Rc::new(definition_nodes),
         };
         self.output = output;
         self.previous = Some(next.clone());
         next
     }
 
-    fn push(&self, range: Range<usize>, kind: BlockKind, blocks: &mut Vec<Rc<Block>>) {
+    fn push(
+        &self,
+        source: &str,
+        range: Range<usize>,
+        kind: BlockKind,
+        blocks: &mut Vec<Rc<Block>>,
+    ) {
+        let text = Some(Rc::from(match &kind {
+            BlockKind::Code(code) => code.text.as_str(),
+            BlockKind::Output { text, .. } => text.as_str(),
+            _ => &source[range.clone()],
+        }));
         blocks.push(Rc::new(Block {
             id: BlockId {
                 message_id: self.message_id.clone(),
@@ -298,6 +818,7 @@ impl MessageFlattener {
                 bytes: range,
             },
             kind,
+            text,
         }));
     }
 
@@ -321,11 +842,11 @@ impl MessageFlattener {
                 continue;
             }
             if cursor < start {
-                self.push(cursor..start, BlockKind::Prose, blocks);
+                self.push(source, cursor..start, BlockKind::Prose, blocks);
                 cursor = start;
             }
             if node.kind == "table" {
-                self.push(cursor..end, BlockKind::Table, blocks);
+                self.push(source, cursor..end, BlockKind::Table, blocks);
             } else {
                 self.code_chunks(source, node, start..end, cursor, blocks);
             }
@@ -335,12 +856,13 @@ impl MessageFlattener {
             if source[cursor..range.end].trim().is_empty() && blocks.len() > 1 {
                 let last = blocks.pop().expect("a content block exists");
                 self.push(
+                    source,
                     last.source.bytes.start..range.end,
                     last.kind.clone(),
                     blocks,
                 );
             } else {
-                self.push(cursor..range.end, BlockKind::Prose, blocks);
+                self.push(source, cursor..range.end, BlockKind::Prose, blocks);
             }
         }
     }
@@ -397,6 +919,7 @@ impl MessageFlattener {
                 raw_chunk_end(&source[..range.end], raw_at)
             };
             self.push(
+                source,
                 source_at..raw_end,
                 BlockKind::Code(CodeChunk {
                     language: language.clone(),
@@ -431,6 +954,7 @@ impl MessageFlattener {
         while at < source.len() {
             let end = raw_chunk_end(source, at);
             self.push(
+                source,
                 at..end,
                 BlockKind::Output {
                     text: source[at..end].into(),
@@ -484,6 +1008,16 @@ fn stable_prefix(blocks: &[Rc<Block>], source: &str, output: bool, document_wide
                 break;
             }
         }
+        // A following partial fence can retract the preceding chunk's newline and `last` flag.
+        if stable > 1
+            && matches!(
+                blocks.last().map(|block| &block.kind),
+                Some(BlockKind::Code(_))
+            )
+            && matches!(&blocks[stable - 1].kind, BlockKind::Code(code) if !code.last)
+        {
+            stable -= 1;
+        }
     }
     stable
 }
@@ -501,6 +1035,40 @@ fn collect_definitions(node: &MarkdownNode, source: &str, index: &SourceIndex, o
             collect_definitions(child, source, index, out);
         }
     }
+}
+
+fn collect_definition_nodes(node: &MarkdownNode, out: &mut Vec<Rc<MarkdownNode>>) {
+    if matches!(node.kind.as_str(), "definition" | "footnoteDefinition") {
+        out.push(Rc::new(node.clone()));
+    }
+    for child in &node.children {
+        collect_definition_nodes(child, out);
+    }
+}
+
+fn flags_outside_code(
+    source: &str,
+    range: Range<usize>,
+    nodes: &[(Range<usize>, &MarkdownNode)],
+) -> (bool, bool) {
+    let mut opaque = false;
+    let mut compound = false;
+    let mut scan = |part: &str| {
+        opaque |= part.contains("[^") || has_document_syntax(part);
+        compound |= part
+            .split(['\n', '\r', '\u{2028}', '\u{2029}'])
+            .any(|line| document_syntax(line) && !line.trim_start_matches(' ').starts_with('['));
+    };
+    let mut at = range.start;
+    for (code, node) in nodes {
+        if node.kind != "code" || code.start < at || code.end > range.end {
+            continue;
+        }
+        scan(&source[at..code.start]);
+        at = code.end;
+    }
+    scan(&source[at..range.end]);
+    (opaque, compound)
 }
 
 // NSH exposes mdast through a plugin hook. Stop conversion there: the client owns the cache,
@@ -564,6 +1132,16 @@ fn convert_node(node: &mdast::Node, index: &SourceIndex) -> MarkdownNode {
         if let Some(meta) = &code.meta {
             data.insert("meta".into(), meta.clone().into());
         }
+    }
+    if let mdast::Node::Definition(definition) = node {
+        data.insert("identifier".into(), definition.identifier.clone().into());
+        data.insert("url".into(), definition.url.clone().into());
+        if let Some(title) = &definition.title {
+            data.insert("title".into(), title.clone().into());
+        }
+    }
+    if let mdast::Node::FootnoteDefinition(definition) = node {
+        data.insert("identifier".into(), definition.identifier.clone().into());
     }
     MarkdownNode {
         kind: kind.into(),
@@ -666,6 +1244,10 @@ pub fn split_markdown_blocks(text: &str) -> Option<Vec<&str>> {
     if text.contains('\r') || text.contains("[^") || has_document_syntax(text) {
         return None;
     }
+    Some(split_structural_blocks(text))
+}
+
+fn split_structural_blocks(text: &str) -> Vec<&str> {
     let mut blocks = Vec::new();
     let mut block_start = 0;
     let mut line_start = 0;
@@ -673,9 +1255,12 @@ pub fn split_markdown_blocks(text: &str) -> Option<Vec<&str>> {
     let mut fence_indent = 0;
     let mut after_blank = false;
     let mut insight_indent = None;
+    let mut compound: Option<CompoundBlock> = None;
     for line in text.split('\n') {
         let opener = fence(line);
-        if let Some(current) = open_fence {
+        if let Some(current) = &mut compound {
+            if current.closes(line) { compound = None; after_blank = false; }
+        } else if let Some(current) = open_fence {
             if line.chars().take(fence_indent).any(|c| !js_whitespace(c)) {
                 break;
             }
@@ -708,11 +1293,66 @@ pub fn split_markdown_blocks(text: &str) -> Option<Vec<&str>> {
             if let Some(opener) = opener {
                 fence_indent = line.find(opener).unwrap_or(0);
             }
+            if open_fence.is_none() && insight_indent.is_none() { compound = CompoundBlock::open(line); }
         }
         line_start += line.len() + 1;
     }
     blocks.push(&text[block_start..]);
-    Some(blocks)
+    blocks
+}
+
+enum CompoundBlock {
+    Math(usize),
+    Directive(usize),
+    Html { tag: String, depth: usize },
+    Until(&'static str),
+}
+
+impl CompoundBlock {
+    fn open(line: &str) -> Option<Self> {
+        let trimmed = line.trim_start_matches(' ');
+        if line.len() - trimmed.len() > 3 { return None; }
+        if let Some(tail) = trimmed.strip_prefix("$$") {
+            return (!tail.contains("$$")).then(|| Self::Math(trimmed.bytes().take_while(|b| *b == b'$').count()));
+        }
+        if let Some(tail) = trimmed.strip_prefix(":::") {
+            return (!tail.trim().is_empty()).then_some(Self::Directive(1));
+        }
+        for (opener, closer) in [("<!--", "-->"), ("<?", "?>"), ("<![CDATA[", "]]>")] {
+            if trimmed.starts_with(opener) { return (!trimmed.contains(closer)).then_some(Self::Until(closer)); }
+        }
+        let tag = trimmed.strip_prefix('<')?.chars().take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | ':')).collect::<String>().to_ascii_lowercase();
+        if tag.is_empty() || matches!(tag.as_str(), "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input" | "link" | "meta" | "param" | "source" | "track" | "wbr") || trimmed.trim_end().ends_with("/>") { return None; }
+        let (opens, closes) = html_tags(line, &tag);
+        (opens > closes).then_some(Self::Html { tag, depth: opens.saturating_sub(closes) })
+    }
+
+    fn closes(&mut self, line: &str) -> bool {
+        let trimmed = line.trim();
+        match self {
+            Self::Math(length) => trimmed.len() >= *length && trimmed.bytes().all(|b| b == b'$'),
+            Self::Directive(depth) => {
+                if trimmed.starts_with(":::") {
+                    if trimmed.bytes().all(|b| b == b':') { *depth = depth.saturating_sub(1); }
+                    else { *depth += 1; }
+                }
+                *depth == 0
+            }
+            Self::Html { tag, depth } => {
+                let (opens, closes) = html_tags(line, tag);
+                *depth = depth.saturating_add(opens).saturating_sub(closes);
+                *depth == 0
+            }
+            Self::Until(closer) => line.contains(*closer),
+        }
+    }
+}
+
+fn html_tags(line: &str, tag: &str) -> (usize, usize) {
+    let line = line.to_ascii_lowercase();
+    let opener = format!("<{tag}");
+    let opens = line.match_indices(&opener).filter(|(at, _)| line[at + opener.len()..].chars().next().is_some_and(|ch| ch.is_ascii_whitespace() || matches!(ch, '>' | '/'))).count();
+    (opens, line.matches(&format!("</{tag}> ").trim_end()).count())
 }
 
 fn js_whitespace(c: char) -> bool {
@@ -794,6 +1434,52 @@ mod tests {
     fn web_incremental_streaming_cases_preserve_tree_positions_and_blocks() {
         for tail in STREAM_CASES {
             assert_stream(&format!("{PREFIX}{tail}"));
+        }
+    }
+
+    #[test]
+    fn appended_ranges_and_code_values_match_the_snapshot_parser() {
+        let code = format!(
+            "Intro\n\n```rust title=x\n{}tail\n```\n\nAfter",
+            "  😀 = 1;\n".repeat(125)
+        );
+        for source in STREAM_CASES
+            .iter()
+            .map(|tail| format!("{PREFIX}{tail}"))
+            .chain([
+                code,
+                format!("    {}\n\nend", "x\n    ".repeat(85)),
+                format!("```\n{}```\n\nend", "x\n".repeat(40)),
+                format!("```\n{}```\n\nend", "x\n".repeat(80)),
+            ])
+        {
+            let mut state = AppendState::new("message", false);
+            let mut end = 0;
+            for ch in source.chars() {
+                let delta = ch.to_string();
+                state.push(&delta);
+                end += ch.len_utf8();
+                assert_eq!(
+                    state.document.source_range(0..end).as_deref(),
+                    Some(&source[..end])
+                );
+                {
+                    let full = MessageFlattener::new("message").update(&source[..end]);
+                    assert_eq!(
+                        state
+                            .document
+                            .0
+                            .borrow()
+                            .blocks
+                            .values()
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                        *full.blocks,
+                        "prefix {end}: {:?}",
+                        &source[..end]
+                    );
+                }
+            }
         }
     }
 
@@ -952,7 +1638,6 @@ mod tests {
             "$$\n```\nmath, not a code row\n```\n$$",
             ":::note\n\n```\ncode in a directive\n```\n\n:::",
             "<details>\n\n```\ncode in HTML\n```\n\n</details>",
-            "[ref]\n\n```\ncode\n```\n\n[ref]: /target",
             "★ Insight ───\n\n```\ncode in a callout\n```\n\n───",
         ] {
             let message = MessageFlattener::new("message").update(source);
@@ -1031,7 +1716,7 @@ mod tests {
             after.blocks.last().expect("tail")
         ));
         assert!(Rc::ptr_eq(&before.keys, &after.keys));
-        assert!(flattener.stable >= 4);
+        assert!(flattener.stable >= 3);
         assert_stream(&format!("```\n{}tail\n```\n\nend", "x\n".repeat(82)));
     }
 

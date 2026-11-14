@@ -3,7 +3,7 @@ use crate::support::{DESKTOP, PHONE};
 use nsh_core::prelude::*;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::{Headless, LayoutNode};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::rc::Rc;
 use t3_client::thread_views::messages_timeline::{
     MessagesTimelineRow, MessagesTimelineRowsInput, derive_messages_timeline_rows,
@@ -66,9 +66,12 @@ fn UserRowFixture() -> impl IntoElement {
         assert!(!row.id.is_empty());
         edits.update(|n| *n += 1);
     }));
-    let working = context.working;
-    let reverting = context.reverting;
-    let find_active = context.find_active;
+    let working = signal(false);
+    let reverting = signal(false);
+    let find_active = signal(false);
+    context.working = computed(move || working.get());
+    context.reverting = computed(move || reverting.get());
+    context.find_active = computed(move || find_active.get());
     let mut root = view().w_full().h_full();
     for (label, kind) in [
         ("Automation example", "automation"),
@@ -81,42 +84,44 @@ fn UserRowFixture() -> impl IntoElement {
     ] {
         root = root.child(
             nsh_base::button()
-                .accessibility_label(Some(SharedString::from(t(label))))
+                .accessibility_label(Some(SharedString::from(label)))
                 .on_press(move || selected.set(kind))
-                .child(text(t(label))),
+                .child(text(label)),
         );
     }
-    root.child(
-        nsh_base::button()
-            .accessibility_label(Some(SharedString::from(t("Toggle working"))))
-            .on_press(move || working.update(|value| *value = !*value))
-            .child(text(t("Toggle working"))),
-    )
-    .child(
-        nsh_base::button()
-            .accessibility_label(Some(SharedString::from(t("Toggle reverting"))))
-            .on_press(move || reverting.update(|value| *value = !*value))
-            .child(text(t("Toggle reverting"))),
-    )
-    .child(
-        nsh_base::button()
-            .accessibility_label(Some(SharedString::from(t("Reveal for find"))))
-            .on_press(move || {
-                find_active.set(true);
-                state.reveal(selected.get_untracked());
-            })
-            .child(text(t("Reveal for find"))),
-    )
-    .child(text(move || {
-        SharedString::from(tr(
-            "Edits: {count}",
-            &[("count", Argument::Int(edits.get()))],
-        ))
-    }))
-    .child(user::user_message_row(
-        computed(move || projection(selected.get())),
-        context,
-    ))
+    let content = root
+        .child(
+            nsh_base::button()
+                .accessibility_label(Some(SharedString::from(t("Toggle working"))))
+                .on_press(move || working.update(|value| *value = !*value))
+                .child(text(t("Toggle working"))),
+        )
+        .child(
+            nsh_base::button()
+                .accessibility_label(Some(SharedString::from(t("Toggle reverting"))))
+                .on_press(move || reverting.update(|value| *value = !*value))
+                .child(text(t("Toggle reverting"))),
+        )
+        .child(
+            nsh_base::button()
+                .accessibility_label(Some(SharedString::from(t("Reveal for find"))))
+                .on_press(move || {
+                    find_active.set(true);
+                    state.reveal(selected.get_untracked());
+                })
+                .child(text(t("Reveal for find"))),
+        )
+        .child(text(move || {
+            SharedString::from(tr(
+                "Edits: {count}",
+                &[("count", Argument::Int(edits.get()))],
+            ))
+        }))
+        .child(user::user_message_row(
+            computed(move || projection(selected.get())),
+            context,
+        ));
+    t3_ui::ui::toast::anchored_toast_provider(content)
 }
 fn fixture(window: (f32, f32)) -> Headless {
     let mut registries = t3_ui::registries();
@@ -225,7 +230,7 @@ fn client_file_guest_and_markdown_content_render_without_injected_presentations(
     }
 }
 #[test]
-fn long_messages_fold_at_twice_the_root_rem_height_and_find_reveals_them() {
+fn long_messages_measure_the_rem_threshold_and_find_reveals_them() {
     for window in [PHONE, DESKTOP] {
         let mut app = fixture(window);
         app.wait_for("Daily audit").expect("row");

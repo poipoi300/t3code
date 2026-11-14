@@ -65,9 +65,73 @@ pub fn formats() -> Formats {
     Formats::new(translator().locale())
 }
 
+/// What a component's text slot holds (ui-package-addendum.md, "Translation keys and content").
+/// A key is English source text the code owns, translated when shown. Content is shown as it
+/// is: user and agent text, names, paths, formatted dates, times, durations and counts, server
+/// details, and text a caller already translated. A literal in our code converts to a key; a
+/// runtime string converts to content, so a slot cannot translate content by accident.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Text {
+    Key(SharedString),
+    Content(SharedString),
+}
+
+impl Text {
+    /// An English sentence the client returns for display (its message is a catalogue key).
+    pub fn client_key(source: impl Into<SharedString>) -> Self {
+        Self::Key(source.into())
+    }
+
+    pub fn content(text: impl Into<SharedString>) -> Self {
+        Self::Content(text.into())
+    }
+
+    /// The text to show in the UI language.
+    pub fn resolve(&self) -> SharedString {
+        match self {
+            Self::Key(source) => ts(source),
+            Self::Content(text) => text.clone(),
+        }
+    }
+}
+
+impl From<&'static str> for Text {
+    fn from(source: &'static str) -> Self {
+        Self::Key(source.into())
+    }
+}
+
+impl From<String> for Text {
+    fn from(text: String) -> Self {
+        Self::Content(text.into())
+    }
+}
+
+impl From<SharedString> for Text {
+    fn from(text: SharedString) -> Self {
+        Self::Content(text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_keys_are_translated_and_runtime_strings_are_content() {
+        assert!(matches!(Text::from("Copy"), Text::Key(_)));
+        let formatted = String::from("Nov 13, 9:41 PM");
+        assert_eq!(
+            Text::from(formatted.clone()),
+            Text::Content(formatted.into())
+        );
+        let already = SharedString::from(t("Delete thread"));
+        assert_eq!(Text::from(already.clone()).resolve(), already);
+        assert!(matches!(
+            Text::client_key("Enter a message."),
+            Text::Key(_)
+        ));
+    }
 
     #[test]
     fn outside_an_engine_the_source_text_is_used() {

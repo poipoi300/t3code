@@ -9,7 +9,7 @@ use serde_json::json;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 use t3_client::thread_views::messages_timeline::{
-    MessagesTimelineRowContent, MessagesTimelineRowsInput, SentMessageEntry, TimelineLatestRun,
+    MessagesTimelineRowContent, MessagesTimelineRowsInput, TimelineLatestRun,
     derive_messages_timeline_rows,
 };
 use t3_client::types::{EnvironmentId, ThreadId, ThreadKey};
@@ -53,6 +53,9 @@ fn AssistantFixture() -> impl IntoElement {
         if embedded.get() {
             entries.push(Rc::new(serde_json::from_value(json!({"id":"html","kind":"html-render","createdAt":AT,"runId":"run","htmlRender":{"attachmentId":"preview","title":"Preview","height":420}})).expect("embedded entry")));
         }
+        if sent.get() {
+            entries.push(Rc::new(serde_json::from_value(json!({"id":"sent","kind":"sent-message","createdAt":AT,"runId":"run","text":"[Across fragments][ref]\n\n[ref]: https://example.test"})).expect("canonical sent message")));
+        }
         derive_messages_timeline_rows(&MessagesTimelineRowsInput {
             timeline_entries: entries,
             is_working: working.get(),
@@ -69,17 +72,6 @@ fn AssistantFixture() -> impl IntoElement {
                 completed_at: (!working.get()).then(|| AT.into()),
                 turn_ended: None,
             }),
-            sent_messages: if sent.get() {
-                vec![SentMessageEntry {
-                    id: "sent".into(),
-                    created_at: AT.into(),
-                    run_id: Some("run".into()),
-                    text: "[Across fragments][ref]\n\n[ref]: https://example.test".into(),
-                    before_entry_id: None,
-                }]
-            } else {
-                vec![]
-            },
             ..Default::default()
         })
     });
@@ -96,7 +88,7 @@ fn AssistantFixture() -> impl IntoElement {
     let release = stored(Some(release));
     let waiting = stored(Some(waiting));
     let mut context = AssistantRowContext::new(state);
-    context.timestamp_format = t3_contracts::settings::TimestampFormat::V24Hour;
+    context.timestamp_format = computed(|| t3_contracts::settings::TimestampFormat::V24Hour);
     context.thread_ref = Some(ThreadKey {
         environment: EnvironmentId("environment".into()),
         thread: ThreadId("conversation".into()),
@@ -161,6 +153,14 @@ fn AssistantFixture() -> impl IntoElement {
                 .child(control("Directives", move || {
                     working.set(false);
                     value.set(entry(DIRECTIVES, false, "completed"));
+                }))
+                .child(control("Replace with code", move || {
+                    working.set(false);
+                    value.set(entry(
+                        "```rust\nlet code_transition = 7;\n```",
+                        false,
+                        "completed",
+                    ));
                 }))
                 .child(control("Hide row", move || visible.set(false)))
                 .child(control("Show row", move || visible.set(true)))
@@ -344,6 +344,24 @@ fn concrete_fork_and_reply_controls_keep_source_identity_and_busy_state_through_
 }
 
 #[test]
+fn a_settled_edit_reuses_the_message_identity_and_switches_its_prose_leaf_to_code() {
+    let mut app = start(PHONE);
+    app.wait_for("Working draft").expect("initial prose");
+    app.press("role:button[Finish]").expect("settle prose");
+    app.wait_for("Final answer").expect("settled prose");
+    app.press("role:button[Replace with code]")
+        .expect("edit same message");
+    app.wait_for("role:button[Copy code]")
+        .expect("code chrome replaces prose leaf");
+    app.press("role:button[Copy code]")
+        .expect("copy actual code");
+    app.wait_until("code is copied", Duration::from_secs(2), |screen| {
+        screen.clipboard() == Some("let code_transition = 7;")
+    })
+    .expect("copy uses the code leaf source");
+}
+
+#[test]
 fn sent_message_uses_the_complete_client_source_for_reference_links() {
     let mut app = start(PHONE);
     app.wait_for("Working draft").expect("mounted");
@@ -351,4 +369,33 @@ fn sent_message_uses_the_complete_client_source_for_reference_links() {
         .expect("client sent message");
     app.wait_for("Across fragments")
         .expect("standalone Markdown resolves its reference definition");
+}
+
+#[test]
+fn the_demo_timeline_mounts_meta_and_copies_the_terminal_response_without_an_injected_renderer() {
+    for window in [PHONE, DESKTOP] {
+        let mut app = crate::support::start(window);
+        crate::support::pair(&mut app);
+        app.press("role:button[Build the shared Rust UI slice]")
+            .expect("open the real thread page");
+        app.wait_for("I added clamp next to sum and the tests pass.")
+            .expect("real timeline body");
+        app.wait_for("role:button[Copy message]")
+            .expect("client-derived terminal response meta");
+        if window == DESKTOP {
+            app.hover("role:button[Copy message]")
+                .expect("assistant frame reveals meta on hover");
+        }
+        app.press("role:button[Copy message]").expect("copy reply");
+        app.wait_until(
+            "terminal reply reaches the clipboard",
+            Duration::from_secs(2),
+            |screen| {
+                screen.clipboard().is_some_and(|text| {
+                    text.contains("I added `clamp` next to `sum` and the tests pass.")
+                })
+            },
+        )
+        .expect("the timeline uses the component's real copy path");
+    }
 }

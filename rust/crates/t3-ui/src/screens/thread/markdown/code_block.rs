@@ -8,8 +8,8 @@ use nsh_core::prelude::*;
 use serde_json::Value as Json;
 
 use crate::i18n::{Value, t, tr};
-use crate::theme::{palette, tw};
-use crate::ui::button::{ButtonSize, ButtonVariant};
+use crate::theme::tw;
+use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::Icon;
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
@@ -22,6 +22,8 @@ pub struct CodeBlockProps {
     pub language: String,
     pub fence_title: Option<String>,
     pub is_streaming: bool,
+    /// The host carries html[data-theme-id], which selects the code-surface CSS rules.
+    pub themed: bool,
     /// ChatMarkdown supplies onRunShellCommand only for a closed fence and an allowed action.
     pub run_shell_command_available: bool,
     pub default_wrapped: bool,
@@ -36,6 +38,7 @@ impl Default for CodeBlockProps {
             language: "text".into(),
             fence_title: None,
             is_streaming: false,
+            themed: false,
             run_shell_command_available: false,
             default_wrapped: true,
             can_wrap: true,
@@ -48,7 +51,7 @@ impl Default for CodeBlockProps {
 pub struct CodeBlockOptions {
     pub on_run_shell_command: Option<Rc<dyn Fn(String)>>,
     pub view_toggle: Option<Slot>,
-    /// None uses NSH's fire-and-forget clipboard; only acknowledged writes show Copied.
+    /// Optional host write adapter; the default uses NSH and owns its copy feedback.
     pub copy: Option<CopyCode>,
 }
 
@@ -99,18 +102,12 @@ impl CodeBlockState {
         let Some(copy) = copy else {
             // NSH supplies no write result; clipboard reads require a separate permission.
             set_clipboard(code);
+            self.did_copy();
             return;
         };
         self.owner.run(|| spawn(async move {
             match copy(code).await {
-                Ok(()) => {
-                    if let Some(timer) = self.reset.replace(None) { timer.cancel(); }
-                    self.copied.set(true);
-                    self.reset
-                        .replace(Some(set_timeout(Duration::from_millis(1200), move || {
-                            self.copied.set(false);
-                        })));
-                }
+                Ok(()) => self.did_copy(),
                 Err(cause) => {
                     log::error!(
                         "[chat-markdown] action failed: copy-code-block language={language:?} fenceTitle={fence_title:?}: {cause}"
@@ -119,6 +116,19 @@ impl CodeBlockState {
                 }
             }
         }));
+    }
+
+    fn did_copy(self) {
+        self.owner.run(|| {
+            if let Some(timer) = self.reset.replace(None) {
+                timer.cancel();
+            }
+            self.copied.set(true);
+            self.reset
+                .replace(Some(set_timeout(Duration::from_millis(1200), move || {
+                    self.copied.set(false)
+                })));
+        });
     }
 }
 
@@ -135,18 +145,22 @@ pub fn markdown_code_block(
             .get()
             .unwrap_or_else(|| props.with(|p| p.default_wrapped))
     });
-    let can_run = computed({
-        let available = options.on_run_shell_command.is_some();
+    let run_available = computed({
+        let callback = options.on_run_shell_command.is_some();
         move || {
             props.with(|p| {
-                can_run_shell_command(
-                    &p.code,
-                    &p.language,
-                    p.is_streaming,
-                    available && p.run_shell_command_available,
-                )
+                callback
+                    && p.run_shell_command_available
+                    && !p.is_streaming
+                    && shell_language(&p.language)
             })
         }
+    });
+    let can_run = computed(move || {
+        if !run_available.get() {
+            return false;
+        }
+        props.with(|p| can_run_shell_command(&p.code, &p.language, false, true))
     });
     let run = options.on_run_shell_command.clone();
     let copy = options.copy.clone();
@@ -155,9 +169,9 @@ pub fn markdown_code_block(
         action_button(
             move || {
                 if state.copied.get() {
-                    "Copied"
+                    ActionLabel::Copied
                 } else {
-                    "Copy code"
+                    ActionLabel::Copy
                 }
             },
             move || {
@@ -168,7 +182,6 @@ pub fn markdown_code_block(
                 }
             },
             || ButtonVariant::GhostMuted,
-            || None,
             move || {
                 let p = props.get_untracked();
                 state.copy(p.code, p.language, p.fence_title, copy.clone());
@@ -210,9 +223,9 @@ pub fn markdown_code_block(
                             action_button(
                                 move || {
                                     if wrapped.get() {
-                                        "Disable line wrap"
+                                        ActionLabel::DisableWrap
                                     } else {
-                                        "Wrap lines"
+                                        ActionLabel::Wrap
                                     }
                                 },
                                 || Glyph::Wrap,
@@ -223,7 +236,6 @@ pub fn markdown_code_block(
                                         ButtonVariant::GhostMuted
                                     }
                                 },
-                                move || Some(wrapped.get()),
                                 move || state.wrap_override.set(Some(!wrapped.get_untracked())),
                             )
                         },
@@ -233,10 +245,9 @@ pub fn markdown_code_block(
                         move || {
                             let run = run.clone();
                             action_button(
-                                || "Run in terminal",
+                                || ActionLabel::Run,
                                 || Glyph::Play,
                                 || ButtonVariant::GhostMuted,
-                                || None,
                                 move || {
                                     let p = props.get_untracked();
                                     if can_run_shell_command(
@@ -280,12 +291,12 @@ pub fn markdown_code_block_frame(
             .child(markdown_code_block_title_content(props))
             .into_element()
     });
-    // chat-markdown-codeblock is a selector hook; dir=ltr has no NSH direction prop.
-    view()
-        .app_class(tw("my-[0.65rem] text-start overflow-hidden rounded-lg border border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32"))
+    // NSH separates the layout direction from the text's bidi base direction.
+    view().direction(LayoutDirection::Ltr).writing_direction(WritingDirection::Ltr)
+        .app_class(move || Some(tw(&crate::theme::cn([Some("my-[0.65rem] text-start overflow-hidden rounded-lg border border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32"), props.with(|p| p.themed).then_some("bg-(--code-background) border-contrast-border text-code-foreground dark:border-contrast-border dark:bg-(--code-background)")]))))
         .child(view()
-            // index.css .chat-markdown-codeblock-header; thread-find omits this subtree in its data model.
-            .app_class(tw(&crate::theme::cn([Some("flex items-center justify-between gap-2 pt-1.5 pr-1.5 pb-0 pl-3 select-none text-foreground/72"), options.header_class.as_deref()])))
+            // index.css:2195 and 1537; thread-find excludes header chrome in its data model.
+            .app_class(move || Some(tw(&crate::theme::cn([Some("flex items-center justify-between gap-2 pt-1.5 pr-1.5 pb-0 pl-3 select-none"), Some(if props.with(|p| p.themed) { "text-code-foreground/72" } else { "text-contrast-foreground/72" }), options.header_class.as_deref()]))))
             .child(title)
             .child(actions))
         .child(children)
@@ -318,7 +329,7 @@ pub fn markdown_code_block_title_content(props: Memo<CodeBlockProps>) -> impl In
                         .tooltip(tooltip(
                             handle,
                             TooltipOptions::default(),
-                            text(t(&language)),
+                            text(language.clone()),
                         ))
                         .child(icon)
                         .into_element(),
@@ -331,14 +342,14 @@ pub fn markdown_code_block_title_content(props: Memo<CodeBlockProps>) -> impl In
                 {
                     content.push(icon);
                 }
-                content.push(text(t(&label)).app_class(tw("truncate")).into_element());
+                content.push(text(label).app_class(tw("truncate")).into_element());
                 content
             }
         }
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Glyph {
     Check,
     Copy,
@@ -346,42 +357,64 @@ enum Glyph {
     Play,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActionLabel {
+    Copy,
+    Copied,
+    Wrap,
+    DisableWrap,
+    Run,
+}
+
+impl ActionLabel {
+    fn translated(self) -> String {
+        match self {
+            Self::Copy => t("Copy code"),
+            Self::Copied => t("Copied"),
+            Self::Wrap => t("Wrap lines"),
+            Self::DisableWrap => t("Disable line wrap"),
+            Self::Run => t("Run in terminal"),
+        }
+    }
+}
+
 fn action_button(
-    label: impl Fn() -> &'static str + Copy + 'static,
+    label: impl Fn() -> ActionLabel + Copy + 'static,
     glyph: impl Fn() -> Glyph + Copy + 'static,
     variant: impl Fn() -> ButtonVariant + Copy + 'static,
-    pressed: impl Fn() -> Option<bool> + Copy + 'static,
     on_press: impl Fn() + 'static,
 ) -> AnyElement {
-    let colors = move || crate::ui::button::variant_colors(variant(), &palette());
+    let on_press = Rc::new(on_press);
     let handle = tooltip_create_handle();
-    // The frozen button API has no reactive label/variant or 12px icon slot; keep one native
-    // button so copy/wrap state changes preserve focus, using button.tsx's cva classes here.
-    // Selector/pseudo hit-target classes become direct glyph classes and native hit_slop;
-    // will-change, custom-property and transition hints have no native equivalent.
-    view().app_class(tw("w-fit"))
-        .tooltip(tooltip(handle, TooltipOptions::default(), text(move || SharedString::from(t(label())))))
-        .child(nsh_base::button()
-            .accessibility_label(move || Some(t(label()).into()))
-            // NSH Button exposes selected, but no aria-pressed prop.
-            .selected(move || pressed().unwrap_or(false))
-            .on_press(on_press)
-            .app_class(tw("relative inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-(--control-radius) border font-medium text-base outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background sm:text-sm size-7 sm:size-6 border-transparent"))
-            .bg(move || colors().background)
-            .text_color(move || colors().foreground)
-            .hover(move |s| s.bg(colors().hover))
-            .active(move |s| s.scale(0.97).bg(if variant() == ButtonVariant::Secondary { palette().secondary.opacity(0.8) } else { palette().accent }))
-            .hit_slop(move || EdgeInsets::all(px(((crate::theme::metrics().hit_target - ButtonSize::IconXs.height(&crate::theme::metrics())) / 2.0).max(0.0))))
-            .child(dynamic(move || {
-                let icon = match glyph() {
-                    Glyph::Copy => svg(Icon::Copy.asset()),
-                    Glyph::Check => svg(Icon::Check.asset()),
-                    Glyph::Play => svg(nsh_core::element::ImageSrc::svg_markup(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg>"#)),
-                    Glyph::Wrap => svg(nsh_core::element::ImageSrc::svg_markup(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 16-3 3 3 3M3 12h14.5a1 1 0 0 1 0 7H13M3 19h6M3 5h18"/></svg>"#)),
-                };
-                icon.app_class(tw("size-3 -mx-0.5 pointer-events-none shrink-0"))
-                    .tint_color(move || colors().icon).accessible(false)
-            }))).into_element()
+    let presentation = computed(move || (label().translated(), glyph(), variant()));
+    view()
+        .app_class(tw("w-fit"))
+        .tooltip(tooltip(
+            handle,
+            TooltipOptions::default(),
+            text(move || SharedString::from(label().translated())),
+        ))
+        .child(dynamic(move || {
+            let (label, glyph, variant) = presentation.get();
+            let icon = match glyph {
+                Glyph::Copy => Icon::Copy,
+                Glyph::Check => Icon::Check,
+                Glyph::Play => Icon::Play,
+                Glyph::Wrap => Icon::TextWrap,
+            };
+            // The primitive has static content/variant props; its reactive replacement needs an upstream slot API.
+            let on_press = on_press.clone();
+            untracked(|| {
+                button(
+                    ButtonContent::Icon { icon, label },
+                    variant,
+                    ButtonSize::IconXs,
+                    || false,
+                    move || on_press(),
+                )
+            })
+        }))
+        .into_element()
 }
 
 /// Port of MarkdownCodeBlock.logic.ts extractFenceLanguage / highlighterLanguageOf.
@@ -590,19 +623,25 @@ pub fn estimate_highlighted_size(html: &str, cache_key: &str) -> usize {
 }
 
 pub fn can_run_shell_command(code: &str, language: &str, streaming: bool, available: bool) -> bool {
+    if !available || streaming || !shell_language(language) {
+        return false;
+    }
+    if !code.ends_with('\n') {
+        return false;
+    }
     let command = code.trim_matches(js_whitespace);
-    available
-        && !streaming
-        && matches!(
-            language,
-            "sh" | "bash" | "zsh" | "fish" | "shell" | "powershell" | "pwsh"
-        )
-        && code.ends_with('\n')
-        && !command.is_empty()
+    !command.is_empty()
         && !command.ends_with('\\')
-        && !code[..code.len().saturating_sub(1)]
+        && !code[..code.len() - 1]
             .chars()
             .any(|c| c.is_control() || format_character(c))
+}
+
+fn shell_language(language: &str) -> bool {
+    matches!(
+        language,
+        "sh" | "bash" | "zsh" | "fish" | "shell" | "powershell" | "pwsh"
+    )
 }
 
 fn format_character(c: char) -> bool {

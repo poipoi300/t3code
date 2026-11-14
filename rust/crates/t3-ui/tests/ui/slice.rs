@@ -10,9 +10,9 @@ fn on_a_phone_the_list_is_a_page_and_a_thread_is_pushed_over_it() {
     pair(&mut app);
     assert!(app.screen().shows("Rich composer: chips, IME and paste"));
     assert!(!app.screen().shows("Select a thread"));
-    app.press("role:button[Build the shared Rust UI slice]")
+    app.press("role:button[Build the shared Rust UI slice, t3code]")
         .expect("open thread");
-    app.wait_for("The project has a single math module. I will add a clamp helper beside sum.")
+    app.wait_for("I added clamp next to sum and the tests pass.")
         .expect("timeline shows the conversation");
     app.press("role:button[Back]").expect("back");
     app.wait_for("Rich composer: chips, IME and paste")
@@ -25,15 +25,15 @@ fn on_a_desktop_the_sidebar_stays_beside_the_thread_and_a_sent_message_streams_a
     pair(&mut app);
     app.wait_for("Select a thread")
         .expect("landing beside the sidebar");
-    app.press("role:button[Build the shared Rust UI slice]")
+    app.press("role:button[Build the shared Rust UI slice, t3code]")
         .expect("open thread");
-    app.wait_for("The project has a single math module. I will add a clamp helper beside sum.")
+    app.wait_for("I added clamp next to sum and the tests pass.")
         .expect("timeline");
     assert!(
         app.screen().shows("Rich composer: chips, IME and paste"),
         "sidebar still shown"
     );
-    app.type_text("id:composer", "Ship it everywhere")
+    app.type_text("id:composer-editor", "Ship it everywhere")
         .expect("type");
     app.press("role:button[Send message]").expect("send");
     app.wait_for("Ship it everywhere")
@@ -57,9 +57,9 @@ fn a_malformed_pairing_link_shows_the_clients_reason_and_stays_on_the_pairing_sc
 fn on_the_web_the_slice_starts_pairs_and_opens_a_thread() {
     let mut app = start_on_web(DESKTOP, "https://t3.example.test/?backend=demo");
     pair(&mut app);
-    app.press("role:button[Build the shared Rust UI slice]")
+    app.press("role:button[Build the shared Rust UI slice, t3code]")
         .expect("open thread");
-    app.wait_for("The project has a single math module. I will add a clamp helper beside sum.")
+    app.wait_for("I added clamp next to sum and the tests pass.")
         .expect("timeline");
 }
 

@@ -114,18 +114,7 @@ pub type FileAction = Rc<dyn Fn(&ChatFileAttachment)>;
 pub type ImageAction = Rc<dyn Fn(&MessageAttachment)>;
 pub type AttachmentRenderer = Rc<dyn Fn(&MessageAttachment) -> AnyElement>;
 pub type EntryIconRenderer = Rc<dyn Fn(&str) -> AnyElement>;
-pub type IconRenderer = Rc<dyn Fn() -> AnyElement>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UserMarkdown {
-    pub message_id: String,
-    pub text: String,
-    pub line_breaks: bool,
-    pub parse_raw_html: bool,
-    pub heading_level_offset: u8,
-}
-
-pub type UserMarkdownRenderer = Rc<dyn Fn(UserMarkdown) -> AnyElement>;
 pub type ContextChipRenderer = Rc<
     dyn Fn(
         &t3_client::thread_views::user_message::Reference,
@@ -143,6 +132,20 @@ struct UserMarkdownPlugin {
 impl MarkdownPlugin for UserMarkdownPlugin {
     fn name(&self) -> &str {
         "user-message"
+    }
+    fn block(
+        &self,
+        node: &mdast::Node,
+        context: &mut ParseContext<'_>,
+    ) -> Option<nsh_base::text_view::Block> {
+        let mdast::Node::Heading(heading) = node else {
+            return None;
+        };
+        Some(nsh_base::text_view::Block::Heading {
+            level: (heading.depth + 3).min(6),
+            content: context.inlines(&heading.children),
+            anchor: None,
+        })
     }
     fn inline(&self, node: &mdast::Node, context: &mut ParseContext<'_>) -> Option<Inline> {
         if let mdast::Node::Text(text) = node {
@@ -179,6 +182,14 @@ impl MarkdownPlugin for UserMarkdownPlugin {
                 .as_deref()
                 == Some(&reference.context_id)
         });
+        if let Some(ComposerContextRecord::File(record)) = record
+            && self.row.audio.iter().any(|attachment| {
+                matches!(&attachment.attachment,
+                ChatAttachment::File(file) if file.id == record.attachment_id.0)
+            })
+        {
+            return Some(view().into_element());
+        }
         // CMP-CHIPS owns UserMessageContextReferenceChip and its detail popovers; no invented fallback copy.
         Some(self.chip.as_ref().map_or_else(
             || view().into_element(),
@@ -203,7 +214,7 @@ impl LocalTimestampHost {
             t3_i18n::TimeZone::Iana(name)
         };
         Self {
-            formats: t3_i18n::Formats::new(&locale().to_string()),
+            formats: crate::i18n::formats(),
             zone,
             hour12: settings.hour_cycle.twelve_hour(),
         }
@@ -270,16 +281,14 @@ impl TimestampHost for LocalTimestampHost {
     }
 }
 
-/// Slots are the existing TSX dependencies (ChatMarkdown, media, lifecycle and workflow).
-/// Absent services stay unsupported; callers must supply permission-checked operations.
+/// Later attachment/chip/lifecycle packages supply their components here.
 #[derive(Clone)]
 pub struct UserRowContext {
     pub state: UserRowState,
-    pub find_active: Signal<bool>,
-    pub working: Signal<bool>,
-    pub reverting: Signal<bool>,
-    pub body: Option<UserMarkdownRenderer>,
-    pub timestamp_format: Signal<TimestampFormat>,
+    pub find_active: Memo<bool>,
+    pub working: Memo<bool>,
+    pub reverting: Memo<bool>,
+    pub timestamp_format: Memo<TimestampFormat>,
     pub context_chip: Option<ContextChipRenderer>,
     pub audio: Option<RowSlot>,
     pub workflow: Option<RowSlot>,
@@ -294,13 +303,12 @@ pub struct UserRowContext {
 
 impl UserRowContext {
     pub fn new(state: UserRowState) -> Self {
-        Self {
+        let mut context = Self {
             state,
-            find_active: signal(false),
-            working: signal(false),
-            reverting: signal(false),
-            body: None,
-            timestamp_format: signal(TimestampFormat::Locale),
+            find_active: computed(|| false),
+            working: computed(|| false),
+            reverting: computed(|| false),
+            timestamp_format: computed(|| TimestampFormat::Locale),
             context_chip: None,
             audio: None,
             workflow: None,
@@ -311,7 +319,35 @@ impl UserRowContext {
             revert: None,
             file_open: None,
             file_download: None,
+        };
+        if let Some(nav) = use_context::<crate::state::nav::Navigator>()
+            && let Some(key) = nav.top().thread().cloned()
+        {
+            if let Some(panel) = use_context::<crate::screens::panel::PanelHost>() {
+                let key = key.clone();
+                context.file_open = Some(Rc::new(move |file| {
+                    panel.apply(
+                        &key,
+                        t3_client::view_logic::shell::panels::Action::OpenAttachment(file.clone()),
+                    );
+                }));
+            }
+            if let Some(runtime) = use_context::<crate::runtime::Rt>() {
+                context.open_sender = Some(Rc::new(move |row| {
+                    if let Some(sender) = t3_client::thread_views::user_message::sender_thread_key(
+                        &row.message,
+                        &key.environment,
+                    ) && runtime
+                        .environments()
+                        .iter()
+                        .any(|entry| entry.id == sender.environment)
+                    {
+                        nav.open(crate::state::nav::Route::Thread(sender));
+                    }
+                }));
+            }
         }
+        context
     }
 }
 
@@ -368,15 +404,10 @@ fn automation_message_row(row: Rc<UserRow>, context: UserRowContext) -> impl Int
     let state = context.state;
     let id = row.id.clone();
     let fold = computed(move || state.read(&id));
-    let summary = row.scheduled_task_title.clone().unwrap_or_else(|| {
-        row.text
-            .trim()
-            .split('\n')
-            .next()
-            .unwrap_or_default()
-            .trim_end_matches('\r')
-            .to_owned()
-    });
+    let summary = row
+        .scheduled_task_title
+        .clone()
+        .unwrap_or_else(|| row.summary.clone());
     let body_row = row.clone();
     let body_context = context.clone();
     let actions_row = row.clone();
@@ -397,7 +428,7 @@ fn automation_message_row(row: Rc<UserRow>, context: UserRowContext) -> impl Int
                 .label(SharedString::from(t("Automation")))
                 .child(folded_message_header(
                     Icon::CalendarClock,
-                    t("Automation"),
+                    SharedString::from(t("Automation")),
                     summary,
                     fold,
                     state,
@@ -432,6 +463,7 @@ fn automation_message_row(row: Rc<UserRow>, context: UserRowContext) -> impl Int
 
 fn user_timeline_row(row: Rc<UserRow>, context: UserRowContext) -> impl IntoElement {
     let folded = row.attribution == Attribution::Agent;
+    let sender_label = row.sender_label.clone().unwrap_or_else(|| t("Agent"));
     let state = context.state;
     let id = row.id.clone();
     let fold = computed(move || state.read(&id));
@@ -476,7 +508,7 @@ fn user_timeline_row(row: Rc<UserRow>, context: UserRowContext) -> impl IntoElem
     let background = !row.media_only && !row.file_cards_only && !row.audio_only;
     let guest = matches!(row.attribution, Attribution::Guest(_));
     let heading = match &row.attribution {
-        Attribution::Agent => row.sender_label.clone(),
+        Attribution::Agent => sender_label.clone(),
         Attribution::Guest(name) => tr("{name} (guest)", &[("name", Value::Text(name.clone()))]),
         _ => t("You"),
     };
@@ -499,7 +531,7 @@ fn user_timeline_row(row: Rc<UserRow>, context: UserRowContext) -> impl IntoElem
     if folded {
         bubble = bubble.child(folded_message_header(
             Icon::MessagesSquare,
-            row.sender_label.clone(),
+            SharedString::from(sender_label),
             row.summary.clone(),
             fold,
             state,
@@ -509,6 +541,15 @@ fn user_timeline_row(row: Rc<UserRow>, context: UserRowContext) -> impl IntoElem
     bubble = bubble.child(dynamic(move || {
         (!folded || fold.get().expanded || body_context.find_active.get()).then(|| {
             untracked(|| {
+                let body = user_row_body(body_row.clone(), body_context.clone(), !folded);
+                let body = if folded && !body_context.find_active.get() {
+                    scroll()
+                        .app_class(tw("max-h-96"))
+                        .child(body)
+                        .into_element()
+                } else {
+                    body.into_element()
+                };
                 view()
                     .app_class(move || {
                         Some(tw(&cn([
@@ -516,11 +557,7 @@ fn user_timeline_row(row: Rc<UserRow>, context: UserRowContext) -> impl IntoElem
                             (folded && !fold.get().expanded).then_some("hidden"),
                         ])))
                     })
-                    .child(user_row_body(
-                        body_row.clone(),
-                        body_context.clone(),
-                        !folded,
-                    ))
+                    .child(body)
             })
         })
     }));
@@ -549,14 +586,14 @@ fn user_timeline_row(row: Rc<UserRow>, context: UserRowContext) -> impl IntoElem
 
 fn folded_message_header(
     which: Icon,
-    label: String,
+    label: SharedString,
     summary: String,
     fold: Memo<FoldState>,
     state: UserRowState,
     id: String,
 ) -> impl IntoElement {
     // NSH Button lacks aria-expanded; an expanded prop is needed on the primitive's actual control.
-    nsh_base::button().accessibility_label(Some(SharedString::from(label.clone())))
+    nsh_base::button().accessibility_label(Some(label.clone()))
         .hit_slop(move || control_hit_slop(36.0))
         .on_press(move || state.update(&id, |state| state.expanded = !state.expanded))
         .app_class(tw("flex w-full min-w-0 items-center gap-1.5 rounded-2xl px-3 py-2 text-left text-sm focus-visible:outline-2 focus-visible:outline-ring"))
@@ -571,16 +608,18 @@ fn folded_message_header(
 
 pub fn user_message_intent_marker(intent: &Intent) -> impl IntoElement + use<> {
     let label = if intent.unread {
-        "Steer · waiting to be read"
+        t("Steer · waiting to be read")
     } else {
-        "Steer"
+        t("Steer")
     };
     let hint = if intent.unread {
-        "Waiting for the agent to read this. It reads steers between steps, after a running command finishes."
+        t(
+            "Waiting for the agent to read this. It reads steers between steps, after a running command finishes.",
+        )
     } else if intent.promoted {
-        "Originally queued, then promoted to steer the active turn"
+        t("Originally queued, then promoted to steer the active turn")
     } else {
-        "Steered the active turn"
+        t("Steered the active turn")
     };
 
     view()
@@ -590,10 +629,10 @@ pub fn user_message_intent_marker(intent: &Intent) -> impl IntoElement + use<> {
         .tooltip(tooltip(
             tooltip_create_handle(),
             Default::default(),
-            text(t(hint)),
+            text(hint),
         ))
         .child(icon(Icon::Redo2, 12.0, || palette().muted_foreground))
-        .child(text(t(label)))
+        .child(text(label))
 }
 
 pub fn user_message_projected_status(status: Option<&str>) -> impl IntoElement + use<> {
@@ -601,7 +640,7 @@ pub fn user_message_projected_status(status: Option<&str>) -> impl IntoElement +
     dynamic(move || {
         status.as_deref().filter(|status| !matches!(*status, "completed" | "pending" | "waiting"))
         .map(|status| view().app_class(tw("me-1 flex items-center gap-1.5"))
-            .child(text(t(status)).app_class(tw("rounded-full border border-destructive/25 bg-destructive/8 px-1.5 py-0.5 text-3xs font-medium text-destructive"))))
+            .child(text(crate::i18n::Text::client_key(status.to_owned()).resolve()).app_class(tw("rounded-full border border-destructive/25 bg-destructive/8 px-1.5 py-0.5 text-3xs font-medium text-destructive"))))
     })
 }
 
@@ -631,9 +670,6 @@ fn user_row_body(row: Rc<UserRow>, context: UserRowContext, collapsible: bool) -
                     entry_icon: Some(Rc::new(|_| {
                         icon(Icon::File, 16.0, || palette().muted_foreground).into_element()
                     })),
-                    download_icon: Some(Rc::new(|| {
-                        icon(Icon::Download, 16.0, || palette().muted_foreground).into_element()
-                    })),
                 };
                 files = files.child(if row.file_cards_only {
                     user_file_card(props).into_element()
@@ -647,6 +683,7 @@ fn user_row_body(row: Rc<UserRow>, context: UserRowContext, collapsible: bool) -
                 files = files.child(
                     view()
                         .app_class(tw("flex min-w-0 items-center gap-2 py-1 text-sm"))
+                        .child(icon(Icon::File, 16.0, || palette().muted_foreground))
                         .child(
                             text(attachment.name.clone()).app_class(tw("min-w-0 flex-1 truncate")),
                         ),
@@ -717,24 +754,50 @@ fn message_actions(
         || (row.attribution == Attribution::Agent && row.can_open_sender)
     {
         let (label, action) = if automation {
-            ("Open automation", &context.open_automation)
+            (t("Open automation"), &context.open_automation)
         } else {
-            ("Open thread", &context.open_sender)
+            (t("Open thread"), &context.open_sender)
         };
         let action = action.clone();
+        let runtime = use_context::<crate::runtime::Rt>();
+        let sender = use_context::<crate::state::nav::Navigator>()
+            .and_then(|nav| nav.top().thread().cloned())
+            .and_then(|key| {
+                t3_client::thread_views::user_message::sender_thread_key(
+                    &row.message,
+                    &key.environment,
+                )
+            });
+        let available = computed(move || {
+            automation
+                || match (runtime, &sender) {
+                    (Some(runtime), Some(sender)) => runtime
+                        .environments()
+                        .iter()
+                        .any(|entry| entry.id == sender.environment),
+                    (Some(_), None) => false,
+                    (None, _) => true,
+                }
+        });
         let row = row.clone();
         let disabled = action.is_none();
-        actions = actions.child(button(
-            ButtonContent::Label(t(label)),
-            ButtonVariant::Link,
-            ButtonSize::Xs,
-            move || disabled,
-            move || {
-                if let Some(action) = &action {
-                    action(&row);
-                }
-            },
-        ));
+        actions = actions.child(dynamic(move || {
+            available.get().then(|| {
+                let action = action.clone();
+                let row = row.clone();
+                button(
+                    ButtonContent::Label(label.clone()),
+                    ButtonVariant::Link,
+                    ButtonSize::Xs,
+                    move || disabled,
+                    move || {
+                        if let Some(action) = &action {
+                            action(&row);
+                        }
+                    },
+                )
+            })
+        }));
     }
     actions = actions.child(
         view()
@@ -760,8 +823,7 @@ fn message_actions(
             row,
             context.state,
             row.copy_text.clone(),
-            "Copy message",
-            Icon::Copy,
+            CopyKind::Message,
         ));
     }
     if let Some(link) = &row.prompt_link {
@@ -769,46 +831,74 @@ fn message_actions(
             row,
             context.state,
             link.clone(),
-            "Copy prompt link",
-            Icon::Link,
+            CopyKind::PromptLink,
         ));
     }
     actions.child(controls)
 }
 
+#[derive(Clone, Copy)]
+enum CopyKind {
+    Message,
+    PromptLink,
+}
+impl CopyKind {
+    fn label(self) -> String {
+        match self {
+            Self::Message => t("Copy message"),
+            Self::PromptLink => t("Copy prompt link"),
+        }
+    }
+    fn icon(self) -> Icon {
+        match self {
+            Self::Message => Icon::Copy,
+            Self::PromptLink => Icon::Link,
+        }
+    }
+}
 fn message_copy_button(
     row: &UserRow,
     state: UserRowState,
     source: String,
-    label: &'static str,
-    glyph: Icon,
+    kind: CopyKind,
 ) -> impl IntoElement + use<> {
-    let key = format!("{}:{label}", row.id);
+    let key = format!(
+        "{}:{}",
+        row.id,
+        match kind {
+            CopyKind::Message => "message",
+            CopyKind::PromptLink => "prompt-link",
+        }
+    );
     let observe_key = key.clone();
     let copied = computed(move || state.read(&observe_key).copied);
     let source = Rc::new(source);
-    dynamic(move || {
-        let anchor = element_ref();
-        let key = key.clone();
-        let source = source.clone();
-        view()
-            .element_ref(&anchor)
-            .tooltip(tooltip(
-                tooltip_create_handle(),
-                Default::default(),
-                text(t(label)),
-            ))
-            .child(button(
+    let anchor = element_ref();
+    view()
+        .element_ref(&anchor)
+        .tooltip(tooltip(
+            tooltip_create_handle(),
+            Default::default(),
+            text(move || SharedString::from(kind.label())),
+        ))
+        .child(dynamic(move || {
+            let key = key.clone();
+            let source = source.clone();
+            button(
                 ButtonContent::Icon {
-                    icon: if copied.get() { Icon::Check } else { glyph },
-                    label: t(label),
+                    icon: if copied.get() {
+                        Icon::Check
+                    } else {
+                        kind.icon()
+                    },
+                    label: kind.label(),
                 },
                 ButtonVariant::GhostMuted,
                 ButtonSize::Xs,
                 move || copied.get(),
                 move || state.copy(key.clone(), source.as_ref().clone(), anchor),
-            ))
-    })
+            )
+        }))
 }
 
 fn actions_frame(actions: impl IntoElement) -> impl IntoElement {
@@ -909,14 +999,14 @@ fn collapsible_user_message_body(
             can_collapse().then(|| {
                 let toggle_id = toggle_id.clone();
                 let label = if fold.get().body_expanded {
-                    "Show less"
+                    t("Show less")
                 } else {
-                    "Show full message"
+                    t("Show full message")
                 };
                 view()
                     .app_class(tw("mt-1.5 flex items-center justify-end gap-2"))
                     .child(view().app_class(tw("-ml-1")).child(button(
-                        ButtonContent::Label(t(label)),
+                        ButtonContent::Label(label),
                         ButtonVariant::GhostMuted,
                         ButtonSize::Xs,
                         || false,
@@ -931,15 +1021,6 @@ fn collapsible_user_message_body(
 }
 
 fn user_message_body(row: &UserRow, context: &UserRowContext) -> AnyElement {
-    if let Some(body) = &context.body {
-        return body(UserMarkdown {
-            message_id: row.id.clone(),
-            text: row.text.clone(),
-            line_breaks: true,
-            parse_raw_html: false,
-            heading_level_offset: 3,
-        });
-    }
     let plugin = UserMarkdownPlugin {
         row: Rc::new(row.clone()),
         chip: context.context_chip.clone(),
@@ -953,14 +1034,38 @@ fn user_message_body(row: &UserRow, context: &UserRowContext) -> AnyElement {
         .markdown(&row.text);
     nsh_base::text_view()
         .document(Some(document))
-        .render_custom(Some(nsh_core::element::Renderer::new(move |node| {
-            plugin.render(node).unwrap_or_else(|| view().into_element())
-        })))
+        .render_custom(move |node| plugin.render(node).unwrap_or_else(|| view().into_element()))
+        .render_code_block(user_code_block)
         .selectable(true)
         .classes(TextViewClasses::default())
         .text_color(move || palette().message_foreground)
         .app_class(tw("text-message-foreground text-sm leading-relaxed"))
         .into_element()
+}
+
+fn user_code_block(code: &nsh_base::text_view::CodeBlock) -> AnyElement {
+    use crate::screens::thread::markdown::code_block::{
+        CodeBlockOptions, CodeBlockProps, CodeBlockState, extract_fence_title, markdown_code_block,
+    };
+    let props = CodeBlockProps {
+        code: code.code.clone(),
+        language: code.language.clone().unwrap_or_else(|| "text".into()),
+        fence_title: extract_fence_title(code.meta.as_deref()),
+        ..Default::default()
+    };
+    let body = code.code.clone();
+    markdown_code_block(
+        computed(move || props.clone()),
+        CodeBlockState::new(),
+        CodeBlockOptions::default(),
+        move |_| {
+            text(SharedString::from(body.clone()))
+                .select_text()
+                .app_class(tw("font-mono"))
+                .into_element()
+        },
+    )
+    .into_element()
 }
 
 fn control_hit_slop(control_size: f32) -> EdgeInsets {
@@ -978,7 +1083,6 @@ pub struct FilePresentation {
     pub open: Option<FileAction>,
     pub download: Option<FileAction>,
     pub entry_icon: Option<EntryIconRenderer>,
-    pub download_icon: Option<IconRenderer>,
 }
 
 pub fn user_file_card(file: FilePresentation) -> impl IntoElement {
@@ -990,7 +1094,7 @@ pub fn user_file_card(file: FilePresentation) -> impl IntoElement {
     } else if pasted {
         size
     } else {
-        format!("{} · {size}", t(&file.extension))
+        format!("{} · {size}", file.extension)
     };
     let entry_icon = view()
         .app_class(tw(
@@ -1032,21 +1136,21 @@ pub fn user_file_card(file: FilePresentation) -> impl IntoElement {
     let downloadable = file.downloadable;
     let download = file.download.clone().filter(|_| downloadable);
     let disabled = download.is_none();
-    // ButtonContent has no custom-icon slot; preserve the icon-xs ghost-muted classes here.
-    let download_button = nsh_base::button()
-        .accessibility_label(Some(SharedString::from(download_label.clone())))
-        .disabled(disabled)
-        .hit_slop(move || control_hit_slop(24.0))
-        .app_class(tw("inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-64 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
-        .on_press(move || { if let Some(download) = &download { download(&file.file); } })
-        .child(file.download_icon.as_ref().map(|render| render()));
-    let hint = if !downloadable {
-        t("Sending attachment")
-    } else if disabled || file.open.is_none() {
-        download_label.clone()
-    } else {
-        download_label
-    };
+    let download_button = button(
+        ButtonContent::Icon {
+            icon: Icon::Download,
+            label: download_label.clone(),
+        },
+        ButtonVariant::GhostMuted,
+        ButtonSize::IconXs,
+        move || disabled,
+        move || {
+            if let Some(download) = &download {
+                download(&file.file);
+            }
+        },
+    );
+    let hint = download_label;
     view().app_class(tw("flex w-64 max-w-full items-center gap-1 rounded-2xl bg-message py-2 ps-2 pe-1 text-message-foreground"))
         .child(identity)
         .child(view().tooltip(tooltip(tooltip_create_handle(), Default::default(), text(hint))).child(download_button))
@@ -1107,26 +1211,37 @@ pub fn user_file_attachment(file: FilePresentation) -> impl IntoElement {
         .hit_slop(move || control_hit_slop(28.0))
         .on_press(move || { if let Some(open) = &open { open(&attachment); } })
         .app_class(tw("focus-visible:ring-ring/70 flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:outline-none"))
-        // Eye awaits UI-ICONS, like PierreEntryIcon and Download.
-        .child(glyph).child(identity);
+        .child(glyph).child(identity)
+        .child(icon(Icon::Eye, 16.0, || palette().muted_foreground));
     let download = file.download.clone();
     let disabled = download.is_none();
     let download_label = tr("Download {label}", &[("label", Value::Text(label))]);
-    let hint = if disabled || file.open.is_none() {
-        download_label.clone()
-    } else {
-        download_label.clone()
-    };
-    view().app_class(tw("flex min-w-0 items-center gap-1"))
+    let hint = download_label.clone();
+    view()
+        .app_class(tw("flex min-w-0 items-center gap-1"))
         .child(preview)
-        .child(view().tooltip(tooltip(tooltip_create_handle(), Default::default(), text(hint)))
-            .child(nsh_base::button()
-                .accessibility_label(Some(SharedString::from(download_label)))
-                .disabled(disabled)
-                .hit_slop(move || control_hit_slop(24.0))
-                .app_class(tw("inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-64 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
-                .on_press(move || { if let Some(download) = &download { download(&file.file); } })
-                .child(file.download_icon.as_ref().map(|render| render()))))
+        .child(
+            view()
+                .tooltip(tooltip(
+                    tooltip_create_handle(),
+                    Default::default(),
+                    text(hint),
+                ))
+                .child(button(
+                    ButtonContent::Icon {
+                        icon: Icon::Download,
+                        label: download_label,
+                    },
+                    ButtonVariant::GhostMuted,
+                    ButtonSize::IconXs,
+                    move || disabled,
+                    move || {
+                        if let Some(download) = &download {
+                            download(&file.file);
+                        }
+                    },
+                )),
+        )
         .into_element()
 }
 

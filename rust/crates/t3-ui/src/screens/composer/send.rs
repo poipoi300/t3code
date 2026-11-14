@@ -976,4 +976,20 @@ mod tests {
         assert_eq!(submit_label(&state), "Resume thread");
         assert!(compact_tokens(&state).is_none());
     }
+
+    #[test]
+    fn typed_prompt_limits_are_formatted_as_one_localisable_message() {
+        for (excess, expected) in [(1, "1 character over"), (18, "18 characters over")] {
+            let message = composer_submission_validation_message(PromptLengthValidation {
+                excess,
+                limit: 120_000,
+            });
+            assert!(message.contains(expected), "{message}");
+            assert!(message.contains("120,000-character"), "{message}");
+            assert!(
+                !message.contains('{'),
+                "ICU arguments must be formatted: {message}"
+            );
+        }
+    }
 }

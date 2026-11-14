@@ -53,12 +53,16 @@ impl ProjectFaviconProject {
 
 /// `source` reads the client's shared favicon resource (including its persistent image cache).
 /// It is read only in automatic mode; overrides never activate a network resource.
-pub fn project_favicon(
-    project: impl Fn() -> ProjectFaviconProject + 'static,
-    source: impl Fn(&ProjectFaviconKey) -> Option<String> + 'static,
+pub fn project_favicon<P, S>(
+    project: P,
+    source: S,
     class_name: &str,
     fallback_icon: Option<Icon>,
-) -> impl IntoElement {
+) -> impl IntoElement + use<P, S>
+where
+    P: Fn() -> ProjectFaviconProject + 'static,
+    S: Fn(&ProjectFaviconKey) -> Option<String> + 'static,
+{
     let project = computed(project);
     let source = Rc::new(source);
     let class_name = class_name.to_owned();
@@ -91,7 +95,7 @@ fn automatic_project_favicon(
     source: FaviconSource,
     class_name: &str,
     fallback_icon: Icon,
-) -> impl IntoElement {
+) -> impl IntoElement + use<> {
     let key = computed(move || project.with(ProjectFaviconProject::resource_key));
     let class_name = class_name.to_owned();
     dynamic(move || {
@@ -127,7 +131,7 @@ fn project_favicon_image(
     project: Memo<ProjectFaviconProject>,
     fallback_icon: Icon,
     class_name: &str,
-) -> impl IntoElement {
+) -> impl IntoElement + use<> {
     let displayed = signal(
         src.get_untracked()
             .filter(|src| src.starts_with("data:image/")),
@@ -137,7 +141,9 @@ fn project_favicon_image(
         Some(shown) => {
             let failed = shown.clone();
             let height = signal(14.0_f32);
-            image(shown)
+            // Native load/error events carry no source URL; a new source needs a new node.
+            image(shown.clone())
+                .key(shown)
                 .test_id("project-favicon-image")
                 .app_class(tw(&cn([
                     Some("size-3.5 shrink-0 object-contain"),
@@ -164,6 +170,7 @@ fn project_favicon_image(
         // image is the web's hidden preloader, disposed with this source's region.
         Some(
             image(next.clone())
+                .key(next.clone())
                 .test_id("project-favicon-preloader")
                 .app_class(tw("absolute size-3.5 opacity-0 pointer-events-none"))
                 .accessible(false)
@@ -196,7 +203,7 @@ fn fallback_for_project(
     project: Memo<ProjectFaviconProject>,
     fallback_icon: Icon,
     class_name: &str,
-) -> impl IntoElement {
+) -> impl IntoElement + use<> {
     let class_name = class_name.to_owned();
     dynamic(move || {
         project.with(|project| {
@@ -246,7 +253,7 @@ pub fn lucide_project_icon(
     name: &str,
     color: &ProjectIconColor,
     class_name: &str,
-) -> impl IntoElement {
+) -> impl IntoElement + use<> {
     let color_class = project_icon_color_class_name(color);
     view()
         .accessible(false)
@@ -266,7 +273,7 @@ pub fn project_monogram(
     text_value: &str,
     color: ProjectIconColor,
     class_name: &str,
-) -> impl IntoElement {
+) -> impl IntoElement + use<> {
     let glyph = SharedString::from(text_value.to_owned());
     let height = signal(16.0_f32);
     // NSH's native SVG canvas drops text nodes; native text preserves the glyphs, but cannot

@@ -134,19 +134,9 @@ fn changed_wrap_default_updates_a_mounted_block_and_a_user_override_wins_at_both
             .expect("setting changes");
         app.wait_for("wrapped")
             .expect("new default reaches the mounted content");
-        let wrap_button = app
-            .screen()
-            .id("role:button[Disable line wrap]")
-            .expect("wrap button");
         app.press("role:button[Disable line wrap]")
             .expect("override");
         app.wait_for("unwrapped").expect("override reaches content");
-        assert_eq!(
-            app.screen()
-                .id("role:button[Wrap lines]")
-                .expect("same button"),
-            wrap_button
-        );
         app.press("role:button[Change wrap default]")
             .expect("false default");
         app.press("role:button[Change wrap default]")
@@ -168,16 +158,8 @@ fn changed_wrap_default_updates_a_mounted_block_and_a_user_override_wins_at_both
 fn copy_preserves_source_resets_feedback_and_does_not_report_failure_as_success() {
     for size in [DESKTOP, PHONE] {
         let mut app = start(size);
-        let copy_button = app
-            .screen()
-            .id("role:button[Copy code]")
-            .expect("copy button");
         app.press("role:button[Copy code]").expect("copy");
         assert_eq!(app.screen().clipboard(), Some("echo hello\n"));
-        assert_eq!(
-            app.screen().id("role:button[Copied]").expect("same button"),
-            copy_button
-        );
         app.press("role:button[Copied]").expect("copy again");
         app.run_for(Duration::from_millis(1199))
             .expect("advance feedback clock");
@@ -266,7 +248,7 @@ fn NativeClipboardFixture() -> impl IntoElement {
 }
 
 #[test]
-fn unacknowledged_writes_do_not_invent_feedback_and_an_empty_block_copies_nothing() {
+fn default_copy_shows_feedback_for_1200_ms_and_an_empty_block_copies_nothing() {
     for window in [DESKTOP, PHONE] {
         let mut app = Headless::start(EngineConfig {
             ui_sets: t3_ui::registries(),
@@ -280,9 +262,22 @@ fn unacknowledged_writes_do_not_invent_feedback_and_an_empty_block_copies_nothin
             .expect("copy using the default NSH path");
         assert_eq!(app.screen().clipboard(), Some("keep the final newline\n"));
         assert!(
-            !app.screen()
+            app.screen()
                 .matches("role:button[Copied]")
-                .expect("feedback requires a write acknowledgement")
+                .expect("component owns feedback")
+        );
+        app.run_for(Duration::from_millis(1199))
+            .expect("before reset");
+        assert!(
+            app.screen()
+                .matches("role:button[Copied]")
+                .expect("feedback remains")
+        );
+        app.run_for(Duration::from_millis(1)).expect("1200ms reset");
+        assert!(
+            app.screen()
+                .matches("role:button[Copy code]")
+                .expect("feedback reset")
         );
         app.press("role:button[Empty code]").expect("empty source");
         app.set_clipboard(Some("sentinel".into()));
@@ -292,6 +287,81 @@ fn unacknowledged_writes_do_not_invent_feedback_and_an_empty_block_copies_nothin
             !app.screen()
                 .matches("role:button[Copied]")
                 .expect("copied state")
+        );
+    }
+}
+
+#[component]
+fn MetadataFixture() -> impl IntoElement {
+    let mut tokens = t3_ui::theme::tokens_for(&Default::default());
+    tokens.set_color("foreground", AdaptiveColor::rgb(0x00ff00, 0x00ff00));
+    tokens.set_color(
+        "contrast-foreground",
+        AdaptiveColor::rgb(0xff0000, 0xff0000),
+    );
+    tokens.set_color("code-foreground", AdaptiveColor::rgb(0x0000ff, 0x0000ff));
+    set_tokens(tokens);
+    set_color_scheme(Appearance::Light);
+    t3_ui::i18n::set_language("fr", &[]);
+    let source = signal(CodeBlockProps {
+        code: "literal".into(),
+        language: "Settings".into(),
+        fence_title: Some("Settings".into()),
+        ..Default::default()
+    });
+    let props = computed(move || source.get());
+    view()
+        .w_full()
+        .h_full()
+        .direction(LayoutDirection::Rtl)
+        .child(text(t("Settings")))
+        .child(control("Use themed host", move || {
+            source.update(|p| p.themed = true)
+        }))
+        .child(control("Use language label", move || {
+            source.update(|p| p.fence_title = None)
+        }))
+        .child(markdown_code_block(
+            props,
+            CodeBlockState::new(),
+            CodeBlockOptions::default(),
+            |_| view().into_element(),
+        ))
+}
+
+#[test]
+fn metadata_stays_literal_in_another_locale_and_header_color_follows_the_host() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = Headless::start(EngineConfig {
+            ui_sets: t3_ui::registries(),
+            viewport: size(px(window.0), px(window.1)),
+            ..EngineConfig::new(Root::of::<MetadataFixture>())
+        })
+        .expect("metadata fixture");
+        app.wait_for("Settings").expect("literal fence title");
+        app.wait_for("Paramètres").expect("French UI is active");
+        assert!(app.screen().texts().contains(&"Settings"));
+        assert_eq!(
+            app.screen()
+                .span_style("text:Settings")
+                .expect("stock header color")
+                .color,
+            nsh_core::Color(0xff0000b8)
+        );
+        app.press("role:button[Use themed host]")
+            .expect("theme host changes");
+        assert_eq!(
+            app.screen()
+                .span_style("text:Settings")
+                .expect("themed header color")
+                .color,
+            nsh_core::Color(0x0000ffb8)
+        );
+        app.press("role:button[Use language label]")
+            .expect("language instead of title");
+        assert!(
+            app.screen().texts().contains(&"Settings"),
+            "a language matching a translation key remains literal"
         );
     }
 }

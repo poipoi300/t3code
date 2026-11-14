@@ -2,32 +2,35 @@
 
 use std::time::Duration;
 
+use futures::StreamExt;
+
 use nsh_core::prelude::*;
 use t3_client::services::config::timestamp_ms;
 use t3_client::services::models::{
     EnvironmentThreadShell, PendingSubagentRequest, format_working_duration_label,
     present_thread_shell, resolve_thread_provider_stack, resolve_thread_working_started_at,
 };
+use t3_client::store::Scope as StoreScope;
+use t3_client::types::ThreadKey;
 use t3_client::view_logic::session::timestamps::{
     format_relative_elapsed, ms_until_relative_time_change, relative_time_elapsed_ms,
 };
+use t3_client::view_logic::shell::models::entries_for;
 use t3_client::view_logic::shell::sidebar::presentation::ThreadInput;
 use t3_client::view_logic::shell::sidebar::status::{self, Status};
-use t3_client::workspace::project_ops::icons::{
-    derive_project_identity, project_icon_color_class_name,
-};
 use t3_contracts::orchestration_project::OrchestrationProjectShell;
 use t3_contracts::orchestration_v2::{
     AppThreadSettledOverride, OrchestrationV2ProviderGoalStatus, OrchestrationV2ThreadShell,
 };
-use t3_contracts::project::{ProjectIconColor, ProjectIconOverride};
+use t3_contracts::server::ServerConfig;
 
 use super::{RowVariant, SidebarItem};
 use crate::i18n::{Value, t, tr};
-use crate::runtime::{Shared, rt};
+use crate::runtime::{Rt, Shared, rt};
 use crate::state::nav::{Navigator, Route};
 use crate::theme::{Scope, cn, palette, tw_with};
-use crate::ui::icon::{Icon, icon};
+use crate::ui::avatar::{self, ProjectFaviconProject};
+use crate::ui::icon::{Icon, icon, icon_with_class, provider_icon};
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
 type Thread = Memo<Option<Shared<OrchestrationV2ThreadShell>>>;
@@ -41,19 +44,20 @@ pub struct RowExtras {
     pub woke_at: Option<String>,
     pub snooze_wake_label: Option<String>,
     pub local_last_visited_at: Option<String>,
-    pub providers: Vec<RowProvider>,
+    pub running_terminal_ids: Vec<String>,
+    pub scratch_machine_label: Option<String>,
     /// Environment clock converted by t3-client and refreshed by the shared second tick.
     pub server_now_ms: Option<i64>,
     pub pending_subagent_request: Option<PendingSubagentRequest>,
     pub environment_label: Option<String>,
 }
 
-/// UI-ICONS supplies the branded glyph; the environment's client catalog supplies its identity.
+/// Only the fields the row reads; provider status checks cannot rebuild its glyphs.
 #[derive(Clone, Debug, PartialEq)]
-pub struct RowProvider {
+struct RowProvider {
     pub instance_id: String,
     pub display_name: String,
-    pub glyph: String,
+    pub driver: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,11 +181,7 @@ fn working_duration_label(
     .and_then(timestamp_ms);
     started
         .zip(host_now)
-        .map(|(started, now)| {
-            t(&format_working_duration_label(
-                (now as f64) - (started as f64),
-            ))
-        })
+        .map(|(started, now)| format_working_duration_label((now as f64) - (started as f64)))
         .unwrap_or_default()
 }
 
@@ -190,8 +190,8 @@ pub fn relative_label(iso: &str, now_ms: i64) -> String {
     let Some(date) = timestamp_ms(iso) else {
         return String::new();
     };
-    let label = t(&format_relative_elapsed(relative_time_elapsed_ms(date, now_ms)).value);
-    compact_sidebar_time_label(&label, &t("just now"), &t("now"))
+    let label = format_relative_elapsed(relative_time_elapsed_ms(date, now_ms)).value;
+    compact_sidebar_time_label(&label, "just now", &t("now"))
 }
 
 fn compact_sidebar_time_label(label: &str, just_now: &str, now: &str) -> String {
@@ -236,6 +236,80 @@ fn relative_time_label(timestamp: impl Fn() -> Option<String> + 'static) -> impl
                 .map(|at| relative_label(at, now.get()))
                 .unwrap_or_default(),
         )
+    })
+}
+
+// Runtime has no config selector yet. Observe only config publications, outside render bindings.
+fn environment_config(key: Memo<Option<ThreadKey>>) -> Memo<Option<Shared<ServerConfig>>> {
+    let config = signal(None);
+    if let (Some(runtime), Some(key)) = (use_context::<Rt>(), key.get_untracked()) {
+        let store = runtime.store.store();
+        let environment = key.environment;
+        let mut changes = store.subscribe_environment(&environment);
+        spawn(async move {
+            loop {
+                config.set(
+                    store
+                        .snapshot()
+                        .environments
+                        .get(&environment)
+                        .and_then(|state| state.config.clone())
+                        .map(Shared),
+                );
+                loop {
+                    let Some(change) = changes.next().await else {
+                        return;
+                    };
+                    if change
+                        .scopes
+                        .iter()
+                        .any(|scope| matches!(scope, StoreScope::All | StoreScope::Environment(_)))
+                    {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+    computed(move || config.get())
+}
+
+fn row_providers(config: Option<&ServerConfig>) -> Vec<RowProvider> {
+    config
+        .map(|config| {
+            entries_for(&config.providers.0, &config.settings, None)
+                .into_iter()
+                .map(|entry| RowProvider {
+                    instance_id: entry.snapshot.instance_id.0.clone(),
+                    display_name: entry.display_name,
+                    driver: entry.snapshot.driver.0.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// SidebarThreadRow.tsx currently returns null for every thread; no diff count can be shown.
+fn latest_run_diff(_thread: &OrchestrationV2ThreadShell) -> Option<(u64, u64)> {
+    None
+}
+
+fn meta_line_empty(thread: Option<&OrchestrationV2ThreadShell>, extras: &RowExtras) -> bool {
+    thread.is_none_or(|thread| {
+        thread.branch.is_none()
+            && extras.scratch_machine_label.is_none()
+            && thread
+                .linked_pull_request
+                .as_ref()
+                .and_then(Option::as_ref)
+                .is_none()
+            && thread
+                .pull_requests
+                .as_ref()
+                .and_then(Option::as_ref)
+                .is_none_or(Vec::is_empty)
+            && latest_run_diff(thread).is_none()
+            && extras.running_terminal_ids.is_empty()
     })
 }
 
@@ -298,6 +372,10 @@ pub fn sidebar_thread_row(
     nav: Navigator,
 ) -> impl IntoElement {
     let key = computed(move || item.with(|i| i.as_ref().map(|i| i.key.clone())));
+    let config = environment_config(key);
+    let providers = computed(move || {
+        config.with(|config| row_providers(config.as_ref().map(|config| config.0.as_ref())))
+    });
     let pending_request = computed(move || extras.with(|extras| extras.pending_subagent_request));
     let model = computed(move || {
         thread.with(|thread| {
@@ -389,13 +467,8 @@ pub fn sidebar_thread_row(
     };
     let meta_empty = move || {
         thread.with(|thread| {
-            thread.as_ref().is_none_or(|thread| {
-                thread.branch.is_none()
-                    && thread
-                        .linked_pull_request
-                        .as_ref()
-                        .and_then(Option::as_ref)
-                        .is_none()
+            extras.with(|extras| {
+                meta_line_empty(thread.as_ref().map(|thread| thread.0.as_ref()), extras)
             })
         })
     };
@@ -430,35 +503,42 @@ pub fn sidebar_thread_row(
             .child(when(move || has_draft.get(), || {
                 view().role(AccessibilityRole::Text).label(t("Unsent draft")).child(icon(Icon::SquarePen, 12.0, move || palette().warning_foreground))
             }))
-            .child(project_favicon(project))
+            .child(project_favicon(project, key))
             .child(pin_indicator(thread))
             .child(text(move || SharedString::from(project_name())).app_class(class("min-w-0 flex-1 truncate font-normal text-secondary-label text-xs")))
             .child(view().app_class(class("group/sidebar-status-slot relative ml-auto flex h-5 min-w-8 shrink-0 items-stretch justify-end text-xs"))
                 // NSH has no focus-visible descendant selector; group hover swaps controls.
-                .child(view().app_class(class("pointer-events-none flex items-center self-center justify-self-end tabular-nums text-secondary-label group-any-hover/sidebar-row:opacity-0"))
+                .child(view().app_class(move || Some(class(&cn([
+                    Some(if presented.get().is_some_and(|p| p.top.is_some_and(|top| top.icon == TopStatusIcon::Woke)) { "pointer-events-auto" } else { "pointer-events-none group-any-hover/sidebar-row:absolute group-any-hover/sidebar-row:right-0 group-any-hover/sidebar-row:opacity-0" }),
+                    Some("flex items-center self-center justify-self-end tabular-nums text-secondary-label"),
+                ]))))
                     .child(dynamic(move || presented.get().and_then(|p| p.top).map(|top| {
+                        if top.icon == TopStatusIcon::Woke { return woke_button(false).into_element(); }
                         view().app_class(class(&cn([Some("inline-flex items-center gap-1 font-medium"), Some(top.class_name)])))
-                            .child(top_status_icon(top)).child(text(t(top.label)))
+                            .child(top_status_icon(top)).child(text(crate::i18n::Text::from(top.label).resolve()))
                             .child(text(move || SharedString::from(model.with(|model| model.as_ref().map(|model| working_duration_label(model, presented.get().map_or(Status::Ready, |p| p.status), extras.with(|extras| extras.server_now_ms))).unwrap_or_default()))).app_class(class("tabular-nums")))
                             .into_element()
                     })))
                     .child(when(move || presented.get().is_none_or(|p| p.top.is_none()), age)))
-                .child(unavailable_action("Settle thread", true))))
+))
         .child(view().app_class(class("mt-1 flex min-w-0 items-center gap-1.5")).child(title_element())
-            .child(when(meta_empty, move || sidebar_provider_stack(model, extras))))
-        .child(when(move || !meta_empty(), move || meta_line(thread, model, extras)))
+            .child(when(meta_empty, move || sidebar_provider_stack(model, providers))))
+        .child(when(move || !meta_empty(), move || meta_line(thread, model, extras, providers)))
     };
     let slim_body = move || {
         dynamic(move || {
             untracked(|| {
                 vec![
-        view().app_class(class("flex shrink-0 items-center transition-opacity opacity-40 grayscale group-focus-within/sidebar-row:opacity-100 group-focus-within/sidebar-row:grayscale-0 group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0")).child(project_favicon(project)).into_element(),
+        view().app_class(move || Some(class(&cn([
+            Some("flex shrink-0 items-center transition-opacity"),
+            (!active() || settled()).then_some("opacity-40 grayscale group-focus-within/sidebar-row:opacity-100 group-focus-within/sidebar-row:grayscale-0 group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0"),
+        ])))).child(project_favicon(project, key)).into_element(),
         when(move || has_draft.get(), || view().role(AccessibilityRole::Text).label(t("Unsent draft")).child(icon(Icon::SquarePen, 12.0, move || palette().warning_foreground))).into_element(),
         title_element().into_element(), pin_indicator(thread).into_element(),
         view().app_class(class("relative ml-auto flex h-6 min-w-8 shrink-0 items-center justify-end"))
-            .child(view().app_class(class("inline-flex justify-end tabular-nums text-secondary-label transition-opacity group-any-hover/sidebar-row:opacity-0 text-xs"))
-                .child(when(move || snooze_wake_label.get().is_some(), move || view().app_class(class("inline-flex items-center gap-1 text-xs text-info-foreground tabular-nums")).child(lucide(CLOCK_ICON, 12.0).tint_color(move || palette().info)).child(text(move || SharedString::from(snooze_wake_label.get().unwrap_or_default())))).otherwise(age)))
-            .child(unavailable_action(if snooze_wake_label.get().is_some() { "Wake thread now" } else if settled() { "Un-settle thread" } else { "Settle thread" }, false)).into_element(),
+            .child(view().app_class(move || Some(class(&cn([Some("inline-flex justify-end tabular-nums text-secondary-label transition-opacity text-xs"), (!presented.get().is_some_and(|p| p.woke)).then_some("group-any-hover/sidebar-row:opacity-0")]))))
+                .child(when(move || snooze_wake_label.get().is_some(), move || view().app_class(class("inline-flex items-center gap-1 text-xs text-info-foreground tabular-nums")).child(icon_with_class(Icon::AlarmClock, "size-3 text-info-foreground")).child(text(move || SharedString::from(snooze_wake_label.get().unwrap_or_default())))).otherwise(move || when(move || presented.get().is_some_and(|p| p.woke), || woke_button(true)).otherwise(age))))
+.into_element(),
     ]
             })
         })
@@ -474,7 +554,7 @@ pub fn sidebar_thread_row(
                 align: Align::Start,
                 ..Default::default()
             },
-            sidebar_thread_tooltip(model, project_name, extras),
+            sidebar_thread_tooltip(model, project_name, extras, providers),
         ))
         .child(
             nsh_base::button()
@@ -487,7 +567,10 @@ pub fn sidebar_thread_row(
                     Some(SharedString::from(
                         [
                             Some(title()),
-                            presented.get().and_then(|p| p.top.map(|s| t(s.label))),
+                            presented.get().and_then(|p| {
+                                p.top
+                                    .map(|s| crate::i18n::Text::from(s.label).resolve().to_string())
+                            }),
                             Some(project_name()),
                         ]
                         .into_iter()
@@ -518,28 +601,34 @@ fn pin_indicator(thread: Thread) -> impl IntoElement {
             })
         },
         || {
-            // Read-only pin matches pinningSupported=false until Backend exposes authorized unpin.
-            view().role(AccessibilityRole::Text).label(t("Pinned"))
-            .child(lucide(r#"<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>"#, 12.0).tint_color(move || palette().muted_foreground.opacity(0.65)))
-            .app_class(class("size-3 shrink-0 text-muted-foreground/65"))
+            view()
+                .role(AccessibilityRole::Text)
+                .label(t("Pinned"))
+                .child(icon_with_class(
+                    Icon::Pin,
+                    "size-3 shrink-0 text-muted-foreground/65",
+                ))
         },
     )
 }
 
-fn unavailable_action(label: &'static str, card: bool) -> impl IntoElement {
-    // Backend has no mutation/permission seam; the disabled control cannot dispatch.
-    view().app_class(class("pointer-events-none absolute inset-y-0 right-0 flex items-stretch opacity-0 group-any-hover/sidebar-row:opacity-100"))
-        .role(AccessibilityRole::Text).label(t("Thread actions are unavailable on this client."))
-        .child(nsh_base::button().disabled(true).accessibility_label(Some(t(label).into()))
-            .app_class(class("-mr-1 inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-1.5 text-xs text-muted-foreground hover:text-foreground"))
-            .child(if label == "Un-settle thread" { lucide(UNDO_ICON, 14.0).tint_color(move || palette().muted_foreground).into_element() } else if label == "Wake thread now" { lucide(WAKE_ICON, 12.0).tint_color(move || palette().muted_foreground).into_element() } else { icon(Icon::Check, 14.0, move || palette().muted_foreground).into_element() })
-            .child(card.then(|| text(t("Settle")))))
+fn woke_button(slim: bool) -> impl IntoElement {
+    // C1 has no acknowledge-wake operation yet; preserve the source affordance without dispatch.
+    nsh_base::button().disabled(true).accessibility_label(Some(t("Dismiss Woke notification").into()))
+        .app_class(class(if slim {
+            "inline-flex cursor-pointer items-center gap-1 rounded-sm text-xs font-medium text-warning-foreground outline-none hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        } else {
+            "inline-flex cursor-pointer items-center gap-1 rounded-sm font-medium outline-none hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring text-warning-foreground"
+        }))
+        .child(icon_with_class(Icon::AlarmClock, if slim { "size-3" } else { "size-4 shrink-0" }))
+        .child(text(t("Woke")))
 }
 
 fn meta_line(
     thread: Thread,
     model: Memo<Option<EnvironmentThreadShell>>,
     extras: Memo<RowExtras>,
+    providers: Memo<Vec<RowProvider>>,
 ) -> impl IntoElement {
     view()
         .app_class(class(
@@ -547,68 +636,41 @@ fn meta_line(
         ))
         .child(when(
             move || thread.with(|t| t.as_ref().is_some_and(|t| t.worktree_path.is_some())),
-            || lucide(WORKTREE_ICON, 14.0).tint_color(move || palette().icon_muted),
+            || icon_with_class(Icon::FolderGit2, "size-3.5 shrink-0 text-icon-muted"),
         ))
         // UI-TRUNCATE has no MiddleTruncate yet; the tooltip retains the full branch.
         .child(
             view().app_class(class("flex min-w-0 flex-1")).child(
                 text(move || {
-                    SharedString::from(thread.with(|t| {
-                        t.as_ref()
-                            .and_then(|t| t.branch.as_ref().map(|b| b.0.clone()))
-                            .unwrap_or_default()
-                    }))
+                    SharedString::from(
+                        thread
+                            .with(|thread| {
+                                thread.as_ref().and_then(|thread| {
+                                    thread.branch.as_ref().map(|branch| branch.0.clone())
+                                })
+                            })
+                            .or_else(|| extras.with(|extras| extras.scratch_machine_label.clone()))
+                            .unwrap_or_default(),
+                    )
                 })
                 .app_class(class("min-w-0 truncate")),
             ),
         )
-        // PR status/reconciliation and stack badges need the client's row presentation.
-        .child(dynamic(move || {
-            thread
-                .with(|thread| {
-                    thread.as_ref().and_then(|thread| {
-                        thread
-                            .linked_pull_request
-                            .as_ref()
-                            .and_then(Option::as_ref)
-                            .map(|pr| pr.number)
-                    })
-                })
-                .map(|number| {
-                    nsh_base::button()
-                        .disabled(true)
-                        .accessibility_label(Some(
-                            tr(
-                                "PR #{number}, status pending",
-                                &[("number", Value::Int(number as i64))],
-                            )
-                            .into(),
-                        ))
-                        .app_class(class(
-                            "inline-flex shrink-0 items-center gap-1 text-muted-foreground text-xs",
-                        ))
-                        .child(icon(Icon::Link, 12.0, move || palette().muted_foreground))
-                        .child(text(tr(
-                            "{number}",
-                            &[("number", Value::Int(number as i64))],
-                        )))
-                        .into_element()
-                })
-        }))
+        // Terminal reveal needs the client's session registry; preserve its meta slot meanwhile.
+        // ThreadPullRequestBadgeControl is a later package; no substitute PR control.
         .child(
             view()
                 .app_class(class(
                     "pointer-events-none ml-auto inline-flex shrink-0 items-center gap-1",
                 ))
-                .child(sidebar_provider_stack(model, extras)),
+                .child(sidebar_provider_stack(model, providers)),
         )
 }
 
 fn sidebar_provider_stack(
     model: Memo<Option<EnvironmentThreadShell>>,
-    extras: Memo<RowExtras>,
+    providers: Memo<Vec<RowProvider>>,
 ) -> impl IntoElement {
-    let providers = computed(move || extras.with(|extras| extras.providers.clone()));
     dynamic(move || {
         let model = model.get()?;
         let providers = providers.get();
@@ -620,92 +682,69 @@ fn sidebar_provider_stack(
         if stack.len() == 1 {
             return Some(
                 view()
+                    .test_id("sidebar-provider-stack")
                     .app_class(class("inline-flex shrink-0 items-center"))
-                    .child(
-                        image(current_entry.glyph.clone())
-                            .app_class(class("size-3.5 opacity-60"))
-                            .accessible(false),
-                    ),
+                    .child(provider_icon(
+                        &current_entry.driver,
+                        &current_entry.display_name,
+                        "size-3.5 opacity-60",
+                    )),
             );
         }
         Some(
             view()
-                .app_class(class(if stack.len() == 1 {
-                    "inline-flex shrink-0 items-center"
-                } else {
-                    "inline-flex shrink-0 items-center gap-1.5"
-                }))
+                .test_id("sidebar-provider-stack")
+                .app_class(class("inline-flex shrink-0 items-center gap-1.5"))
                 .child(
                     stack
                         .iter()
                         .take(stack.len().saturating_sub(1))
                         .filter_map(|id| providers.iter().find(|entry| entry.instance_id == id.0))
                         .map(|entry| {
-                            image(entry.glyph.clone())
-                                .app_class(class("size-3 opacity-35 grayscale"))
-                                .accessible(false)
-                                .into_element()
+                            provider_icon(
+                                &entry.driver,
+                                &entry.display_name,
+                                "size-3 opacity-35 grayscale",
+                            )
+                            .into_element()
                         })
                         .collect::<Vec<_>>(),
                 )
                 .child(
                     view()
                         .app_class(class("relative z-10 inline-flex items-center"))
-                        .child(
-                            image(current_entry.glyph.clone())
-                                .app_class(class("size-3.5 opacity-60"))
-                                .accessible(false),
-                        ),
+                        .child(provider_icon(
+                            &current_entry.driver,
+                            &current_entry.display_name,
+                            "size-3.5 opacity-60",
+                        )),
                 ),
         )
     })
 }
 
-/// Port of ProjectFavicon.tsx / ProjectMonogram.tsx, with the client's identity algorithm.
-fn project_favicon(project: Project) -> impl IntoElement {
+fn project_favicon(project: Project, key: Memo<Option<ThreadKey>>) -> impl IntoElement {
     dynamic(move || {
-        project.get().map(|project| {
-            let identity = derive_project_identity(&project.title.0);
-            match project
-                .project_icon
-                .as_ref()
-                .and_then(Option::as_ref)
-                .and_then(|icon| icon.0.as_ref())
-            {
-                Some(ProjectIconOverride::Emoji(emoji)) => text(emoji.emoji.0.clone())
-                    .app_class(class(
-                        "inline-flex size-4 shrink-0 items-center justify-center leading-none",
-                    ))
-                    .into_element(),
-                Some(ProjectIconOverride::Monogram(monogram)) => {
-                    project_monogram(&monogram.text.0, &monogram.color).into_element()
-                }
-                // Authenticated favicon resources and Lucide overrides need Backend/UI-ICONS.
-                _ => project_monogram(&identity.monogram, &identity.color).into_element(),
-            }
-        })
+        let project = project.get()?;
+        let environment = key.get()?.environment;
+        Some(untracked(|| {
+            avatar::project_favicon(
+                move || ProjectFaviconProject::from_shell(environment.clone(), &project),
+                // The runtime has no shared automatic-favicon resource reader yet.
+                |_| None,
+                "size-4 shrink-0",
+                None,
+            )
+        }))
     })
-}
-
-fn project_monogram(label: &str, color: &ProjectIconColor) -> impl IntoElement {
-    let foreground = project_icon_color_class_name(color);
-    let background = foreground
-        .replace("text-", "bg-")
-        .replace("-600", "-600/14")
-        .replace("-400", "-400/14");
-    // NSH has no SVG textLength; native mono text keeps the 8.25px lettering.
-    // Its fixed 16px tile converts the unsupported 25% corner radius to 4px.
-    view().app_class(class("inline-flex size-4 shrink-0 items-center justify-center")).accessible(false)
-        .child(view().app_class(class(&cn([Some("size-full overflow-hidden rounded-[4px] font-mono select-none items-center justify-center"), Some(foreground), Some(&background)])))
-            .child(text(label.to_owned()).app_class(class("font-mono text-[8.25px] font-bold leading-none"))))
 }
 
 fn sidebar_thread_tooltip(
     model: Memo<Option<EnvironmentThreadShell>>,
     project: impl Fn() -> String + 'static,
     extras: Memo<RowExtras>,
+    providers: Memo<Vec<RowProvider>>,
 ) -> impl IntoElement {
-    let providers = computed(move || extras.with(|extras| extras.providers.clone()));
     view().app_class(class("flex min-w-0 max-w-80 flex-col gap-2 px-1 py-2"))
         .child(text(move || SharedString::from(model.with(|model| model.as_ref().map(|model| model.title.clone()).unwrap_or_default()))).app_class(class("min-w-0 truncate text-xs leading-tight font-medium text-foreground")))
         // Flex column replaces CSS grid, preserving sibling order and spacing.
@@ -724,7 +763,7 @@ fn sidebar_thread_tooltip(
                 let current = stack.last()?;
                 let entry = entries.iter().find(|entry| entry.instance_id == current.0)?;
                 Some(view().app_class(class("flex min-w-0 items-center gap-2"))
-                    .child(image(entry.glyph.clone()).app_class(class("size-3 shrink-0 grayscale opacity-60")).accessible(false))
+                    .child(provider_icon(&entry.driver, &entry.display_name, "size-3 shrink-0 grayscale opacity-60"))
                     .child(text(model.source.model_selection.model.clone()).app_class(class("min-w-0 truncate text-foreground/75"))))
             }))
             .child(dynamic(move || {
@@ -743,72 +782,19 @@ fn sidebar_thread_tooltip(
             })))
 }
 
-fn lucide(paths: &str, size: f32) -> nsh_core::element::Image {
-    image(nsh_core::element::ImageSrc::svg_markup(&format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">{paths}</svg>")))
-        .w(px(size)).h(px(size)).flex_shrink_0().accessible(false)
-}
-
-/// TOP_STATUS_ICONS; inline Lucide paths until UI-ICONS exposes these variants.
 fn top_status_icon(top: TopStatus) -> impl IntoElement {
-    let which = top.icon;
-    let paths = match which {
-        TopStatusIcon::Working => {
-            r#"<path d="M10.1 2.182a10 10 0 0 1 3.8 0"/><path d="M13.9 21.818a10 10 0 0 1-3.8 0"/><path d="M17.609 3.721a10 10 0 0 1 2.69 2.7"/><path d="M2.182 13.9a10 10 0 0 1 0-3.8"/><path d="M20.279 17.609a10 10 0 0 1-2.7 2.69"/><path d="M21.818 10.1a10 10 0 0 1 0 3.8"/><path d="M3.721 6.391a10 10 0 0 1 2.7-2.69"/><path d="M6.391 20.279a10 10 0 0 1-2.69-2.7"/>"#
-        }
-        TopStatusIcon::Waiting => {
-            r#"<path d="M10.1 2.18a9.93 9.93 0 0 1 3.8 0"/><path d="M17.6 3.71a9.95 9.95 0 0 1 2.69 2.7"/><path d="M21.82 10.1a9.93 9.93 0 0 1 0 3.8"/><path d="M20.29 17.6a9.95 9.95 0 0 1-2.7 2.69"/><path d="M13.9 21.82a9.94 9.94 0 0 1-3.8 0"/><path d="M6.4 20.29a9.95 9.95 0 0 1-2.69-2.7"/><path d="M2.18 13.9a9.93 9.93 0 0 1 0-3.8"/><path d="M3.71 6.4a9.95 9.95 0 0 1 2.7-2.69"/><circle cx="12" cy="12" r="1"/>"#
-        }
-        TopStatusIcon::Input => {
-            r#"<path d="M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>"#
-        }
-        TopStatusIcon::Request => {
-            r#"<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/>"#
-        }
-        TopStatusIcon::Approval => {
-            r#"<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M9.1 9a3 3 0 0 1 5.82 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>"#
-        }
-        TopStatusIcon::Failed => {
-            r#"<circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/>"#
-        }
-        TopStatusIcon::Done => r#"<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>"#,
-        TopStatusIcon::Woke => {
-            r#"<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3 2 6"/><path d="m22 6-3-3"/><path d="M6.38 18.7 4 21"/><path d="M17.64 18.67 20 21"/>"#
-        }
+    let which = match top.icon {
+        TopStatusIcon::Working => Icon::CircleDashed,
+        TopStatusIcon::Waiting => Icon::CircleDotDashed,
+        TopStatusIcon::Input => Icon::MessageCircleQuestionMark,
+        TopStatusIcon::Request => Icon::UserRound,
+        TopStatusIcon::Approval => Icon::ShieldQuestionMark,
+        TopStatusIcon::Failed => Icon::CircleAlert,
+        TopStatusIcon::Done => Icon::CircleCheck,
+        TopStatusIcon::Woke => Icon::AlarmClock,
     };
-    lucide(paths, 16.0).tint_color(move || match which {
-        TopStatusIcon::Working => tokens().color("info-foreground").unwrap_or(palette().info),
-        TopStatusIcon::Waiting => palette().muted_foreground,
-        TopStatusIcon::Input => AdaptiveColor::new(
-            tokens()
-                .color("indigo-600")
-                .unwrap_or(palette().foreground)
-                .light,
-            tokens()
-                .color("indigo-300")
-                .unwrap_or(palette().foreground)
-                .dark,
-        ),
-        TopStatusIcon::Request => tokens()
-            .color("guest-foreground")
-            .unwrap_or(palette().foreground),
-        TopStatusIcon::Approval | TopStatusIcon::Woke => palette().warning_foreground,
-        TopStatusIcon::Failed if top.class_name == "text-warning-foreground" => {
-            palette().warning_foreground
-        }
-        TopStatusIcon::Failed => palette().error_foreground,
-        TopStatusIcon::Done => tokens()
-            .color("success-foreground")
-            .unwrap_or(palette().success),
-    })
+    icon_with_class(which, "shrink-0 size-4").into_element()
 }
-
-const UNDO_ICON: &str = r#"<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11"/>"#;
-
-const WORKTREE_ICON: &str = r#"<path d="M18 19a5 5 0 0 1-5-5v8"/><path d="M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"/><circle cx="13" cy="12" r="2"/><circle cx="20" cy="19" r="2"/>"#;
-
-const CLOCK_ICON: &str = r#"<path d="M12 6v6l4 2"/><circle cx="12" cy="12" r="10"/>"#;
-
-const WAKE_ICON: &str = r#"<path d="M6.87 6.87a8 8 0 1 0 11.26 11.26"/><path d="M19.9 14.25a8 8 0 0 0-9.15-9.15"/><path d="m22 6-3-3"/><path d="M6.26 18.67 4 21"/><path d="m2 2 20 20"/><path d="M4 4 2 6"/>"#;
 
 #[cfg(test)]
 mod tests {
@@ -1046,5 +1032,30 @@ mod tests {
             compact_sidebar_time_label("3d ago", "just now", "now"),
             "3d"
         );
+    }
+
+    #[test]
+    fn metadata_is_retained_for_scratch_machines_and_running_terminals() {
+        let model = thread(json!({}));
+        assert!(meta_line_empty(Some(&model.source), &RowExtras::default()));
+        assert!(!meta_line_empty(
+            Some(&model.source),
+            &RowExtras {
+                scratch_machine_label: Some("Tommy-PC".into()),
+                ..Default::default()
+            }
+        ));
+        assert!(!meta_line_empty(
+            Some(&model.source),
+            &RowExtras {
+                running_terminal_ids: vec!["terminal-1".into()],
+                ..Default::default()
+            }
+        ));
+        let branch = thread(json!({"branch":"main"}));
+        assert!(!meta_line_empty(
+            Some(&branch.source),
+            &RowExtras::default()
+        ));
     }
 }
