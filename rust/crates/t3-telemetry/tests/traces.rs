@@ -125,4 +125,121 @@ fn cli_credentials_and_prompt_arguments_are_redacted() {
     assert!(!command.contains("second line"));
     assert!(!command.contains("multi word"));
     assert!(command.contains("--model safe"));
+    for (text, secret) in [
+        (
+            "open https://host.test/pair#token=PAIRING_TOKEN",
+            "PAIRING_TOKEN",
+        ),
+        (
+            "https://host.test/x#a=1&access_token=FRAGMENT_TOKEN",
+            "FRAGMENT_TOKEN",
+        ),
+        ("https://host.test/x;token=MATRIX_TOKEN", "MATRIX_TOKEN"),
+        (
+            "https://host.test/callback?code=OAUTH_CODE&state=s",
+            "OAUTH_CODE",
+        ),
+        (
+            "https://host.test/callback?state=OAUTH_STATE&code=c",
+            "OAUTH_STATE",
+        ),
+        (
+            "https://host.test/callback#code=FRAGMENT_CODE",
+            "FRAGMENT_CODE",
+        ),
+    ] {
+        let redacted = t3_telemetry::privacy::redact_text(text);
+        assert!(!redacted.contains(secret), "{redacted}");
+        assert!(redacted.contains("host.test"), "{redacted}");
+    }
+    assert_eq!(
+        t3_telemetry::privacy::redact_text("process exited with code=1 state=idle"),
+        "process exited with code=1 state=idle"
+    );
+}
+
+fn local_logging(dir: &std::path::Path) -> t3_telemetry::logging::LoggingOptions {
+    t3_telemetry::logging::LoggingOptions {
+        trace: TraceOptions {
+            file_path: dir.join("server.trace.ndjson"),
+            max_bytes: 100_000,
+            max_files: 2,
+            batch_window: Duration::from_secs(60),
+        },
+        log_level: "Info".into(),
+        trace_min_level: "Info".into(),
+        trace_timing_enabled: true,
+        telemetry: t3_config::config::TelemetryConfig {
+            disabled: false,
+            warnings: vec![],
+            resource_attributes: Default::default(),
+            traces: None,
+            metrics: None,
+            logs: None,
+            default_export: t3_config::config::SignalExport {
+                protocol: "http/json".into(),
+                headers: None,
+                export_interval_ms: 10_000,
+            },
+        },
+        version: "test".into(),
+        release_channel: "dev".into(),
+        host_name: "test-host".into(),
+        mode: t3_config::config::RuntimeMode::Web,
+        console: false,
+    }
+}
+
+#[tokio::test]
+async fn local_spans_are_batched_off_the_ending_thread_and_keep_usage_counters() {
+    let dir = tempfile::tempdir().expect("temp");
+    let path = dir.path().join("server.trace.ndjson");
+    let (dispatch, handle) = t3_telemetry::logging::build(local_logging(dir.path()))
+        .await
+        .expect("logging");
+    tracing::dispatcher::with_default(&dispatch, || {
+        let _span = tracing::info_span!(
+            "provider.turn",
+            inputTokens = 12_i64,
+            total_tokens = 30_i64,
+            tokenCount = "PRIVATE_TOKEN",
+            outputTokens = "NOT_A_NUMBER"
+        )
+        .entered();
+    });
+    // Ending the span only queues it; nothing reaches the sink until the batch is exported.
+    handle.sink.flush_sync().expect("flush sink");
+    let before = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(!before.contains("provider.turn"), "{before}");
+    handle.force_flush().await.expect("flush");
+    let trace = std::fs::read_to_string(&path).expect("trace");
+    let span: serde_json::Value = trace
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .find(|record: &serde_json::Value| record["name"] == "provider.turn")
+        .expect("span exported");
+    assert_eq!(span["attributes"]["inputTokens"], 12);
+    assert_eq!(span["attributes"]["total_tokens"], 30);
+    assert_eq!(span["attributes"]["tokenCount"], "<redacted>");
+    assert_eq!(span["attributes"]["outputTokens"], "<redacted>");
+    let sink = TraceSink::new(TraceOptions {
+        file_path: dir.path().join("records.ndjson"),
+        max_bytes: 100_000,
+        max_files: 1,
+        batch_window: Duration::from_secs(1),
+    })
+    .expect("sink");
+    sink.push(json!({"usage":{"inputTokens":7,"cachedInputTokens":"PRIVATE","secretToken":3}}));
+    sink.flush_sync().expect("flush");
+    let record: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(dir.path().join("records.ndjson"))
+            .expect("records")
+            .trim(),
+    )
+    .expect("record");
+    assert_eq!(
+        record["usage"],
+        json!({"inputTokens":7,"cachedInputTokens":"<redacted>","secretToken":"<redacted>"})
+    );
+    handle.shutdown().await.expect("shutdown");
 }

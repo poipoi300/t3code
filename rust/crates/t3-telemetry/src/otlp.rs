@@ -89,7 +89,7 @@ pub struct OtlpEndpointCheck {
 }
 impl OtlpEndpointCheck {
     pub fn new(config: TelemetryConfig) -> Result<Self> {
-        let client = reqwest::Client::builder()
+        let client = crate::http::client_builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(5))
             .build()

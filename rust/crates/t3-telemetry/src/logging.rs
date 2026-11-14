@@ -232,7 +232,9 @@ fn attributes(values: &[KeyValue]) -> Value {
 }
 fn clean_attributes(values: &mut Vec<KeyValue>) {
     for value in values {
-        if privacy::private_field(value.key.as_str()) {
+        let counter = privacy::usage_counter(value.key.as_str())
+            && matches!(value.value, OtelValue::I64(_) | OtelValue::F64(_));
+        if privacy::private_field(value.key.as_str()) && !counter {
             value.value = OtelValue::String("<redacted>".into());
         } else if matches!(&value.value, OtelValue::String(_) | OtelValue::Array(_)) {
             let mut v = Value::String(value.value.to_string());
@@ -469,30 +471,54 @@ impl TelemetryHandle {
         let local = self.sink.flush().await;
         exported.and(local)
     }
+    /// Flushes and stops all signals within one deadline shared by the three of them.
     pub async fn shutdown(mut self) -> Result<()> {
         self.cancel.cancel();
         if let Some(task) = self.task.take() {
             let _ = task.await;
         }
         let trace = self.tracer_provider.clone();
-        let metrics = self.meter_provider.clone();
-        let logs = self.logger_provider.clone();
-        let exported = tokio::task::spawn_blocking(move || {
-            let mut failed = trace.shutdown().is_err();
-            if let Some(metrics) = metrics {
-                failed |= metrics.shutdown().is_err();
+        let mut pending = vec![on_thread(move || {
+            trace.shutdown_with_timeout(SHUTDOWN_DEADLINE).is_ok()
+        })];
+        if let Some(metrics) = self.meter_provider.clone() {
+            pending.push(on_thread(move || {
+                metrics.shutdown_with_timeout(SHUTDOWN_DEADLINE).is_ok()
+            }));
+        }
+        if let Some(logs) = self.logger_provider.clone() {
+            pending.push(on_thread(move || {
+                logs.shutdown_with_timeout(SHUTDOWN_DEADLINE).is_ok()
+            }));
+        }
+        let all = async {
+            let mut exported = true;
+            for signal in pending {
+                exported &= signal.await.unwrap_or(false);
             }
-            if let Some(logs) = logs {
-                failed |= logs.shutdown().is_err();
-            }
-            if failed { Err(Error::Export) } else { Ok(()) }
-        })
-        .await
-        .map_err(|_| Error::WorkerStopped)?;
+            exported
+        };
+        let exported = tokio::time::timeout(SHUTDOWN_DEADLINE, all)
+            .await
+            .unwrap_or(false);
         let local = self.sink.flush().await;
-        exported.and(local)
+        if exported { local } else { Err(Error::Export) }
     }
 }
+/// Effect's OTLP exporters flush for up to three seconds at shutdown. The SDK's per-signal
+/// timeouts would run one after another (metrics ignores its own), so all three share this one.
+const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
+
+/// A dedicated thread, so an export stuck past the deadline holds neither the runtime's blocking
+/// pool nor its shutdown.
+fn on_thread(work: impl FnOnce() -> bool + Send + 'static) -> tokio::sync::oneshot::Receiver<bool> {
+    let (done, receiver) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(work());
+    });
+    receiver
+}
+
 impl Drop for TelemetryHandle {
     fn drop(&mut self) {
         self.cancel.cancel();
@@ -570,20 +596,30 @@ pub async fn build(options: LoggingOptions) -> Result<(tracing::Dispatch, Teleme
     let config = options.telemetry.clone();
     let local = sink.clone();
     let timing = options.trace_timing_enabled;
+    let local_window = options.trace.batch_window;
     let (provider, meter_provider, logger_provider) =
         tokio::task::spawn_blocking(move || -> Result<_> {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http::blocking_client_builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(10))
                 .build()
                 .map_err(|_| Error::Export)?;
+            // Spans end on runtime threads; the SDK's worker thread formats and redacts them.
             let mut provider = SdkTracerProvider::builder()
                 .with_sampler(Sampler::AlwaysOn)
                 .with_resource(resource.clone())
-                .with_simple_exporter(LocalExporter {
-                    sink: local,
-                    timing,
-                });
+                .with_span_processor(
+                    BatchSpanProcessor::builder(LocalExporter {
+                        sink: local,
+                        timing,
+                    })
+                    .with_batch_config(
+                        opentelemetry_sdk::trace::BatchConfigBuilder::default()
+                            .with_scheduled_delay(local_window)
+                            .build(),
+                    )
+                    .build(),
+                );
             if let Some(endpoint) = otlp::endpoint(&config, OtlpSignal::Traces) {
                 let exporter = opentelemetry_otlp::SpanExporter::builder()
                     .with_http()

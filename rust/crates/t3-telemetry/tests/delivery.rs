@@ -187,6 +187,145 @@ async fn opt_out_policy_pending_or_unreadable_settings_emit_no_requests() {
 }
 
 #[tokio::test]
+async fn consent_withdrawn_during_a_flush_stops_the_remaining_batches() {
+    let consent = Arc::new(RwLock::new(Some(allowed())));
+    let requests = Arc::new(Mutex::new(0_usize));
+    let app = Router::new().fallback(post({
+        let consent = Arc::clone(&consent);
+        let requests = Arc::clone(&requests);
+        move || {
+            *requests.lock().expect("requests") += 1;
+            *consent.write().expect("consent") = Some(Consent {
+                enabled: false,
+                ..allowed()
+            });
+            async { StatusCode::OK }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let url = format!("http://{}", listener.local_addr().expect("address"));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let mut config = AnalyticsConfig::from_environment(
+        &BTreeMap::new(),
+        "1.0.0".into(),
+        "stable".into(),
+        "web".into(),
+    )
+    .expect("config");
+    config.host = url;
+    config.batch_size = 1;
+    let service = AnalyticsService::new(
+        config,
+        Identity {
+            distinct_id: Some(hash_telemetry_id("person")),
+            install_id: None,
+        },
+        Arc::clone(&consent),
+    )
+    .expect("analytics");
+    for _ in 0..3 {
+        service.record("feature.used", BTreeMap::new()).await;
+    }
+    service.flush().await.expect("flush");
+    assert_eq!(*requests.lock().expect("requests"), 1);
+    service.flush().await.expect("denied flush");
+    assert_eq!(*requests.lock().expect("requests"), 1);
+    assert_eq!(service.buffered_count().await, 0);
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_redirecting_ingest_host_is_a_retryable_failure_and_never_followed() {
+    let collector = Collector::new().await;
+    let service = analytics(&collector, Arc::new(RwLock::new(Some(allowed()))));
+    for status in [301, 302, 307, 308] {
+        collector.status.store(status, Ordering::Release);
+        service.record_at("feature.used", BTreeMap::new(), 0).await;
+        assert!(service.flush_at(0, false).await.is_err(), "{status}");
+        assert!(
+            service.buffered_count().await > 0,
+            "{status} keeps the batch for retry"
+        );
+    }
+    let requests = collector.requests();
+    assert!(!requests.is_empty());
+    assert!(requests.iter().all(|r| r.uri == "/batch/"), "{requests:?}");
+    collector.close().await;
+}
+
+#[tokio::test]
+async fn shutdown_has_one_deadline_against_a_collector_that_never_responds() {
+    use opentelemetry::metrics::MeterProvider;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let url = format!("http://{}", listener.local_addr().expect("address"));
+    let hung = tokio::spawn(async move {
+        let mut held = vec![];
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    let dir = tempfile::tempdir().expect("temp");
+    let mut config = telemetry();
+    let endpoint = |path: &str| SignalEndpoint {
+        url: format!("{url}{path}"),
+        export: SignalExport {
+            protocol: "http/json".into(),
+            headers: None,
+            export_interval_ms: 600_000,
+        },
+        source: "settings".into(),
+        variable: None,
+    };
+    config.traces = Some(endpoint("/v1/traces"));
+    config.metrics = Some(endpoint("/v1/metrics"));
+    config.logs = Some(endpoint("/v1/logs"));
+    let (dispatch, handle) = t3_telemetry::logging::build(t3_telemetry::logging::LoggingOptions {
+        trace: t3_telemetry::logging::TraceOptions {
+            file_path: dir.path().join("server.trace.ndjson"),
+            max_bytes: 100_000,
+            max_files: 2,
+            batch_window: Duration::from_secs(60),
+        },
+        log_level: "Info".into(),
+        trace_min_level: "Info".into(),
+        trace_timing_enabled: true,
+        telemetry: config,
+        version: "test".into(),
+        release_channel: "dev".into(),
+        host_name: "test-host".into(),
+        mode: t3_config::config::RuntimeMode::Web,
+        console: false,
+    })
+    .await
+    .expect("logging");
+    tracing::dispatcher::with_default(&dispatch, || {
+        let _span = tracing::info_span!("before.shutdown").entered();
+        tracing::warn!("queued log");
+    });
+    handle
+        .meter_provider
+        .as_ref()
+        .expect("metrics")
+        .meter("test")
+        .u64_counter("t3_rpc_requests_total")
+        .build()
+        .add(1, &[]);
+    // Each signal waits on its own hung export; the three share one deadline (three seconds,
+    // as Effect's OTLP exporters) instead of running the SDK's per-signal timeouts in sequence.
+    let started = std::time::Instant::now();
+    assert!(handle.shutdown().await.is_err());
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(8), "{elapsed:?}");
+    let local = std::fs::read_to_string(dir.path().join("server.trace.ndjson")).expect("local");
+    assert!(local.contains("before.shutdown"));
+    hung.abort();
+}
+
+#[tokio::test]
 async fn retries_preserve_uuid_and_timestamp_and_expire_or_reject() {
     let collector = Collector::new().await;
     let service = analytics(&collector, Arc::new(RwLock::new(Some(allowed()))));

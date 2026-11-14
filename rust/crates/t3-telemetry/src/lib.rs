@@ -17,6 +17,7 @@ pub mod resources;
 pub mod rpc;
 
 mod collector;
+mod http;
 
 use t3_contracts::wire::{JsNumber, WireDateTime};
 

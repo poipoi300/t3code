@@ -14,7 +14,11 @@ Call `logging::initialize(LoggingOptions::from_config(&resolved, version,
 channel, hostname)).await` **once**, before starting domain services. This installs
 the global `tracing` dispatcher and configured meter provider. Keep the returned
 `TelemetryHandle`; after domains stop, call `handle.shutdown().await`. It joins the
-local writer, flushes the three SDK providers and flushes the local trace buffer.
+local writer, flushes the three SDK providers concurrently within **one three-second
+deadline** (Effect's OTLP exporters flush for up to three seconds; the SDK's own
+per-signal timeouts would run in sequence, and metrics ignores its own), then flushes
+the local trace buffer. An export still hung at the deadline is left on its own thread
+and shutdown returns `Error::Export`.
 `build` returns a scoped dispatcher instead, for embedders and isolated tests.
 No `RUST_LOG` or OTEL environment discovery supersedes `t3-config`'s resolved levels,
 signals or credentials. SDK HTTP requests are restricted to that resolved signal.
@@ -60,6 +64,10 @@ the file tracer is initialized and which configured signals are exporting.
 
 ## Source behavior
 
+* Local spans go through the SDK's batch processor: ending a span only queues it
+  (bounded SDK queue, 2,048 spans), and the SDK worker thread redacts, formats and
+  hands them to the sink every batch window or each 512 spans, instead of every span
+  end running that work behind one processor-wide lock.
 * `serverLogger.ts`, `observability/Observability.ts`, shared `observability.ts`
   and `logging.ts`: console logging, level filters, sampled spans, trace events,
   size-based NDJSON rotation, startup backup pruning, bounded batching, shutdown
@@ -177,14 +185,32 @@ separate from product analytics opt-out, as in TypeScript.
 
 No prompt/file contents, provider credentials, bearer tokens, cookies or query
 tickets belong in these APIs. Redaction covers sensitive field names, URL ticket,
-DPoP/token/password parameters, URL user-info, bearer strings and private CLI arguments; nested
-values are bounded and strings truncated. This is stricter than the TypeScript
+DPoP/token/password parameters in a query, fragment (pairing links are
+`…/pair#token=…`) or `;` segment, OAuth `code` and `state` inside a URL's query or
+fragment (a bare `code=1` stays readable), URL user-info, bearer strings and private
+CLI arguments; nested values are bounded and strings truncated. Numeric provider
+token counters (`inputTokens`, `total_tokens` and the other usage counters analytics
+already exempts, in any of camel, snake or dotted spelling) keep their values in local
+traces, logs and OTLP although their names contain "token"; any other value under such
+a name is redacted. This is stricter than the TypeScript
 field behavior. Process command lines, names and local diagnostic paths are
 returned **only** to authorized diagnostic clients as in TypeScript, with known
 credential/prompt arguments redacted. They are never analytics dimensions.
 Local traces are always local unless the operator separately enables OTLP.
 
 ## Native differences and boundaries
+
+Outbound HTTP (OTLP exporters, the endpoint check, analytics) behaves like Node's
+fetch: ambient `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` are ignored, and the bundled
+Mozilla roots are trusted plus every certificate in the PEM file named by
+`NODE_EXTRA_CA_CERTS` (read when a client is built; an unreadable file adds nothing,
+as in Node).
+
+Inherited from TypeScript: `server.checkOtlpEndpoint` posts to any http(s) URL a
+settings writer supplies, so such a session learns whether an address is reachable
+from the server and which status it returns. Credentials go only to the exactly
+configured URL, redirects are not followed, the timeout is five seconds and no body
+is returned; restricting the URL set or the scope is left to a product decision.
 
 The collector runs in-process, preserving the monitor's sysinfo semantics and
 protocol-v3 snapshot input through `ingest_native`. Its health therefore has no
@@ -246,3 +272,9 @@ Windows runtime example: `desktopControl={version:1,type:serverReady}`,
 `traceRecords=2`, `parseErrors=0`,
 `nativeStatus=healthy`, `processes=1`, `hostCpuCount=32`,
 `hostMemorySampled=true`, `externalExports=false`.
+
+Review fixes, 2026-11-14: formatting and strict Clippy pass; 33 tests pass, including
+fragment/OAuth redaction, batched local spans keeping numeric token counters, consent
+withdrawn mid-flush, a redirecting ingest host, the shared shutdown deadline against a
+collector that never answers, and a child-process run with an ambient proxy and
+`NODE_EXTRA_CA_CERTS` against a local TLS collector.

@@ -1,4 +1,4 @@
-use crate::{Error, Result, datetime, unix_millis};
+use crate::{Error, Result, datetime, privacy::usage_counter, unix_millis};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -309,7 +309,7 @@ impl AnalyticsService {
                 "analytics buffer limits must be positive".into(),
             ));
         }
-        let client = reqwest::Client::builder()
+        let client = crate::http::client_builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(10))
             .build()
@@ -342,10 +342,10 @@ impl AnalyticsService {
         }
         let mut properties = properties;
         properties.retain(|key, value| {
-            !crate::privacy::private_field(key) || is_usage_counter(key) && value.is_number()
+            !crate::privacy::private_field(key) || usage_counter(key) && value.is_number()
         });
         for (key, value) in &mut properties {
-            if !is_usage_counter(key) {
+            if !usage_counter(key) {
                 crate::privacy::sanitize(value);
             }
         }
@@ -515,19 +515,4 @@ impl AnalyticsService {
     pub async fn shutdown(&self) {
         let _ = tokio::time::timeout(Duration::from_secs(1), self.flush()).await;
     }
-}
-fn is_usage_counter(key: &str) -> bool {
-    matches!(
-        key,
-        "inputTokens"
-            | "outputTokens"
-            | "cachedInputTokens"
-            | "cacheCreationTokens"
-            | "reasoningTokens"
-            | "totalTokens"
-            | "otherInputTokens"
-            | "otherOutputTokens"
-            | "childInputTokens"
-            | "childOutputTokens"
-    )
 }

@@ -2,9 +2,14 @@ use regex::Regex;
 use serde_json::Value;
 use std::sync::LazyLock;
 
+// After a string start, quote or space, or opening a query, fragment (`/pair#token=`) or `;` part.
 static CREDENTIALS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(^|[?&\"\s])(wsTicket|dpop|token|access_token|refresh_token|id_token|api_key|apikey|password|secret)=([^&#\"\\\s]*)"#)
+    Regex::new(r#"(?i)(^|[?&#;\"\s])(wsTicket|dpop|token|access_token|refresh_token|id_token|api_key|apikey|password|secret)=([^&#\"\\\s]*)"#)
         .expect("static credential pattern")
+});
+// OAuth `code` and `state` only inside a URL's query or fragment: `exit code=1` stays readable.
+static OAUTH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)([?&#;])(code|state)=([^&#\"\\\s]*)"#).expect("static OAuth pattern")
 });
 static BEARER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+").expect("static bearer pattern")
@@ -20,6 +25,7 @@ static CLI_PRIVATE: LazyLock<Regex> = LazyLock::new(|| {
 pub fn redact_text(text: &str) -> String {
     let redacted = URL_USERINFO.replace_all(text, "$1<redacted>@");
     let redacted = CREDENTIALS.replace_all(&redacted, "$1$2=<redacted>");
+    let redacted = OAUTH.replace_all(&redacted, "$1$2=<redacted>");
     let redacted = BEARER.replace_all(&redacted, "Bearer <redacted>");
     CLI_PRIVATE
         .replace_all(&redacted, "$1$2$3<redacted>")
@@ -89,6 +95,25 @@ pub fn private_field(key: &str) -> bool {
     .any(|fragment| normalized.contains(fragment))
 }
 
+/// Token counters a provider reports; numeric values are kept although the names contain "token".
+pub(crate) fn usage_counter(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase()
+            .replace(['-', '_', '.'], "")
+            .as_str(),
+        "inputtokens"
+            | "outputtokens"
+            | "cachedinputtokens"
+            | "cachecreationtokens"
+            | "reasoningtokens"
+            | "totaltokens"
+            | "otherinputtokens"
+            | "otheroutputtokens"
+            | "childinputtokens"
+            | "childoutputtokens"
+    )
+}
+
 pub fn sanitize(value: &mut Value) {
     fn visit(value: &mut Value, budget: &mut usize, depth: usize) {
         if *budget == 0 || depth > 64 {
@@ -105,7 +130,7 @@ pub fn sanitize(value: &mut Value) {
             }
             Value::Object(fields) => {
                 for (key, entry) in fields {
-                    if private_field(key) {
+                    if private_field(key) && !(usage_counter(key) && entry.is_number()) {
                         *entry = Value::String("<redacted>".into());
                     } else {
                         visit(entry, budget, depth + 1);
