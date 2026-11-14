@@ -83,6 +83,9 @@ const WHEN_LABELS: [(&str, &str); 10] = [
     ("sunday", "Sunday"),
 ];
 
+/// Saves the rows: the presets, and their keys when they change with them.
+type SaveRows = Rc<dyn Fn(Vec<SnoozePresetSetting>, Option<Vec<u64>>)>;
+
 /// One state for presets and their keys, so a sort queued with an edit applies on top of it.
 /// Keys survive removals and sorts, so a row's in-progress field state stays with it.
 #[derive(Clone, PartialEq, Default)]
@@ -169,26 +172,25 @@ pub fn snooze_presets_row(context: SettingsContext) -> impl IntoElement {
     }
     // Environments disagree, so equal-looking edits and Reset must still write to all of them.
     let mixed = move || context.mixed(&["snoozePresets"]);
-    let save: Rc<dyn Fn(Vec<SnoozePresetSetting>, Option<Vec<u64>>)> =
-        Rc::new(move |presets, keys| {
-            let current = rows.get_untracked();
-            if !mixed() && presets == current.presets {
-                return;
-            }
-            let keys = keys.unwrap_or(current.keys);
-            rows.set(SnoozeRows {
-                presets: presets.clone(),
-                keys,
-            });
-            written.borrow_mut().push(presets.clone());
-            let written = written.clone();
-            let source = source.clone();
-            context.update_with(json!({ "snoozePresets": presets }), move || {
-                written.borrow_mut().clear();
-                *source.borrow_mut() = None;
-                retry.update(|n| *n += 1);
-            });
+    let save: SaveRows = Rc::new(move |presets, keys| {
+        let current = rows.get_untracked();
+        if !mixed() && presets == current.presets {
+            return;
+        }
+        let keys = keys.unwrap_or(current.keys);
+        rows.set(SnoozeRows {
+            presets: presets.clone(),
+            keys,
         });
+        written.borrow_mut().push(presets.clone());
+        let written = written.clone();
+        let source = source.clone();
+        context.update_with(json!({ "snoozePresets": presets }), move || {
+            written.borrow_mut().clear();
+            *source.borrow_mut() = None;
+            retry.update(|n| *n += 1);
+        });
+    });
     let defaults = || ServerSettings::default().snooze_presets;
     let reset_save = save.clone();
     let reset_fresh = fresh.clone();
@@ -216,7 +218,7 @@ pub fn snooze_presets_row(context: SettingsContext) -> impl IntoElement {
 /// `SnoozePresetList`.
 fn snooze_preset_list(
     rows: Signal<SnoozeRows>,
-    save: Rc<dyn Fn(Vec<SnoozePresetSetting>, Option<Vec<u64>>)>,
+    save: SaveRows,
     fresh: impl Fn(usize) -> Vec<u64> + 'static,
     format: Memo<TimestampFormat>,
     now: impl Fn() -> i64 + Copy + 'static,
@@ -348,7 +350,7 @@ fn snooze_preset_row(
     item: ReadSignal<(u64, SnoozePresetSetting)>,
     index: ReadSignal<usize>,
     previews: Memo<(Vec<Preview>, Vec<String>)>,
-    save: Rc<dyn Fn(Vec<SnoozePresetSetting>, Option<Vec<u64>>)>,
+    save: SaveRows,
 ) -> impl IntoElement {
     let preset = computed(move || item.with(|(_, preset)| preset.clone()));
     let number = move || Value::Text((index.get() + 1).to_string());

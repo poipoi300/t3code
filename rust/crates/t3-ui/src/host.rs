@@ -29,6 +29,39 @@ pub fn desktop_title_bar_for(platform: Os) -> TitleBarOptions {
     options
 }
 
+/// Whether NSH will show its file picker (`pick_files`). NSH answers a pick it may not show
+/// with no files, exactly like a cancel, so where `shells/nsh.json` does not grant `picker` the
+/// composer hides "Attach files" instead of offering a control that does nothing. Logged once.
+pub fn file_picker_granted() -> bool {
+    static GRANTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *GRANTED.get_or_init(|| {
+        let granted = picker_granted_by(NSH_MANIFEST);
+        if !granted {
+            log::warn!(
+                "nsh.json does not grant the `picker` capability, so \"Attach files\" is hidden; \
+                 add `\"picker\": true` to its `capabilities`"
+            );
+        }
+        granted
+    })
+}
+
+/// The manifest NSH's generated root compiles its capabilities from.
+const NSH_MANIFEST: &str = include_str!("../../../shells/nsh.json");
+
+/// [`file_picker_granted`] for the `nsh.json` text `manifest`, read as NSH reads it
+/// (`Root::capabilities_json`): no `capabilities` grants everything; a block grants the picker
+/// only with `"picker": true`, and one NSH cannot read grants nothing.
+fn picker_granted_by(manifest: &str) -> bool {
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(manifest) else {
+        return false;
+    };
+    manifest.get("capabilities").is_none_or(|declared| {
+        nsh_core::access::Capabilities::from_json_lenient(declared)
+            .is_ok_and(|(capabilities, _)| capabilities.picker)
+    })
+}
+
 /// Whether the platform keeps `stroke` for itself (quitting, hiding, minimizing, full screen),
 /// so it cannot be bound.
 pub fn reserved_stroke(stroke: &Keystroke) -> bool {
@@ -78,4 +111,29 @@ pub fn code_highlighter() -> Option<nsh_base::text_view::CodeHighlighter> {
     return Some(nsh_base::text_view::CodeHighlighter::new(|_| Vec::new()));
     #[cfg(target_arch = "wasm32")]
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_picker_counts_as_granted_only_as_nsh_grants_it() {
+        for (manifest, granted) in [
+            (r#"{"name":"T3"}"#, true),
+            (r#"{"capabilities":{"picker":true,"clipboard":true}}"#, true),
+            (r#"{"capabilities":{"clipboard":true}}"#, false),
+            (r#"{"capabilities":{"picker":false}}"#, false),
+            (r#"{"capabilities":5}"#, false),
+            ("not json", false),
+        ] {
+            assert_eq!(picker_granted_by(manifest), granted, "{manifest}");
+        }
+    }
+
+    #[test]
+    fn the_shipped_manifest_lets_the_composer_attach_files() {
+        // A `capabilities` block without `"picker": true` would make every pick a silent cancel.
+        assert!(picker_granted_by(NSH_MANIFEST), "add \"picker\": true to shells/nsh.json");
+    }
 }

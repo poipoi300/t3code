@@ -165,7 +165,12 @@ fn fixture_on(size_: (f32, f32), os: Os) -> Headless {
     let mut registry = Registry::new();
     registry.register::<PaletteFixture>();
     let mut app = Headless::start(EngineConfig {
-        ui_sets: vec![nsh_base::registry(), registry],
+        // Through `registries()`, as every UI test: it carries the engine-panic test switch.
+        ui_sets: {
+            let mut sets = t3_ui::registries();
+            sets.push(registry);
+            sets
+        },
         viewport: size(px(size_.0), px(size_.1)),
         environment: Environment {
             os,
@@ -474,7 +479,12 @@ fn choosing_a_command_restores_the_opener_unless_the_action_moves_focus() {
             let mut registry = Registry::new();
             registry.register::<CommandFocusFixture>();
             let mut app = Headless::start(EngineConfig {
-                ui_sets: vec![nsh_base::registry(), registry],
+                // Through `registries()`, as every UI test: it carries the engine-panic test switch.
+        ui_sets: {
+            let mut sets = t3_ui::registries();
+            sets.push(registry);
+            sets
+        },
                 environment: Environment {
                     os,
                     idiom: Idiom::Desktop,

@@ -159,7 +159,7 @@ pub fn general_settings_panel() -> impl IntoElement {
     // `lastEnabledProjectGroupingMode`, read once from storage.
     let last_enabled = signal("repository");
     if let Some(read) = context.last_enabled_grouping_mode() {
-        spawn(async move {
+        crate::runtime::tasks::watch(async move {
             let mode = read.await;
             let _ = last_enabled.try_set(mode);
         });

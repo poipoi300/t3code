@@ -290,11 +290,9 @@ pub fn thread_notifications() -> impl IntoElement {
     view().app_class(crate::theme::tw("hidden"))
 }
 
-/// The web's alert sounds, read from `apps/web/src/assets` so there is one copy of each.
-const COMPLETION_SOUND: &[u8] =
-    include_bytes!("../../../../../apps/web/src/assets/notification-completion.mp3");
-const INPUT_SOUND: &[u8] =
-    include_bytes!("../../../../../apps/web/src/assets/notification-input.mp3");
+/// The web's alert sounds, kept byte-identical by `tests::sounds_match_the_web`.
+const COMPLETION_SOUND: &[u8] = include_bytes!("../../assets/sounds/notification-completion.mp3");
+const INPUT_SOUND: &[u8] = include_bytes!("../../assets/sounds/notification-input.mp3");
 
 /// `playNotificationSound`: each alert decoded once, then played. Another of the same alert while
 /// one still plays is coalesced; completion and input keep separate slots.
@@ -445,5 +443,30 @@ fn present(
             });
         }
         Presentation::None => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The alerts are the web's files, byte for byte, while the web app is beside this crate; a
+    /// change there must be copied here. Skipped where there is no `apps/web`.
+    #[test]
+    fn sounds_match_the_web() {
+        let web =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/web/src/assets");
+        if !web.is_dir() {
+            return;
+        }
+        for (name, ours) in [
+            ("notification-completion.mp3", super::COMPLETION_SOUND),
+            ("notification-input.mp3", super::INPUT_SOUND),
+        ] {
+            let theirs =
+                std::fs::read(web.join(name)).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert!(
+                theirs == ours,
+                "assets/sounds/{name} differs from apps/web/src/assets/{name}: copy it again"
+            );
+        }
     }
 }

@@ -5,6 +5,7 @@
 //! rewrite's notes for the architecture and the work packages.
 
 pub mod app;
+mod engine_panics;
 pub mod host;
 pub mod i18n;
 pub mod keys;
@@ -25,5 +26,6 @@ fn native(registry: &mut Registry) {
 }
 
 pub fn registries() -> Vec<Registry> {
+    engine_panics::install_from_environment();
     vec![nsh_base::registry(), registry()]
 }

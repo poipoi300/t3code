@@ -226,7 +226,7 @@ pub struct SettingsContext {
     /// Bumped by Restore device defaults to remount the content (`restoreSignal`).
     pub restore_signal: Signal<u64>,
     /// The settings screen's owner: writes started by a control outlive it (rule 7).
-    owner: Owner,
+    tasks: crate::runtime::tasks::TaskOwner,
 }
 
 pub fn use_settings() -> SettingsContext {
@@ -242,7 +242,7 @@ impl SettingsContext {
         let revision = signal(0u64);
         if let Some(runtime) = runtime.clone() {
             let mut changes = runtime.0.changes();
-            spawn(async move {
+            crate::runtime::tasks::watch(async move {
                 while changes.next().await.is_some() {
                     revision.update(|value| *value += 1);
                 }
@@ -274,7 +274,7 @@ impl SettingsContext {
             location,
             view,
             client,
-            owner: Owner::current(),
+            tasks: crate::runtime::tasks::TaskOwner::here(),
             content_width: signal(0.0),
             restore_signal: signal(0),
         }
@@ -362,12 +362,9 @@ impl SettingsContext {
         });
     }
 
-    /// Starts a write under the screen's owner: a select or menu disposes the control that
-    /// picked the value as it closes, and the write must still run.
+    /// Starts a handler's task under the settings screen's owner (rule 7).
     pub fn spawn(self, task: impl std::future::Future<Output = ()> + 'static) {
-        self.owner.run(move || {
-            spawn(task);
-        });
+        self.tasks.spawn(task);
     }
 
     /// `useClearScopedSettings()(keys)`.
