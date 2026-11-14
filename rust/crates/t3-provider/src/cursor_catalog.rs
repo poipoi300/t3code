@@ -72,7 +72,8 @@ impl CursorCatalog {
             .await
             .map_err(|_| CatalogError::response())?;
         if !(200..300).contains(&response.status) {
-            let value: Value = serde_json::from_slice(response.body.expose()).unwrap_or(Value::Null);
+            let value: Value =
+                serde_json::from_slice(response.body.expose()).unwrap_or(Value::Null);
             let error = value
                 .get("error")
                 .filter(|error| error.is_object())

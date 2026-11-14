@@ -283,7 +283,8 @@ remains those owners' work. The current focused rerun passes all 53 tests, and t
 --no-deps Clippy -D warnings run passes. The default library check passes.
 Library Clippy reports no package-12 diagnostics; two package-08 diagnostics
 block its -D warnings result (pull_request_sync_reactor.rs:605 and
-thread_settlement_service.rs:843). Composed runtime verification is running.
+thread_settlement_service.rs:843). Both composed-runtime tests pass: Replay turn/restart recovery and real Git
+checkpoint capture (2 passed, 0 failed/ignored).
 No sccache failure occurred in these commands.
 
 ## ISAAC redistribution notices

@@ -101,6 +101,7 @@ pub struct NativeMaintenance {
     clock: Arc<dyn ProviderClock>,
     versions: Arc<LatestVersions>,
     cache: Mutex<Option<(i64, Resolved)>>,
+    opencode_generation: Option<u8>,
 }
 impl NativeMaintenance {
     pub fn new(
@@ -117,12 +118,22 @@ impl NativeMaintenance {
             clock,
             versions,
             cache: Mutex::new(None),
+            opencode_generation: None,
         }
+    }
+    pub fn with_opencode_generation(mut self, generation: u8) -> Self {
+        self.opencode_generation = Some(generation);
+        self
     }
     fn package(&self) -> ServiceResult<&str> {
         match self.context.driver.as_str() {
             "codex" => Ok("@openai/codex"),
             "claudeAgent" => Ok("@anthropic-ai/claude-code"),
+            "opencode" => match self.opencode_generation {
+                Some(1) => Ok("opencode-ai"),
+                Some(2) => Ok("@opencode/cli"),
+                _ => Err(ServiceError::Unsupported),
+            },
             _ => Err(ServiceError::Unsupported),
         }
     }
@@ -275,15 +286,39 @@ impl NativeMaintenance {
         {
             return self.manual(Some(real));
         }
+        if context.driver == "opencode"
+            && paths
+                .iter()
+                .any(|path| opencode_native_home(path).is_some())
+            && maintenance::npm_global_prefix(&real, package).is_none()
+        {
+            let mut environment = context.environment.clone();
+            if let Some(home) =
+                opencode_native_home(&real).or_else(|| opencode_native_home(&resolved))
+            {
+                environment.retain(|key, _| !key.eq_ignore_ascii_case("HOME"));
+                environment.insert("HOME".into(), home);
+            }
+            return self.managed(
+                &resolved,
+                vec!["upgrade".into(), "--method".into(), "curl".into()],
+                "opencode-native",
+                environment,
+                Lookup::Npm,
+                true,
+            );
+        }
         let native = if context.driver == "codex" {
             paths.iter().any(|p| codex_standalone_home(p).is_some())
-        } else {
+        } else if context.driver == "claudeAgent" {
             paths.iter().any(|p| {
                 let p = normalize(p);
                 p.ends_with("/.local/bin/claude.exe")
                     || p.contains("/.local/share/claude/")
                     || p.contains("/claude/versions/")
             })
+        } else {
+            false
         };
         if native && maintenance::npm_global_prefix(&real, package).is_none() {
             let mut environment = context.environment.clone();
@@ -453,10 +488,10 @@ impl NativeMaintenance {
         self.manual(Some(real))
     }
     async fn mise(&self, resolved: &str, real: &str) -> ServiceResult<Option<Resolved>> {
-        let tool = if self.context.driver == "claudeAgent" {
-            "claude"
-        } else {
-            "codex"
+        let tool = match self.context.driver.as_str() {
+            "claudeAgent" => "claude",
+            "opencode" => "opencode",
+            _ => "codex",
         };
         let paths = [resolved, real];
         let shim = command_name(real) == "mise";
@@ -546,6 +581,9 @@ impl NativeMaintenance {
             } else {
                 Ok(None)
             };
+        }
+        if self.context.driver == "opencode" && self.opencode_generation != Some(2) {
+            return self.manual(Some(binary.into())).map(Some);
         }
         let Some(install) = owned
             .iter()
@@ -920,6 +958,16 @@ pub fn codex_standalone_home(path: &str) -> Option<String> {
     let root = home.is_empty()
         || home.len() == 2 && home.ends_with(':') && home.as_bytes()[0].is_ascii_alphabetic();
     Some(path[..index + usize::from(root)].into())
+}
+pub fn opencode_native_home(path: &str) -> Option<String> {
+    let slash = path.replace('\\', "/");
+    let lower = slash.to_ascii_lowercase();
+    let index = lower
+        .strip_suffix("/.opencode/bin/opencode")
+        .or_else(|| lower.strip_suffix("/.opencode/bin/opencode.exe"))?
+        .len();
+    let root = index == 0 || index == 2 && slash.as_bytes().get(1) == Some(&b':');
+    Some(slash[..index + usize::from(root)].into())
 }
 fn numeric_version(version: &str) -> bool {
     let mut count = 0;

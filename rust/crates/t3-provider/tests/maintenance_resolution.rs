@@ -97,6 +97,52 @@ fn build_resolver(
     )
 }
 #[tokio::test]
+async fn opencode_updates_keep_the_package_generation_and_native_home_and_never_upgrade_mise_v1_to_v2()
+ {
+    let path = "C:/different-home/.opencode/bin/opencode.exe";
+    for (generation, package) in [(1, "opencode-ai"), (2, "@opencode/cli")] {
+        let probe = Arc::new(Probe {
+            resolved: BTreeMap::from([("provider".into(), path.into())]),
+            ..Default::default()
+        });
+        let resolver = build_resolver(context("opencode", path), probe, Arc::new(Http::default()))
+            .with_opencode_generation(generation);
+        let caps = resolver.capabilities(false).await.unwrap();
+        assert_eq!(caps.package.as_deref(), Some(package));
+        let action = caps.update.unwrap();
+        assert_eq!(action.args, ["upgrade", "--method", "curl"]);
+        assert_eq!(action.environment["HOME"], "C:/different-home");
+    }
+    let shim = "C:/tools/mise/installs/opencode/latest/bin/opencode.exe";
+    let real = "C:/tools/mise/installs/opencode/1.14.19/bin/opencode.exe";
+    let probe=Arc::new(Probe{
+        resolved:BTreeMap::from([("provider".into(),shim.into()),("mise".into(),"mise".into())]),canonical:BTreeMap::from([(shim.into(),real.into())]),
+        replies:BTreeMap::from([("mise|which|opencode".into(),real.into()),("mise|ls|--json|--installed|opencode".into(),json!([{"install_path":"C:/tools/mise/installs/opencode/1.14.19","active":true,"requested_version":"latest"}]).to_string())]),..Default::default()
+    });
+    let v1 = build_resolver(
+        context("opencode", shim),
+        probe.clone(),
+        Arc::new(Http::default()),
+    )
+    .with_opencode_generation(1);
+    assert!(v1.capabilities(false).await.unwrap().update.is_none());
+    let v2 = build_resolver(context("opencode", shim), probe, Arc::new(Http::default()))
+        .with_opencode_generation(2);
+    assert_eq!(
+        v2.capabilities(false).await.unwrap().update.unwrap().args,
+        ["upgrade", "opencode"]
+    );
+    assert_eq!(
+        opencode_native_home("/.opencode/bin/opencode"),
+        Some("/".into())
+    );
+    assert_eq!(
+        opencode_native_home("C:\\.opencode\\bin\\opencode.exe"),
+        Some("C:/".into())
+    );
+    assert!(opencode_native_home("C:/local/.opencode/bin/opencode-wrapper").is_none());
+}
+#[tokio::test]
 async fn native_codex_updates_use_the_executables_home_and_its_own_release_channel() {
     let path = "C:/fixture/standalone-home/packages/standalone/codex.exe";
     let probe = Arc::new(Probe {

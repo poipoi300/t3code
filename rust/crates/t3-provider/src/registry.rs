@@ -3,9 +3,11 @@ use crate::{
     environment::{Environment, Platform},
     invalid,
 };
+use async_trait::async_trait;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -35,7 +37,7 @@ static UVX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^[a-z0-9][a-z0-9._-]*(?:@|==)v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$").expect("uvx regex")
 });
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PackageDistribution {
     pub package: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -43,7 +45,7 @@ pub struct PackageDistribution {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: Environment,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct BinaryTarget {
     pub archive: String,
     pub cmd: String,
@@ -216,7 +218,7 @@ pub enum Preference {
     Npx,
     Uvx,
 }
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ResolvedDistribution {
     pub kind: Distribution,
     pub args: Vec<String>,
@@ -431,19 +433,97 @@ struct RegistryState {
     fetched_at_ms: Option<i64>,
 }
 pub struct RegistryCatalog {
-    client: reqwest::Client,
+    fetch: Arc<dyn RegistryFetch>,
     url: String,
     state: Mutex<RegistryState>,
+    revision: AtomicU64,
+    cache_file: Option<PathBuf>,
+}
+#[async_trait]
+pub trait RegistryFetch: Send + Sync {
+    async fn bytes(&self, url: &str) -> crate::sensitive::ServiceResult<Vec<u8>>;
+}
+pub struct ReqwestRegistryFetch(pub reqwest::Client);
+#[async_trait]
+impl RegistryFetch for ReqwestRegistryFetch {
+    async fn bytes(&self, url: &str) -> crate::sensitive::ServiceResult<Vec<u8>> {
+        use crate::sensitive::ServiceError;
+        let mut response = self
+            .0
+            .get(url)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|_| ServiceError::Network)?
+            .error_for_status()
+            .map_err(|_| ServiceError::Network)?;
+        let mut bytes = vec![];
+        while let Some(chunk) = response.chunk().await.map_err(|_| ServiceError::Network)? {
+            if bytes.len().saturating_add(chunk.len()) > MAX_REGISTRY_BYTES {
+                return Err(ServiceError::Response);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
 }
 impl RegistryCatalog {
+    pub async fn cached(&self) -> Option<Arc<RegistryIndex>> {
+        let mut state = self.state.lock().await;
+        self.load_cached(&mut state).await;
+        state.index.clone()
+    }
+    pub fn with_cache_file(mut self, path: PathBuf) -> Self {
+        self.cache_file = Some(path);
+        self
+    }
+    async fn load_cached(&self, state: &mut RegistryState) {
+        if state.index.is_some() {
+            return;
+        }
+        let Some(path) = self.cache_file.as_ref() else {
+            return;
+        };
+        if tokio::fs::metadata(path)
+            .await
+            .is_ok_and(|metadata| metadata.len() <= MAX_REGISTRY_BYTES as u64)
+            && let Ok(bytes) = tokio::fs::read(path).await
+            && let Ok(index) = RegistryIndex::parse(&bytes)
+        {
+            state.index = Some(Arc::new(index));
+        }
+    }
+    async fn write_cached(&self, index: &RegistryIndex) {
+        let Some(path) = self.cache_file.clone() else {
+            return;
+        };
+        let Ok(bytes) = serde_json::to_vec(index) else {
+            return;
+        };
+        let _ = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            use std::io::Write;
+            let parent = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
+            std::fs::create_dir_all(parent)?;
+            let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+            temporary.write_all(&bytes)?;
+            temporary.persist(path).map_err(|error| error.error)?;
+            Ok(())
+        })
+        .await;
+    }
     pub fn new(client: reqwest::Client, cache: Option<RegistryIndex>) -> Self {
+        Self::with_fetcher(Arc::new(ReqwestRegistryFetch(client)), cache)
+    }
+    pub fn with_fetcher(fetch: Arc<dyn RegistryFetch>, cache: Option<RegistryIndex>) -> Self {
         Self {
-            client,
+            fetch,
             url: REGISTRY_URL.into(),
             state: Mutex::new(RegistryState {
                 index: cache.map(Arc::new),
                 fetched_at_ms: None,
             }),
+            revision: AtomicU64::new(0),
+            cache_file: None,
         }
     }
     pub fn with_url(mut self, url: String) -> Self {
@@ -451,7 +531,14 @@ impl RegistryCatalog {
         self
     }
     pub async fn recent(&self, now_ms: i64, force: bool) -> Result<Arc<RegistryIndex>> {
+        let observed = self.revision.load(Ordering::Acquire);
         let mut state = self.state.lock().await;
+        self.load_cached(&mut state).await;
+        if self.revision.load(Ordering::Acquire) != observed
+            && let Some(index) = state.index.as_ref()
+        {
+            return Ok(index.clone());
+        }
         if !force
             && state.fetched_at_ms.is_some_and(|t| now_ms < t + 300_000)
             && let Some(index) = &state.index
@@ -465,41 +552,48 @@ impl RegistryCatalog {
                     "expected HTTPS without credentials",
                 ));
             }
-            let mut response = self
-                .client
-                .get(&self.url)
-                .timeout(Duration::from_secs(30))
-                .send()
-                .await?
-                .error_for_status()?;
-            let mut bytes = Vec::new();
-            while let Some(chunk) = response.chunk().await? {
-                if bytes.len() + chunk.len() > MAX_REGISTRY_BYTES {
-                    return Err(invalid("registry index", "response exceeds one MiB"));
-                }
-                bytes.extend_from_slice(&chunk);
+            let bytes = tokio::time::timeout(Duration::from_secs(30), self.fetch.bytes(&self.url))
+                .await
+                .map_err(|_| invalid("registry index", "request timed out"))?
+                .map_err(|_| invalid("registry index", "request failed"))?;
+            if bytes.len() > MAX_REGISTRY_BYTES {
+                return Err(invalid("registry index", "response exceeds one MiB"));
             }
             RegistryIndex::parse(&bytes)
         }
         .await;
         match fetched {
             Ok(index) => {
+                self.write_cached(&index).await;
                 let index = Arc::new(index);
                 state.index = Some(index.clone());
                 state.fetched_at_ms = Some(now_ms);
+                self.revision.fetch_add(1, Ordering::Release);
                 Ok(index)
             }
-            Err(error) => state.index.clone().ok_or(error),
+            Err(error) => {
+                self.revision.fetch_add(1, Ordering::Release);
+                state.index.clone().ok_or(error)
+            }
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LaunchDescription {
     pub executable: PathBuf,
     pub args: Vec<String>,
     pub environment: Environment,
 }
+macro_rules! redacted_debug {
+    ($($name:ty),+)=>{$(impl std::fmt::Debug for $name{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str(concat!(stringify!($name),"([REDACTED])"))}})+};
+}
+redacted_debug!(
+    PackageDistribution,
+    BinaryTarget,
+    ResolvedDistribution,
+    LaunchDescription
+);
 
 pub fn launch_description(
     distribution: &ResolvedDistribution,

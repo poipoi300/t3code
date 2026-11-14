@@ -36,7 +36,13 @@ pub trait HttpTransport: Send + Sync {
     async fn send(&self, request: HttpRequest) -> ServiceResult<HttpResponse>;
     async fn raw(&self, request: HttpRequest) -> ServiceResult<RawHttpResponse> {
         let response = self.send(request).await?;
-        Ok(RawHttpResponse { status: response.status, content_type: Some("application/json".into()), body: Sensitive::new(serde_json::to_vec(response.body.expose()).map_err(|_|ServiceError::Response)?) })
+        Ok(RawHttpResponse {
+            status: response.status,
+            content_type: Some("application/json".into()),
+            body: Sensitive::new(
+                serde_json::to_vec(response.body.expose()).map_err(|_| ServiceError::Response)?,
+            ),
+        })
     }
     async fn text(&self, request: HttpRequest) -> ServiceResult<HttpTextResponse> {
         let response = self.send(request).await?;
@@ -76,7 +82,11 @@ impl ReqwestTransport {
         }
         let mut response = builder.send().await.map_err(|_| ServiceError::Network)?;
         let status = response.status().as_u16();
-        let content_type = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).map(str::to_owned);
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| ServiceError::Network)? {
             if bytes.len().saturating_add(chunk.len()) > 8 * 1024 * 1024 {
@@ -84,12 +94,18 @@ impl ReqwestTransport {
             }
             bytes.extend_from_slice(&chunk);
         }
-        Ok(RawHttpResponse {status, content_type, body: Sensitive::new(bytes)})
+        Ok(RawHttpResponse {
+            status,
+            content_type,
+            body: Sensitive::new(bytes),
+        })
     }
 }
 #[async_trait]
 impl HttpTransport for ReqwestTransport {
-    async fn raw(&self, request: HttpRequest) -> ServiceResult<RawHttpResponse> { self.bytes(request).await }
+    async fn raw(&self, request: HttpRequest) -> ServiceResult<RawHttpResponse> {
+        self.bytes(request).await
+    }
     async fn text(&self, request: HttpRequest) -> ServiceResult<HttpTextResponse> {
         let response = self.bytes(request).await?;
         Ok(HttpTextResponse {

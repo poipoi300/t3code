@@ -193,8 +193,14 @@ fn inspect_with_budget(
 ) -> SkillInspection {
     let home = environment
         .get("HOME")
-        .map(|value| value.trim()).filter(|value| !value.is_empty())
-        .or_else(|| environment.get("USERPROFILE").map(|value| value.trim()).filter(|value| !value.is_empty()))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            environment
+                .get("USERPROFILE")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+        })
         .map(Path::new)
         .unwrap_or(home);
     let mut roots = vec![];

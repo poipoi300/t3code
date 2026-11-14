@@ -106,3 +106,134 @@ pub fn cursor(
         },
     }
 }
+
+pub fn opencode_v1(
+    mode: RuntimeMode,
+    approval: Option<&Value>,
+    sandbox: Option<&Value>,
+) -> Vec<Value> {
+    let kind = sandbox.and_then(|sandbox| sandbox["type"].as_str());
+    let approval_text = approval
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let ask = approval_text.map_or(
+        approval.is_some_and(Value::is_object) || mode != RuntimeMode::FullAccess,
+        |approval| approval != "never",
+    );
+    let rule = |permission: &str, pattern: &str, action: &str| json!({"permission":permission,"pattern":pattern,"action":action});
+    if !ask
+        && (matches!(kind, Some("externalSandbox" | "dangerFullAccess"))
+            || kind.is_none() && mode == RuntimeMode::FullAccess)
+    {
+        return vec![rule("*", "*", "allow")];
+    }
+    let restricted = [
+        "bash",
+        "edit",
+        "webfetch",
+        "websearch",
+        "codesearch",
+        "external_directory",
+        "doom_loop",
+    ];
+    let mut rules = vec![rule("*", "*", "deny")];
+    rules.extend(
+        restricted
+            .iter()
+            .map(|permission| rule(permission, "*", "deny")),
+    );
+    if ask {
+        rules.push(rule("*", "*", "ask"));
+        rules.extend(
+            restricted
+                .iter()
+                .map(|permission| rule(permission, "*", "ask")),
+        );
+    }
+    rules.extend(
+        [
+            "question",
+            "read",
+            "glob",
+            "grep",
+            "lsp",
+            "todowrite",
+            "task",
+            "skill",
+        ]
+        .iter()
+        .map(|permission| rule(permission, "*", "allow")),
+    );
+    rules.extend([
+        rule("read", "*.env", if ask { "ask" } else { "deny" }),
+        rule("read", "*.env.*", if ask { "ask" } else { "deny" }),
+        rule("read", "*.env.example", "allow"),
+    ]);
+    if mode == RuntimeMode::AutoAcceptEdits || !ask && kind == Some("workspaceWrite") {
+        rules.push(rule("edit", "*", "allow"));
+    }
+    if !ask && sandbox.is_some_and(|sandbox| sandbox["networkAccess"] == true) {
+        rules.extend(
+            ["webfetch", "websearch", "codesearch"]
+                .iter()
+                .map(|permission| rule(permission, "*", "allow")),
+        );
+    }
+    if !ask
+        && kind == Some("readOnly")
+        && sandbox.is_some_and(|sandbox| sandbox["access"]["type"] == "fullAccess")
+    {
+        rules.push(rule("external_directory", "*", "allow"));
+    }
+    if !ask
+        && kind == Some("workspaceWrite")
+        && let Some(roots) = sandbox.and_then(|sandbox| sandbox["writableRoots"].as_array())
+    {
+        rules.extend(
+            roots
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|root| !root.trim().is_empty())
+                .map(|root| {
+                    rule(
+                        "external_directory",
+                        &format!("{}/*", root.strip_suffix('/').unwrap_or(root)),
+                        "allow",
+                    )
+                }),
+        );
+    }
+    rules
+}
+
+pub fn opencode_v2(
+    mode: RuntimeMode,
+    interaction: ProviderInteractionMode,
+    grants: &[Value],
+    paths: &[Value],
+) -> Vec<Value> {
+    let rule = |action: &str, effect: &str| json!({"action":action,"effect":effect,"resource":"*"});
+    let mut rules = if mode == RuntimeMode::FullAccess {
+        vec![rule("*", "allow")]
+    } else {
+        vec![
+            rule("shell", "ask"),
+            rule(
+                "edit",
+                if mode == RuntimeMode::AutoAcceptEdits {
+                    "allow"
+                } else {
+                    "ask"
+                },
+            ),
+            rule("external_directory", "ask"),
+        ]
+    };
+    rules.extend_from_slice(grants);
+    if interaction == ProviderInteractionMode::Plan {
+        rules.push(rule("edit", "deny"));
+    }
+    rules.extend_from_slice(paths);
+    rules
+}

@@ -544,12 +544,25 @@ async fn cursor_status_uses_the_shipped_sdk_http_catalog_and_disabled_instances_
             assert_eq!(snapshot["models"].as_array().unwrap().len(), 2);
             assert_eq!(snapshot["auth"]["label"], "Cursor API key (T3)");
             assert_eq!(snapshot["auth"]["email"], "ada@example.com");
-            let project=directory.path().join("workspace");
+            let project = directory.path().join("workspace");
             std::fs::create_dir_all(project.join(".cursor/skills/project")).unwrap();
-            std::fs::write(project.join(".cursor/skills/project/SKILL.md"),"# Instructions").unwrap();
-            let workspace=serde_json::to_value(provider.snapshot(Some(project.to_str().unwrap()),true).await.unwrap()).unwrap();
-            assert_eq!(workspace["auth"]["status"],"authenticated");
-            assert_eq!(workspace["workspaceSnapshots"][0]["skills"][0]["name"],"project");
+            std::fs::write(
+                project.join(".cursor/skills/project/SKILL.md"),
+                "# Instructions",
+            )
+            .unwrap();
+            let workspace = serde_json::to_value(
+                provider
+                    .snapshot(Some(project.to_str().unwrap()), true)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(workspace["auth"]["status"], "authenticated");
+            assert_eq!(
+                workspace["workspaceSnapshots"][0]["skills"][0]["name"],
+                "project"
+            );
             assert!(workspace["skills"].as_array().unwrap().is_empty());
         } else {
             assert!(usage.calls.lock().await.is_empty());
@@ -606,13 +619,13 @@ fn cursor_windows_defaults_require_auto_review_for_the_unsandboxed_path_but_expl
 
 #[tokio::test]
 async fn empty_http_authentication_failures_preserve_status_and_never_expose_response_bytes() {
-    use tokio::io::{AsyncReadExt,AsyncWriteExt};
-    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address=listener.local_addr().unwrap();
-    let server=tokio::spawn(async move {
-        let mut replies=tokio::task::JoinSet::new();
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut replies = tokio::task::JoinSet::new();
         for _ in 0..2 {
-            let (mut socket,_)=listener.accept().await.unwrap();
+            let (mut socket, _) = listener.accept().await.unwrap();
             replies.spawn(async move {
                 let mut request=[0;4096]; let count=socket.read(&mut request).await.unwrap();
                 let request=String::from_utf8_lossy(&request[..count]);
@@ -624,10 +637,19 @@ async fn empty_http_authentication_failures_preserve_status_and_never_expose_res
                 let _=socket.write_all(reply.as_bytes()).await;
             });
         }
-        while let Some(result)=replies.join_next().await { result.unwrap(); }
+        while let Some(result) = replies.join_next().await {
+            result.unwrap();
+        }
     });
-    let catalog=CursorCatalog::new(Arc::new(ReqwestTransport::new().unwrap()),Arc::new(Clock(AtomicI64::new(0))),format!("http://{address}"));
-    let error=match catalog.read(&Sensitive::new("secret-key".into())).await { Err(error)=>error,Ok(_)=>panic!("unauthorized account") };
+    let catalog = CursorCatalog::new(
+        Arc::new(ReqwestTransport::new().unwrap()),
+        Arc::new(Clock(AtomicI64::new(0))),
+        format!("http://{address}"),
+    );
+    let error = match catalog.read(&Sensitive::new("secret-key".into())).await {
+        Err(error) => error,
+        Ok(_) => panic!("unauthorized account"),
+    };
     assert!(!format!("{error:?} {error}").contains("secret-key"));
     assert!(error.authentication_failure);
     server.await.unwrap();

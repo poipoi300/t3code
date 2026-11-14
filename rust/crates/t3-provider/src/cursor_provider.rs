@@ -23,8 +23,23 @@ pub struct CursorProvider {
     machine: tokio::sync::Mutex<Option<ServerProvider>>,
 }
 impl CursorProvider {
-    pub fn new(spec: Arc<InstanceSpec>, context: NativeProviderContext, auth: Arc<CursorAuth>, http: Arc<dyn HttpTransport>, manifest: ManifestSource, clock: Arc<dyn ProviderClock>) -> Self {
-        Self { spec,context,auth,http,manifest,clock,machine:tokio::sync::Mutex::new(None) }
+    pub fn new(
+        spec: Arc<InstanceSpec>,
+        context: NativeProviderContext,
+        auth: Arc<CursorAuth>,
+        http: Arc<dyn HttpTransport>,
+        manifest: ManifestSource,
+        clock: Arc<dyn ProviderClock>,
+    ) -> Self {
+        Self {
+            spec,
+            context,
+            auth,
+            http,
+            manifest,
+            clock,
+            machine: tokio::sync::Mutex::new(None),
+        }
     }
     async fn check(&self) -> ServiceResult<ServerProvider> {
         let now = self.clock.now_ms();
@@ -151,13 +166,8 @@ impl CursorProvider {
                 &self.context.home,
                 self.context.platform,
             );
-            let skills = crate::cursor_skills::probe(
-                None,
-                &self.context.home,
-                &environment,
-            )?;
+            let skills = crate::cursor_skills::probe(None, &self.context.home, &environment)?;
             value["skills"] = json!(skills);
-
         }
         if let Some(advisory) = crate::versions::resolve_compatibility(
             self.manifest
@@ -199,23 +209,49 @@ impl ProviderInstanceService for CursorProvider {
         })
     }
     async fn snapshot(&self, cwd: Option<&str>, fresh: bool) -> ServiceResult<ServerProvider> {
-        let mut machine=self.machine.lock().await;
-        if let Some(cwd)=cwd {
-            if machine.is_none() { *machine=Some(self.check().await?); }
-            let base=machine.as_mut().ok_or(ServiceError::Unavailable)?;
-            if !base.enabled {return Ok(base.clone());}
-            if !fresh && base.workspace_snapshots.as_ref().is_some_and(|workspaces|workspaces.iter().any(|workspace|workspace.cwd.0==cwd)) {return Ok(base.clone());}
-            let environment=self.spec.environment(&self.context.environment,&self.context.home,self.context.platform);
-            let skills=crate::cursor_skills::probe(Some(std::path::Path::new(cwd)),&self.context.home,&environment)?;
-            let checked=chrono::DateTime::from_timestamp_millis(self.clock.now_ms()).ok_or(ServiceError::Response)?.to_rfc3339_opts(chrono::SecondsFormat::Millis,true);
+        let mut machine = self.machine.lock().await;
+        if let Some(cwd) = cwd {
+            if machine.is_none() {
+                *machine = Some(self.check().await?);
+            }
+            let base = machine.as_mut().ok_or(ServiceError::Unavailable)?;
+            if !base.enabled {
+                return Ok(base.clone());
+            }
+            if !fresh
+                && base.workspace_snapshots.as_ref().is_some_and(|workspaces| {
+                    workspaces.iter().any(|workspace| workspace.cwd.0 == cwd)
+                })
+            {
+                return Ok(base.clone());
+            }
+            let environment = self.spec.environment(
+                &self.context.environment,
+                &self.context.home,
+                self.context.platform,
+            );
+            let skills = crate::cursor_skills::probe(
+                Some(std::path::Path::new(cwd)),
+                &self.context.home,
+                &environment,
+            )?;
+            let checked = chrono::DateTime::from_timestamp_millis(self.clock.now_ms())
+                .ok_or(ServiceError::Response)?
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
             let snapshot=serde_json::from_value(json!({"cwd":cwd,"checkedAt":checked,"slashCommands":base.slash_commands,"skills":skills,"slashCommandsPending":false})).map_err(|_|ServiceError::Response)?;
-            let snapshots=base.workspace_snapshots.get_or_insert_with(Vec::new);
-            snapshots.retain(|snapshot|snapshot.cwd.0!=cwd);snapshots.push(snapshot);
-            if snapshots.len()>16 {snapshots.remove(0);}
+            let snapshots = base.workspace_snapshots.get_or_insert_with(Vec::new);
+            snapshots.retain(|snapshot| snapshot.cwd.0 != cwd);
+            snapshots.push(snapshot);
+            if snapshots.len() > 16 {
+                snapshots.remove(0);
+            }
             return Ok(base.clone());
         }
-        let mut next=self.check().await?;
-        if let Some(previous)=machine.as_ref() {next.workspace_snapshots=previous.workspace_snapshots.clone();}
-        *machine=Some(next.clone());Ok(next)
+        let mut next = self.check().await?;
+        if let Some(previous) = machine.as_ref() {
+            next.workspace_snapshots = previous.workspace_snapshots.clone();
+        }
+        *machine = Some(next.clone());
+        Ok(next)
     }
 }

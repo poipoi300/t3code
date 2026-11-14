@@ -196,20 +196,52 @@ pub struct ManagedCodexProvider {
     pub manifest: ManifestSource,
     pub http: Arc<dyn HttpTransport>,
 }
+impl ManagedCodexProvider {
+    pub fn initial_snapshot(&self) -> ServiceResult<ServerProvider> {
+        let checked = chrono::DateTime::from_timestamp_millis(self.clock.now_ms())
+            .ok_or(ServiceError::Response)?
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let mut value = json!({"instanceId":self.spec.instance_id,"driver":"codex","displayName":self.spec.display_name.as_deref().unwrap_or("Codex"),"enabled":self.spec.enabled,"installed":false,"version":null,"status":if self.spec.enabled{"warning"}else{"disabled"},"auth":{"status":"unknown"},"models":[],"checkedAt":checked,"setup":{"canAuthenticate":true,"canInstall":true},"continuation":{"groupKey":self.runtime.layout.continuation_key},"runtimePaths":{"homePath":self.runtime.layout.shared_home.to_string_lossy(),"shadowHomePath":if self.runtime.layout.auth_overlay{self.runtime.layout.effective_home.as_ref().map(|p|p.to_string_lossy().into_owned())}else{None}},"reportsContextWindow":true,"showInteractionModeToggle":true,"supportedRuntimeModes":["approval-required","auto-accept-edits","auto","full-access"]});
+        if let Some(color) = self.spec.accent_color.as_ref() {
+            value["accentColor"] = json!(color);
+        }
+        value["message"] = json!(if self.spec.enabled {
+            "Codex provider status has not been checked in this session yet."
+        } else {
+            "Codex is disabled in T3 Code settings."
+        });
+        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+    }
+    pub async fn into_managed(
+        self,
+        options: crate::managed_provider::ManagedOptions,
+    ) -> ServiceResult<Arc<crate::managed_provider::ManagedProvider>> {
+        let initial = self.initial_snapshot()?;
+        let background = options.background.clone();
+        let changes = self
+            .runtime
+            .controller
+            .subscribe("managed-codex-snapshot".into());
+        let provider =
+            crate::managed_provider::ManagedProvider::new(Arc::new(self), initial, options)?;
+        provider.recheck_on_auth(changes, background).await;
+        Ok(provider)
+    }
+}
 #[async_trait]
 impl ProviderInstanceService for ManagedCodexProvider {
     fn instance_id(&self) -> &ProviderInstanceId {
         &self.spec.instance_id
     }
     async fn snapshot(&self, cwd: Option<&str>, _fresh: bool) -> ServiceResult<ServerProvider> {
-        let checked = chrono::DateTime::from_timestamp_millis(self.clock.now_ms())
+        let mut value =
+            serde_json::to_value(self.initial_snapshot()?).map_err(|_| ServiceError::Response)?;
+        let checked = value["checkedAt"]
+            .as_str()
             .ok_or(ServiceError::Response)?
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let mut value = json!({"instanceId":self.spec.instance_id,"driver":"codex","displayName":self.spec.display_name.as_deref().unwrap_or("Codex"),"enabled":self.spec.enabled,"installed":false,"version":null,"status":if self.spec.enabled{"warning"}else{"disabled"},"auth":{"status":"unauthenticated"},"models":[],"checkedAt":checked,"setup":{"canAuthenticate":true,"canInstall":true},"continuation":{"groupKey":self.runtime.layout.continuation_key},"runtimePaths":{"homePath":self.runtime.layout.shared_home.to_string_lossy(),"shadowHomePath":if self.runtime.layout.auth_overlay{self.runtime.layout.effective_home.as_ref().map(|p|p.to_string_lossy().into_owned())}else{None}},"showInteractionModeToggle":true,"supportedRuntimeModes":["approval-required","auto-accept-edits","auto","full-access"]});
-        if let Some(color) = self.spec.accent_color.as_ref() {
-            value["accentColor"] = json!(color);
-        }
+            .to_owned();
         if self.spec.enabled {
+            value["auth"] = json!({"status":"unauthenticated"});
             match self.runtime.installation.resolve().await {
                 Err(_) => {
                     value["message"] = json!("Set up Codex to get started.");

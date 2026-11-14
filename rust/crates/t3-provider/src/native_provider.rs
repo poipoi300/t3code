@@ -137,6 +137,58 @@ impl NativeProvider {
         self.update_checks = update_checks;
         self
     }
+    pub fn initial_snapshot(&self) -> ServiceResult<ServerProvider> {
+        let driver = Driver::from_kind(&self.spec.driver.0)
+            .filter(|driver| matches!(driver, Driver::Codex | Driver::Claude))
+            .ok_or(ServiceError::Unsupported)?;
+        let now = self.clock.now_ms();
+        let checked = chrono::DateTime::from_timestamp_millis(now)
+            .ok_or(ServiceError::Response)?
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let manifest = self.manifest.current();
+        let catalog = manifest.catalog(driver.kind(), now);
+        let custom = self.spec.config["customModels"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let built_in = catalog
+            .map(|catalog| {
+                catalog
+                    .models
+                    .into_iter()
+                    .map(|entry| entry.model)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let models = catalog::custom_models(&built_in, &custom, None);
+        let name = if driver == Driver::Codex {
+            "Codex"
+        } else {
+            "Claude"
+        };
+        let message = if self.spec.enabled {
+            format!("{name} provider status has not been checked in this session yet.")
+        } else {
+            format!("{name} is disabled in T3 Code settings.")
+        };
+        let mut value = json!({"installed":false,"version":null,"status":if self.spec.enabled{"warning"}else{"disabled"},"auth":{"status":"unknown"},"skills":[],"slashCommands":[],"message":message});
+        self.stamp(&mut value, &checked, &models);
+        let environment = self.spec.environment(
+            &self.context.environment,
+            &self.context.home,
+            self.context.platform,
+        );
+        let home = self.spec.config["homePath"].as_str().unwrap_or_default();
+        value["continuation"] = json!({"groupKey":if driver==Driver::Codex{crate::environment::codex_home_layout(home,self.spec.config["shadowHomePath"].as_str().unwrap_or_default(),&self.context.home,&self.context.cwd).continuation_key}else{format!("claude:home:{}",crate::environment::claude_home(home,&environment,&self.context.home,&self.context.cwd).display())}});
+        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+    }
+    pub fn into_managed(
+        self,
+        options: crate::managed_provider::ManagedOptions,
+    ) -> ServiceResult<Arc<crate::managed_provider::ManagedProvider>> {
+        let initial = self.initial_snapshot()?;
+        crate::managed_provider::ManagedProvider::new(Arc::new(self), initial, options)
+    }
     fn stamp(&self, value: &mut Value, checked: &str, models: &[ServerProviderModel]) {
         value["instanceId"] = json!(self.spec.instance_id);
         value["driver"] = json!(self.spec.driver);
@@ -563,6 +615,10 @@ impl NativeProvider {
 }
 #[async_trait]
 impl ProviderInstanceService for NativeProvider {
+    async fn invalidate_usage_cache(&self) -> ServiceResult<()> {
+        self.probe_cache.invalidate().await;
+        Ok(())
+    }
     async fn invalidate_caches(&self) -> ServiceResult<()> {
         self.probe_cache.invalidate().await;
         if let Some(machine) = self.machine.lock().await.as_mut() {

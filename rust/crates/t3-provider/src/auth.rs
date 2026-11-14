@@ -28,6 +28,9 @@ pub enum AuthReply {
 
 #[async_trait]
 pub trait AuthBackend: Send + Sync {
+    fn default_method_id(&self) -> Option<&str> {
+        None
+    }
     fn check_start(&self) -> ServiceResult<()> {
         Ok(())
     }
@@ -408,6 +411,7 @@ impl AuthController {
             let work = async {
                 let methods = backend.methods().await?;
                 let method = method
+                    .or_else(|| backend.default_method_id().map(str::to_owned))
                     .or_else(|| methods.first().map(|m| m.id.0.clone()))
                     .ok_or(ServiceError::Method)?;
                 if !methods.iter().any(|m| m.id.0 == method) {

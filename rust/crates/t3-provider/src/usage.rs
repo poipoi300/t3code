@@ -27,6 +27,22 @@ fn sort_windows(windows: &mut [ServerProviderUsageWindow]) {
     });
 }
 
+pub fn make_usage_limits(
+    mut windows: Vec<ServerProviderUsageWindow>,
+    checked_at: WireDateTime,
+) -> ServerProviderUsageLimits {
+    sort_windows(&mut windows);
+    ServerProviderUsageLimits {
+        checked_at,
+        windows,
+        credential_fingerprint: None,
+        reset_credits: None,
+        zero_spend_cap: None,
+        external_usage: None,
+        unavailable: None,
+    }
+}
+
 pub fn apply_usage_update(
     previous: Option<&Arc<ServerProviderUsageLimits>>,
     update: &ProviderUsageLimitsUpdate,
@@ -78,6 +94,9 @@ pub fn apply_usage_update(
         windows,
         credential_fingerprint: None,
         reset_credits: previous.and_then(|p| p.reset_credits.clone()),
+        zero_spend_cap: previous
+            .filter(|previous| previous.zero_spend_cap == Some(Some(true)))
+            .map(|_| Some(true)),
         external_usage: None,
         unavailable: previous.map(|p| p.unavailable.clone()).unwrap_or(Some(Some(
             ServerProviderUsageUnavailable {
