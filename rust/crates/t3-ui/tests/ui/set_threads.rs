@@ -97,3 +97,21 @@ fn without_a_policy_values_at_the_built_in_default_say_so() {
     );
     assert!(!app.screen().shows("Managed by Acme."));
 }
+
+/// Rule 7: a select disposes its content when it closes, and the write must still be sent.
+#[test]
+fn picking_an_option_in_a_select_sends_one_settings_write_after_it_closes() {
+    let mut app = start_connected(TALL, SettingsPage::Threads, Remote::default());
+    app.press("role:combobox[Default workspace]")
+        .expect("open the select");
+    app.wait_for("role:option[New worktree]")
+        .expect("its options");
+    app.press("role:option[New worktree]").expect("pick");
+    app.wait_for_gone("role:option", std::time::Duration::from_secs(5))
+        .expect("the select closed");
+    app.press("id:read-server").expect("read the server");
+    app.wait_for("Updates 1")
+        .expect("one settings write after the select closed");
+    app.wait_for("text:/\"defaultThreadEnvMode\":\"worktree\"/")
+        .expect("the patch the environment received");
+}

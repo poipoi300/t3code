@@ -117,6 +117,15 @@ pub fn app_tree(runtime: Rt, route: Route, provide_services: impl FnOnce()) -> A
         }))
         // ConfirmDialogHost at the root, as the web mounts it: every confirm request needs one.
         .child(crate::ui::confirm::confirm_dialog_host())
+        // CONN-1: pairing links handed to the running app (confirmed by origin, through the
+        // confirm host above) and the storage notice, once; nothing on the demo backend.
+        .child(
+            view()
+                .test_id("connection-notices")
+                .accessible(false)
+                .app_class(theme::tw("absolute size-0"))
+                .child(crate::screens::connect::connection_notices()),
+        )
         // ThreadNotificationCoordinator, started once from the app root (hidden, effects only).
         .child(crate::screens::notifications::thread_notifications())
         .into_element();
