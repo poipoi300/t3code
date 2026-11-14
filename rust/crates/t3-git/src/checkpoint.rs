@@ -1138,16 +1138,19 @@ impl Git {
                 }
             }
             self.recreate_restore_scope(&scope).await?;
-            self.clean_checkpoint_workspace(&scope, &mut mutated, native_clean_guard).await
+            self.clean_checkpoint_workspace(&scope, &mut mutated, native_clean_guard)
+                .await
         }
         .await;
         let restored = restored.map_err(|error| match error {
             GitError::UnsafeRestore(message) if mutated => GitError::UnsafeRestore(format!(
-                "{}: {message}", if tracked_restored {
+                "{}: {message}",
+                if tracked_restored {
                     "Tracked files were restored before cleanup was refused"
                 } else {
                     "Workspace cleanup had already started before refusal"
-                })),
+                }
+            )),
             error => error,
         });
         if mutated {

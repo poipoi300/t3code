@@ -337,6 +337,46 @@ fn a_redacted_key_is_substituted_only_for_the_saved_kind_and_origin() {
         listing_config(Some(supplied), Some(&saved), SENTINEL).map(|c| c.api_key)
     };
     let saved_key = Ok(SettingsSecretValue::Literal("saved-key".into()));
+    // A supplied secret reference also reuses a stored secret: only the saved one, at the saved
+    // address, for the saved kind.
+    let referring = |kind: &str, url: &str, reference: &str| -> TextGeneratorConfig {
+        serde_json::from_value(serde_json::json!({
+            "kind": kind,
+            "baseUrl": url,
+            "apiKey": {"provider": "1password", "reference": reference},
+            "enabled": true,
+        }))
+        .expect("config")
+    };
+    let saved_reference = referring(
+        "openaiCompatible",
+        "https://api.example.com/v1",
+        "op://Private/api/key",
+    );
+    for stolen in [
+        referring("openaiCompatible", "https://attacker.example/v1", "op://Private/other/password"),
+        referring("openaiCompatible", "https://attacker.example/v1", "op://Private/api/key"),
+        referring("openaiCompatible", "https://api.example.com/v1", "op://Private/other/password"),
+        referring("anthropic", "https://api.example.com/v1", "op://Private/api/key"),
+    ] {
+        for saved in [&saved_reference, &saved] {
+            assert_eq!(
+                listing_config(Some(&stolen), Some(saved), SENTINEL).map(|c| c.api_key),
+                Err(GenerationError::KeyRequired),
+                "{} {:?}",
+                stolen.base_url.0,
+                saved.api_key
+            );
+        }
+        assert_eq!(
+            listing_config(Some(&stolen), None, SENTINEL).map(|c| c.api_key),
+            Err(GenerationError::KeyRequired)
+        );
+    }
+    assert_eq!(
+        listing_config(Some(&saved_reference), Some(&saved_reference), SENTINEL),
+        Ok(saved_reference.clone())
+    );
     assert_eq!(
         key(&config(
             "openaiCompatible",

@@ -563,13 +563,17 @@ async fn sparse_restore_checks_changed_and_source_only_paths_outside_the_cone() 
     repo.write("a/x", "inside\n")?;
     repo.write("b/old", "base\n")?;
     repo.commit("base").await?;
-    repo.command(&["sparse-checkout", "init", "--cone", "--sparse-index"]).await?;
+    repo.command(&["sparse-checkout", "init", "--cone", "--sparse-index"])
+        .await?;
     repo.command(&["sparse-checkout", "set", "a"]).await?;
     repo.write("b/new", "captured outside cone\n")?;
     repo.write("b/old", "changed outside cone\n")?;
     let checkpoint = checkpoint_ref("outside-cone", 0);
     repo.git.capture_checkpoint(&checkpoint).await?;
-    assert_eq!(repo.show(&checkpoint, "b/new").await?, "captured outside cone\n");
+    assert_eq!(
+        repo.show(&checkpoint, "b/new").await?,
+        "captured outside cone\n"
+    );
     std::fs::remove_dir_all(repo.root().join("b"))?;
     let outside = repo.temp.path().join("outside");
     std::fs::create_dir(&outside)?;
@@ -577,7 +581,10 @@ async fn sparse_restore_checks_changed_and_source_only_paths_outside_the_cone() 
     let index = repo.index()?;
     let result = repo.git.restore_checkpoint(&checkpoint, false).await;
     junction::delete(repo.root().join("b"))?;
-    assert!(matches!(result, Err(GitError::UnsafeRestore(_))), "{result:?}");
+    assert!(
+        matches!(result, Err(GitError::UnsafeRestore(_))),
+        "{result:?}"
+    );
     assert!(std::fs::read_dir(&outside)?.next().is_none());
     assert_eq!(repo.index()?, index);
     Ok(())
@@ -588,25 +595,49 @@ async fn sparse_restore_checks_changed_and_source_only_paths_outside_the_cone() 
 async fn unchanged_gitlinks_still_check_their_ancestors() -> TestResult {
     let repo = Repository::new().await?;
     repo.command(&["init", "x/sub"]).await?;
-    repo.git.at(repo.root().join("x/sub")).execute(&["commit", "--allow-empty", "-m", "sub"], Default::default()).await?;
+    repo.git
+        .at(repo.root().join("x/sub"))
+        .execute(
+            &["commit", "--allow-empty", "-m", "sub"],
+            Default::default(),
+        )
+        .await?;
     let checkpoint = repo.commit("gitlink").await?;
     std::fs::remove_dir_all(repo.root().join("x"))?;
     let outside = repo.temp.path().join("outside");
     std::fs::create_dir(&outside)?;
     std::fs::write(outside.join("sub"), "victim file\n")?;
     junction::create(&outside, repo.root().join("x"))?;
-    assert!(repo.command(&["diff", "--cached", "--name-only", &checkpoint]).await?.is_empty());
-    assert!(repo.command(&["diff", "--name-only", "--ignore-submodules=all", &checkpoint]).await?.is_empty());
+    assert!(
+        repo.command(&["diff", "--cached", "--name-only", &checkpoint])
+            .await?
+            .is_empty()
+    );
+    assert!(
+        repo.command(&[
+            "diff",
+            "--name-only",
+            "--ignore-submodules=all",
+            &checkpoint
+        ])
+        .await?
+        .is_empty()
+    );
     let index = repo.index()?;
     let result = repo.git.restore_checkpoint(&checkpoint, false).await;
     junction::delete(repo.root().join("x"))?;
-    assert!(matches!(result, Err(GitError::UnsafeRestore(_))), "{result:?}");
-    assert_eq!(std::fs::read_to_string(outside.join("sub"))?, "victim file\n");
+    assert!(
+        matches!(result, Err(GitError::UnsafeRestore(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.join("sub"))?,
+        "victim file\n"
+    );
     assert_eq!(repo.index()?, index);
     Ok(())
 }
 
-#[cfg(windows)]
 #[tokio::test]
 async fn restore_replaces_true_symlink_and_file_ancestors_without_following_them() -> TestResult {
     for symlinks in ["false", "true"] {
@@ -620,19 +651,46 @@ async fn restore_replaces_true_symlink_and_file_ancestors_without_following_them
             std::fs::remove_dir_all(repo.root().join("file"))?;
             let outside = repo.temp.path().join("outside");
             let victim = repo.temp.path().join("victim");
-            std::fs::create_dir(&outside)?; std::fs::create_dir(&victim)?;
+            std::fs::create_dir(&outside)?;
+            std::fs::create_dir(&victim)?;
             std::fs::write(victim.join("x"), "outside\n")?;
-            junction::create(&victim, outside.join("deep"))?;
-            std::os::windows::fs::symlink_dir(&outside, repo.root().join("link"))?;
+            #[cfg(windows)]
+            {
+                junction::create(&victim, outside.join("deep"))?;
+                std::os::windows::fs::symlink_dir(&outside, repo.root().join("link"))?;
+            }
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&victim, outside.join("deep"))?;
+                std::os::unix::fs::symlink(&outside, repo.root().join("link"))?;
+            }
             repo.write("file", "regular file ancestor\n")?;
-            if staged { repo.command(&["add", "-A"]).await?; }
+            if staged {
+                repo.command(&["add", "-A"]).await?;
+            }
             let result = repo.git.restore_checkpoint(&checkpoint, false).await;
+            #[cfg(windows)]
             junction::delete(outside.join("deep"))?;
-            assert!(matches!(result, Ok(true)), "symlinks={symlinks}, staged={staged}: {result:?}");
+            #[cfg(unix)]
+            std::fs::remove_file(outside.join("deep"))?;
+            assert!(
+                matches!(result, Ok(true)),
+                "symlinks={symlinks}, staged={staged}: {result:?}"
+            );
             assert_eq!(std::fs::read_to_string(victim.join("x"))?, "outside\n");
-            assert!(!std::fs::symlink_metadata(repo.root().join("link"))?.file_type().is_symlink());
-            assert_eq!(std::fs::read_to_string(repo.root().join("link/deep/x"))?, "checkpoint\n");
-            assert_eq!(std::fs::read_to_string(repo.root().join("file/b"))?, "checkpoint\n");
+            assert!(
+                !std::fs::symlink_metadata(repo.root().join("link"))?
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(
+                std::fs::read_to_string(repo.root().join("link/deep/x"))?,
+                "checkpoint\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(repo.root().join("file/b"))?,
+                "checkpoint\n"
+            );
             index_is_head(&repo).await?;
         }
     }
@@ -654,11 +712,19 @@ async fn clean_unlinks_top_level_and_nested_junctions_without_following_targets(
         std::fs::create_dir_all(path.parent().unwrap())?;
         junction::create(&outside, &path)?;
         let result = repo.git.restore_checkpoint(&checkpoint, false).await;
-        if junction::exists(&path)? { junction::delete(&path)?; }
+        if junction::exists(&path)? {
+            junction::delete(&path)?;
+        }
         assert!(matches!(result, Ok(true)), "{suffix}: {result:?}");
         assert!(!repo.root().join("junk").exists());
-        assert_eq!(std::fs::read_to_string(outside.join("marker"))?, "untouched\n");
-        assert_eq!(std::fs::read_to_string(repo.root().join("safe"))?, "checkpoint\n");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("marker"))?,
+            "untouched\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.root().join("safe"))?,
+            "checkpoint\n"
+        );
         index_is_head(&repo).await?;
     }
     Ok(())
@@ -667,7 +733,12 @@ async fn clean_unlinks_top_level_and_nested_junctions_without_following_targets(
 #[cfg(windows)]
 #[tokio::test]
 async fn unknown_or_old_git_refuses_clean_before_restoring_or_resetting_staging() -> TestResult {
-    for version in ["git version 2.22.0.windows.1", "git version 2.52.0", "unknown"] {
+    for (version, native_guard) in [
+        ("git version 2.22.0.windows.1", false),
+        ("git version 2.23.0.windows.1", true),
+        ("git version 2.52.0", false),
+        ("unknown", false),
+    ] {
         let repo = Repository::new().await?;
         repo.write("safe", "checkpoint\n")?;
         let checkpoint = repo.commit("base").await?;
@@ -680,15 +751,40 @@ async fn unknown_or_old_git_refuses_clean_before_restoring_or_resetting_staging(
         std::fs::create_dir(repo.root().join("junk"))?;
         junction::create(&outside, repo.root().join("junk/link"))?;
         let index = repo.index()?;
-        let git = repo.git.clone().with_program(env!("CARGO_BIN_EXE_git-gate-fixture"))
+        let git = repo
+            .git
+            .clone()
+            .with_program(env!("CARGO_BIN_EXE_git-gate-fixture"))
             .with_environment([("T3_GIT_VERSION_OVERRIDE".into(), Some(version.into()))].into());
         let result = git.restore_checkpoint(&checkpoint, false).await;
-        junction::delete(repo.root().join("junk/link"))?;
-        assert!(matches!(result, Err(GitError::UnsafeRestore(_))), "{result:?}");
-        assert_eq!(std::fs::read_to_string(repo.root().join("safe"))?, "working\n", "{version}");
-        assert_eq!(repo.index()?, index);
-        assert!(result.unwrap_err().to_string().contains("junk"));
-        assert_eq!(std::fs::read_to_string(outside.join("marker"))?, "untouched\n");
+        if junction::exists(repo.root().join("junk/link"))? {
+            junction::delete(repo.root().join("junk/link"))?;
+        }
+        if native_guard {
+            assert!(matches!(result, Ok(true)), "{version}: {result:?}");
+            assert!(!repo.root().join("junk").exists());
+            assert_eq!(
+                std::fs::read_to_string(repo.root().join("safe"))?,
+                "checkpoint\n"
+            );
+            index_is_head(&repo).await?;
+        } else {
+            assert!(
+                matches!(result, Err(GitError::UnsafeRestore(_))),
+                "{result:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(repo.root().join("safe"))?,
+                "working\n",
+                "{version}"
+            );
+            assert_eq!(repo.index()?, index);
+            assert!(result.unwrap_err().to_string().contains("junk"));
+        }
+        assert_eq!(
+            std::fs::read_to_string(outside.join("marker"))?,
+            "untouched\n"
+        );
     }
     Ok(())
 }
@@ -712,18 +808,27 @@ async fn a_later_clean_refusal_names_the_path_and_reports_restored_tracked_files
     junction::create(&outside, repo.root().join("d"))?;
     let result = repo.git.restore_checkpoint(&checkpoint, false).await;
     junction::delete(repo.root().join("d"))?;
-    let error = result.expect_err("new ignore rules expose unsafe clean ancestor").to_string();
+    let error = result
+        .expect_err("new ignore rules expose unsafe clean ancestor")
+        .to_string();
     assert!(error.contains("Tracked files were restored"), "{error}");
     assert!(error.contains("d"), "{error}");
-    assert_eq!(std::fs::read_to_string(repo.root().join("safe"))?, "checkpoint\n");
-    assert_eq!(std::fs::read_to_string(outside.join("extra"))?, "untouched\n");
+    assert_eq!(
+        std::fs::read_to_string(repo.root().join("safe"))?,
+        "checkpoint\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.join("extra"))?,
+        "untouched\n"
+    );
     index_is_head(&repo).await?;
     Ok(())
 }
 
 #[cfg(windows)]
 #[tokio::test]
-async fn clean_ancestor_preflight_refuses_before_restore_even_when_both_diffs_are_empty() -> TestResult {
+async fn clean_ancestor_preflight_refuses_before_restore_even_when_both_diffs_are_empty()
+-> TestResult {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let repo = Repository::new().await?;
     repo.write("d/k", "equal\n")?;
@@ -734,12 +839,32 @@ async fn clean_ancestor_preflight_refuses_before_restore_even_when_both_diffs_ar
     std::fs::write(outside.join("k"), "equal\n")?;
     std::fs::write(outside.join("extra"), "untouched\n")?;
     junction::create(&outside, repo.root().join("d"))?;
-    assert!(repo.command(&["diff", "--cached", "--name-only", &checkpoint]).await?.is_empty());
-    assert!(repo.command(&["diff", "--name-only", &checkpoint]).await?.is_empty());
+    assert!(
+        repo.command(&["diff", "--cached", "--name-only", &checkpoint])
+            .await?
+            .is_empty()
+    );
+    assert!(
+        repo.command(&["diff", "--name-only", &checkpoint])
+            .await?
+            .is_empty()
+    );
     let index = repo.index()?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let git = repo.git.clone().with_program(env!("CARGO_BIN_EXE_git-gate-fixture"))
-        .with_environment([("T3_GIT_GATE_COMMAND".into(), Some("restore".into())), ("T3_GIT_GATE_ADDRESS".into(), Some(listener.local_addr()?.to_string().into()))].into());
+    let git = repo
+        .git
+        .clone()
+        .with_program(env!("CARGO_BIN_EXE_git-gate-fixture"))
+        .with_environment(
+            [
+                ("T3_GIT_GATE_COMMAND".into(), Some("restore".into())),
+                (
+                    "T3_GIT_GATE_ADDRESS".into(),
+                    Some(listener.local_addr()?.to_string().into()),
+                ),
+            ]
+            .into(),
+        );
     let mut task = tokio::spawn(async move { git.restore_checkpoint(&checkpoint, false).await });
     let (result, started_restore) = tokio::select! {
         result = &mut task => (result?, false),
@@ -751,10 +876,19 @@ async fn clean_ancestor_preflight_refuses_before_restore_even_when_both_diffs_ar
         }
     };
     junction::delete(repo.root().join("d"))?;
-    assert!(matches!(result, Err(GitError::UnsafeRestore(_))), "{result:?}");
-    assert!(!started_restore, "clean ancestor refusal came after restore started");
+    assert!(
+        matches!(result, Err(GitError::UnsafeRestore(_))),
+        "{result:?}"
+    );
+    assert!(
+        !started_restore,
+        "clean ancestor refusal came after restore started"
+    );
     assert_eq!(repo.index()?, index);
-    assert_eq!(std::fs::read_to_string(outside.join("extra"))?, "untouched\n");
+    assert_eq!(
+        std::fs::read_to_string(outside.join("extra"))?,
+        "untouched\n"
+    );
     Ok(())
 }
 
@@ -766,9 +900,20 @@ async fn unmerged_index_stages_are_checked_and_restore_resolves_them() -> TestRe
         repo.write("dir/k", "base\n")?;
         let checkpoint = repo.commit("base").await?;
         let blob = repo.command(&["rev-parse", "HEAD:dir/k"]).await?;
-        repo.command(&["update-index", "--force-remove", "dir/k"]).await?;
-        let stages: String = (1..=3).map(|stage| format!("100644 {} {stage}\tdir/k\n", blob.trim())).collect();
-        repo.git.execute(&["update-index", "--index-info"], ExecuteOptions { stdin: Some(stages.into_bytes()), ..Default::default() }).await?;
+        repo.command(&["update-index", "--force-remove", "dir/k"])
+            .await?;
+        let stages: String = (1..=3)
+            .map(|stage| format!("100644 {} {stage}\tdir/k\n", blob.trim()))
+            .collect();
+        repo.git
+            .execute(
+                &["update-index", "--index-info"],
+                ExecuteOptions {
+                    stdin: Some(stages.into_bytes()),
+                    ..Default::default()
+                },
+            )
+            .await?;
         repo.write("dir/k", "conflict\n")?;
         let outside = repo.temp.path().join("outside");
         std::fs::create_dir(&outside)?;
@@ -781,12 +926,18 @@ async fn unmerged_index_stages_are_checked_and_restore_resolves_them() -> TestRe
         let result = repo.git.restore_checkpoint(&checkpoint, false).await;
         if linked {
             junction::delete(repo.root().join("dir"))?;
-            assert!(matches!(result, Err(GitError::UnsafeRestore(_))), "{result:?}");
+            assert!(
+                matches!(result, Err(GitError::UnsafeRestore(_))),
+                "{result:?}"
+            );
             assert_eq!(repo.index()?, index);
         } else {
             assert!(matches!(result, Ok(true)), "{result:?}");
             assert!(repo.command(&["ls-files", "--unmerged"]).await?.is_empty());
-            assert_eq!(std::fs::read_to_string(repo.root().join("dir/k"))?, "base\n");
+            assert_eq!(
+                std::fs::read_to_string(repo.root().join("dir/k"))?,
+                "base\n"
+            );
             index_is_head(&repo).await?;
         }
         assert_eq!(std::fs::read_to_string(outside.join("k"))?, "outside\n");
@@ -801,7 +952,8 @@ async fn intent_to_add_entries_are_checked_before_restore_removes_them() -> Test
         let repo = Repository::new().await?;
         let checkpoint = repo.commit("empty").await?;
         repo.write("new/path", "intent to add\n")?;
-        repo.command(&["add", "--intent-to-add", "new/path"]).await?;
+        repo.command(&["add", "--intent-to-add", "new/path"])
+            .await?;
         let outside = repo.temp.path().join("outside");
         std::fs::create_dir(&outside)?;
         std::fs::write(outside.join("path"), "outside\n")?;
@@ -813,7 +965,10 @@ async fn intent_to_add_entries_are_checked_before_restore_removes_them() -> Test
         let result = repo.git.restore_checkpoint(&checkpoint, false).await;
         if linked {
             junction::delete(repo.root().join("new"))?;
-            assert!(matches!(result, Err(GitError::UnsafeRestore(_))), "{result:?}");
+            assert!(
+                matches!(result, Err(GitError::UnsafeRestore(_))),
+                "{result:?}"
+            );
             assert_eq!(repo.index()?, index);
         } else {
             assert!(matches!(result, Ok(true)), "{result:?}");
@@ -831,10 +986,19 @@ async fn case_renamed_index_paths_are_checked_against_the_checkpoint() -> TestRe
     let repo = Repository::new().await?;
     repo.write("Dir/k", "checkpoint\n")?;
     let checkpoint = repo.commit("base").await?;
-    repo.command(&["config", "core.ignorecase", "false"]).await?;
+    repo.command(&["config", "core.ignorecase", "false"])
+        .await?;
     repo.command(&["mv", "Dir", "renaming"]).await?;
     repo.command(&["mv", "renaming", "dir"]).await?;
-    let changed = repo.command(&["diff", "--cached", "--no-renames", "--name-only", &checkpoint]).await?;
+    let changed = repo
+        .command(&[
+            "diff",
+            "--cached",
+            "--no-renames",
+            "--name-only",
+            &checkpoint,
+        ])
+        .await?;
     assert!(changed.lines().any(|path| path == "Dir/k"));
     assert!(changed.lines().any(|path| path == "dir/k"));
     std::fs::remove_dir_all(repo.root().join("dir"))?;
@@ -845,7 +1009,10 @@ async fn case_renamed_index_paths_are_checked_against_the_checkpoint() -> TestRe
     let index = repo.index()?;
     let result = repo.git.restore_checkpoint(&checkpoint, false).await;
     junction::delete(repo.root().join("dir"))?;
-    assert!(matches!(result, Err(GitError::UnsafeRestore(_))), "{result:?}");
+    assert!(
+        matches!(result, Err(GitError::UnsafeRestore(_))),
+        "{result:?}"
+    );
     assert_eq!(repo.index()?, index);
     assert_eq!(std::fs::read_to_string(outside.join("k"))?, "outside\n");
     Ok(())
@@ -859,7 +1026,13 @@ async fn a_checkpoint_file_over_an_index_gitlink_checks_the_checkout_contents() 
     let checkpoint = repo.commit("file").await?;
     std::fs::remove_file(repo.root().join("leaf"))?;
     repo.command(&["init", "leaf"]).await?;
-    repo.git.at(repo.root().join("leaf")).execute(&["commit", "--allow-empty", "-m", "sub"], Default::default()).await?;
+    repo.git
+        .at(repo.root().join("leaf"))
+        .execute(
+            &["commit", "--allow-empty", "-m", "sub"],
+            Default::default(),
+        )
+        .await?;
     repo.commit("gitlink").await?;
     let outside = repo.temp.path().join("outside");
     std::fs::create_dir(&outside)?;
@@ -868,9 +1041,15 @@ async fn a_checkpoint_file_over_an_index_gitlink_checks_the_checkout_contents() 
     let index = repo.index()?;
     let result = repo.git.restore_checkpoint(&checkpoint, false).await;
     junction::delete(repo.root().join("leaf/link"))?;
-    assert!(matches!(result, Err(GitError::UnsafeRestore(_))), "{result:?}");
+    assert!(
+        matches!(result, Err(GitError::UnsafeRestore(_))),
+        "{result:?}"
+    );
     assert_eq!(repo.index()?, index);
-    assert_eq!(std::fs::read_to_string(outside.join("marker"))?, "untouched\n");
+    assert_eq!(
+        std::fs::read_to_string(outside.join("marker"))?,
+        "untouched\n"
+    );
     Ok(())
 }
 
@@ -892,15 +1071,29 @@ async fn content_equal_eol_paths_are_not_written_through_junctions_or_resmudged(
     let before_outside = std::fs::metadata(outside.join("k"))?.modified()?;
     let before_inside = std::fs::metadata(repo.root().join("inside"))?.modified()?;
     junction::create(&outside, repo.root().join("d"))?;
-    assert!(repo.command(&["diff", "--cached", "--name-only", &checkpoint]).await?.is_empty());
-    assert!(repo.command(&["diff", "--name-only", &checkpoint]).await?.is_empty());
+    assert!(
+        repo.command(&["diff", "--cached", "--name-only", &checkpoint])
+            .await?
+            .is_empty()
+    );
+    assert!(
+        repo.command(&["diff", "--name-only", &checkpoint])
+            .await?
+            .is_empty()
+    );
     let result = repo.git.restore_checkpoint(&checkpoint, false).await;
     junction::delete(repo.root().join("d"))?;
     assert!(matches!(result, Ok(true)), "{result:?}");
     assert_eq!(std::fs::read(outside.join("k"))?, b"equal\n");
     assert_eq!(std::fs::read(repo.root().join("inside"))?, b"equal\n");
-    assert_eq!(std::fs::metadata(outside.join("k"))?.modified()?, before_outside);
-    assert_eq!(std::fs::metadata(repo.root().join("inside"))?.modified()?, before_inside);
+    assert_eq!(
+        std::fs::metadata(outside.join("k"))?.modified()?,
+        before_outside
+    );
+    assert_eq!(
+        std::fs::metadata(repo.root().join("inside"))?.modified()?,
+        before_inside
+    );
     index_is_head(&repo).await?;
     Ok(())
 }
@@ -916,23 +1109,38 @@ async fn clean_refuses_a_real_non_symlink_name_surrogate() -> TestResult {
     let checkpoint = repo.commit("base").await?;
     let point = repo.root().join("opaque");
     std::fs::write(&point, "")?;
-    let file = std::fs::OpenOptions::new().write(true).share_mode(7)
-        .custom_flags(0x00200000).open(&point)?;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .share_mode(7)
+        .custom_flags(0x00200000)
+        .open(&point)?;
     let mut data = [0u8; 24];
     data[..4].copy_from_slice(&0x20000042u32.to_le_bytes());
     data[8..].fill(1);
     let mut returned = 0;
     // SAFETY: File owns the live handle; the input GUID reparse buffer and output count remain valid.
     let ok = unsafe {
-        DeviceIoControl(file.as_raw_handle(), FSCTL_SET_REPARSE_POINT,
-            data.as_ptr().cast(), data.len() as u32, std::ptr::null_mut(), 0,
-            &mut returned, std::ptr::null_mut())
+        DeviceIoControl(
+            file.as_raw_handle(),
+            FSCTL_SET_REPARSE_POINT,
+            data.as_ptr().cast(),
+            data.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
     };
-    if ok == 0 { return Err(std::io::Error::last_os_error().into()); }
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
     drop(file);
     let index = repo.index()?;
     let result = repo.git.restore_checkpoint(&checkpoint, false).await;
-    assert!(matches!(result, Err(GitError::UnsafeRestore(_))), "{result:?}");
+    assert!(
+        matches!(result, Err(GitError::UnsafeRestore(_))),
+        "{result:?}"
+    );
     assert!(std::fs::symlink_metadata(&point).is_ok());
     assert_eq!(repo.index()?, index);
     Ok(())

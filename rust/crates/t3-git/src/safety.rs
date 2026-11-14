@@ -102,11 +102,16 @@ impl LinkKind {
         {
             false
         }
-    }    fn is_junction(self) -> bool {
+    }
+    fn is_junction(self) -> bool {
         #[cfg(windows)]
-        { self == Self::MountPoint }
+        {
+            self == Self::MountPoint
+        }
         #[cfg(not(windows))]
-        { false }
+        {
+            false
+        }
     }
 }
 
@@ -311,7 +316,8 @@ impl PathRecords {
                     return Err(GitError::InvalidOutput("Git index path record".into()));
                 }
                 let gitlink = record.get(2..8) == Some(b"160000".as_slice());
-                if !gitlink && !(include_skipped && record[0] == b'S')
+                if !gitlink
+                    && !(include_skipped && record[0] == b'S')
                     && !record[0].is_ascii_lowercase()
                 {
                     return Ok(());
@@ -469,9 +475,12 @@ impl Git {
         }
         index_args.extend(["--", "."]);
         let (index, staged, worktree) = tokio::join!(
-            self.path_records(&index_args, PathOutput::Index {
-                include_skipped: !sparse || selected.is_some(),
-            }),
+            self.path_records(
+                &index_args,
+                PathOutput::Index {
+                    include_skipped: !sparse || selected.is_some(),
+                }
+            ),
             self.path_records(&cached, PathOutput::CachedDiff),
             self.path_records(&working, PathOutput::Diff)
         );
@@ -505,24 +514,41 @@ impl Git {
     }
     pub(crate) async fn clean_has_native_mount_guard(&self) -> Result<bool, GitError> {
         #[cfg(not(windows))]
-        { Ok(true) }
+        {
+            Ok(true)
+        }
         #[cfg(windows)]
         {
-            let result = self.without_fsmonitor().execute(&["--version"], ExecuteOptions {
-                allow_nonzero: true,
-                timeout: Some(std::time::Duration::from_secs(5)),
-                max_output_bytes: 4096,
-                ..Default::default()
-            }).await;
+            let result = self
+                .without_fsmonitor()
+                .execute(
+                    &["--version"],
+                    ExecuteOptions {
+                        allow_nonzero: true,
+                        timeout: Some(std::time::Duration::from_secs(5)),
+                        max_output_bytes: 4096,
+                        ..Default::default()
+                    },
+                )
+                .await;
             match result {
                 Err(error @ GitError::Process(t3_process::ProcessError::Cancelled)) => Err(error),
-                Ok(output) if output.code == Some(0) && !output.stdout_truncated
-                    && !output.stdout_invalid_utf8 => Ok(clean_mount_guard_version(&output.stdout_text())),
+                Ok(output)
+                    if output.code == Some(0)
+                        && !output.stdout_truncated
+                        && !output.stdout_invalid_utf8 =>
+                {
+                    Ok(clean_mount_guard_version(&output.stdout_text()))
+                }
                 _ => Ok(false),
             }
         }
     }
-    pub(crate) async fn check_clean_paths(&self, scope: &RestoreScope, native_mount_guard: bool) -> Result<(), GitError> {
+    pub(crate) async fn check_clean_paths(
+        &self,
+        scope: &RestoreScope,
+        native_mount_guard: bool,
+    ) -> Result<(), GitError> {
         let (_, paths, _) = self
             .path_records(
                 &[
@@ -557,7 +583,13 @@ impl Git {
         let directory = scope.directory.clone();
         let cancellation = self.cancellation.clone();
         tokio::task::spawn_blocking(move || {
-            check_directories(&root, &directory, &mut BTreeMap::new(), &cancellation, false)?;
+            check_directories(
+                &root,
+                &directory,
+                &mut BTreeMap::new(),
+                &cancellation,
+                false,
+            )?;
             std::fs::create_dir_all(directory)?;
             Ok(())
         })
@@ -604,13 +636,21 @@ impl Git {
 #[cfg(windows)]
 fn clean_mount_guard_version(output: &str) -> bool {
     // Git for Windows 2.23.0 added clean's mount-point guard: git-for-windows/git#2268.
-    let Some(version) = output.trim().strip_prefix("git version ") else { return false; };
-    let Some((core, build)) = version.split_once(".windows.") else { return false; };
-    if !build.parse::<u32>().is_ok_and(|build| build > 0) { return false; }
+    let Some(version) = output.trim().strip_prefix("git version ") else {
+        return false;
+    };
+    let Some((core, build)) = version.split_once(".windows.") else {
+        return false;
+    };
+    if !build.parse::<u32>().is_ok_and(|build| build > 0) {
+        return false;
+    }
     let mut parts = core.split('.');
-    let version = (parts.next().and_then(|v| v.parse::<u32>().ok()),
+    let version = (
         parts.next().and_then(|v| v.parse::<u32>().ok()),
-        parts.next().and_then(|v| v.parse::<u32>().ok()));
+        parts.next().and_then(|v| v.parse::<u32>().ok()),
+        parts.next().and_then(|v| v.parse::<u32>().ok()),
+    );
     matches!(version, (Some(major), Some(minor), Some(patch))
         if parts.next().is_none() && (major, minor, patch) >= (2, 23, 0))
 }
@@ -621,14 +661,21 @@ fn check_directories(
     cancellation: &CancellationToken,
     replace_ancestors: bool,
 ) -> Result<bool, GitError> {
-    let relative = directory.strip_prefix(root)
+    let relative = directory
+        .strip_prefix(root)
         .map_err(|_| GitError::UnsafeRestore("Git path parent is outside the top-level.".into()))?;
     let mut directory = root.to_owned();
     for component in std::iter::once(None).chain(relative.components().map(Some)) {
-        if cancellation.is_cancelled() { return Err(t3_process::ProcessError::Cancelled.into()); }
-        if let Some(component) = component { directory.push(component); }
+        if cancellation.is_cancelled() {
+            return Err(t3_process::ProcessError::Cancelled.into());
+        }
+        if let Some(component) = component {
+            directory.push(component);
+        }
         if let Some(real) = checked.get(&directory) {
-            if !real { return Ok(false); }
+            if !real {
+                return Ok(false);
+            }
             continue;
         }
         match std::fs::symlink_metadata(&directory) {
@@ -636,12 +683,16 @@ fn check_directories(
                 let kind = link_kind(&directory, &metadata)?;
                 if kind.is_mount() {
                     return Err(GitError::UnsafeRestore(format!(
-                        "Refusing a junction, mount point or name surrogate ancestor at {}.", directory.display())));
+                        "Refusing a junction, mount point or name surrogate ancestor at {}.",
+                        directory.display()
+                    )));
                 }
                 if kind == LinkKind::Symlink || !metadata.is_dir() {
                     if directory == root || !replace_ancestors {
                         return Err(GitError::UnsafeRestore(format!(
-                            "Restore scope is not a real directory at {}.", directory.display())));
+                            "Restore scope is not a real directory at {}.",
+                            directory.display()
+                        )));
                     }
                     checked.insert(directory, false);
                     return Ok(false);
@@ -666,7 +717,9 @@ fn check_clean_leaf(path: &Path) -> Result<(), GitError> {
     let kind = link_kind(path, &metadata)?;
     if kind.is_mount() && !kind.is_junction() {
         return Err(GitError::UnsafeRestore(format!(
-            "Refusing an unsupported name surrogate at {}.", path.display())));
+            "Refusing an unsupported name surrogate at {}.",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -683,9 +736,10 @@ fn check_deleting_directory(path: &Path, cancellation: &CancellationToken) -> Re
         };
         let kind = link_kind(&path, &metadata)?;
         if kind.is_mount() {
-            return Err(GitError::UnsafeRestore(
-                format!("Refusing a junction, mount point or name surrogate at {}.", path.display()),
-            ));
+            return Err(GitError::UnsafeRestore(format!(
+                "Refusing a junction, mount point or name surrogate at {}.",
+                path.display()
+            )));
         }
         if kind == LinkKind::None && metadata.is_dir() {
             for entry in std::fs::read_dir(&path)? {
@@ -791,16 +845,36 @@ mod touch_tests {
             b"a\n\t\"\\\xc3\xa9/"
         );
         assert!(unquote_git_path(br#""bad\q""#).is_err());
-        #[cfg(windows)]
-        {
-            assert!(classify_tag(0xa000000c) == LinkKind::Symlink);
-            assert!(classify_tag(0xa0000003).is_mount());
-            for tag in [0xa0000019, 0xa000001d, 0xa0000027, 0x20000042] {
-                assert!(classify_tag(tag).is_mount(), "name surrogate {tag:#x}");
-            }
-            for tag in [0x9000001a, 0x80000017, 0x8000001b, 0] {
-                assert!(classify_tag(tag) == LinkKind::None);
-            }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn name_surrogate_tags_fail_closed_except_true_symlinks() {
+        assert!(classify_tag(0xa000000c) == LinkKind::Symlink);
+        assert!(classify_tag(0xa0000003).is_mount());
+        for tag in [0xa0000019, 0xa000001d, 0xa0000027, 0x20000042] {
+            assert!(classify_tag(tag).is_mount(), "name surrogate {tag:#x}");
+        }
+        for tag in [0x9000001a, 0x80000017, 0x8000001b, 0] {
+            assert!(classify_tag(tag) == LinkKind::None);
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn native_clean_guard_requires_a_supported_windows_release() {
+        for version in [
+            "git version 2.23.0.windows.1",
+            "git version 2.52.0.windows.1\n",
+        ] {
+            assert!(clean_mount_guard_version(version), "{version}");
+        }
+        for version in [
+            "git version 2.22.0.windows.1",
+            "git version 2.23.0.windows.0",
+            "git version 2.23.0.rc1.windows.1",
+            "git version 2.52.0",
+            "unknown",
+        ] {
+            assert!(!clean_mount_guard_version(version), "{version}");
         }
     }
 }
