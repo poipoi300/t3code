@@ -3,9 +3,7 @@
 pub mod clones;
 pub mod enrichment;
 pub mod identity;
-#[cfg(feature = "session-inventory")]
 pub mod import_store;
-#[cfg(feature = "session-inventory")]
 pub mod inventory;
 pub mod managed;
 mod projection;

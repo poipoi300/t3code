@@ -1,7 +1,6 @@
 //! The native session inventory (`AgentSessionScanner.ts` discovery, reads and Git identities)
 //! over temporary provider homes; no real provider home is read. Ported from
 //! `AgentSessionScanner.test.ts`, plus hostile store contents.
-#![cfg(feature = "session-inventory")]
 #![allow(clippy::unwrap_used)]
 use async_trait::async_trait;
 use futures_util::StreamExt;

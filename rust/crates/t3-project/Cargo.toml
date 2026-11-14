@@ -7,9 +7,6 @@ publish = false
 
 
 
-[features]
-session-inventory = []
-
 [dependencies]
 t3-contracts = { path = "../t3-contracts" }
 t3-orchestration = { path = "../t3-orchestration" }

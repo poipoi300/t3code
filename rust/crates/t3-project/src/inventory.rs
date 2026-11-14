@@ -296,28 +296,18 @@ struct Record<'a, R> {
     done: bool,
     /// Whether any byte of this record was consumed.
     started: bool,
+    /// Bytes at the front of the inner buffer known to hold no newline, so a long line is
+    /// scanned once rather than once per byte the parser pulls.
+    segment: usize,
 }
-impl<R: BufRead> Read for Record<'_, R> {
-    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        if self.done || out.is_empty() {
-            return Ok(0);
+impl<'a, R: BufRead> Record<'a, R> {
+    fn new(inner: &'a mut R) -> Self {
+        Self {
+            inner,
+            done: false,
+            started: false,
+            segment: 0,
         }
-        let available = self.inner.fill_buf()?;
-        if available.is_empty() {
-            self.done = true;
-            return Ok(0);
-        }
-        self.started = true;
-        let (take, newline) = match available.iter().position(|b| *b == b'\n') {
-            Some(index) => (index.min(out.len()), index < out.len()),
-            None => (available.len().min(out.len()), false),
-        };
-        out[..take].copy_from_slice(&available[..take]);
-        self.inner.consume(take + usize::from(newline));
-        if newline {
-            self.done = true;
-        }
-        Ok(take)
     }
 }
 impl<R: BufRead> BufRead for Record<'_, R> {
@@ -325,25 +315,39 @@ impl<R: BufRead> BufRead for Record<'_, R> {
         if self.done {
             return Ok(&[]);
         }
-        let available = self.inner.fill_buf()?;
-        if available.is_empty() {
-            self.done = true;
-            return Ok(&[]);
+        if self.segment == 0 {
+            let available = self.inner.fill_buf()?;
+            if available.is_empty() {
+                self.done = true;
+                return Ok(&[]);
+            }
+            self.started = true;
+            match available.iter().position(|b| *b == b'\n') {
+                Some(0) => {
+                    self.inner.consume(1);
+                    self.done = true;
+                    return Ok(&[]);
+                }
+                Some(end) => self.segment = end,
+                None => self.segment = available.len(),
+            }
         }
-        self.started = true;
-        let end = available
-            .iter()
-            .position(|b| *b == b'\n')
-            .unwrap_or(available.len());
-        if end == 0 {
-            self.inner.consume(1);
-            self.done = true;
-            return Ok(&[]);
-        }
-        Ok(&self.inner.fill_buf()?[..end])
+        let segment = self.segment;
+        Ok(&self.inner.fill_buf()?[..segment])
     }
     fn consume(&mut self, amount: usize) {
+        let amount = amount.min(self.segment);
         self.inner.consume(amount);
+        self.segment -= amount;
+    }
+}
+impl<R: BufRead> Read for Record<'_, R> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let available = self.fill_buf()?;
+        let count = available.len().min(out.len());
+        out[..count].copy_from_slice(&available[..count]);
+        self.consume(count);
+        Ok(count)
     }
 }
 
@@ -1632,7 +1636,7 @@ fn read_transcript(
     let mut history = prefix.map_or(0, |(_, h)| h);
     let mut count = 0usize;
     loop {
-        let mut record = Record { inner: &mut reader, done: false, started: false };
+        let mut record = Record::new(&mut reader);
         let mut budget = MAX_IMPORT_HISTORY_BYTES.checked_sub(history)?;
         let available = budget;
         let value = match read_projected_json(&mut record, &mut budget, select_transcript_path) {
