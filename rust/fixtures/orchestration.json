@@ -563,6 +563,13 @@
       }
     },
     {
+      "tag": "thread.visit-recorded",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEvent.thread.visit-recorded"
+      }
+    },
+    {
       "tag": "run.created",
       "discriminator": "type",
       "payload": {
@@ -884,6 +891,13 @@
       "discriminator": "type",
       "payload": {
         "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.pull-request-link-updated"
+      }
+    },
+    {
+      "tag": "thread.visit-recorded",
+      "discriminator": "type",
+      "payload": {
+        "$ref": "#/$defs/OrchestrationV2DomainEventJson.thread.visit-recorded"
       }
     },
     {

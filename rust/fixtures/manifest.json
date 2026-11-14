@@ -2,18 +2,18 @@
   "effectVersion": "4.1.3",
   "seed": 29747,
   "counts": {
-    "schemas": 2216,
-    "unsupported": 1483,
-    "unsupportedJsonSchema": 631,
+    "schemas": 2230,
+    "unsupported": 1493,
+    "unsupportedJsonSchema": 632,
     "unsupportedSampling": 32,
-    "nonScalarSampleFiles": 1161,
-    "namedExports": 1663,
+    "nonScalarSampleFiles": 1170,
+    "namedExports": 1675,
     "rpcMethods": 272,
     "commands": 59,
-    "events": 49,
-    "sampleFiles": 2216,
-    "samples": 48592,
-    "tables": 46
+    "events": 50,
+    "sampleFiles": 2230,
+    "samples": 48868,
+    "tables": 47
   },
   "exports": {
     "acpRegistry.ts#AcpRegistryAcceptUrlAuthInput": "AcpRegistryAcceptUrlAuthInput",
@@ -103,12 +103,16 @@
     "auth.ts#AuthAccessStreamPairingLinkUpsertedEvent": "AuthAccessStreamPairingLinkUpsertedEvent",
     "auth.ts#AuthAccessStreamSnapshotEvent": "AuthAccessStreamSnapshotEvent",
     "auth.ts#AuthAccessTokenResult": "AuthAccessTokenResult",
+    "auth.ts#AuthApproveConnectDeviceInput": "AuthApproveConnectDeviceInput",
+    "auth.ts#AuthApproveConnectDeviceResult": "AuthApproveConnectDeviceResult",
     "auth.ts#AuthBrowserSessionRequest": "AuthBrowserSessionRequest",
     "auth.ts#AuthBrowserSessionResult": "AuthBrowserSessionResult",
     "auth.ts#AuthClientMetadata": "AuthClientMetadata",
     "auth.ts#AuthClientMetadataDeviceType": "AuthClientMetadataDeviceType",
     "auth.ts#AuthClientPresentationMetadata": "AuthClientPresentationMetadata",
     "auth.ts#AuthClientSession": "AuthClientSession",
+    "auth.ts#AuthConnectDevice": "AuthConnectDevice",
+    "auth.ts#AuthConnectDeviceRequest": "AuthConnectDeviceRequest",
     "auth.ts#AuthCreatePairingCredentialInput": "AuthCreatePairingCredentialInput",
     "auth.ts#AuthEnvironmentScope": "AuthEnvironmentScope",
     "auth.ts#AuthEnvironmentScopes": "AuthEnvironmentScopes",
@@ -132,6 +136,8 @@
     "auth.ts#AuthPairingCredentialResult": "AuthPairingCredentialResult",
     "auth.ts#AuthPairingLink": "AuthPairingLink",
     "auth.ts#AuthRevokeClientSessionInput": "AuthRevokeClientSessionInput",
+    "auth.ts#AuthRevokeConnectDeviceInput": "AuthRevokeConnectDeviceInput",
+    "auth.ts#AuthRevokeConnectDeviceResult": "AuthRevokeConnectDeviceResult",
     "auth.ts#AuthRevokePairingLinkInput": "AuthRevokePairingLinkInput",
     "auth.ts#AuthSessionState": "AuthSessionState",
     "auth.ts#AuthTokenExchangeRequest": "AuthTokenExchangeRequest",
@@ -353,6 +359,7 @@
     "environmentHttp.ts#EnvironmentCloudLinkStateResult": "EnvironmentCloudLinkStateResult",
     "environmentHttp.ts#EnvironmentCloudPreferencesRequest": "EnvironmentCloudPreferencesRequest",
     "environmentHttp.ts#EnvironmentCloudRelayConfigResult": "EnvironmentCloudRelayConfigResult",
+    "environmentHttp.ts#EnvironmentConnectApprovalPendingError": "EnvironmentConnectApprovalPendingError",
     "environmentHttp.ts#EnvironmentConnectReachability": "EnvironmentConnectReachability",
     "environmentHttp.ts#EnvironmentConnectReachabilityCause": "EnvironmentConnectReachabilityCause",
     "environmentHttp.ts#EnvironmentHttpBadRequestError": "EnvironmentHttpBadRequestError",
@@ -527,6 +534,8 @@
     "index.ts#AuthAccessStreamPairingLinkUpsertedEvent": "AuthAccessStreamPairingLinkUpsertedEvent",
     "index.ts#AuthAccessStreamSnapshotEvent": "AuthAccessStreamSnapshotEvent",
     "index.ts#AuthAccessTokenResult": "AuthAccessTokenResult",
+    "index.ts#AuthApproveConnectDeviceInput": "AuthApproveConnectDeviceInput",
+    "index.ts#AuthApproveConnectDeviceResult": "AuthApproveConnectDeviceResult",
     "index.ts#AuthBrowserSessionRequest": "AuthBrowserSessionRequest",
     "index.ts#AuthBrowserSessionResult": "AuthBrowserSessionResult",
     "index.ts#AuthClientMetadata": "AuthClientMetadata",
@@ -534,6 +543,8 @@
     "index.ts#AuthClientPresentationMetadata": "AuthClientPresentationMetadata",
     "index.ts#AuthClientSession": "AuthClientSession",
     "index.ts#AuthClientSessionRevokeResult": "AuthClientSessionRevokeResult",
+    "index.ts#AuthConnectDevice": "AuthConnectDevice",
+    "index.ts#AuthConnectDeviceRequest": "AuthConnectDeviceRequest",
     "index.ts#AuthCreatePairingCredentialInput": "AuthCreatePairingCredentialInput",
     "index.ts#AuthEnvironmentScope": "AuthEnvironmentScope",
     "index.ts#AuthEnvironmentScopes": "AuthEnvironmentScopes",
@@ -559,6 +570,8 @@
     "index.ts#AuthPairingLink": "AuthPairingLink",
     "index.ts#AuthPairingLinkRevokeResult": "AuthPairingLinkRevokeResult",
     "index.ts#AuthRevokeClientSessionInput": "AuthRevokeClientSessionInput",
+    "index.ts#AuthRevokeConnectDeviceInput": "AuthRevokeConnectDeviceInput",
+    "index.ts#AuthRevokeConnectDeviceResult": "AuthRevokeConnectDeviceResult",
     "index.ts#AuthRevokePairingLinkInput": "AuthRevokePairingLinkInput",
     "index.ts#AuthSessionId": "AuthSessionId",
     "index.ts#AuthSessionState": "AuthSessionState",
@@ -616,6 +629,7 @@
     "index.ts#ClientDeviceType": "ClientDeviceType",
     "index.ts#ClientKind": "ClientKind",
     "index.ts#ClientOs": "ClientOs",
+    "index.ts#ClientServerSettingsPatch": "ClientServerSettingsPatch",
     "index.ts#ClientSettingsPatch": "ClientSettingsPatch",
     "index.ts#ClientSettingsSchema": "ClientSettingsSchema",
     "index.ts#ClientSurface": "ClientSurface",
@@ -644,6 +658,7 @@
     "index.ts#CustomModelSetting": "CustomModelSetting",
     "index.ts#DatabaseReclaimError": "DatabaseReclaimError",
     "index.ts#DatabaseStorageStatus": "DatabaseStorageStatus",
+    "index.ts#DefaultAppearancePreference": "DefaultAppearancePreference",
     "index.ts#DefaultThemePreference": "DefaultThemePreference",
     "index.ts#DesktopAppActivationErrorCode": "DesktopAppActivationErrorCode",
     "index.ts#DesktopAppActivationFailure": "DesktopAppActivationFailure",
@@ -725,6 +740,7 @@
     "index.ts#DesktopTelemetryCommitDesktopUpdate": "DesktopTelemetryCommitDesktopUpdate",
     "index.ts#DesktopTelemetryControlMessage": "DesktopTelemetryControlMessage",
     "index.ts#DesktopTelemetryRequestDesktopUpdate": "DesktopTelemetryRequestDesktopUpdate",
+    "index.ts#DesktopTelemetryServerReady": "DesktopTelemetryServerReady",
     "index.ts#DesktopTelemetrySetDiagnosticsDemand": "DesktopTelemetrySetDiagnosticsDemand",
     "index.ts#DesktopTelemetrySetHostPowerIntervals": "DesktopTelemetrySetHostPowerIntervals",
     "index.ts#DesktopThemeSchema": "DesktopThemeSchema",
@@ -807,6 +823,7 @@
     "index.ts#EnvironmentCloudLinkStateResult": "EnvironmentCloudLinkStateResult",
     "index.ts#EnvironmentCloudPreferencesRequest": "EnvironmentCloudPreferencesRequest",
     "index.ts#EnvironmentCloudRelayConfigResult": "EnvironmentCloudRelayConfigResult",
+    "index.ts#EnvironmentConnectApprovalPendingError": "EnvironmentConnectApprovalPendingError",
     "index.ts#EnvironmentConnectReachability": "EnvironmentConnectReachability",
     "index.ts#EnvironmentConnectReachabilityCause": "EnvironmentConnectReachabilityCause",
     "index.ts#EnvironmentContextRecord": "EnvironmentContextRecord",
@@ -1134,6 +1151,8 @@
     "index.ts#OrchestrationV2ThreadStreamItem": "OrchestrationV2ThreadStreamItem",
     "index.ts#OrchestrationV2ThreadTitles": "OrchestrationV2ThreadTitles",
     "index.ts#OrchestrationV2ThreadTranscript": "OrchestrationV2ThreadTranscript",
+    "index.ts#OrchestrationV2ThreadVisit": "OrchestrationV2ThreadVisit",
+    "index.ts#OrchestrationV2ThreadVisitJson": "OrchestrationV2ThreadVisitJson",
     "index.ts#OrchestrationV2ToolCapabilities": "OrchestrationV2ToolCapabilities",
     "index.ts#OrchestrationV2TurnCapabilities": "OrchestrationV2TurnCapabilities",
     "index.ts#OrchestrationV2TurnItem": "OrchestrationV2TurnItem",
@@ -2294,6 +2313,8 @@
     "orchestrationV2.ts#OrchestrationV2ThreadStreamItem": "OrchestrationV2ThreadStreamItem",
     "orchestrationV2.ts#OrchestrationV2ThreadTitles": "OrchestrationV2ThreadTitles",
     "orchestrationV2.ts#OrchestrationV2ThreadTranscript": "OrchestrationV2ThreadTranscript",
+    "orchestrationV2.ts#OrchestrationV2ThreadVisit": "OrchestrationV2ThreadVisit",
+    "orchestrationV2.ts#OrchestrationV2ThreadVisitJson": "OrchestrationV2ThreadVisitJson",
     "orchestrationV2.ts#OrchestrationV2ToolCapabilities": "OrchestrationV2ToolCapabilities",
     "orchestrationV2.ts#OrchestrationV2TurnCapabilities": "OrchestrationV2TurnCapabilities",
     "orchestrationV2.ts#OrchestrationV2TurnItem": "OrchestrationV2TurnItem",
@@ -2816,6 +2837,7 @@
     "resourceTelemetry.ts#DesktopTelemetryCommitDesktopUpdate": "DesktopTelemetryCommitDesktopUpdate",
     "resourceTelemetry.ts#DesktopTelemetryControlMessage": "DesktopTelemetryControlMessage",
     "resourceTelemetry.ts#DesktopTelemetryRequestDesktopUpdate": "DesktopTelemetryRequestDesktopUpdate",
+    "resourceTelemetry.ts#DesktopTelemetryServerReady": "DesktopTelemetryServerReady",
     "resourceTelemetry.ts#DesktopTelemetrySetDiagnosticsDemand": "DesktopTelemetrySetDiagnosticsDemand",
     "resourceTelemetry.ts#DesktopTelemetrySetHostPowerIntervals": "DesktopTelemetrySetHostPowerIntervals",
     "resourceTelemetry.ts#DesktopUpdateRemoteOutcome": "DesktopUpdateRemoteOutcome",
@@ -3009,6 +3031,7 @@
     "settings.ts#BrowserSearchEngine": "BrowserSearchEngine",
     "settings.ts#ChatWidth": "ChatWidth",
     "settings.ts#ClaudeSettings": "ClaudeSettings",
+    "settings.ts#ClientServerSettingsPatch": "ClientServerSettingsPatch",
     "settings.ts#ClientSettingsPatch": "ClientSettingsPatch",
     "settings.ts#ClientSettingsSchema": "ClientSettingsSchema",
     "settings.ts#CloudSpeechCredentials": "CloudSpeechCredentials",
@@ -3016,6 +3039,7 @@
     "settings.ts#CodexSettings": "CodexSettings",
     "settings.ts#DatabaseReclaimError": "DatabaseReclaimError",
     "settings.ts#DatabaseStorageStatus": "DatabaseStorageStatus",
+    "settings.ts#DefaultAppearancePreference": "DefaultAppearancePreference",
     "settings.ts#DefaultThemePreference": "DefaultThemePreference",
     "settings.ts#DiffColorScheme": "DiffColorScheme",
     "settings.ts#DiffLayout": "DiffLayout",
@@ -3727,7 +3751,7 @@
     {
       "schema": "AuthAccessStreamEvent",
       "file": "samples/AuthAccessStreamEvent.jsonl",
-      "count": 87
+      "count": 88
     },
     {
       "schema": "AuthAccessStreamPairingLinkRemovedEvent",
@@ -3742,12 +3766,22 @@
     {
       "schema": "AuthAccessStreamSnapshotEvent",
       "file": "samples/AuthAccessStreamSnapshotEvent.jsonl",
-      "count": 36
+      "count": 37
     },
     {
       "schema": "AuthAccessTokenResult",
       "file": "samples/AuthAccessTokenResult.jsonl",
       "count": 29
+    },
+    {
+      "schema": "AuthApproveConnectDeviceInput",
+      "file": "samples/AuthApproveConnectDeviceInput.jsonl",
+      "count": 15
+    },
+    {
+      "schema": "AuthApproveConnectDeviceResult",
+      "file": "samples/AuthApproveConnectDeviceResult.jsonl",
+      "count": 2
     },
     {
       "schema": "AuthBrowserSessionRequest",
@@ -3783,6 +3817,16 @@
       "schema": "AuthClientSessionRevokeResult",
       "file": "samples/AuthClientSessionRevokeResult.jsonl",
       "count": 2
+    },
+    {
+      "schema": "AuthConnectDevice",
+      "file": "samples/AuthConnectDevice.jsonl",
+      "count": 34
+    },
+    {
+      "schema": "AuthConnectDeviceRequest",
+      "file": "samples/AuthConnectDeviceRequest.jsonl",
+      "count": 37
     },
     {
       "schema": "AuthCreatePairingCredentialInput",
@@ -3897,7 +3941,7 @@
     {
       "schema": "AuthPairingLink",
       "file": "samples/AuthPairingLink.jsonl",
-      "count": 30
+      "count": 29
     },
     {
       "schema": "AuthPairingLinkRevokeResult",
@@ -3908,6 +3952,16 @@
       "schema": "AuthRevokeClientSessionInput",
       "file": "samples/AuthRevokeClientSessionInput.jsonl",
       "count": 15
+    },
+    {
+      "schema": "AuthRevokeConnectDeviceInput",
+      "file": "samples/AuthRevokeConnectDeviceInput.jsonl",
+      "count": 15
+    },
+    {
+      "schema": "AuthRevokeConnectDeviceResult",
+      "file": "samples/AuthRevokeConnectDeviceResult.jsonl",
+      "count": 2
     },
     {
       "schema": "AuthRevokePairingLinkInput",
@@ -4195,6 +4249,11 @@
       "count": 8
     },
     {
+      "schema": "ClientServerSettingsPatch",
+      "file": "samples/ClientServerSettingsPatch.jsonl",
+      "count": 39
+    },
+    {
       "schema": "ClientSettingsPatch",
       "file": "samples/ClientSettingsPatch.jsonl",
       "count": 38
@@ -4333,6 +4392,11 @@
       "schema": "DatabaseStorageStatus",
       "file": "samples/DatabaseStorageStatus.jsonl",
       "count": 55
+    },
+    {
+      "schema": "DefaultAppearancePreference",
+      "file": "samples/DefaultAppearancePreference.jsonl",
+      "count": 4
     },
     {
       "schema": "DefaultThemePreference",
@@ -4738,6 +4802,11 @@
       "schema": "DesktopTelemetryRequestDesktopUpdate",
       "file": "samples/DesktopTelemetryRequestDesktopUpdate.jsonl",
       "count": 26
+    },
+    {
+      "schema": "DesktopTelemetryServerReady",
+      "file": "samples/DesktopTelemetryServerReady.jsonl",
+      "count": 1
     },
     {
       "schema": "DesktopTelemetrySetDiagnosticsDemand",
@@ -5150,6 +5219,11 @@
       "count": 7
     },
     {
+      "schema": "EnvironmentConnectApprovalPendingError",
+      "file": "samples/EnvironmentConnectApprovalPendingError.jsonl",
+      "count": 15
+    },
+    {
       "schema": "EnvironmentConnectReachability",
       "file": "samples/EnvironmentConnectReachability.jsonl",
       "count": 48
@@ -5172,7 +5246,7 @@
     {
       "schema": "EnvironmentHttpCommonError",
       "file": "samples/EnvironmentHttpCommonError.jsonl",
-      "count": 44
+      "count": 48
     },
     {
       "schema": "EnvironmentHttpConflictError",
@@ -5212,7 +5286,7 @@
     {
       "schema": "EnvironmentInternalErrorReason",
       "file": "samples/EnvironmentInternalErrorReason.jsonl",
-      "count": 17
+      "count": 19
     },
     {
       "schema": "EnvironmentMachineKind",
@@ -5332,7 +5406,7 @@
     {
       "schema": "EnvironmentTheme",
       "file": "samples/EnvironmentTheme.jsonl",
-      "count": 16
+      "count": 15
     },
     {
       "schema": "EnvironmentThemeColor",
@@ -5342,7 +5416,7 @@
     {
       "schema": "EnvironmentThemeFile",
       "file": "samples/EnvironmentThemeFile.jsonl",
-      "count": 24
+      "count": 25
     },
     {
       "schema": "EnvironmentThemeId",
@@ -5357,7 +5431,7 @@
     {
       "schema": "ExecutionEnvironmentCapabilities",
       "file": "samples/ExecutionEnvironmentCapabilities.jsonl",
-      "count": 4
+      "count": 5
     },
     {
       "schema": "ExecutionEnvironmentDescriptor",
@@ -6650,6 +6724,11 @@
       "count": 21
     },
     {
+      "schema": "OrchestrationV2DomainEvent.thread.visit-recorded",
+      "file": "samples/OrchestrationV2DomainEvent.thread.visit-recorded.jsonl",
+      "count": 21
+    },
+    {
       "schema": "OrchestrationV2DomainEvent.thread.visited",
       "file": "samples/OrchestrationV2DomainEvent.thread.visited.jsonl",
       "count": 21
@@ -6882,6 +6961,11 @@
     {
       "schema": "OrchestrationV2DomainEventJson.thread.unsnoozed",
       "file": "samples/OrchestrationV2DomainEventJson.thread.unsnoozed.jsonl",
+      "count": 21
+    },
+    {
+      "schema": "OrchestrationV2DomainEventJson.thread.visit-recorded",
+      "file": "samples/OrchestrationV2DomainEventJson.thread.visit-recorded.jsonl",
       "count": 21
     },
     {
@@ -7512,7 +7596,7 @@
     {
       "schema": "OrchestrationV2ThreadStreamItem",
       "file": "samples/OrchestrationV2ThreadStreamItem.jsonl",
-      "count": 50
+      "count": 51
     },
     {
       "schema": "OrchestrationV2ThreadTitles",
@@ -7523,6 +7607,16 @@
       "schema": "OrchestrationV2ThreadTranscript",
       "file": "samples/OrchestrationV2ThreadTranscript.jsonl",
       "count": 33
+    },
+    {
+      "schema": "OrchestrationV2ThreadVisit",
+      "file": "samples/OrchestrationV2ThreadVisit.jsonl",
+      "count": 32
+    },
+    {
+      "schema": "OrchestrationV2ThreadVisitJson",
+      "file": "samples/OrchestrationV2ThreadVisitJson.jsonl",
+      "count": 32
     },
     {
       "schema": "OrchestrationV2ToolCapabilities",
@@ -8452,7 +8546,7 @@
     {
       "schema": "PreviewOpenInput",
       "file": "samples/PreviewOpenInput.jsonl",
-      "count": 29
+      "count": 25
     },
     {
       "schema": "PreviewRenderedViewportSize",
@@ -8692,7 +8786,7 @@
     {
       "schema": "ProjectListIgnoredFilesInput",
       "file": "samples/ProjectListIgnoredFilesInput.jsonl",
-      "count": 15
+      "count": 23
     },
     {
       "schema": "ProjectListIgnoredFilesResult",
@@ -9867,7 +9961,7 @@
     {
       "schema": "RelayEnvironmentHealthResponse",
       "file": "samples/RelayEnvironmentHealthResponse.jsonl",
-      "count": 24
+      "count": 23
     },
     {
       "schema": "RelayEnvironmentHealthResponseProofPayload",
@@ -9927,7 +10021,7 @@
     {
       "schema": "RelayEnvironmentLinkProofPayload",
       "file": "samples/RelayEnvironmentLinkProofPayload.jsonl",
-      "count": 14
+      "count": 12
     },
     {
       "schema": "RelayEnvironmentLinkRequest",
@@ -10682,7 +10776,7 @@
     {
       "schema": "ServerConfigEnvironmentThemesUpdatedPayload",
       "file": "samples/ServerConfigEnvironmentThemesUpdatedPayload.jsonl",
-      "count": 18
+      "count": 17
     },
     {
       "schema": "ServerConfigIssue",
@@ -10712,7 +10806,7 @@
     {
       "schema": "ServerConfigStreamEnvironmentThemesUpdatedEvent",
       "file": "samples/ServerConfigStreamEnvironmentThemesUpdatedEvent.jsonl",
-      "count": 18
+      "count": 17
     },
     {
       "schema": "ServerConfigStreamEvent",
@@ -10802,7 +10896,7 @@
     {
       "schema": "ServerLifecycleStreamReadyEvent",
       "file": "samples/ServerLifecycleStreamReadyEvent.jsonl",
-      "count": 24
+      "count": 25
     },
     {
       "schema": "ServerLifecycleStreamWelcomeEvent",
@@ -10812,7 +10906,7 @@
     {
       "schema": "ServerLifecycleWelcomePayload",
       "file": "samples/ServerLifecycleWelcomePayload.jsonl",
-      "count": 22
+      "count": 23
     },
     {
       "schema": "ServerNpmRelease",
@@ -10897,7 +10991,7 @@
     {
       "schema": "ServerProviderAuth",
       "file": "samples/ServerProviderAuth.jsonl",
-      "count": 29
+      "count": 28
     },
     {
       "schema": "ServerProviderAuthStatus",
@@ -10997,7 +11091,7 @@
     {
       "schema": "ServerProviderUsageLimits",
       "file": "samples/ServerProviderUsageLimits.jsonl",
-      "count": 33
+      "count": 32
     },
     {
       "schema": "ServerProviderUsageWindow",
@@ -11927,7 +12021,7 @@
     {
       "schema": "UsageLimitSourceSnapshot",
       "file": "samples/UsageLimitSourceSnapshot.jsonl",
-      "count": 29
+      "count": 27
     },
     {
       "schema": "UsageLimitSourceSnapshots",
@@ -14738,6 +14832,13 @@
       "count": 21
     },
     {
+      "schema": "OrchestrationV2DomainEventJson.thread.visit-recorded",
+      "parent": "OrchestrationV2DomainEventJson",
+      "boundary": "event-store",
+      "file": "stored/OrchestrationV2DomainEventJson.thread.visit-recorded.jsonl",
+      "count": 21
+    },
+    {
       "schema": "OrchestrationV2DomainEventJson.thread.visited",
       "parent": "OrchestrationV2DomainEventJson",
       "boundary": "event-store",
@@ -14840,7 +14941,7 @@
       "parent": "ServerSettings",
       "boundary": "settings-file",
       "file": "stored/ServerSettings.jsonl",
-      "count": 4
+      "count": 5
     }
   ],
   "unsupported": [
@@ -15105,6 +15206,26 @@
       "reason": "$.union[0].state.credentialOwner: opaque declaration has no structural JSON codec; Effect emits an unconstrained schema"
     },
     {
+      "schema": "ClientServerSettingsPatch",
+      "stage": "json-schema",
+      "reason": "$.speechProjectCustomWords: custom check has no JSON Schema representation (unnamed filter)"
+    },
+    {
+      "schema": "ClientServerSettingsPatch",
+      "stage": "json-schema",
+      "reason": "$.speechPostProcessingModelSelection.union[0].provider.union[0]: opaque declaration has no structural JSON codec; Effect emits an unconstrained schema"
+    },
+    {
+      "schema": "ClientServerSettingsPatch",
+      "stage": "json-schema",
+      "reason": "$.projectSettingsOverrides.[value].union[0].worktreeSubmodules: opaque declaration has no structural JSON codec; Effect emits an unconstrained schema"
+    },
+    {
+      "schema": "ClientServerSettingsPatch",
+      "stage": "json-schema",
+      "reason": "$.providerInstances.[value].config: opaque declaration has no structural JSON codec; Effect emits an unconstrained schema"
+    },
+    {
       "schema": "ClientSettingsPatch",
       "stage": "json-schema",
       "reason": "$.browserDefaultViewport.union[1]: custom check has no JSON Schema representation (unnamed filter)"
@@ -15302,12 +15423,12 @@
     {
       "schema": "OrchestrationV2DomainEvent",
       "stage": "json-schema",
-      "reason": "$.union[12].payload.pendingBackgroundTasks.union[0].union[0][].union[4].kind.union[0]: custom check has no JSON Schema representation (unnamed filter)"
+      "reason": "$.union[13].payload.pendingBackgroundTasks.union[0].union[0][].union[4].kind.union[0]: custom check has no JSON Schema representation (unnamed filter)"
     },
     {
       "schema": "OrchestrationV2DomainEvent",
       "stage": "json-schema",
-      "reason": "$.union[15].payload.notification.union[0].source.union[8].kind.union[0]: custom check has no JSON Schema representation (unnamed filter)"
+      "reason": "$.union[16].payload.notification.union[0].source.union[8].kind.union[0]: custom check has no JSON Schema representation (unnamed filter)"
     },
     {
       "schema": "OrchestrationV2DomainEventJson",
@@ -15317,12 +15438,12 @@
     {
       "schema": "OrchestrationV2DomainEventJson",
       "stage": "json-schema",
-      "reason": "$.union[12].payload.pendingBackgroundTasks.union[0].union[0][].union[4].kind.union[0]: custom check has no JSON Schema representation (unnamed filter)"
+      "reason": "$.union[13].payload.pendingBackgroundTasks.union[0].union[0][].union[4].kind.union[0]: custom check has no JSON Schema representation (unnamed filter)"
     },
     {
       "schema": "OrchestrationV2DomainEventJson",
       "stage": "json-schema",
-      "reason": "$.union[15].payload.notification.union[0].source.union[8].kind.union[0]: custom check has no JSON Schema representation (unnamed filter)"
+      "reason": "$.union[16].payload.notification.union[0].source.union[8].kind.union[0]: custom check has no JSON Schema representation (unnamed filter)"
     },
     {
       "schema": "OrchestrationV2ForceStopThreadError",
@@ -15537,12 +15658,12 @@
     {
       "schema": "OrchestrationV2StoredEvent",
       "stage": "json-schema",
-      "reason": "$.event.union[12].payload.pendingBackgroundTasks.union[0].union[0][].union[4].kind.union[0]: custom check has no JSON Schema representation (unnamed filter)"
+      "reason": "$.event.union[13].payload.pendingBackgroundTasks.union[0].union[0][].union[4].kind.union[0]: custom check has no JSON Schema representation (unnamed filter)"
     },
     {
       "schema": "OrchestrationV2StoredEvent",
       "stage": "json-schema",
-      "reason": "$.event.union[15].payload.notification.union[0].source.union[8].kind.union[0]: custom check has no JSON Schema representation (unnamed filter)"
+      "reason": "$.event.union[16].payload.notification.union[0].source.union[8].kind.union[0]: custom check has no JSON Schema representation (unnamed filter)"
     },
     {
       "schema": "OrchestrationV2Subagent",
@@ -21340,9 +21461,19 @@
       "reason": "2 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/AuthAccessStreamPairingLinkUpsertedEvent.jsonl"
     },
     {
+      "schema": "AuthAccessStreamSnapshotEvent",
+      "stage": "unicode",
+      "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/AuthAccessStreamSnapshotEvent.jsonl"
+    },
+    {
       "schema": "AuthAccessTokenResult",
       "stage": "unicode",
       "reason": "2 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/AuthAccessTokenResult.jsonl"
+    },
+    {
+      "schema": "AuthApproveConnectDeviceInput",
+      "stage": "unicode",
+      "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/AuthApproveConnectDeviceInput.jsonl"
     },
     {
       "schema": "AuthBrowserSessionRequest",
@@ -21358,6 +21489,16 @@
       "schema": "AuthClientSession",
       "stage": "unicode",
       "reason": "3 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/AuthClientSession.jsonl"
+    },
+    {
+      "schema": "AuthConnectDevice",
+      "stage": "unicode",
+      "reason": "3 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/AuthConnectDevice.jsonl"
+    },
+    {
+      "schema": "AuthConnectDeviceRequest",
+      "stage": "unicode",
+      "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/AuthConnectDeviceRequest.jsonl"
     },
     {
       "schema": "AuthMcpApprovalDetails",
@@ -21403,6 +21544,11 @@
       "schema": "AuthRevokeClientSessionInput",
       "stage": "unicode",
       "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/AuthRevokeClientSessionInput.jsonl"
+    },
+    {
+      "schema": "AuthRevokeConnectDeviceInput",
+      "stage": "unicode",
+      "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/AuthRevokeConnectDeviceInput.jsonl"
     },
     {
       "schema": "AuthRevokePairingLinkInput",
@@ -21995,6 +22141,11 @@
       "reason": "2 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/EnvironmentCloudLinkStateResult.jsonl"
     },
     {
+      "schema": "EnvironmentConnectApprovalPendingError",
+      "stage": "unicode",
+      "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/EnvironmentConnectApprovalPendingError.jsonl"
+    },
+    {
       "schema": "EnvironmentContextRecord",
       "stage": "unicode",
       "reason": "2 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/EnvironmentContextRecord.jsonl"
@@ -22002,7 +22153,7 @@
     {
       "schema": "EnvironmentHttpCommonError",
       "stage": "unicode",
-      "reason": "2 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/EnvironmentHttpCommonError.jsonl"
+      "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/EnvironmentHttpCommonError.jsonl"
     },
     {
       "schema": "EnvironmentId",
@@ -22072,12 +22223,12 @@
     {
       "schema": "EnvironmentTheme",
       "stage": "samples",
-      "reason": "arbitrary: {\"_tag\":\"SampleError\",\"generated\":2,\"discards\":101,\"seed\":29747}"
+      "reason": "arbitrary: {\"_tag\":\"SampleError\",\"generated\":3,\"discards\":101,\"seed\":29747}"
     },
     {
       "schema": "EnvironmentThemeFile",
       "stage": "unicode",
-      "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/EnvironmentThemeFile.jsonl"
+      "reason": "2 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/EnvironmentThemeFile.jsonl"
     },
     {
       "schema": "EnvironmentThemeId",
@@ -22642,7 +22793,7 @@
     {
       "schema": "OrchestrationV2Command.thread.metadata.update",
       "stage": "unicode",
-      "reason": "2 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/OrchestrationV2Command.thread.metadata.update.jsonl"
+      "reason": "3 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/OrchestrationV2Command.thread.metadata.update.jsonl"
     },
     {
       "schema": "OrchestrationV2Command.thread.model-selection.set",
@@ -23035,6 +23186,11 @@
       "reason": "4 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/OrchestrationV2DomainEvent.thread.unsnoozed.jsonl"
     },
     {
+      "schema": "OrchestrationV2DomainEvent.thread.visit-recorded",
+      "stage": "unicode",
+      "reason": "2 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/OrchestrationV2DomainEvent.thread.visit-recorded.jsonl"
+    },
+    {
       "schema": "OrchestrationV2DomainEvent.thread.visited",
       "stage": "unicode",
       "reason": "4 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/OrchestrationV2DomainEvent.thread.visited.jsonl"
@@ -23268,6 +23424,11 @@
       "schema": "OrchestrationV2DomainEventJson.thread.unsnoozed",
       "stage": "unicode",
       "reason": "4 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/OrchestrationV2DomainEventJson.thread.unsnoozed.jsonl"
+    },
+    {
+      "schema": "OrchestrationV2DomainEventJson.thread.visit-recorded",
+      "stage": "unicode",
+      "reason": "2 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/OrchestrationV2DomainEventJson.thread.visit-recorded.jsonl"
     },
     {
       "schema": "OrchestrationV2DomainEventJson.thread.visited",
@@ -23753,6 +23914,11 @@
       "schema": "OrchestrationV2ThreadShellJson",
       "stage": "unicode",
       "reason": "5 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/OrchestrationV2ThreadShellJson.jsonl"
+    },
+    {
+      "schema": "OrchestrationV2ThreadStreamItem",
+      "stage": "unicode",
+      "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/OrchestrationV2ThreadStreamItem.jsonl"
     },
     {
       "schema": "OrchestrationV2ThreadTitles",
@@ -25247,7 +25413,7 @@
     {
       "schema": "RelayEnvironmentHealthResponseProofPayload",
       "stage": "unicode",
-      "reason": "6 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/RelayEnvironmentHealthResponseProofPayload.jsonl"
+      "reason": "7 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/RelayEnvironmentHealthResponseProofPayload.jsonl"
     },
     {
       "schema": "RelayEnvironmentLinkChallengeResponse",
@@ -25282,7 +25448,7 @@
     {
       "schema": "RelayEnvironmentLinkProofPayload",
       "stage": "unicode",
-      "reason": "7 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/RelayEnvironmentLinkProofPayload.jsonl"
+      "reason": "5 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/RelayEnvironmentLinkProofPayload.jsonl"
     },
     {
       "schema": "RelayEnvironmentLinkRequest",
@@ -25732,7 +25898,7 @@
     {
       "schema": "ServerConfigSettingsUpdatedPayload",
       "stage": "unicode",
-      "reason": "2 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/ServerConfigSettingsUpdatedPayload.jsonl"
+      "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/ServerConfigSettingsUpdatedPayload.jsonl"
     },
     {
       "schema": "ServerConfigStreamProviderStatusDeltasEvent",
@@ -25747,7 +25913,7 @@
     {
       "schema": "ServerConfigStreamSettingsUpdatedEvent",
       "stage": "unicode",
-      "reason": "2 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/ServerConfigStreamSettingsUpdatedEvent.jsonl"
+      "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/ServerConfigStreamSettingsUpdatedEvent.jsonl"
     },
     {
       "schema": "ServerConfigStreamSnapshotEvent",
@@ -25812,7 +25978,7 @@
     {
       "schema": "ServerProvider",
       "stage": "unicode",
-      "reason": "5 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/ServerProvider.jsonl"
+      "reason": "2 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/ServerProvider.jsonl"
     },
     {
       "schema": "ServerProviderCompatibilityAdvisory",
@@ -25870,6 +26036,11 @@
       "reason": "3 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/ServerProviderUpdateState.jsonl"
     },
     {
+      "schema": "ServerProviderUsageLimits",
+      "stage": "unicode",
+      "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/ServerProviderUsageLimits.jsonl"
+    },
+    {
       "schema": "ServerProviderUsageWindow",
       "stage": "unicode",
       "reason": "2 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/ServerProviderUsageWindow.jsonl"
@@ -25917,17 +26088,12 @@
     {
       "schema": "ServerSettings",
       "stage": "unicode",
-      "reason": "2 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/ServerSettings.jsonl"
+      "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/ServerSettings.jsonl"
     },
     {
       "schema": "ServerSettingsError",
       "stage": "unicode",
       "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/ServerSettingsError.jsonl"
-    },
-    {
-      "schema": "ServerSettingsPatch",
-      "stage": "unicode",
-      "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/ServerSettingsPatch.jsonl"
     },
     {
       "schema": "ServerSignalProcessResult",
@@ -26372,7 +26538,7 @@
     {
       "schema": "UsageLimitSourceAccount",
       "stage": "unicode",
-      "reason": "2 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/UsageLimitSourceAccount.jsonl"
+      "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/UsageLimitSourceAccount.jsonl"
     },
     {
       "schema": "UsageLimitSourceConfig",
@@ -26977,7 +27143,7 @@
     {
       "schema": "rpc.WsRpcGroup.server.updateSettings.payload",
       "stage": "unicode",
-      "reason": "2 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/rpc.WsRpcGroup.server.updateSettings.payload.jsonl"
+      "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/rpc.WsRpcGroup.server.updateSettings.payload.jsonl"
     },
     {
       "schema": "rpc.WsRpcGroup.vcs.createWorktree.payload",
@@ -26988,11 +27154,6 @@
       "schema": "rpc.WsRpcGroup.vcs.refreshStatus.payload",
       "stage": "unicode",
       "reason": "1 wire samples contain lone UTF-16 surrogates; serde_json cannot represent them. Preserved in non-scalar/rpc.WsRpcGroup.vcs.refreshStatus.payload.jsonl"
-    },
-    {
-      "schema": "ServerSettings",
-      "stage": "stored",
-      "reason": "ServerSettings: Expected number | undefined"
     },
     {
       "schema": "ServerSettings",
