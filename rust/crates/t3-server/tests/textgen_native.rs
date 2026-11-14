@@ -144,6 +144,14 @@ mod fake {
         let mut prompt = String::new();
         let _ = std::io::stdin().read_to_string(&mut prompt);
         let mode = mode();
+        let server_only: Vec<&str> = [
+            "T3CODE_DEV_AUTH_TOKEN",
+            "TUNNEL_TOKEN",
+            "T3_MCP_BEARER_TOKEN",
+        ]
+        .into_iter()
+        .filter(|name| std::env::var(name).is_ok())
+        .collect();
         report(&json!({
             "kind": kind,
             "args": args,
@@ -153,10 +161,7 @@ mod fake {
             "secret": std::env::var("T3_FAKE_SECRET").ok(),
             "forkSettings": cwd.join(".claude").join("settings.json").exists(),
             "modelBin": std::fs::read_to_string(cwd.join("model.bin")).ok(),
-            "serverOnly": ["T3CODE_DEV_AUTH_TOKEN", "TUNNEL_TOKEN", "T3_MCP_BEARER_TOKEN"]
-                .iter()
-                .filter(|name| std::env::var(name).is_ok())
-                .collect::<Vec<_>>(),
+            "serverOnly": server_only,
             "mode": mode,
         }));
         match mode.as_str() {
@@ -698,7 +703,11 @@ async fn codex_by_default() {
     assert_eq!(codex_home.file_name().unwrap(), "codex-home");
     assert_eq!(canonical(codex_home.parent().unwrap()), canonical(s.home()));
     assert_eq!(report["secret"], "textgen-secret-1b2c");
-    assert_eq!(report["serverOnly"], json!([]), "T3's own variables reached codex");
+    assert_eq!(
+        report["serverOnly"],
+        json!([]),
+        "T3's own variables reached codex"
+    );
 
     // The commit writer (no writer model set) is the same Codex instance, in the checkout.
     std::fs::write(repo.join("greeting.txt"), "hi\n").unwrap();
@@ -779,7 +788,8 @@ async fn claude_titles_and_commits() {
             .any(|pair| pair == ["--permission-mode", "dontAsk"])
     );
     assert!(
-        argv.windows(2).any(|pair| pair == ["--setting-sources", "user"]),
+        argv.windows(2)
+            .any(|pair| pair == ["--setting-sources", "user"]),
         "{argv:?}"
     );
     let settings_arg = &argv[argv.iter().position(|arg| arg == "--settings").unwrap() + 1];
@@ -810,11 +820,16 @@ async fn claude_titles_and_commits() {
         canonical(Path::new(report["cwd"].as_str().unwrap())),
         canonical(&repo)
     );
-    assert_eq!(report["serverOnly"], json!([]), "T3's own variables reached claude");
+    assert_eq!(
+        report["serverOnly"],
+        json!([]),
+        "T3's own variables reached claude"
+    );
     // The checkout may be a clone of a hostile repository: its `.claude` settings never load.
     let argv = args(&report);
     assert!(
-        argv.windows(2).any(|pair| pair == ["--setting-sources", "user"]),
+        argv.windows(2)
+            .any(|pair| pair == ["--setting-sources", "user"]),
         "{argv:?}"
     );
     assert_eq!(
@@ -1223,7 +1238,10 @@ async fn review_guides_with(driver: &'static str) {
         cwd.display()
     );
     let argv = args(&report);
-    assert_eq!(report["forkSettings"], true, "the checkout carries the fork's settings");
+    assert_eq!(
+        report["forkSettings"], true,
+        "the checkout carries the fork's settings"
+    );
     if driver == "codex" {
         assert!(
             argv.windows(2).any(|pair| pair == ["-s", "read-only"]),

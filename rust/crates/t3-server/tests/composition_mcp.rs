@@ -1059,7 +1059,7 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
         .call(
             &token,
             "t3_thread_send_attachments",
-            json!({"threadId":PEER,"attachments":[]}),
+            json!({"threadId":PEER,"attachments":[{"type":"file","id":"pending-00000000-0000-4000-8000-000000000000","name":"notes.txt","mimeType":"text/plain","sizeBytes":3}]}),
         )
         .await;
     assert!(is_error(&attachments), "{attachments}");
@@ -1711,7 +1711,11 @@ async fn a_delegated_child_inherits_its_parents_link_fence() {
         .to_owned();
     // The child carries the parent's link origin.
     let snapshot: Value = reqwest::Client::new()
-        .get(format!("{}/api/orchestration/threads/{child}", world.origin))
+        .get(format!(
+            "{}/api/orchestration/threads/{}",
+            world.origin,
+            child.replace('%', "%25")
+        ))
         .header("cookie", &world.cookie)
         .header("x-t3-orchestration-protocol", "2")
         .send()

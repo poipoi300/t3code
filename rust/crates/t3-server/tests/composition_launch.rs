@@ -882,36 +882,32 @@ fn bindings_file(s: &Server) -> PathBuf {
 }
 
 /// t3-git re-review 4, H-1 item 5: a new worktree is created through the project root's saved
-/// binding. A repository planted at the bound root (here: the original `.git` moved aside and a
-/// new repository made in its place, with a hook and a smudge filter that write a marker) makes
-/// a worktree launch refuse with `checkpoint.git.repository-changed` before any Git command runs
-/// against it: no marker, no worktree, no branch in the planted repository.
+/// binding. Here the saved record (written as a previous server would have left it) names one
+/// repository, and the folder now holds another, with a hook and a smudge filter that write a
+/// marker. A worktree launch refuses with `checkpoint.git.repository-changed` before any Git
+/// command runs against it: no marker, no worktree, no branch in the planted repository.
+///
+/// The root is never bound in this process: t3-git also pins identities in a process-wide cache,
+/// which a test inside one process cannot clear, so only a root this process never bound shows
+/// what a restart leaves, where the saved record is the only protection.
 #[tokio::test]
 async fn a_repository_planted_at_the_bound_project_root_refuses_a_worktree_launch() {
+    use t3_orchestration::api::RepositoryBindingStore;
     let mut s = Server::start().await;
+    // The repository the record names (bound through t3-git, as the server binds).
+    let recorded = s.home().join("recorded");
+    repository(&recorded);
+    let binding = t3_git::Git::new(&recorded)
+        .bind_repository()
+        .await
+        .unwrap()
+        .expect("a repository");
+
+    // The project folder holds a different, hostile repository.
     let project = s.home().join("planted");
     repository(&project);
-    s.insert_project("project-planted", &project, "[]");
-
-    // A launch in the project folder binds the root (the runtime binds a launch's workspace).
-    ok(s.call(
-        "orchestration.launchThread",
-        launch("thread:bind", "project-planted", json!({"type": "root"}), "auto-accept-edits"),
-    )
-    .await);
-    first_turn_completes(&mut s, "thread:bind").await;
-    assert!(
-        std::fs::read_to_string(bindings_file(&s)).unwrap_or_default().contains("planted"),
-        "the project root was not bound"
-    );
-
-    // Plant: the real repository moves aside, a hostile one takes its place.
-    std::fs::rename(project.join(".git"), project.join(".git-original")).unwrap();
     let marker = s.home().join("planted-marker");
     let marker_text = marker.to_string_lossy().replace('\\', "/");
-    git(&project, &["init", "-q", "-b", "main"]);
-    git(&project, &["add", "hello.txt"]);
-    git(&project, &["commit", "-q", "-m", "planted"]);
     std::fs::write(project.join(".gitattributes"), "*.txt filter=t3\n").unwrap();
     git(&project, &["add", ".gitattributes"]);
     git(&project, &["commit", "-q", "-m", "attributes"]);
@@ -927,6 +923,11 @@ async fn a_repository_planted_at_the_bound_project_root_refuses_a_worktree_launc
             &format!("sh -c 'echo filter >> \"{marker_text}\"; cat'"),
         ],
     );
+    t3_orchestration::runtime::repository_bindings::FileRepositoryBindings::new(bindings_file(&s))
+        .put(&project, json!({"repository": binding}))
+        .await
+        .unwrap();
+    s.insert_project("project-planted", &project, "[]");
 
     let launched = s
         .call(
@@ -940,8 +941,8 @@ async fn a_repository_planted_at_the_bound_project_root_refuses_a_worktree_launc
         )
         .await;
     if matches!(launched, Exit::Success { .. }) {
-        // Before the fix the launch was accepted; let its preparation finish so the planted
-        // hooks have had their chance to run.
+        // Accepted (before the fix): let the preparation finish so the planted hooks have had
+        // their chance to run.
         let setup = s.subscribe(
             "subscribeWorktreeSetup",
             json!({"threadId": "thread:planted"}),

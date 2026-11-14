@@ -1077,7 +1077,12 @@ impl t3_git::GitWorkflowFactory for ForgeWorkflows {
     ) -> Result<t3_git::GitWorkflowService, t3_git::GitError> {
         let handle = match self.registry.resolve(cwd, None).await {
             Ok(handle) => handle,
-            Err(_) if self.lenient_lookups => return Ok(self.template.at(cwd)),
+            // Status: an undetectable forge is the unknown one for now; each lookup resolves
+            // again.
+            Err(_) if self.lenient_lookups => match self.registry.resolve_remotes(&[], None) {
+                Ok(unknown) => unknown,
+                Err(_) => return Ok(self.template.at(cwd)),
+            },
             Err(_) => {
                 return Err(t3_git::GitError::Unavailable(
                     "the source control provider could not be detected".into(),
@@ -1090,7 +1095,8 @@ impl t3_git::GitWorkflowFactory for ForgeWorkflows {
             .at(cwd)
             .with_review_host(if self.lenient_lookups {
                 Arc::new(StatusReviewHost {
-                    inner: host,
+                    registry: self.registry.clone(),
+                    current: std::sync::Mutex::new(Arc::new(host)),
                     last: Default::default(),
                 })
             } else {
@@ -1102,9 +1108,33 @@ impl t3_git::GitWorkflowFactory for ForgeWorkflows {
 /// Status looks the branch's pull request up through `list`. A failed lookup (the forge CLI
 /// missing or signed out, the forge unreachable) answers that branch's last listing, else none,
 /// with a warning: TypeScript's `lookupStatusPr` does the same, so status never fails on it.
+/// Like TypeScript (`sourceControlProvider(cwd)` in each lookup), every call resolves the
+/// checkout's forge again through the registry's five-second detection cache, so a remote added
+/// after the checkout's status worker started is used; the synchronous questions use the forge
+/// the latest call resolved.
 struct StatusReviewHost {
-    inner: ForgeReviewHost,
+    registry: Arc<ForgeRegistry>,
+    current: std::sync::Mutex<Arc<ForgeReviewHost>>,
     last: std::sync::Mutex<BTreeMap<String, Vec<t3_contracts::source_control::ChangeRequest>>>,
+}
+impl StatusReviewHost {
+    async fn host(&self, cwd: &Path) -> Arc<ForgeReviewHost> {
+        if let Ok(handle) = self.registry.resolve(cwd, None).await {
+            let host = Arc::new(ForgeReviewHost::new(handle, Arc::new(NoProjectSetup)));
+            *self
+                .current
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = host.clone();
+            return host;
+        }
+        self.current()
+    }
+    fn current(&self) -> Arc<ForgeReviewHost> {
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 #[async_trait::async_trait]
 impl t3_git::ReviewHost for StatusReviewHost {
@@ -1116,7 +1146,7 @@ impl t3_git::ReviewHost for StatusReviewHost {
         limit: usize,
     ) -> Result<Vec<t3_contracts::source_control::ChangeRequest>, t3_git::GitError> {
         let key = format!("{}\0{head}\0{state:?}\0{limit}", cwd.display());
-        let listed = self.inner.list(cwd, head, state, limit).await;
+        let listed = self.host(cwd).await.list(cwd, head, state, limit).await;
         let mut last = self
             .last
             .lock()
@@ -1140,10 +1170,10 @@ impl t3_git::ReviewHost for StatusReviewHost {
         cwd: &Path,
         reference: &str,
     ) -> Result<t3_contracts::source_control::ChangeRequest, t3_git::GitError> {
-        self.inner.get(cwd, reference).await
+        self.host(cwd).await.get(cwd, reference).await
     }
     async fn checkout(&self, cwd: &Path, reference: &str) -> Result<(), t3_git::GitError> {
-        self.inner.checkout(cwd, reference).await
+        self.host(cwd).await.checkout(cwd, reference).await
     }
     async fn create(
         &self,
@@ -1153,7 +1183,10 @@ impl t3_git::ReviewHost for StatusReviewHost {
         title: &str,
         body_file: &Path,
     ) -> Result<(), t3_git::GitError> {
-        self.inner.create(cwd, base, head, title, body_file).await
+        self.host(cwd)
+            .await
+            .create(cwd, base, head, title, body_file)
+            .await
     }
     async fn clone_urls(
         &self,
@@ -1161,16 +1194,16 @@ impl t3_git::ReviewHost for StatusReviewHost {
         repository: &str,
         request_url: &str,
     ) -> Result<SourceControlRepositoryCloneUrls, t3_git::GitError> {
-        self.inner.clone_urls(cwd, repository, request_url).await
+        self.host(cwd)
+            .await
+            .clone_urls(cwd, repository, request_url)
+            .await
     }
     async fn default_branch(&self, cwd: &Path) -> Result<Option<String>, t3_git::GitError> {
-        self.inner.default_branch(cwd).await
+        self.host(cwd).await.default_branch(cwd).await
     }
     fn head_ref(&self, number: u64) -> Option<String> {
-        self.inner.head_ref(number)
-    }
-    fn short_label(&self) -> &str {
-        self.inner.short_label()
+        self.current().head_ref(number)
     }
     fn head_branch_probe(
         &self,
@@ -1178,7 +1211,7 @@ impl t3_git::ReviewHost for StatusReviewHost {
         state: Option<t3_contracts::source_control::ChangeRequestState>,
         default_branch_selector: Option<&str>,
     ) -> (Vec<String>, usize) {
-        self.inner
+        self.current()
             .head_branch_probe(selectors, state, default_branch_selector)
     }
     async fn targets_remote(
@@ -1187,7 +1220,10 @@ impl t3_git::ReviewHost for StatusReviewHost {
         remote: &str,
         repository: Option<&str>,
     ) -> Result<bool, t3_git::GitError> {
-        self.inner.targets_remote(cwd, remote, repository).await
+        self.host(cwd)
+            .await
+            .targets_remote(cwd, remote, repository)
+            .await
     }
     async fn setup(
         &self,
@@ -1195,7 +1231,7 @@ impl t3_git::ReviewHost for StatusReviewHost {
         thread_id: &str,
         worktree: &Path,
     ) -> Result<(), t3_git::GitError> {
-        self.inner.setup(cwd, thread_id, worktree).await
+        self.host(cwd).await.setup(cwd, thread_id, worktree).await
     }
 }
 

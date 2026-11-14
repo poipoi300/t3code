@@ -222,9 +222,10 @@ fn served_methods_are_registered_and_the_rest_stay_unimplemented_with_or_without
         .map(|m| m.tag)
         .filter(|tag| {
             // `projectClone.*` and `subscribeProjectClones` are registered by
-            // `handlers/project_clone.rs`, `agentSessions.*` by `handlers/host_leftovers.rs`:
-            // served or unimplemented there, never here (`composition_forge` pins the former).
-            tag.starts_with("orchestration.")
+            // `handlers/project_clone.rs`, `agentSessions.*` by `handlers/host_leftovers.rs` and
+            // `orchestration.launchThread` by `handlers/launch.rs`: served or unimplemented there,
+            // never here (`composition_forge` pins the clone methods).
+            tag.starts_with("orchestration.") && *tag != "orchestration.launchThread"
                 || tag.starts_with("projects.")
                     && !matches!(
                         *tag,
@@ -242,7 +243,7 @@ fn served_methods_are_registered_and_the_rest_stay_unimplemented_with_or_without
                     )
         })
         .collect();
-    assert_eq!(owned.len(), 23, "{owned:?}");
+    assert_eq!(owned.len(), 22, "{owned:?}");
     for tag in owned {
         assert_eq!(
             without.disposition(tag),

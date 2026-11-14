@@ -46,8 +46,10 @@ pub struct LaunchAdapter {
 struct Inner {
     this: std::sync::Weak<Inner>,
     git: Arc<GitAdapter>,
-    /// The workflow template every launch checkout derives from with `.at(root)`.
-    workflows: GitWorkflowService,
+    /// `vcs.createWorktree`'s folder settings; each launch builds its workflow from the project
+    /// root's bound handle.
+    worktrees_dir: PathBuf,
+    worktree_host: Arc<dyn t3_git::WorktreeHost>,
     settings: Arc<t3_config::settings::SettingsService>,
     database: StoreDatabase,
     textgen: Arc<TextGenAdapter>,
@@ -71,6 +73,8 @@ struct Created {
 struct Late {
     projects: Arc<crate::adapters::project::ProjectAdapter>,
     setup: Option<Arc<crate::adapters::project_setup::ProjectSetupAdapter>>,
+    /// Saved repository bindings and the runtime's trust of a checkout the server creates.
+    orchestration: Arc<crate::adapters::orchestration::OrchestrationAdapter>,
 }
 
 /// One tracked worktree preparation (TS `setupTracker.begin` … `finish`).
@@ -90,6 +94,17 @@ fn failure(operation: &'static str, detail: impl std::fmt::Display) -> Error {
     }
 }
 
+/// The checkpoint backend's refusal for a folder whose repository changed, without the folder's
+/// path (re-review 4 L4).
+fn repository_changed(detail: &str) -> Error {
+    Error::Service {
+        operation: t3_orchestration::ports::checkpoints_forks::checkpoint_rollback_service::REPOSITORY_CHANGED_OPERATION,
+        detail: format!(
+            "This project folder no longer belongs to the repository T3 recorded for it: {detail} T3 will not create a worktree from it until the folder is restored or the repository is trusted again."
+        ),
+    }
+}
+
 fn git_failure(operation: &'static str) -> impl Fn(t3_git::GitError) -> Error {
     // Git's own text can carry stderr, argv and URLs; the run's failure item gets a fixed text.
     move |error| {
@@ -105,15 +120,13 @@ impl LaunchAdapter {
         textgen: Arc<TextGenAdapter>,
         terminal: Arc<crate::adapters::terminal::TerminalAdapter>,
     ) -> Option<Arc<Self>> {
-        let vcs = git.vcs()?;
-        let workflows = GitWorkflowService::new(git.at(&context.local.config.cwd))
-            .with_worktrees_directory(context.local.config.paths.worktrees())
-            .with_worktree_host(vcs.worktree_host());
+        let worktree_host = git.vcs()?.worktree_host();
         Some(Arc::new(Self {
             inner: Arc::new_cyclic(|this| Inner {
                 this: this.clone(),
                 git,
-                workflows,
+                worktrees_dir: context.local.config.paths.worktrees(),
+                worktree_host,
                 settings: context.local.settings.clone(),
                 database: StoreDatabase(context.database.clone()),
                 textgen,
@@ -125,13 +138,19 @@ impl LaunchAdapter {
         }))
     }
 
-    /// Projects and the setup runner start after the runtime; bound before requests are served.
+    /// Projects, the setup runner and the orchestration adapter start after this; bound before
+    /// requests are served.
     pub fn bind(
         &self,
         projects: Arc<crate::adapters::project::ProjectAdapter>,
         setup: Option<Arc<crate::adapters::project_setup::ProjectSetupAdapter>>,
+        orchestration: Arc<crate::adapters::orchestration::OrchestrationAdapter>,
     ) {
-        let _ = self.inner.late.set(Late { projects, setup });
+        let _ = self.inner.late.set(Late {
+            projects,
+            setup,
+            orchestration,
+        });
     }
 
     /// `OrchestrationAdapter::start`'s launch ports.
@@ -151,7 +170,8 @@ impl LaunchAdapter {
             Strategy::Root(root) => check_branch(root.branch.as_ref().and_then(Option::as_ref)),
             Strategy::Worktree(worktree) => {
                 check_revision(&worktree.base_ref.0)?;
-                check_branch(worktree.branch.as_ref().and_then(Option::as_ref))
+                check_branch(worktree.branch.as_ref().and_then(Option::as_ref))?;
+                self.inner.root_binding_refusal(project).await
             }
             Strategy::ExistingWorktree(existing) => {
                 check_branch(existing.branch.as_ref().and_then(Option::as_ref))?;
@@ -240,6 +260,67 @@ impl Inner {
             .map_err(|e| failure("read-settings", e))
     }
 
+    /// The project root through its saved repository binding (t3-git re-review 4, H-1 item 5):
+    /// every Git command it runs validates the recorded repository first and names its Git
+    /// directory explicitly, so a repository planted at the root is refused before any of its
+    /// hooks, filters or configuration can run. A root never bound (a project from before
+    /// bindings were kept) is bound now, at first sight.
+    async fn bound_root(&self, root: &Path) -> Result<t3_git::Git> {
+        let orchestration = &self.late()?.orchestration;
+        let read = |e: crate::adapters::orchestration::OrchestrationError| failure("read-binding", e);
+        let saved = match orchestration.repository_binding(root).await.map_err(read)? {
+            Some(saved) => saved,
+            None => {
+                orchestration
+                    .composed()
+                    .ok_or(Error::Unsupported("orchestration runtime not started"))?
+                    .bind_repository(root.to_owned())
+                    .await?;
+                orchestration.repository_binding(root).await.map_err(read)?.flatten()
+            }
+        };
+        let Some(binding) = saved else {
+            return Err(repository_changed(
+                "it was recorded as not being a Git repository.",
+            ));
+        };
+        self.git
+            .at(root)
+            .with_repository_binding(binding)
+            .await
+            .map_err(|error| match error {
+                t3_git::GitError::RepositoryChanged { detail, .. } => repository_changed(detail),
+                error => git_failure("provision-worktree")(error),
+            })
+    }
+
+    /// A worktree launch's early refusal, before anything is recorded: the project root's
+    /// saved binding no longer matches (or a repository appeared where none was recorded).
+    /// An unknown, scratch, never-bound or non-repository project is left to the launch itself,
+    /// which answers as TypeScript does. `Err` is the typed refusal's text.
+    async fn root_binding_refusal(&self, project: &ProjectId) -> std::result::Result<(), String> {
+        let Ok(project) = self.project(project).await else {
+            return Ok(());
+        };
+        let Ok(late) = self.late() else { return Ok(()) };
+        if late.projects.managed().is_scratch_project(&project.project_id).await {
+            return Ok(());
+        }
+        let root = PathBuf::from(&project.workspace_root);
+        match late.orchestration.repository_binding(&root).await {
+            Ok(Some(Some(binding))) => match self.git.at(&root).with_repository_binding(binding).await {
+                Err(t3_git::GitError::RepositoryChanged { detail, .. }) => {
+                    Err(repository_changed(detail).to_string())
+                }
+                _ => Ok(()),
+            },
+            Ok(Some(None)) if tokio::fs::symlink_metadata(root.join(".git")).await.is_ok() => Err(
+                repository_changed("a repository appeared where none was recorded.").to_string(),
+            ),
+            _ => Ok(()),
+        }
+    }
+
     /// An existing worktree: a local-disk path (decided from its text before any filesystem
     /// call) that resolves without a link to a network target, a remote drive or a device name
     /// (the workspace rule, `t3_workspace::paths::canonicalize`), and that Git lists as a
@@ -278,7 +359,10 @@ impl Inner {
                 _ => Err(REFUSED.into()),
             };
         }
-        let Ok(trees) = self.git.at(&project.workspace_root).list_worktrees().await else {
+        let Ok(root) = self.bound_root(Path::new(&project.workspace_root)).await else {
+            return Err(REFUSED.into());
+        };
+        let Ok(trees) = root.list_worktrees().await else {
             return Err(REFUSED.into());
         };
         for tree in trees {
@@ -417,7 +501,8 @@ impl Inner {
                 ),
             ));
         }
-        let git = self.git.at(root).with_cancellation(cancellation.clone());
+        let bound = self.bound_root(root).await?;
+        let git = bound.clone().with_cancellation(cancellation.clone());
         let mut start = base_ref.to_owned();
         let mut base_name = base_ref.to_owned();
         let remote = if start_from_origin {
@@ -449,9 +534,9 @@ impl Inner {
             self.stage(thread, Stage::Fetch, Status::Done, None);
         }
         self.stage(thread, Stage::Checkout, Status::Running, None);
-        let created = self
-            .workflows
-            .at(root)
+        let created = GitWorkflowService::new(bound)
+            .with_worktrees_directory(self.worktrees_dir.clone())
+            .with_worktree_host(self.worktree_host.clone())
             .with_cancellation(cancellation)
             .create_worktree_with_options(
                 &VcsCreateWorktreeInput {
@@ -489,6 +574,22 @@ impl Inner {
             .get_mut(&thread.0)
         {
             active.worktree = Some(path.clone());
+        }
+        // The server just created this checkout: it is recorded as trusted now, in the same
+        // operation, before setup or a turn can write there. If it cannot be recorded, it is
+        // removed rather than left unbound.
+        if let Err(error) = self.late()?.orchestration.trust_repository(&path).await {
+            tracing::warn!(%error, "could not record a new launch worktree's repository");
+            let workspace = Workspace {
+                cwd: path.clone(),
+                branch: Some(branch.clone()),
+                worktree_path: Some(path.clone()),
+            };
+            let _ = WorkspaceBackend::remove(self, workspace, CancellationToken::new()).await;
+            return Err(failure(
+                "provision-worktree",
+                "The new worktree's repository could not be recorded.",
+            ));
         }
         if let Some(tracker) = self.tracker() {
             let (worktree, name) = (path.to_string_lossy().into_owned(), branch.clone());
@@ -975,21 +1076,24 @@ impl WorkspaceBackend for Inner {
             .unwrap_or_else(|e| e.into_inner())
             .get(&created.thread.0)
             .map(|active| active.preparation.is_cancelled());
-        // Cleanup completes during shutdown too (TS removes in an uninterruptible finalizer);
-        // the root's own token is the server's shutdown.
-        let git = self
-            .git
-            .at(&created.project_root)
-            .with_cancellation(CancellationToken::new());
-        let removed = git
-            .remove_worktree(&path, true)
-            .await
-            .map_err(git_failure("remove-worktree"));
-        if removed.is_ok()
-            && let Err(error) = git.delete_local_branch(&created.branch, true).await
-        {
-            tracing::warn!(%error, "failed to delete an abandoned thread worktree branch");
-        }
+        // Through the root's bound handle, like the creation; cleanup completes during shutdown
+        // too (TS removes in an uninterruptible finalizer), so not under the shutdown token.
+        let removed = match self.bound_root(&created.project_root).await {
+            Ok(git) => {
+                let git = git.with_cancellation(CancellationToken::new());
+                let removed = git
+                    .remove_worktree(&path, true)
+                    .await
+                    .map_err(git_failure("remove-worktree"));
+                if removed.is_ok()
+                    && let Err(error) = git.delete_local_branch(&created.branch, true).await
+                {
+                    tracing::warn!(%error, "failed to delete an abandoned thread worktree branch");
+                }
+                removed
+            }
+            Err(error) => Err(error),
+        };
         // Still running: the launch failed or was cancelled before its setup step.
         match cancelled {
             Some(true) => self.finish(&created.thread, WorktreeSetupPhase::Cancelled, None),

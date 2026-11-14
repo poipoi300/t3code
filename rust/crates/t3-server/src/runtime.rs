@@ -707,10 +707,15 @@ async fn start_domains(
         launch,
         domains.get::<crate::adapters::project::ProjectAdapter>(),
     ) {
-        launch.bind(
-            projects,
-            domains.get::<crate::adapters::project_setup::ProjectSetupAdapter>(),
-        );
+        if let Some(orchestration) =
+            domains.get::<crate::adapters::orchestration::OrchestrationAdapter>()
+        {
+            launch.bind(
+                projects,
+                domains.get::<crate::adapters::project_setup::ProjectSetupAdapter>(),
+                orchestration,
+            );
+        }
     }
     // After providers (secret resolver), cloud, orchestration and the workspace authority.
     #[cfg(feature = "host")]

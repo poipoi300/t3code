@@ -49,7 +49,13 @@ pub struct ReviewGuideGenerator {
     cleanups: OnceLock<tokio::sync::mpsc::UnboundedSender<String>>,
     runs: Mutex<HashMap<String, Run>>,
     counter: AtomicU64,
+    /// At most `CONCURRENT_RUNS` checkouts and agents at once; a run holds its slot from
+    /// `prepare` until its cleanup, and later runs wait for one.
+    slots: Arc<tokio::sync::Semaphore>,
 }
+
+/// Each run is a full checkout plus an agent allowed 900 s (review L2).
+const CONCURRENT_RUNS: usize = 2;
 
 /// What a run created, so `cleanup` (or a failed `prepare`) can remove exactly that.
 #[derive(Default)]
@@ -63,6 +69,7 @@ struct Run {
     selection: Option<ModelSelection>,
     instructions: Option<String>,
     stack: Vec<ReviewLayer>,
+    slot: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 fn failed(detail: &str) -> Error {
@@ -85,6 +92,7 @@ impl ReviewGuideGenerator {
             cleanups: OnceLock::new(),
             runs: Mutex::new(HashMap::new()),
             counter: AtomicU64::new(0),
+            slots: Arc::new(tokio::sync::Semaphore::new(CONCURRENT_RUNS)),
         })
     }
 
@@ -205,11 +213,31 @@ impl ReviewGuideGenerator {
             .flatten()
             .ok_or_else(|| failed("This host did not report the pull request's head commit."))?
             .to_string();
+        let slot = self
+            .slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| failed("Review guide generation is shutting down."))?;
+        self.update(id, |run| run.slot = Some(slot));
         let detail_value = serde_json::to_value(detail).unwrap_or_default();
+        // t3-git's repository binding: a repository replaced or redirected at the project's
+        // root since it was first bound refuses instead of being used (review L3).
+        let root = self.git.at(&context.project.workspace_root);
+        let identity = root
+            .bind_repository()
+            .await
+            .map_err(|_| failed("This project's checkout changed; trust the repository again."))?
+            .ok_or_else(|| failed("This project's folder is not a Git repository."))?;
+        let bound = root
+            .with_repository_binding(identity)
+            .await
+            .map_err(|_| failed("This project's checkout changed; trust the repository again."))?;
+        let empty_tree = empty_tree(&bound).await?;
         let checkout = Checkout {
             generator: self,
             id,
-            git: self.git.at(&context.project.workspace_root),
+            git: bound,
             provider: detail_value["provider"]
                 .as_str()
                 .unwrap_or_default()
@@ -268,13 +296,19 @@ impl ReviewGuideGenerator {
         let path = directory.join("checkout");
         self.update(id, |run| run.worktree = Some(path.clone()));
         let path_text = path.to_string_lossy().into_owned();
-        // A scratch checkout for reading the change: no repository hook may run.
+        // A scratch checkout for reading the change: no repository hook runs, and no attribute
+        // from the fork selects a filter, eol conversion or driver (git-lfs ships enabled on
+        // Windows; a fork's `.lfsconfig` would otherwise send requests where it chooses).
+        let attr_source = format!("--attr-source={empty_tree}");
         checkout
             .git
             .execute(
                 &[
+                    attr_source.as_str(),
                     "-c",
                     "core.hooksPath=/dev/null",
+                    "-c",
+                    "core.fsmonitor=false",
                     "worktree",
                     "add",
                     "--detach",
@@ -282,19 +316,29 @@ impl ReviewGuideGenerator {
                     &path_text,
                     &resolved_head,
                 ],
-                options(300),
+                isolated(300),
             )
             .await
             .map_err(|_| failed("Could not check out the pull request head."))?;
         let worktree = self.git.at(&path);
         let merge_base = worktree
-            .execute(&["merge-base", &base_tip, "HEAD"], options(60))
+            .execute(
+                &[
+                    attr_source.as_str(),
+                    "-c",
+                    "core.fsmonitor=false",
+                    "merge-base",
+                    &base_tip,
+                    "HEAD",
+                ],
+                isolated(60),
+            )
             .await
             .map_err(|_| failed("Could not find where the pull request branched off."))?
             .stdout_text()
             .trim()
             .to_owned();
-        let change = read_change(&worktree, &merge_base).await?;
+        let change = read_change(&worktree, &merge_base, &attr_source).await?;
         self.update(id, |run| {
             run.project = Some(project);
             run.selection = Some(selection);
@@ -315,15 +359,54 @@ impl ReviewGuideGenerator {
 /// Removes a review worktree's registration and files.
 async fn force_remove_worktree(git: &Git, worktree: &std::path::Path) -> bool {
     let path = worktree.to_string_lossy().into_owned();
-    git.execute(&["worktree", "remove", "--force", "--", &path], options(60))
-        .await
-        .is_ok()
+    git.execute(
+        &["worktree", "remove", "--force", "--force", "--", &path],
+        options(60),
+    )
+    .await
+    .is_ok()
 }
 
 fn options(seconds: u64) -> ExecuteOptions {
     ExecuteOptions {
         timeout: Some(Duration::from_secs(seconds)),
         ..Default::default()
+    }
+}
+
+/// Options for commands that read the fork's tree: git-lfs never fetches (second guard beside
+/// the empty attribute source).
+fn isolated(seconds: u64) -> ExecuteOptions {
+    ExecuteOptions {
+        env: [(
+            std::ffi::OsString::from("GIT_LFS_SKIP_SMUDGE"),
+            Some(std::ffi::OsString::from("1")),
+        )]
+        .into_iter()
+        .collect(),
+        ..options(seconds)
+    }
+}
+
+/// The repository's empty tree (SHA-1 or SHA-256), for `--attr-source`.
+async fn empty_tree(git: &Git) -> Result<String> {
+    let tree = git
+        .execute(
+            &["hash-object", "-t", "tree", "--stdin"],
+            ExecuteOptions {
+                stdin: Some(Vec::new()),
+                ..options(30)
+            },
+        )
+        .await
+        .map_err(|_| failed("Could not prepare the review checkout."))?
+        .stdout_text()
+        .trim()
+        .to_owned();
+    if matches!(tree.len(), 40 | 64) && tree.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(tree)
+    } else {
+        Err(failed("Could not prepare the review checkout."))
     }
 }
 
@@ -388,7 +471,17 @@ impl Checkout<'_> {
     async fn fetch(&self, remote: &str, refspec: &str) -> Result<()> {
         self.git
             .execute(
-                &["fetch", "--quiet", "--no-tags", "--", remote, refspec],
+                &[
+                    "-c",
+                    "core.fsmonitor=false",
+                    "fetch",
+                    "--quiet",
+                    "--no-tags",
+                    "--no-recurse-submodules",
+                    "--",
+                    remote,
+                    refspec,
+                ],
                 options(300),
             )
             .await
@@ -491,10 +584,14 @@ impl Checkout<'_> {
 async fn read_change(
     worktree: &Git,
     base: &str,
+    attr_source: &str,
 ) -> Result<t3_pull_request::guide::ReviewGuideChange> {
     let range = format!("{base}...HEAD");
     let diff = |extra: &'static [&'static str]| {
         let mut args = vec![
+            attr_source,
+            "-c",
+            "core.fsmonitor=false",
             "-c",
             "core.quotePath=false",
             "diff",
@@ -509,9 +606,8 @@ async fn read_change(
                 .execute(
                     &args,
                     ExecuteOptions {
-                        timeout: Some(Duration::from_secs(60)),
                         max_output_bytes: 64 * 1024 * 1024,
-                        ..Default::default()
+                        ..isolated(60)
                     },
                 )
                 .await
@@ -733,12 +829,25 @@ mod tests {
         git(
             &repo,
             temp.path(),
-            &["worktree", "add", "-q", "--detach", &checkout.to_string_lossy(), "HEAD"],
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                &checkout.to_string_lossy(),
+                "HEAD",
+            ],
         );
         git(
             &repo,
             temp.path(),
-            &["worktree", "lock", "--reason", "initializing", &checkout.to_string_lossy()],
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "initializing",
+                &checkout.to_string_lossy(),
+            ],
         );
         let handle = Git::new(&repo).with_environment(
             [

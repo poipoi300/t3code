@@ -786,6 +786,16 @@ impl t3_mcp::adapters::delegation::DelegationHost for DelegationHost {
         )
         .map_err(|_| McpError::unavailable())
     }
+    async fn refresh_instance(&self, instance: &str) -> t3_mcp::Result<Vec<serde_json::Value>> {
+        let input = serde_json::from_value(serde_json::json!({ "instanceId": instance }))
+            .map_err(|_| McpError::Internal)?;
+        self.providers
+            .providers
+            .refresh_providers(input)
+            .await
+            .map_err(|_| McpError::unavailable())?;
+        t3_mcp::adapters::delegation::DelegationHost::providers(self).await
+    }
 }
 
 #[async_trait::async_trait]
