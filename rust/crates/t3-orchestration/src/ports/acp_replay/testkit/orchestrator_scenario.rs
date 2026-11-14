@@ -14,7 +14,6 @@ use t3_contracts::{
     orchestration_v2::*,
     provider_policy::{ProviderApprovalDecision, ProviderUserInputAnswers},
 };
-use tokio::task::JoinSet;
 
 pub struct Scenario {
     pub name: String,
@@ -286,7 +285,6 @@ pub async fn run_scenario(
             }
         }
     }
-    let mut dispatches = JoinSet::new();
     let mut keys = Vec::<String>::new();
     let mut anonymous_dispatch_index = 0;
     let mut consumed_finish_receipts = 0;
@@ -302,21 +300,19 @@ pub async fn run_scenario(
                         let key = key.unwrap_or_else(|| format!("dispatch:{anonymous_dispatch_index}"));
                         if keys.contains(&key) { return Err(step_error(&scenario.name, format!("duplicate dispatch:{key}"))); }
                         keys.push(key.clone());
-                        let dispatcher = services.dispatcher.clone();
-                        dispatches.spawn(async move { (key, dispatcher.dispatch(*command).await) });
+                        // A background step only skips waiting for idle. Its command commits before
+                        // the next step, so commands reach the thread in step order; a spawned
+                        // dispatch could lose the thread's intake lane to the next one.
+                        let result = services.dispatcher.dispatch(*command).await;
+                        results.insert(key, result);
                     }
                 }
                 ScenarioStep::Await(key) => {
                     if !keys.contains(&key) { return Err(step_error(&scenario.name,format!("await:{key}"))); }
-                    while !results.contains_key(&key) {
-                        let (finished, result) = dispatches.join_next().await.ok_or_else(||step_error(&scenario.name,"missing dispatch"))?.map_err(|e|step_error(&scenario.name,e))?;
-                        results.insert(finished, result);
-                    }
                     results.remove(&key).ok_or_else(||step_error(&scenario.name,"missing dispatch result"))??;
                     keys.retain(|candidate|candidate!=&key);
                 }
                 ScenarioStep::AwaitAll => {
-                    while let Some(result) = dispatches.join_next().await { let (key,result) = result.map_err(|e|step_error(&scenario.name,e))?; results.insert(key,result); }
                     for key in keys.drain(..) { results.remove(&key).ok_or_else(||step_error(&scenario.name,"missing dispatch result"))??; }
                 }
                 ScenarioStep::AwaitThreadIdle(thread) => { wait_for_projection(services,thread,|p| !array(p,"runs").any(|run|matches!(run["status"].as_str(),Some("preparing"|"queued"|"starting"|"running"|"waiting")))).await?; }
@@ -394,7 +390,6 @@ pub async fn run_scenario(
                 }
             }
         }
-        while let Some(result) = dispatches.join_next().await { let (key,result) = result.map_err(|e|step_error(&scenario.name,e))?; results.insert(key,result); }
         for key in keys.drain(..) { results.remove(&key).ok_or_else(||step_error(&scenario.name,"missing dispatch result"))??; }
         services.worker.drain(10000).await?;
         let stored_events = services.database.read(move |db|EventStore::new().read(db,&EventFilter { after_sequence, ..Default::default() })).await?;
@@ -407,7 +402,6 @@ pub async fn run_scenario(
         Ok(ScenarioResult { domain_events: stored_events.iter().map(|stored|stored.event.clone()).collect(), stored_events, projections, shell_snapshot, captured_shell_snapshots: captured,command_output:None })
     }.await;
     drop(release_gate);
-    dispatches.shutdown().await;
     result
 }
 

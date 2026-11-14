@@ -1730,3 +1730,91 @@ async fn writer_names_in_a_refusal_are_capped_and_on_one_line() -> Result<()> {
     assert!(message.chars().count() < 260, "{message}");
     Ok(())
 }
+
+/// Re-review 4 F2, side chats: a message to a side chat also takes its parent's lane, which a
+/// restore holds from after the provider's rollback to the commit. The side chat's turn starts
+/// once the restore is done: not during it, and not never.
+#[tokio::test]
+async fn a_side_chat_turn_starts_once_its_parents_restore_is_done() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let h = Harness::new().await?;
+    let backend = Arc::new(Backend::default());
+    let mut session = serde_json::to_value(session())?;
+    session["id"] = serde_json::json!("session:side");
+    session["providerInstanceId"] = serde_json::json!("codex-side");
+    let session: OrchestrationV2ProviderSession = serde_json::from_value(session)?;
+    let (side_adapter, _side_calls) = FakeProviderAdapter::new(
+        ProviderInstanceId("codex-side".into()),
+        t3_contracts::provider_instance::ProviderDriverKind("codex".into()),
+        session.capabilities.clone(),
+        session,
+        ThreadSnapshot {
+            provider_thread: provider(),
+            provider_turns: vec![],
+            messages: vec![],
+            reasoning_message_ids: None,
+            runtime_requests: vec![],
+            provider_payload: None,
+        },
+    );
+    let adapter = Arc::new(side_adapter);
+    let (runtime, _parent, scope, baseline, _calls) = composed(
+        &h,
+        temp.path(),
+        temp.path(),
+        &backend,
+        Arc::new(Recovery),
+        Some(adapter.clone()),
+    )
+    .await?;
+    let runtime = Arc::new(runtime);
+    let gate = Arc::new(Gate::default());
+    *backend.restore_gate.lock().expect("restore gate") = Some(gate.clone());
+    runtime.dispatch_command(serde_json::from_value(serde_json::json!({"type":"checkpoint.rollback","commandId":"composed:rollback","threadId":"thread:test","checkpointId":baseline.id,"scopeId":scope.id,"restoreFiles":true}))?).await?;
+    let worker = runtime.effect_worker();
+    let drain = worker.drain(64);
+    tokio::pin!(drain);
+    tokio::select! {
+        biased;
+        permit = gate.entered.acquire() => permit.expect("restore reached").forget(),
+        result = &mut drain => panic!("the rollback ended before Git restored: {result:?}"),
+    }
+    adapter
+        .open_session_with_policy
+        .push(Ok(adapter.runtime.clone()));
+    let mut side = serde_json::to_value(thread("thread:side", Some(temp.path())))?;
+    side["providerInstanceId"] = serde_json::json!("codex-side");
+    side["modelSelection"]["instanceId"] = serde_json::json!("codex-side");
+    side["lineage"]["parentThreadId"] = serde_json::json!("thread:test");
+    side["lineage"]["rootThreadId"] = serde_json::json!("thread:test");
+    side["lineage"]["sideChat"] = serde_json::json!(true);
+    side["activeProviderThreadId"] = serde_json::Value::Null;
+    h.seed("thread.created", side).await?;
+    let sender = runtime.clone();
+    let send = tokio::spawn(async move {
+        sender.dispatch_command(serde_json::from_value(serde_json::json!({"type":"message.dispatch","commandId":"side:message","threadId":"thread:side","messageId":"message:side","text":"Hello","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"}))?).await
+    });
+    tokio::pin!(send);
+    let lanes = runtime.thread_lanes();
+    tokio::select! {
+        biased;
+        opened = adapter.open_session_with_policy.next_call() => panic!(
+            "the side chat opened its provider while Git restored: {:?}",
+            opened.map(|(input, _, _)| input.thread_id)
+        ),
+        sent = &mut send => panic!("the side chat's message committed while Git restored: {sent:?}"),
+        () = lanes.waiting_on("thread:test") => {}
+        result = &mut drain => panic!("the worker settled while Git restored: {result:?}"),
+    }
+    gate.release.add_permits(1);
+    send.await.expect("side chat send")?;
+    let opened = adapter.open_session_with_policy.next_call().await;
+    assert_eq!(
+        opened.map(|(input, _, _)| input.thread_id),
+        Some(ThreadId("thread:side".into()))
+    );
+    drain.await?;
+    assert_eq!(backend.restores.load(Ordering::SeqCst), 1);
+    runtime.shutdown().await?;
+    Ok(())
+}
