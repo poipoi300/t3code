@@ -110,9 +110,9 @@ impl BrowserHistory {
             };
             let entry = js_sys::Object::new();
             if previous.is_object() {
-                let _=js_sys::Object::assign(&entry, &js_sys::Object::from(previous));
+                let _ = js_sys::Object::assign(&entry, &js_sys::Object::from(previous));
             }
-            let _=js_sys::Object::assign(&entry, &keyed_state(index(&window), &key)?);
+            let _ = js_sys::Object::assign(&entry, &keyed_state(index(&window), &key)?);
             history.replace_state(&entry, "").map_err(history_error)?;
         }
         let state = Rc::new(RefCell::new(State {

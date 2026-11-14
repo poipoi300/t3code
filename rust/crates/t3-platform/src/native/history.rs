@@ -164,10 +164,10 @@ mod tests {
             ("/archived".into(), true, false),
             "forward entries are gone"
         );
-        let pushed_key=history.snapshot().entry_key;
+        let pushed_key = history.snapshot().entry_key;
         history.apply(AppUrlRequest::Replace("/archived?x=1".into()));
         assert_eq!(history.snapshot().history_index, 1);
-        assert_ne!(history.snapshot().entry_key,pushed_key);
+        assert_ne!(history.snapshot().entry_key, pushed_key);
         let seen: Vec<_> = std::iter::from_fn(|| changes.next().now_or_never().flatten())
             .map(|snapshot| snapshot.unwrap().path)
             .collect();

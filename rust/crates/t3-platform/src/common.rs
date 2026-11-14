@@ -80,12 +80,6 @@ pub(crate) fn mime_essence(mime: &str) -> String {
         .to_ascii_lowercase()
 }
 
-#[cfg(any(
-    target_arch = "wasm32",
-    target_os = "windows",
-    target_os = "macos",
-    target_os = "linux"
-))]
 /// The client's one opener policy for this surface; anything else could launch arbitrary
 /// handlers.
 pub(crate) fn validate_open_url(

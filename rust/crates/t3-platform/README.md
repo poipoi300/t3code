@@ -180,6 +180,24 @@ config and shell synchronization, and reconnects. The example prints the config,
 and thread titles, then closes and awaits the connection task. It never prints the credential.
 See the [client entry point](../t3-client/README.md) for the UI lifetime contract.
 
+## Required checks before a change to `t3-platform` or `t3-client`
+
+Most of this crate is compiled per target (`cfg(target_os = …)`), so a desktop test run and the
+wasm check do not compile the Android and iOS arms. Type-check one target of each as well:
+
+```sh
+cargo check -p t3-client -p t3-platform --target wasm32-unknown-unknown
+cargo check -p t3-client -p t3-platform --target x86_64-linux-android
+cargo check -p t3-client -p t3-platform --target aarch64-apple-ios-sim
+```
+
+Without the Android NDK or an Apple SDK, the build scripts of `ring` and `libsqlite3-sys` cannot
+compile their C. `cargo check` never links, so a stand-in compiler that writes empty objects is
+enough: set `CC_<target>`, `CXX_<target>` and `AR_<target>` (target with underscores) to it, and
+for Apple targets `SDKROOT` and `IPHONEOS_DEPLOYMENT_TARGET` so the `cc` crate does not run
+`xcrun`. With the NDK installed, its `clang` works too. When an item is gated to a list of
+targets, every call site's condition must be a subset of the item's.
+
 ## Tests
 
 Native tests run against loopback servers on ephemeral ports (a hand-written HTTP/1.1 server and
