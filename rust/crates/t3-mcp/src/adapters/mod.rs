@@ -7,6 +7,8 @@ pub mod orchestration;
 pub mod scheduler;
 #[cfg(feature = "orchestration")]
 pub mod threads;
+#[cfg(feature = "delegation")]
+pub mod delegation;
 #[cfg(feature = "git")]
 pub mod worktree;
 pub use integrated::ServiceAdapters;
