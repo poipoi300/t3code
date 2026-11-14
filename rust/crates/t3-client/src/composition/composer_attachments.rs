@@ -156,10 +156,11 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                                             client.state().generation,
                                             AttachmentConnection {
                                                 endpoint,
-                                                base_url: entry
-                                                    .routes
-                                                    .first()
-                                                    .map(|route| route.http_base.clone())
+                                                // The session's own HTTP address, as message
+                                                // delivery uses (`bind_sessions`): a relay or SSH
+                                                // route saves no address of its own.
+                                                base_url: client
+                                                    .http_base_url()
                                                     .unwrap_or_default(),
                                             },
                                         )

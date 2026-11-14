@@ -549,6 +549,11 @@ pub trait Platform: Storage {
         }
         .boxed_local()
     }
+    /// Whether this host can open a file picker; the composer hides "Attach files" where it
+    /// cannot. A picker that fails anyway answers `Unsupported`, and a cancel an empty list.
+    fn can_pick_resources(&self) -> bool {
+        false
+    }
     fn pick_resources(
         &self,
         mime: Vec<String>,
