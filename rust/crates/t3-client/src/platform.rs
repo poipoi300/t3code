@@ -136,14 +136,20 @@ pub enum Credentials {
     Include,
 }
 /// Saved data the host's storage could not keep when it opened.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct StorageReport {
-    /// Secure records (credentials, tokens) discarded because their key was gone or unreadable.
+    /// Secure records (credentials, tokens) discarded for good: their key is gone.
     pub discarded_secure_records: usize,
     /// The storage key was unreadable and was replaced.
     pub replaced_unreadable_key: bool,
     /// The database was damaged; it was moved aside and a new one started.
     pub recreated_database: bool,
+    /// Secure records set aside because their key could not be read; they come back on a later
+    /// launch if it reads again.
+    pub retained_secure_records: usize,
+    /// Records set aside earlier, back now that their key read again.
+    pub recovered_secure_records: usize,
 }
 
 impl StorageReport {

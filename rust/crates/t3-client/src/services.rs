@@ -2,6 +2,7 @@
 pub mod asset_urls;
 pub mod assets;
 pub mod command_output;
+pub mod storage_notice;
 pub mod config;
 pub mod default_theme;
 pub mod filesystem;

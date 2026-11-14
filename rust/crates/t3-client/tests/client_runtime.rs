@@ -910,10 +910,20 @@ fn an_unreadable_catalog_is_quarantined_and_pairing_starts_afresh() {
         1,
         "the unreadable catalog is kept aside, not discarded"
     );
-    // Re-review N8: the user is told, once.
-    let notice = client.take_storage_notice().expect("a notice");
+    // Second re-review B1: a crash before the UI showed the notice must not lose it, though the
+    // next launch finds nothing wrong itself.
+    let relaunched = runtime(&harness);
+    harness.run(relaunched.restore()).unwrap();
+    harness.settle();
+    let notice = relaunched.take_storage_notice().expect("a notice");
     assert!(notice.reset_catalog);
-    assert_eq!(client.take_storage_notice(), None);
+    assert_eq!(relaunched.take_storage_notice(), None);
+    harness.settle();
+    // Re-review N8: the user is told once.
+    let after = runtime(&harness);
+    harness.run(after.restore()).unwrap();
+    harness.settle();
+    assert_eq!(after.take_storage_notice(), None);
     // Re-review N5: nothing can reach these once the catalog is empty, so they go with it.
     for namespace in [
         "connection-credential",
@@ -1239,6 +1249,15 @@ fn signing_out_with_a_relay_only_and_a_mixed_environment_saved_together() {
         [ConnectionMode::Remote]
     );
     assert_eq!(entries[0].state.phase, Phase::Connected);
+    // Round 6: nothing of the signed-out one is left in the store, or comes back.
+    harness.advance(60_000);
+    assert!(
+        !client
+            .store()
+            .snapshot()
+            .environments
+            .contains_key(&environment("other"))
+    );
 }
 
 #[test]
@@ -1346,4 +1365,54 @@ fn announced_direct_addresses_are_learned_for_that_environment_except_unsafe_one
             .unwrap()
     });
     assert_eq!(left, None);
+}
+
+/// Removal ends everything that writes the environment into the store before clearing it: a
+/// "remove from this device" must not leave, or bring back, its config or connection state.
+fn removed_and_stays_removed(harness: &mut Harness, client: &ClientRuntime<TestPlatform>) {
+    harness.run(client.remove(&environment(ENV))).unwrap();
+    harness.settle();
+    let removed = |client: &ClientRuntime<TestPlatform>| {
+        !client
+            .store()
+            .snapshot()
+            .environments
+            .contains_key(&environment(ENV))
+    };
+    assert!(removed(client), "cleared by remove");
+    // Long enough for any surviving supervisor to reconnect and write again.
+    harness.advance(120_000);
+    assert!(removed(client), "nothing brought it back");
+    assert!(client.environments().is_empty());
+}
+
+#[test]
+fn a_removed_environment_does_not_come_back_into_the_store() {
+    // Connection lane, round 6: after `remove`, the store held the environment again, with its
+    // config, a connection state and a second session.
+    let mut harness = Harness::new(ENV);
+    let client = paired(&mut harness);
+    harness.advance(5_000);
+    assert!(
+        client
+            .store()
+            .snapshot()
+            .environments
+            .get(&environment(ENV))
+            .is_some_and(|state| state.config.is_some())
+    );
+    removed_and_stays_removed(&mut harness, &client);
+}
+
+#[test]
+fn an_environment_removed_while_it_reconnects_does_not_come_back_into_the_store() {
+    let mut harness = Harness::new(ENV);
+    let client = paired(&mut harness);
+    harness.advance(5_000);
+    harness.server().state.borrow_mut().refuse_sockets = true;
+    harness.server().hang_up();
+    harness.advance(2_000);
+    assert_ne!(client.environments()[0].state.phase, Phase::Connected);
+    harness.server().state.borrow_mut().refuse_sockets = false;
+    removed_and_stays_removed(&mut harness, &client);
 }

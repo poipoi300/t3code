@@ -62,15 +62,7 @@ pub struct EnvironmentEntry {
     pub damaged: bool,
 }
 
-/// What the first restore found it could not keep, for the UI to tell the user once.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct StorageNotice {
-    pub storage: crate::platform::StorageReport,
-    /// The saved environment list was unreadable; it was set aside and started empty.
-    pub reset_catalog: bool,
-    /// Saved environments with a record that could not be read.
-    pub damaged: Vec<EnvironmentId>,
-}
+pub use crate::services::storage_notice::StorageNotice;
 
 /// T3 Connect: the relay that reaches environments linked to the signed-in account.
 #[derive(Clone, Debug)]
@@ -520,6 +512,9 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                     reset_catalog,
                     damaged: this.inner.damaged.borrow().iter().cloned().collect(),
                 };
+                // Saved until the UI takes it, with any an earlier launch never showed.
+                let notice =
+                    crate::services::storage_notice::remember(&this.inner.platform, notice).await;
                 if notice != StorageNotice::default() {
                     this.inner.storage_notice.replace(Some(notice));
                 }
@@ -534,7 +529,15 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
     /// Saved data the first restore could not keep (a reset environment list, unreadable
     /// records, discarded credentials), once; `None` after it was taken or when nothing was lost.
     pub fn take_storage_notice(&self) -> Option<StorageNotice> {
-        self.inner.storage_notice.take()
+        let notice = self.inner.storage_notice.take();
+        if notice.is_some() {
+            let platform = self.inner.platform.clone();
+            (self.inner.spawn)(
+                async move { crate::services::storage_notice::acknowledge(&platform).await }
+                    .boxed_local(),
+            );
+        }
+        notice
     }
 
     /// Pairing requests from links the OS hands the running app (mobile deep links), for the
