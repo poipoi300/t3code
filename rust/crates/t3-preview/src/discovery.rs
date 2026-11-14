@@ -920,60 +920,6 @@ async fn run_with_exit(
     Ok(output.stdout_text())
 }
 
-#[cfg(test)]
-mod probe_tests {
-    use super::*;
-    #[tokio::test]
-    async fn nonzero_probe_exit_preserves_stdout_but_output_limits_still_fail_closed() {
-        let source = "process.stdout.write('p42\\ncnode\\nn127.0.0.1:3000\\n');process.exitCode=1";
-        let output = run_probe("node", &["-e", source], 1024)
-            .await
-            .expect("probe stdout must survive nonzero exit");
-        assert_eq!(
-            parse_lsof(&output),
-            vec![Listener {
-                port: 3000,
-                pid: Some(42),
-                process_name: Some("node".into())
-            }]
-        );
-        assert!(
-            run_probe(
-                "node",
-                &[
-                    "-e",
-                    "process.stdout.write('x'.repeat(1025));process.exitCode=1"
-                ],
-                1024
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            run("node", &["-e", source], 1024).await.is_err(),
-            "strict process-table/Windows probes must still reject nonzero exit"
-        );
-    }
-    #[tokio::test]
-    async fn stop_refresh_skips_unretained_scans_but_refreshes_active_consumers() {
-        let scanner = PortDiscovery::with_options(false, PathBuf::new()).expect("discovery");
-        let guard = scanner.inner.cache.lock().await;
-        let mut refresh = Box::pin(scanner.refresh_after_stop());
-        assert!(
-            matches!(
-                futures_util::poll!(refresh.as_mut()),
-                std::task::Poll::Ready(Ok(()))
-            ),
-            "unretained stop attempted another scan"
-        );
-        drop(refresh);
-        lock(&scanner.inner.state).retained = 1;
-        let mut refresh = Box::pin(scanner.refresh_after_stop());
-        assert!(futures_util::poll!(refresh.as_mut()).is_pending());
-        drop(guard);
-        refresh.await.expect("refresh retained consumers");
-    }
-}
 fn find_socket_owners(
     root: &Path,
     inodes: &BTreeSet<String>,
@@ -1064,5 +1010,60 @@ fn list_event(servers: Vec<DiscoveredLocalServer>) -> DiscoveredLocalServerList 
         servers,
         scanned_at: now(),
         configured_url_probing: Some(Some(PreviewConfiguredUrlProbing)),
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    #[tokio::test]
+    async fn nonzero_probe_exit_preserves_stdout_but_output_limits_still_fail_closed() {
+        let source = "process.stdout.write('p42\\ncnode\\nn127.0.0.1:3000\\n');process.exitCode=1";
+        let output = run_probe("node", &["-e", source], 1024)
+            .await
+            .expect("probe stdout must survive nonzero exit");
+        assert_eq!(
+            parse_lsof(&output),
+            vec![Listener {
+                port: 3000,
+                pid: Some(42),
+                process_name: Some("node".into())
+            }]
+        );
+        assert!(
+            run_probe(
+                "node",
+                &[
+                    "-e",
+                    "process.stdout.write('x'.repeat(1025));process.exitCode=1"
+                ],
+                1024
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            run("node", &["-e", source], 1024).await.is_err(),
+            "strict process-table/Windows probes must still reject nonzero exit"
+        );
+    }
+    #[tokio::test]
+    async fn stop_refresh_skips_unretained_scans_but_refreshes_active_consumers() {
+        let scanner = PortDiscovery::with_options(false, PathBuf::new()).expect("discovery");
+        let guard = scanner.inner.cache.lock().await;
+        let mut refresh = Box::pin(scanner.refresh_after_stop());
+        assert!(
+            matches!(
+                futures_util::poll!(refresh.as_mut()),
+                std::task::Poll::Ready(Ok(()))
+            ),
+            "unretained stop attempted another scan"
+        );
+        drop(refresh);
+        lock(&scanner.inner.state).retained = 1;
+        let mut refresh = Box::pin(scanner.refresh_after_stop());
+        assert!(futures_util::poll!(refresh.as_mut()).is_pending());
+        drop(guard);
+        refresh.await.expect("refresh retained consumers");
     }
 }
