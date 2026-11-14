@@ -59,6 +59,10 @@ impl SchedulerAdapter {
             self.scheduler.activate();
         }
     }
+    /// The one scheduled-task service; project promotion moves a thread's tasks through it.
+    pub fn service(&self) -> Arc<ScheduledTaskService> {
+        self.service.clone()
+    }
     pub fn commands_available(&self) -> bool {
         self.commands_available
     }

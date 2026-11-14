@@ -340,7 +340,7 @@ async fn start_domains(
             .await?,
     )?;
     #[cfg(feature = "host")]
-    domains.insert(crate::adapters::host::HostAdapter::start()?)?;
+    domains.insert_runtime(crate::adapters::host::HostAdapter::start(&context).await?)?;
     #[cfg(feature = "workspace")]
     let workspaces = crate::workspaces::EnvironmentWorkspaces::new(&context);
     #[cfg(all(feature = "git", feature = "workspace"))]
@@ -368,17 +368,26 @@ async fn start_domains(
         )
         .await?,
     )?;
+    // Before projects: promoting a scratch thread moves its scheduled tasks.
+    #[cfg(feature = "scheduler")]
+    let scheduler = crate::adapters::scheduler::SchedulerAdapter::start(&context).await?;
+    #[cfg(feature = "scheduler")]
+    domains.insert_runtime(scheduler.clone())?;
     #[cfg(feature = "project")]
     if let Some(orchestration) =
         domains.get::<crate::adapters::orchestration::OrchestrationAdapter>()
     {
-        domains.insert(crate::adapters::project::ProjectAdapter::start(
+        #[cfg(feature = "scheduler")]
+        let scheduled_tasks: Option<Arc<dyn t3_project::promotion::MoveThreadTasks>> =
+            Some(scheduler.service());
+        #[cfg(not(feature = "scheduler"))]
+        let scheduled_tasks = None;
+        domains.insert_runtime(crate::adapters::project::ProjectAdapter::start(
             &context,
             &orchestration,
+            scheduled_tasks,
         )?)?;
     }
-    #[cfg(feature = "scheduler")]
-    domains.insert_runtime(crate::adapters::scheduler::SchedulerAdapter::start(&context).await?)?;
     let _ = (&context, domains, options);
     Ok(())
 }

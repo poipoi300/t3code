@@ -17,13 +17,6 @@ fn register_pending(registry: &mut HandlerRegistry) -> crate::Result<()> {
     registry.unimplemented::<WsOrchestrationV2SearchThreadsRpc>()?;
     // ThreadFind::search_thread_stream (ports::transport::thread_find is empty).
     registry.unimplemented::<WsOrchestrationV2SearchThreadStreamRpc>()?;
-    // ProjectionReader::{thread_titles, thread_link_metadata, older_settled_threads}.
-    registry.unimplemented::<WsOrchestrationV2GetThreadTitlesRpc>()?;
-    registry.unimplemented::<WsOrchestrationV2GetThreadLinkMetadataRpc>()?;
-    registry.unimplemented::<WsOrchestrationV2GetOlderSettledThreadsRpc>()?;
-    // CheckpointDiffQuery::{get_turn_diff, get_full_thread_diff}.
-    registry.unimplemented::<WsOrchestrationV2GetTurnDiffRpc>()?;
-    registry.unimplemented::<WsOrchestrationV2GetFullThreadDiffRpc>()?;
     // workflow_script_query::read_workflow_script, native_child_work_query::get_native_child_work.
     registry.unimplemented::<WsOrchestrationV2GetWorkflowScriptRpc>()?;
     registry.unimplemented::<WsOrchestrationV2GetNativeChildWorkRpc>()?;
@@ -32,8 +25,6 @@ fn register_pending(registry: &mut HandlerRegistry) -> crate::Result<()> {
     registry.unimplemented::<WsProjectCloneCancelRpc>()?;
     registry.unimplemented::<WsProjectCloneRetryRpc>()?;
     registry.unimplemented::<WsSubscribeProjectClonesRpc>()?;
-    // ProjectService::{mutate, ensure_scratch, create_new, create_from_thread}.
-    registry.unimplemented::<WsProjectsCreateFromThreadRpc>()?;
     // AgentSessionScanner::scan, AgentSessionImporter::import_recent_agent_threads.
     registry.unimplemented::<WsAgentSessionsScanRpc>()?;
     registry.unimplemented::<WsAgentSessionsImportRpc>()?;
@@ -43,6 +34,11 @@ fn register_pending(registry: &mut HandlerRegistry) -> crate::Result<()> {
 /// Methods served once an orchestration adapter is present.
 fn register_adapter_backed_unavailable(registry: &mut HandlerRegistry) -> crate::Result<()> {
     registry.unimplemented::<WsOrchestrationV2SubscribePromptSuggestionRpc>()?;
+    registry.unimplemented::<WsOrchestrationV2GetThreadTitlesRpc>()?;
+    registry.unimplemented::<WsOrchestrationV2GetThreadLinkMetadataRpc>()?;
+    registry.unimplemented::<WsOrchestrationV2GetOlderSettledThreadsRpc>()?;
+    registry.unimplemented::<WsOrchestrationV2GetTurnDiffRpc>()?;
+    registry.unimplemented::<WsOrchestrationV2GetFullThreadDiffRpc>()?;
     registry.unimplemented::<WsOrchestrationV2SubscribeShellRpc>()?;
     registry.unimplemented::<WsOrchestrationV2SubscribeThreadRpc>()?;
     registry.unimplemented::<WsOrchestrationV2GetThreadProjectionRpc>()?;
@@ -297,6 +293,67 @@ mod live {
                     .map_err(|e| shell_error("Failed to load the thread family", &e))
             }
         })?;
+        let a = adapter.clone();
+        registry.register::<WsOrchestrationV2GetTurnDiffRpc, _, _>(move |_, input| {
+            let a = a.clone();
+            async move {
+                a.turn_diff(input).await.map_err(|failure| {
+                    Failure::Typed(WsOrchestrationV2GetTurnDiffError::OrchestrationGetTurnDiffError(
+                        Box::new(t3_contracts::checkpoint_diff::OrchestrationGetTurnDiffError {
+                            _tag: t3_contracts::checkpoint_diff::OrchestrationGetTurnDiffErrorTag::OrchestrationGetTurnDiffError,
+                            message: "Failed to load turn diff".into(),
+                            cause: Some(Some(failure.cause())),
+                        }),
+                    ))
+                })
+            }
+        })?;
+        let a = adapter.clone();
+        registry.register::<WsOrchestrationV2GetFullThreadDiffRpc, _, _>(move |_, input| {
+            let a = a.clone();
+            async move {
+                a.full_thread_diff(input).await.map_err(|failure| {
+                    Failure::Typed(
+                        WsOrchestrationV2GetFullThreadDiffError::OrchestrationGetFullThreadDiffError(
+                            Box::new(t3_contracts::checkpoint_diff::OrchestrationGetFullThreadDiffError {
+                                _tag: t3_contracts::checkpoint_diff::OrchestrationGetFullThreadDiffErrorTag::OrchestrationGetFullThreadDiffError,
+                                message: "Failed to load full thread diff".into(),
+                                cause: Some(Some(failure.cause())),
+                            }),
+                        ),
+                    )
+                })
+            }
+        })?;
+        let a = adapter.clone();
+        registry.register::<WsOrchestrationV2GetThreadTitlesRpc, _, _>(move |_, input| {
+            let a = a.clone();
+            async move {
+                a.thread_titles(input.thread_ids)
+                    .await
+                    .map_err(|e| shell_error("Failed to load thread titles", &e))
+            }
+        })?;
+        let a = adapter.clone();
+        registry.register::<WsOrchestrationV2GetThreadLinkMetadataRpc, _, _>(move |_, input| {
+            let a = a.clone();
+            async move {
+                a.thread_link_metadata(input.thread_ids)
+                    .await
+                    .map_err(|e| shell_error("Failed to load thread link metadata", &e))
+            }
+        })?;
+        let a = adapter.clone();
+        registry.register::<WsOrchestrationV2GetOlderSettledThreadsRpc, _, _>(
+            move |_, input| {
+                let a = a.clone();
+                async move {
+                    a.older_settled_threads(input)
+                        .await
+                        .map_err(|e| shell_error("Failed to load older settled threads", &e))
+                }
+            },
+        )?;
         let a = adapter;
         registry.register::<WsOrchestrationV2GetWorktreeThreadIdsRpc, _, _>(move |_, input| {
             let a = a.clone();

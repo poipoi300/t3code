@@ -33,6 +33,27 @@ pub fn register_with(registry: &mut HandlerRegistry, domains: &Domains) -> crate
                 })
             }
         })?;
+        if projects.promotes_threads() {
+            let p = projects.clone();
+            // TypeScript: OrchestrationDispatchCommandError with the promotion's message.
+            registry.register::<WsProjectsCreateFromThreadRpc, _, _>(move |_, input| {
+                let p = p.clone();
+                async move {
+                    match p.create_from_thread(input).await {
+                        Some(Ok(result)) => Ok(result),
+                        Some(Err(error)) => Err(typed(serde_json::json!({
+                            "_tag": "OrchestrationDispatchCommandError",
+                            "message": error.to_string(),
+                        }))),
+                        None => Err(Failure::Defect(ServerDefect::NotImplemented {
+                            method: "projects.createFromThread".into(),
+                        })),
+                    }
+                }
+            })?;
+        } else {
+            registry.unimplemented::<WsProjectsCreateFromThreadRpc>()?;
+        }
         let p = projects;
         // Mutations pass the command gate, as TypeScript's `startup.enqueueCommand` does.
         registry.register::<WsProjectsMutateRpc, _, _>(move |ctx, mutation| {
@@ -65,6 +86,7 @@ pub fn register_with(registry: &mut HandlerRegistry, domains: &Domains) -> crate
     let _ = domains;
     registry.unimplemented::<WsProjectsEnsureScratchRpc>()?;
     registry.unimplemented::<WsProjectsCreateNewRpc>()?;
+    registry.unimplemented::<WsProjectsCreateFromThreadRpc>()?;
     registry.unimplemented::<WsProjectsMutateRpc>()
 }
 

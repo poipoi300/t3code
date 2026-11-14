@@ -121,6 +121,62 @@ impl Server {
     fn home(&self) -> &Path {
         self.temp.path()
     }
+    /// Replaces this connection with one whose session holds only `scopes`.
+    async fn reconnect_with(&mut self, scopes: &[&str]) {
+        let http = reqwest::Client::new();
+        let grant: Value = http
+            .post(format!("{}/api/auth/pairing-token", self.origin))
+            .header("cookie", &self.cookie)
+            .json(&json!({ "scopes": scopes }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let paired = http
+            .post(format!("{}/api/auth/browser-session", self.origin))
+            .json(&json!({"credential": grant["credential"]}))
+            .send()
+            .await
+            .unwrap();
+        self.cookie = paired.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let ticket: Value = http
+            .post(format!("{}/api/auth/websocket-ticket/rpc", self.origin))
+            .header("cookie", &self.cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let (socket, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{}/ws?orchestrationProtocol=2&wsTicket={}",
+            self.runtime.address,
+            ticket["ticket"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
+        self.socket = socket;
+        self.client = Client::new(0, Default::default());
+    }
+    /// A unary call's exit, acknowledging chunks of other open streams meanwhile.
+    async fn call(&mut self, tag: &str, payload: Value) -> Exit {
+        let id = self.client.start(tag, payload, CallKind::Unary).unwrap();
+        loop {
+            match self.event().await {
+                CallEvent::Exit { id: done, exit } if done == id => return exit,
+                CallEvent::Chunk { id, .. } => self.client.acknowledge(id),
+                _ => {}
+            }
+        }
+    }
     fn database(&self) -> t3_persistence::rusqlite::Connection {
         let layout = t3_config::home::HomeLayout {
             base_dir: self.home().into(),
@@ -415,5 +471,41 @@ async fn scheduled_tasks_and_their_webhook_route_are_served() {
     // Without command intake the webhook adapter fails closed for every hook (package G).
     assert_eq!(post.status(), 500);
     assert_eq!(post.headers()["x-t3-hook-outcome"], "error");
+    s.runtime.shutdown().await.unwrap();
+}
+
+/// t3-host services: database storage's status stream and its reclaim refusal (no supervisor
+/// can restart this server with the database closed), and the scope checks.
+#[cfg(feature = "host")]
+#[tokio::test]
+async fn host_database_storage_and_scoped_host_services() {
+    let mut s = Server::start().await;
+    s.client
+        .start("server.getDatabaseStorage", json!({}), CallKind::Stream)
+        .unwrap();
+    let status = s.chunk().await;
+    assert!(status["databaseBytes"].as_f64().unwrap() > 0.0, "{status}");
+    assert_eq!(status["canReclaim"], false, "{status}");
+    let command = status["compactCommand"].as_str().unwrap();
+    assert!(command.starts_with("t3 doctor --base-dir '"), "{command}");
+
+    let refused = s.call("server.reclaimDatabaseSpace", json!({})).await;
+    let encoded = serde_json::to_value(&refused).unwrap();
+    let error = &encoded["cause"][0]["error"];
+    assert_eq!(error["_tag"], "DatabaseReclaimError", "{encoded}");
+    assert_eq!(
+        error["reason"],
+        format!("Stop T3 Code on this machine, then run: {command}")
+    );
+
+    // A read-only session: no reclaim (environment:maintain) and no triage (orchestration:operate).
+    s.reconnect_with(&["orchestration:read"]).await;
+    for (tag, payload) in [
+        ("server.reclaimDatabaseSpace", json!({})),
+        ("server.prepareTriage", json!({"client": {}})),
+    ] {
+        let exit = s.call(tag, payload).await;
+        assert_eq!(failure(exit), "EnvironmentAuthorizationError", "{tag}");
+    }
     s.runtime.shutdown().await.unwrap();
 }

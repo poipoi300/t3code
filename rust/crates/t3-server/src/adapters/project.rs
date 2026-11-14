@@ -14,6 +14,7 @@ use t3_project::{
     enrichment::ProjectEnrichmentService,
     identity::RepositoryIdentityResolver,
     managed::{ManagedFolderIo, ManagedProjectFolders},
+    promotion::{MoveThreadTasks, ScratchThreadPromotion},
 };
 
 pub use t3_project::Error as ProjectError;
@@ -21,6 +22,8 @@ pub use t3_project::Error as ProjectError;
 pub struct ProjectAdapter {
     service: ProjectService,
     managed: ManagedProjectFolders,
+    /// Present when scheduled tasks exist to move with a promoted thread.
+    promotion: Option<ScratchThreadPromotion>,
 }
 
 /// Cloning a remote repository needs the clone workflow (source-control sign-in, progress,
@@ -102,6 +105,7 @@ impl ProjectAdapter {
     pub fn start(
         context: &crate::services::DomainContext<'_>,
         orchestration: &crate::adapters::orchestration::OrchestrationAdapter,
+        scheduled_tasks: Option<Arc<dyn MoveThreadTasks>>,
     ) -> crate::Result<Arc<Self>> {
         let runtime = orchestration.composed().ok_or_else(|| {
             crate::Error::Service("projects need the composed orchestration runtime".into())
@@ -131,7 +135,31 @@ impl ProjectAdapter {
             Arc::new(HostFolders),
             Default::default(),
         );
-        Ok(Arc::new(Self { service, managed }))
+        let promotion = scheduled_tasks.map(|tasks| {
+            ScratchThreadPromotion::new(
+                service.clone(),
+                managed.clone(),
+                runtime.projections.clone(),
+                runtime.command_dispatcher(),
+                tasks,
+            )
+        });
+        Ok(Arc::new(Self {
+            service,
+            managed,
+            promotion,
+        }))
+    }
+
+    /// `projects.createFromThread`; `None` without scheduled tasks to move.
+    pub async fn create_from_thread(
+        &self,
+        input: t3_contracts::project::ProjectCreateFromThreadInput,
+    ) -> Option<t3_project::Result<t3_contracts::project::ProjectCreateFromThreadResult>> {
+        Some(self.promotion.as_ref()?.create_from_thread(input).await)
+    }
+    pub fn promotes_threads(&self) -> bool {
+        self.promotion.is_some()
     }
 
     /// `projects.ensureScratch`.
@@ -150,5 +178,20 @@ impl ProjectAdapter {
     /// `projects.mutate`.
     pub async fn mutate(&self, mutation: ProjectMutation) -> t3_project::Result<Project> {
         self.service.mutate(mutation).await
+    }
+}
+
+impl crate::services::DomainRuntime for ProjectAdapter {
+    fn name(&self) -> &'static str {
+        "project"
+    }
+    /// Joins admitted promotions (including detached callers) while SQLite is still open.
+    fn shutdown(&self) -> futures::future::BoxFuture<'_, crate::Result<()>> {
+        Box::pin(async move {
+            if let Some(promotion) = &self.promotion {
+                promotion.shutdown().await;
+            }
+            Ok(())
+        })
     }
 }

@@ -193,9 +193,29 @@ impl OrchestrationAdapter {
         ports.settings = Arc::new(
             LiveSettings::start(context.local.settings.clone(), context.shutdown.clone()).await?,
         );
+        // Turns run in the project's root. No managed policy is loaded and no provider snapshot
+        // is assembled yet, which is TypeScript's behaviour without a policy file or providers.
+        ports.policy = {
+            use t3_orchestration::ports::decisions::runtime_policy::{
+                ProjectRuntimePolicy, RuntimePolicyOverride, SnapshotRuntimeModes,
+            };
+            let (_, providers) = tokio::sync::watch::channel(Arc::new(Vec::new()));
+            ProjectRuntimePolicy::configured(
+                StoreDatabase(context.database.clone()),
+                Arc::new(SnapshotRuntimeModes::new(providers)),
+                None,
+                RuntimePolicyOverride::default(),
+                None,
+            )
+        };
         let runtime = OrchestrationRuntime::start(ports)
             .await
             .map_err(|e| service(&e))?;
+        let recovery = runtime.delegated_recovery();
+        for failure in &recovery.failures {
+            tracing::warn!(phase = ?failure.phase, thread = ?failure.thread_id, error = %failure.cause, "delegated task recovery failed");
+        }
+        log_lifecycle_failures(&runtime);
         Ok(Arc::new(Self {
             transport: runtime.transport.clone(),
             events: Arc::new(runtime.events.clone()),
@@ -456,6 +476,103 @@ impl OrchestrationAdapter {
     }
 }
 
+/// Committed-event consumer failures since start; each consumer keeps running after one.
+fn log_lifecycle_failures(runtime: &t3_orchestration::composition::OrchestrationRuntime) {
+    for (consumer, error) in runtime.lifecycle_failures() {
+        tracing::warn!(consumer, error, "orchestration lifecycle consumer failed");
+    }
+}
+
+impl OrchestrationAdapter {
+    /// `orchestration.getTurnDiff`.
+    pub async fn turn_diff(
+        &self,
+        input: t3_contracts::checkpoint_diff::OrchestrationGetTurnDiffInput,
+    ) -> Result<t3_contracts::checkpoint_diff::OrchestrationGetTurnDiffResult, DiffFailure> {
+        let runtime = self.runtime().map_err(DiffFailure::Runtime)?;
+        runtime
+            .checkpoint_diffs
+            .get_turn_diff(input)
+            .await
+            .map_err(DiffFailure::Query)
+    }
+    /// `orchestration.getFullThreadDiff`.
+    pub async fn full_thread_diff(
+        &self,
+        input: t3_contracts::checkpoint_diff::OrchestrationGetFullThreadDiffInput,
+    ) -> Result<t3_contracts::checkpoint_diff::OrchestrationGetFullThreadDiffResult, DiffFailure>
+    {
+        let runtime = self.runtime().map_err(DiffFailure::Runtime)?;
+        runtime
+            .checkpoint_diffs
+            .get_full_thread_diff(input)
+            .await
+            .map_err(DiffFailure::Query)
+    }
+    /// `orchestration.getThreadTitles`.
+    pub async fn thread_titles(
+        &self,
+        ids: Vec<ThreadId>,
+    ) -> OrchestrationResult<OrchestrationV2ThreadTitles> {
+        self.runtime()?.projections.thread_titles(ids).await
+    }
+    /// `orchestration.getThreadLinkMetadata`.
+    pub async fn thread_link_metadata(
+        &self,
+        ids: Vec<ThreadId>,
+    ) -> OrchestrationResult<std::collections::BTreeMap<ThreadId, OrchestrationV2ThreadLinkMetadata>>
+    {
+        self.runtime()?.projections.thread_link_metadata(ids).await
+    }
+    /// `orchestration.getOlderSettledThreads`.
+    pub async fn older_settled_threads(
+        &self,
+        input: OrchestrationV2GetOlderSettledThreadsInput,
+    ) -> OrchestrationResult<OrchestrationV2OlderSettledThreadsPage> {
+        self.runtime()?
+            .projections
+            .older_settled_threads(input)
+            .await
+    }
+    /// `GET /api/orchestration/threads/{id}/transcript`, capped at the provider attachment limit.
+    pub async fn thread_transcript(
+        &self,
+        scopes: &[t3_contracts::auth::AuthEnvironmentScope],
+        thread_id: ThreadId,
+        environment_id: t3_contracts::base_schemas::EnvironmentId,
+    ) -> Result<OrchestrationV2ThreadTranscript, HttpReadError> {
+        let runtime = self.runtime().map_err(|error| HttpReadError::Internal {
+            reason: t3_contracts::environment_http::EnvironmentInternalErrorReason::OrchestrationThreadSnapshotFailed,
+            source: error,
+        })?;
+        self.http_read()
+            .thread_transcript(
+                scopes,
+                &runtime.threads,
+                thread_id,
+                environment_id,
+                t3_contracts::chat_attachment::PROVIDER_SEND_TURN_MAX_FILE_BYTES,
+            )
+            .await
+    }
+}
+
+/// A diff read fails in the query (typed cause) or because the runtime is absent.
+pub enum DiffFailure {
+    Query(
+        t3_orchestration::ports::checkpoints_forks::checkpoint_diff_query::CheckpointDiffQueryError,
+    ),
+    Runtime(OrchestrationError),
+}
+impl DiffFailure {
+    pub fn cause(&self) -> serde_json::Value {
+        match self {
+            Self::Query(error) => error.cause(),
+            Self::Runtime(error) => serde_json::json!({"message": error.to_string()}),
+        }
+    }
+}
+
 fn boxed<T: Send + 'static>(
     stream: impl Stream<Item = OrchestrationResult<T>> + Send + 'static,
 ) -> BoxStream<'static, OrchestrationResult<T>> {
@@ -471,10 +588,13 @@ impl crate::services::DomainRuntime for OrchestrationAdapter {
     fn shutdown(&self) -> futures::future::BoxFuture<'_, crate::Result<()>> {
         Box::pin(async move {
             let stopped = match &self.runtime {
-                Some(runtime) => runtime
-                    .shutdown()
-                    .await
-                    .map_err(|e| crate::Error::Service(e.to_string())),
+                Some(runtime) => {
+                    log_lifecycle_failures(runtime);
+                    runtime
+                        .shutdown()
+                        .await
+                        .map_err(|e| crate::Error::Service(e.to_string()))
+                }
                 None => Ok(()),
             };
             self.events.drain().await;

@@ -639,6 +639,54 @@ async fn dev_mode_scratch_project_thread_and_replay_turn_over_the_socket() {
         "{named}"
     );
 
+    // A No project thread with its own folder under the scratch root becomes a project there;
+    // one without its own folder is refused with the promotion's message.
+    let own_folder = home.join("scratch").join("promote-me");
+    std::fs::create_dir_all(&own_folder).unwrap();
+    for (id, worktree) in [
+        ("thread:promote", json!(own_folder.to_string_lossy())),
+        ("thread:no-folder", Value::Null),
+    ] {
+        ok(unary(
+            &mut client,
+            &mut socket,
+            "orchestration.dispatchCommand",
+            json!({"type":"thread.create","commandId":format!("command:{id}"),"threadId":id,"projectId":project,"title":"Scratch work","modelSelection":{"instanceId":"devReplay","model":"multi-turn"},"runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":worktree,"createdBy":"user","creationSource":"web"}),
+        )
+        .await);
+    }
+    let promoted = ok(unary(
+        &mut client,
+        &mut socket,
+        "projects.createFromThread",
+        json!({"threadId": "thread:promote"}),
+    )
+    .await);
+    let promoted_project = promoted["projectId"].as_str().unwrap();
+    assert_ne!(promoted_project, project, "{promoted}");
+    let refused = serde_json::to_value(
+        unary(
+            &mut client,
+            &mut socket,
+            "projects.createFromThread",
+            json!({"threadId": "thread:no-folder"}),
+        )
+        .await,
+    )
+    .unwrap();
+    let error = &refused["cause"][0]["error"];
+    assert_eq!(
+        error["_tag"], "OrchestrationDispatchCommandError",
+        "{refused}"
+    );
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("its own folder"),
+        "{refused}"
+    );
+
     // An unserved method: Effect's answer for an unknown request tag, never a structured defect.
     let unserved = unary(
         &mut client,
@@ -697,8 +745,9 @@ async fn dev_mode_scratch_project_thread_and_replay_turn_over_the_socket() {
             CallKind::Unary,
         )
         .unwrap();
-    let (mut dispatched, mut reply, mut completed) = (false, false, false);
-    while !(dispatched && reply && completed) {
+    // The turn's checkpoint is captured after the run completes; the diff read needs it.
+    let (mut dispatched, mut reply, mut completed, mut checkpointed) = (false, false, false, false);
+    while !(dispatched && reply && completed && checkpointed) {
         match event(&mut socket, &mut client).await {
             CallEvent::Exit { id, exit } if id == dispatch => {
                 ok(exit);
@@ -713,6 +762,7 @@ async fn dev_mode_scratch_project_thread_and_replay_turn_over_the_socket() {
                 );
                 reply |= text.contains("\"message.updated\"") && text.contains("\"assistant\"");
                 completed |= text.contains("\"run.updated\"") && text.contains("\"completed\"");
+                checkpointed |= text.contains("\"checkpoint.captured\"");
             }
             CallEvent::Exit { id, exit } if id == subscription => {
                 panic!(
@@ -724,5 +774,108 @@ async fn dev_mode_scratch_project_thread_and_replay_turn_over_the_socket() {
             _ => {}
         }
     }
+
+    // Reads bound on the composed runtime: titles, link metadata, the turn's diff.
+    let titles = ok(unary(
+        &mut client,
+        &mut socket,
+        "orchestration.getThreadTitles",
+        json!({"threadIds": [thread, "thread:absent"]}),
+    )
+    .await);
+    assert_eq!(titles[thread], "Dev milestone");
+    assert_eq!(titles.as_object().unwrap().len(), 1, "{titles}");
+    let links = ok(unary(
+        &mut client,
+        &mut socket,
+        "orchestration.getThreadLinkMetadata",
+        json!({"threadIds": [thread]}),
+    )
+    .await);
+    assert!(links.get(thread).is_some(), "{links}");
+    // An empty range answers without reading checkpoints.
+    let diff = ok(unary(
+        &mut client,
+        &mut socket,
+        "orchestration.getTurnDiff",
+        json!({"threadId": thread, "fromTurnCount": 1, "toTurnCount": 1}),
+    )
+    .await);
+    assert_eq!(diff["threadId"], thread);
+    assert_eq!(diff["diff"], "");
+    // The scratch folder is not a git repository, so its checkpoints are captured as missing and
+    // no turn is diffable: the typed diff failure, carrying the query's own cause.
+    let beyond = unary(
+        &mut client,
+        &mut socket,
+        "orchestration.getFullThreadDiff",
+        json!({"threadId": thread, "toTurnCount": 1}),
+    )
+    .await;
+    let beyond = serde_json::to_value(beyond).unwrap();
+    let failure = &beyond["cause"][0]["error"];
+    assert_eq!(
+        failure["_tag"], "OrchestrationGetFullThreadDiffError",
+        "{beyond}"
+    );
+    assert_eq!(failure["message"], "Failed to load full thread diff");
+    assert_eq!(
+        failure["cause"]["_tag"], "CheckpointTurnRangeUnavailableError",
+        "{beyond}"
+    );
+    assert_eq!(failure["cause"]["availableTurnCount"], 0, "{beyond}");
+
+    // The transcript export: orchestration:read, then the thread's items.
+    let transcript_url = format!("{origin}/api/orchestration/threads/{thread}/transcript");
+    let transcript = http
+        .get(&transcript_url)
+        .header("cookie", &cookie)
+        .header("x-t3-orchestration-protocol", "2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(transcript.status(), 200);
+    let transcript: Value = transcript.json().await.unwrap();
+    assert_eq!(transcript["threadId"], thread);
+    assert_eq!(transcript["title"], "Dev milestone");
+    assert!(!transcript["items"].as_array().unwrap().is_empty());
+    let anonymous = http
+        .get(&transcript_url)
+        .header("x-t3-orchestration-protocol", "2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), 401);
+    let grant: Value = http
+        .post(format!("{origin}/api/auth/pairing-token"))
+        .header("cookie", &cookie)
+        .json(&json!({"scopes": ["settings:write"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let unscoped = http
+        .post(format!("{origin}/api/auth/browser-session"))
+        .json(&json!({"credential": grant["credential"]}))
+        .send()
+        .await
+        .unwrap()
+        .headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let refused = http
+        .get(&transcript_url)
+        .header("cookie", &unscoped)
+        .header("x-t3-orchestration-protocol", "2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 403);
     server.shutdown().await.unwrap();
 }

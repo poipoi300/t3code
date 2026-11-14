@@ -27,7 +27,7 @@ forge = ["dep:t3-forge"]
 terminal = ["dep:t3-terminal"]
 scheduler = ["dep:t3-scheduler", "dep:async-trait"]
 usage = ["dep:t3-usage", "dep:sysinfo"]
-host = ["dep:t3-host"]
+host = ["dep:t3-host", "dep:sysinfo", "dep:async-trait"]
 project = ["dep:t3-project", "orchestration", "workspace", "dep:t3-process", "dep:async-trait"]
 providers = ["dep:t3-process", "dep:t3-acp", "dep:t3-codex-app-server", "dep:t3-claude-cli"]
 [dependencies]
@@ -60,7 +60,7 @@ qrcodegen = { version = "1.8", optional = true }
 if-addrs = { version = "0.14", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json"], optional = true }
 async-trait = { version = "0.1", optional = true }
-sysinfo = { version = "0.37", default-features = false, features = ["system"], optional = true }
+sysinfo = { version = "0.37", default-features = false, features = ["system", "disk"], optional = true }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter", "std"] }
 async-stream = "0.3"
 serde = { version = "1", features = ["derive"] }

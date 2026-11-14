@@ -18,14 +18,11 @@ pub fn register(registry: &mut HandlerRegistry) -> crate::Result<()> {
     registry.unimplemented::<WsProviderInstallCancelRpc>()?;
     registry.unimplemented::<WsProviderInstallSubscribeRpc>()?;
     registry.unimplemented::<WsProviderInstallRemoveRpc>()?;
-    registry.unimplemented::<WsServerGetNpmReleaseRpc>()?;
     registry.unimplemented::<WsServerUpdateServerRpc>()?;
     registry.unimplemented::<WsServerUpdateServerWithProgressRpc>()?;
     registry.unimplemented::<WsServerCommitDesktopUpdateRpc>()?;
     registry.unimplemented::<WsServerRunStorageCleanupRpc>()?;
     registry.unimplemented::<WsServerGetStorageCleanupReportRpc>()?;
-    registry.unimplemented::<WsServerGetDatabaseStorageRpc>()?;
-    registry.unimplemented::<WsServerReclaimDatabaseSpaceRpc>()?;
     registry.unimplemented::<WsPeerLinksListRpc>()?;
     registry.unimplemented::<WsPeerLinksLinkRpc>()?;
     registry.unimplemented::<WsPeerLinksUnlinkRpc>()?;
@@ -44,7 +41,6 @@ pub fn register(registry: &mut HandlerRegistry) -> crate::Result<()> {
     registry.unimplemented::<WsServerDisableAcpRegistryProviderRpc>()?;
     registry.unimplemented::<WsServerLogoutAcpRegistryRpc>()?;
     registry.unimplemented::<WsServerListTextGeneratorModelsRpc>()?;
-    registry.unimplemented::<WsServerPrepareTriageRpc>()?;
     registry.unimplemented::<WsCloudGetRelayClientStatusRpc>()?;
     registry.unimplemented::<WsCloudInstallRelayClientRpc>()?;
     registry.unimplemented::<WsPullRequestsListRpc>()?;

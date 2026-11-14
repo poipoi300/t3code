@@ -1,7 +1,6 @@
 //! Orchestration HTTP reads (`apps/server/src/orchestration-v2/http.ts`): the shell snapshot and
-//! the thread snapshot, bounded snapshot and history page. Order on every route: the protocol
-//! header gate, authentication with `orchestration:read`, then the scope-checked read.
-//! `GET /api/orchestration/threads/{id}/transcript` has no Rust service yet and is not mounted.
+//! the thread snapshot, transcript, bounded snapshot and history page. Order on every route: the
+//! protocol header gate, authentication with `orchestration:read`, then the scope-checked read.
 use super::{auth::split, error::ApiError};
 use crate::{adapters::orchestration, services::ServiceRegistry};
 use axum::{
@@ -25,6 +24,10 @@ pub fn routes(router: Router<Arc<ServiceRegistry>>) -> Router<Arc<ServiceRegistr
     router
         .route("/api/orchestration/shell", get(shell))
         .route("/api/orchestration/threads/{thread_id}", get(thread))
+        .route(
+            "/api/orchestration/threads/{thread_id}/transcript",
+            get(transcript),
+        )
         .route(
             "/api/orchestration/threads/{thread_id}/bounded",
             get(bounded),
@@ -161,6 +164,28 @@ async fn thread(
     };
     answer(
         adapter.http_read().thread_snapshot(&scopes, id).await,
+        internal,
+    )
+}
+
+async fn transcript(
+    State(s): State<Arc<ServiceRegistry>>,
+    Path(id): Path<String>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    request: axum::extract::Request,
+) -> Response {
+    let internal = Internal::OrchestrationThreadSnapshotFailed;
+    let (adapter, scopes, _) = match guard(&s, remote, request, internal).await {
+        Ok(guarded) => guarded,
+        Err(response) => return *response,
+    };
+    let id = match thread_id(id) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    let environment = s.local.environment.environment_id.clone();
+    answer(
+        adapter.thread_transcript(&scopes, id, environment).await,
         internal,
     )
 }
