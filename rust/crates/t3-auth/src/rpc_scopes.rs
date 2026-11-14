@@ -221,6 +221,8 @@ rpc_scopes! {
     "vcs.createRef" => SourceControlWrite,
     "vcs.createWorktree" => SourceControlWrite,
     "vcs.init" => SourceControlWrite,
+    // Rust only (`t3_contracts::rpc::RUST_ONLY_METHODS`): the scope a file restore needs.
+    "vcs.trustRepository" => OrchestrationOperate,
     "vcs.listRefs" => OrchestrationRead,
     "vcs.pull" => SourceControlWrite,
     "vcs.refreshBranch" => OrchestrationRead,

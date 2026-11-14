@@ -66,12 +66,15 @@ fn every_typescript_rpc_scope_matches_the_checked_in_source() {
             actual.insert(constants[&c[1]].clone(), scopes[&c[2]].to_owned());
         }
     }
+    // TypeScript's table exactly; the Rust-only methods are declared beside it.
+    let rust_only = t3_contracts::rpc::RUST_ONLY_METHODS;
     let expected: std::collections::BTreeMap<_, _> = RPC_REQUIRED_SCOPES
         .iter()
+        .filter(|(m, _)| !rust_only.contains(m))
         .map(|(m, s)| (m.to_string(), scope_name(*s)))
         .collect();
     assert_eq!(actual, expected);
-    assert_eq!(RPC_REQUIRED_SCOPES.len(), 220);
+    assert_eq!(RPC_REQUIRED_SCOPES.len(), 220 + rust_only.len());
     let http = std::fs::read_to_string(root.join("apps/server/src/auth/http.ts")).unwrap();
     let contracts =
         std::fs::read_to_string(root.join("packages/contracts/src/environmentHttp.ts")).unwrap();

@@ -263,6 +263,7 @@ pub(super) fn decode(method: &str, input: &Value) -> Result<Option<Value>> {
         "vcs.createRef" => validate::<rpc::WsVcsCreateRefRpc>(input, false),
         "vcs.switchRef" => validate::<rpc::WsVcsSwitchRefRpc>(input, false),
         "vcs.init" => validate::<rpc::WsVcsInitRpc>(input, false),
+        "vcs.trustRepository" => validate::<rpc::WsVcsTrustRepositoryRpc>(input, false),
         "review.getBranchCommits" => validate::<rpc::WsReviewGetBranchCommitsRpc>(input, false),
         "review.getDiffPreview" => validate::<rpc::WsReviewGetDiffPreviewRpc>(input, false),
         "review.getDiffFileContents" => {
