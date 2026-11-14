@@ -5,3 +5,12 @@
 # `--jobs` or `CARGO_BUILD_JOBS` on a quiet machine.
 [build]
 jobs = 2
+# Twenty-odd build directories compile the same dependencies. sccache shares the
+# ones it can across them (measured: about a third; crates downstream of a
+# proc macro miss on Windows). It never caches the workspace's own edited crates.
+rustc-wrapper = "sccache"
+
+[env]
+SCCACHE_DIR = "D:\\sccache"
+SCCACHE_CACHE_SIZE = "80G"
+SCCACHE_IDLE_TIMEOUT = "0"
