@@ -373,3 +373,215 @@ async fn persisted_handles_revalidate_discovery_before_each_operation() -> TestR
     ));
     Ok(())
 }
+
+/// A clean-filter helper that records each run in `marker` and passes content through.
+fn marker_filter(repo: &Repository, name: &str) -> std::io::Result<(std::path::PathBuf, String)> {
+    let marker = repo.temp.path().join(format!("{name}-ran"));
+    let script = repo.temp.path().join(format!("{name}.sh"));
+    let marker_path = marker.to_string_lossy().replace('\\', "/");
+    std::fs::write(
+        &script,
+        format!("printf '%s\\n' \"$1\" >> '{marker_path}'\ncat\n"),
+    )?;
+    let command = format!("sh '{}' clean", script.to_string_lossy().replace('\\', "/"));
+    Ok((marker, command))
+}
+
+/// Re-review 4 F4: the real `.git` moved aside and a repository created at the same path, with a
+/// clean filter on `f` that records each run. Returns the filter's marker.
+async fn replace_git_directory_at_the_same_path(
+    repo: &Repository,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    std::fs::rename(repo.root().join(".git"), repo.temp.path().join("real.git"))?;
+    repo.command(&["init", "--initial-branch=planted"]).await?;
+    let (marker, command) = marker_filter(repo, "swapped")?;
+    repo.command(&["config", "filter.plant.clean", &command])
+        .await?;
+    repo.write(".gitattributes", "f filter=plant\n")?;
+    repo.write("f", "changed after the swap\n")?;
+    Ok(marker)
+}
+
+fn refused_as_changed<T: std::fmt::Debug>(result: &Result<T, t3_git::GitError>) -> bool {
+    matches!(result, Err(t3_git::GitError::RepositoryChanged { .. }))
+}
+
+#[tokio::test]
+async fn a_git_directory_replaced_at_the_same_path_is_refused_in_process() -> TestResult {
+    let repo = Repository::new().await?;
+    repo.write("f", "real\n")?;
+    repo.commit("real").await?;
+    let identity = repo.git.bind_repository().await?.expect("repository");
+    let marker = replace_git_directory_at_the_same_path(&repo).await?;
+    let capture = repo
+        .git
+        .capture_checkpoint(&checkpoint_ref("swapped", 0))
+        .await;
+    assert!(refused_as_changed(&capture), "{capture:?}");
+    let rebound = repo.git.clone().with_repository_binding(identity).await;
+    assert!(refused_as_changed(&rebound), "{:?}", rebound.map(|_| ()));
+    assert!(!marker.exists(), "the replaced repository's filter ran");
+    Ok(())
+}
+
+const CHILD_SCOPE: &str = "T3_GIT_TEST_REPLACED_SCOPE";
+const CHILD_BINDING: &str = "T3_GIT_TEST_REPLACED_BINDING";
+
+/// A server restart: a fresh process (empty binding cache) with the saved binding.
+#[tokio::test]
+async fn a_git_directory_replaced_at_the_same_path_is_refused_after_a_restart() -> TestResult {
+    let repo = Repository::new().await?;
+    repo.write("f", "real\n")?;
+    repo.commit("real").await?;
+    let saved = serde_json::to_string(&repo.git.bind_repository().await?.expect("repository"))?;
+    let marker = replace_git_directory_at_the_same_path(&repo).await?;
+    let home = repo.temp.path().join("home");
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "fresh_process_capture_with_a_saved_binding",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD_SCOPE, repo.root())
+        .env(CHILD_BINDING, &saved)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_CONFIG_HOME", &home)
+        .env("GIT_CONFIG_GLOBAL", home.join("no-global-config"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.contains("child: repository changed"), "{stdout}");
+    assert!(!marker.exists(), "the replaced repository's filter ran");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "run as the child process of a_git_directory_replaced_at_the_same_path_is_refused_after_a_restart"]
+async fn fresh_process_capture_with_a_saved_binding() -> TestResult {
+    let (Ok(scope), Ok(saved)) = (std::env::var(CHILD_SCOPE), std::env::var(CHILD_BINDING)) else {
+        return Ok(());
+    };
+    let identity: t3_git::RepositoryBinding = serde_json::from_str(&saved)?;
+    match t3_git::Git::new(scope)
+        .with_repository_binding(identity)
+        .await
+    {
+        Err(t3_git::GitError::RepositoryChanged { .. }) => println!("child: repository changed"),
+        Err(error) => println!("child: other error {error}"),
+        Ok(git) => {
+            let capture = git
+                .capture_checkpoint(&checkpoint_ref("restarted", 0))
+                .await;
+            println!("child: bound, capture {capture:?}");
+        }
+    }
+    Ok(())
+}
+
+/// A binding saved before identities carried file ids cannot prove the repository is the same
+/// one: it is refused with the typed error, never silently rebound.
+#[tokio::test]
+async fn a_binding_saved_in_the_earlier_format_is_refused_not_rebound() -> TestResult {
+    let repo = Repository::new().await?;
+    repo.write("f", "real\n")?;
+    repo.commit("real").await?;
+    let identity = repo.git.bind_repository().await?.expect("repository");
+    let earlier = serde_json::json!({
+        "top_level": identity.top_level,
+        "git_dir": identity.git_dir,
+        "common_dir": identity.common_dir,
+    });
+    let result = repo
+        .git
+        .clone()
+        .with_repository_binding(serde_json::from_value(earlier)?)
+        .await;
+    let Err(t3_git::GitError::RepositoryChanged { detail, .. }) = result else {
+        panic!("expected a refusal, got {:?}", result.map(|_| ()));
+    };
+    assert!(detail.contains("earlier version"), "{detail}");
+    Ok(())
+}
+
+/// Re-review 4 F5: a repository planted at a submodule path is not run by the automatic status
+/// reads, which still report the submodule's changed commit.
+#[tokio::test]
+async fn status_reads_do_not_run_a_repository_planted_at_a_submodule_path() -> TestResult {
+    let repo = Repository::new().await?;
+    repo.write("f", "real\n")?;
+    repo.commit("real").await?;
+    let source = Repository::new().await?;
+    source.write("f", "submodule\n")?;
+    source.commit("source").await?;
+    repo.command(&[
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        &source.root().to_string_lossy(),
+        "sub",
+    ])
+    .await?;
+    repo.command(&["commit", "-m", "submodule"]).await?;
+    // The submodule's `.git` pointer replaced by a repository with a recording clean filter.
+    let sub = repo.root().join("sub");
+    std::fs::remove_file(sub.join(".git"))?;
+    let planted = repo.git.at(&sub);
+    planted
+        .execute(
+            &["init", "--initial-branch=planted"],
+            ExecuteOptions::default(),
+        )
+        .await?;
+    let (marker, command) = marker_filter(&repo, "submodule")?;
+    planted
+        .execute(
+            &["config", "filter.plant.clean", &command],
+            ExecuteOptions::default(),
+        )
+        .await?;
+    std::fs::write(sub.join(".gitattributes"), "f filter=plant\n")?;
+    planted
+        .execute(&["add", "f", ".gitattributes"], ExecuteOptions::default())
+        .await?;
+    planted
+        .execute(&["commit", "-m", "planted"], ExecuteOptions::default())
+        .await?;
+    // Stat-dirty, so a status inside the submodule must run the filter to compare contents.
+    let timestamp = filetime::FileTime::from_unix_time(2_000_000_000, 0);
+    filetime::set_file_times(sub.join("f"), timestamp, timestamp)?;
+    std::fs::remove_file(&marker)?;
+
+    let status = repo.git.status().await?;
+    let details = repo
+        .git
+        .status_details_local(t3_git::LocalStatusOptions::default())
+        .await?;
+    assert!(!marker.exists(), "a status read ran the planted repository");
+    assert!(
+        status.files.iter().any(|file| file.path == "sub"),
+        "the changed submodule commit must still be reported: {:?}",
+        status.files
+    );
+    assert!(details.has_working_tree_changes);
+    // The fixture is live: the same status without the setting runs the planted filter.
+    repo.command(&[
+        "-c",
+        "core.fsmonitor=false",
+        "status",
+        "--porcelain=2",
+        "--branch",
+        "-z",
+    ])
+    .await?;
+    assert!(
+        marker.exists(),
+        "the planted filter must run without the setting"
+    );
+    Ok(())
+}
