@@ -21,6 +21,11 @@ in `packages/provider-core/src/server/textGeneration*.ts` and
   text or a content-free `GenerationError` out. The host dispatches by selected
   instance, applies the installation gate and supplies current settings/usage
   snapshots. Dropping a runner future must stop its provider-owned work.
+- `codex::codex_exec_mcp_prefix` supplies the native Codex runner's ordered MCP
+  disable policy. Pass filtered exec launch argv and enabled server names from
+  discovery, then append ephemeral/model/output arguments. The policy preserves
+  launch-defined transports, repeats the off table after a whole-table override,
+  and places ordinary-name disable flags after all user launch arguments.
 - `ApiTextRunner` implements the configured OpenAI-compatible and Anthropic HTTP
   generators. `GeneratorSecrets` resolves saved credentials. `ModelCache` caches
   by the complete configuration, bypasses on refresh/unsaved/test requests, and

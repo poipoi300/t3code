@@ -25,6 +25,31 @@ pub fn is_terminal_url(value: &str) -> bool {
             .get(..8)
             .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
 }
+#[cfg(test)]
+mod wp10_drift_tests {
+    use super::*;
+    #[test]
+    fn typescript_diagnostics_keep_location_and_display_range() {
+        for path in ["src/main.ts", "/repo/src/main.ts", r"C:\repo\src\main.ts", "app/(auth)/page.tsx"] {
+            for kind in ["error", "warning"] {
+                let text = format!("{path}(42,7)");
+                let links = extract_terminal_links(&format!("{text}: {kind} TS2322: Type mismatch"));
+                assert_eq!(links, [TerminalLinkMatch { kind: TerminalLinkKind::Path, text: format!("{path}:42:7"), start: 0, end: text.len() }]);
+                let target = if is_absolute(path) { path.into() } else { format!("/repo/{path}") };
+                assert_eq!(resolve_terminal_link_target(&links[0].text, "/repo"), format!("{target}:42:7"));
+            }
+        }
+    }
+    #[test]
+    fn preserves_non_typescript_and_powershell_parentheses() {
+        for (line, expected) in [(r"PS C:\dev\folder (42,7)> ", r"C:\dev\folder (42,7)"),
+            ("/tmp/report(42,7)", "/tmp/report(42,7)"),
+            ("src/Program.cs(3,10): error CS1002: x", "/repo/src/Program.cs")] {
+            let links = extract_terminal_links(line);
+            assert_eq!(resolve_terminal_link_target(&links[0].text,"/repo"),expected);
+        }
+    }
+}
 fn trim_closing_delimiters(value: &str, kind: TerminalLinkKind) -> &str {
     let mut s = value
         .trim_end_matches(|c| ".,;!?".contains(c) || (kind == TerminalLinkKind::Path && c == ':'));

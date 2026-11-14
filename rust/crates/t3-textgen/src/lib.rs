@@ -3,6 +3,7 @@
 pub mod api;
 pub mod audio;
 pub mod cloud;
+pub mod codex;
 pub mod dictionary;
 pub mod generation;
 pub mod host_titles;
