@@ -1086,7 +1086,10 @@ fn method_table_matches_manifest() -> Result<(), Box<dyn std::error::Error>> {
     }
     // TypeScript's methods exactly, plus the documented Rust-only ones.
     for tag in t3_contracts::rpc::RUST_ONLY_METHODS {
-        assert!(actual.contains_key(tag), "Rust-only method {tag} is not in the table");
+        assert!(
+            actual.contains_key(tag),
+            "Rust-only method {tag} is not in the table"
+        );
         assert!(!expected.contains_key(*tag), "{tag} exists in TypeScript");
     }
     assert_eq!(
