@@ -182,11 +182,11 @@ fn retry_survives_the_failure_to_loading_transition_and_a_failed_retry_can_repea
             .expect("service failure arrives");
         app.press("role:button[Finish retry]")
             .expect("settle signing attempt");
-        app.wait_for("retries:1;dropped:false")
+        app.wait_for("text:retries:1;dropped:false")
             .expect("retry future remained alive across the visual branch change");
         app.press("role:button[Retry video]")
             .expect("a rejected retry did not stick in Retrying");
-        app.wait_for("retries:2;dropped:false")
+        app.wait_for("text:retries:2;dropped:false")
             .expect("another attempt starts");
     }
 }

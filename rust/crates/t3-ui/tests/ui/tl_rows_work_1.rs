@@ -55,11 +55,12 @@ fn source_entry(id: &str, suffix: &str) -> Rc<TimelineEntry> {
 }
 
 fn control(label: &'static str, id: &str, press: impl Fn() + 'static) -> impl IntoElement {
+    let label = t3_ui::i18n::Text::from(label).resolve();
     nsh_base::button()
-        .accessibility_label(Some(t(label).into()))
+        .accessibility_label(Some(label.clone()))
         .test_id(id)
         .on_press(press)
-        .child(text(t(label)))
+        .child(text(label))
 }
 
 #[component]

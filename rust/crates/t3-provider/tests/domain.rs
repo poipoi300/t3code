@@ -159,9 +159,11 @@ async fn startup_publishes_real_registry_keeps_checks_deferred_and_watches_curre
             helper_command: "fixture-helper".into(),
             helper_args: vec![],
             manifest_cache: None,
+            manifest: None,
         },
         DomainPorts {
             settings: settings.clone(),
+            policy: Arc::new(t3_provider::policy::ManagedProviders::new(&serde_json::from_value(json!({"allowedDrivers":["codex"]})).unwrap(),None,Platform::current()).unwrap()),
             http: effects.clone(),
             clock: Arc::new(SystemClock),
             sessions: effects.clone(),
@@ -184,6 +186,8 @@ async fn startup_publishes_real_registry_keeps_checks_deferred_and_watches_curre
     .unwrap();
     let providers = domain.config_providers().await;
     assert!(!providers.0.is_empty());
+    assert!(providers.0.iter().filter(|provider|provider.driver.0!="codex").all(|provider|!provider.enabled && provider.availability.is_some()));
+
     assert!(
         providers
             .0

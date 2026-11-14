@@ -309,9 +309,9 @@ impl CursorAccountReader {
         team: Option<u64>,
         page: usize,
         total: Option<usize>,
-        since: f64,
-        until: f64,
+        window: (f64, f64),
     ) -> Result<Page, Failure> {
+        let (since, until) = window;
         if page
             > total.map_or(1000, |total| {
                 total.div_ceil(1000).saturating_mul(2).saturating_add(1)
@@ -396,14 +396,14 @@ impl CursorAccountReader {
                 let number = page + ahead.len();
                 ahead.push_back(PageTask(tokio::spawn(async move {
                     reader
-                        .page(&session, slots, team, number, total, since, until)
+                        .page(&session, slots, team, number, total, (since, until))
                         .await
                 })));
             }
             let next = if let Some(mut task) = ahead.pop_front() {
                 (&mut task.0).await.map_err(|_| Failure::Invalid)??
             } else {
-                self.page(&session, slots.clone(), team, page, total, since, until)
+                self.page(&session, slots.clone(), team, page, total, (since, until))
                     .await?
             };
             if total

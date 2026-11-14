@@ -89,12 +89,6 @@ fn growing_and_shrinking_the_container_clears_and_restores_the_ellipsis() {
     let mut app = start(DESKTOP);
     app.wait_for("…times").expect("narrow");
     app.press("role:button[Toggle width]").expect("grow");
-    for node in app.screen().layout_nodes().into_iter().take(12) {
-        eprintln!(
-            "node {} parent {} id {:?} bounds {:?} text {:?}",
-            node.id, node.parent, node.test_id, node.bounds, node.text
-        );
-    }
     app.wait_for("text:times")
         .expect("full tail without ellipsis");
     assert!(!app.screen().shows("…times"));

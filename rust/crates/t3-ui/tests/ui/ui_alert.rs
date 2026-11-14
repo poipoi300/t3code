@@ -160,36 +160,58 @@ fn AlertFixture() -> impl IntoElement {
 fn LabelFixture() -> impl IntoElement {
     t3_ui::theme::install(&t3_ui::theme::ThemeChoice::default());
     t3_ui::i18n::set_language("fr", &[]);
-    banner::root(banner::Props::default(), |context| {
-        view()
-            .child(banner::row_button(
-                context,
-                banner::Layout::Inline,
-                || String::from("Settings"),
-                || false,
-                || {},
-                |_| banner::RowSlots::default(),
-            ))
-            .child(banner::row_button(
-                context,
-                banner::Layout::Inline,
-                || String::from("Settings"),
-                || false,
-                || {},
-                |_| banner::RowSlots::default(),
-            ))
-            .child(banner::row_button(
-                context,
-                banner::Layout::Inline,
-                || String::from("Settings"),
-                || false,
-                || {},
-                |_| banner::RowSlots::default(),
-            ))
-            .child(banner::dismiss(String::from("Copy"), || false, || {}))
-            .child(banner::dismiss(String::from("Copy"), || false, || {}))
-            .child(banner::dismiss(String::from("Copy"), || false, || {}))
-    })
+    view()
+        .w_full()
+        .h_full()
+        .child(banner::root(banner::Props::default(), |context| {
+            let rows = view()
+                .test_id("row-labels")
+                .child(banner::row_button(
+                    context,
+                    banner::Layout::Inline,
+                    || String::from("Settings").into(),
+                    || false,
+                    || {},
+                    label_row,
+                ))
+                .child(banner::row_button(
+                    context,
+                    banner::Layout::Inline,
+                    || "Settings".into(),
+                    || false,
+                    || {},
+                    label_row,
+                ))
+                .child(banner::row_button(
+                    context,
+                    banner::Layout::Inline,
+                    || SharedString::from("Settings").into(),
+                    || false,
+                    || {},
+                    label_row,
+                ));
+            let dismissals = view()
+                .test_id("dismiss-labels")
+                .child(banner::dismiss(
+                    String::from("Settings").into(),
+                    || false,
+                    || {},
+                ))
+                .child(banner::dismiss("Settings".into(), || false, || {}))
+                .child(banner::dismiss(
+                    SharedString::from("Settings").into(),
+                    || false,
+                    || {},
+                ));
+            view().child(rows).child(dismissals)
+        }))
+}
+
+fn label_row(row: banner::RowContext) -> banner::RowSlots {
+    banner::RowSlots {
+        content: Some(banner::content(row, text(t3_ui::i18n::ts("Review"))).into_element()),
+        ..Default::default()
+    }
 }
 
 // No primitive gallery route exists; this fixture mounts the owned components directly.
@@ -214,11 +236,25 @@ fn start_root(window: (f32, f32), root: Root) -> Headless {
 #[test]
 fn labels_translate_keys_and_preserve_runtime_and_already_translated_content() {
     for window in [PHONE, DESKTOP] {
-        let app = start_root(window, Root::of::<LabelFixture>());
-        assert_eq!(app.screen().count("role:button[Settings]"), Ok(2));
-        assert_eq!(app.screen().count("role:button[Paramètres]"), Ok(1));
-        assert_eq!(app.screen().count("role:button[Copy]"), Ok(2));
-        assert_eq!(app.screen().count("role:button[Copier]"), Ok(1));
+        let mut app = start_root(window, Root::of::<LabelFixture>());
+        app.wait_for("role:button").expect("label controls mounted");
+        assert_eq!(app.screen().count("role:button"), Ok(6));
+        let labels = ["row-labels", "dismiss-labels"].map(|scope| {
+            (
+                scope,
+                app.screen()
+                    .count(&format!("id:{scope} >> role:button[Settings]")),
+                app.screen()
+                    .count(&format!("id:{scope} >> role:button[Paramètres]")),
+            )
+        });
+        assert_eq!(
+            labels,
+            [
+                ("row-labels", Ok(2), Ok(1)),
+                ("dismiss-labels", Ok(2), Ok(1)),
+            ]
+        );
     }
 }
 
