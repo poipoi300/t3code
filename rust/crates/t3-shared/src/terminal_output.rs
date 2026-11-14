@@ -955,4 +955,4 @@ fn bound_window(terminal: &mut Terminal, truncated: &mut bool, max: usize) {
     }
 }
 mod incremental;
-pub use incremental::TerminalOutput;
+pub use incremental::{SettledChange, SettledCursor, TerminalOutput};

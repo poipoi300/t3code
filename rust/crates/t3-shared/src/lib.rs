@@ -1,8 +1,10 @@
 //! Pure helpers shared by servers and clients. Must compile for wasm32-unknown-unknown.
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
+pub mod background_activity;
 pub mod find_text;
 pub mod palette_search;
+pub mod project_settings;
 pub mod search_policy;
 pub mod terminal_history;
 pub mod terminal_output;
