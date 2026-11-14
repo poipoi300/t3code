@@ -70,6 +70,18 @@ pub(super) async fn dispatch(
         HostAction::ClipboardWrite(data) => desktop::clipboard_write(platform, data).await,
         #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
         HostAction::OpenUrl(url) => desktop::open_url(platform, url).await,
+        // The shell opens it, but only what the mobile app would open reaches the shell.
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        HostAction::OpenUrl(url) => {
+            let url = crate::common::validate_open_url(
+                &url,
+                t3_client::persistence::external_links::ExternalUrlSurface::Mobile,
+            )?;
+            match &platform.inner.extension {
+                Some(extension) => extension.host(HostAction::OpenUrl(url)).await,
+                None => Err(unsupported(&HostAction::OpenUrl(url))),
+            }
+        }
         action => match &platform.inner.extension {
             Some(extension) => extension.host(action).await,
             None => Err(unsupported(&action)),

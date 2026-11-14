@@ -4,6 +4,7 @@
 //! current-thread runtime driving them, or any executor while a multi-thread runtime runs).
 //! Network work runs as runtime tasks and storage on its blocking pool; dropping a returned
 //! future cancels the request, and a dropped storage call still commits or rolls back whole.
+mod history;
 mod host;
 mod http;
 mod secret;
@@ -64,6 +65,12 @@ pub struct NativeConfig {
     pub legacy: Option<Rc<dyn LegacyStorage>>,
     pub extension: Option<Rc<dyn HostExtension>>,
     pub timeouts: Timeouts,
+    /// The link the app was launched with (a mobile deep link, a claimed URL), if any; the
+    /// app's location starts there.
+    pub launch_url: Option<String>,
+    /// DER certificates trusted in addition to the OS trust store on desktop (or the Mozilla
+    /// roots on mobile): a deployment's own CA, or a test's.
+    pub extra_roots: Vec<Vec<u8>>,
 }
 impl NativeConfig {
     pub fn new(data_dir: impl Into<PathBuf>, secrets: Box<dyn SecretKeyStore>) -> Self {
@@ -73,6 +80,8 @@ impl NativeConfig {
             presentation: None,
             legacy: None,
             extension: None,
+            launch_url: None,
+            extra_roots: Vec::new(),
             timeouts: Timeouts::default(),
         }
     }
@@ -110,6 +119,8 @@ struct Inner {
     extension: Option<Rc<dyn HostExtension>>,
     host: host::HostState,
     report: OpenReport,
+    launch_url: Option<String>,
+    history: std::cell::RefCell<history::MemoryHistory>,
 }
 
 #[derive(Clone)]
@@ -124,17 +135,38 @@ impl std::fmt::Debug for NativePlatform {
     }
 }
 
-fn tls_config() -> Result<rustls::ClientConfig, OpenError> {
-    let roots = rustls::RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
-    Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|e| OpenError::Network(e.to_string()))?
-    .with_root_certificates(roots)
-    .with_no_client_auth())
+/// Desktop trusts the OS store (Windows CryptoAPI, macOS Security framework, Linux's system
+/// bundle), so a server behind a private or enterprise CA connects as it does with the
+/// TypeScript desktop app. Mobile keeps the Mozilla roots until the Android verifier lands.
+fn tls_config(extra_roots: Vec<Vec<u8>>) -> Result<rustls::ClientConfig, OpenError> {
+    let network = |error: rustls::Error| OpenError::Network(error.to_string());
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(network)?;
+    let extra = extra_roots
+        .into_iter()
+        .map(rustls::pki_types::CertificateDer::from);
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    {
+        let verifier = rustls_platform_verifier::Verifier::new_with_extra_roots(extra, provider)
+            .map_err(network)?;
+        Ok(builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(verifier))
+            .with_no_client_auth())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        let _ = provider;
+        let mut roots = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        for root in extra {
+            roots.add(root).map_err(network)?;
+        }
+        Ok(builder.with_root_certificates(roots).with_no_client_auth())
+    }
 }
 
 /// Runs on the runtime even when the caller polls from another executor; drop aborts it.
@@ -162,6 +194,8 @@ impl NativePlatform {
             legacy,
             extension,
             timeouts,
+            launch_url,
+            extra_roots,
         } = config;
         // A plain thread: OS key stores may block, and some start their own async runtime.
         let (tx, rx) = oneshot::channel();
@@ -169,7 +203,7 @@ impl NativePlatform {
             let _ = tx.send(store::Store::open(&data_dir, secrets.as_ref()));
         });
         let (store, report) = rx.await.map_err(|_| OpenError::Worker)??;
-        let tls = Arc::new(tls_config()?);
+        let tls = Arc::new(tls_config(extra_roots)?);
         let http = http::HttpClient::new(tls.clone(), &timeouts)
             .map_err(|e| OpenError::Network(e.to_string()))?;
         Ok(Self {
@@ -186,6 +220,12 @@ impl NativePlatform {
                 extension,
                 host: host::HostState::default(),
                 report,
+                history: std::cell::RefCell::new(history::MemoryHistory::new(
+                    launch_url
+                        .as_deref()
+                        .and_then(t3_client::navigation::app_path),
+                )),
+                launch_url,
             }),
         })
     }
@@ -197,6 +237,22 @@ impl NativePlatform {
 
     pub fn open_report(&self) -> OpenReport {
         self.inner.report
+    }
+
+    /// The shell hands over a link the OS delivered while the app runs (a mobile deep link or
+    /// a claimed URL): an app address becomes the next location, and every link is announced
+    /// as `PlatformEvent::OpenedLink` (pairing links are read from it).
+    pub fn open_link(&self, link: String) {
+        if let Some(path) = t3_client::navigation::app_path(&link) {
+            self.inner.history.borrow_mut().push(path);
+        }
+        self.inner.events.emit(PlatformEvent::OpenedLink(link));
+    }
+
+    /// What the client's auth and config allow (`t3_client::navigation::RoutePolicy`); the
+    /// location stream republishes it.
+    pub fn set_route_policy(&self, policy: t3_client::navigation::RoutePolicy) {
+        self.inner.history.borrow_mut().set_policy(policy);
     }
 
     async fn blocking<T: Send + 'static>(
@@ -317,6 +373,30 @@ impl Platform for NativePlatform {
 
     fn events(&self) -> LocalBoxStream<'static, PlatformEvent> {
         self.inner.events.subscribe()
+    }
+    fn storage_report(&self) -> t3_client::platform::StorageReport {
+        let report = self.inner.report;
+        t3_client::platform::StorageReport {
+            discarded_secure_records: report.discarded_secure_records,
+            replaced_unreadable_key: report.replaced_unreadable_key,
+            recreated_database: report.recreated_database,
+        }
+    }
+    fn app_url(&self) -> HostFuture<'_, Option<String>> {
+        let launch = self.inner.launch_url.clone();
+        async move { Ok(launch) }.boxed_local()
+    }
+    fn app_url_changes(
+        &self,
+    ) -> LocalBoxStream<'static, Result<t3_client::navigation::AppUrlSnapshot, PlatformError>> {
+        self.inner.history.borrow_mut().changes()
+    }
+    fn navigate_app_url(
+        &self,
+        request: t3_client::navigation::AppUrlRequest,
+    ) -> HostFuture<'_, ()> {
+        self.inner.history.borrow_mut().apply(request);
+        async { Ok(()) }.boxed_local()
     }
 
     fn http(&self, request: HttpRequest) -> HostFuture<'_, HttpResponse> {

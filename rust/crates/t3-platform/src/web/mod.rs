@@ -2,6 +2,7 @@
 //!
 //! Storage is the IndexedDB database `t3code:client`; the TypeScript client's databases are
 //! read-only legacy sources (see the README for the mapping).
+mod history;
 mod host;
 mod http;
 mod idb;
@@ -69,6 +70,7 @@ struct Inner {
     presentation: Option<AuthClientPresentationMetadata>,
     extension: Option<Rc<dyn HostExtension>>,
     dpop: futures::lock::Mutex<Option<host::BrowserDpopKey>>,
+    history: history::BrowserHistory,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
@@ -138,8 +140,11 @@ impl WebPlatform {
                 }
             })?);
         }
+        let (history, popstate) = history::BrowserHistory::new(window.clone())?;
+        listeners.push(popstate);
         Ok(Self {
             inner: Rc::new(Inner {
+                history,
                 window,
                 factory,
                 database,
@@ -156,6 +161,12 @@ impl WebPlatform {
     /// The shell can add lifecycle events the browser does not raise itself.
     pub fn event_sender(&self) -> EventSender {
         self.inner.events.clone()
+    }
+
+    /// What the client's auth and config allow (`t3_client::navigation::RoutePolicy`); the
+    /// location stream republishes it.
+    pub fn set_route_policy(&self, policy: t3_client::navigation::RoutePolicy) {
+        self.inner.history.set_policy(policy);
     }
 
     /// `navigator.onLine` as the supervisor's starting network status.
@@ -384,6 +395,21 @@ impl Platform for WebPlatform {
 
     fn events(&self) -> LocalBoxStream<'static, PlatformEvent> {
         self.inner.events.subscribe()
+    }
+    fn app_url(&self) -> HostFuture<'_, Option<String>> {
+        let launch = self.inner.history.launch_url();
+        async move { Ok(launch) }.boxed_local()
+    }
+    fn app_url_changes(
+        &self,
+    ) -> LocalBoxStream<'static, Result<t3_client::navigation::AppUrlSnapshot, PlatformError>> {
+        self.inner.history.changes()
+    }
+    fn navigate_app_url(
+        &self,
+        request: t3_client::navigation::AppUrlRequest,
+    ) -> HostFuture<'_, ()> {
+        async move { self.inner.history.apply(request).await }.boxed_local()
     }
 
     fn http(&self, request: HttpRequest) -> HostFuture<'_, HttpResponse> {

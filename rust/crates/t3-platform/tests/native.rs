@@ -861,11 +861,71 @@ async fn a_file_that_is_not_a_database_is_moved_aside_and_storage_starts_afresh(
         .unwrap();
     assert_eq!(
         platform
-            .get(StorageArea::Ordinary, ordinary)
+            .get(StorageArea::Ordinary, ordinary.clone())
             .await
             .unwrap()
             .as_deref(),
         Some(&b"x"[..])
+    );
+    drop(platform);
+    // Re-review N6: the next launch deletes the reported copy, sealed rows and all.
+    let platform = NativePlatform::open(config(dir.path(), &secrets))
+        .await
+        .unwrap();
+    assert!(!platform.open_report().recreated_database);
+    let aside = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+        .count();
+    assert_eq!(aside, 0);
+    assert!(
+        platform
+            .get(StorageArea::Ordinary, ordinary)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn damage_past_the_file_header_is_moved_aside_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(EphemeralSecretStore::default());
+    {
+        let platform = NativePlatform::open(config(dir.path(), &secrets))
+            .await
+            .unwrap();
+        let writes = (0..200)
+            .map(|index| put(&key("thread", &format!("t{index}")), &[7_u8; 1024]))
+            .collect();
+        platform.write(StorageArea::Ordinary, writes).await.unwrap();
+    }
+    let path = dir.path().join("client-storage.sqlite");
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+    }
+    // Page 1 (the header and schema) stays valid; the tables' root pages after it do not.
+    let mut bytes = std::fs::read(&path).unwrap();
+    let page = 4096;
+    assert!(bytes.len() > page * 8, "{}", bytes.len());
+    bytes[page..page * 4].fill(0xA5);
+    std::fs::write(&path, bytes).unwrap();
+
+    let platform = NativePlatform::open(config(dir.path(), &secrets))
+        .await
+        .expect("opens a fresh database");
+    assert!(platform.open_report().recreated_database);
+    assert_eq!(
+        platform
+            .list(StorageArea::Ordinary, "thread".into())
+            .await
+            .unwrap()
+            .len(),
+        0
     );
 }
 
@@ -884,7 +944,9 @@ impl t3_platform::SecretKeyStore for FlakySecrets {
     ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, t3_platform::SecretStoreError> {
         use std::sync::atomic::Ordering::SeqCst;
         if self.unavailable_once.swap(false, SeqCst) {
-            return Err(t3_platform::SecretStoreError::Unavailable("keystore busy".into()));
+            return Err(t3_platform::SecretStoreError::Unavailable(
+                "keystore busy".into(),
+            ));
         }
         if self.corrupt_once.swap(false, SeqCst) {
             return Err(t3_platform::SecretStoreError::Corrupt);
@@ -905,7 +967,10 @@ async fn a_key_store_that_is_unavailable_once_keeps_every_record_for_the_next_op
     // Re-review N1: a temporary Keystore failure must not discard saved credentials.
     let (platform, dir, secrets) = platform().await;
     let secure = key("connection-credential", "c");
-    platform.write(StorageArea::Secure, vec![put(&secure, b"token")]).await.unwrap();
+    platform
+        .write(StorageArea::Secure, vec![put(&secure, b"token")])
+        .await
+        .unwrap();
     drop(platform);
     let retired = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut flaky = config(dir.path(), &secrets);
@@ -915,11 +980,20 @@ async fn a_key_store_that_is_unavailable_once_keeps_every_record_for_the_next_op
         corrupt_once: false.into(),
         retired: retired.clone(),
     });
-    assert!(NativePlatform::open(flaky).await.is_err(), "a temporary failure fails this launch");
-    let reopened = NativePlatform::open(config(dir.path(), &secrets)).await.unwrap();
+    assert!(
+        NativePlatform::open(flaky).await.is_err(),
+        "a temporary failure fails this launch"
+    );
+    let reopened = NativePlatform::open(config(dir.path(), &secrets))
+        .await
+        .unwrap();
     assert_eq!(reopened.open_report().discarded_secure_records, 0);
     assert_eq!(
-        reopened.get(StorageArea::Secure, secure).await.unwrap().as_deref(),
+        reopened
+            .get(StorageArea::Secure, secure)
+            .await
+            .unwrap()
+            .as_deref(),
         Some(&b"token"[..])
     );
     assert!(retired.lock().unwrap().is_empty());
@@ -940,4 +1014,216 @@ async fn an_unreadable_key_is_set_aside_before_a_new_one_replaces_it() {
     let reopened = NativePlatform::open(damaged).await.unwrap();
     assert!(reopened.open_report().replaced_unreadable_key);
     assert_eq!(retired.lock().unwrap().len(), 1, "retired, not overwritten");
+}
+
+#[tokio::test]
+async fn the_app_location_starts_at_the_launch_link_and_follows_opened_links_and_navigation() {
+    use t3_client::navigation::AppUrlRequest;
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(EphemeralSecretStore::default());
+    let mut launched = config(dir.path(), &secrets);
+    launched.launch_url = Some("t3code://settings".into());
+    let platform = NativePlatform::open(launched).await.unwrap();
+    assert_eq!(
+        platform.app_url().await.unwrap().as_deref(),
+        Some("t3code://settings")
+    );
+    let mut locations = platform.app_url_changes();
+    assert_eq!(locations.next().await.unwrap().unwrap().path, "/settings");
+    let mut events = platform.events();
+    platform
+        .open_link("t3code://pair?pairingUrl=https%3A%2F%2Fhost.test%2Fpair%23token%3Dabc".into());
+    assert_eq!(
+        locations.next().await.unwrap().unwrap().path,
+        "/pair?pairingUrl=https%3A%2F%2Fhost.test%2Fpair%23token%3Dabc"
+    );
+    let Some(PlatformEvent::OpenedLink(link)) = events.next().await else {
+        panic!("the link is announced");
+    };
+    assert_eq!(
+        t3_client::connection::pairing_link(&link)
+            .unwrap()
+            .pairing_url
+            .as_deref(),
+        Some("https://host.test/pair#token=abc")
+    );
+    platform
+        .navigate_app_url(AppUrlRequest::Go(-1))
+        .await
+        .unwrap();
+    let back = locations.next().await.unwrap().unwrap();
+    assert_eq!(back.path, "/settings");
+    assert!(back.can_go_forward && !back.can_go_back);
+}
+
+/// Records every key id it is asked to store; the first `store` fails, as a declined keychain
+/// prompt or a crash does, and every `store` can probe the database lock.
+struct RecordingSecrets {
+    inner: Arc<EphemeralSecretStore>,
+    stored_ids: Arc<std::sync::Mutex<Vec<String>>>,
+    fail_first_store: std::sync::atomic::AtomicBool,
+    database: Option<std::path::PathBuf>,
+    lock_free: Arc<std::sync::Mutex<Option<bool>>>,
+}
+impl t3_platform::SecretKeyStore for RecordingSecrets {
+    fn load(
+        &self,
+        id: &str,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, t3_platform::SecretStoreError> {
+        self.inner.load(id)
+    }
+    fn store(&self, id: &str, secret: &[u8]) -> Result<(), t3_platform::SecretStoreError> {
+        self.stored_ids.lock().unwrap().push(id.to_owned());
+        if let Some(path) = &self.database {
+            // Another process taking the write lock while the OS store may be prompting.
+            let other = rusqlite::Connection::open(path).unwrap();
+            other.busy_timeout(Duration::from_millis(0)).unwrap();
+            let free = other.execute_batch("BEGIN IMMEDIATE; COMMIT;").is_ok();
+            *self.lock_free.lock().unwrap() = Some(free);
+        }
+        if self
+            .fail_first_store
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(t3_platform::SecretStoreError::Unavailable(
+                "prompt declined".into(),
+            ));
+        }
+        self.inner.store(id, secret)
+    }
+}
+
+#[tokio::test]
+async fn a_failed_first_open_reuses_its_key_id_and_the_os_store_runs_without_the_database_lock() {
+    // L7: the key id is committed before the secret is stored, and no prompt holds the lock.
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(EphemeralSecretStore::default());
+    let stored_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let lock_free = Arc::new(std::sync::Mutex::new(None));
+    let recording = |fail| RecordingSecrets {
+        inner: secrets.clone(),
+        stored_ids: stored_ids.clone(),
+        fail_first_store: std::sync::atomic::AtomicBool::new(fail),
+        database: Some(dir.path().join("client-storage.sqlite")),
+        lock_free: lock_free.clone(),
+    };
+    let mut first = config(dir.path(), &secrets);
+    first.secrets = Box::new(recording(true));
+    assert!(NativePlatform::open(first).await.is_err());
+    assert_eq!(
+        *lock_free.lock().unwrap(),
+        Some(true),
+        "no write lock during the OS store"
+    );
+    let mut second = config(dir.path(), &secrets);
+    second.secrets = Box::new(recording(false));
+    let platform = NativePlatform::open(second).await.unwrap();
+    let ids = stored_ids.lock().unwrap().clone();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ids[0], ids[1], "the same key id, so no orphaned OS entry");
+    let secure = key("connection-credential", "c");
+    platform
+        .write(StorageArea::Secure, vec![put(&secure, b"token")])
+        .await
+        .unwrap();
+    drop(platform);
+    // A later open with the same key keeps the records (the stored fingerprint matches).
+    let reopened = NativePlatform::open(config(dir.path(), &secrets))
+        .await
+        .unwrap();
+    assert_eq!(reopened.open_report().discarded_secure_records, 0);
+    assert!(
+        reopened
+            .get(StorageArea::Secure, secure)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// A loopback HTTPS server whose certificate chains to a CA made for this test only.
+async fn tls_server() -> (String, Vec<u8>, tokio::task::JoinHandle<()>) {
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let mut ca = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca.distinguished_name
+        .push(rcgen::DnType::CommonName, "t3 platform test CA");
+    ca.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::DigitalSignature,
+    ];
+    let ca_der = ca.self_signed(&ca_key).unwrap().der().to_vec();
+    let issuer = rcgen::Issuer::new(ca, ca_key);
+    let server_key = rcgen::KeyPair::generate().unwrap();
+    let mut leaf = rcgen::CertificateParams::new(vec!["127.0.0.1".to_owned()]).unwrap();
+    leaf.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+    let leaf = leaf.signed_by(&server_key, &issuer).unwrap();
+    let server = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![leaf.der().clone()],
+        rustls::pki_types::PrivateKeyDer::Pkcs8(server_key.serialize_der().into()),
+    )
+    .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
+    let (listener, address) = bind().await;
+    let serve = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            // A client that does not trust the chain aborts the handshake; take the next one.
+            let Ok(mut stream) = acceptor.accept(stream).await else {
+                continue;
+            };
+            let mut head = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "client closed before sending a request");
+                head.extend_from_slice(&chunk[..read]);
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\ntrusted",
+                )
+                .await
+                .unwrap();
+            stream.shutdown().await.unwrap();
+        }
+    });
+    (format!("https://{address}/"), ca_der, serve)
+}
+
+#[tokio::test]
+async fn https_trusts_a_deployment_ca_only_when_it_is_configured() {
+    let (url, ca, serve) = tls_server().await;
+    let get = |url: &str| HttpRequest {
+        method: "GET".into(),
+        url: url.to_owned(),
+        headers: BTreeMap::new(),
+        body: Vec::new(),
+        credentials: Credentials::Omit,
+        max_response_bytes: 1024,
+    };
+
+    // Neither the OS store nor the Mozilla roots know this CA.
+    let (untrusting, _dir, _) = platform().await;
+    let refused = untrusting.http(get(&url)).await;
+    assert!(
+        matches!(refused, Err(PlatformError::Network(_))),
+        "{refused:?}"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(EphemeralSecretStore::default());
+    let mut trusting = config(dir.path(), &secrets);
+    trusting.extra_roots = vec![ca];
+    let trusting = NativePlatform::open(trusting).await.unwrap();
+    let response = trusting.http(get(&url)).await.unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"trusted");
+    serve.abort();
 }

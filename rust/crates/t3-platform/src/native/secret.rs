@@ -80,12 +80,44 @@ pub(crate) mod keystore_failure {
                 ..Facts::default()
             };
             for (facts, expected) in [
-                (Facts { tag_mismatch: true, ..Facts::default() }, Failure::Permanent { replace_key: false }),
-                (Facts { permanently_invalidated: true, ..Facts::default() }, Failure::Permanent { replace_key: true }),
+                (
+                    Facts {
+                        tag_mismatch: true,
+                        ..Facts::default()
+                    },
+                    Failure::Permanent { replace_key: false },
+                ),
+                (
+                    Facts {
+                        permanently_invalidated: true,
+                        ..Facts::default()
+                    },
+                    Failure::Permanent { replace_key: true },
+                ),
                 // A keystore2 error behind UnrecoverableKeyException may be temporary.
-                (Facts { keystore_cause: true, ..unrecoverable }, Failure::Transient),
-                (Facts { keystore_cause: true, cause_transient: Some(true), ..unrecoverable }, Failure::Transient),
-                (Facts { keystore_cause: true, cause_transient: Some(false), ..unrecoverable }, Failure::Permanent { replace_key: false }),
+                (
+                    Facts {
+                        keystore_cause: true,
+                        ..unrecoverable
+                    },
+                    Failure::Transient,
+                ),
+                (
+                    Facts {
+                        keystore_cause: true,
+                        cause_transient: Some(true),
+                        ..unrecoverable
+                    },
+                    Failure::Transient,
+                ),
+                (
+                    Facts {
+                        keystore_cause: true,
+                        cause_transient: Some(false),
+                        ..unrecoverable
+                    },
+                    Failure::Permanent { replace_key: false },
+                ),
                 (unrecoverable, Failure::Permanent { replace_key: false }),
                 // Bad padding, a provider or keystore error: not certain, so temporary.
                 (Facts::default(), Failure::Transient),

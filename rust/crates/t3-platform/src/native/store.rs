@@ -46,7 +46,8 @@ pub struct OpenReport {
     /// wrong length), so a new key replaced it.
     pub replaced_unreadable_key: bool,
     /// The database file was not a readable SQLite database; it was moved aside (named
-    /// `client-storage.sqlite.corrupt-<seconds>`) and a new one started.
+    /// `client-storage.sqlite.corrupt-<seconds>`, deleted by the next open) and a new one
+    /// started.
     pub recreated_database: bool,
 }
 
@@ -59,7 +60,21 @@ fn damaged(error: &rusqlite::Error) -> bool {
     )
 }
 
-/// Renames the database and its WAL and shared-memory files aside, for diagnosis.
+/// Deletes databases moved aside by earlier launches, which reported them: their sealed rows
+/// (credentials, tokens) would otherwise stay on disk with their key still in the OS store.
+fn remove_moved_aside(directory: &Path) -> Result<(), OpenError> {
+    let prefix = format!("{DATABASE_FILE}.corrupt-");
+    for entry in std::fs::read_dir(directory).map_err(OpenError::Directory)? {
+        let entry = entry.map_err(OpenError::Directory)?;
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            std::fs::remove_file(entry.path()).map_err(OpenError::Directory)?;
+        }
+    }
+    Ok(())
+}
+
+/// Renames the database and its WAL and shared-memory files aside, for diagnosis until the
+/// next launch.
 fn move_aside(path: &Path) -> Result<(), OpenError> {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -91,6 +106,24 @@ fn create_private_directory(directory: &Path) -> std::io::Result<()> {
     }
 }
 
+fn meta(connection: &Connection, name: &str) -> Result<Option<String>, OpenError> {
+    connection
+        .query_row("SELECT value FROM meta WHERE name = ?1", [name], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+        .map_err(database_error)
+}
+
+/// A one-way fingerprint of the storage key, to tell which key sealed the secure records.
+fn key_check(secret: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, secret)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn prepare(path: &Path) -> rusqlite::Result<Connection> {
     let connection = Connection::open(path)?;
     connection.busy_timeout(std::time::Duration::from_secs(10))?;
@@ -108,6 +141,14 @@ fn prepare(path: &Path) -> rusqlite::Result<Connection> {
          ) STRICT, WITHOUT ROWID;
          CREATE INDEX IF NOT EXISTS records_namespace ON records (area, namespace);",
     )?;
+    // Damage past the header otherwise fails some later read on every launch instead.
+    let verdict: String = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if verdict != "ok" {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            Some(verdict),
+        ));
+    }
     Ok(connection)
 }
 
@@ -141,6 +182,7 @@ impl Store {
     ) -> Result<(Self, OpenReport), OpenError> {
         create_private_directory(directory).map_err(OpenError::Directory)?;
         let path = directory.join(DATABASE_FILE);
+        remove_moved_aside(directory)?;
         let mut report = OpenReport::default();
         // A damaged file would otherwise fail every launch; keep it aside and start again.
         let mut connection = match prepare(&path) {
@@ -153,62 +195,73 @@ impl Store {
             Err(error) => return Err(database_error(error)),
         };
         let random = SystemRandom::new();
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(database_error)?;
-        let read = |name: &str| {
-            transaction
-                .query_row("SELECT value FROM meta WHERE name = ?1", [name], |row| {
-                    row.get::<_, String>(0)
-                })
-                .optional()
-                .map_err(database_error)
-        };
-        match read("schema")?.as_deref() {
-            None => {
-                transaction
-                    .execute(
-                        "INSERT INTO meta (name, value) VALUES ('schema', ?1)",
-                        [SCHEMA_VERSION],
-                    )
-                    .map_err(database_error)?;
+        // 1. The key id is committed on its own before any secret is stored, so an open that
+        //    fails later reuses it instead of leaving a new OS entry behind each time.
+        let key_id = {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(database_error)?;
+            let read = |name: &str| meta(&transaction, name);
+            match read("schema")?.as_deref() {
+                None => {
+                    transaction
+                        .execute(
+                            "INSERT INTO meta (name, value) VALUES ('schema', ?1)",
+                            [SCHEMA_VERSION],
+                        )
+                        .map_err(database_error)?;
+                }
+                Some(SCHEMA_VERSION) => {}
+                Some(_) => return Err(OpenError::NewerSchema),
             }
-            Some(SCHEMA_VERSION) => {}
-            Some(_) => return Err(OpenError::NewerSchema),
+            let key_id = match read("secure-key-id")? {
+                Some(id) => id,
+                None => {
+                    let mut bytes = [0_u8; 16];
+                    random.fill(&mut bytes).map_err(|_| OpenError::Random)?;
+                    let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                    let id = format!("storage-{id}");
+                    transaction
+                        .execute(
+                            "INSERT INTO meta (name, value) VALUES ('secure-key-id', ?1)",
+                            [&id],
+                        )
+                        .map_err(database_error)?;
+                    id
+                }
+            };
+            transaction.commit().map_err(database_error)?;
+            key_id
+        };
+        // 2. The OS key store runs with no database lock held: a keychain or Secret Service
+        //    prompt must not keep another process waiting on the database.
+        enum KeyRead {
+            Present(zeroize::Zeroizing<Vec<u8>>),
+            Missing,
+            Unreadable,
         }
-        let key_id = match read("secure-key-id")? {
-            Some(id) => id,
-            None => {
-                let mut bytes = [0_u8; 16];
-                random.fill(&mut bytes).map_err(|_| OpenError::Random)?;
-                let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-                let id = format!("storage-{id}");
-                transaction
-                    .execute(
-                        "INSERT INTO meta (name, value) VALUES ('secure-key-id', ?1)",
-                        [&id],
-                    )
-                    .map_err(database_error)?;
-                id
+        let read_key = || -> Result<KeyRead, SecretStoreError> {
+            match secrets.load(&key_id) {
+                Ok(Some(secret)) if secret.len() == AES_256_GCM.key_len() => {
+                    Ok(KeyRead::Present(secret))
+                }
+                // Unreadable for good: its records can never be opened, as with a missing key.
+                Ok(Some(_)) | Err(SecretStoreError::Corrupt) => Ok(KeyRead::Unreadable),
+                Ok(None) => Ok(KeyRead::Missing),
+                // Unavailable: fail this launch and touch nothing.
+                Err(error) => Err(error),
             }
         };
-        let loaded = match secrets.load(&key_id) {
-            Ok(Some(secret)) if secret.len() == AES_256_GCM.key_len() => Some(secret),
-            // Unreadable for good: its records can never be opened, as with a missing key.
-            Ok(Some(_)) | Err(SecretStoreError::Corrupt) => {
-                report.replaced_unreadable_key = true;
-                None
-            }
-            Ok(None) => None,
-            Err(error) => return Err(error.into()),
+        let loaded = match read_key()? {
+            // A store that has not caught up yet (a roaming credential, a collection that is
+            // still unlocking) gets a second look before the key counts as gone.
+            KeyRead::Missing => read_key()?,
+            other => other,
         };
-        let secret = match loaded {
-            Some(secret) => secret,
-            None => {
-                // Records sealed under a key the OS no longer holds can never be read again.
-                report.discarded_secure_records = transaction
-                    .execute("DELETE FROM records WHERE area = 1", [])
-                    .map_err(database_error)?;
+        let (secret, fresh) = match loaded {
+            KeyRead::Present(secret) => (secret, false),
+            KeyRead::Missing | KeyRead::Unreadable => {
+                report.replaced_unreadable_key = matches!(loaded, KeyRead::Unreadable);
                 let mut fresh = zeroize::Zeroizing::new([0_u8; 32]);
                 random.fill(fresh.as_mut()).map_err(|_| OpenError::Random)?;
                 if report.replaced_unreadable_key {
@@ -220,13 +273,37 @@ impl Store {
                 if stored.as_slice() != fresh.as_ref() {
                     return Err(SecretStoreError::Corrupt.into());
                 }
-                stored
+                (stored, true)
             }
         };
+        // 3. Records sealed under another key can never be read: discard them when the key is
+        //    new, or when it is not the one the records were sealed with (a crash between
+        //    storing a new key and this step).
+        let check = key_check(&secret);
+        {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(database_error)?;
+            let saved = meta(&transaction, "secure-key-check")?;
+            if fresh || saved.as_ref().is_some_and(|saved| *saved != check) {
+                report.discarded_secure_records = transaction
+                    .execute("DELETE FROM records WHERE area = 1", [])
+                    .map_err(database_error)?;
+            }
+            if saved.as_deref() != Some(check.as_str()) {
+                transaction
+                    .execute(
+                        "INSERT INTO meta (name, value) VALUES ('secure-key-check', ?1)
+                         ON CONFLICT (name) DO UPDATE SET value = excluded.value",
+                        [&check],
+                    )
+                    .map_err(database_error)?;
+            }
+            transaction.commit().map_err(database_error)?;
+        }
         let key = UnboundKey::new(&AES_256_GCM, &secret)
             .map(LessSafeKey::new)
             .map_err(|_| SecretStoreError::Corrupt)?;
-        transaction.commit().map_err(database_error)?;
         Ok((
             Self {
                 connection: Mutex::new(connection),

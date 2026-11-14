@@ -28,17 +28,34 @@ the blocking pool; a dropped storage call still commits or rolls back as a whole
 
 ### HTTP client choice
 
-reqwest with default features off and only `rustls-tls-webpki-roots-no-provider`, configured
-with the same `rustls` `ClientConfig` (ring provider, Mozilla roots from `webpki-roots`) as the
-WebSocket. It was already in the workspace lockfile through three crates, so it adds no new
+reqwest with default features off and only `rustls-tls-webpki-roots-no-provider` (plus
+`system-proxy` on desktop), configured with the same `rustls` `ClientConfig` as the WebSocket:
+ring provider, and on Windows, macOS and Linux the OS trust store through
+`rustls-platform-verifier` (Mozilla roots from `webpki-roots` on Android and iOS).
+`NativeConfig::extra_roots` adds a deployment's own CA without touching the OS store. It was already in the workspace lockfile through three crates, so it adds no new
 transitive dependencies, and it runs on the tokio runtime the socket needs anyway. Redirects are
 off (`Policy::none()`, the 3xx is returned unfollowed), there is no cookie store, no HTTP/2,
-no proxy discovery, connect and whole-request timeouts come from `Timeouts`, and the body is
+HTTP follows the system proxy on desktop (environment variables, Windows proxy settings, macOS
+network settings) and none on mobile, connect and whole-request timeouts come from `Timeouts`, and the body is
 read chunk by chunk so a response over `max_response_bytes` fails with `TooLarge` without
 being buffered, with or without a `Content-Length`. `ureq` is smaller but blocking, and a raw
 hyper client would mean owning connection and TLS setup code.
 
 `Credentials` has no effect on native: there is no ambient cookie jar.
+
+### Known differences from the TypeScript clients
+
+- **Android TLS trusts only the Mozilla roots** (not approved yet). A server behind a private or
+  enterprise CA that the user installed on the device does not connect from Android, where the
+  React Native app trusts the system and user stores. Needed: the verifier's Android path, which
+  ships a Kotlin component in the APK (`rustls-platform-verifier-android`) and needs JNI
+  initialisation with the app's `Context` (the Java VM is already reachable, U13). About a day,
+  plus a device check.
+- **WebSockets ignore the proxy** (not approved yet). On a network where only a proxy reaches the
+  internet, HTTP works on desktop but the live connection does not, so environments never get
+  past connecting. `tokio-tungstenite` has no proxy support: the socket needs a hand-written
+  HTTP `CONNECT` through the system proxy (with its auth), then TLS over the tunnel. About a day
+  and a half with tests against a local proxy.
 
 ### Secret storage per OS
 
@@ -56,9 +73,13 @@ and stay inside the cross-area transaction. If the OS store is unavailable, `ope
 `OpenError::SecretStore`; nothing is written in plaintext. If the key is gone (the user cleared
 the keychain) or unreadable (a damaged Android wrapped key, a Keystore key that no longer opens
 it, a wrong length), the unreadable secure rows are deleted at open, a new key replaces it, and
-both are counted in `NativePlatform::open_report()`. A database file SQLite reports as not a
-database or corrupt is moved aside as `client-storage.sqlite.corrupt-<seconds>` and a new one
-started (`recreated_database`). On Unix the data directory is created `0700`; deleted secure rows
+both are counted in `NativePlatform::open_report()`. The OS store is read with no database lock
+held, a missing key gets a second read before it counts as gone, and the key id is committed
+before a new key is stored, so a failed open reuses it. A database file SQLite reports as not a
+database or corrupt, at open or in `PRAGMA quick_check`, is moved aside as
+`client-storage.sqlite.corrupt-<seconds>` and a new one started (`recreated_database`); the next
+open deletes the copy, sealed rows and all. The report reaches the UI once, through
+`Platform::storage_report` and `ClientRuntime::take_storage_notice`. On Unix the data directory is created `0700`; deleted secure rows
 are overwritten (`secure_delete`) and the WAL is checkpointed after secure deletes.
 
 **Shell requirement (iOS keychain accessibility).** `KeychainStore` sets only class, service and
@@ -105,6 +126,12 @@ profile keeps them without import:
 - the DPoP proof key: `t3code:cloud-auth` / `keys` / `relay-dpop-proof-key`, same record shape
   (`{ privateKey: CryptoKey, publicJwk, thumbprint }`), private key non-extractable;
 - the analytics device id: `localStorage["t3code:analytics-device-id"]`.
+
+**Shell requirement (legacy credentials).** These stores stay read-only here, so a token the
+TypeScript client saved (the `t3code:connection-runtime` catalog, `expo-secure-store`, the
+Electron store) is still on disk after the environment is removed in the Rust client. Once a
+shell stops shipping the TypeScript client beside it, it must clear those stores after a
+successful import; until then removing an environment does not remove the legacy copy.
 
 ## Host actions
 

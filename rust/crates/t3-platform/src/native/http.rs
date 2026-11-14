@@ -1,5 +1,5 @@
 //! reqwest without default features: rustls with the ring provider, no redirects, no cookies,
-//! no HTTP/2, no proxy discovery. The body is read chunk by chunk against the caller's cap.
+//! no HTTP/2, the system proxy on desktop. The body is read chunk by chunk against the caller's cap.
 use super::Timeouts;
 use std::{collections::BTreeMap, sync::Arc};
 use t3_client::platform::{HttpRequest, HttpResponse, PlatformError};
@@ -7,6 +7,20 @@ use t3_client::platform::{HttpRequest, HttpResponse, PlatformError};
 #[derive(Clone)]
 pub(crate) struct HttpClient {
     client: reqwest::Client,
+    /// Loopback never goes through a proxy, as Chromium's implicit `<-loopback>` bypass does
+    /// in the TypeScript desktop app; the system proxy settings do not say so on their own.
+    direct: reqwest::Client,
+}
+
+fn is_loopback(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(name) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            name == "localhost" || name.ends_with(".localhost")
+        }
+        url::Host::Ipv4(address) => address.is_loopback(),
+        url::Host::Ipv6(address) => address.is_loopback(),
+    }
 }
 
 fn network(error: reqwest::Error) -> PlatformError {
@@ -23,14 +37,21 @@ impl HttpClient {
         tls: Arc<rustls::ClientConfig>,
         timeouts: &Timeouts,
     ) -> Result<Self, reqwest::Error> {
-        let client = reqwest::Client::builder()
-            .use_preconfigured_tls((*tls).clone())
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(timeouts.connect)
-            .timeout(timeouts.http)
-            .no_proxy()
-            .build()?;
-        Ok(Self { client })
+        let builder = || {
+            reqwest::Client::builder()
+                .use_preconfigured_tls((*tls).clone())
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(timeouts.connect)
+                .timeout(timeouts.http)
+        };
+        // Desktop follows the system proxy (environment, Windows settings, macOS network
+        // settings) as the TypeScript desktop app does; mobile does not use one yet.
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        let client = builder().build()?;
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        let client = builder().no_proxy().build()?;
+        let direct = builder().no_proxy().build()?;
+        Ok(Self { client, direct })
     }
 
     pub(crate) async fn send(&self, request: HttpRequest) -> Result<HttpResponse, PlatformError> {
@@ -39,6 +60,11 @@ impl HttpClient {
         if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
             return Err(PlatformError::InvalidData("HTTP URL scheme".into()));
         }
+        let client = if url.host().as_ref().is_some_and(is_loopback) {
+            &self.direct
+        } else {
+            &self.client
+        };
         let method = reqwest::Method::from_bytes(request.method.as_bytes())
             .map_err(|_| PlatformError::InvalidData("HTTP method".into()))?;
         let mut headers = reqwest::header::HeaderMap::new();
@@ -50,8 +76,7 @@ impl HttpClient {
                     .map_err(|_| PlatformError::InvalidData("HTTP header value".into()))?,
             );
         }
-        let mut response = self
-            .client
+        let mut response = client
             .request(method, url)
             .headers(headers)
             .body(request.body)
@@ -89,5 +114,30 @@ impl HttpClient {
             headers: response_headers,
             body,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::is_loopback;
+
+    #[test]
+    fn loopback_hosts_are_the_ones_chromium_never_proxies() {
+        for (url, loopback) in [
+            ("http://localhost:3773/", true),
+            ("http://LOCALHOST./", true),
+            ("http://app.localhost/", true),
+            ("http://127.0.0.1/", true),
+            ("http://127.8.9.10/", true),
+            ("http://[::1]:80/", true),
+            ("http://localhost.example.com/", false),
+            ("http://10.0.0.1/", false),
+            ("https://example.com/", false),
+            ("http://[::2]/", false),
+        ] {
+            let parsed = url::Url::parse(url).unwrap();
+            assert_eq!(is_loopback(&parsed.host().unwrap()), loopback, "{url}");
+        }
     }
 }

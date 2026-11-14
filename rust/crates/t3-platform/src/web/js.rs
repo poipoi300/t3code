@@ -32,7 +32,7 @@ pub(crate) fn error_name(value: &JsValue) -> String {
         .unwrap_or_else(|| "Error".into())
 }
 
-type Listener = (
+pub(crate) type Listener = (
     EventTarget,
     &'static str,
     Closure<dyn FnMut(web_sys::Event)>,
