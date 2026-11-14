@@ -149,8 +149,10 @@ pub fn screen() -> AnyElement {
                     }
                 })
             },
-        ))
-        .child(button(
+        ));
+    // Only the demo backend knows the demo server.
+    let actions = if runtime.is_demo() {
+        actions.child(button(
             ButtonContent::Label(t("Fill in the demo server")),
             ButtonVariant::GhostMuted,
             ButtonSize::Default,
@@ -159,7 +161,10 @@ pub fn screen() -> AnyElement {
                 method.set(Method::Link);
                 link.set(DEMO_PAIRING_URL.to_owned());
             },
-        ));
+        ))
+    } else {
+        actions
+    };
 
     let status = dynamic(move || {
         connecting().then(|| label(TextRole::Caption, Tone::Muted, || t("Connecting…")))

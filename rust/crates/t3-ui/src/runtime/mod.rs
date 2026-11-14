@@ -1,6 +1,7 @@
 //! The application runtime: one store, one backend, one adapter, owned by `App`.
 
 pub mod backend;
+pub mod client;
 pub mod demo;
 pub mod host;
 pub mod store;
@@ -20,19 +21,19 @@ pub struct Rt {
     pub store: StoreSignals,
     backend: Stored<Rc<dyn Backend>>,
     environments: Signal<Vec<EnvironmentEntry>>,
+    choice: host::Choice,
 }
 
 impl Rt {
-    /// Builds the runtime under the current owner (`App`) and provides it.
-    pub fn boot() -> Self {
-        let store = ClientStore::default();
-        let backend = host::backend(store.clone());
-        let rt = Self::new(store, backend);
+    /// Builds the runtime under the current owner (`App`) around a started backend, and
+    /// provides it.
+    pub fn boot(store: ClientStore, started: host::Started) -> Self {
+        let rt = Self::new(store, started.backend, started.choice);
         provide_context(rt);
         rt
     }
 
-    pub fn new(store: ClientStore, backend: Rc<dyn Backend>) -> Self {
+    pub fn new(store: ClientStore, backend: Rc<dyn Backend>, choice: host::Choice) -> Self {
         let signals = StoreSignals::attach(store);
         let environments = signal(backend.environments());
         let mut changes = backend.changes();
@@ -46,7 +47,13 @@ impl Rt {
             store: signals,
             backend: stored(backend),
             environments,
+            choice,
         }
+    }
+
+    /// Whether the demo backend runs (its switch was given at launch).
+    pub fn is_demo(&self) -> bool {
+        self.choice == host::Choice::Demo
     }
 
     pub fn backend(&self) -> Rc<dyn Backend> {

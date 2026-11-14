@@ -1,30 +1,19 @@
 //! The seam between the UI and the composed client core.
 //!
 //! The UI calls these methods and reads the `ClientStore`; it never applies server events,
-//! retries commands or decides permissions. `t3-client` will provide the production
-//! implementation (its composition root: catalog, pairing, supervisor, RPC session, shell and
-//! thread sync, operations); until then `demo::DemoBackend` drives the same store.
+//! retries commands or decides permissions. Production is `t3_client::composition::ClientRuntime`
+//! (adapted below, started by `client.rs`); `demo::DemoBackend` drives the same store behind the
+//! explicit demo switch (`host.rs`).
 
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
-use t3_client::connection::{ConnectionFailure, ConnectionState, PairingInput};
+use futures::{FutureExt, StreamExt};
+use t3_client::composition::ClientRuntime;
+use t3_client::connection::{ConnectionFailure, FailureKind, PairingInput};
+use t3_client::platform::Platform;
 use t3_client::types::{EnvironmentId, ThreadKey};
 
-/// One saved environment as the connection layer sees it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct EnvironmentEntry {
-    pub id: EnvironmentId,
-    pub label: String,
-    pub state: ConnectionState,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SendError {
-    /// The environment has no live session; the message was not accepted.
-    Disconnected,
-    /// The server or the client's validation refused it, with the client's English reason.
-    Rejected(String),
-}
+pub use t3_client::composition::{EnvironmentEntry, SendError};
 
 pub trait Backend {
     /// Pairs with the server the user described and registers it. Validation and its messages
@@ -53,4 +42,129 @@ pub trait Backend {
         key: &ThreadKey,
         text: String,
     ) -> LocalBoxFuture<'static, Result<(), SendError>>;
+}
+
+/// The composition root is the backend: each method is the client's own.
+impl<P: Platform + Clone + 'static> Backend for ClientRuntime<P> {
+    fn pair(
+        &self,
+        input: PairingInput,
+    ) -> LocalBoxFuture<'static, Result<EnvironmentId, ConnectionFailure>> {
+        ClientRuntime::pair(self, input)
+    }
+
+    fn environments(&self) -> Vec<EnvironmentEntry> {
+        ClientRuntime::environments(self)
+    }
+
+    fn changes(&self) -> LocalBoxStream<'static, ()> {
+        ClientRuntime::changes(self)
+    }
+
+    fn open_thread(&self, key: &ThreadKey) {
+        ClientRuntime::open_thread(self, key);
+    }
+
+    fn close_thread(&self, key: &ThreadKey) {
+        ClientRuntime::close_thread(self, key);
+    }
+
+    fn send_message(
+        &self,
+        key: &ThreadKey,
+        text: String,
+    ) -> LocalBoxFuture<'static, Result<(), SendError>> {
+        ClientRuntime::send_message(self, key, text)
+    }
+}
+
+/// The client could not start on this host (no app data directory, storage that would not
+/// open). Pairing answers with why, so the connect screen shows the reason, not a dead button.
+pub struct Unavailable(pub String);
+
+impl Backend for Unavailable {
+    fn pair(
+        &self,
+        _input: PairingInput,
+    ) -> LocalBoxFuture<'static, Result<EnvironmentId, ConnectionFailure>> {
+        futures::future::ready(Err(ConnectionFailure {
+            kind: FailureKind::Unsupported,
+            detail: self.0.clone(),
+            http_status: None,
+            trace_id: None,
+            hop: None,
+            via: None,
+            cause: None,
+            server_update_required: false,
+        }))
+        .boxed_local()
+    }
+
+    fn environments(&self) -> Vec<EnvironmentEntry> {
+        Vec::new()
+    }
+
+    fn changes(&self) -> LocalBoxStream<'static, ()> {
+        futures::stream::empty().boxed_local()
+    }
+
+    fn open_thread(&self, _key: &ThreadKey) {}
+
+    fn close_thread(&self, _key: &ThreadKey) {}
+
+    fn send_message(
+        &self,
+        _key: &ThreadKey,
+        _text: String,
+    ) -> LocalBoxFuture<'static, Result<(), SendError>> {
+        futures::future::ready(Err(SendError::Disconnected)).boxed_local()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+    use std::rc::Rc;
+    use t3_client::ClientStore;
+    use t3_client::connection::resolve_pairing_target;
+    use t3_client::testing::FakePlatform;
+    use t3_client::types::ThreadId;
+    use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+
+    fn client() -> Rc<dyn Backend> {
+        Rc::new(ClientRuntime::new(
+            FakePlatform::default(),
+            ClientStore::default(),
+            OrchestrationV2CreationSource::Web,
+            Rc::new(|_| {}),
+        ))
+    }
+
+    #[test]
+    fn the_adapter_answers_with_the_composition_roots_own_results() {
+        let backend = client();
+        let input = PairingInput {
+            pairing_url: Some("https://example.test/pair".into()),
+            ..PairingInput::default()
+        };
+        let expected = resolve_pairing_target(&input).expect_err("no token");
+        let failure = block_on(backend.pair(input)).expect_err("the client's validation");
+        assert_eq!(failure.detail, expected.detail);
+        assert!(backend.environments().is_empty());
+        let key = ThreadKey {
+            environment: EnvironmentId("nowhere".into()),
+            thread: ThreadId("thread".into()),
+        };
+        assert_eq!(
+            block_on(backend.send_message(&key, "  ".into())),
+            Err(SendError::Rejected("Enter a message.".into()))
+        );
+        assert_eq!(
+            block_on(backend.send_message(&key, "hello".into())),
+            Err(SendError::Disconnected)
+        );
+        backend.open_thread(&key);
+        backend.close_thread(&key);
+    }
 }

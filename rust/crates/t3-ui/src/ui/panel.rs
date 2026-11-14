@@ -13,6 +13,7 @@
 
 use std::rc::Rc;
 
+use nsh_core::element::desktop::title_bar;
 use nsh_core::prelude::*;
 
 use crate::i18n::t;
@@ -39,7 +40,7 @@ pub fn panel<E: IntoElement + 'static>(
             LayoutClass::Wide => when(open, move || {
                 view()
                     .app_class(tw("flex min-h-0 min-w-0 h-full flex-col"))
-                    .child(untracked(|| children()))
+                    .child(untracked(&*children))
             })
             .into_element(),
             LayoutClass::Medium => right_panel_sheet(
@@ -52,13 +53,20 @@ pub fn panel<E: IntoElement + 'static>(
             // Adaptive departure: the outer navigation stack pushes this page over the thread.
             LayoutClass::Compact => when(open, move || {
                 let on_dismiss = on_close.clone();
+                let on_back = on_close.clone();
                 nsh_base::nav_page()
-                    .title(SharedString::from(t("Workspace panel")))
-                    .on_dismiss(move || on_dismiss())
+                    .title(move || SharedString::from(t("Workspace panel")))
+                    .pop_on_back(false)
+                    .on_back_press(move || on_back())
+                    .on_dismiss(move || {
+                        if open.get_untracked() {
+                            on_dismiss();
+                        }
+                    })
                     .child(
                         view()
                             .app_class(tw("flex min-h-0 min-w-0 flex-1 flex-col"))
-                            .child(untracked(|| children())),
+                            .child(untracked(&*children)),
                     )
             })
             .into_element(),
@@ -80,16 +88,27 @@ pub fn right_panel_sheet<E: IntoElement + 'static>(
     let on_close = Rc::new(on_close);
     effect(move || {
         let next = open.get();
+        if !next && !shown.get_untracked() {
+            return;
+        }
         if next {
             shown.set(true);
         }
-        let duration = if reduce_motion() { 0 } else { animation_duration_ms };
+        let duration = if reduce_motion() {
+            0
+        } else {
+            animation_duration_ms
+        };
         if duration == 0 {
             progress.set(if next { 1.0 } else { 0.0 });
             shown.set(next);
             return;
         }
-        let end = progress.timing(if next { 1.0 } else { 0.0 }, duration as f32, Easing::EaseInOut);
+        let end = progress.timing(
+            if next { 1.0 } else { 0.0 },
+            duration as f32,
+            Easing::EaseInOut,
+        );
         spawn(async move {
             if end.await && !open.get_untracked() {
                 shown.set(false);
@@ -104,6 +123,7 @@ pub fn right_panel_sheet<E: IntoElement + 'static>(
             .label(move || SharedString::from(t("Workspace panel")))
             .animation(ModalAnimation::None)
             .close_on_escape(false)
+            .close_on_backdrop_press(false)
             .close_on_swipe(false)
             .on_cancel(move || {
                 if open.get_untracked() {
@@ -126,27 +146,29 @@ pub fn right_panel_sheet<E: IntoElement + 'static>(
             )
             .child(
                 overlay()
-                    .top_0()
+                    // wco's topbar margin/height becomes NSH's reactive title-bar inset.
+                    .top(move || title_bar().top)
                     .right_0()
                     .bottom_0()
                     // Viewport min()/vw lengths are resolved from the same window width in NSH.
                     .w(move || px(sheet_width(window().width.0)))
-                    // wco insets are supplied by the shared shell, not a browser CSS variant.
                     // will-change-transform is dropped: native animation bindings own scheduling.
-                    .app_class(tw("flex max-h-full min-h-0 min-w-0 flex-col bg-popover not-dark:bg-clip-padding text-popover-foreground shadow-lg/5 border-s"))
+                    // NSH has no background-clip property (`not-dark:bg-clip-padding`).
+                    .app_class(tw("flex max-h-full min-h-0 min-w-0 flex-col bg-popover text-popover-foreground shadow-lg/5 border-s min-w-80 max-w-[28rem] max-[760px]:min-w-0"))
+                    .disabled(move || !open.get())
                     .bind_opacity(&progress)
                     .bind_translate_x(&translate_x)
                     // SheetPopup's before shadow is an explicit first child; max-sm hides it.
                     .child(view().app_class(tw("pointer-events-none absolute inset-0 shadow-[0_1px_rgb(0_0_0/4%)] dark:shadow-[0_-1px_rgb(255_255_255/6%)] max-sm:hidden")))
                     // SheetHeader's sr-only SheetTitle becomes the dialog's accessible label.
-                    .child(untracked(|| children())),
+                    .child(untracked(&children)),
             )
     })
 }
 
 /// `RightPanelSheet`'s 760 px media query, 28rem cap and narrow 24rem cap (16 px root).
 pub fn sheet_width(viewport_width: f32) -> f32 {
-    if viewport_width <= 760.0 {
+    if viewport_width < 760.0 {
         (viewport_width * 0.88).min(384.0)
     } else {
         (viewport_width * 0.42).clamp(320.0, 448.0)
@@ -162,13 +184,17 @@ mod tests {
         for (viewport, expected) in [
             (390.0, 343.2),
             (640.0, 384.0),
-            (760.0, 384.0),
+            (759.0, 384.0),
+            (760.0, 320.0),
             (761.0, 320.0),
             (800.0, 336.0),
             (1024.0, 430.08),
             (1280.0, 448.0),
         ] {
-            assert!((sheet_width(viewport) - expected).abs() < 0.01, "{viewport}");
+            assert!(
+                (sheet_width(viewport) - expected).abs() < 0.01,
+                "{viewport}"
+            );
         }
     }
 }

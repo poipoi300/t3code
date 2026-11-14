@@ -7,25 +7,30 @@ use nsh_testing::Headless;
 pub const PHONE: (f32, f32) = (390.0, 844.0);
 pub const DESKTOP: (f32, f32) = (1280.0, 800.0);
 
-pub fn start(window: (f32, f32)) -> Headless {
-    Headless::start(EngineConfig {
+/// Launched by a link carrying the demo switch, so the app runs `DemoBackend`.
+pub const DEMO_LINK: &str = "https://t3.example.test/?backend=demo";
+
+fn config(window: (f32, f32)) -> EngineConfig {
+    EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
         ..EngineConfig::new(Root::of::<t3_ui::App>())
-    })
-    .expect("the engine starts")
+    }
+}
+
+/// The app on the demo backend.
+pub fn start(window: (f32, f32)) -> Headless {
+    Headless::start_with_link(config(window), DEMO_LINK).expect("the engine starts")
+}
+
+/// The app as a plain launch starts it: the real client. Headless keeps no app data.
+pub fn start_without_switch(window: (f32, f32)) -> Headless {
+    Headless::start(config(window)).expect("the engine starts")
 }
 
 /// The app as the web runtime runs it, at an address.
 pub fn start_on_web(window: (f32, f32), address: &str) -> Headless {
-    Headless::start_at_page(
-        EngineConfig {
-            ui_sets: t3_ui::registries(),
-            viewport: size(px(window.0), px(window.1)),
-            ..EngineConfig::new(Root::of::<t3_ui::App>())
-        },
-        address,
-    )
+    Headless::start_at_page(config(window), address)
     .expect("the engine starts on a page")
 }
 

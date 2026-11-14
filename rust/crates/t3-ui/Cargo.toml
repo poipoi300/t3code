@@ -19,6 +19,12 @@ t3-i18n = { path = "../t3-i18n", default-features = false }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 serde_json = "1"
 percent-encoding = "2"
+t3-platform = { path = "../t3-platform" }
+log = "0.4"
+
+# The client's network and storage runtime on native hosts (`runtime/client.rs`).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread"] }
 
 [dev-dependencies]
 futures = { version = "0.3", features = ["executor"] }
