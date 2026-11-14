@@ -3,6 +3,7 @@
 
 mod detached;
 mod non_blocking;
+pub mod provider_environment;
 mod resolve;
 pub use detached::{DetachedConsole, spawn_detached};
 pub use non_blocking::{env_trampoline, spawn_non_blocking, supports_env_chdir};
