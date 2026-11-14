@@ -55,6 +55,30 @@ fn concurrent_limits_only_extend_the_pause() {
 }
 #[test]
 fn remote_recognition_priority_and_url_shapes() {
+    for key in [
+        "ssh.dev.azure.com/v3/Org/Project/Repo",
+        "vs-ssh.visualstudio.com/v3/Org/Project/Repo",
+        "org.visualstudio.com/DefaultCollection/Project/_git/Repo",
+        "dev.azure.com/Org/Project/_git/Repo",
+    ] {
+        assert_eq!(
+            azure_canonical_repository_key(key).as_deref(),
+            Some("dev.azure.com/org/project/_git/repo")
+        );
+    }
+    assert_eq!(
+        azure_repository_key_from_remote("vs-ssh.visualstudio.com/v3/Org/Project/Repo").as_deref(),
+        Some("Org.visualstudio.com/Project/_git/Repo")
+    );
+    assert_eq!(
+        azure_canonical_repository_key("server.example/Project/_git/Repo"),
+        None
+    );
+    let identity: RepositoryIdentity=serde_json::from_value(serde_json::json!({"canonicalKey":"dev.azure.com/org/project/_git/web%20app","locator":{"source":"git-remote","remoteName":"origin","remoteUrl":"git@ssh.dev.azure.com:v3/org/project/web%20app"},"name":"Web%20App+One"})).unwrap();
+    assert_eq!(
+        azure_repository_selector(&identity).as_deref(),
+        Some("Web App+One")
+    );
     for (remote, kind, host, repository) in [
         (
             "git@github.com:Acme/Web.git",

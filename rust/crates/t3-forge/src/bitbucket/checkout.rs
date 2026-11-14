@@ -91,7 +91,8 @@ impl Bitbucket {
         let state = match input.state {
             Some(ChangeRequestState::Merged) => vec!["MERGED"],
             Some(ChangeRequestState::Closed) => vec!["DECLINED", "SUPERSEDED"],
-            Some(ChangeRequestState::Open) | None => vec!["OPEN"],
+            Some(ChangeRequestState::Open) => vec!["OPEN"],
+            None => vec!["OPEN", "MERGED", "DECLINED", "SUPERSEDED"],
         };
         let source = input
             .source

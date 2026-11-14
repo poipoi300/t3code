@@ -2,8 +2,8 @@
 
 Native, transport-neutral forge layer on Tokio, `t3-contracts`, `t3-process`,
 `t3-git`, and reqwest. GitHub operations and the source-control application
-services, GitLab, and Bitbucket are implemented. Azure DevOps, GitCafe, Forgejo,
-and Cursor Origin are being ported; URL recognition does not imply backend support.
+services, GitLab, Bitbucket, Azure DevOps, GitCafe, Forgejo/Gitea and Cursor Origin
+are implemented. Optional operations follow each source backend's supported surface.
 
 ## Public API
 
@@ -56,7 +56,7 @@ and ends quietly when unavailable; consumers must retain polling.
 
 Sources are `packages/source-control-core/src/{server,shared}`,
 `packages/source-control-definitions`, `apps/server/src/sourceControl`, and
-`packages/source-control-github/src/{server,shared}`.
+`packages/source-control-{github,gitlab,bitbucket,azure-devops,gitcafe,forgejo,cursor-origin}/src/{server,shared}`.
 
 GitHub includes repository creation/clone URL/default branch lookup; PR creation,
 number/URL/branch lookup and owner-qualified REST listing; single/cross-repository
@@ -102,8 +102,7 @@ Its optional surface follows TypeScript: no app login, credential pinning, SSE,
 stack operations, workflow approval, host viewed marks, or cross-repository list.
 `GitLab::with_environment` takes the refreshed environment; `with_cli` permits
 recorded request/response fixtures. Neither reads a provider home itself.
-Eleven GitLab fixture tests passed on Windows. The all-target/all-feature Clippy
-run passes with warnings denied (two Cargo jobs; dedicated D: build output).
+Eleven GitLab fixture tests cover its native CLI/API behavior.
 
 Bitbucket implements the TypeScript Cloud backend: checkout/repository creation
 and clone/default-target lookup, listings and filters, detail/preview/checks,
@@ -114,10 +113,93 @@ and environment precedence. `ApiHttp::update_credential` atomically updates a
 registered adapter and changes its settings revision. Calls and redirects pin
 one credential snapshot; cooldowns are scoped to its fingerprint. Foreign
 origins are refused, response bodies are bounded, and raw diagnostics stay local.
-Ten Bitbucket/HTTP fixture tests and a quoted-path revision parser test pass.
+Eleven Bitbucket/HTTP fixture tests and a quoted-path revision parser test cover it.
 Cloud-compatible custom endpoints are explicit; Server/Data Center APIs differ.
 Unlike TypeScript's unbounded recursion, non-conversation pagination has a
 1,000-page safety ceiling and fails rather than reporting incomplete results.
+
+Azure DevOps uses `az` with its DevOps extension through `ForgeCli`. It covers
+checkout/repository workflows, discovery and PAT viewer fallback, raw-offset PR
+paging, summary/detail/activity, reviewer writes, edits, and supported state and
+auto-complete actions. Diffs pin an iteration; whole item reads have eight shared
+spawn slots, binary metadata and byte limits, native bounded Myers diffing on
+blocking workers, and the source file/edit/byte slice budgets. Blob revisions
+preserve unknown paths when change paging is truncated. The native text diff
+replaces TypeScript's `diff` dependency; no Node/Python helper is launched.
+Ten Azure CLI fixture tests and three bounded-diff tests cover it.
+Azure review writes, check lists, reactions, and reviewer candidates remain
+unsupported exactly as in the source backend. Repository visibility follows
+project permissions because `az repos create` has no visibility option.
+Values beginning with `@` are refused where Azure could treat them as local-file
+indirection; the authorized PR description file is passed intentionally.
+
+GitCafe includes literal/settings/environment/CLI credential precedence, scoped
+staging credentials, five-minute helper-token caching and live settings updates;
+managed CLI discovery, checkout and asynchronous repository admission; actor-ID
+filters and creation-position list cursors; checks, line totals, labels, review
+threads, reactions and permissions; versioned writes and head-fenced reviews;
+immutable fork source reads and revision-pinned diff pages; and stack landing or
+restacking fenced by the reviewed heads. API redirects stay on the configured
+origin under `/api/`; non-preserving write redirects are refused. Error text is
+fixed rather than echoing a remote problem response. Thirteen GitCafe fixtures
+cover it. Optional methods absent from the source (for example inline draft reviews,
+viewed-file host marks, and commit diffs) return `Unsupported`.
+`gitcafe::credentials::GitCafeCredentials` takes literal settings, an explicit
+environment snapshot and the CLI working directory; it never resolves secrets or
+reads provider homes. `ApiHttp::ApiCredentials` supplies pinned request-time
+authentication, including 401 invalidation; the direct credential API remains
+available for Bitbucket. The composition root owns settings-to-adapter wiring.
+
+Forgejo/Gitea covers repository and checkout workflows, authenticated unknown-host
+and SSH alias refinement, mounted serving URLs, listings, details and required
+check globs, comments/reviews/commits/reactions, diffs and fork file contents,
+reviewers/labels, edits and merge/update/close/reopen actions. It prefers configured
+`fj` accounts, validates them with `fj whoami`, rereads renewed OAuth credentials,
+then uses native HTTP with token authentication. `tea` is the fallback when no
+configured fj account serves the target; a rejected configured account cannot
+silently change identity to tea. JSON writes use stdin. Redirects remain inside
+the serving origin and mounted API path. Ten Forgejo fixture tests cover these
+boundaries. Replies, resolution and draft conversion are unsupported as in the
+source backend.
+
+Construct `Forgejo` with `ForgejoConfig`: an authorized CLI working directory,
+explicit environment and resolved key-file candidates. `transport::keys_paths`
+computes the current platform's modern and legacy locations from caller-supplied
+home/data-home/app-data paths; it reads no environment or home itself. Empty
+candidates disable native fj credential reads. Authentication files are bounded
+to 1 MiB. No provider's credentials appear in Debug output or remote errors.
+
+Cursor Origin covers private repository creation, namespace discovery, clone URLs,
+checkout and PR creation/listing, summary/detail/checks/activity, version-pinned
+diffs, state/draft/merge actions, edits, comments, inline reviews, replies and
+thread resolution. Its explicit `CursorOriginConfig` supplies the authentication
+working directory and environment; only `origin auth token/status` and checkout
+or decorative avatar reads use the CLI. Native HTTP reuses pooled connections,
+serializes token reads, caches successful sessions for five minutes and failures
+for ten seconds, and refreshes a refused token once. Late refusals cannot clear
+a newer session. Long page tokens stay behind bounded opaque cursors; expired
+cursors request a refresh. A changed base triggers mergeability verification;
+an open stacked parent prevents an implicit stack merge. Twelve Cursor fixtures
+cover these behaviors. Repository creation is followed by a private-visibility
+update; failure identifies the already-created repository and team exposure.
+Reviewer requests/candidates, reactions, labels, blob contents and host viewed
+marks remain unsupported, matching the source's optional surface.
+
+All checkout listings interpret an absent state as every state. This matters to
+`ForgeHost::discover_branch` and `ForgeReviewHost`: a merged branch must still
+resolve. Bounded pagination reports truncation; Cursor's incomplete all-green
+check list remains pending. Registry shutdown cancels HTTP/CLI work and joins
+GitHub event producers and GitLab cleanup tasks.
+
+| Backend | Construction and credentials | Source-supported optional features |
+| --- | --- | --- |
+| GitHub | `GitHub` + `GitHubHttp` + explicit `Credentials` | App auth, pinned sessions, batches, stacks, events, media, host viewed marks |
+| GitLab | `GitLab::new` + refreshed environment/optional `ForgeCli` | Discussions, reactions, labels/reviewers, blob revisions, auto-merge/revert |
+| Bitbucket Cloud | `Bitbucket::new(ApiHttp, Git)` + literal/updatable `ApiCredential` | Threads/votes, reviewer UUIDs, patch-derived revisions |
+| Azure DevOps | `AzureDevOps::new` + refreshed environment/optional `ForgeCli` | Iteration diffs/revisions, reviewers, auto-complete |
+| GitCafe | `GitCafe::new(Git, GitCafeCredentials, RateLimits)` | Versioned writes, fork snapshots, guarded stack land/restack |
+| Forgejo/Gitea | `Forgejo::new(Git, ForgejoConfig)` | fj/tea account routing, mounted hosts, required checks, fork contents, reactions |
+| Cursor Origin | `CursorOrigin::new(Git, CursorOriginConfig)` | Session refresh, inline threads, pinned patches, guarded merge |
 
 ## Remaining work and known differences
 
@@ -127,10 +209,11 @@ Unlike TypeScript's unbounded recursion, non-conversation pagination has a
   No service reads T3 home, provider homes, application settings or live secrets
   implicitly. Updating credentials uses `GitHubCredentials::update_settings`;
   host-secret resolution remains in the settings/application layer.
-- Core definitions are native recognition/link helpers, not the complete
-  browser-safe `shared/definition.ts` API. Azure SSH/web canonical keys and
-  mounted-host identity refinement remain with their backend ports. Identity
-  hooks expose Rust values rather than TypeScript resolver callbacks.
+- Core definitions are native recognition/link helpers, not the browser-safe UI
+  `shared/definition.ts` API. `remote::azure_{repository_key_from_remote,
+  canonical_repository_key,repository_selector}` supplies Azure SSH/legacy web
+  normalization and decoded CLI names to the project/host composition. Azure,
+  GitLab, Forgejo and Cursor identity hooks expose existing Rust contracts.
 - Native errors preserve classification, retry time, HTTP status, access hints
   and sanitized upstream diagnostic values; exact TypeScript cause classes and
   every error sentence are not reproduced. Diagnostic strings and clone progress
@@ -139,11 +222,12 @@ Unlike TypeScript's unbounded recursion, non-conversation pagination has a
   refreshed environment; it does not launch a login shell itself.
 - The full TypeScript test suite has not been ported. Recorded-response and real
   Git integration coverage is listed below; POSIX execution remains unverified.
-- All other backends remain, in the requested order:
-  `packages/source-control-gitlab`, `source-control-bitbucket`,
-  `source-control-azure-devops`, `source-control-gitcafe`,
-  `source-control-forgejo`, `source-control-cursor-origin`. Recognition of their
-  URLs is core functionality, not an implementation of those backends.
+- Native Cursor reads are performed from a fresh PR basis rather than launching
+  speculative reads from the last observed PR. Successful PR/check reads cache
+  for one second, repository settings five minutes, base tips two seconds and
+  verified immutable patches/mergeability one hour. Caches are bounded and
+  generation/revision scoped; some evict all entries at capacity rather than the
+  source's FIFO policy. There is no detached connection warmup or avatar task.
 
 `Provider*`, selector/context and operation-input structs correspond to native
 interfaces in TypeScript source-control-core. Wire actors, capabilities, actions,
@@ -151,10 +235,10 @@ checks, reviews and source-control results reuse `t3-contracts`; no missing wire
 contract was replaced locally. Therefore there are no substitute wire types to
 move to `t3-contracts`.
 
-The PR watch service in `apps/server/src/pullRequest/` is intentionally untouched.
 `Forge` exposes summary, detail/checks, activity, thread tails, watch fingerprints,
-stack reads and optional events for its future Rust implementation. Its polling,
-persistence, notification and agent-wake policy belong outside this crate.
+stack reads and optional events to the implemented `t3-pull-request` and
+`t3-orchestration` services. Their polling, persistence, notification and agent-wake
+policy belong outside this crate.
 
 ## Server handoff: all 54 deferred RPCs
 
@@ -243,17 +327,26 @@ This crate does not remove registrations from `t3-server/handlers/unsupported.rs
 | `worktreeSetup.cancel` | No forge I/O | `WorktreeSetupTracker::cancel` |
 | `git.resolvePullRequest` | `ForgeReviewHost` implements `ReviewHost::get` | Existing `GitWorkflowService::resolve_pull_request` |
 | `git.preparePullRequestThread` | `ForgeReviewHost` implements get/checkout/clone URLs/default branch and explicit setup | Existing Git workflow plus authorized project/setup context |
-| `git.runStackedAction` | `ForgeReviewHost` implements list/create/targets-remote; `Forge::run_action` handles GitHub stack actions | Commit/PR content generation, link-created/refresh-pushed and status postconditions |
+| `git.runStackedAction` | `ForgeReviewHost` implements list/create/targets-remote; `Forge::run_action` handles GitHub/GitCafe stack actions | Commit/PR content generation, link-created/refresh-pushed and status postconditions |
 | `vcs.createWorktree` | No forge I/O | Trusted worktree settings/destination, submodules, branch-base persistence and setup |
 
 ## Verification
 
-Verified on Windows during takeover: all 67 tests pass, together with crate
-formatting and exact Clippy with dependencies (`-D warnings`). The inherited
-baseline was 55 passing tests. Added coverage includes real clone/publish and SSH
+Windows verification: `cargo fmt -p t3-forge --check`, exact
+`cargo clippy -p t3-forge --all-targets --all-features -- -D warnings`, and
+`cargo test -p t3-forge` pass (139 tests across 14 suites). The dependent
+`cargo check -p t3-pull-request --lib --features forge` also passes. All Cargo
+output uses `D:\t3code-rust-target\server-k` and the unchanged two-job config.
+The combined `--all-targets --features forge,orchestration` dependent check is
+blocked outside this crate: `t3-orchestration/src/ports/acp_replay/testkit/fixtures/index.rs:399`
+includes the absent `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/grok_transcript.ndjson`.
+No sibling source or fixture was changed to bypass that error.
+
+The inherited baseline was 55 passing tests. Added coverage includes real clone/publish and SSH
 fallback, URL credential redaction, typed progress, sign-in dispatch, CLI
 credential caching/settings changes, discovery and real `GitWorkflowService`
-integration. Refresh-failure, whitespace-host verification and stack-permission
+integration, all six additional backend fixtures, paging/version fences and
+shutdown. Refresh-failure, whitespace-host verification and stack-permission
 batching regressions were observed failing before their fixes. No real forge or
 developer credential is used. POSIX execution remains unverified.
 
@@ -282,7 +375,7 @@ detail storage and an inherited test-module placement that failed Clippy. The
 stale README's unimplemented-feature list was reconciled against actual code.
 
 From `rust`, set `CARGO_TARGET_DIR` to `D:\t3code-rust-target\server-k`, then
-run `cargo fmt -p t3-forge`, `cargo clippy -p t3-forge --all-targets -- -D warnings`
+run `cargo fmt -p t3-forge --check`, `cargo clippy -p t3-forge --all-targets --all-features -- -D warnings`
 and `cargo test -p t3-forge`. If an in-progress sibling dependency prevents the
 Clippy command, `--no-deps` isolates diagnostics for this crate; it does not replace
 the required workspace-integrated check. Keep the workspace's two-job Cargo limit.

@@ -167,6 +167,64 @@ pub fn source_branch(head: &str, source: Option<&RefSelector>) -> String {
         .or_else(|| parse_owner_ref(head).map(|s| s.ref_name))
         .unwrap_or_else(|| head.trim().into())
 }
+pub fn azure_repository_key_from_remote(key: &str) -> Option<String> {
+    let parts = key.split('/').collect::<Vec<_>>();
+    if parts.len() != 5 || parts[1] != "v3" || parts.iter().any(|s| s.is_empty()) {
+        return None;
+    }
+    match parts[0] {
+        "ssh.dev.azure.com" => Some(format!(
+            "dev.azure.com/{}/{}/_git/{}",
+            parts[2], parts[3], parts[4]
+        )),
+        "vs-ssh.visualstudio.com" => Some(format!(
+            "{}.visualstudio.com/{}/_git/{}",
+            parts[2], parts[3], parts[4]
+        )),
+        _ => None,
+    }
+}
+pub fn azure_canonical_repository_key(key: &str) -> Option<String> {
+    let key = key.to_ascii_lowercase();
+    let web = azure_repository_key_from_remote(&key).unwrap_or(key);
+    if web.starts_with("dev.azure.com/") {
+        return Some(web);
+    }
+    let (host, path) = web.split_once('/')?;
+    let organization = host
+        .strip_suffix(".visualstudio.com")
+        .filter(|s| !s.is_empty() && !s.contains('.'))?;
+    let path = path.strip_prefix("defaultcollection/").unwrap_or(path);
+    let parts = path.split('/').collect::<Vec<_>>();
+    (parts.len() == 3 && parts[1] == "_git" && parts.iter().all(|s| !s.is_empty()))
+        .then(|| format!("dev.azure.com/{organization}/{path}"))
+}
+pub fn azure_repository_selector(identity: &RepositoryIdentity) -> Option<String> {
+    let name = identity.name.as_ref().map(|n| n.0.as_str()).or_else(|| {
+        identity
+            .display_name
+            .as_ref()?
+            .0
+            .split('/')
+            .rfind(|s| !s.is_empty() && *s != "_git")
+    })?;
+    let mut bytes = vec![];
+    let mut source = name.as_bytes().iter().copied();
+    while let Some(byte) = source.next() {
+        if byte == b'%' {
+            let Some(a) = source.next().and_then(|b| (b as char).to_digit(16)) else {
+                return Some(name.into());
+            };
+            let Some(b) = source.next().and_then(|b| (b as char).to_digit(16)) else {
+                return Some(name.into());
+            };
+            bytes.push((a * 16 + b) as u8);
+        } else {
+            bytes.push(byte);
+        }
+    }
+    Some(String::from_utf8(bytes).unwrap_or_else(|_| name.into()))
+}
 pub fn transport_safe_error_value(value: &str) -> String {
     static URLS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r#"(?i)(?:https?|ssh|git)://[^\s<>"']+"#).expect("diagnostic URL regex")

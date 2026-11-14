@@ -216,6 +216,13 @@ async fn templates_read_committed_blobs_and_honor_directory_ambiguity() {
         "Committed template\n",
     )
     .unwrap();
+    std::fs::create_dir_all(dir.path().join(".gitlab/merge_request_templates")).unwrap();
+    std::fs::write(
+        dir.path()
+            .join(".gitlab/merge_request_templates/Default.md"),
+        "Committed GitLab template\n",
+    )
+    .unwrap();
     git(dir.path(), &["add", "--all"]).await;
     git(
         dir.path(),
@@ -235,6 +242,26 @@ async fn templates_read_committed_blobs_and_honor_directory_ambiguity() {
     )
     .unwrap();
     let github = github();
+    let gitlab = t3_forge::gitlab::GitLab::new(t3_git::Git::new(dir.path()))
+        .unwrap()
+        .with_environment(environment());
+    std::fs::write(
+        dir.path()
+            .join(".gitlab/merge_request_templates/Default.md"),
+        "Dirty GitLab template",
+    )
+    .unwrap();
+    assert_eq!(
+        gitlab
+            .read_change_request_template(TemplateInput {
+                cwd: dir.path().into(),
+                treeish: "HEAD".into()
+            })
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("Committed GitLab template")
+    );
     assert_eq!(
         github
             .read_change_request_template(TemplateInput {

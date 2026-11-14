@@ -31,6 +31,7 @@ pub struct CheckoutListInput {
     pub checkout: CheckoutInput,
     pub source: Option<RefSelector>,
     pub head_selector: String,
+    /// None lists every state, including merged and closed requests.
     pub state: Option<ChangeRequestState>,
     pub limit: Option<usize>,
 }

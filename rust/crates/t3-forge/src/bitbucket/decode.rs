@@ -3,7 +3,7 @@ pub(super) fn actor(raw: &Value) -> Value {
     let login = text(raw, "nickname").or_else(|| text(raw, "display_name"));
     login.map(|login|json!({"login":login,"name":text(raw,"display_name"),"avatarUrl":text(&raw["links"]["avatar"],"href")})).unwrap_or(Value::Null)
 }
-fn date(value: &Value) -> Value {
+pub(super) fn date(value: &Value) -> Value {
     value
         .as_str()
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())

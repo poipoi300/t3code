@@ -20,6 +20,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 chrono = "0.4"
 sha2 = "0.10"
 sha1 = "0.10"
+uuid = { version = "1", features = ["v4"] }
 futures-util = "0.3"
 base64 = "0.22"
 tempfile = "3"

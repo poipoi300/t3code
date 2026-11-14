@@ -22,5 +22,35 @@
     "source": "packages/source-control-github/src/server/GitHubPullRequestApi.test.ts",
     "line": 366,
     "origin": "TypeScript fixture-builder output; synthetic call arguments"
+  },
+  {
+    "origin": "Synthetic recorded-response fixtures built from the source API decoders and provider behavior; no live credential or forge capture",
+    "fixture": "tests/gitlab.rs (inline)",
+    "source": "packages/source-control-gitlab/src/server/"
+  },
+  {
+    "origin": "Synthetic recorded-response fixtures built from the source API decoders and provider behavior; no live credential or forge capture",
+    "fixture": "tests/api.rs (inline)",
+    "source": "packages/source-control-bitbucket/src/server/"
+  },
+  {
+    "origin": "Synthetic recorded-response fixtures built from the source API decoders and provider behavior; no live credential or forge capture",
+    "fixture": "tests/azure_devops.rs (inline)",
+    "source": "packages/source-control-azure-devops/src/server/"
+  },
+  {
+    "origin": "Synthetic recorded-response fixtures built from the source API decoders and provider behavior; no live credential or forge capture",
+    "fixture": "tests/gitcafe.rs (inline)",
+    "source": "packages/source-control-gitcafe/src/server/"
+  },
+  {
+    "origin": "Synthetic recorded-response fixtures built from the source API decoders and provider behavior; no live credential or forge capture",
+    "fixture": "tests/forgejo.rs (inline)",
+    "source": "packages/source-control-forgejo/src/server/"
+  },
+  {
+    "origin": "Synthetic recorded-response fixtures built from the source API decoders and provider behavior; no live credential or forge capture",
+    "fixture": "tests/cursor_origin.rs (inline)",
+    "source": "packages/source-control-cursor-origin/src/server/"
   }
 ]

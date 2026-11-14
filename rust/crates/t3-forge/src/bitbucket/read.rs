@@ -224,12 +224,12 @@ impl Bitbucket {
         value["mergeCapabilities"] = json!({"merge":true,"squash":true,"rebase":true});
         value["viewerPermissions"] = permissions(write);
         value["closedAt"] = if d::state(&raw) == "closed" {
-            raw["closed_on"].clone()
+            d::date(&raw["closed_on"])
         } else {
             Value::Null
         };
         value["mergedAt"] = if d::state(&raw) == "merged" {
-            raw["closed_on"].clone()
+            d::date(&raw["closed_on"])
         } else {
             Value::Null
         };

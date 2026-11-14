@@ -140,7 +140,14 @@ pub(super) fn location(raw: &Value) -> Option<Location> {
     })
 }
 pub(super) fn checkout(raw: &Value) -> Result<ChangeRequest> {
-    let summary = summary(raw)?;
+    if raw["status"].as_str().is_none() {
+        return Err(error("checkout", "Missing pull request status."));
+    }
+    let mut normalized = raw.clone();
+    if text(raw, "creationDate").is_none() {
+        normalized["creationDate"] = json!("1970-01-01T00:00:00Z");
+    }
+    let summary = summary(&normalized)?;
     let date = text(raw, "closedDate")
         .or_else(|| text(raw, "creationDate"))
         .filter(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok());
