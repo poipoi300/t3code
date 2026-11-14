@@ -373,13 +373,22 @@ async fn start_domains(
     let workspaces = crate::workspaces::EnvironmentWorkspaces::new(&context);
     #[cfg(feature = "providers")]
     domains.insert(workspaces.clone())?;
+    // After the host: the VCS status policy reads its background-activity leases.
     #[cfg(all(feature = "git", feature = "workspace"))]
-    domains.insert_runtime(crate::adapters::git::GitAdapter::start_with_authority(
-        &context,
-        workspaces.clone(),
-    ))?;
+    {
+        let git = crate::adapters::git::GitAdapter::start_with_authority(
+            &context,
+            workspaces.clone(),
+            domains,
+        )
+        .await;
+        domains.insert_runtime(git)?;
+    }
     #[cfg(all(feature = "git", not(feature = "workspace")))]
-    domains.insert_runtime(crate::adapters::git::GitAdapter::start(&context))?;
+    {
+        let git = crate::adapters::git::GitAdapter::start(&context, domains).await;
+        domains.insert_runtime(git)?;
+    }
     #[cfg(feature = "cloud")]
     domains.insert_runtime(crate::adapters::cloud::CloudAdapter::start(&context).await?)?;
     // Device hosts resolve a thread's workspace through the same authority.
@@ -423,6 +432,16 @@ async fn start_domains(
         domains.insert(providers.domain.secrets.clone())?;
         domains.insert_runtime(providers)?;
     }
+    // The orchestration runtime offers each thread the modes its provider instance lists.
+    #[cfg(all(feature = "providers", feature = "orchestration"))]
+    if let (Some(orchestration), Some(providers)) = (
+        domains.get::<crate::adapters::orchestration::OrchestrationAdapter>(),
+        domains.get::<t3_provider::domain::ProviderDomain>(),
+    ) {
+        orchestration
+            .follow_providers(providers.providers.clone(), context.shutdown.clone())
+            .await;
+    }
     // After the providers: devices read secret references through the same resolver.
     #[cfg(feature = "device")]
     if let Some(device) = crate::adapters::device::DeviceAdapter::start(
@@ -433,6 +452,11 @@ async fn start_domains(
     .await?
     {
         domains.insert_runtime(device)?;
+    }
+    // The one forge registry; source control, project clones and pull requests derive from it.
+    #[cfg(feature = "forge")]
+    if let Some(forge) = crate::adapters::forge::ForgeAdapter::start(&context, domains).await? {
+        domains.insert_runtime(forge)?;
     }
     // Before projects: promoting a scratch thread moves its scheduled tasks.
     #[cfg(feature = "scheduler")]
@@ -448,10 +472,17 @@ async fn start_domains(
             Some(scheduler.service());
         #[cfg(not(feature = "scheduler"))]
         let scheduled_tasks = None;
+        #[cfg(feature = "forge")]
+        let clones = domains
+            .get::<crate::adapters::forge::ForgeAdapter>()
+            .map(|forge| forge.clone_backend());
+        #[cfg(not(feature = "forge"))]
+        let clones = None;
         domains.insert_runtime(crate::adapters::project::ProjectAdapter::start(
             &context,
             &orchestration,
             scheduled_tasks,
+            clones,
         )?)?;
     }
     let _ = (&context, domains, options);

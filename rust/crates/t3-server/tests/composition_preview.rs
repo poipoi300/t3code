@@ -43,6 +43,9 @@ impl Server {
             .into_iter()
             .filter_map(|key| std::env::var(key).ok().map(|value| (key.into(), value)))
             .collect();
+        for name in ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"] {
+            env.insert(name.into(), root.path().to_string_lossy().into_owned());
+        }
         if available {
             let node = node();
             env.insert(
@@ -291,6 +294,22 @@ async fn preview_is_optional_without_node_and_all_eleven_methods_are_served_with
         "Unknown request tag: preview.list"
     );
     absent.runtime.shutdown().await.unwrap();
+    let missing = Server::start_with(true, |root, environment| {
+        environment.insert(
+            "T3_PREVIEW_PLAYWRIGHT_MODULE".into(),
+            root.join("missing-playwright.cjs")
+                .to_string_lossy()
+                .into_owned(),
+        );
+    })
+    .await;
+    for method in METHODS {
+        assert!(
+            missing.runtime.unserved_methods.contains(method),
+            "{method}"
+        );
+    }
+    missing.runtime.shutdown().await.unwrap();
     let server = Server::start(true).await;
     for method in METHODS {
         assert!(
@@ -529,11 +548,7 @@ async fn discovered_servers_stream_starts_and_updates_from_a_real_local_http_lis
     assert!(web.await.unwrap_err().is_cancelled());
 }
 
-#[tokio::test]
-async fn viewer_refuses_a_tab_from_another_thread_and_stops_with_its_server() {
-    let mut s = Server::start(true).await;
-    s.thread("one");
-    s.thread("two");
+fn install_fake_browser(s: &Server) {
     let release =
         t3_preview::installer::pinned_release(std::env::consts::OS, std::env::consts::ARCH)
             .unwrap();
@@ -555,6 +570,60 @@ async fn viewer_refuses_a_tab_from_another_thread_and_stops_with_its_server() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
+}
+
+#[tokio::test]
+async fn viewer_launch_failure_is_an_http_503_without_internal_details() {
+    let mut s = Server::start_with(true, |root, _| {
+        use std::io::Write;
+        let mut module = std::fs::OpenOptions::new()
+            .append(true)
+            .open(root.join("playwright.cjs"))
+            .unwrap();
+        writeln!(
+            module,
+            "chromium.launch=async()=>{{throw Error('secret launch internals')}};"
+        )
+        .unwrap();
+    })
+    .await;
+    s.thread("one");
+    install_fake_browser(&s);
+    let opened = success(
+        s.call("preview.open", json!({"threadId":"one","runtime":"server"}))
+            .await,
+    );
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = format!(
+        "ws://{}/api/preview-stream/ws?threadId=one&tabId={}",
+        s.runtime.address,
+        opened["tabId"].as_str().unwrap()
+    )
+    .into_client_request()
+    .unwrap();
+    request
+        .headers_mut()
+        .insert("cookie", s.cookie.parse().unwrap());
+    match tokio_tungstenite::connect_async(request).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status(), 503);
+            assert_eq!(
+                response.body().as_deref(),
+                Some(b"Service Unavailable".as_slice())
+            );
+        }
+        result => panic!("expected HTTP launch refusal, got {result:?}"),
+    }
+    s.socket.close(None).await.unwrap();
+    s.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn viewer_refuses_a_tab_from_another_thread_and_stops_with_its_server() {
+    let mut s = Server::start(true).await;
+    s.thread("one");
+    s.thread("two");
+    install_fake_browser(&s);
     let opened = success(
         s.call("preview.open", json!({"threadId":"one","runtime":"server"}))
             .await,
@@ -619,7 +688,7 @@ async fn viewer_refuses_a_tab_from_another_thread_and_stops_with_its_server() {
         ))
         .await
         .unwrap();
-    barrier(&mut controller).await;
+    probe_barrier(&mut controller, 41).await;
     assert_eq!(
         success(s.call("preview.list", json!({"threadId":"one"})).await)["sessions"][0]["viewport"]
             ["width"],
@@ -633,7 +702,7 @@ async fn viewer_refuses_a_tab_from_another_thread_and_stops_with_its_server() {
         ))
         .await
         .unwrap();
-    barrier(&mut controller).await;
+    probe_barrier(&mut controller, 42).await;
     assert_eq!(
         success(s.call("preview.list", json!({"threadId":"one"})).await)["sessions"][0]["viewport"]
             ["width"],
@@ -672,10 +741,37 @@ async fn barrier(socket: &mut Socket) {
     }
 }
 
+async fn probe_barrier(socket: &mut Socket, x: u32) {
+    socket
+        .send(Message::Text(
+            json!({"type":"probe","x":x,"y":7}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        match socket.next().await.unwrap().unwrap() {
+            Message::Text(text) => {
+                let value: Value = serde_json::from_str(&text).unwrap();
+                if value["type"] == "probe" && value["x"] == x {
+                    assert_eq!(value["editable"], true);
+                    return;
+                }
+            }
+            Message::Binary(_) => socket
+                .send(Message::Text(json!({"type":"ack"}).to_string().into()))
+                .await
+                .unwrap(),
+            other => panic!("expected input completion: {other:?}"),
+        }
+    }
+}
+
 #[cfg(feature = "terminal")]
 #[tokio::test]
 async fn discovery_updates_when_a_real_terminal_child_opens_a_listener() {
     let mut s = Server::start_with(true, |root, environment| {
+        // Select Node as the PTY shell without loading account shell profiles.
+        // The per-terminal patch restores SystemRoot before Node starts Winsock.
         let node = node();
         environment.insert(
             "T3_PREVIEW_NODE".into(),
@@ -707,11 +803,16 @@ async fn discovery_updates_when_a_real_terminal_child_opens_a_listener() {
     let cwd = s.root.path().join("worktrees/preview");
     std::fs::create_dir_all(&cwd).unwrap();
     let script = cwd.join("preview-http.cjs");
-    std::fs::write(&script,"const http=require('node:http');const server=http.createServer((req,res)=>{res.setHeader('Content-Type','text/html');res.end('ok')});server.on('error',error=>{console.log('PREVIEW_ERROR');process.exit(1)});server.listen(0,'127.0.0.1',()=>console.log('PREVIEW_READY '+server.address().port));").unwrap();
+    std::fs::write(&script,"const http=require('node:http');const server=http.createServer((req,res)=>{res.setHeader('Content-Type','text/html');res.end('ok')});server.on('error',error=>{console.log('PREVIEW_ERROR '+error.code);process.exit(1)});server.listen(0,'127.0.0.1',()=>console.log('PREVIEW_READY '+server.address().port));").unwrap();
+    let runtime_env: std::collections::BTreeMap<_, _> = std::env::var("SystemRoot")
+        .ok()
+        .map(|root| ("SystemRoot", root))
+        .into_iter()
+        .collect();
     success(
         s.call(
             "terminal.open",
-            json!({"threadId":"owned","terminalId":"preview-http","cwd":cwd,"cols":80,"rows":24}),
+            json!({"threadId":"owned","terminalId":"preview-http","cwd":cwd,"cols":80,"rows":24,"env":runtime_env}),
         )
         .await,
     );

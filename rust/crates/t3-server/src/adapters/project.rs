@@ -114,6 +114,8 @@ impl ProjectAdapter {
         context: &crate::services::DomainContext<'_>,
         orchestration: &crate::adapters::orchestration::OrchestrationAdapter,
         scheduled_tasks: Option<Arc<dyn MoveThreadTasks>>,
+        // The forge registry's clone backend (`adapters/forge.rs`); refused without it.
+        clones: Option<Arc<dyn CloneRepository>>,
     ) -> crate::Result<Arc<Self>> {
         let runtime = orchestration.composed().ok_or_else(|| {
             crate::Error::Service("projects need the composed orchestration runtime".into())
@@ -134,7 +136,10 @@ impl ProjectAdapter {
                     context.account_home.clone(),
                 )),
             ),
-            clones: ProjectCloneTracker::new(Arc::new(CloningUnavailable), clock),
+            clones: ProjectCloneTracker::new(
+                clones.unwrap_or_else(|| Arc::new(CloningUnavailable)),
+                clock,
+            ),
             home: context.account_home.clone(),
         });
         let managed = ManagedProjectFolders::new(
@@ -252,6 +257,11 @@ impl ProjectAdapter {
     pub async fn mutate(&self, mutation: ProjectMutation) -> t3_project::Result<Project> {
         self.service.mutate(mutation).await
     }
+
+    /// The project service, for the project clone handlers (`handlers/project_clone.rs`).
+    pub fn service(&self) -> &ProjectService {
+        &self.service
+    }
 }
 
 impl crate::services::DomainRuntime for ProjectAdapter {
@@ -261,6 +271,8 @@ impl crate::services::DomainRuntime for ProjectAdapter {
     /// Joins admitted promotions (including detached callers) while SQLite is still open.
     fn shutdown(&self) -> futures::future::BoxFuture<'_, crate::Result<()>> {
         Box::pin(async move {
+            // Clone producers stop before the project service and the forge registry.
+            self.service.clones().shutdown().await;
             if let Some(promotion) = &self.promotion {
                 promotion.shutdown().await;
             }

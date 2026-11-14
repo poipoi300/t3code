@@ -11,20 +11,9 @@ use t3_contracts::rpc::*;
 fn register_pending(registry: &mut HandlerRegistry) -> crate::Result<()> {
     // ThreadMessageIntake::launch_thread (ThreadLaunchService::launch exists, its intake wrapper does not).
     registry.unimplemented::<WsOrchestrationV2LaunchThreadRpc>()?;
-    // CommandOutputHub::subscribe (ports::transport::command_output_hub is empty).
-    registry.unimplemented::<WsOrchestrationV2SubscribeCommandOutputRpc>()?;
-    // ThreadSearch::search_threads (ports::transport::thread_search is empty).
-    registry.unimplemented::<WsOrchestrationV2SearchThreadsRpc>()?;
-    // ThreadFind::search_thread_stream (ports::transport::thread_find is empty).
-    registry.unimplemented::<WsOrchestrationV2SearchThreadStreamRpc>()?;
     // workflow_script_query::read_workflow_script, native_child_work_query::get_native_child_work.
     registry.unimplemented::<WsOrchestrationV2GetWorkflowScriptRpc>()?;
     registry.unimplemented::<WsOrchestrationV2GetNativeChildWorkRpc>()?;
-    // ProjectCloneTracker::{start, cancel, retry, stream}.
-    registry.unimplemented::<WsProjectCloneStartRpc>()?;
-    registry.unimplemented::<WsProjectCloneCancelRpc>()?;
-    registry.unimplemented::<WsProjectCloneRetryRpc>()?;
-    registry.unimplemented::<WsSubscribeProjectClonesRpc>()?;
     // AgentSessionScanner::scan, AgentSessionImporter::import_recent_agent_threads.
     registry.unimplemented::<WsAgentSessionsScanRpc>()?;
     registry.unimplemented::<WsAgentSessionsImportRpc>()?;
@@ -34,6 +23,10 @@ fn register_pending(registry: &mut HandlerRegistry) -> crate::Result<()> {
 /// Methods served once an orchestration adapter is present.
 fn register_adapter_backed_unavailable(registry: &mut HandlerRegistry) -> crate::Result<()> {
     registry.unimplemented::<WsOrchestrationV2SubscribePromptSuggestionRpc>()?;
+    registry.unimplemented::<WsOrchestrationV2SubscribeCommandOutputRpc>()?;
+    registry.unimplemented::<WsProviderUploadFeedbackRpc>()?;
+    registry.unimplemented::<WsOrchestrationV2SearchThreadsRpc>()?;
+    registry.unimplemented::<WsOrchestrationV2SearchThreadStreamRpc>()?;
     registry.unimplemented::<WsOrchestrationV2GetThreadTitlesRpc>()?;
     registry.unimplemented::<WsOrchestrationV2GetThreadLinkMetadataRpc>()?;
     registry.unimplemented::<WsOrchestrationV2GetOlderSettledThreadsRpc>()?;
@@ -293,6 +286,80 @@ mod live {
                     .map_err(|e| shell_error("Failed to load the thread family", &e))
             }
         })?;
+        let a = adapter.clone();
+        // `CommandOutputHub.ts`: "No such command." / "Lost the thread's event stream.".
+        registry.register_stream::<WsOrchestrationV2SubscribeCommandOutputRpc, _, _, _>(
+            move |_, input| {
+                let a = a.clone();
+                async move {
+                    let thread_id = input.thread_id.clone();
+                    Ok(a.subscribe_command_output(input).map(move |item| {
+                        item.map_err(|error| {
+                            let message = match &error {
+                                OrchestrationError::Service {
+                                    operation: "CommandOutputHub",
+                                    detail,
+                                } => detail.clone(),
+                                other => other.to_string(),
+                            };
+                            Failure::Typed(
+                                WsOrchestrationV2SubscribeCommandOutputError::OrchestrationV2CommandOutputError(
+                                    Box::new(OrchestrationV2CommandOutputError {
+                                        _tag: CommandOutputErrorTag::OrchestrationV2CommandOutputError,
+                                        thread_id: thread_id.clone(),
+                                        message,
+                                        cause: None,
+                                    }),
+                                ),
+                            )
+                        })
+                    }))
+                }
+            },
+        )?;
+        let a = adapter.clone();
+        registry.register::<WsProviderUploadFeedbackRpc, _, _>(move |_, input| {
+            let a = a.clone();
+            async move {
+                let thread_id = input.thread_id.clone();
+                a.upload_feedback(input.thread_id, input.reason.flatten())
+                    .await
+                    .map_err(|cause| {
+                        Failure::Typed(WsProviderUploadFeedbackError::ProviderUploadFeedbackError(
+                            Box::new(t3_contracts::provider::ProviderUploadFeedbackError {
+                                _tag: t3_contracts::provider::ProviderUploadFeedbackErrorTag::ProviderUploadFeedbackError,
+                                thread_id,
+                                cause: Some(Some(cause)),
+                            }),
+                        ))
+                    })
+            }
+        })?;
+        let a = adapter.clone();
+        registry.register::<WsOrchestrationV2SearchThreadsRpc, _, _>(move |_, input| {
+            let a = a.clone();
+            async move {
+                a.search_threads(input).await.map_err(|error| {
+                    Failure::Typed(WsOrchestrationV2SearchThreadsError::OrchestrationSearchThreadsError(
+                        Box::new(t3_contracts::thread_search::OrchestrationSearchThreadsError {
+                            _tag: t3_contracts::thread_search::OrchestrationSearchThreadsErrorTag::OrchestrationSearchThreadsError,
+                            message: "Failed to search threads".into(),
+                            cause: cause(&error),
+                        }),
+                    ))
+                })
+            }
+        })?;
+        let a = adapter.clone();
+        registry.register_stream::<WsOrchestrationV2SearchThreadStreamRpc, _, _, _>(
+            move |_, input| {
+                let a = a.clone();
+                async move {
+                    Ok(a.search_thread_stream(input)
+                        .map(|item| item.map_err(|e| search_error(&e))))
+                }
+            },
+        )?;
         let a = adapter.clone();
         registry.register::<WsOrchestrationV2GetTurnDiffRpc, _, _>(move |_, input| {
             let a = a.clone();

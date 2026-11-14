@@ -9,7 +9,7 @@ publish.workspace = true
 workspace = true
 [features]
 # The assembled domain services the `t3` binary serves.
-default = ["local-services", "workspace", "terminal", "git", "scheduler", "usage", "orchestration", "host", "project", "device", "providers", "preview", "cloud"]
+default = ["local-services", "workspace", "terminal", "git", "scheduler", "usage", "orchestration", "host", "project", "device", "providers", "preview", "cloud", "forge"]
 local-services = [
     "dep:t3-auth",
     "dep:t3-config",
@@ -22,8 +22,8 @@ local-services = [
 ]
 orchestration = ["dep:t3-orchestration", "t3-orchestration/git-backend", "t3-orchestration/acp-adapter", "dep:t3-git", "dep:async-trait"]
 workspace = ["dep:t3-workspace", "dep:t3-git"]
-git = ["dep:t3-git"]
-forge = ["dep:t3-forge"]
+git = ["dep:t3-git", "dep:t3-shared", "dep:async-trait"]
+forge = ["dep:t3-forge", "local-services", "git", "workspace", "dep:t3-process", "dep:async-trait"]
 terminal = ["dep:t3-terminal"]
 scheduler = ["dep:t3-scheduler", "dep:async-trait"]
 usage = ["dep:t3-usage", "dep:sysinfo"]
@@ -43,6 +43,7 @@ t3-persistence = { path = "../t3-persistence", optional = true }
 t3-orchestration = { path = "../t3-orchestration", optional = true }
 t3-workspace = { path = "../t3-workspace", optional = true }
 t3-git = { path = "../t3-git", optional = true }
+t3-shared = { path = "../t3-shared", optional = true }
 t3-forge = { path = "../t3-forge", optional = true }
 t3-terminal = { path = "../t3-terminal", optional = true }
 t3-scheduler = { path = "../t3-scheduler", optional = true }

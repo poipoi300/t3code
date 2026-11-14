@@ -25,6 +25,8 @@ pub struct PreviewAdapter {
     retention: Mutex<Option<DiscoveryRetention>>,
     stop: tokio_util::sync::CancellationToken,
     terminal_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    #[cfg(feature = "terminal")]
+    discovery_enabled: bool,
 }
 fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     value
@@ -59,25 +61,31 @@ impl PreviewAdapter {
         let Some(module_root) = root else {
             return Ok(None);
         };
-        let host = match PreviewHost::new(HostInputs {
-            runtime: RuntimeInputs {
-                node: Some(node),
-                module_root,
-                playwright_module: module,
-                electron_run_as_node: environment
-                    .get("ELECTRON_RUN_AS_NODE")
-                    .is_some_and(|value| value == "1"),
+        let discovery_enabled = environment
+            .get("T3CODE_PORT_DISCOVERY")
+            .is_none_or(|value| value != "0");
+        let host = match PreviewHost::new_with_discovery(
+            HostInputs {
+                runtime: RuntimeInputs {
+                    node: Some(node),
+                    module_root,
+                    playwright_module: module,
+                    electron_run_as_node: environment
+                        .get("ELECTRON_RUN_AS_NODE")
+                        .is_some_and(|value| value == "1"),
+                },
+                base_dir: paths.base_dir.clone(),
+                state_dir: paths.state_dir.clone(),
+                attachments_dir: paths.attachments(),
+                secrets_dir: paths.secrets(),
+                sandbox: environment
+                    .get("T3CODE_SERVER_BROWSER_SANDBOX")
+                    .is_none_or(|value| value != "0"),
+                desktop: Default::default(),
+                recovery: Arc::new(t3_preview::html::MemoryHtmlRecovery::default()),
             },
-            base_dir: paths.base_dir.clone(),
-            state_dir: paths.state_dir.clone(),
-            attachments_dir: paths.attachments(),
-            secrets_dir: paths.secrets(),
-            sandbox: environment
-                .get("T3CODE_SERVER_BROWSER_SANDBOX")
-                .is_none_or(|value| value != "0"),
-            desktop: Default::default(),
-            recovery: Arc::new(t3_preview::html::MemoryHtmlRecovery::default()),
-        })
+            discovery_enabled,
+        )
         .await
         {
             Ok(host) => host,
@@ -105,6 +113,8 @@ impl PreviewAdapter {
             retention: Mutex::new(Some(retention)),
             stop: context.shutdown.child_token(),
             terminal_task: Mutex::new(None),
+            #[cfg(feature = "terminal")]
+            discovery_enabled,
         })))
     }
     pub async fn require_thread(&self, thread: &str) -> Result<(), EnvironmentAuthorizationError> {
@@ -116,7 +126,7 @@ impl PreviewAdapter {
             Err(unavailable_thread())
         }
     }
-    pub async fn require_tab(&self, thread: &str, tab: &str) -> t3_preview::Result<()> {
+    pub async fn require_tab(&self, thread: &str, tab: &str) -> Result<(), Box<t3_preview::Error>> {
         let listed = self
             .browser
             .manager()
@@ -131,7 +141,7 @@ impl PreviewAdapter {
         {
             Ok(())
         } else {
-            Err(t3_preview::Error::TabNotFound)
+            Err(Box::new(t3_preview::Error::TabNotFound))
         }
     }
     pub fn reporter(&self, socket: u64) -> Arc<ProfileReporter> {
@@ -143,8 +153,38 @@ impl PreviewAdapter {
     pub fn socket_closed(&self, socket: u64) {
         lock(&self.reporters).remove(&socket);
     }
+    pub async fn stop_local_server(
+        &self,
+        input: PreviewStopLocalServerInput,
+    ) -> Result<(), Box<t3_preview::Error>> {
+        use futures::FutureExt;
+        let database = self.database.clone();
+        self.discovery.stop_server_with_thread_check(input,Arc::new(move|thread|{
+            let database=database.clone();
+            async move {database.reader(move|connection|connection.query_row("SELECT EXISTS(SELECT 1 FROM orchestration_v2_projection_threads WHERE thread_id=?1 AND deleted_at IS NULL)",[thread],|row|row.get::<_,bool>(0)).map_err(Into::into)).await.unwrap_or(false)}.boxed()
+        })).await.map_err(Box::new)
+    }
+    pub async fn visible_servers(
+        &self,
+        mut event: DiscoveredLocalServerList,
+    ) -> DiscoveredLocalServerList {
+        let mut visible = Vec::new();
+        for server in event.servers {
+            if let Some(agent) = server.agent.as_ref().and_then(Option::as_ref)
+                && self.require_thread(&agent.thread_id.0).await.is_err()
+            {
+                continue;
+            }
+            visible.push(server);
+        }
+        event.servers = visible;
+        event
+    }
     #[cfg(feature = "terminal")]
     pub fn observe_terminals(&self, terminal: Arc<crate::adapters::terminal::TerminalAdapter>) {
+        if !self.discovery_enabled {
+            return;
+        }
         let mut metadata = terminal.manager.subscribe_metadata();
         let discovery = self.discovery.clone();
         let stop = self.stop.clone();

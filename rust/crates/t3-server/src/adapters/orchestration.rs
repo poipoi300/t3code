@@ -88,7 +88,12 @@ pub struct OrchestrationAdapter {
     events: Arc<EventSink>,
     /// The composed runtime (commands, worker, recovery); `None` for a read-only adapter.
     runtime: Option<Arc<t3_orchestration::composition::OrchestrationRuntime>>,
+    /// Provider rows for offered runtime modes; fed by `follow_providers` once the provider
+    /// domain has started (it starts after this runtime, before any turn can run).
+    provider_snapshots: Option<ProviderSnapshots>,
 }
+
+type ProviderSnapshots = tokio::sync::watch::Sender<Arc<Vec<t3_contracts::server::ServerProvider>>>;
 
 pub use t3_orchestration::provider::ProviderAdapter;
 
@@ -193,28 +198,20 @@ impl OrchestrationAdapter {
         ports.settings = Arc::new(
             LiveSettings::start(context.local.settings.clone(), context.shutdown.clone()).await?,
         );
-        // Turns run in the project's root, capped by the organisation's managed policy: the same
-        // document caps thread creation and mode changes (`runtime_mode_ceiling`) and each turn
-        // (`ProjectRuntimePolicy`). No provider snapshot is assembled here yet, which is
-        // TypeScript's behaviour without providers.
-        let managed = context.local.managed_policy.as_ref();
-        ports.runtime_mode_ceiling = managed.and_then(|document| {
-            Some(
-                t3_orchestration::ports::decisions::dispatch_mode_limit::RuntimeModeCeiling {
-                    organization: document.organization.0.clone(),
-                    max_runtime_mode: document.limits.as_ref()?.max_runtime_mode?,
-                },
-            )
-        });
+        // The organisation's managed policy has one reader: the runtime caps thread creation and
+        // mode changes from it and wraps the turn policy below (`CeilingRuntimePolicy`).
+        ports.managed_policy = context.local.managed_policy.clone();
+        // Turns run in the project's root, in the modes their provider instance offers.
+        let (provider_snapshots, offered) = tokio::sync::watch::channel(Arc::new(Vec::new()));
+        ports.provider_snapshots = Some(offered.clone());
         ports.policy = {
             use t3_orchestration::ports::decisions::runtime_policy::{
                 ProjectRuntimePolicy, RuntimePolicyOverride, SnapshotRuntimeModes,
             };
-            let (_, providers) = tokio::sync::watch::channel(Arc::new(Vec::new()));
             ProjectRuntimePolicy::configured(
                 StoreDatabase(context.database.clone()),
-                Arc::new(SnapshotRuntimeModes::new(providers)),
-                managed,
+                Arc::new(SnapshotRuntimeModes::new(offered)),
+                None,
                 RuntimePolicyOverride::default(),
                 None,
             )
@@ -231,7 +228,31 @@ impl OrchestrationAdapter {
             transport: runtime.transport.clone(),
             events: Arc::new(runtime.events.clone()),
             runtime: Some(Arc::new(runtime)),
+            provider_snapshots: Some(provider_snapshots),
         }))
+    }
+
+    /// Feeds the runtime's provider snapshot from the provider service until shutdown.
+    #[cfg(feature = "providers")]
+    pub async fn follow_providers(
+        &self,
+        service: Arc<t3_provider::service::ProviderService>,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) {
+        let Some(snapshots) = self.provider_snapshots.clone() else {
+            return;
+        };
+        let mut changes = service.subscribe();
+        snapshots.send_replace(Arc::new(service.get_providers().await.0));
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = shutdown.cancelled() => break,
+                    changed = changes.changed() => if changed.is_err() { break },
+                }
+                snapshots.send_replace(Arc::new(service.get_providers().await.0));
+            }
+        });
     }
 
     /// The composed runtime, for host services that commit alongside it (projects).
@@ -307,6 +328,7 @@ impl OrchestrationAdapter {
             transport,
             events,
             runtime: None,
+            provider_snapshots: None,
         }
     }
 
@@ -565,6 +587,112 @@ impl OrchestrationAdapter {
                 t3_contracts::chat_attachment::PROVIDER_SEND_TURN_MAX_FILE_BYTES,
             )
             .await
+    }
+}
+
+impl OrchestrationAdapter {
+    /// `orchestration.subscribeCommandOutput`: the command's output frames until it settles or
+    /// the client unsubscribes.
+    pub fn subscribe_command_output(
+        &self,
+        input: OrchestrationV2SubscribeCommandOutputInput,
+    ) -> BoxStream<'static, OrchestrationResult<OrchestrationV2CommandOutputFrame>> {
+        let hub = self.runtime().map(|runtime| runtime.command_output.clone());
+        boxed(async_stream::try_stream! {
+            let hub = hub?.ok_or(OrchestrationError::Unsupported("command output backend"))?;
+            let mut subscription = hub.subscribe(input).await?;
+            while let Some(frame) = subscription.pull().await? {
+                yield frame;
+            }
+        })
+    }
+    /// `provider.uploadFeedback` (`ws.ts`): the thread's active provider thread (else its
+    /// latest) uploads feedback through its live session. `Err` is TypeScript's cause text.
+    pub async fn upload_feedback(
+        &self,
+        thread_id: ThreadId,
+        reason: Option<String>,
+    ) -> Result<t3_contracts::provider::ProviderUploadFeedbackResult, serde_json::Value> {
+        use t3_contracts::orchestration_v2_id_table::IdOrIndex;
+        use t3_orchestration::api::SessionDirectory;
+        let text = |message: &str| serde_json::Value::String(message.into());
+        let runtime = self.runtime().map_err(|e| text(&e.to_string()))?;
+        let projection = self
+            .transport
+            .projections
+            .snapshot(thread_id, None)
+            .await
+            .map_err(|e| text(&e.to_string()))?
+            .projection;
+        let active = projection.thread.active_provider_thread_id.clone();
+        let provider_thread = projection
+            .provider_threads
+            .iter()
+            .find(|candidate| active.as_ref() == Some(&candidate.id))
+            .or_else(|| projection.provider_threads.last())
+            .cloned();
+        let session =
+            provider_thread
+                .as_ref()
+                .and_then(|thread| match &thread.provider_session_id {
+                    Some(IdOrIndex::Id(id)) => Some(id.clone()),
+                    _ => None,
+                });
+        let (Some(provider_thread), Some(session)) = (provider_thread, session) else {
+            return Err(text("No provider session has run in this thread yet."));
+        };
+        let Some(live) = runtime
+            .sessions
+            .get(session)
+            .await
+            .map_err(|e| text(&e.to_string()))?
+        else {
+            return Err(text(
+                "The provider session is no longer running. Send a message first.",
+            ));
+        };
+        let driver = provider_thread.driver.0.clone();
+        let unsupported = || {
+            text(&format!(
+                "Provider '{driver}' does not support feedback uploads."
+            ))
+        };
+        let Some(extensions) = live.extensions() else {
+            return Err(unsupported());
+        };
+        match extensions.upload_feedback(provider_thread, reason).await {
+            Ok(feedback_id) => {
+                Ok(t3_contracts::provider::ProviderUploadFeedbackResult { feedback_id })
+            }
+            Err(t3_orchestration::provider::ProviderError::Unsupported(_)) => Err(unsupported()),
+            Err(error) => Err(text(&error.to_string())),
+        }
+    }
+    /// `orchestration.searchThreads`: titles and messages across threads, older settled
+    /// threads included.
+    pub async fn search_threads(
+        &self,
+        input: OrchestrationV2SearchThreadsInput,
+    ) -> OrchestrationResult<OrchestrationV2SearchThreadsResult> {
+        self.runtime()?
+            .thread_search
+            .as_ref()
+            .ok_or(OrchestrationError::Unsupported("thread search backend"))?
+            .search_with_older_settled_rows(input)
+            .await
+    }
+    /// `orchestration.searchThreadStream`: progressive find in one thread.
+    pub fn search_thread_stream(
+        &self,
+        input: OrchestrationV2SearchThreadInput,
+    ) -> BoxStream<'static, OrchestrationResult<OrchestrationV2SearchThreadResult>> {
+        let projections = self.runtime().map(|runtime| runtime.projections.clone());
+        boxed(async_stream::try_stream! {
+            let mut find = projections?.search_thread_stream(input).await?;
+            while let Some(result) = find.pull().await? {
+                yield result;
+            }
+        })
     }
 }
 

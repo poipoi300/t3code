@@ -879,6 +879,86 @@ async fn dev_mode_scratch_project_thread_and_replay_turn_over_the_socket() {
         .await
         .unwrap();
     assert_eq!(refused.status(), 403);
+
+    // Search over t3-shared's policy, in-thread find, and command output.
+    let found = ok(unary(
+        &mut client,
+        &mut socket,
+        "orchestration.searchThreads",
+        // Message text; the client matches titles itself.
+        json!({"query": "Hello"}),
+    )
+    .await);
+    assert!(found.to_string().contains(thread), "{found}");
+    let find = client
+        .start(
+            "orchestration.searchThreadStream",
+            json!({"threadId": thread, "query": "Hello"}),
+            CallKind::Stream,
+        )
+        .unwrap();
+    let first = loop {
+        match event(&mut socket, &mut client).await {
+            CallEvent::Chunk { id, values } if id == find => {
+                client.acknowledge(id);
+                break values;
+            }
+            CallEvent::Exit { id, exit } if id == find => {
+                panic!("find ended: {}", serde_json::to_value(exit).unwrap())
+            }
+            CallEvent::Chunk { id, .. } => client.acknowledge(id),
+            _ => {}
+        }
+    };
+    assert!(!first.is_empty());
+    let output = client
+        .start(
+            "orchestration.subscribeCommandOutput",
+            json!({"threadId": thread, "itemId": "item:absent"}),
+            CallKind::Stream,
+        )
+        .unwrap();
+    let missing = loop {
+        match event(&mut socket, &mut client).await {
+            CallEvent::Exit { id, exit } if id == output => {
+                break serde_json::to_value(exit).unwrap();
+            }
+            CallEvent::Chunk { id, .. } => client.acknowledge(id),
+            _ => {}
+        }
+    };
+    let error = &missing["cause"][0]["error"];
+    assert_eq!(
+        error["_tag"], "OrchestrationV2CommandOutputError",
+        "{missing}"
+    );
+    assert_eq!(error["message"], "No such command.");
+
+    // Feedback goes through the thread's live provider session, with TypeScript's refusals.
+    for (target, cause) in [
+        (
+            "thread:no-folder",
+            "No provider session has run in this thread yet.".to_owned(),
+        ),
+        (
+            thread,
+            "Provider 'acpRegistry' does not support feedback uploads.".to_owned(),
+        ),
+    ] {
+        let exit = serde_json::to_value(
+            unary(
+                &mut client,
+                &mut socket,
+                "provider.uploadFeedback",
+                json!({"threadId": target}),
+            )
+            .await,
+        )
+        .unwrap();
+        let error = &exit["cause"][0]["error"];
+        assert_eq!(error["_tag"], "ProviderUploadFeedbackError", "{exit}");
+        assert_eq!(error["cause"], cause.as_str(), "{exit}");
+    }
     server.shutdown().await.unwrap();
 }
 

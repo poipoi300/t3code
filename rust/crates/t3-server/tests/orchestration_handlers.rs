@@ -26,8 +26,11 @@ use t3_server::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-const SERVED: [&str; 17] = [
+const SERVED: [&str; 20] = [
     "orchestration.dispatchCommand",
+    "orchestration.subscribeCommandOutput",
+    "orchestration.searchThreads",
+    "orchestration.searchThreadStream",
     "orchestration.getTurnDiff",
     "orchestration.getFullThreadDiff",
     "orchestration.getThreadTitles",

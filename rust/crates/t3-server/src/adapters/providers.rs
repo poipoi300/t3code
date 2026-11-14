@@ -234,7 +234,7 @@ impl ProvidersAdapter {
         &self,
         id: &ProviderInstanceId,
         operation: &str,
-    ) -> Result<(), ProviderSetupError> {
+    ) -> Result<(), Box<ProviderSetupError>> {
         let Some(entry) = self.domain.instances.get(id).await else {
             return Err(setup_error(
                 id,
@@ -251,7 +251,7 @@ impl ProvidersAdapter {
         &self,
         input: t3_contracts::provider_setup::ProviderSetupInput,
         owner: String,
-    ) -> Result<t3_provider::auth::AuthSubscription, ProviderSetupError> {
+    ) -> Result<t3_provider::auth::AuthSubscription, Box<ProviderSetupError>> {
         self.instance(&input.instance_id, "subscribe").await?;
         let id = input.instance_id.clone();
         self.domain
@@ -265,7 +265,7 @@ impl ProvidersAdapter {
         input: t3_contracts::provider_setup::ProviderSetupInput,
     ) -> Result<
         watch::Receiver<t3_contracts::provider_setup::ProviderInstallState>,
-        ProviderSetupError,
+        Box<ProviderSetupError>,
     > {
         self.instance(&input.instance_id, "subscribe").await?;
         let id = input.instance_id.clone();
@@ -331,7 +331,7 @@ impl ProvidersAdapter {
         &self,
         mut input: t3_contracts::provider_setup::ProviderAuthStartInput,
         owner: &str,
-    ) -> Result<t3_contracts::provider_setup::ProviderAuthState, ProviderSetupError> {
+    ) -> Result<t3_contracts::provider_setup::ProviderAuthState, Box<ProviderSetupError>> {
         let id = input.instance_id.clone();
         self.instance(&id, "start").await?;
         if let Some(url) = input.return_url.as_deref() {
@@ -351,7 +351,7 @@ impl ProvidersAdapter {
         &self,
         input: t3_contracts::provider_setup::ProviderAuthRespondInput,
         owner: &str,
-    ) -> Result<t3_contracts::provider_setup::ProviderAuthState, ProviderSetupError> {
+    ) -> Result<t3_contracts::provider_setup::ProviderAuthState, Box<ProviderSetupError>> {
         let id = input.instance_id.clone();
         self.instance(&id, "respond").await?;
         self.domain
@@ -365,7 +365,7 @@ impl ProvidersAdapter {
         &self,
         input: t3_contracts::provider_setup::ProviderAuthCompleteInput,
         owner: &str,
-    ) -> Result<t3_contracts::provider_setup::ProviderAuthState, ProviderSetupError> {
+    ) -> Result<t3_contracts::provider_setup::ProviderAuthState, Box<ProviderSetupError>> {
         let id = input.instance_id.clone();
         self.instance(&id, "complete").await?;
         self.domain
@@ -379,7 +379,7 @@ impl ProvidersAdapter {
         &self,
         input: t3_contracts::provider_setup::ProviderAuthCancelInput,
         owner: &str,
-    ) -> Result<t3_contracts::provider_setup::ProviderAuthState, ProviderSetupError> {
+    ) -> Result<t3_contracts::provider_setup::ProviderAuthState, Box<ProviderSetupError>> {
         let id = input.instance_id.clone();
         self.instance(&id, "cancel").await?;
         self.domain
@@ -392,7 +392,7 @@ impl ProvidersAdapter {
     pub async fn remove_auth(
         &self,
         input: t3_contracts::provider_setup::ProviderAuthRemoveMethodInput,
-    ) -> Result<t3_contracts::provider_setup::ProviderAuthState, ProviderSetupError> {
+    ) -> Result<t3_contracts::provider_setup::ProviderAuthState, Box<ProviderSetupError>> {
         let id = input.instance_id.clone();
         self.instance(&id, "removeMethod").await?;
         self.domain
@@ -405,7 +405,7 @@ impl ProvidersAdapter {
     pub async fn logout_auth(
         &self,
         input: t3_contracts::provider_setup::ProviderSetupInput,
-    ) -> Result<t3_contracts::provider_setup::ProviderAuthState, ProviderSetupError> {
+    ) -> Result<t3_contracts::provider_setup::ProviderAuthState, Box<ProviderSetupError>> {
         let id = input.instance_id.clone();
         self.instance(&id, "logout").await?;
         self.domain
@@ -418,8 +418,10 @@ impl ProvidersAdapter {
     pub async fn reconnect_profile(
         &self,
         input: t3_contracts::provider_setup::ChatGptReconnectProfileInput,
-    ) -> Result<Option<t3_contracts::provider_setup::ChatGptReconnectProfile>, ProviderSetupError>
-    {
+    ) -> Result<
+        Option<t3_contracts::provider_setup::ChatGptReconnectProfile>,
+        Box<ProviderSetupError>,
+    > {
         let id = input.instance_id.clone();
         self.instance(&id, "export").await?;
         self.domain
@@ -446,7 +448,7 @@ impl ProvidersAdapter {
     pub async fn import_auth(
         &self,
         input: t3_contracts::provider_setup::ChatGptImportProfileInput,
-    ) -> Result<t3_contracts::provider_setup::ProviderAuthState, ProviderSetupError> {
+    ) -> Result<t3_contracts::provider_setup::ProviderAuthState, Box<ProviderSetupError>> {
         let id = input.instance_id.clone();
         self.instance(&id, "import").await?;
         if input
@@ -478,7 +480,7 @@ impl ProvidersAdapter {
     pub async fn start_install(
         &self,
         input: t3_contracts::provider_setup::ProviderSetupInput,
-    ) -> Result<t3_contracts::provider_setup::ProviderInstallState, ProviderSetupError> {
+    ) -> Result<t3_contracts::provider_setup::ProviderInstallState, Box<ProviderSetupError>> {
         let id = input.instance_id.clone();
         self.instance(&id, "install").await?;
         self.domain
@@ -490,7 +492,7 @@ impl ProvidersAdapter {
     pub async fn cancel_install(
         &self,
         input: t3_contracts::provider_setup::ProviderInstallCancelInput,
-    ) -> Result<t3_contracts::provider_setup::ProviderInstallState, ProviderSetupError> {
+    ) -> Result<t3_contracts::provider_setup::ProviderInstallState, Box<ProviderSetupError>> {
         let id = input.instance_id.clone();
         self.instance(&id, "cancel-install").await?;
         self.domain
@@ -502,7 +504,7 @@ impl ProvidersAdapter {
     pub async fn remove_install(
         &self,
         input: t3_contracts::provider_setup::ProviderSetupInput,
-    ) -> Result<t3_contracts::provider_setup::ProviderInstallState, ProviderSetupError> {
+    ) -> Result<t3_contracts::provider_setup::ProviderInstallState, Box<ProviderSetupError>> {
         let id = input.instance_id.clone();
         self.instance(&id, "remove-install").await?;
         self.domain
@@ -561,14 +563,18 @@ impl ProvidersAdapter {
 fn start_error(_: ServiceError) -> crate::Error {
     crate::Error::Service("Could not start provider services.".into())
 }
-pub fn setup_error(id: &ProviderInstanceId, operation: &str, detail: &str) -> ProviderSetupError {
-    ProviderSetupError {
+pub fn setup_error(
+    id: &ProviderInstanceId,
+    operation: &str,
+    detail: &str,
+) -> Box<ProviderSetupError> {
+    Box::new(ProviderSetupError {
         _tag: ProviderSetupErrorTag::Error,
         instance_id: id.clone(),
         operation: operation.into(),
         detail: detail.into(),
         cause: None,
-    }
+    })
 }
 impl DomainRuntime for ProvidersAdapter {
     fn name(&self) -> &'static str {
@@ -696,7 +702,7 @@ pub fn auth_error(
     id: &ProviderInstanceId,
     operation: &str,
     error: ServiceError,
-) -> ProviderSetupError {
+) -> Box<ProviderSetupError> {
     setup_error(
         id,
         operation,

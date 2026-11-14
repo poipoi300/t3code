@@ -1,5 +1,7 @@
-//! Source-control RPCs; application PR/cache/watch workflows remain unsupported.
-use crate::registry::HandlerRegistry;
+//! Source-control RPCs: the VCS and review methods over the Git adapter, and the ten
+//! source-control methods plus `git.resolvePullRequest` over the forge registry
+//! (`adapters/forge.rs`). Pull-request application workflows are served elsewhere.
+use crate::{registry::HandlerRegistry, services::Domains};
 use t3_contracts::rpc::*;
 
 pub const REGISTERED: &[&str] = &[
@@ -14,7 +16,7 @@ pub const REGISTERED: &[&str] = &[
     WsReviewGetDiffFileContentsRpc::TAG,
 ];
 
-pub fn register(registry: &mut HandlerRegistry) -> crate::Result<()> {
+fn register_vcs(registry: &mut HandlerRegistry) -> crate::Result<()> {
     #[cfg(feature = "git")]
     {
         registry.register::<WsVcsPullRpc, _, _>(|ctx, input| async move {
@@ -144,4 +146,115 @@ fn init_error(error: Error) -> Failure<WsVcsInitError> {
             },
         ))),
     })
+}
+
+/// Every method in this module: the VCS group, then the forge group (served only with the
+/// forge registry; otherwise unsupported).
+pub fn register_with(registry: &mut HandlerRegistry, domains: &Domains) -> crate::Result<()> {
+    register_vcs(registry)?;
+    #[cfg(feature = "forge")]
+    if let Some(forge) = domains.get::<crate::adapters::forge::ForgeAdapter>() {
+        return forge::register(registry, forge);
+    }
+    let _ = domains;
+    registry.unimplemented::<WsSourceControlLookupRepositoryRpc>()?;
+    registry.unimplemented::<WsSourceControlCloneRepositoryRpc>()?;
+    registry.unimplemented::<WsSourceControlPublishRepositoryRpc>()?;
+    registry.unimplemented::<WsSourceControlSignInStartRpc>()?;
+    registry.unimplemented::<WsSourceControlSignInWaitRpc>()?;
+    registry.unimplemented::<WsSourceControlSignInCancelRpc>()?;
+    registry.unimplemented::<WsSourceControlAppAccessRpc>()?;
+    registry.unimplemented::<WsSourceControlStarredRpc>()?;
+    registry.unimplemented::<WsSourceControlStarRpc>()?;
+    registry.unimplemented::<WsServerDiscoverSourceControlRpc>()?;
+    registry.unimplemented::<WsGitResolvePullRequestRpc>()
+}
+
+/// `ws.ts`'s source-control block: each method calls one forge adapter method. The RPC guard
+/// has already applied the method's scope.
+#[cfg(feature = "forge")]
+mod forge {
+    use super::*;
+    use crate::{
+        adapters::forge::{ForgeAdapter, PullRequestRefusal, Refusal},
+        registry::{Failure, ServerDefect},
+    };
+    use std::sync::Arc;
+    use t3_contracts::source_control::SourceControlSignInError;
+
+    fn repository(refusal: Refusal) -> Failure<WsSourceControlLookupRepositoryError> {
+        Failure::Typed(match refusal {
+            Refusal::Authorization(e) => {
+                WsSourceControlLookupRepositoryError::EnvironmentAuthorizationError(e)
+            }
+            Refusal::Repository(e) => {
+                WsSourceControlLookupRepositoryError::SourceControlRepositoryError(e)
+            }
+        })
+    }
+
+    fn sign_in(error: Box<SourceControlSignInError>) -> Failure<WsSourceControlSignInStartError> {
+        Failure::Typed(WsSourceControlSignInStartError::SourceControlSignInError(
+            error,
+        ))
+    }
+
+    pub fn register(registry: &mut HandlerRegistry, forge: Arc<ForgeAdapter>) -> crate::Result<()> {
+        macro_rules! method {
+            ($rpc:ty, |$f:ident, $ctx:ident, $input:ident| $call:expr) => {{
+                let forge = forge.clone();
+                registry.register::<$rpc, _, _>(move |$ctx, $input| {
+                    let $f = forge.clone();
+                    async move { $call }
+                })?;
+            }};
+        }
+        method!(WsSourceControlLookupRepositoryRpc, |f, ctx, input| f
+            .lookup_repository(&ctx.session_id, input)
+            .await
+            .map_err(repository));
+        method!(WsSourceControlCloneRepositoryRpc, |f, _ctx, input| f
+            .clone_repository(input)
+            .await
+            .map_err(repository));
+        method!(WsSourceControlPublishRepositoryRpc, |f, ctx, input| f
+            .publish_repository(&ctx.session_id, input)
+            .await
+            .map_err(repository));
+        method!(WsSourceControlSignInStartRpc, |f, _ctx, input| f
+            .sign_in_start(input)
+            .await
+            .map_err(sign_in));
+        method!(WsSourceControlSignInWaitRpc, |f, _ctx, input| f
+            .sign_in_wait(input)
+            .await
+            .map_err(sign_in));
+        method!(WsSourceControlSignInCancelRpc, |f, _ctx, input| f
+            .sign_in_cancel(input)
+            .await
+            .map_err(sign_in));
+        method!(WsSourceControlAppAccessRpc, |f, _ctx, input| Ok(f
+            .app_access(input)
+            .await));
+        method!(WsSourceControlStarredRpc, |f, _ctx, input| Ok(f
+            .starred(input)
+            .await));
+        method!(WsSourceControlStarRpc, |f, _ctx, input| Ok(f.star(input).await));
+        method!(WsServerDiscoverSourceControlRpc, |f, _ctx, _input| f
+            .discover()
+            .await
+            .ok_or_else(|| Failure::Defect(ServerDefect::Internal {
+                message: "Source control discovery failed.".into(),
+            })));
+        method!(WsGitResolvePullRequestRpc, |f, ctx, input| f
+            .resolve_pull_request(&ctx.session_id, input)
+            .await
+            .map_err(|refusal| Failure::Typed(match refusal {
+                PullRequestRefusal::Authorization(e) => {
+                    WsSubscribeVcsBranchError::EnvironmentAuthorizationError(e)
+                }
+                PullRequestRefusal::Git(e) => WsSubscribeVcsBranchError::GitManagerServiceError(e),
+            })));
+        Ok(())
+    }
 }

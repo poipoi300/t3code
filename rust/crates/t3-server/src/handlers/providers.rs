@@ -87,22 +87,22 @@ fn register_status(
     registry.register::<WsChatGptReconnectProfileRpc, _, _>(move |_, input| {
         let a = a.clone();
         async move {
-            a.reconnect_profile(input).await.map_err(|error| {
-                Failure::Typed(ProviderSetupRpcError::ProviderSetupError(Box::new(error)))
-            })
+            a.reconnect_profile(input)
+                .await
+                .map_err(|error| Failure::Typed(ProviderSetupRpcError::ProviderSetupError(error)))
         }
     })?;
     let a = adapter.clone();
     registry.register_stream::<WsProviderAuthSubscribeRpc,_,_,_>(move |ctx,input|{
         let a=a.clone();async move {
-            let mut subscription=a.auth_status(input,ctx.session_id.0).await.map_err(|error|Failure::Typed(ProviderSetupRpcError::ProviderSetupError(Box::new(error))))?;
+            let mut subscription=a.auth_status(input,ctx.session_id.0).await.map_err(|error|Failure::Typed(ProviderSetupRpcError::ProviderSetupError(error)))?;
             Ok(async_stream::stream! {while let Some(state)=subscription.next().await {yield Ok(state.into_inner());}})
         }
     })?;
     let a = adapter.clone();
     registry.register_stream::<WsProviderInstallSubscribeRpc,_,_,_>(move |_,input|{
         let a=a.clone();async move {
-            let mut subscription=a.install_status(input).await.map_err(|error|Failure::Typed(ProviderSetupRpcError::ProviderSetupError(Box::new(error))))?;
+            let mut subscription=a.install_status(input).await.map_err(|error|Failure::Typed(ProviderSetupRpcError::ProviderSetupError(error)))?;
             Ok(async_stream::stream! {
                 loop {let state=subscription.borrow_and_update().clone();yield Ok(state); if subscription.changed().await.is_err(){break;}}
             })
@@ -146,15 +146,15 @@ fn register_mutations(
                 async move {
                     if $ctx.services.lifecycle.admit_command().is_err() {
                         return Err(Failure::Typed(ProviderSetupRpcError::ProviderSetupError(
-                            Box::new(setup_error(
+                            setup_error(
                                 &$input.instance_id,
                                 $operation,
                                 "The server is not accepting provider changes.",
-                            )),
+                            ),
                         )));
                     }
                     $call.await.map_err(|error| {
-                        Failure::Typed(ProviderSetupRpcError::ProviderSetupError(Box::new(error)))
+                        Failure::Typed(ProviderSetupRpcError::ProviderSetupError(error))
                     })
                 }
             })?;

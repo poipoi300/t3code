@@ -5,11 +5,13 @@ pub mod host;
 pub mod optional_services;
 pub mod orchestration;
 pub mod preview;
+pub mod project_clone;
 pub mod projects;
 pub mod providers;
 pub mod source_control;
 pub mod telemetry;
 mod unsupported;
+pub mod vcs;
 pub mod workspace_terminal;
 use crate::{registry::HandlerRegistry, services::Domains};
 
@@ -31,7 +33,7 @@ pub fn registry_with(domains: &Domains) -> crate::Result<HandlerRegistry> {
     #[cfg(not(feature = "orchestration"))]
     orchestration::register_unavailable(&mut registry)?;
     workspace_terminal::register_with(&mut registry, domains)?;
-    source_control::register(&mut registry)?;
+    source_control::register_with(&mut registry, domains)?;
     optional_services::register_with(&mut registry, domains)?;
     telemetry::register_with(&mut registry, domains)?;
     host::register_with(&mut registry, domains)?;
@@ -39,7 +41,9 @@ pub fn registry_with(domains: &Domains) -> crate::Result<HandlerRegistry> {
     preview::register_with(&mut registry, domains)?;
     cloud::register_with(&mut registry, domains)?;
     projects::register_with(&mut registry, domains)?;
+    project_clone::register_with(&mut registry, domains)?;
     providers::register_with(&mut registry, domains)?;
+    vcs::register_with(&mut registry, domains)?;
     unsupported::register(&mut registry)?;
     registry.validate()?;
     Ok(registry)
