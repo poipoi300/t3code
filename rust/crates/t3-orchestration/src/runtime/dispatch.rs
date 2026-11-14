@@ -1,5 +1,6 @@
 use crate::{
     api::*,
+    effects::EffectExecutionOptions,
     error::{Error, Result},
     ports::decisions::{
         dispatch_mode_limit::*, orchestrator::command_identity, thread_command_executor::KeyedLanes,
@@ -1225,7 +1226,151 @@ struct Inner {
 #[derive(Clone)]
 pub struct Dispatcher(Arc<Inner>);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelegatedRecoveryPhase {
+    SubagentResults,
+    DelegatedCompletions,
+}
+
+#[derive(Debug)]
+pub struct DelegatedRecoveryFailure {
+    pub phase: DelegatedRecoveryPhase,
+    pub thread_id: Option<ThreadId>,
+    pub cause: Error,
+}
+
+#[derive(Debug, Default)]
+pub struct DelegatedRecoveryReport {
+    pub subagent_result_threads: usize,
+    pub completion_threads: usize,
+    pub failures: Vec<DelegatedRecoveryFailure>,
+}
+
+pub struct DispatchThreadOperations {
+    pub base: Arc<dyn ThreadOperations>,
+    pub dispatcher: Dispatcher,
+}
+
+pub struct PreparedContinuations {
+    pub service: Arc<
+        crate::ports::sessions_recovery::provider_continuation_service::ProviderContinuationService,
+    >,
+    pub requests: tokio::sync::mpsc::Receiver<
+        crate::ports::sessions_recovery::provider_continuation_service::ContinuationRequest,
+    >,
+}
+
+#[async_trait]
+impl ThreadOperations for DispatchThreadOperations {
+    async fn start(&self, thread: ThreadId, run: RunId) -> Result<()> {
+        self.base.start(thread, run).await
+    }
+    async fn start_with_options(
+        &self,
+        thread: ThreadId,
+        run: RunId,
+        options: EffectExecutionOptions,
+    ) -> Result<()> {
+        self.base.start_with_options(thread, run, options).await
+    }
+    async fn finalize(&self, thread: ThreadId, run: RunId, scope: CheckpointScopeId) -> Result<()> {
+        self.base.finalize(thread, run, scope).await
+    }
+    async fn continue_run(&self, thread: ThreadId, source: RunId) -> Result<()> {
+        self.base.continue_run(thread, source).await
+    }
+    async fn continue_run_with_options(
+        &self,
+        thread: ThreadId,
+        source: RunId,
+        options: EffectExecutionOptions,
+    ) -> Result<()> {
+        self.base
+            .continue_run_with_options(thread, source, options)
+            .await
+    }
+    async fn stop_delegated(&self, thread: ThreadId, reason: Option<String>) -> Result<()> {
+        self.base.stop_delegated(thread, reason).await
+    }
+    async fn stop_delegated_for_effect(
+        &self,
+        thread: ThreadId,
+        command: CommandId,
+        reason: Option<String>,
+    ) -> Result<()> {
+        self.base
+            .stop_delegated_for_effect(thread, command, reason)
+            .await
+    }
+    async fn generate_title(
+        &self,
+        thread: ThreadId,
+        kind: crate::effects::TitleKind,
+    ) -> Result<()> {
+        self.base.generate_title(thread, kind).await
+    }
+    async fn generate_title_for_effect(
+        &self,
+        thread: ThreadId,
+        command: CommandId,
+        kind: crate::effects::TitleKind,
+    ) -> Result<()> {
+        self.base
+            .generate_title_for_effect(thread, command, kind)
+            .await
+    }
+    async fn recover_delegated_task(
+        &self,
+        thread: ThreadId,
+        source: Option<RunId>,
+        completed: Option<RunId>,
+    ) -> Result<()> {
+        self.dispatcher
+            .recover_delegated_task(thread, source, completed)
+            .await
+    }
+    async fn resume_queue(&self, thread: ThreadId, selected: Option<RunId>) -> Result<()> {
+        self.dispatcher.resume_queue(thread, selected).await
+    }
+}
+
 impl Dispatcher {
+    pub fn prepare_continuations(
+        &self,
+        reader: Arc<dyn ProjectionReader>,
+        ids: Arc<dyn IdGenerator>,
+        capacity: std::num::NonZeroUsize,
+    ) -> Result<PreparedContinuations> {
+        let (sender, receiver) = tokio::sync::mpsc::channel(capacity.get());
+        self.set_continuation_requests(sender)?;
+        let service=crate::ports::sessions_recovery::provider_continuation_service::ProviderContinuationService::new(
+            reader,
+            Arc::new(self.clone()),self.0.services.committer.clone(),ids,
+        );
+        Ok(PreparedContinuations {
+            service: Arc::new(service),
+            requests: receiver,
+        })
+    }
+
+    pub async fn recover_delegated_tasks(&self) -> DelegatedRecoveryReport {
+        let inner = self.0.clone();
+        match tokio::spawn(async move { inner.recover_delegated_tasks().await }).await {
+            Ok(report) => report,
+            Err(cause) => DelegatedRecoveryReport {
+                failures: vec![DelegatedRecoveryFailure {
+                    phase: DelegatedRecoveryPhase::SubagentResults,
+                    thread_id: None,
+                    cause: Error::Service {
+                        operation: "Dispatcher.recover_delegated_tasks",
+                        detail: cause.to_string(),
+                    },
+                }],
+                ..Default::default()
+            },
+        }
+    }
+
     pub fn new(services: DispatchServices, ceiling: Option<RuntimeModeCeiling>) -> Self {
         Self::with_command_lanes(services, ceiling, Arc::new(KeyedLanes::default()))
     }
@@ -1515,6 +1660,102 @@ impl CommandDispatcher for Dispatcher {
 }
 
 impl Inner {
+    async fn recover_delegated_tasks(self: Arc<Self>) -> DelegatedRecoveryReport {
+        let mut report = DelegatedRecoveryReport::default();
+        if let Err(cause) = self.admit().await {
+            report.failures.push(DelegatedRecoveryFailure {
+                phase: DelegatedRecoveryPhase::SubagentResults,
+                thread_id: None,
+                cause,
+            });
+            return report;
+        }
+        for phase in [
+            DelegatedRecoveryPhase::SubagentResults,
+            DelegatedRecoveryPhase::DelegatedCompletions,
+        ] {
+            let candidates = self
+                .services
+                .database
+                .read(move |db| {
+                    crate::projections::read::recovery_thread_ids(
+                        db,
+                        match phase {
+                            DelegatedRecoveryPhase::SubagentResults => {
+                                crate::projections::read::RecoveryKind::SubagentResults
+                            }
+                            DelegatedRecoveryPhase::DelegatedCompletions => {
+                                crate::projections::read::RecoveryKind::DelegatedCompletions
+                            }
+                        },
+                        None,
+                        None,
+                    )
+                })
+                .await;
+            let threads = match candidates {
+                Ok(threads) => threads,
+                Err(cause) => {
+                    report.failures.push(DelegatedRecoveryFailure {
+                        phase,
+                        thread_id: None,
+                        cause,
+                    });
+                    continue;
+                }
+            };
+            match phase {
+                DelegatedRecoveryPhase::SubagentResults => {
+                    report.subagent_result_threads = threads.len()
+                }
+                DelegatedRecoveryPhase::DelegatedCompletions => {
+                    report.completion_threads = threads.len()
+                }
+            }
+            for batch in threads.chunks(8) {
+                let mut tasks = tokio::task::JoinSet::new();
+                for thread in batch {
+                    let thread = thread.clone();
+                    let inner = self.clone();
+                    tasks.spawn(async move {
+                        let result = match phase {
+                            DelegatedRecoveryPhase::SubagentResults => {
+                                inner
+                                    .recover_delegated_task_inner(thread.clone(), None, None, true)
+                                    .await
+                            }
+                            DelegatedRecoveryPhase::DelegatedCompletions => {
+                                inner.recover_completion_thread(thread.clone()).await
+                            }
+                        };
+                        (thread, result)
+                    });
+                }
+                while let Some(result) = tasks.join_next().await {
+                    match result {
+                        Ok((thread, Err(cause))) => {
+                            report.failures.push(DelegatedRecoveryFailure {
+                                phase,
+                                thread_id: Some(thread),
+                                cause,
+                            })
+                        }
+                        Err(cause) => report.failures.push(DelegatedRecoveryFailure {
+                            phase,
+                            thread_id: None,
+                            cause: Error::Service {
+                                operation: "Dispatcher.recover_delegated_tasks",
+                                detail: cause.to_string(),
+                            },
+                        }),
+                        Ok((_, Ok(()))) => {}
+                    }
+                }
+            }
+        }
+        report
+    }
+
     async fn sync_delegated_run(&self, thread: ThreadId, id: RunId) -> Result<()> {
         let reader = self.services.inputs.reader().ok_or(Error::Unsupported(
             "delegated synchronization requires reader",
@@ -1563,6 +1804,17 @@ impl Inner {
         source: Option<RunId>,
         completed: Option<RunId>,
     ) -> Result<()> {
+        self.recover_delegated_task_inner(thread_id, source, completed, false)
+            .await
+    }
+
+    async fn recover_delegated_task_inner(
+        &self,
+        thread_id: ThreadId,
+        source: Option<RunId>,
+        completed: Option<RunId>,
+        startup: bool,
+    ) -> Result<()> {
         self.admit().await?;
         let reader = self.services.inputs.reader().ok_or(Error::Unsupported(
             "delegated recovery requires the projection reader",
@@ -1598,7 +1850,8 @@ impl Inner {
             return Ok(());
         }
         let parent: ThreadId = serde_json::from_value(value["lineage"]["parentThreadId"].clone())?;
-        if source.is_none()
+        if !startup
+            && source.is_none()
             && !reader
                 .pending_delegated_completion(thread_id.clone())
                 .await?
@@ -1695,6 +1948,58 @@ impl Inner {
             .await?;
         drop(lanes);
         self.offer_deliveries(parent).await
+    }
+
+    async fn recover_completion_thread(&self, thread: ThreadId) -> Result<()> {
+        let reader = self.services.inputs.reader().ok_or(Error::Unsupported(
+            "delegated recovery requires the projection reader",
+        ))?;
+        let lanes = self.lanes.acquire([thread.0.clone()]).await;
+        let projection = projection_from_records(
+            reader
+                .records(
+                    thread.clone(),
+                    vec![RecordKind::Runs],
+                    RecordFilter::default(),
+                )
+                .await?,
+        );
+        let runs = projection
+            .runs
+            .iter()
+            .map(crate::decision::engine::stored_value)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let messages: std::collections::HashSet<_> = runs
+            .iter()
+            .filter_map(|run| run["delegatedCompletion"]["delivery"]["messageId"].as_str())
+            .collect();
+        let terminal: Vec<RunId> = runs
+            .iter()
+            .filter(|run| {
+                matches!(
+                    run["status"].as_str(),
+                    Some("completed" | "interrupted" | "failed" | "cancelled" | "rolled_back")
+                ) && run["userMessageId"]
+                    .as_str()
+                    .is_some_and(|id| messages.contains(id))
+            })
+            .map(|run| serde_json::from_value(run["id"].clone()))
+            .collect::<std::result::Result<_, _>>()?;
+        for id in terminal {
+            let prepared = self.prepare_delegated_recovery(thread.clone()).await?;
+            self.commit_recovery(
+                crate::decision::engine::PureDecisionEngine.decide_delegated_recovery(
+                    &prepared.context,
+                    None,
+                    Some(&id),
+                    None,
+                    &[],
+                )?,
+            )
+            .await?;
+        }
+        drop(lanes);
+        self.offer_deliveries(thread).await
     }
 
     async fn clean_finished_delegate(

@@ -127,7 +127,13 @@ pub type GeneratedImageMarkdown = Arc<dyn Fn(&str, &[String]) -> String + Send +
 
 pub type CodexAgentTracker = Arc<dyn Fn() -> Box<dyn FnOnce() + Send> + Send + Sync>;
 struct AgentLease(Option<Box<dyn FnOnce() + Send>>);
-impl Drop for AgentLease { fn drop(&mut self) { if let Some(release) = self.0.take() { release(); } } }
+impl Drop for AgentLease {
+    fn drop(&mut self) {
+        if let Some(release) = self.0.take() {
+            release();
+        }
+    }
+}
 
 pub type VersionGate = Arc<dyn Fn(&str) -> ProviderResult<()> + Send + Sync>;
 
@@ -210,11 +216,24 @@ fn clean_stderr(text: &str) -> String {
     while let Some(ch) = chars.next() {
         if ch == '\u{1b}' {
             match chars.next() {
-                Some('[') => for ch in chars.by_ref() { if ('@'..='~').contains(&ch) { break; } },
-                Some(']' | 'P' | '^' | '_') => while let Some(ch) = chars.next() {
-                    if ch == '\u{7}' { break; }
-                    if ch == '\u{1b}' && chars.peek() == Some(&'\\') { chars.next(); break; }
-                },
+                Some('[') => {
+                    for ch in chars.by_ref() {
+                        if ('@'..='~').contains(&ch) {
+                            break;
+                        }
+                    }
+                }
+                Some(']' | 'P' | '^' | '_') => {
+                    while let Some(ch) = chars.next() {
+                        if ch == '\u{7}' {
+                            break;
+                        }
+                        if ch == '\u{1b}' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
                 _ => {}
             }
             continue;
@@ -362,7 +381,9 @@ pub fn codex_registration(
     options: CodexAdapterOptions,
     continuation_key: String,
     enabled: bool,
-    credential_access: Vec<Arc<crate::ports::sessions_recovery::provider_adapter_registry::CredentialAccess>>,
+    credential_access: Vec<
+        Arc<crate::ports::sessions_recovery::provider_adapter_registry::CredentialAccess>,
+    >,
 ) -> crate::ports::sessions_recovery::provider_adapter_registry::AdapterRegistration {
     crate::ports::sessions_recovery::provider_adapter_registry::AdapterRegistration {
         adapter: Arc::new(CodexAdapterV2::new(options)),
@@ -465,7 +486,7 @@ impl ProviderAdapter for CodexAdapterV2 {
         let stderr = process.stderr.take();
         let (client, events) =
             native::Client::connect(stdout, stdin, native::ClientOptions::default());
-        let agent = AgentLease(self.options.track_agent.as_ref().map(|track|track()));
+        let agent = AgentLease(self.options.track_agent.as_ref().map(|track| track()));
         let process = ProcessScope::start(process, stderr, &cancellation, agent);
         let runtime = CodexSessionRuntime::connect(
             self.options.clone(),
@@ -907,33 +928,26 @@ impl CodexSessionRuntime {
         self.mutate(move |state| state.complete_goal_command(input, reply))
             .await
     }
-    async fn terminate_background_process(&self, thread: &str, process: &str) -> ProviderResult<()> {
-        let terminated: ProviderResult<native::BackgroundTerminalsTerminateResponse> = self.rpc(
-            "thread/backgroundTerminals/terminate", &json!({"threadId":thread,"processId":process})).await;
-        let mut confirmed = match terminated {
-            Ok(response) => response.terminated,
-            Err(error) if unknown_method(&error) => false,
-            Err(error) => return Err(error),
+    async fn terminate_background_process(
+        &self,
+        thread: &str,
+        process: &str,
+    ) -> ProviderResult<()> {
+        let confirmed = tokio::select! {
+            _ = self.cancellation.cancelled() => return Err(ProviderError::SessionStopped),
+            result = terminate_native_background_process(&self.client, thread, process, self.options.background.as_ref()) => result?,
         };
         if !confirmed {
-            let mut cursor: Option<String> = None;
-            let mut seen = HashSet::new();
-            loop {
-                if !seen.insert(cursor.clone()) { return Err(protocol("Background terminal pagination repeated a cursor")); }
-                let mut params = json!({"threadId":thread});
-                if let Some(cursor) = &cursor { params["cursor"] = json!(cursor); }
-                let page: ProviderResult<native::BackgroundTerminalsListResponse> = self.rpc("thread/backgroundTerminals/list",&params).await;
-                let page = match page { Ok(page)=>page, Err(error) if unknown_method(&error)=>break, Err(error)=>return Err(error) };
-                if page.data.iter().any(|terminal|terminal.process_id == process) { break; }
-                cursor = page.next_cursor;
-                if cursor.is_none() { confirmed = true; break; }
-            }
-            if !confirmed && let Some(host) = &self.options.background { confirmed=host.terminate_untracked_command(thread,process).await?; }
+            return Err(protocol(
+                "Codex background terminal remained active after termination",
+            ));
         }
-        if !confirmed { return Err(protocol("Codex background terminal remained active after termination")); }
         let thread = thread.to_owned();
         let process = process.to_owned();
-        match self.mutate(move |state|state.confirm_command_stopped(&thread,&process)).await {
+        match self
+            .mutate(move |state| state.confirm_command_stopped(&thread, &process))
+            .await
+        {
             Ok(()) | Err(ProviderError::SessionStopped) => Ok(()),
             Err(error) => Err(error),
         }
@@ -1249,11 +1263,23 @@ impl SessionRuntime for CodexSessionRuntime {
                 .await?;
         }
         let native_thread = thread.clone();
-        let (interrupts, tracked) = self.mutate(move |state| {
-            let (interrupts,events)=state.prepare_interrupt_for_thread(&target,Some(&native_thread))?;
-            let tracked=state.lineage_threads(&native_thread).into_iter().flat_map(|thread|state.tracked_commands(&thread).into_iter().map(move |process|(thread.clone(),process))).collect::<std::collections::BTreeSet<_>>();
-            Ok(((interrupts,tracked),events))
-        }).await?;
+        let (interrupts, tracked) = self
+            .mutate(move |state| {
+                let (interrupts, events) =
+                    state.prepare_interrupt_for_thread(&target, Some(&native_thread))?;
+                let tracked = state
+                    .lineage_threads(&native_thread)
+                    .into_iter()
+                    .flat_map(|thread| {
+                        state
+                            .tracked_commands(&thread)
+                            .into_iter()
+                            .map(move |process| (thread.clone(), process))
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
+                Ok(((interrupts, tracked), events))
+            })
+            .await?;
         for (thread_id, turn_id) in interrupts {
             let target = turn_id.clone();
             let ready = self
@@ -1281,7 +1307,9 @@ impl SessionRuntime for CodexSessionRuntime {
                 )
                 .await?;
         }
-        for (thread,process) in tracked { self.terminate_background_process(&thread,&process).await?; }
+        for (thread, process) in tracked {
+            self.terminate_background_process(&thread, &process).await?;
+        }
         Ok(())
     }
     async fn respond(&self, input: RuntimeResponse) -> ProviderResult<()> {
@@ -1457,6 +1485,64 @@ fn archived(error: &ProviderError) -> bool {
 fn active_writer(error: &ProviderError) -> bool {
     error.to_string().contains("already has an active writer")
 }
+pub(crate) async fn terminate_native_background_process(
+    client: &native::Client,
+    thread: &str,
+    process: &str,
+    background: Option<&Arc<dyn CodexBackgroundHost>>,
+) -> ProviderResult<bool> {
+    let terminated: ProviderResult<native::BackgroundTerminalsTerminateResponse> = client
+        .request(
+            "thread/backgroundTerminals/terminate",
+            &json!({"threadId":thread,"processId":process}),
+        )
+        .await
+        .map_err(native_error);
+    let mut confirmed = match terminated {
+        Ok(response) => response.terminated,
+        Err(error) if unknown_method(&error) => false,
+        Err(error) => return Err(error),
+    };
+    if !confirmed {
+        let mut cursor: Option<String> = None;
+        let mut seen = HashSet::new();
+        loop {
+            if !seen.insert(cursor.clone()) {
+                return Err(protocol("Background terminal pagination repeated a cursor"));
+            }
+            let mut params = json!({"threadId":thread});
+            if let Some(cursor) = &cursor {
+                params["cursor"] = json!(cursor);
+            }
+            let page: ProviderResult<native::BackgroundTerminalsListResponse> = client
+                .request("thread/backgroundTerminals/list", &params)
+                .await
+                .map_err(native_error);
+            let page = match page {
+                Ok(page) => page,
+                Err(error) if unknown_method(&error) => break,
+                Err(error) => return Err(error),
+            };
+            if page
+                .data
+                .iter()
+                .any(|terminal| terminal.process_id == process)
+            {
+                break;
+            }
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                confirmed = true;
+                break;
+            }
+        }
+        if !confirmed && let Some(host) = background {
+            confirmed = host.terminate_untracked_command(thread, process).await?;
+        }
+    }
+    Ok(confirmed)
+}
+
 fn unknown_method(error: &ProviderError) -> bool {
     error.to_string().contains("-32601")
 }
@@ -1551,8 +1637,13 @@ impl SessionExtensions for CodexSessionRuntime {
             "Codex applies model selection on turn/start",
         ))
     }
-    async fn stop_task(&self, thread: OrchestrationV2ProviderThread, task_id: String) -> ProviderResult<()> {
-        self.terminate_background_process(native_thread(&thread)?, &task_id).await
+    async fn stop_task(
+        &self,
+        thread: OrchestrationV2ProviderThread,
+        task_id: String,
+    ) -> ProviderResult<()> {
+        self.terminate_background_process(native_thread(&thread)?, &task_id)
+            .await
     }
     async fn await_tasks(
         &self,

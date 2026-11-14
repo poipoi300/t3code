@@ -593,6 +593,59 @@ fn preparation_progress_requires_the_current_preparing_run_and_preserves_its_ite
 }
 
 #[test]
+fn stop_requires_execution_records_to_end_preparation_and_holds_the_queue_either_way() {
+    for complete in [false, true] {
+        let mut projection = prepared_projection();
+        projection.runs[0] = change(
+            &projection.runs[0],
+            json!({"startedAt":null,"completedAt":null}),
+        );
+        projection.runs.push(run("queued", 2, "queued"));
+        if !complete {
+            projection.nodes.clear();
+            projection.provider_threads.clear();
+            projection.attempts.clear();
+            let interrupt = command(
+                json!({"type":"run.interrupt","commandId":"interrupt-incomplete","threadId":"thread","runId":"prepared","holdQueue":true}),
+            );
+            assert!(
+                PureDecisionEngine
+                    .decide(&context(Some(projection.clone())), &interrupt)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Run prepared is not interruptible.")
+            );
+        }
+        let stop = command(
+            json!({"type":"thread.stop","commandId":"stop-preparing","threadId":"thread","stopDelegatedTasks":false}),
+        );
+        let decision = PureDecisionEngine
+            .decide(&context(Some(projection)), &stop)
+            .unwrap();
+        let events: Vec<_> = decision
+            .events
+            .iter()
+            .map(|event| t3_contracts::stored::to_value(event).unwrap())
+            .collect();
+        assert_eq!(
+            events.iter().any(|event| event["type"] == "run.updated"
+                && event["payload"]["id"] == "prepared"
+                && event["payload"]["status"] == "interrupted"),
+            complete
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event["type"] == "turn-item.created"
+                    && event["payload"]["type"] == "run_interrupt_request")
+        );
+        assert!(events.iter().any(|event| event["type"] == "run.updated"
+            && event["payload"]["id"] == "queued"
+            && event["payload"]["queueHeld"] == true));
+    }
+}
+
+#[test]
 fn releasing_preparation_attaches_the_root_scope_before_starting_the_provider() {
     let mut projection = prepared_projection();
     projection.thread = change(&projection.thread, json!({"worktreePath":"C:/work/thread"}));
@@ -2588,8 +2641,7 @@ fn rollback_validates_provider_ownership_and_missing_files_before_scheduling_wor
     );
 }
 
-#[tokio::test]
-async fn delegated_recovery_commits_the_child_result_and_offers_only_its_current_cohort() {
+async fn completed_delegate_harness() -> (Harness, ThreadId, RunId) {
     let harness = message_harness().await;
     harness.dispatch(json!({"type":"message.dispatch","commandId":"parent-start","threadId":"thread","messageId":"parent-input","text":"Work","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"})).await.unwrap();
     let parent = harness
@@ -2612,15 +2664,24 @@ async fn delegated_recovery_commits_the_child_result_and_offers_only_its_current
     run["completedAt"] = json!(TEST_TIME);
     let result = json!({"id":"child-result","threadId":child_id,"runId":run["id"],"nodeId":run["rootNodeId"],"role":"assistant","text":"Use UTF-16 offsets.","attachments":[],"streaming":false,"createdBy":"agent","creationSource":"provider","createdAt":TEST_TIME,"updatedAt":TEST_TIME});
     harness.sink.commit(CommitRequest{receipt:None,decision:Decision{events:vec![serde_json::from_value(json!({"id":"child:completed","threadId":child_id,"type":"run.updated","runId":run["id"],"occurredAt":TEST_TIME,"payload":run})).unwrap(),serde_json::from_value(json!({"id":"child:reply","threadId":child_id,"type":"message.updated","runId":run["id"],"nodeId":run["rootNodeId"],"occurredAt":TEST_TIME,"payload":result})).unwrap()],..Default::default()},guard:CommitGuard::None}).await.unwrap();
+    let child_run = serde_json::from_value(run["id"].clone()).unwrap();
+    (harness, child_id, child_run)
+}
+
+#[tokio::test]
+async fn delegated_recovery_commits_the_child_result_and_offers_only_its_current_cohort() {
+    let (harness, child_id, child_run) = completed_delegate_harness().await;
     let (sender, mut offers) = tokio::sync::mpsc::channel(4);
     harness
         .dispatcher
         .set_continuation_requests(sender)
         .unwrap();
-    let child_run = serde_json::from_value(run["id"].clone()).unwrap();
-    harness
-        .dispatcher
-        .recover_delegated_task(child_id.clone(), Some(child_run), None)
+    let operations = t3_orchestration::runtime::dispatch::DispatchThreadOperations {
+        base: std::sync::Arc::new(t3_orchestration::testing::FakeThreadOperations::default()),
+        dispatcher: harness.dispatcher.clone(),
+    };
+    operations
+        .recover_delegated_task(child_id.clone(), Some(child_run.clone()), None)
         .await
         .unwrap();
     let parent = harness
@@ -2652,7 +2713,7 @@ async fn delegated_recovery_commits_the_child_result_and_offers_only_its_current
         .filter(|transfer| transfer["type"] == "subagent_result")
         .collect();
     assert_eq!(transfers.len(), 1);
-    assert_eq!(transfers[0]["sourcePoint"]["runId"], run["id"]);
+    assert_eq!(transfers[0]["sourcePoint"]["runId"], json!(child_run));
     harness
         .dispatcher
         .recover_delegated_task(child_id, None, None)
@@ -2665,6 +2726,164 @@ async fn delegated_recovery_commits_the_child_result_and_offers_only_its_current
         .unwrap()
         .unwrap();
     assert_eq!(again.context_transfers, parent.context_transfers);
+}
+
+#[tokio::test]
+async fn startup_recovers_good_children_and_contains_a_bad_child_before_offering_completions() {
+    use std::sync::Arc;
+    use t3_orchestration::{runtime::dispatch::DelegatedRecoveryPhase, testing::SequenceIds};
+    let (harness, good_child, _) = completed_delegate_harness().await;
+    let parent = harness
+        .reader
+        .projection(ThreadId("thread".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    harness.dispatch(json!({"type":"delegated_task.request","commandId":"bad-delegate","parentThreadId":"thread","parentRunId":parent.runs[0].id,"parentNodeId":parent.runs[0].root_node_id,"task":"Bad result","completionWake":"always","modelSelection":{"instanceId":"codex","model":"a"},"runtimeMode":"approval-required","interactionMode":"default","createdBy":"agent","creationSource":"server"})).await.unwrap();
+    let bad_child = ThreadId("thread:delegated-task:bad-delegate".into());
+    let child = harness
+        .reader
+        .projection(bad_child.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let ended = change(
+        &child.runs[0],
+        json!({"status":"completed","completedAt":TEST_TIME}),
+    );
+    harness.sink.commit(CommitRequest { receipt: None, decision: Decision { events: vec![serde_json::from_value(json!({"id":"bad-ended","threadId":bad_child,"type":"run.updated","runId":ended.id,"occurredAt":TEST_TIME,"payload":t3_contracts::stored::to_value(&ended).unwrap()})).unwrap()], ..Default::default() }, guard: CommitGuard::None }).await.unwrap();
+    let corrupt_id = bad_child.0.clone();
+    harness.database.stores.transaction(move |tx| {
+        tx.execute("UPDATE orchestration_v2_projection_runs SET payload_json=json_remove(payload_json,'$.id') WHERE thread_id=?1", [&corrupt_id])?;
+        Ok(())
+    }).await.unwrap();
+    let mut continuations = harness
+        .dispatcher
+        .prepare_continuations(
+            harness.reader.clone(),
+            Arc::new(SequenceIds::new("startup")),
+            std::num::NonZeroUsize::new(8).unwrap(),
+        )
+        .unwrap();
+    let report = harness.dispatcher.recover_delegated_tasks().await;
+    assert_eq!(report.subagent_result_threads, 2);
+    assert_eq!(report.completion_threads, 1);
+    assert_eq!(report.failures.len(), 1, "{report:?}");
+    assert_eq!(
+        report.failures[0].phase,
+        DelegatedRecoveryPhase::SubagentResults
+    );
+    assert_eq!(report.failures[0].thread_id.as_ref(), Some(&bad_child));
+    let parent = harness
+        .reader
+        .projection(ThreadId("thread".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    let task = parent
+        .subagents
+        .iter()
+        .find(|task| task.child_thread_id == Some(t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(good_child.clone())))
+        .unwrap();
+    assert_eq!(task.result.as_deref(), Some("Use UTF-16 offsets."));
+    let offer = continuations.requests.recv().await.unwrap();
+    assert_eq!(offer.thread_id, ThreadId("thread".into()));
+    assert_eq!(offer.delegated_completion.as_ref().unwrap().generation, 1);
+    assert_eq!(continuations.service.process(&offer).await.unwrap(), t3_orchestration::ports::sessions_recovery::provider_continuation_service::ContinuationOutcome::Settled);
+    let delivered = harness
+        .reader
+        .projection(ThreadId("thread".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(delivered.messages.iter().any(|message| message.id
+        == t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(
+            offer.delegated_completion.unwrap().message_id
+        )));
+    continuations.service.shutdown().await;
+}
+
+#[tokio::test]
+async fn startup_and_effect_repair_finalize_only_the_current_completion_and_replay_without_writes()
+{
+    use std::sync::Arc;
+    use t3_orchestration::{
+        runtime::dispatch::DispatchThreadOperations,
+        testing::{FakeThreadOperations, SequenceIds},
+    };
+    for startup in [false, true] {
+        let (harness, child, child_run) = completed_delegate_harness().await;
+        let mut continuations = harness
+            .dispatcher
+            .prepare_continuations(
+                harness.reader.clone(),
+                Arc::new(SequenceIds::new("repair")),
+                std::num::NonZeroUsize::new(8).unwrap(),
+            )
+            .unwrap();
+        let operations = DispatchThreadOperations {
+            base: Arc::new(FakeThreadOperations::default()),
+            dispatcher: harness.dispatcher.clone(),
+        };
+        operations
+            .recover_delegated_task(child, Some(child_run), None)
+            .await
+            .unwrap();
+        let offer = continuations.requests.recv().await.unwrap();
+        assert_eq!(continuations.service.process(&offer).await.unwrap(), t3_orchestration::ports::sessions_recovery::provider_continuation_service::ContinuationOutcome::Settled);
+        let before = harness
+            .reader
+            .projection(ThreadId("thread".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        let delivery_message = &offer.delegated_completion.as_ref().unwrap().message_id;
+        let delivery = before
+            .runs
+            .iter()
+            .find(|run| {
+                run.user_message_id
+                    == t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(
+                        delivery_message.clone(),
+                    )
+            })
+            .unwrap();
+        let ended = change(
+            delivery,
+            json!({"status":"completed","completedAt":TEST_TIME}),
+        );
+        let id: RunId =
+            serde_json::from_value(t3_contracts::stored::to_value(&ended.id).unwrap()).unwrap();
+        harness.sink.commit(CommitRequest { receipt: None, decision: Decision { events: vec![serde_json::from_value(json!({"id":"delivery:ended","threadId":"thread","type":"run.updated","runId":id,"occurredAt":TEST_TIME,"payload":t3_contracts::stored::to_value(&ended).unwrap()})).unwrap()], ..Default::default() }, guard: CommitGuard::None }).await.unwrap();
+        if startup {
+            let report = harness.dispatcher.recover_delegated_tasks().await;
+            assert!(report.failures.is_empty(), "{report:?}");
+            assert_eq!(report.completion_threads, 1);
+        } else {
+            operations
+                .recover_delegated_task(ThreadId("thread".into()), None, Some(id.clone()))
+                .await
+                .unwrap();
+        }
+        let after = harness
+            .reader
+            .projection(ThreadId("thread".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            t3_contracts::stored::to_value(&after.subagents[0]).unwrap()["completionDelivery"]["state"],
+            "delivered"
+        );
+        assert!(t3_contracts::stored::to_value(&after.runs[0]).unwrap()["delegatedCompletion"]["delivery"].is_null());
+        let events = harness.count_events().await;
+        operations
+            .recover_delegated_task(ThreadId("thread".into()), None, Some(id))
+            .await
+            .unwrap();
+        assert_eq!(harness.count_events().await, events);
+        continuations.service.shutdown().await;
+    }
 }
 
 #[test]

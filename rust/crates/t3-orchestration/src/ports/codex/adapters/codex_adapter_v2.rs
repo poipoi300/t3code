@@ -31,6 +31,155 @@ use tokio_util::sync::CancellationToken;
 pub fn decode<T: DeserializeOwned>(value: Value) -> ProviderResult<T> {
     serde_json::from_value(value).map_err(|e| protocol(format!("Codex projection: {e}")))
 }
+
+// Local shim until the native client exposes decoded frames, including RPC replies.
+pub struct CodexProtocolLogger {
+    session: ProviderSessionId,
+    native_threads: BTreeMap<String, ThreadId>,
+    requests: BTreeMap<String, ThreadId>,
+}
+impl CodexProtocolLogger {
+    pub fn new(session: ProviderSessionId) -> Self {
+        Self {
+            session,
+            native_threads: BTreeMap::new(),
+            requests: BTreeMap::new(),
+        }
+    }
+
+    pub fn frame(
+        &mut self,
+        direction: &str,
+        stage: &str,
+        payload: Value,
+        bound: &dyn Fn(Value) -> Value,
+    ) -> Option<(Option<ThreadId>, Value)> {
+        if stage != "decoded"
+            || matches!(
+                payload["method"].as_str(),
+                Some(
+                    "item/agentMessage/delta"
+                        | "item/commandExecution/outputDelta"
+                        | "item/fileChange/outputDelta"
+                        | "item/plan/delta"
+                        | "item/reasoning/summaryTextDelta"
+                        | "item/reasoning/textDelta"
+                        | "thread/realtime/outputAudio/delta"
+                        | "thread/realtime/transcript/delta"
+                        | "turn/diff/updated"
+                )
+            )
+        {
+            return None;
+        }
+        let request = payload["method"].is_string();
+        let key = match &payload["id"] {
+            Value::String(id) => Some(id.clone()),
+            Value::Number(id) => Some(id.to_string()),
+            _ => None,
+        }
+        .map(|id| {
+            format!(
+                "{}:{id}",
+                if request == (direction == "outgoing") {
+                    "client"
+                } else {
+                    "server"
+                }
+            )
+        });
+        let thread = if request {
+            let params = &payload["params"];
+            let native = params["threadId"]
+                .as_str()
+                .or_else(|| params["thread"]["id"].as_str());
+            let mut thread = params["config"]["shell_environment_policy.set.T3CODE_THREAD_ID"]
+                .as_str()
+                .map(|id| ThreadId(id.into()))
+                .or_else(|| native.and_then(|id| self.native_threads.get(id).cloned()));
+            if thread.is_none()
+                && let Some(native) = native
+            {
+                thread = params["thread"]["source"]["subAgent"]["thread_spawn"]["parent_thread_id"]
+                    .as_str()
+                    .and_then(|parent| self.native_threads.get(parent).cloned());
+                if let Some(thread) = &thread {
+                    self.native_threads.insert(native.into(), thread.clone());
+                }
+            }
+            if let (Some(key), Some(thread)) = (key, &thread) {
+                self.requests.insert(key, thread.clone());
+            }
+            thread
+        } else {
+            let thread = key.and_then(|key| self.requests.remove(&key));
+            if let (Some(thread), Some(native)) =
+                (&thread, payload["result"]["thread"]["id"].as_str())
+            {
+                self.native_threads.insert(native.into(), thread.clone());
+            }
+            thread
+        };
+        let event = redact_protocol_value(
+            bound(json!({"direction":direction,"stage":stage,"payload":payload})),
+            bound,
+        );
+        Some((
+            thread,
+            json!({"provider":"codex","protocol":"codex.app-server","kind":"protocol","providerSessionId":self.session,"event":event}),
+        ))
+    }
+}
+
+fn redact_protocol_value(value: Value, bound: &dyn Fn(Value) -> Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| redact_protocol_value(value, bound))
+                .collect(),
+        ),
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| {
+                    let normalized: String = key
+                        .chars()
+                        .filter(char::is_ascii_alphanumeric)
+                        .map(|ch| ch.to_ascii_lowercase())
+                        .collect();
+                    let value = if ["authorization", "apikey", "token", "password", "secret"]
+                        .iter()
+                        .any(|suffix| normalized.ends_with(suffix))
+                    {
+                        json!("[REDACTED]")
+                    } else {
+                        redact_protocol_value(value, bound)
+                    };
+                    (key, value)
+                })
+                .collect(),
+        ),
+        Value::String(value) => {
+            if value
+                .get(..6)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer"))
+                && value[6..].chars().next().is_some_and(char::is_whitespace)
+            {
+                return json!("[REDACTED]");
+            }
+            let trimmed = value.trim();
+            if ((trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']')))
+                && let Ok(parsed) = serde_json::from_str::<Value>(trimmed)
+            {
+                return Value::String(redact_protocol_value(bound(parsed), bound).to_string());
+            }
+            Value::String(value)
+        }
+        value => value,
+    }
+}
 fn encoded(value: impl Serialize) -> ProviderResult<Value> {
     serde_json::to_value(value).map_err(|e| protocol(e.to_string()))
 }
@@ -496,6 +645,13 @@ pub fn build_turn_start_params_with_input(
         params["cwd"] = json!(cwd.to_string_lossy());
     }
     if let Some(effort) = string_option(&input.model_selection, "reasoningEffort")
+        .or_else(|| {
+            matches!(
+                input.model_selection.model.as_str(),
+                "gpt-6-astra" | "openai.gpt-6-astra"
+            )
+            .then_some("medium")
+        })
         .or(options.reasoning_effort.as_deref())
     {
         if effort.is_empty() {
@@ -722,6 +878,25 @@ struct Context {
     commands: BTreeMap<String, Value>,
     closed_commands: BTreeSet<String>,
     offered: BTreeSet<String>,
+}
+
+fn compact_context(context: &mut Context) {
+    context.positions.clear();
+    context.items.clear();
+    context.texts.clear();
+    context.final_texts.clear();
+    context.last_final_text = None;
+    context.commands.clear();
+    context.offered.clear();
+    context.start_params = None;
+    context.latest_failure = None;
+    context.latest_error = None;
+    context.image_saved.clear();
+    context.image_answer = None;
+    let input = Arc::make_mut(&mut context.input);
+    input.message.text.clear();
+    input.message.attachments.clear();
+    input.app_context.clear();
 }
 
 #[derive(Clone)]
@@ -1180,6 +1355,7 @@ pub struct Projection {
     child_templates: BTreeMap<String, Context>,
     early: BTreeMap<String, Vec<(String, Value)>>,
     subagents: BTreeMap<String, Value>,
+    subagent_items: BTreeMap<String, Value>,
     pending: BTreeMap<String, Pending>,
     responses: BTreeMap<String, (Value, Value, Value)>,
     plans: BTreeMap<String, String>,
@@ -1192,6 +1368,7 @@ pub struct Projection {
     target_waiters: BTreeMap<String, Vec<tokio::sync::oneshot::Sender<ProviderResult<String>>>>,
     stopped_threads: BTreeSet<String>,
     root_terminals: BTreeSet<String>,
+    retired_turns: BTreeSet<String>,
     goals: BTreeMap<String, Value>,
     goal_holds: BTreeMap<String, GoalHold>,
     goal_updates_held: BTreeSet<String>,
@@ -1235,6 +1412,7 @@ impl Projection {
             child_templates: BTreeMap::new(),
             early: BTreeMap::new(),
             subagents: BTreeMap::new(),
+            subagent_items: BTreeMap::new(),
             pending: BTreeMap::new(),
             responses: BTreeMap::new(),
             plans: BTreeMap::new(),
@@ -1247,6 +1425,7 @@ impl Projection {
             target_waiters: BTreeMap::new(),
             stopped_threads: BTreeSet::new(),
             root_terminals: BTreeSet::new(),
+            retired_turns: BTreeSet::new(),
             goals: BTreeMap::new(),
             goal_holds: BTreeMap::new(),
             goal_updates_held: BTreeSet::new(),
@@ -1366,6 +1545,9 @@ impl Projection {
     }
     fn start(&mut self, thread: &str, turn: Value) -> ProviderResult<Vec<ProviderEvent>> {
         let id = text(&turn, "id");
+        if self.retired_turns.contains(id) {
+            return Ok(vec![]);
+        }
         if turn.get("startedAt").is_some_and(|time| !time.is_null()) {
             self.native_started.insert(id.into());
         }
@@ -1515,23 +1697,20 @@ impl Projection {
             context
         } else if let Some(template) = self.child_templates.get(thread) {
             let mut context = template.clone();
-            if let Some(parent) = context
-                .parent_turn
-                .as_ref()
-                .and_then(|id| self.turns.get(id))
-                && let Some(current) = self
-                    .turns
-                    .values()
-                    .filter(|candidate| {
-                        candidate.native_thread == parent.native_thread && !candidate.settled
-                    })
-                    .max_by_key(|candidate| {
-                        (
-                            candidate.input.run_ordinal,
-                            candidate.input.provider_turn_ordinal,
-                            candidate.native_turn.as_str(),
-                        )
-                    })
+            if let Some(current) = self
+                .turns
+                .values()
+                .filter(|candidate| {
+                    candidate.thread_id == context.app["lineage"]["parentThreadId"]
+                        && !candidate.settled
+                })
+                .max_by_key(|candidate| {
+                    (
+                        candidate.input.run_ordinal,
+                        candidate.input.provider_turn_ordinal,
+                        candidate.native_turn.as_str(),
+                    )
+                })
             {
                 context.parent_turn = Some(current.native_turn.clone());
                 context.input = current.input.clone();
@@ -1596,6 +1775,11 @@ impl Projection {
                 .values()
                 .filter(|c| c.native_thread == thread)
                 .map(|c| c.turn["ordinal"].as_u64().unwrap_or(0))
+                .chain(
+                    self.child_templates
+                        .get(thread)
+                        .and_then(|template| template.turn["ordinal"].as_u64()),
+                )
                 .max()
                 .unwrap_or(0)
                 + 1
@@ -1637,6 +1821,7 @@ impl Projection {
             if let Some(template) = self.child_templates.get_mut(thread) {
                 template.parent_turn = context.parent_turn.clone();
                 template.input = context.input.clone();
+                template.turn = context.turn.clone();
             }
             if ordinal > 1 {
                 let parent = context
@@ -1820,6 +2005,15 @@ impl Projection {
         for id in &selected {
             if let Some(context) = self.turns.get_mut(id) {
                 context.interrupted = true;
+                context.unconfirmed_commands.extend(
+                    context
+                        .commands
+                        .values()
+                        .filter(|command| {
+                            matches!(text(command, "status"), "inProgress" | "running")
+                        })
+                        .filter_map(|command| command["processId"].as_str().map(str::to_owned)),
+                );
                 if context.parent_turn.is_none() {
                     self.stopped_threads.insert(context.native_thread.clone());
                 }
@@ -2217,6 +2411,9 @@ impl Projection {
             return Ok(events);
         }
         if !self.turns.contains_key(&turn_id) {
+            if self.retired_turns.contains(&turn_id) {
+                return Ok(events);
+            }
             if matches!(
                 method,
                 "item/started"
@@ -3472,7 +3669,84 @@ impl Projection {
         }
         Ok(events)
     }
-    pub fn release_settled_turns(&mut self) -> usize { 0 }
+    pub fn release_settled_turns(&mut self) -> usize {
+        let work = |context: &Context| {
+            !context.unconfirmed_commands.is_empty()
+                || !context.captures.is_empty()
+                || !context.image_running.is_empty()
+                || context.image_pending
+                || context.items.values().any(|item| {
+                    item["status"] == "running"
+                        && matches!(text(item, "type"), "command_execution" | "dynamic_tool")
+                })
+        };
+        let mut keep: BTreeSet<String> = self
+            .turns
+            .iter()
+            .filter(|(_, context)| {
+                !context.settled || work(context) || context.capacity_pending.is_some()
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        keep.extend(
+            self.continuations
+                .values()
+                .map(|continuation| continuation.source.clone()),
+        );
+        keep.extend(self.goal_holds.values().map(|hold| hold.source.clone()));
+        keep.extend(self.deferred_terminals.keys().cloned());
+        keep.extend(self.pending.values().map(|pending| pending.owner.clone()));
+        for (thread, template) in &self.child_templates {
+            if self
+                .subagents
+                .get(thread)
+                .is_some_and(|task| matches!(text(task, "status"), "pending" | "running"))
+            {
+                keep.extend(template.parent_turn.iter().cloned());
+            }
+        }
+        loop {
+            let parents: Vec<_> = keep
+                .iter()
+                .filter_map(|id| {
+                    self.turns
+                        .get(id)
+                        .and_then(|context| context.parent_turn.clone())
+                })
+                .collect();
+            let previous = keep.len();
+            keep.extend(parents);
+            if previous == keep.len() {
+                break;
+            }
+        }
+        let retired: Vec<_> = self
+            .turns
+            .iter()
+            .filter(|(id, context)| context.settled && !context.interrupted && !keep.contains(*id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &retired {
+            self.turns.remove(id);
+            self.retired_turns.insert(id.clone());
+            self.native_started.remove(id);
+        }
+        for (id, context) in &mut self.turns {
+            if context.settled && context.interrupted && !keep.contains(id) {
+                compact_context(context);
+            }
+        }
+        for (thread, template) in &mut self.child_templates {
+            if self
+                .subagents
+                .get(thread)
+                .is_none_or(|task| !matches!(text(task, "status"), "pending" | "running"))
+            {
+                compact_context(template);
+            }
+        }
+        retired.len()
+    }
     pub fn stopped(&mut self) -> ProviderResult<Vec<ProviderEvent>> {
         let mut events = vec![];
         let pending = std::mem::take(&mut self.pending);
@@ -4190,8 +4464,18 @@ impl Projection {
                     .map(|(_, events)| events)
             } else {
                 self.containment.remove(&(thread.clone(), process.clone()));
-                self.turns.values().filter(|context|context.native_thread == *thread && context.unconfirmed_commands.contains(process))
-                    .map(|context|Ok(event(ProviderEventKind::BackgroundWork {provider_turn_id:decode(context.turn["id"].clone())?,pending:true})))
+                self.turns
+                    .values()
+                    .filter(|context| {
+                        context.native_thread == *thread
+                            && context.unconfirmed_commands.contains(process)
+                    })
+                    .map(|context| {
+                        Ok(event(ProviderEventKind::BackgroundWork {
+                            provider_turn_id: decode(context.turn["id"].clone())?,
+                            pending: true,
+                        }))
+                    })
                     .collect()
             };
         }
@@ -4677,7 +4961,141 @@ fn failure_value(error: &Value) -> Value {
         Some("usageLimitExceeded" | "rateLimitExceeded")
     ) || error["codexErrorInfo"]["responseTooManyFailedAttempts"]["httpStatusCode"]
         == 429;
-    json!({"class":if usage{"usage_limit"}else{"provider_error"},"message":message,"code":code,"retryable":false})
+    let mut failure = json!({"class":if usage{"usage_limit"}else{"provider_error"},"message":message,"code":code,"retryable":false});
+    if let Some((code, message, usage)) = managed_failure(error) {
+        failure["code"] = json!(code);
+        failure["message"] = json!(message);
+        if usage {
+            failure["class"] = json!("usage_limit");
+        }
+    }
+    failure
+}
+
+fn unwrap_managed_error(value: &Value) -> Value {
+    let value = value
+        .as_str()
+        .and_then(|value| serde_json::from_str(value).ok())
+        .unwrap_or_else(|| value.clone());
+    value.get("error").cloned().unwrap_or(value)
+}
+
+fn managed_code(value: &Value) -> Option<(&'static str, &'static str, bool)> {
+    let value = unwrap_managed_error(value);
+    let code = value.get("code").unwrap_or(&value).as_str()?;
+    let (code, message) = match code {
+        "subscription_sharing_v2_user_not_eligible" => (
+            "subscription_sharing_v2_user_not_eligible",
+            "ChatGPT sharing is unavailable for this account or workspace. Use another provider or check its sharing policy.",
+        ),
+        "subscription_sharing_user_not_eligible" => (
+            "subscription_sharing_user_not_eligible",
+            "ChatGPT sharing is unavailable for this account or workspace. Use another provider or check its sharing policy.",
+        ),
+        "subscription_sharing_usage_limit_exceeded" => (
+            "subscription_sharing_usage_limit_exceeded",
+            "Your ChatGPT usage limit was reached. Check ChatGPT Usage settings for your available allowance.",
+        ),
+        "subscription_sharing_workplace_individual_usage_limit_exceeded" => (
+            "subscription_sharing_workplace_individual_usage_limit_exceeded",
+            "You reached your workspace's limit for using ChatGPT in other apps. Ask your workspace admin to increase it.",
+        ),
+        "subscription_sharing_usage_unavailable" => (
+            "subscription_sharing_usage_unavailable",
+            "ChatGPT usage is temporarily unavailable. Try again shortly.",
+        ),
+        "subscription_sharing_unsupported_capability" => (
+            "subscription_sharing_unsupported_capability",
+            "Codex used a feature that ChatGPT sharing does not support. Use another provider for this request.",
+        ),
+        "subscription_sharing_v2_client_not_enabled" => (
+            "subscription_sharing_v2_client_not_enabled",
+            "This app is not enabled for this ChatGPT connection. Use your existing CLI or another provider.",
+        ),
+        "subscription_sharing_v2_route_not_supported" => (
+            "subscription_sharing_v2_route_not_supported",
+            "ChatGPT does not support this request route.",
+        ),
+        "subscription_sharing_route_not_supported" => (
+            "subscription_sharing_route_not_supported",
+            "ChatGPT does not support this request route.",
+        ),
+        "subscription_sharing_v2_invalid_user" => (
+            "subscription_sharing_v2_invalid_user",
+            "ChatGPT could not validate this connection. Check the selected account and sharing permissions.",
+        ),
+        "subscription_sharing_invalid_user" => (
+            "subscription_sharing_invalid_user",
+            "ChatGPT could not validate this connection. Check the selected account and sharing permissions.",
+        ),
+        "subscription_sharing_v2_user_unavailable" => (
+            "subscription_sharing_v2_user_unavailable",
+            "ChatGPT is temporarily unavailable. Try again shortly.",
+        ),
+        "subscription_sharing_user_unavailable" => (
+            "subscription_sharing_user_unavailable",
+            "ChatGPT is temporarily unavailable. Try again shortly.",
+        ),
+        "chatpass_v2_scope_not_authorized" => (
+            "chatpass_v2_scope_not_authorized",
+            "This ChatGPT grant does not authorize the request. Check the connection's sharing permissions.",
+        ),
+        "chatpass_v2_invalid_authorization_context" => (
+            "chatpass_v2_invalid_authorization_context",
+            "ChatGPT could not authorize this connection. Check the client and sharing permissions.",
+        ),
+        _ => return None,
+    };
+    Some((
+        code,
+        message,
+        matches!(
+            code,
+            "subscription_sharing_usage_limit_exceeded"
+                | "subscription_sharing_workplace_individual_usage_limit_exceeded"
+        ),
+    ))
+}
+
+fn managed_failure(error: &Value) -> Option<(&'static str, &'static str, bool)> {
+    let error = unwrap_managed_error(error);
+    let messages: Vec<&str> = if let Some(message) = error.as_str() {
+        vec![message]
+    } else {
+        ["message", "additionalDetails"]
+            .into_iter()
+            .filter_map(|key| error[key].as_str())
+            .collect()
+    };
+    let (code, mut message, usage) = managed_code(&error)
+        .or_else(|| {
+            messages
+                .iter()
+                .find_map(|message| managed_code(&json!(message)))
+        })
+        .or_else(|| {
+            messages
+                .iter()
+                .any(|message| {
+                    message.contains("has reached their Subscription Sharing usage limit")
+                })
+                .then(|| managed_code(&json!("subscription_sharing_usage_limit_exceeded")))
+                .flatten()
+        })?;
+    if code == "subscription_sharing_unsupported_capability" {
+        if messages
+            .iter()
+            .any(|message| message.contains("tool 'namespace'"))
+        {
+            message = "Codex sent a tool namespace that ChatGPT sharing does not support. Use another provider for this request.";
+        } else if messages
+            .iter()
+            .any(|message| message.contains("additional_tools"))
+        {
+            message = "Codex sent an input item that ChatGPT sharing does not support. Use another provider for this request.";
+        }
+    }
+    Some((code, message, usage))
 }
 
 pub async fn run(
@@ -4761,6 +5179,7 @@ pub(crate) async fn run_runtime(
         if let Some(complete) = complete {
             complete();
         }
+        projection.release_settled_turns();
         native.acknowledge();
         while tasks.len() < 32 {
             let Some(mut action) = projection.actions.pop_front() else {
@@ -4886,6 +5305,16 @@ async fn execute_action(
         let Some(client) = client else {
             return Ok(Value::Null);
         };
+        if let NativeAction::Terminate { thread, process } = action {
+            let terminated = crate::adapters::codex::terminate_native_background_process(
+                &client,
+                thread,
+                process,
+                background.as_ref(),
+            )
+            .await?;
+            return Ok(json!({"terminated":terminated}));
+        }
         let (method, params) = match action {
             NativeAction::Interrupt { thread, turn } => {
                 ("turn/interrupt", json!({"threadId":thread,"turnId":turn}))
@@ -4914,16 +5343,6 @@ async fn execute_action(
         };
         let result: ProviderResult<Value> =
             client.request(method, &params).await.map_err(native_error);
-        if let NativeAction::Terminate { thread, process } = action
-            && !result
-                .as_ref()
-                .is_ok_and(|response| response["terminated"] == true)
-            && let Some(background) = &background
-        {
-            return Ok(
-                json!({"terminated":background.terminate_untracked_command(thread,process).await?}),
-            );
-        }
         result
     };
     tokio::select! {_=stop.cancelled()=>Err(ProviderError::Cancelled),result=tokio::time::timeout(std::time::Duration::from_secs(timeout),operation)=>result.map_err(|_|protocol("Codex native action timed out"))?}
@@ -5034,8 +5453,16 @@ impl Projection {
             && elicitation_response(&params, ProviderApprovalDecision::Accept)["action"] != "accept"
         {
             self.actions.push_back(NativeAction::Reply {
-                pending: Some(Box::new(PendingResponse {handle:request.into_typed(),question_ids:BTreeMap::new()})),
-                response: RuntimeResponse {request_id:RuntimeRequestId(self.ids.next(IdKind::RuntimeRequest)),decision:Some(ProviderApprovalDecision::Decline),feedback:None,answers:None},
+                pending: Some(Box::new(PendingResponse {
+                    handle: request.into_typed(),
+                    question_ids: BTreeMap::new(),
+                })),
+                response: RuntimeResponse {
+                    request_id: RuntimeRequestId(self.ids.next(IdKind::RuntimeRequest)),
+                    decision: Some(ProviderApprovalDecision::Decline),
+                    feedback: None,
+                    answers: None,
+                },
             });
             return Ok(vec![]);
         }
@@ -5394,6 +5821,7 @@ impl Projection {
             }),
             event(ProviderEventKind::Subagent(Box::new(decode(task.clone())?))),
         ];
+        self.subagent_items.insert(child.into(), turn_item.clone());
         events.extend(self.artifact_events(&mut parent, &native_item, turn_item, node)?);
         parent.has_subagents = true;
         self.turns.insert(turn.into(), parent.clone());
@@ -5467,26 +5895,22 @@ impl Projection {
         let mut events = vec![event(ProviderEventKind::Subagent(Box::new(decode(
             task.clone(),
         )?)))];
-        for context in self.turns.values_mut() {
-            for item in context.items.values_mut() {
-                if item["subagentId"] == task["id"] {
-                    item["runId"] = task["runId"].clone();
-                    if let Some(parent_turn) = &parent_turn {
-                        item["providerTurnId"] = parent_turn.clone();
-                    }
-                    item["status"] = task["status"].clone();
-                    item["result"] = task["result"].clone();
-                    if let Some(progress) = task.get("progress") {
-                        item["progress"] = progress.clone();
-                    }
-                    item["completedAt"] = task["completedAt"].clone();
-                    item["updatedAt"] = task["updatedAt"].clone();
-                    events.push(event(ProviderEventKind::TurnItem {
-                        item: Box::new(decode(item.clone())?),
-                        session_scoped: None,
-                    }));
-                }
+        if let Some(item) = self.subagent_items.get_mut(child) {
+            item["runId"] = task["runId"].clone();
+            if let Some(parent_turn) = &parent_turn {
+                item["providerTurnId"] = parent_turn.clone();
             }
+            item["status"] = task["status"].clone();
+            item["result"] = task["result"].clone();
+            if let Some(progress) = task.get("progress") {
+                item["progress"] = progress.clone();
+            }
+            item["completedAt"] = task["completedAt"].clone();
+            item["updatedAt"] = task["updatedAt"].clone();
+            events.push(event(ProviderEventKind::TurnItem {
+                item: Box::new(decode(item.clone())?),
+                session_scoped: None,
+            }));
         }
         Ok(events)
     }

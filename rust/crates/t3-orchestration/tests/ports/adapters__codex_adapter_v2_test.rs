@@ -29,7 +29,9 @@ fn codex_process_fixture() {
                     .write_all(&vec![b'x'; 256 * 1024])
                     .unwrap();
                 if mode == "early-exit" {
-                    eprintln!("\n\u{1b}[31mfatal: simulated Codex process failure\u{1b}[0m\u{1b}]2;hidden-title\u{7}\u{1b}]8;;https://hidden-link\u{1b}\\");
+                    eprintln!(
+                        "\n\u{1b}[31mfatal: simulated Codex process failure\u{1b}[0m\u{1b}]2;hidden-title\u{7}\u{1b}]8;;https://hidden-link\u{1b}\\"
+                    );
                     std::process::exit(7);
                 }
                 writeln!(
@@ -41,7 +43,9 @@ fn codex_process_fixture() {
                 std::io::stdout().flush().unwrap();
             }
             Some("initialized") if mode == "exit" => {
-                eprintln!("\n\u{1b}[31mfatal: simulated Codex process failure\u{1b}[0m\u{1b}]2;hidden-title\u{7}\u{1b}]8;;https://hidden-link\u{1b}\\");
+                eprintln!(
+                    "\n\u{1b}[31mfatal: simulated Codex process failure\u{1b}[0m\u{1b}]2;hidden-title\u{7}\u{1b}]8;;https://hidden-link\u{1b}\\"
+                );
                 std::process::exit(7);
             }
             _ => {}
@@ -72,28 +76,44 @@ async fn startup_drains_stderr_before_the_initialize_response() {
     let running = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let tracked = running.clone();
     options.track_agent = Some(Arc::new(move || {
-        tracked.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+        tracked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let tracked = tracked.clone();
-        Box::new(move || { tracked.fetch_sub(1,std::sync::atomic::Ordering::SeqCst); })
+        Box::new(move || {
+            tracked.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        })
     }));
-    use t3_orchestration::{api::ProviderRegistry,adapters::codex::codex_registration,ports::sessions_recovery::provider_adapter_registry::{AdapterRegistry,CredentialAccess}};
+    use t3_orchestration::{
+        adapters::codex::codex_registration,
+        api::ProviderRegistry,
+        ports::sessions_recovery::provider_adapter_registry::{AdapterRegistry, CredentialAccess},
+    };
     let instance = options.instance_id.clone();
     let credential = Arc::new(CredentialAccess::default());
-    let registry = AdapterRegistry::new(vec![codex_registration(options,"codex:synthetic-home".into(),true,vec![credential.clone()])]);
+    let registry = AdapterRegistry::new(vec![codex_registration(
+        options,
+        "codex:synthetic-home".into(),
+        true,
+        vec![credential.clone()],
+    )]);
     let metadata = registry.metadata(&instance).await.unwrap();
-    assert_eq!(metadata.continuation_key,"codex:synthetic-home");
+    assert_eq!(metadata.continuation_key, "codex:synthetic-home");
     let adapter = registry.adapter(instance).await.unwrap();
     credential.begin_change();
-    assert!(adapter.open_session(kit::open_input(),CancellationToken::new()).await.is_err());
+    assert!(
+        adapter
+            .open_session(kit::open_input(), CancellationToken::new())
+            .await
+            .is_err()
+    );
     credential.end_change();
     let runtime = adapter
         .open_session(kit::open_input(), CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(runtime.session().status, ProviderSessionStatus::Ready);
-    assert_eq!(running.load(std::sync::atomic::Ordering::SeqCst),1);
+    assert_eq!(running.load(std::sync::atomic::Ordering::SeqCst), 1);
     runtime.close().await.unwrap();
-    assert_eq!(running.load(std::sync::atomic::Ordering::SeqCst),0);
+    assert_eq!(running.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -132,6 +152,118 @@ fn value(event: &ProviderEvent) -> Option<Value> {
         ProviderEventKind::TurnItem { item, .. } => Some(serde_json::to_value(item).unwrap()),
         _ => None,
     }
+}
+
+#[test]
+fn decoded_protocol_logs_route_both_request_directions_and_redact_nested_credentials() {
+    let mut logger = mapping::CodexProtocolLogger::new(ProviderSessionId("session".into()));
+    let mut routes = vec![];
+    for (id, app, native) in [(1, "app-1", "native-1"), (2, "app-2", "native-2")] {
+        routes.push(logger.frame("outgoing","decoded",json!({"id":id,"method":"thread/start","params":{"config":{"shell_environment_policy.set.T3CODE_THREAD_ID":app}}}),&|value|value).unwrap().0);
+        routes.push(
+            logger
+                .frame(
+                    "incoming",
+                    "decoded",
+                    json!({"id":id,"result":{"thread":{"id":native}}}),
+                    &|value| value,
+                )
+                .unwrap()
+                .0,
+        );
+    }
+    for (direction, payload) in [
+        (
+            "outgoing",
+            json!({"id":3,"method":"turn/start","params":{"threadId":"native-2"}}),
+        ),
+        (
+            "incoming",
+            json!({"id":3,"result":{"turn":{"id":"turn-2"}}}),
+        ),
+        (
+            "incoming",
+            json!({"id":4,"result":{"userAgent":"codex/1.0.0"}}),
+        ),
+    ] {
+        routes.push(
+            logger
+                .frame(direction, "decoded", payload, &|value| value)
+                .unwrap()
+                .0,
+        );
+    }
+    assert_eq!(
+        routes
+            .into_iter()
+            .map(|thread| thread.map(|id| id.0))
+            .collect::<Vec<_>>(),
+        vec![
+            Some("app-1".into()),
+            Some("app-1".into()),
+            Some("app-2".into()),
+            Some("app-2".into()),
+            Some("app-2".into()),
+            Some("app-2".into()),
+            None
+        ]
+    );
+    let payload = json!({"id":3,"method":"item/requestApproval","params":{"threadId":"native-1","http_headers":{"Authorization":"Bearer secret"},"nested":"{\"api_key\":\"secret\"}","body":"bEaReR secret","usage":{"inputTokens":12}}});
+    let (thread, record) = logger
+        .frame("incoming", "decoded", payload, &|value| value)
+        .unwrap();
+    assert_eq!(thread.unwrap().0, "app-1");
+    assert_eq!(
+        record["event"]["payload"]["params"]["http_headers"]["Authorization"],
+        "[REDACTED]"
+    );
+    assert_eq!(
+        record["event"]["payload"]["params"]["nested"],
+        "{\"api_key\":\"[REDACTED]\"}"
+    );
+    assert_eq!(record["event"]["payload"]["params"]["body"], "[REDACTED]");
+    assert_eq!(
+        record["event"]["payload"]["params"]["usage"]["inputTokens"],
+        12
+    );
+    assert_eq!(
+        logger
+            .frame(
+                "outgoing",
+                "decoded",
+                json!({"id":3,"result":{}}),
+                &|value| value
+            )
+            .unwrap()
+            .0
+            .unwrap()
+            .0,
+        "app-1"
+    );
+    assert!(
+        logger
+            .frame("incoming", "raw", json!("raw frame"), &|value| value)
+            .is_none()
+    );
+    assert!(
+        logger
+            .frame(
+                "incoming",
+                "decoded",
+                json!({"method":"item/agentMessage/delta"}),
+                &|value| value
+            )
+            .is_none()
+    );
+    let (_, bounded) = logger
+        .frame(
+            "incoming",
+            "decoded",
+            json!({"method":"thread/event"}),
+            &|_| json!({"truncated":true}),
+        )
+        .unwrap();
+    assert_eq!(bounded["event"], json!({"truncated":true}));
 }
 
 fn latest_entities(
@@ -330,20 +462,39 @@ fn malformed_native_policy_fields_fail_before_turn_start() {
 
 #[test]
 fn settled_turn_payloads_release_when_idle_and_wait_for_retained_work() {
-    let options=kit::options();
-    let mut projection=mapping::Projection::new(options.clock,options.ids,kit::open_input(),options.instance_id);
-    projection.prepare_start(kit::turn_input("native-thread",1,"work").unwrap()).unwrap();
-    projection.notification("turn/started",json!({"threadId":"native-thread","turn":kit::native_turn("idle-turn","inProgress")})).unwrap();
-    projection.notification("turn/completed",json!({"threadId":"native-thread","turn":kit::native_turn("idle-turn","completed")})).unwrap();
-    assert_eq!(projection.release_settled_turns(),1);
+    let options = kit::options();
+    let mut projection = mapping::Projection::new(
+        options.clock,
+        options.ids,
+        kit::open_input(),
+        options.instance_id,
+    );
+    projection
+        .prepare_start(kit::turn_input("native-thread", 1, "work").unwrap())
+        .unwrap();
+    projection
+        .notification(
+            "turn/started",
+            json!({"threadId":"native-thread","turn":kit::native_turn("idle-turn","inProgress")}),
+        )
+        .unwrap();
+    projection
+        .notification(
+            "turn/completed",
+            json!({"threadId":"native-thread","turn":kit::native_turn("idle-turn","completed")}),
+        )
+        .unwrap();
+    assert_eq!(projection.release_settled_turns(), 1);
     assert!(projection.notification("item/completed",json!({"threadId":"native-thread","turnId":"idle-turn","item":{"type":"agentMessage","id":"late","text":"stale"}})).unwrap().is_empty());
-    projection.prepare_start(kit::turn_input("native-thread",2,"work").unwrap()).unwrap();
+    projection
+        .prepare_start(kit::turn_input("native-thread", 2, "work").unwrap())
+        .unwrap();
     projection.notification("turn/started",json!({"threadId":"native-thread","turn":kit::native_turn("background-turn","inProgress")})).unwrap();
     projection.notification("item/started",json!({"threadId":"native-thread","turnId":"background-turn","item":native_background_command("retained","inProgress")})).unwrap();
     projection.notification("turn/completed",json!({"threadId":"native-thread","turn":kit::native_turn("background-turn","completed")})).unwrap();
-    assert_eq!(projection.release_settled_turns(),0);
+    assert_eq!(projection.release_settled_turns(), 0);
     projection.notification("item/completed",json!({"threadId":"native-thread","turnId":"background-turn","item":native_background_command("retained","completed")})).unwrap();
-    assert_eq!(projection.release_settled_turns(),1);
+    assert_eq!(projection.release_settled_turns(), 1);
 }
 
 #[test]
@@ -555,6 +706,82 @@ async fn a_stalled_429_retry_fails_as_usage_limited_and_interrupts_native_work()
 }
 
 #[test]
+fn managed_failures_keep_sharing_limits_and_actionable_capability_messages() {
+    for (error, code, class, message) in [
+        (
+            json!({"message":"native","additionalDetails":"{\"error\":{\"code\":\"subscription_sharing_usage_limit_exceeded\"}}"}),
+            "subscription_sharing_usage_limit_exceeded",
+            "usage_limit",
+            "Your ChatGPT usage limit was reached. Check ChatGPT Usage settings for your available allowance.",
+        ),
+        (
+            json!({"message":"The user has reached their Subscription Sharing usage limit"}),
+            "subscription_sharing_usage_limit_exceeded",
+            "usage_limit",
+            "Your ChatGPT usage limit was reached. Check ChatGPT Usage settings for your available allowance.",
+        ),
+        (
+            json!({"code":"subscription_sharing_workplace_individual_usage_limit_exceeded","message":"native"}),
+            "subscription_sharing_workplace_individual_usage_limit_exceeded",
+            "usage_limit",
+            "You reached your workspace's limit for using ChatGPT in other apps. Ask your workspace admin to increase it.",
+        ),
+        (
+            json!({"message":"{\"code\":\"subscription_sharing_unsupported_capability\"}","additionalDetails":"tool 'namespace' and additional_tools"}),
+            "subscription_sharing_unsupported_capability",
+            "provider_error",
+            "Codex sent a tool namespace that ChatGPT sharing does not support. Use another provider for this request.",
+        ),
+        (
+            json!({"message":"{\"code\":\"subscription_sharing_unsupported_capability\"}","additionalDetails":"additional_tools"}),
+            "subscription_sharing_unsupported_capability",
+            "provider_error",
+            "Codex sent an input item that ChatGPT sharing does not support. Use another provider for this request.",
+        ),
+        (
+            json!({"message":"{\"code\":\"chatpass_v2_scope_not_authorized\"}"}),
+            "chatpass_v2_scope_not_authorized",
+            "provider_error",
+            "This ChatGPT grant does not authorize the request. Check the connection's sharing permissions.",
+        ),
+    ] {
+        let options = kit::options();
+        let mut projection = mapping::Projection::new(
+            options.clock,
+            options.ids,
+            kit::open_input(),
+            options.instance_id,
+        );
+        projection
+            .prepare_start(kit::turn_input("native-thread", 1, "work").unwrap())
+            .unwrap();
+        projection.notification("turn/started",json!({"threadId":"native-thread","turn":kit::native_turn("native-turn","inProgress")})).unwrap();
+        let mut turn = kit::native_turn("native-turn", "failed");
+        turn["error"] = error;
+        let events = projection
+            .notification(
+                "turn/completed",
+                json!({"threadId":"native-thread","turn":turn}),
+            )
+            .unwrap();
+        let failure = events
+            .into_iter()
+            .find_map(|event| match event.kind {
+                ProviderEventKind::Terminal {
+                    outcome: TerminalOutcome::Failed { failure, .. },
+                    ..
+                } => Some(serde_json::to_value(failure).unwrap()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(failure["code"], code);
+        assert_eq!(failure["class"], class);
+        assert_eq!(failure["message"], message);
+        assert!(failure.get("resetAt").is_none_or(Value::is_null));
+    }
+}
+
+#[test]
 fn capacity_failures_hold_the_run_for_an_empty_input_continuation() {
     let options = kit::options();
     let mut projection = mapping::Projection::new(
@@ -746,9 +973,7 @@ async fn stopped_inflight_capacity_restart_contains_late_native_work() {
         )),
         request_runtime_restart: false,
     });
-    let server = async {
-
-    };
+    let server = async {};
     let (result, _) = tokio::join!(stop, server);
     result.unwrap();
     let events = h
@@ -874,6 +1099,21 @@ fn policy_effort_is_a_fallback_for_an_explicit_model_choice() {
         mapping::build_turn_start_params_with_policy(&input, &options).unwrap()["effort"],
         "high"
     );
+    for model in ["gpt-6-astra", "openai.gpt-6-astra"] {
+        input.model_selection.model = model.into();
+        let params = mapping::build_turn_start_params_with_policy(&input, &options).unwrap();
+        assert_eq!(params["effort"], "medium");
+        assert_eq!(
+            params["collaborationMode"]["settings"]["reasoning_effort"],
+            "medium"
+        );
+    }
+    input.model_selection.model = "gpt-6-astra-custom".into();
+    assert_eq!(
+        mapping::build_turn_start_params_with_policy(&input, &options).unwrap()["effort"],
+        "high"
+    );
+    input.model_selection.model = "gpt-6-astra".into();
     input.model_selection.options = Some(t3_contracts::model::ProviderOptionSelections(vec![
         t3_contracts::model::ProviderOptionSelection {
             id: "reasoningEffort".into(),
@@ -1132,7 +1372,14 @@ async fn unsupported_native_elicitations_are_explicitly_declined_without_an_appr
         assert!(reply.get("error").is_none());
     }
     h.runtime.close().await.unwrap();
-    while let Some(event)=h.events.events.recv().await { if let Ok(event)=event { assert!(!matches!(event.kind,ProviderEventKind::RuntimeRequest {..})); } }
+    while let Some(event) = h.events.events.recv().await {
+        if let Ok(event) = event {
+            assert!(!matches!(
+                event.kind,
+                ProviderEventKind::RuntimeRequest { .. }
+            ));
+        }
+    }
 }
 
 #[tokio::test]
@@ -2058,7 +2305,6 @@ async fn stopped_turns_contain_late_commands_and_confirm_untracked_process_clean
         assert_eq!(interrupt["method"], "turn/interrupt");
         h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":kit::native_turn("native-turn","interrupted")}})).await.unwrap();
         h.peer.respond(&interrupt, json!({})).await.unwrap();
-
     };
     let (result, _) = tokio::join!(
         runtime.interrupt_turn(InterruptInput {
@@ -2081,6 +2327,15 @@ async fn stopped_turns_contain_late_commands_and_confirm_untracked_process_clean
     assert_eq!(terminate["method"], "thread/backgroundTerminals/terminate");
     h.peer
         .respond(&terminate, json!({"terminated":false}))
+        .await
+        .unwrap();
+    let list = h.peer.read().await.unwrap();
+    assert_eq!(list["method"], "thread/backgroundTerminals/list");
+    h.peer
+        .respond(
+            &list,
+            json!({"data":[{"processId":"fixture-pid"}],"nextCursor":null}),
+        )
         .await
         .unwrap();
     assert_eq!(killed.recv().await.unwrap(), "fixture-pid");
@@ -2109,29 +2364,120 @@ async fn stopped_turns_contain_late_commands_and_confirm_untracked_process_clean
 
 #[tokio::test]
 async fn failed_late_command_containment_keeps_the_session_alive_and_work_pending_for_stop_retry() {
-    let mut h=kit::Harness::open().await.unwrap();
+    let mut h = kit::Harness::open().await.unwrap();
     h.start("native-turn").await.unwrap();
-    let stop=InterruptInput {provider_thread:kit::thread("native-thread").unwrap(),provider_turn_id:ProviderTurnId(mapping::derived("provider-turn","native-turn","native-turn")),request_runtime_restart:false};
-    let runtime=h.runtime.clone();
-    let server=async {
-        let request=h.peer.read().await.unwrap();assert_eq!(request["method"],"turn/interrupt");
+    let stop = InterruptInput {
+        provider_thread: kit::thread("native-thread").unwrap(),
+        provider_turn_id: ProviderTurnId(mapping::derived(
+            "provider-turn",
+            "native-turn",
+            "native-turn",
+        )),
+        request_runtime_restart: false,
+    };
+    let runtime = h.runtime.clone();
+    let server = async {
+        let request = h.peer.read().await.unwrap();
+        assert_eq!(request["method"], "turn/interrupt");
         h.peer.write(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":kit::native_turn("native-turn","interrupted")}})).await.unwrap();
-        h.peer.respond(&request,json!({})).await.unwrap();
+        h.peer.respond(&request, json!({})).await.unwrap();
     };
-    let (result,_)=tokio::join!(runtime.interrupt_turn(stop.clone()),server);result.unwrap();
-    h.collect_until(|event|matches!(event.kind,ProviderEventKind::Terminal{..})).await.unwrap();
+    let (result, _) = tokio::join!(runtime.interrupt_turn(stop.clone()), server);
+    result.unwrap();
+    h.collect_until(|event| matches!(event.kind, ProviderEventKind::Terminal { .. }))
+        .await
+        .unwrap();
     h.peer.write(&json!({"method":"item/started","params":{"threadId":"native-thread","turnId":"native-turn","item":native_background_command("late-failure","inProgress")}})).await.unwrap();
-    let request=h.peer.read().await.unwrap();assert_eq!(request["method"],"thread/backgroundTerminals/terminate");
-    h.peer.respond(&request,json!({"terminated":false})).await.unwrap();
-    h.collect_until(|event|matches!(event.kind,ProviderEventKind::BackgroundWork{pending:true,..})).await.unwrap();
-    assert!(h.runtime.pending_background_work(Some(kit::thread("native-thread").unwrap()),true).await.unwrap());
-    let runtime=h.runtime.clone();
-    let server=async {
-        let request=h.peer.read().await.unwrap();assert_eq!(request["method"],"thread/backgroundTerminals/terminate");
-        h.peer.respond(&request,json!({"terminated":true})).await.unwrap();
+    let request = h.peer.read().await.unwrap();
+    assert_eq!(request["method"], "thread/backgroundTerminals/terminate");
+    h.peer
+        .respond(&request, json!({"terminated":false}))
+        .await
+        .unwrap();
+    let request = h.peer.read().await.unwrap();
+    assert_eq!(request["method"], "thread/backgroundTerminals/list");
+    h.peer
+        .respond(
+            &request,
+            json!({"data":[{"processId":"fixture-pid"}],"nextCursor":null}),
+        )
+        .await
+        .unwrap();
+    h.collect_until(|event| {
+        matches!(
+            event.kind,
+            ProviderEventKind::BackgroundWork { pending: true, .. }
+        )
+    })
+    .await
+    .unwrap();
+    assert!(
+        h.runtime
+            .pending_background_work(Some(kit::thread("native-thread").unwrap()), true)
+            .await
+            .unwrap()
+    );
+    let runtime = h.runtime.clone();
+    let server = async {
+        let request = h.peer.read().await.unwrap();
+        assert_eq!(request["method"], "thread/backgroundTerminals/terminate");
+        h.peer
+            .respond(&request, json!({"terminated":true}))
+            .await
+            .unwrap();
     };
-    let (result,_)=tokio::join!(runtime.interrupt_turn(stop),server);result.unwrap();
-    assert!(!h.runtime.pending_background_work(Some(kit::thread("native-thread").unwrap()),true).await.unwrap());
+    let (result, _) = tokio::join!(runtime.interrupt_turn(stop), server);
+    result.unwrap();
+    assert!(
+        !h.runtime
+            .pending_background_work(Some(kit::thread("native-thread").unwrap()), true)
+            .await
+            .unwrap()
+    );
+    h.collect_until(|event| {
+        matches!(
+            event.kind,
+            ProviderEventKind::BackgroundWork { pending: false, .. }
+        )
+    })
+    .await
+    .unwrap();
+    h.peer.write(&json!({"method":"item/started","params":{"threadId":"native-thread","turnId":"native-turn","item":native_background_command("late-gone","inProgress")}})).await.unwrap();
+    let request = h.peer.read().await.unwrap();
+    assert_eq!(request["method"], "thread/backgroundTerminals/terminate");
+    h.peer
+        .respond(&request, json!({"terminated":false}))
+        .await
+        .unwrap();
+    for cursor in [None, Some("page-2")] {
+        let request = h.peer.read().await.unwrap();
+        assert_eq!(request["method"], "thread/backgroundTerminals/list");
+        assert_eq!(
+            request["params"].get("cursor").and_then(Value::as_str),
+            cursor
+        );
+        h.peer
+            .respond(
+                &request,
+                json!({"data":[],"nextCursor":if cursor.is_none(){Some("page-2")}else{None}}),
+            )
+            .await
+            .unwrap();
+    }
+    h.collect_until(|event| {
+        matches!(
+            event.kind,
+            ProviderEventKind::BackgroundWork { pending: false, .. }
+        )
+    })
+    .await
+    .unwrap();
+    assert!(
+        !h.runtime
+            .pending_background_work(Some(kit::thread("native-thread").unwrap()), true)
+            .await
+            .unwrap()
+    );
     h.runtime.close().await.unwrap();
 }
 
@@ -2843,9 +3189,7 @@ async fn cancelling_an_mcp_app_capture_releases_its_pending_work_without_a_stale
         .await
         .unwrap();
     let runtime = h.runtime.clone();
-    let server = async {
-
-    };
+    let server = async {};
     let (result, _) = tokio::join!(
         runtime.interrupt_turn(InterruptInput {
             provider_thread: kit::thread("native-thread").unwrap(),
@@ -3138,7 +3482,18 @@ impl t3_orchestration::ports::checkpoints_forks::checkpoint_rollback_service::Ro
 struct CodexScenarioDispatcher(Arc<t3_orchestration::composition::OrchestrationRuntime>);
 #[async_trait::async_trait]
 impl t3_orchestration::api::CommandDispatcher for CodexScenarioDispatcher {
-    async fn dispatch(&self, command:OrchestrationV2ServerCommand) -> t3_orchestration::error::Result<t3_orchestration::stores::receipts::CommandReceipt> { self.0.dispatch_command(command).await }
+    async fn dispatch(
+        &self,
+        command: OrchestrationV2ServerCommand,
+    ) -> t3_orchestration::error::Result<t3_orchestration::stores::receipts::CommandReceipt> {
+        let rollback = serde_json::to_value(&command)?["type"] == "checkpoint.rollback";
+        let receipt = self.0.dispatch_command(command).await?;
+        // Local shim: the shared scenario runner must await the rollback effect before recall.
+        if rollback {
+            self.0.effect_worker().drain(10000).await?;
+        }
+        Ok(receipt)
+    }
 }
 
 async fn composed_codex_scenario(name: &str) -> t3_orchestration::error::Result<()> {
@@ -3149,7 +3504,7 @@ async fn composed_codex_scenario(name: &str) -> t3_orchestration::error::Result<
             acp_replay::testkit::{
                 deterministic_runtime::{DEFAULT_RANDOM_SEED, SeededIds},
                 fixtures::{index, shared},
-                orchestrator_scenario::{self,ScenarioServices},
+                orchestrator_scenario::{self, ScenarioServices},
             },
             sessions_recovery::provider_adapter_registry::AdapterRegistry,
         },
@@ -3264,7 +3619,9 @@ async fn composed_codex_scenario(name: &str) -> t3_orchestration::error::Result<
                     let mut rows = statement.query([])?;
                     Ok(match rows.next()? {Some(row)=>Some((row.get::<_,String>(0)?,row.get::<_,String>(1)?)),None=>None})
                 }).await?;
-                if let Some((kind,error)) = failure { return Err(t3_orchestration::error::Error::Service { operation:"Codex scenario effect",detail:format!("{kind}: {error}") }); }
+                if let Some((kind,error)) = failure {
+                    return Err(t3_orchestration::error::Error::Service { operation:"Codex scenario effect",detail:format!("{kind}: {error}") });
+                }
                 tokio::select! {
                     changed=progress.changed()=>changed.map_err(|error|t3_orchestration::error::Error::Service { operation:"Codex native replay status",detail:error.to_string() })?,
                     changed=effects.changed()=>changed.map_err(|error|t3_orchestration::error::Error::Service { operation:"Codex effect status",detail:error.to_string() })?,

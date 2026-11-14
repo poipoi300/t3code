@@ -2,6 +2,8 @@
 // t3-ui's DemoBackend (`rust/crates/t3-ui/src/runtime/demo/fixtures.rs`, which a test keeps in
 // step with this file), every route, at 1280x800 and 390x844. Runs in the repo's scenario
 // harness; `rust/shells/REFERENCE.md` gives the one command.
+import { expect } from "e2e";
+
 import { test, WEB } from "./t3.ts";
 
 const SHOWCASE_PROMPT = "Give me a short tour.";
@@ -55,23 +57,31 @@ test(
       if (index < 2) threads.unshift({ slug: index === 0 ? "thread-showcase" : "thread-multi-turn", thread });
     }
     await t3.open();
-    // Fonts and the first frame after a navigation, before each capture.
-    const settled = () =>
-      browser.evaluate(
-        () =>
-          document.fonts.ready.then(
-            () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
-          ),
-      );
+    const settled = async () => {
+      await expect(browser.locator("#boot-shell")).toBeHidden({ timeout: 120_000 });
+      await expect(browser.locator("#root")).toHaveText(/\S/);
+      await browser.evaluate("document.fonts.ready.then(() => true)");
+    };
     for (const size of SIZES) {
       await browser.setViewport({ width: size.width, height: size.height });
       for (const { slug, thread } of threads) {
         await t3.open(thread);
         await settled();
+        await expect(browser.locator("#root")).toContainText(
+          slug === "thread-showcase" ? "This turn is a replay." : "second fixture turn complete",
+        );
         await app.screenshot(`${size.name}-${slug}`);
       }
       for (const page of PAGES) {
-        await app.open(page);
+        if (page === "/settings/scheduled-tasks") {
+          await browser.locator('[data-settings-section="/settings/scheduled-tasks"]').tap();
+          await expect(browser).toHaveURL(/\/settings\/scheduled-tasks/);
+          await expect(browser.locator("#root")).toContainText("No scheduled tasks", {
+            timeout: 120_000,
+          });
+        } else {
+          await app.open(page);
+        }
         await settled();
         await app.screenshot(`${size.name}-${page === "/" ? "home" : page.slice(1).replaceAll("/", "-")}`);
       }
