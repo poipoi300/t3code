@@ -77,7 +77,8 @@ impl ComposerAttachments {
                 ClientError::Rejected { message, detail } => UiText::from(
                     t3_client::error::rejection_text(&message, detail.as_deref()),
                 ),
-                other => UiText::client_key(other.to_string()),
+                // Other errors can carry transport or server detail: content.
+                other => UiText::content(other.to_string()),
             };
             self.error.set(Some(message));
         }

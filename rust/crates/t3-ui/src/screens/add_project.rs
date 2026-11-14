@@ -308,26 +308,32 @@ fn new_project_publication(
             }
         }));
     }
-    row.child(
-        nsh_base::checkbox()
-            .accessibility_label(Some(t("Create private repository").into()))
-            .checked(move || current.get().is_some_and(|value| value.publishes))
-            .disabled(move || busy.get() || current.get().is_none_or(|value| !value.can_change))
-            .on_change(move |checked: &bool| {
-                let Some(value) = current
-                    .get_untracked()
-                    .filter(|value| value.can_change && !busy.get_untracked())
-                else {
-                    return;
-                };
-                if let Err(message) = client
-                    .get()
-                    .set_publishing(*checked, Some(value.selected.clone()))
-                {
-                    error.set(Some(message));
-                }
-            }),
-    )
+    row.child(crate::ui::switch::checkbox(
+        "Create private repository",
+        crate::ui::switch::ControlState {
+            checked: computed(move || current.get().is_some_and(|value| value.publishes)).into(),
+            disabled: computed(move || {
+                busy.get() || current.get().is_none_or(|value| !value.can_change)
+            })
+            .into(),
+            ..Default::default()
+        },
+        crate::ui::switch::Variant::Default,
+        move |checked| {
+            let Some(value) = current
+                .get_untracked()
+                .filter(|value| value.can_change && !busy.get_untracked())
+            else {
+                return;
+            };
+            if let Err(message) = client
+                .get()
+                .set_publishing(checked, Some(value.selected.clone()))
+            {
+                error.set(Some(message));
+            }
+        },
+    ))
     .into_element()
 }
 

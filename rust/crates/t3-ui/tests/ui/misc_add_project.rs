@@ -333,3 +333,100 @@ fn optional_publication_control_delegates_and_retains_a_failure() {
         assert!(!app.screen().shows("Closed project flow"));
     }
 }
+
+#[derive(Clone, Default)]
+struct ProjectReply(
+    std::sync::Arc<std::sync::Mutex<Option<futures::channel::oneshot::Sender<()>>>>,
+);
+struct DeferredProject {
+    base: RejectedProject,
+    reply: ProjectReply,
+}
+impl AddProjectClient for DeferredProject {
+    fn watch(&self) -> LocalBoxStream<'static, Rc<AddProjectView>> {
+        self.base.watch()
+    }
+    fn set_query(&self, query: String) -> Result<(), Text> {
+        self.base.set_query(query)
+    }
+    fn select_item(&self, id: &str) -> LocalBoxFuture<'static, Result<Option<Destination>, Text>> {
+        self.base.select_item(id)
+    }
+    fn back(&self) -> Result<(), Text> {
+        self.base.back()
+    }
+    fn pick_folder(
+        &self,
+        revision: u64,
+    ) -> LocalBoxFuture<'static, Result<Option<Destination>, Text>> {
+        self.base.pick_folder(revision)
+    }
+    fn submit(&self, _: u64) -> LocalBoxFuture<'static, Result<Option<Destination>, Text>> {
+        let (reply, result) = futures::channel::oneshot::channel();
+        *self.reply.0.lock().expect("reply slot") = Some(reply);
+        let mut pending = self.base.view.borrow().clone();
+        pending.can_submit = false;
+        pending.empty_message = Some("Awaiting project service".into());
+        self.base
+            .sender
+            .unbounded_send(Rc::new(pending))
+            .expect("mounted pending view");
+        async move {
+            result.await.expect("server response");
+            Err("Deferred project rejection".into())
+        }
+        .boxed_local()
+    }
+}
+#[component]
+fn DeferredHarness() -> impl IntoElement {
+    let reply = use_context::<ProjectReply>().expect("test response context");
+    theme::install(&Default::default());
+    provide_context(Navigator::new(Route::AddProject));
+    let (sender, receiver) = mpsc::unbounded();
+    let client = Rc::new(DeferredProject {
+        base: RejectedProject {
+            view: RefCell::new(completion_view("~/clone")),
+            sender,
+            receiver: RefCell::new(Some(receiver)),
+            calls: signal(0),
+        },
+        reply,
+    });
+    add_project::command_palette_add_project(client)
+}
+#[test]
+fn pending_project_submission_survives_an_authoritative_view_update() {
+    for window in [DESKTOP, PHONE] {
+        let reply = ProjectReply(Rc::default());
+        let responder = reply.clone();
+        let mut app = Headless::start(EngineConfig {
+            ui_sets: t3_ui::registries(),
+            viewport: size(px(window.0), px(window.1)),
+            ..EngineConfig::new(Root::new::<DeferredHarness>(move || {
+                provide_context(reply.clone())
+            }))
+        })
+        .expect("deferred project harness");
+        app.wait_for("~/clone").expect("clone destination");
+        app.press("role:button[Clone]").expect("submit clone");
+        app.wait_for("Awaiting project service")
+            .expect("authoritative pending view");
+        responder
+            .0
+            .lock()
+            .expect("reply slot")
+            .take()
+            .expect("submitted request")
+            .send(())
+            .expect("view update must retain the request");
+        app.wait_for("Deferred project rejection")
+            .expect("deferred error remains visible");
+        assert_eq!(
+            app.screen()
+                .input_text("label:Command palette")
+                .expect("path input"),
+            Some("~/clone")
+        );
+    }
+}

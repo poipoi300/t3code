@@ -32,3 +32,27 @@ fn a_search_without_matches_says_so_and_clearing_restores_the_nav() {
         .expect("clear");
     app.wait_for("Agents").expect("sections back");
 }
+
+#[test]
+fn a_result_whose_scope_is_not_selected_shows_the_owning_scopes_instead_of_the_page() {
+    let mut app = start(DESKTOP, SettingsPage::General);
+    app.type_text("role:combobox[Search settings]", "project overview")
+        .expect("search typed");
+    app.press("role:option[Project overview]")
+        .expect("open result");
+    app.wait_for("Route projects").expect("the row's page");
+    app.wait_for("Project overview is not available for the selected target. Choose its owning scope to continue.")
+        .expect("the scope notice replaces the page");
+}
+
+#[test]
+fn a_jump_to_a_folded_row_opens_its_advanced_section_on_the_other_page() {
+    let mut app = start(DESKTOP, SettingsPage::General);
+    app.type_text("role:combobox[Search settings]", "skills slash")
+        .expect("search typed");
+    app.press("role:option[Show skills in slash menu]")
+        .expect("open result");
+    app.wait_for("Route chat").expect("the row's page");
+    app.wait_for("role:switch[Show skills in slash menu]")
+        .expect("the fold opened for the target");
+}

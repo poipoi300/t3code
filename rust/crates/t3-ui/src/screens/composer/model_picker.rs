@@ -150,9 +150,9 @@ impl CatalogState {
             Self::Ready => None,
             Self::Loading => Some(t("Searching project models...")),
             Self::Offline => Some(t("Not connected. Model selection is unavailable.")),
-            Self::Error(reason) | Self::Denied(reason) | Self::Unsupported(reason) => {
-                Some(t(reason))
-            }
+            // Catalogue failures carry server detail: content, never a catalogue key.
+            Self::Error(reason) => Some(reason.clone()),
+            Self::Denied(reason) | Self::Unsupported(reason) => Some(t(reason)), // client English key
         }
     }
 }
@@ -179,6 +179,7 @@ pub type Search = Rc<dyn Fn(&PickerData, &str) -> Vec<ModelKey>>;
 pub struct PickerProps {
     pub data: Prop<Rc<PickerData>>,
     pub catalog: Prop<CatalogState>,
+    /// Final display text: the caller translates its own keys; client detail is content.
     pub disabled_reason: Prop<Option<String>>,
     pub traits: Prop<TraitsView>,
     pub docked: bool,
@@ -334,11 +335,11 @@ fn trigger_title(data: &PickerData, key: &ModelKey, short: bool) -> String {
             if key.model.is_empty() || key.model == ANTIGRAVITY_DEFAULT_MODEL {
                 t("Choose model")
             } else {
-                t(&key.model)
+                key.model.clone()
             }
         },
         |model| {
-            let label = t(&display_name(&model, short));
+            let label = display_name(&model, short);
             if model.is_unavailable && !short {
                 format!("{label} ({})", t("Unavailable"))
             } else {
@@ -628,7 +629,7 @@ pub fn provider_model_picker(props: PickerProps) -> impl IntoElement {
 
 fn trigger_label(props: &PickerProps, short: bool) -> String {
     if let Some(label) = props.trigger_label.get() {
-        return t(&label);
+        return label;
     }
     let data = props.data.get();
     if let Some(selected) = &data.selected_models {
@@ -666,7 +667,7 @@ fn provider_instance_icon(
         return glyph(provider, size);
     }
     // The frozen icon module contains Lucide only; use the client's initials fallback.
-    text(t(&provider_instance_initials(&provider.display_name)))
+    text(provider_instance_initials(&provider.display_name))
         .accessible(false)
         .w(px(size))
         .h(px(size))
@@ -716,7 +717,7 @@ fn model_picker_sidebar(props: Rc<PickerProps>, state: PickerState) -> impl Into
             provider_status(provider)
         };
         rail = rail.child(view().app_class(tw("relative w-full"))
-            .child(nsh_base::button().accessibility_label(t(&reason)).disabled(disabled).on_press(move || if !disabled { state.tab.set(Some(id.clone())); })
+            .child(nsh_base::button().accessibility_label(reason.clone()).disabled(disabled).on_press(move || if !disabled { state.tab.set(Some(id.clone())); })
                 .app_class(tw(&cn([Some("relative flex w-full cursor-pointer aspect-square items-center justify-center rounded-md hover:bg-foreground/10 focus-visible:bg-foreground/10 focus-visible:outline-none"), disabled.then_some("opacity-50 cursor-not-allowed hover:bg-transparent")])))
                 .child(provider_instance_icon(provider, props.provider_glyph.as_ref(), 20.0)))
             .child(dynamic(move || (state.tab.get().as_ref() == Some(&selected_id)).then(|| view().app_class(tw("pointer-events-none absolute right-1 z-10 h-5 w-0.75 rounded-full bg-primary")).top(px(8.0))))));
@@ -729,16 +730,16 @@ fn model_picker_sidebar(props: Rc<PickerProps>, state: PickerState) -> impl Into
 
 fn provider_status(provider: &PickerProvider) -> String {
     if provider.ready {
-        return t(&provider.display_name);
+        return provider.display_name.clone();
     }
     let state = if !provider.enabled || provider.snapshot.status == ServerProviderState::Disabled {
-        "Disabled in settings."
+        t("Disabled in settings.")
     } else if provider.snapshot.status == ServerProviderState::Error {
-        "Unavailable"
+        t("Unavailable")
     } else if provider.snapshot.status == ServerProviderState::Warning {
-        "Limited"
+        t("Limited")
     } else {
-        "Not ready"
+        t("Not ready")
     };
     let message = provider
         .snapshot
@@ -746,7 +747,8 @@ fn provider_status(provider: &PickerProvider) -> String {
         .as_ref()
         .and_then(Option::as_ref)
         .map_or("", |s| s.0.as_str());
-    [t(&provider.display_name), t(state), t(message)]
+    // The provider's name and status message are content.
+    [provider.display_name.clone(), state, message.to_owned()]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
@@ -803,8 +805,8 @@ fn model_list_row(props: Rc<PickerProps>, state: PickerState, key: ModelKey) -> 
     };
     let label = format!(
         "{}, {}",
-        t(&display_name(model, false)),
-        t(&provider.display_name)
+        display_name(model, false),
+        provider.display_name
     );
     let disabled = !can_pick(&props, &key);
     let selected = data
@@ -822,14 +824,14 @@ fn model_list_row(props: Rc<PickerProps>, state: PickerState, key: ModelKey) -> 
             16.0,
         ))
         .child(
-            text(t(&display_name(model, false)))
+            text(display_name(model, false))
                 .app_class(tw("min-w-0 truncate text-sm font-normal leading-snug")),
         );
     if selected {
         content = content.child(icon(Icon::Check, 14.0, move || palette().foreground));
     }
     if let Some(sub) = &model.sub_provider {
-        content = content.child(text(t(sub)).app_class(tw(
+        content = content.child(text(sub.clone()).app_class(tw(
             "min-w-0 shrink truncate text-xs text-muted-foreground/70",
         )));
     }
@@ -895,7 +897,6 @@ fn model_picker_provider_notices(
     let reason = props
         .disabled_reason
         .get()
-        .map(|reason| t(&reason))
         .or_else(|| props.catalog.get().reason());
     let data = props.data.get();
     let mut notices = view();
@@ -955,7 +956,7 @@ fn model_picker_provider_notices(
 /// Port of ComposerModelEffort.tsx describeComposerEffort; the client supplies the summary.
 pub fn describe_composer_effort(traits: TraitsView) -> impl IntoElement {
     view().child(traits.summary.map(|summary| {
-        text(t(&summary)).app_class(tw(
+        text(summary).app_class(tw(
             "flex shrink-0 items-center gap-1.5 text-muted-foreground -ms-0.5 max-w-24 truncate",
         ))
     }))
@@ -1019,14 +1020,17 @@ pub fn composer_effort_column(props: Rc<PickerProps>) -> impl IntoElement {
                         "flex h-8.25 items-center gap-2 border-b border-border/70 pb-1.5 text-sm",
                     ))
                     .child(
-                        text(t(traits.reasoning.as_ref().map_or(
-                            if traits.others.is_empty() {
-                                "Effort"
-                            } else {
-                                "Options"
+                        // A provider's descriptor label is content; the fallbacks are ours.
+                        text(traits.reasoning.as_ref().map_or_else(
+                            || {
+                                if traits.others.is_empty() {
+                                    t("Effort")
+                                } else {
+                                    t("Options")
+                                }
                             },
-                            descriptor_label,
-                        )))
+                            |descriptor| descriptor_label(descriptor).to_owned(),
+                        ))
                         .app_class(tw("text-muted-foreground")),
                     )
                     .child(
@@ -1044,6 +1048,7 @@ pub fn composer_effort_column(props: Rc<PickerProps>) -> impl IntoElement {
         ));
         if let Some(reason) = &traits.disabled_reason {
             levels = levels.child(
+                // PickerProps::new's own English default, or a client sentence.
                 text(t(reason)).app_class(tw("px-2 pb-1.5 text-muted-foreground/80 text-xs")),
             );
         }
@@ -1099,7 +1104,7 @@ fn effort_rows(
     };
     let mut group = view()
         .role(AccessibilityRole::Radiogroup)
-        .label(t(descriptor_label(descriptor)))
+        .label(descriptor_label(descriptor).to_owned())
         .app_class(tw("flex flex-col gap-0.5"));
     for (label, value, checked, default) in choices {
         let props = props.clone();
@@ -1111,7 +1116,7 @@ fn effort_rows(
         group =
             group.child(
                 nsh_base::radio()
-                    .accessibility_label(t(&label))
+                    .accessibility_label(label.clone())
                     .checked(checked)
                     .disabled(disabled)
                     .app_class(tw(COLUMN_ROW))
@@ -1125,7 +1130,7 @@ fn effort_rows(
                             },
                         )
                     })
-                    .child(text(t(&label)).app_class(tw("min-w-0 flex-1 truncate")))
+                    .child(text(label.clone()).app_class(tw("min-w-0 flex-1 truncate")))
                     .child(checked.then(|| icon(Icon::Check, 14.0, move || palette().foreground)))
                     .child((default && !checked).then(|| {
                         text(t("Default")).app_class(tw("text-muted-foreground/70 text-xs"))
@@ -1163,7 +1168,7 @@ fn option_row(
             select.disabled = Prop::bind(move || !options_enabled(&enabled, &enabled.traits.get()));
             let id = d.id.clone();
             view()
-                .child(text(t(&d.label)).app_class(tw(
+                .child(text(d.label.clone()).app_class(tw(
                     "px-2 pt-1.5 pb-1 font-medium text-muted-foreground text-xs",
                 )))
                 .child(select::select(select, move |next| {
@@ -1187,7 +1192,7 @@ fn option_row(
             view()
                 .app_class(tw("flex h-auto w-full items-center gap-2 px-2 py-1"))
                 .child(
-                    text(t(&d.label))
+                    text(d.label.clone())
                         .app_class(tw("min-w-0 flex-1 truncate text-xs text-muted-foreground")),
                 )
                 .child(switch::switch(
@@ -1277,16 +1282,16 @@ fn speed_control(
     };
     let mut group = view()
         .role(AccessibilityRole::Radiogroup)
-        .label(t(descriptor_label(descriptor)))
+        .label(descriptor_label(descriptor).to_owned())
         .app_class(tw("flex rounded-lg bg-input/40 p-0.5"));
     for (label, value, checked) in choices {
         let props = props.clone();
         let model = model.clone();
         let id = id.clone();
-        group = group.child(nsh_base::radio().checked(checked).disabled(!options_enabled(&props, traits)).accessibility_label(t(&label))
+        group = group.child(nsh_base::radio().checked(checked).disabled(!options_enabled(&props, traits)).accessibility_label(label.clone())
             .app_class(tw("flex h-6 cursor-pointer items-center justify-center gap-1 px-2 text-muted-foreground text-xs outline-none hover:text-foreground checked:bg-input/72 checked:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"))
             .on_change(move |_: &bool| pick_option(&props, &model, ProviderOptionSelection { id: id.clone(), value: value.clone() }))
-            .child(text(t(&label))));
+            .child(text(label.clone())));
     }
     group.into_element()
 }

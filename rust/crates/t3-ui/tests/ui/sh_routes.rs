@@ -221,7 +221,15 @@ fn failed_navigation_retains_the_resolved_page_and_exposes_the_client_error() {
     app.wait_for("Rejected by URL host")
         .expect("failed request settles");
     assert!(app.screen().shows("Location /env/thread"));
-    assert!(app.screen().shows("Selected Thread("));
+    let expected = Route::Thread(t3_client::types::ThreadKey {
+        environment: t3_client::types::EnvironmentId("env".into()),
+        thread: t3_client::types::ThreadId("thread".into()),
+    });
+    assert!(
+        app.screen().shows(&format!("Selected {expected:?}")),
+        "{:?}",
+        app.screen().texts()
+    );
     assert!(app.screen().shows("Requests [Push(\"/usage\")]"));
 }
 

@@ -93,17 +93,7 @@ impl<P: Platform + Clone + 'static> crate::screens::composer::questions::Pending
             {
                 return mapped.clone();
             }
-            let mapped = Rc::new(crate::screens::composer::questions::PendingUserInputView {
-                request_id: view.request_id.clone(),
-                questions: view.questions.clone(),
-                question_index: view.question_index,
-                selected_option_values: view.selected_option_values.clone(),
-                using_custom_answer: view.using_custom_answer,
-                disabled: view.disabled,
-                response_disabled: view.response_disabled,
-                is_responding: view.is_responding,
-                dismissible: view.dismissible,
-            });
+            let mapped = Rc::new(question_view(&view));
             cache.insert(key.clone(), (view, mapped.clone()));
             mapped
         })
@@ -133,6 +123,26 @@ impl<P: Platform + Clone + 'static> crate::screens::composer::questions::Pending
         request: &t3_contracts::base_schemas::RuntimeRequestId,
     ) -> Result<(), ClientError> {
         self.0.pending_user_input(key).dismiss(request)
+    }
+}
+
+/// The panel's `responseDisabled` is the web's `disabled || isResponding || !canRespond`
+/// (ComposerPendingUserInputPanel.tsx); the client's `response_disabled` also closes while no
+/// answer is chosen, which is the submit action's gate, not the options'.
+pub fn question_view(
+    view: &t3_client::thread_views::composer::questions_service::PendingUserInputView,
+) -> crate::screens::composer::questions::PendingUserInputView {
+    crate::screens::composer::questions::PendingUserInputView {
+        request_id: view.request_id.clone(),
+        questions: view.questions.clone(),
+        question_index: view.question_index,
+        selected_option_values: view.selected_option_values.clone(),
+        using_custom_answer: view.using_custom_answer,
+        disabled: view.disabled,
+        // The client's `disabled` already includes a not-resumable request.
+        response_disabled: view.disabled || view.is_responding,
+        is_responding: view.is_responding,
+        dismissible: view.dismissible,
     }
 }
 
@@ -652,4 +662,104 @@ pub fn ranked_model_search() -> crate::screens::composer::model_picker::Search {
             .map(|index| entries[index].0.clone())
             .collect()
     })
+}
+
+/// CMP-MODEL for a thread composer: the controlled picker over the thread's client model session.
+/// `failure` receives operation errors for the composer's error line (server detail is content).
+pub fn thread_model_picker<P: Platform + Clone + 'static>(
+    runtime: &ClientRuntime<P>,
+    key: &ThreadKey,
+    handle: crate::screens::composer::model_picker::PickerHandle,
+) -> crate::screens::composer::model_picker::PickerProps {
+    use crate::screens::composer::model_picker::{CatalogState, PickerProps};
+    use futures::StreamExt;
+    use nsh_core::prelude::*;
+    let session = runtime.composer_models(key);
+    let mut changes = session.changes();
+    let current = signal(session.snapshot());
+    let failure = signal(None::<String>);
+    let watching = session.clone();
+    spawn(async move {
+        while changes.next().await.is_some() {
+            current.set(watching.snapshot());
+        }
+    });
+    let report =
+        move |operation: futures::future::LocalBoxFuture<'static, Result<(), ClientError>>| {
+            failure.set(None);
+            spawn(async move {
+                if let Err(error) = operation.await {
+                    failure.set(Some(error.to_string()));
+                }
+            });
+        };
+    let picking = session.clone();
+    let mut props = PickerProps::new(
+        computed(move || model_picker_data(&current.get())).into(),
+        move |model| {
+            report(
+                picking.set_model_selection(t3_contracts::model_selection::ModelSelection {
+                    instance_id: model.instance_id,
+                    model: model.model,
+                    options: None,
+                }),
+            )
+        },
+    );
+    props.catalog = computed(move || {
+        failure.get().map_or_else(
+            || model_catalog_state(&current.get().state),
+            CatalogState::Error,
+        )
+    })
+    .into();
+    props.traits = computed(move || model_traits(&current.get())).into();
+    props.search = Some(ranked_model_search());
+    let favorites = session.clone();
+    props.on_toggle_favorite = Some(Rc::new(move |model| {
+        report(favorites.toggle_model_favorite(model.instance_id, model.model))
+    }));
+    let options = session.clone();
+    props.on_option_pick = Some(Rc::new(move |model, selection| {
+        report(options.change_model_trait(model.instance_id, model.model, selection))
+    }));
+    props.on_refresh = Some(Rc::new(move || report(session.refresh_model_catalog())));
+    props.handle = Some(handle);
+    props
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unanswered_question_still_takes_options_and_digits() {
+        let client = t3_client::thread_views::composer::questions_service::PendingUserInputView {
+            request_id: t3_contracts::base_schemas::RuntimeRequestId("request".into()),
+            questions: Rc::new(Vec::new()),
+            question_index: 0,
+            selected_option_values: Vec::new(),
+            using_custom_answer: false,
+            disabled: false,
+            response_disabled: true,
+            is_responding: false,
+            dismissible: true,
+            question_draft_key: String::new(),
+            can_previous: false,
+            is_last_question: true,
+            is_complete: false,
+            error: None,
+        };
+        assert!(!question_view(&client).response_disabled);
+        let responding = t3_client::thread_views::composer::questions_service::PendingUserInputView {
+            is_responding: true,
+            ..client.clone()
+        };
+        assert!(question_view(&responding).response_disabled);
+        let disabled = t3_client::thread_views::composer::questions_service::PendingUserInputView {
+            disabled: true,
+            ..client
+        };
+        assert!(question_view(&disabled).response_disabled);
+    }
 }
