@@ -102,10 +102,11 @@ pub(super) struct Session<E> {
 #[derive(Default)]
 struct SignalSlot {
     dirty: bool,
+    closed: bool,
     waker: Option<Waker>,
 }
 #[derive(Default)]
-pub(super) struct Changes {
+pub(crate) struct Changes {
     slots: RefCell<Vec<Weak<RefCell<SignalSlot>>>>,
 }
 struct ChangesStream(Rc<RefCell<SignalSlot>>);
@@ -116,6 +117,8 @@ impl Stream for ChangesStream {
         if slot.dirty {
             slot.dirty = false;
             Poll::Ready(Some(()))
+        } else if slot.closed {
+            Poll::Ready(None)
         } else {
             slot.waker = Some(cx.waker().clone());
             Poll::Pending
@@ -126,6 +129,7 @@ impl Changes {
     pub fn subscribe(&self) -> LocalBoxStream<'static, ()> {
         let slot = Rc::new(RefCell::new(SignalSlot {
             dirty: true,
+            closed: false,
             waker: None,
         }));
         self.slots.borrow_mut().push(Rc::downgrade(&slot));
@@ -146,6 +150,15 @@ impl Changes {
         });
         for waker in wakes {
             waker.wake();
+        }
+    }
+}
+impl Drop for Changes {
+    fn drop(&mut self) {
+        for slot in self.slots.get_mut().iter().filter_map(Weak::upgrade) {
+            let mut slot = slot.borrow_mut();
+            slot.closed = true;
+            if let Some(waker) = slot.waker.take() { waker.wake(); }
         }
     }
 }
@@ -726,6 +739,9 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             .iter()
             .rev()
             .find(|entry| entry.message.thread_key() == *key)?;
+        if let Some(drafts) = self.inner.web_drafts.borrow().as_ref() {
+            return drafts.document().borrow()["draftsByThreadKey"][&entry.draft_key]["prompt"].as_str().map(str::to_owned);
+        }
         match self.inner.drafts.borrow().as_ref() {
             Some(drafts) => drafts.snapshot()["drafts"][&entry.draft_key]["text"]
                 .as_str()

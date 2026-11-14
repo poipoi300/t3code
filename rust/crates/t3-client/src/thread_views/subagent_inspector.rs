@@ -1,4 +1,4 @@
-//! SubagentTooltipContent.tsx selection traits; displayed values never come from another model/account.
+//! Port of apps/web/src/components/chat/SubagentTooltipContent.tsx selection presentation.
 
 use t3_contracts::{
     model::ProviderOptionSelectionValue, model_selection::ModelSelection, server::ServerProvider,

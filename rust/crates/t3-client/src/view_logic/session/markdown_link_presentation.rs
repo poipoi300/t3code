@@ -372,7 +372,7 @@ pub fn favicon_url_for_host(host: &str) -> Option<String> {
             ".test",
         ]
         .iter()
-        .any(|suffix| normalized == &suffix[1..] || normalized.ends_with(suffix))
+        .any(|suffix| *normalized == suffix[1..] || normalized.ends_with(suffix))
         || normalized
             .split('.')
             .any(|part| ["corp", "internal", "intranet"].contains(&part))

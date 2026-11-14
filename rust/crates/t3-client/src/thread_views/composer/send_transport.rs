@@ -21,7 +21,7 @@ use futures::{FutureExt, future::LocalBoxFuture, stream::LocalBoxStream};
 use serde_json::{Value, json};
 use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 use t3_contracts::{
-    chat_attachment::{ChatAttachment, PersistChatAttachmentsInput},
+    chat_attachment::PersistChatAttachmentsInput,
     orchestration_v2::*,
     rpc::{WsOrchestrationV2DispatchCommandRpc, WsOrchestrationV2LaunchThreadRpc},
 };
@@ -579,7 +579,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                         }
                     }
                     self.check_current(generation)?;
-                    attachments.push(Some(serde_json::from_value::<ChatAttachment>(json!({"type":value["type"],"id":value["uploadedAttachmentId"],"name":value["name"],"mimeType":value["mimeType"],"sizeBytes":value["sizeBytes"]}))?));
+                    attachments.push(Some(super::attachment_intake::uploaded_attachment(value)?));
                     continue;
                 }
                 let base = self

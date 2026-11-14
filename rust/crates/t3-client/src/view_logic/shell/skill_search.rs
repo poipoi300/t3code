@@ -34,7 +34,7 @@ fn subsequence(value: &[u16], query: &[u16]) -> Option<usize> {
     }
     None
 }
-fn score(
+pub(crate) fn score(
     value: &str,
     query: &str,
     bases: (

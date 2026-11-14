@@ -20,7 +20,7 @@ pub(crate) fn is_js_whitespace(ch: char) -> bool {
         | '\u{205f}' | '\u{3000}' | '\u{feff}')
 }
 
-pub(crate) trait JsTrim {
+pub trait JsTrim {
     fn js_trim(&self) -> &str;
     fn js_trim_start(&self) -> &str;
     fn js_trim_end(&self) -> &str;

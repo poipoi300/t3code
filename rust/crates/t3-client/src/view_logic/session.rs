@@ -33,6 +33,8 @@ pub mod questions;
 pub mod review;
 #[path = "session/terminal.rs"]
 pub mod terminal;
+#[path = "session/terminal_drawer.rs"]
+pub mod terminal_drawer;
 #[path = "session/text.rs"]
 pub mod text;
 #[path = "session/thread_links.rs"]
@@ -200,3 +202,6 @@ mod helper_acceptance;
 #[cfg(test)]
 #[path = "session/tests.rs"]
 mod tests;
+
+#[path = "session/plan_presentation.rs"]
+pub mod plan_presentation;

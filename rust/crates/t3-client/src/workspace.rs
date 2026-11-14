@@ -4,6 +4,7 @@ pub mod chat_canvas;
 pub mod branch;
 #[path = "workspace/git_actions.rs"]
 pub mod git_actions;
+pub mod diff_panel;
 pub mod git_panel;
 pub mod ignored_files;
 #[path = "workspace/pr_assignment.rs"]

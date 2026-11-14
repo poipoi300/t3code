@@ -1,16 +1,43 @@
 //! Composed, destination-guarded operations shared by the sidebar and timeline.
+pub mod actions;
 pub mod approvals;
+pub mod header;
+pub mod menu;
+pub mod metadata;
 pub mod plans;
+pub mod projects;
+pub mod recall;
+pub mod rewind;
+pub mod snooze;
+pub mod undo;
 
-use crate::{ClientError, composition::ClientRuntime, platform::Platform, rpc::SessionEndpoint,
-    types::{EnvironmentId, ThreadKey}, workspace::project_ops::ProjectCommands};
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use crate::{
+    ClientError,
+    composition::ClientRuntime,
+    platform::Platform,
+    rpc::SessionEndpoint,
+    types::{EnvironmentId, ThreadKey},
+    workspace::project_ops::ProjectCommands,
+};
 use futures::{StreamExt, stream::LocalBoxStream};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 
 #[derive(Default)]
 pub struct ThreadOpsState {
     approvals: RefCell<BTreeMap<ThreadKey, approvals::PendingApprovals>>,
     files: ProjectCommands,
+    actions: actions::ActionState,
+    projects: crate::workspace::project_ops::ProjectEntities,
+    rewind: rewind::RewindStateStore,
+    shells: RefCell<Rc<crate::thread_views::threads::shell::ThreadShellViews>>,
+    undo: undo::UndoState,
+    confirmation: RefCell<Option<actions::ConfirmationPort>>,
+    unsupported: RefCell<BTreeMap<(EnvironmentId, &'static str), u64>>,
+    answering: RefCell<BTreeSet<(ThreadKey, String)>>,
 }
 
 #[derive(Clone)]
@@ -20,16 +47,66 @@ pub struct ThreadOperations<P: Platform + Clone + 'static> {
     pub(crate) state: Rc<ThreadOpsState>,
 }
 impl<P: Platform + Clone + 'static> ThreadOperations<P> {
-    pub fn new(runtime: ClientRuntime<P>, platform: P, state: Rc<ThreadOpsState>) -> Self {
-        Self { runtime, platform, state }
+    fn session_generation(&self, environment: &EnvironmentId) -> Option<u64> {
+        self.runtime
+            .store()
+            .snapshot()
+            .environments
+            .get(environment)
+            .map(|e| e.session.0)
     }
-    pub(crate) fn endpoint(&self, environment: &EnvironmentId) -> Result<SessionEndpoint, ClientError> {
-        self.runtime.client(environment).and_then(|c| c.session()).ok_or(ClientError::Disconnected)
+    fn unsupported(&self, environment: &EnvironmentId, method: &'static str) -> bool {
+        self.state
+            .unsupported
+            .borrow()
+            .get(&(environment.clone(), method))
+            .is_some_and(|g| Some(*g) == self.session_generation(environment))
+    }
+    fn remember_unsupported(
+        &self,
+        environment: &EnvironmentId,
+        method: &'static str,
+        generation: Option<u64>,
+        error: &ClientError,
+    ) {
+        if matches!(error, ClientError::Unsupported(_))
+            && generation == self.session_generation(environment)
+            && let Some(generation) = generation
+        {
+            self.state
+                .unsupported
+                .borrow_mut()
+                .insert((environment.clone(), method), generation);
+            self.state.actions.notify();
+        }
+    }
+    pub fn new(runtime: ClientRuntime<P>, platform: P, state: Rc<ThreadOpsState>) -> Self {
+        Self {
+            runtime,
+            platform,
+            state,
+        }
+    }
+    pub(crate) fn endpoint(
+        &self,
+        environment: &EnvironmentId,
+    ) -> Result<SessionEndpoint, ClientError> {
+        self.runtime
+            .client(environment)
+            .and_then(|c| c.session())
+            .ok_or(ClientError::Disconnected)
     }
     pub fn changes(&self, key: &ThreadKey) -> LocalBoxStream<'static, ()> {
-        self.runtime.store().subscribe_environment(&key.environment).map(|_| ()).boxed_local()
+        futures::stream::select(
+            self.runtime
+                .store()
+                .subscribe_environment(&key.environment)
+                .map(|_| ()),
+            self.state.actions.changes(),
+        )
+        .boxed_local()
     }
     pub(crate) fn refused(message: &str) -> ClientError {
-        ClientError::Rejected { message: message.into(), detail: None }
+        ClientError::InvalidPayload(message.into())
     }
 }

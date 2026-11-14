@@ -297,10 +297,22 @@ fn tool_group_actions_follow_the_shared_tool_classifier() {
     use crate::work_log::tool_group_action;
     for (entry, action) in [
         // The tool's kind decides before any name.
-        (json!({"toolTitle":"Run","toolData":{"kind":"execute"}}), "command"),
-        (json!({"toolTitle":"Read","toolData":{"kind":"edit"}}), "edit"),
-        (json!({"toolTitle":"Lookup","toolData":{"kind":"search"}}), "code-search"),
-        (json!({"toolTitle":"Open","toolData":{"kind":"read"}}), "read"),
+        (
+            json!({"toolTitle":"Run","toolData":{"kind":"execute"}}),
+            "command",
+        ),
+        (
+            json!({"toolTitle":"Read","toolData":{"kind":"edit"}}),
+            "edit",
+        ),
+        (
+            json!({"toolTitle":"Lookup","toolData":{"kind":"search"}}),
+            "code-search",
+        ),
+        (
+            json!({"toolTitle":"Open","toolData":{"kind":"read"}}),
+            "read",
+        ),
         // A nested ACP tool name counts when nothing else names the tool.
         (json!({"toolData":{"item":{"tool":"grep"}}}), "code-search"),
         (json!({"toolData":{"toolName":"Bash"}}), "command"),
@@ -308,11 +320,21 @@ fn tool_group_actions_follow_the_shared_tool_classifier() {
         (json!({"label":"Read"}), "other"),
         // A namespaced name is not a token.
         (json!({"toolData":{"toolName":"files.read"}}), "other"),
-        (json!({"itemType":"web_search","toolTitle":"grep src"}), "code-search"),
-        (json!({"itemType":"web_search","toolTitle":"Searched the web"}), "search"),
+        (
+            json!({"itemType":"web_search","toolTitle":"grep src"}),
+            "code-search",
+        ),
+        (
+            json!({"itemType":"web_search","toolTitle":"Searched the web"}),
+            "search",
+        ),
         (json!({"command":"ls"}), "command"),
         (json!({"tone":"info"}), "update"),
     ] {
-        assert_eq!(tool_group_action(&work_entry(entry.clone())), action, "{entry}");
+        assert_eq!(
+            tool_group_action(&work_entry(entry.clone())),
+            action,
+            "{entry}"
+        );
     }
 }

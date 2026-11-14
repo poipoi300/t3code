@@ -24,6 +24,15 @@ pub(super) fn block_reason(
     message: &QueuedMessage,
     settings: &ThreadSettings,
 ) -> Option<String> {
+    composer_block_reason(config, project, &message.attachments, settings)
+}
+
+pub(super) fn composer_block_reason(
+    config: &ServerConfig,
+    project: Option<&ProjectId>,
+    attachments: &[crate::thread_views::outbox::DraftAttachment],
+    settings: &ThreadSettings,
+) -> Option<String> {
     let selection = &settings.model_selection;
     let instance = &selection.instance_id;
     let provider = config
@@ -111,7 +120,7 @@ pub(super) fn block_reason(
     {
         return Some("Antigravity model unavailable. Set up Antigravity on web or desktop, or choose another model.".into());
     }
-    if message.attachments.len() > t3_contracts::chat_attachment::PROVIDER_SEND_TURN_MAX_ATTACHMENTS
+    if attachments.len() > t3_contracts::chat_attachment::PROVIDER_SEND_TURN_MAX_ATTACHMENTS
     {
         return Some("Too many attachments. Remove some before sending.".into());
     }
@@ -124,13 +133,13 @@ pub(super) fn block_reason(
     if let crate::thread_views::outbox::DispatchStep::Restore(reason) =
         crate::thread_views::outbox::dispatch_step(
             crate::thread_views::outbox::DeliveryAction::Send,
-            &message.attachments,
+            attachments,
             Some(max),
         )
     {
         return Some(reason);
     }
-    if let Some(image) = message.attachments.iter().find(|attachment| {
+    if let Some(image) = attachments.iter().find(|attachment| {
         !attachment.is_file()
             && attachment.size_bytes()
                 > t3_contracts::chat_attachment::PROVIDER_SEND_TURN_MAX_IMAGE_BYTES as f64
