@@ -352,19 +352,18 @@ impl GitLab {
                 result["version"] =
                     json!({"_tag":"Some","value":crate::remote::transport_safe_error_value(line)});
             }
-            let mut auth = self
-                .probe(cwd, vec!["auth".into(), "status".into()])
-                .await?;
+            let Ok(mut auth) = self.probe(cwd, vec!["auth".into(), "status".into()]).await else {
+                return parse(result, "discovery");
+            };
             let mut accounts = auth_hosts(&auth);
             if accounts.iter().all(|(_, account)| account.is_none())
                 && let Ok(all) = self
                     .probe(cwd, vec!["auth".into(), "status".into(), "--all".into()])
                     .await
+                && !String::from_utf8_lossy(&all.stderr).contains("unknown flag")
             {
-                if !String::from_utf8_lossy(&all.stderr).contains("unknown flag") {
-                    auth = all;
-                    accounts = auth_hosts(&auth);
-                }
+                auth = all;
+                accounts = auth_hosts(&auth);
             }
             let chosen = accounts.iter().find(|(_, a)| a.is_some());
             result["auth"]["status"] = json!(if chosen.is_some() {
@@ -391,16 +390,33 @@ impl GitLab {
         let Some(remote) = crate::remote::parse_remote(&context.remote_url) else {
             return Ok(None);
         };
-        let output = self
+        let authority = context
+            .remote_url
+            .trim()
+            .split_once("://")
+            .map(|(_, rest)| rest.split('/').next().unwrap_or(""))
+            .unwrap_or_else(|| context.remote_url.trim().split(':').next().unwrap_or(""))
+            .rsplit('@')
+            .next()
+            .unwrap_or("");
+        let hostname = if authority.to_lowercase().starts_with(&remote.host) {
+            &authority[..remote.host.len()]
+        } else {
+            &remote.host
+        };
+        let Ok(output) = self
             .probe(
                 &input.cwd,
                 vec![
                     "auth".into(),
                     "status".into(),
-                    format!("--hostname={}", remote.host),
+                    format!("--hostname={hostname}"),
                 ],
             )
-            .await?;
+            .await
+        else {
+            return Ok(None);
+        };
         Ok(auth_hosts(&output)
             .iter()
             .any(|(host, account)| host.eq_ignore_ascii_case(&remote.host) && account.is_some())

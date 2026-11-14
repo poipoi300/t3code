@@ -205,12 +205,12 @@ impl Forge for GitLab {
         input: PullRequestInput,
     ) -> Result<ProviderChangeRequestSummary> {
         let raw = self.raw_detail(&input).await?;
-        let mut value = d::listing(&raw)?;
+        let mut value = d::detail(&raw, Value::Null, Value::Null, vec![])?;
         if let Some(head) = text(&raw, "sha") {
             value["headSha"] = json!(head);
         }
-        self.add_stats(&input, &mut value).await?;
-        self.add_states(&input, &mut value).await?;
+        super::read::optional(self.add_stats(&input, &mut value).await, ())?;
+        super::read::optional(self.add_states(&input, &mut value).await, ())?;
         parse(value, "getChangeRequestSummary")
     }
     async fn get_viewer_permissions(

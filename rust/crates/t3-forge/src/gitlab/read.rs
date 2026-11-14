@@ -1,6 +1,6 @@
 use super::{decode as d, queries as q, *};
 use std::collections::{BTreeMap, HashSet};
-fn optional<T>(result: Result<T>, fallback: T) -> Result<T> {
+pub(super) fn optional<T>(result: Result<T>, fallback: T) -> Result<T> {
     match result {
         Ok(value) => Ok(value),
         Err(error)
@@ -72,10 +72,10 @@ impl GitLab {
                 && request["sourceBranchProtected"] == false
                 && project["visibility"]
                     .as_str()
-                    .is_some_and(|v| v != "private")
+                    .is_some_and(|v| matches!(v, "public" | "internal"))
                 && request["sourceProject"]["visibility"]
                     .as_str()
-                    .is_some_and(|v| v != "private");
+                    .is_some_and(|v| matches!(v, "public" | "internal"));
         } else if d::state(raw) != "open" {
             let value = optional(
                 self.graphql(
@@ -178,15 +178,14 @@ impl GitLab {
                     None,
                 )
                 .await
+                && bridges.as_array().is_some_and(|a| a.len() < 100)
             {
-                if bridges.as_array().is_some_and(|a| a.len() < 100) {
-                    for bridge in rows(&bridges).filter(|b| b["downstream_pipeline"].is_object()) {
-                        let status = d::check_status(
-                            text(&bridge["downstream_pipeline"], "status").unwrap_or(""),
-                        );
-                        if let Some(name) = text(bridge, "name") {
-                            checks.push(json!({"name":name,"status":if status=="failure"&&bridge["allow_failure"]==true{"neutral"}else{status},"description":"Downstream pipeline","url":text(&bridge["downstream_pipeline"],"web_url")}));
-                        }
+                for bridge in rows(&bridges).filter(|b| b["downstream_pipeline"].is_object()) {
+                    let status = d::check_status(
+                        text(&bridge["downstream_pipeline"], "status").unwrap_or(""),
+                    );
+                    if let Some(name) = text(bridge, "name") {
+                        checks.push(json!({"name":name,"status":if status=="failure"&&bridge["allow_failure"]==true{"neutral"}else{status},"description":"Downstream pipeline","url":text(&bridge["downstream_pipeline"],"web_url")}));
                     }
                 }
             }
@@ -197,8 +196,8 @@ impl GitLab {
             d::merge_capabilities(&project_settings),
             checks,
         )?;
-        self.add_stats(input, &mut value).await?;
-        self.add_states(input, &mut value).await?;
+        optional(self.add_stats(input, &mut value).await, ())?;
+        optional(self.add_states(input, &mut value).await, ())?;
         if cached && self.generation.load(std::sync::atomic::Ordering::Acquire) == generation {
             let mut cache = self.details.lock().await;
             if cache.len() >= 256 {
@@ -374,14 +373,16 @@ impl GitLab {
         }
         let numbers: Vec<_> = items.iter().map(|v| v["number"].to_string()).collect();
         for chunk in numbers.chunks(100) {
-            let states = self
-                .graphql(
+            let states = optional(
+                self.graphql(
                     &input.repo,
                     "getListStates",
                     q::LIST_STATES_GRAPHQL_QUERY,
                     json!({"fullPath":input.repo.repository,"iids":chunk}),
                 )
-                .await?;
+                .await,
+                Value::Null,
+            )?;
             for node in nodes(&states["project"]["mergeRequests"]) {
                 if let Some(value) = items.iter_mut().find(|v| {
                     node["iid"].as_str().and_then(|s| s.parse::<u64>().ok()) == v["number"].as_u64()
@@ -591,15 +592,16 @@ impl GitLab {
                 refs["head_sha"].as_str().unwrap_or("").into(),
             )
         };
-        let read = |revision: String, path: String| async {
+        let repo = &input.pr.repo;
+        let read = |revision: String, path: String| async move {
             let bytes = self
                 .api_raw(
-                    &input.pr.repo,
+                    repo,
                     "getDiffFileContents",
                     "GET",
                     &format!(
                         "{}/repository/files/{}/raw?ref={}",
-                        project(&input.pr.repo.repository)?,
+                        project(&repo.repository)?,
                         encode(&path),
                         encode(&revision)
                     ),
@@ -633,6 +635,12 @@ impl GitLab {
         input: FileRevisionsInput,
     ) -> Result<ProviderFileRevisions> {
         let mut revisions = BTreeMap::new();
+        if input.paths.is_empty() {
+            return Ok(ProviderFileRevisions {
+                revisions,
+                complete: Some(true),
+            });
+        }
         let refs = self.refs(&input.pr).await?;
         for paths in input.paths.chunks(100) {
             let raw=self.graphql(&input.pr.repo,"getFileRevisions",q::REPOSITORY_BLOBS_GRAPHQL_QUERY,json!({"fullPath":input.pr.repo.repository,"ref":refs["head_sha"],"paths":paths})).await?;
@@ -696,11 +704,7 @@ fn add_rest_filters(input: &ListInput, params: &mut Vec<(String, String)>) {
     {
         params.push((
             "author_username".into(),
-            if author == "@me" {
-                input.viewer.clone()
-            } else {
-                author.into()
-            },
+            resolve_author(author, &input.viewer).into(),
         ));
     }
     if let Some(draft) = text(&filters, "draft") {
@@ -727,7 +731,7 @@ fn graph_arguments(input: &ListInput) -> (Vec<(&'static str, &'static str)>, Val
     let author = if input.involvement == PullRequestInvolvement::Authored {
         Some(input.viewer.as_str())
     } else {
-        text(&filters, "author").map(|s| if s == "@me" { input.viewer.as_str() } else { s })
+        text(&filters, "author").map(|s| resolve_author(s, &input.viewer))
     };
     if let Some(author) = author {
         args.push(("authorUsername", "String"));

@@ -22,7 +22,7 @@ pub async fn with_interactive<F: std::future::Future>(future: F) -> F::Output {
 fn interactive() -> bool {
     INTERACTIVE.try_with(|value| *value).unwrap_or(false)
 }
-pub(super) fn is_interactive() -> bool {
+pub(crate) fn is_interactive() -> bool {
     interactive()
 }
 pub(super) fn access_hint_for(source: &str) -> Option<String> {

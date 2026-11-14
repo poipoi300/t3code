@@ -3,9 +3,10 @@ pub(super) fn actor(raw: &Value) -> Value {
     text(raw,"username").map(|login|json!({"login":login,"name":text(raw,"name"),"avatarUrl":text(raw,"avatar_url").or_else(||text(raw,"avatarUrl"))})).unwrap_or(Value::Null)
 }
 pub(super) fn state(raw: &Value) -> &'static str {
-    if text(raw, "merged_at").is_some() || raw["state"] == "merged" {
+    let state = text(raw, "state").unwrap_or("").to_ascii_lowercase();
+    if text(raw, "merged_at").is_some() || state == "merged" {
         "merged"
-    } else if raw["state"] == "closed" {
+    } else if state == "closed" {
         "closed"
     } else {
         "open"
@@ -51,10 +52,10 @@ pub(super) fn listing(raw: &Value) -> Result<Value> {
             ));
         }
     }
-    let mergeability = if raw["has_conflicts"] == true || raw["merge_status"] == "cannot_be_merged"
-    {
+    let merge_status = text(raw, "merge_status").unwrap_or("").to_ascii_lowercase();
+    let mergeability = if raw["has_conflicts"] == true || merge_status == "cannot_be_merged" {
         "conflicting"
-    } else if raw["merge_status"] == "can_be_merged" {
+    } else if merge_status == "can_be_merged" {
         "mergeable"
     } else {
         "unknown"
@@ -68,28 +69,27 @@ pub(super) fn graph_raw(raw: &Value) -> Value {
 }
 pub(super) fn apply_states(value: &mut Value, raw: &Value, enterprise: Option<bool>) {
     let status = text(&raw["headPipeline"], "status");
-    value["checksState"] = json!(status.map(|s| match s.to_lowercase().as_str() {
-        "success" => "success",
-        "failed" => "failure",
-        "skipped" | "manual" => "none",
-        _ => "pending",
+    value["checksState"] = json!(status.and_then(|s| match check_status(s) {
+        "success" => Some("passing"),
+        "failure" | "cancelled" => Some("failing"),
+        "pending" => Some("pending"),
+        _ => None,
     }));
     let approvals = raw["approvedBy"]["nodes"].as_array().map(Vec::len);
     if nodes(&raw["reviewers"])
         .any(|n| n["mergeRequestInteraction"]["reviewState"] == "REQUESTED_CHANGES")
     {
         value["reviewDecision"] = json!("changes-requested");
-    } else if let (Some(approved), Some(count)) = (raw["approved"].as_bool(), approvals) {
-        if !(!approved && count == 0 && enterprise.is_none()) {
-            value["reviewDecision"] =
-                json!(if !approved && (enterprise == Some(true) || count > 0) {
-                    Some("review-required")
-                } else if count > 0 {
-                    Some("approved")
-                } else {
-                    None
-                });
-        }
+    } else if let (Some(approved), Some(count)) = (raw["approved"].as_bool(), approvals)
+        && !(!approved && count == 0 && enterprise.is_none())
+    {
+        value["reviewDecision"] = json!(if !approved && (enterprise == Some(true) || count > 0) {
+            Some("review-required")
+        } else if count > 0 {
+            Some("approved")
+        } else {
+            None
+        });
     }
 }
 pub(super) fn merge_capabilities(raw: &Value) -> Value {

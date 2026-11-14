@@ -32,6 +32,16 @@ pub(crate) fn nodes(value: &Value) -> impl Iterator<Item = &Value> {
 pub(crate) fn sha(value: &str) -> bool {
     (7..=64).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
+pub(crate) fn resolve_author<'a>(author: &'a str, viewer: &'a str) -> &'a str {
+    let author = author.trim();
+    if (author.eq_ignore_ascii_case("me") || author.eq_ignore_ascii_case("@me"))
+        && !viewer.trim().is_empty()
+    {
+        viewer
+    } else {
+        author
+    }
+}
 pub(crate) fn quote_patch_path(value: &str) -> String {
     if value
         .bytes()
@@ -43,7 +53,6 @@ pub(crate) fn quote_patch_path(value: &str) -> String {
                 b'"' => result.push_str("\\\""),
                 b'\\' => result.push_str("\\\\"),
                 32..=126 => result.push(*byte as char),
-                128..=255 => result.push_str(&format!("\\{byte:03o}")),
                 _ => result.push_str(&format!("\\{byte:03o}")),
             }
         }

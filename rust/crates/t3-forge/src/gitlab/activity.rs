@@ -33,16 +33,11 @@ impl GitLab {
         &self,
         input: PullRequestInput,
     ) -> Result<ProviderChangeRequestActivity> {
+        let commits_path = format!("{}/commits?per_page=100", mr(&input)?);
         let (notes, discussions, commits, detail, awards) = tokio::join!(
             self.pages(&input, "notes?order_by=created_at&sort=asc"),
             self.pages(&input, "discussions"),
-            self.api(
-                &input.repo,
-                "listCommits",
-                "GET",
-                &format!("{}/commits?per_page=100", mr(&input)?),
-                None
-            ),
+            self.api(&input.repo, "listCommits", "GET", &commits_path, None),
             self.raw_detail(&input),
             self.awards(&input)
         );
@@ -282,14 +277,12 @@ impl GitLab {
         &self,
         input: CandidateInput,
     ) -> Result<PullRequestReviewerCandidateList> {
-        let (raw, users) = tokio::try_join!(
-            self.raw_detail(&input.pr),
-            self.users(&RepositoryQueryInput {
-                repo: input.pr.repo.clone(),
-                query: input.query.clone(),
-                sigil: None
-            })
-        )?;
+        let users_input = RepositoryQueryInput {
+            repo: input.pr.repo.clone(),
+            query: input.query.clone(),
+            sigil: None,
+        };
+        let (raw, users) = tokio::try_join!(self.raw_detail(&input.pr), self.users(&users_input))?;
         let requested: HashSet<_> = rows(&raw["reviewers"])
             .filter_map(|v| v["id"].as_u64())
             .collect();

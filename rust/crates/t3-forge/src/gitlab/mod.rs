@@ -9,6 +9,7 @@ use crate::{FailureReason, ForgeError, Result, cli::*, forge::*, model::*, suppo
 use serde_json::{Value, json};
 use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
+type DetailCache = Arc<Mutex<HashMap<String, (tokio::time::Instant, u64, Value)>>>;
 
 #[derive(Clone)]
 pub struct GitLab {
@@ -16,7 +17,7 @@ pub struct GitLab {
     git: t3_git::Git,
     environment: t3_process::Environment,
     capabilities: PullRequestCapabilities,
-    details: Arc<Mutex<HashMap<String, (tokio::time::Instant, u64, Value)>>>,
+    details: DetailCache,
     projects: Arc<Mutex<HashMap<String, (tokio::time::Instant, Value)>>>,
     stop: t3_process::CancellationToken,
     tasks: tokio_util::task::TaskTracker,

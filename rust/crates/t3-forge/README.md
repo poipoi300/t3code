@@ -2,8 +2,8 @@
 
 Native, transport-neutral forge layer on Tokio, `t3-contracts`, `t3-process`,
 `t3-git`, and reqwest. GitHub operations and the source-control application
-services are implemented. Other forge backends remain unported; URL recognition
-does not imply backend support.
+services, GitLab, and Bitbucket are implemented. Azure DevOps, GitCafe, Forgejo,
+and Cursor Origin are being ported; URL recognition does not imply backend support.
 
 ## Public API
 
@@ -90,6 +90,34 @@ and real Git repositories in temporary directories with isolated Git config.
 `tests/fixtures/provenance.json` records the fixture sources. No test contacts a
 forge, invokes gh, uses developer credentials, or reads T3 home. The full
 TypeScript suite has **not** been ported. POSIX execution remains unverified.
+
+GitLab uses `glab` through the injectable `cli::ForgeCli` boundary and `t3-git`
+for committed templates. It implements checkout/repository workflows, API
+discovery and authenticated self-hosted identity refinement; REST/GraphQL MR
+paging, detail/checks/stats/permissions, discussions/reactions/commits, diff and
+blob reads, review ranges and verdicts, reviewers/labels/references, merge and
+auto-merge, guarded source deletion, and revert with tracked cleanup. Queries
+follow `packages/source-control-gitlab/src/server/GitLabPullRequestCli.ts`.
+Its optional surface follows TypeScript: no app login, credential pinning, SSE,
+stack operations, workflow approval, host viewed marks, or cross-repository list.
+`GitLab::with_environment` takes the refreshed environment; `with_cli` permits
+recorded request/response fixtures. Neither reads a provider home itself.
+Eleven GitLab fixture tests passed on Windows. The all-target/all-feature Clippy
+run passes with warnings denied (two Cargo jobs; dedicated D: build output).
+
+Bitbucket implements the TypeScript Cloud backend: checkout/repository creation
+and clone/default-target lookup, listings and filters, detail/preview/checks,
+conversation threads and votes, diff revisions, reviewer UUID preservation,
+partial edits, comments/replies/resolution, and review verdicts. API credentials
+are explicit `http::ApiCredential` literals; the application resolves settings
+and environment precedence. `ApiHttp::update_credential` atomically updates a
+registered adapter and changes its settings revision. Calls and redirects pin
+one credential snapshot; cooldowns are scoped to its fingerprint. Foreign
+origins are refused, response bodies are bounded, and raw diagnostics stay local.
+Ten Bitbucket/HTTP fixture tests and a quoted-path revision parser test pass.
+Cloud-compatible custom endpoints are explicit; Server/Data Center APIs differ.
+Unlike TypeScript's unbounded recursion, non-conversation pagination has a
+1,000-page safety ceiling and fails rather than reporting incomplete results.
 
 ## Remaining work and known differences
 

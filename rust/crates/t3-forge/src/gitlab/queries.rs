@@ -57,9 +57,6 @@ pub(super) const MERGE_MESSAGES_GRAPHQL_QUERY: &str = r###"query($fullPath: ID!,
     mergeRequest(iid: $iid) { title squashOnMerge defaultMergeCommitMessage defaultSquashCommitMessage }
   }
 }"###;
-pub(super) const LIST_STATE_GRAPHQL_FIELDS: &str = r###"iid approved approvedBy(first: 1) { nodes { username } }
-  reviewers(first: 20) { nodes { username mergeRequestInteraction { reviewState } } }
-  headPipeline { status }"###;
 pub(super) const LIST_STATES_GRAPHQL_QUERY: &str = r###"query($fullPath: ID!, $iids: [String!]) {
   metadata { enterprise }
   project(fullPath: $fullPath) {
