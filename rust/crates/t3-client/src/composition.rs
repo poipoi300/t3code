@@ -473,7 +473,10 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
 
     /// Opens an ordinary link outside the app through the host's policy (`Platform::open_url`);
     /// a refused address is an error and nothing opens.
-    pub fn open_external_url(&self, url: String) -> LocalBoxFuture<'static, Result<(), crate::platform::PlatformError>> {
+    pub fn open_external_url(
+        &self,
+        url: String,
+    ) -> LocalBoxFuture<'static, Result<(), crate::platform::PlatformError>> {
         let platform = self.inner.platform.clone();
         async move { platform.open_url(url).await }.boxed_local()
     }
@@ -492,38 +495,42 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
     /// backoff, in the background. A disabled environment is listed and left disconnected.
     pub fn restore(&self) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         let this = self.clone();
-        async move {
-            let _lease = this.inner.registry.lock().await;
-            let registry = this.load_registry().await?;
-            let reset_catalog = registry.reset_catalog();
-            let saved: Vec<_> = registry
-                .entries()
-                .map(|registration| (registration.id.clone(), registration.label.clone()))
-                .collect();
-            for (id, label) in saved {
-                if let Err(error) = this.start_saved(&id).await {
-                    this.list(id.clone(), label);
-                    this.fail(&id, session_failure(&error));
+        self.owned(
+            async move {
+                let _lease = this.inner.registry.lock().await;
+                let registry = this.load_registry().await?;
+                let reset_catalog = registry.reset_catalog();
+                let saved: Vec<_> = registry
+                    .entries()
+                    .map(|registration| (registration.id.clone(), registration.label.clone()))
+                    .collect();
+                for (id, label) in saved {
+                    if let Err(error) = this.start_saved(&id).await {
+                        this.list(id.clone(), label);
+                        this.fail(&id, session_failure(&error));
+                    }
                 }
-            }
-            if !this.inner.restored.replace(true) {
-                let notice = StorageNotice {
-                    storage: this.inner.platform.storage_report(),
-                    reset_catalog,
-                    damaged: this.inner.damaged.borrow().iter().cloned().collect(),
-                };
-                // Saved until the UI takes it, with any an earlier launch never showed.
-                let notice =
-                    crate::services::storage_notice::remember(&this.inner.platform, notice).await;
-                if notice != StorageNotice::default() {
-                    this.inner.storage_notice.replace(Some(notice));
+                if !this.inner.restored.replace(true) {
+                    let notice = StorageNotice {
+                        storage: this.inner.platform.storage_report(),
+                        reset_catalog,
+                        damaged: this.inner.damaged.borrow().iter().cloned().collect(),
+                    };
+                    // Saved until the UI takes it, with any an earlier launch never showed.
+                    let notice =
+                        crate::services::storage_notice::remember(&this.inner.platform, notice)
+                            .await;
+                    if notice != StorageNotice::default() {
+                        this.inner.storage_notice.replace(Some(notice));
+                    }
                 }
+                drop(_lease);
+                this.refresh_relay().await;
+                Ok(())
             }
-            drop(_lease);
-            this.refresh_relay().await;
-            Ok(())
-        }
-        .boxed_local()
+            .boxed_local(),
+            || Err(ClientError::Cancelled),
+        )
     }
 
     /// Saved data the first restore could not keep (a reset environment list, unreadable
@@ -565,38 +572,46 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         input: SshPairingInput,
     ) -> LocalBoxFuture<'static, Result<EnvironmentId, ConnectionFailure>> {
         let this = self.clone();
-        async move {
-            let _lease = this.inner.registry.lock().await;
-            let platform = this.inner.platform.clone();
-            let prepared = prepare_ssh_registration(
-                &platform,
-                input.target,
-                input.label.as_deref(),
-                input.expected_environment.as_ref(),
-            )
-            .await?;
-            let id = prepared.registration.id.clone();
-            let mut registry = this
-                .load_registry()
-                .await
-                .map_err(|error| session_failure(&error))?;
-            registry
-                .register_prepared(
+        self.owned(
+            async move {
+                let _lease = this.inner.registry.lock().await;
+                let platform = this.inner.platform.clone();
+                let prepared = prepare_ssh_registration(
                     &platform,
-                    prepared,
-                    false,
-                    false,
-                    NetworkStatus::Unknown,
-                    Time::from_platform(&platform),
+                    input.target,
+                    input.label.as_deref(),
+                    input.expected_environment.as_ref(),
                 )
-                .await
-                .map_err(|error| session_failure(&error))?;
-            this.start_saved(&id)
-                .await
-                .map_err(|error| session_failure(&error))?;
-            Ok(id)
-        }
-        .boxed_local()
+                .await?;
+                let id = prepared.registration.id.clone();
+                let mut registry = this
+                    .load_registry()
+                    .await
+                    .map_err(|error| session_failure(&error))?;
+                registry
+                    .register_prepared(
+                        &platform,
+                        prepared,
+                        false,
+                        false,
+                        NetworkStatus::Unknown,
+                        Time::from_platform(&platform),
+                    )
+                    .await
+                    .map_err(|error| session_failure(&error))?;
+                this.start_saved(&id)
+                    .await
+                    .map_err(|error| session_failure(&error))?;
+                Ok(id)
+            }
+            .boxed_local(),
+            || {
+                Err(ConnectionFailure::new(
+                    crate::connection::FailureKind::Transport,
+                    "the client stopped before pairing finished",
+                ))
+            },
+        )
     }
 
     /// What relay discovery knows: the account's linked environments and their health. `None`
@@ -649,34 +664,37 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         let this = self.clone();
         let environment = environment.clone();
         let label = label.to_owned();
-        async move {
-            if this.inner.relay.is_none() {
-                return Err(ClientError::Unsupported("T3 Connect is not configured"));
+        self.owned(
+            async move {
+                if this.inner.relay.is_none() {
+                    return Err(ClientError::Unsupported("T3 Connect is not configured"));
+                }
+                let _lease = this.inner.registry.lock().await;
+                let platform = this.inner.platform.clone();
+                let mut registry = this.load_registry().await?;
+                registry.register(
+                    EnvironmentRegistration {
+                        id: environment.clone(),
+                        label,
+                        routes: vec![Route {
+                            id: RELAY_ROUTE_ID.into(),
+                            environment: environment.clone(),
+                            mode: ConnectionMode::Relay,
+                            http_base: String::new(),
+                            ws_base: String::new(),
+                        }],
+                        enabled: true,
+                    },
+                    false,
+                    NetworkStatus::Unknown,
+                    Time::from_platform(&platform),
+                )?;
+                registry.save(&platform).await?;
+                this.start_saved(&environment).await
             }
-            let _lease = this.inner.registry.lock().await;
-            let platform = this.inner.platform.clone();
-            let mut registry = this.load_registry().await?;
-            registry.register(
-                EnvironmentRegistration {
-                    id: environment.clone(),
-                    label,
-                    routes: vec![Route {
-                        id: RELAY_ROUTE_ID.into(),
-                        environment: environment.clone(),
-                        mode: ConnectionMode::Relay,
-                        http_base: String::new(),
-                        ws_base: String::new(),
-                    }],
-                    enabled: true,
-                },
-                false,
-                NetworkStatus::Unknown,
-                Time::from_platform(&platform),
-            )?;
-            registry.save(&platform).await?;
-            this.start_saved(&environment).await
-        }
-        .boxed_local()
+            .boxed_local(),
+            || Err(ClientError::Cancelled),
+        )
     }
 
     /// After signing out of T3 Connect: drops every relay route. An environment reachable only
@@ -684,44 +702,47 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
     /// and reconnects over them. Ports TypeScript's `removeRelayEnvironments`.
     pub fn remove_relay_environments(&self) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         let this = self.clone();
-        async move {
-            let _lease = this.inner.registry.lock().await;
-            let platform = this.inner.platform.clone();
-            let mut registry = this.load_registry().await?;
-            let relayed: Vec<_> = registry
-                .entries()
-                .filter(|registration| {
-                    registration
-                        .routes
-                        .iter()
-                        .any(|route| route.mode == ConnectionMode::Relay)
-                })
-                .map(|registration| (registration.id.clone(), registration.routes.len() == 1))
-                .collect();
-            // Drop the relay routes of environments that keep a direct route and save that
-            // first: each removal below loads and saves the catalog itself, which would leave
-            // this registry's copy stale.
-            let (only_relay, kept): (Vec<_>, Vec<_>) =
-                relayed.into_iter().partition(|(_, only_route)| *only_route);
-            for (environment, _) in &kept {
-                registry.remove_route(
-                    environment,
-                    RELAY_ROUTE_ID,
-                    Time::from_platform(&platform),
-                )?;
+        self.owned(
+            async move {
+                let _lease = this.inner.registry.lock().await;
+                let platform = this.inner.platform.clone();
+                let mut registry = this.load_registry().await?;
+                let relayed: Vec<_> = registry
+                    .entries()
+                    .filter(|registration| {
+                        registration
+                            .routes
+                            .iter()
+                            .any(|route| route.mode == ConnectionMode::Relay)
+                    })
+                    .map(|registration| (registration.id.clone(), registration.routes.len() == 1))
+                    .collect();
+                // Drop the relay routes of environments that keep a direct route and save that
+                // first: each removal below loads and saves the catalog itself, which would leave
+                // this registry's copy stale.
+                let (only_relay, kept): (Vec<_>, Vec<_>) =
+                    relayed.into_iter().partition(|(_, only_route)| *only_route);
+                for (environment, _) in &kept {
+                    registry.remove_route(
+                        environment,
+                        RELAY_ROUTE_ID,
+                        Time::from_platform(&platform),
+                    )?;
+                }
+                if !kept.is_empty() {
+                    registry.save(&platform).await?;
+                }
+                for (environment, _) in only_relay {
+                    this.remove_locked(&environment).await?;
+                }
+                for (environment, _) in kept {
+                    this.start_saved(&environment).await?;
+                }
+                Ok(())
             }
-            if !kept.is_empty() {
-                registry.save(&platform).await?;
-            }
-            for (environment, _) in only_relay {
-                this.remove_locked(&environment).await?;
-            }
-            for (environment, _) in kept {
-                this.start_saved(&environment).await?;
-            }
-            Ok(())
-        }
-        .boxed_local()
+            .boxed_local(),
+            || Err(ClientError::Cancelled),
+        )
     }
 
     /// What failed on the way to `environment`, as Settings shows it, or `None` while it is
@@ -776,35 +797,43 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         input: PairingInput,
     ) -> LocalBoxFuture<'static, Result<EnvironmentId, ConnectionFailure>> {
         let this = self.clone();
-        async move {
-            let _lease = this.inner.registry.lock().await;
-            let platform = this.inner.platform.clone();
-            let mut registry = this
-                .load_registry()
-                .await
-                .map_err(|error| session_failure(&error))?;
-            let prepared = prepare_pairing_registration(&platform, &input, |route| {
-                registry.assert_known_address(route)
-            })
-            .await?;
-            let id = prepared.registration.id.clone();
-            registry
-                .register_prepared(
-                    &platform,
-                    prepared,
-                    input.expected_environment.is_none(),
-                    true,
-                    NetworkStatus::Unknown,
-                    Time::from_platform(&platform),
-                )
-                .await
-                .map_err(|error| session_failure(&error))?;
-            this.start_saved(&id)
-                .await
-                .map_err(|error| session_failure(&error))?;
-            Ok(id)
-        }
-        .boxed_local()
+        self.owned(
+            async move {
+                let _lease = this.inner.registry.lock().await;
+                let platform = this.inner.platform.clone();
+                let mut registry = this
+                    .load_registry()
+                    .await
+                    .map_err(|error| session_failure(&error))?;
+                let prepared = prepare_pairing_registration(&platform, &input, |route| {
+                    registry.assert_known_address(route)
+                })
+                .await?;
+                let id = prepared.registration.id.clone();
+                registry
+                    .register_prepared(
+                        &platform,
+                        prepared,
+                        input.expected_environment.is_none(),
+                        true,
+                        NetworkStatus::Unknown,
+                        Time::from_platform(&platform),
+                    )
+                    .await
+                    .map_err(|error| session_failure(&error))?;
+                this.start_saved(&id)
+                    .await
+                    .map_err(|error| session_failure(&error))?;
+                Ok(id)
+            }
+            .boxed_local(),
+            || {
+                Err(ConnectionFailure::new(
+                    crate::connection::FailureKind::Transport,
+                    "the client stopped before pairing finished",
+                ))
+            },
+        )
     }
 
     /// Asks `environment` to connect again now. A connection whose supervisor stopped on an
@@ -815,19 +844,42 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
     ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         let this = self.clone();
         let environment = environment.clone();
-        async move {
-            let _lease = this.inner.registry.lock().await;
-            if let Some(client) = this.client(&environment)
-                && client.reconnect().is_ok()
-            {
-                return Ok(());
+        self.owned(
+            async move {
+                let _lease = this.inner.registry.lock().await;
+                if let Some(client) = this.client(&environment)
+                    && client.reconnect().is_ok()
+                {
+                    return Ok(());
+                }
+                if this.load_registry().await?.get(&environment).is_none() {
+                    return Err(ClientError::EnvironmentMismatch);
+                }
+                this.start_saved(&environment).await
             }
-            if this.load_registry().await?.get(&environment).is_none() {
-                return Err(ClientError::EnvironmentMismatch);
+            .boxed_local(),
+            || Err(ClientError::Cancelled),
+        )
+    }
+
+    /// Runs a change of several steps on the runtime's own spawner and returns a future that
+    /// only observes it, so a caller dropped part-way (its screen disposed, a navigation, a
+    /// closing window, an app sent to the background) cannot leave it half done: a removal
+    /// stopped at the driver's end left the environment's config and session in the store.
+    /// `stopped` answers if the runtime itself stops first.
+    fn owned<T: 'static>(
+        &self,
+        work: LocalBoxFuture<'static, T>,
+        stopped: fn() -> T,
+    ) -> LocalBoxFuture<'static, T> {
+        let (done, result) = futures::channel::oneshot::channel();
+        (self.inner.spawn)(
+            async move {
+                let _ = done.send(work.await);
             }
-            this.start_saved(&environment).await
-        }
-        .boxed_local()
+            .boxed_local(),
+        );
+        async move { result.await.unwrap_or_else(|_| stopped()) }.boxed_local()
     }
 
     /// Disconnects `environment`, ends its follows and delivery, removes its saved
@@ -838,11 +890,14 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
     ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         let this = self.clone();
         let environment = environment.clone();
-        async move {
-            let _lease = this.inner.registry.lock().await;
-            this.remove_locked(&environment).await
-        }
-        .boxed_local()
+        self.owned(
+            async move {
+                let _lease = this.inner.registry.lock().await;
+                this.remove_locked(&environment).await
+            }
+            .boxed_local(),
+            || Err(ClientError::Cancelled),
+        )
     }
 
     /// The saved environments, in catalogue order.
