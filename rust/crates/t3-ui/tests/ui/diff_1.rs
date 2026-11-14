@@ -44,6 +44,7 @@ pub struct Inputs {
     pub collapsed: BTreeSet<String>,
     pub layout: DiffLayout,
     pub file_tree_open: bool,
+    pub hide_test_files: bool,
     pub comments: Vec<CommentAnnotation>,
 }
 
@@ -57,6 +58,7 @@ impl Default for Inputs {
             collapsed: BTreeSet::new(),
             layout: DiffLayout::Stacked,
             file_tree_open: false,
+            hide_test_files: false,
             comments: Vec::new(),
         }
     }
@@ -133,7 +135,7 @@ pub fn snapshot(inputs: &Inputs) -> DiffPanelSnapshot {
         word_wrap: false,
         timestamp_format: TimestampFormat::Locale,
         ignore_whitespace: false,
-        hide_test_files: false,
+        hide_test_files: inputs.hide_test_files,
         file_tree_open: inputs.file_tree_open,
         can_refresh: false,
         refreshing: false,
@@ -214,7 +216,14 @@ impl DiffPanelBackend for Fake {
         hide: bool,
     ) -> LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
         record(format!("tests:{hide}"));
-        self.done()
+        // As the client: the choice shows at once, and its save runs when polled.
+        self.inputs.borrow_mut().hide_test_files = hide;
+        self.publish();
+        async move {
+            record(format!("saved tests:{hide}"));
+            Ok(())
+        }
+        .boxed_local()
     }
     fn set_file_tree_open(
         &self,
@@ -434,4 +443,20 @@ fn a_saved_review_comment_shows_under_its_line_and_deletes_through_the_client() 
         );
         assert!(app.screen().shows("src/a.ts"), "the diff stays");
     }
+}
+
+// Rule 7: hiding test files republishes the snapshot, which rebuilt the toggle before its save ran.
+#[test]
+fn hiding_test_files_saves_the_choice_after_the_toolbar_rebuilds() {
+    let (mut app, _guard) = start(DESKTOP, Inputs::default());
+    app.wait_for("src/a.ts").expect("diff");
+    app.press("role:button[Hide test files]")
+        .expect("hide test files");
+    app.settle();
+    assert!(calls().contains(&"tests:true".to_owned()));
+    assert!(
+        calls().contains(&"saved tests:true".to_owned()),
+        "the save never ran: {:?}",
+        calls()
+    );
 }

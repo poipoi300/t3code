@@ -421,3 +421,187 @@ fn an_opened_link_exposes_the_source_reopen_action_and_retains_a_failure() {
         assert!(app.screen().shows("Link actions: 1"));
     }
 }
+
+/// A draft whose project choice and scratch start answer only when the test says so, as server
+/// replies arriving after the picker closed or the draft changed.
+struct SlowDraft {
+    draft: RefCell<DraftView>,
+    updates: mpsc::UnboundedSender<Rc<NewThreadView>>,
+    receiver: RefCell<Option<mpsc::UnboundedReceiver<Rc<NewThreadView>>>>,
+    answers: Rc<RefCell<Vec<futures::channel::oneshot::Sender<()>>>>,
+    started: Signal<usize>,
+}
+impl SlowDraft {
+    fn answer_later(&self, message: String) -> LocalBoxFuture<'static, Result<(), Text>> {
+        let (sender, answered) = futures::channel::oneshot::channel();
+        self.answers.borrow_mut().push(sender);
+        let started = self.started;
+        async move {
+            started.update(|n| *n += 1);
+            let _ = answered.await;
+            Err(Text::content(message))
+        }
+        .boxed_local()
+    }
+}
+fn slow_project(id: &str) -> ProjectKey {
+    ProjectKey {
+        environment: t3_client::types::EnvironmentId("env".into()),
+        project: t3_client::types::ProjectId(id.into()),
+    }
+}
+impl NewThreadClient for SlowDraft {
+    fn watch(&self, _: Target) -> LocalBoxStream<'static, Rc<NewThreadView>> {
+        let initial = Rc::new(NewThreadView::Draft(Rc::new(self.draft.borrow().clone())));
+        futures::stream::once(futures::future::ready(initial))
+            .chain(self.receiver.borrow_mut().take().expect("one session"))
+            .boxed_local()
+    }
+    fn retry(&self, _: Target) -> LocalBoxFuture<'static, Result<(), Text>> {
+        unused()
+    }
+    fn start_scratch(&self, _: Option<String>) -> LocalBoxFuture<'static, Result<(), Text>> {
+        self.answer_later("scratch answered".into())
+    }
+    fn select_project(
+        &self,
+        _: String,
+        project: ProjectKey,
+    ) -> LocalBoxFuture<'static, Result<(), Text>> {
+        self.answer_later(format!("{} answered", project.project.0))
+    }
+    fn set_prompt(&self, _: &str, prompt: String, cursor: usize) -> Result<u64, Text> {
+        let mut draft = self.draft.borrow_mut();
+        draft.prompt = prompt;
+        draft.cursor = cursor;
+        draft.revision += 1;
+        let _ = self
+            .updates
+            .unbounded_send(Rc::new(NewThreadView::Draft(Rc::new(draft.clone()))));
+        Ok(draft.revision)
+    }
+    fn submit(
+        &self,
+        _: String,
+        _: u64,
+        _: ComposerDispatchMode,
+    ) -> LocalBoxFuture<'static, Result<ThreadKey, Text>> {
+        unused()
+    }
+    fn attachments(&self, _: &str) -> Option<AttachmentSession> {
+        None
+    }
+    fn model_picker(&self, _: &str) -> Option<PickerProps> {
+        None
+    }
+    fn link_action(
+        &self,
+        _: String,
+        _: LinkAction,
+    ) -> LocalBoxFuture<'static, Result<Option<Destination>, Text>> {
+        unused()
+    }
+}
+#[component]
+fn SlowDraftHarness() -> impl IntoElement {
+    theme::install(&theme::ThemeChoice::default());
+    provide_context(Navigator::new(Route::Draft("saved".into())));
+    let started = signal(0usize);
+    let answers = Rc::new(RefCell::new(Vec::new()));
+    let (updates, receiver) = mpsc::unbounded();
+    provide_context(NewThreadRuntime(Rc::new(SlowDraft {
+        draft: RefCell::new(DraftView {
+            id: "saved".into(),
+            prompt: String::new(),
+            cursor: 0,
+            revision: 1,
+            project: Some(slow_project("first")),
+            project_title: Some("First project".into()),
+            projects: vec![
+                new_thread::ProjectChoice {
+                    key: slow_project("first"),
+                    title: "First project".into(),
+                    environment_label: None,
+                },
+                new_thread::ProjectChoice {
+                    key: slow_project("second"),
+                    title: "Second project".into(),
+                    environment_label: None,
+                },
+            ],
+            is_scratch: false,
+            can_start_scratch: true,
+            editable: true,
+            actions: PrimaryActionState::default(),
+            banner: None,
+        }),
+        updates,
+        receiver: RefCell::new(Some(receiver)),
+        answers: answers.clone(),
+        started,
+    })));
+    view()
+        .w_full()
+        .h_full()
+        .child(
+            nsh_base::button()
+                .accessibility_label(Some("Answer the pending requests".into()))
+                .child(text("Answer the pending requests"))
+                .on_press(move || {
+                    for sender in answers.borrow_mut().drain(..) {
+                        let _ = sender.send(());
+                    }
+                }),
+        )
+        .child(text(move || format!("Requests started: {}", started.get())))
+        .child(new_thread::screen(Some("saved")))
+}
+fn slow_draft(window: (f32, f32)) -> Headless {
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(window.0), px(window.1)),
+        ..EngineConfig::new(Root::of::<SlowDraftHarness>())
+    })
+    .expect("slow draft harness");
+    app.wait_for("role:button[Choose a project]")
+        .expect("project trigger");
+    app
+}
+// Rule 7: the picker closes on the press and the draft changes while the choice is pending.
+#[test]
+fn a_project_choice_answered_after_the_picker_closed_still_reports() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = slow_draft(window);
+        app.press("role:button[Choose a project]")
+            .expect("open the picker");
+        app.press("role:button[Second project]")
+            .expect("choose another project");
+        app.wait_for("Requests started: 1")
+            .expect("the choice reached the client");
+        app.wait_for_gone("role:button[Second project]", nsh_testing::WAIT)
+            .expect("the picker closed");
+        app.type_text("id:composer-editor", "typed while pending")
+            .expect("type in the draft");
+        app.press("role:button[Answer the pending requests]")
+            .expect("the client answers");
+        app.wait_for("second answered")
+            .unwrap_or_else(|error| panic!("answer lost at {window:?}: {error}"));
+    }
+}
+// Rule 7 and defect 3: typing changes the draft, which rebuilt the scratch button's region.
+#[test]
+fn starting_without_a_project_reports_its_answer_after_the_draft_changed() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = slow_draft(window);
+        app.press("role:button[or start without a project]")
+            .expect("start without a project");
+        app.wait_for("Requests started: 1")
+            .expect("the start reached the client");
+        app.type_text("id:composer-editor", "typed while pending")
+            .expect("type in the draft");
+        app.press("role:button[Answer the pending requests]")
+            .expect("the client answers");
+        app.wait_for("scratch answered")
+            .unwrap_or_else(|error| panic!("answer lost at {window:?}: {error}"));
+    }
+}

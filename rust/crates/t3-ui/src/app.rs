@@ -160,7 +160,7 @@ pub fn provide_client_services<P: Platform + Clone + 'static>(client: &ClientRun
     provide_context(crate::runtime::services::links::link_opener(client));
     provide_context(shell::sidebar_width_store(client));
     provide_context(shell::sidebar_shelves_store(client));
-    provide_context(crate::screens::notifications::notification_settings(client));
+    provide_context(crate::screens::notifications::notification_services(client));
     let host = panel::workspace_panel_host();
     provide_context(host);
     // RightPanelSurfaceContent.tsx's surfaces. Browser, Terminal tabs, pull requests, devices and

@@ -446,6 +446,8 @@ impl<P: Platform + Clone + 'static> ui_new::NewThreadClient for NewThreadBinding
         use crate::screens::composer::model_picker::{CatalogState, PickerProps};
         use nsh_core::prelude::*;
         let service = self.0.model_session(id).ok()?;
+        // Picks close the picker that made them; their writes run under the draft's owner.
+        let tasks = crate::runtime::tasks::TaskOwner::here();
         let navigation = self.0.clone();
         let id = id.to_owned();
         let resolve = Rc::new(move || navigation.model_session(&id));
@@ -479,7 +481,7 @@ impl<P: Platform + Clone + 'static> ui_new::NewThreadClient for NewThreadBinding
                         model: model.model,
                         options: None,
                     });
-                spawn(async move {
+                tasks.spawn(async move {
                     if let Err(error) = operation.await {
                         failure.set(Some(error.to_string()));
                     }
@@ -505,7 +507,7 @@ impl<P: Platform + Clone + 'static> ui_new::NewThreadClient for NewThreadBinding
                 }
             };
             let operation = service.toggle_model_favorite(model.instance_id, model.model);
-            spawn(async move {
+            tasks.spawn(async move {
                 if let Err(error) = operation.await {
                     failure.set(Some(error.to_string()));
                 }
@@ -521,7 +523,7 @@ impl<P: Platform + Clone + 'static> ui_new::NewThreadClient for NewThreadBinding
                 }
             };
             let operation = service.change_model_trait(model.instance_id, model.model, selection);
-            spawn(async move {
+            tasks.spawn(async move {
                 if let Err(error) = operation.await {
                     failure.set(Some(error.to_string()));
                 }
@@ -537,7 +539,7 @@ impl<P: Platform + Clone + 'static> ui_new::NewThreadClient for NewThreadBinding
                 }
             };
             let operation = service.refresh_model_catalog();
-            spawn(async move {
+            tasks.spawn(async move {
                 if let Err(error) = operation.await {
                     failure.set(Some(error.to_string()));
                 }

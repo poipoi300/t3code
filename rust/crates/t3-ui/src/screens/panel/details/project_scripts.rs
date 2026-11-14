@@ -16,6 +16,7 @@ use t3_contracts::project::{ProjectScript, ProjectScriptIcon};
 use t3_contracts::t3_project_file::T3ProjectFileScript;
 
 use crate::i18n::{Value, t, tr};
+use crate::runtime::tasks::TaskOwner;
 use crate::screens::panel::git_actions::thread_details_control;
 use crate::theme::tw;
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
@@ -47,7 +48,19 @@ pub trait ProjectScriptsBackend {
     fn run(&self, id: String) -> LocalBoxFuture<'static, Result<String, ClientError>>;
 }
 
-type Backend = Stored<Rc<dyn ProjectScriptsBackend>>;
+/// The client, and the owner of the control its actions start under: its menu and dialogs close
+/// as those actions start.
+#[derive(Clone, Copy)]
+struct Backend {
+    client: Stored<Rc<dyn ProjectScriptsBackend>>,
+    owner: TaskOwner,
+}
+
+impl Backend {
+    fn get(self) -> Rc<dyn ProjectScriptsBackend> {
+        self.client.get()
+    }
+}
 type Snapshot = Signal<Option<Rc<ProjectScriptsSnapshot>>>;
 
 /// The editor form's fields (`NewProjectScriptInput` in projectScriptEditor.tsx).
@@ -268,8 +281,8 @@ fn run_script(backend: Backend, snapshot: Snapshot, script: ProjectScript) {
     if !snapshot.with_untracked(|s| s.as_ref().is_some_and(|s| s.can_run)) {
         return;
     }
-    let backend = backend.get();
-    spawn(async move {
+    let (owner, backend) = (backend.owner, backend.get());
+    owner.spawn(async move {
         if let Err(error) = backend.run(script.id.0.clone()).await {
             // The source reports this on the thread's error banner (useChatTerminalActions.ts).
             show_error(
@@ -290,7 +303,14 @@ enum Mode {
     Add,
 }
 
-pub(super) fn project_scripts_control(backend: Backend, snapshot: Snapshot) -> impl IntoElement {
+pub(super) fn project_scripts_control(
+    client: Stored<Rc<dyn ProjectScriptsBackend>>,
+    snapshot: Snapshot,
+) -> impl IntoElement {
+    let backend = Backend {
+        client,
+        owner: TaskOwner::here(),
+    };
     let request = signal::<Option<EditorRequest>>(None);
     let scripts_open = signal(false);
     let mode = computed(move || {
@@ -560,9 +580,9 @@ fn script_items(
                                 .child(icon_with_class(Icon::Download, "size-3.5")),
                         ),
                     move || {
-                        let backend = backend.get();
+                        let (owner, backend) = (backend.owner, backend.get());
                         let script = script.clone();
-                        spawn(async move {
+                        owner.spawn(async move {
                             let payload = import_input(script.clone(), can_edit_keybindings);
                             match backend.import(script).await {
                                 Ok(()) | Err(ClientError::Cancelled) => {}
@@ -659,8 +679,8 @@ fn project_script_editor_dialog(
         error.set(None);
         saving.set(true);
         let mine = generation.get_untracked();
-        let backend = backend.get();
-        spawn(async move {
+        let (owner, backend) = (backend.owner, backend.get());
+        owner.spawn(async move {
             let result = match current.script_id {
                 Some(id) => backend.update(id, payload).await,
                 None => backend.add(payload).await,
@@ -789,8 +809,8 @@ fn delete_confirmation(
                                 }
                                 open.set(false);
                                 request.set(None);
-                                let backend = backend.get();
-                                spawn(async move {
+                                let (owner, backend) = (backend.owner, backend.get());
+                                owner.spawn(async move {
                                     if let Err(failure) = backend.delete(id).await {
                                         show_error(t("Failed to delete action."), failure);
                                     }

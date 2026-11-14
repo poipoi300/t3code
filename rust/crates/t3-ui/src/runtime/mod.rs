@@ -6,6 +6,7 @@ pub mod demo;
 pub mod host;
 pub mod services;
 pub mod store;
+pub mod tasks;
 
 use std::rc::Rc;
 

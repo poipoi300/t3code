@@ -198,6 +198,8 @@ struct Drawer {
     key: ThreadKey,
     view: Signal<Rc<TerminalDrawerView>>,
     presentation: Memo<Rc<DrawerPresentation>>,
+    // Tabs and toolbar controls go with the terminals they open and close.
+    tasks: crate::runtime::tasks::TaskOwner,
 }
 
 impl Drawer {
@@ -212,7 +214,7 @@ impl Drawer {
             return;
         }
         if let Some((_, opened)) = self.services.0.launch(&self.key, placement, None) {
-            spawn(async move {
+            self.tasks.spawn(async move {
                 let _ = opened.await;
             });
         }
@@ -233,7 +235,7 @@ impl Drawer {
     /// Closes without asking: the shell already ended.
     fn close(&self, terminal: &str) {
         if let Some(closing) = self.services.0.close_terminal(&self.key, terminal) {
-            spawn(closing);
+            self.tasks.spawn(closing);
         }
     }
     fn confirm_close(&self, terminal: &str) {
@@ -252,7 +254,7 @@ impl Drawer {
         );
         let drawer = self.clone();
         let terminal = terminal.to_owned();
-        spawn(async move {
+        self.tasks.spawn(async move {
             // Without a dialog host the web closes at once, as without its local API.
             let confirmed = match answer {
                 Some(answer) => answer.await,
@@ -302,6 +304,7 @@ pub fn thread_terminal_drawer(services: TerminalServices, key: ThreadKey) -> imp
         key,
         view: state,
         presentation,
+        tasks: crate::runtime::tasks::TaskOwner::here(),
     };
     let keys = use_context::<Keybindings>();
     if let Some(keys) = keys {

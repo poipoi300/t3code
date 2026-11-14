@@ -9,6 +9,7 @@ use t3_client::workspace::branch::branch_trigger_label;
 pub use t3_client::workspace::git_panel::branches::{BranchItem, BranchSelectorState};
 
 use crate::i18n::{Text, Value, t, tr};
+use crate::runtime::tasks::TaskOwner;
 use crate::state::layout::{Pointer, pointer};
 use crate::theme::{cn, tw};
 use crate::ui::icon::{Icon, icon_with_class};
@@ -187,6 +188,8 @@ fn branch_picker(
     state: Signal<Rc<BranchSelectorState>>,
 ) -> impl IntoElement {
     let open = signal(false);
+    // The picker closes as a choice starts; the work runs under the picker's own owner.
+    let tasks = TaskOwner::here();
     let query = signal(String::new());
     let anchor_width = signal(0.0_f32);
     let available = signal(nsh_core::Size::new(window().width, window().height));
@@ -197,7 +200,7 @@ fn branch_picker(
     let select = move |item: PickerItem| {
         open.set(false);
         let backend = backend.get();
-        spawn(async move {
+        tasks.spawn(async move {
             let result = match item {
                 PickerItem::Ref(item) => backend
                     .select_ref(item.reference.name.0)
@@ -218,7 +221,7 @@ fn branch_picker(
         open.set(next);
         if next && !was_open {
             let backend = backend.get();
-            spawn(async move {
+            tasks.spawn(async move {
                 let _ = backend.refresh().await;
             });
         }
@@ -281,7 +284,7 @@ fn branch_picker(
                                                 let remaining = event.content_size.height.0 - event.offset.y.0 - event.size.height.0;
                                                 if remaining <= event.size.height.0 * 0.5 && state.with_untracked(|s| s.next_cursor.is_some() && !s.loading_next) {
                                                     let backend = backend.get();
-                                                    spawn(async move { let _ = backend.load_next().await; });
+                                                    tasks.spawn(async move { let _ = backend.load_next().await; });
                                                 }
                                             })
                                             .child(dynamic(move || {
@@ -289,7 +292,7 @@ fn branch_picker(
                                                 let project_cwd = state.with(|s| s.checkout_root.clone());
                                                 untracked(|| view().child(items.into_iter().map(|item| picker_row(item, project_cwd.as_deref(), select).into_element()).collect::<Vec<_>>()).into_element())
                                             }))))
-                                    .child(when(move || state.with(|s| s.selecting_worktree_base), move || start_from_origin_control(backend, state)))
+                                    .child(when(move || state.with(|s| s.selecting_worktree_base), move || start_from_origin_control(backend, state, tasks)))
                                     .child(dynamic(move || state.with(|s| s.filtered.iter().any(|i| i.disabled_reason.as_deref() == Some(WORKTREE_CHANGE_BLOCKED_MESSAGE)))
                                         .then(|| combobox_status(t(WORKTREE_CHANGE_BLOCKED_MESSAGE)).into_element())))
                                     .child(dynamic(move || state.with(|s| status_text(s)).map(|s| combobox_status(s).into_element()))),
@@ -383,6 +386,7 @@ fn combobox_item(
 fn start_from_origin_control(
     backend: Stored<Rc<dyn BranchSelectorBackend>>,
     state: Signal<Rc<BranchSelectorState>>,
+    tasks: TaskOwner,
 ) -> impl IntoElement {
     view()
         .app_class(tw("flex cursor-pointer items-center justify-between gap-3 border-t border-border/60 px-3 py-2 text-xs"))
@@ -406,7 +410,7 @@ fn start_from_origin_control(
             SwitchSize::Sm,
             move |checked| {
                 let backend = backend.get();
-                spawn(async move {
+                tasks.spawn(async move {
                     let _ = backend.set_start_from_origin(checked).await;
                 });
             },

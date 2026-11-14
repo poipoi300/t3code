@@ -26,6 +26,7 @@ use t3_contracts::server::ServerConfig;
 
 use super::{RowVariant, SidebarItem};
 use crate::i18n::{Value, t, tr};
+use crate::runtime::tasks::TaskOwner;
 use crate::runtime::{Rt, Shared, rt};
 use crate::state::nav::{Navigator, Route};
 use crate::theme::{Scope, cn, palette, tw_with};
@@ -34,6 +35,47 @@ use crate::ui::icon::{Icon, icon, icon_with_class, provider_icon};
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
 type Thread = Memo<Option<Shared<OrchestrationV2ThreadShell>>>;
+
+/// The client's thread operations a row uses: its action menu, its actions and rename.
+pub trait RowThreadActions {
+    fn menu(&self, key: &ThreadKey) -> super::actions::ThreadActionMenu;
+    fn perform(
+        &self,
+        key: ThreadKey,
+        action: String,
+    ) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>>;
+    fn rename(
+        &self,
+        key: ThreadKey,
+        title: String,
+    ) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>>;
+}
+
+impl<P: t3_client::platform::Platform + Clone + 'static> RowThreadActions
+    for t3_client::composition::ClientRuntime<P>
+{
+    fn menu(&self, key: &ThreadKey) -> super::actions::ThreadActionMenu {
+        crate::runtime::services::thread_ops::thread_action_menu(self, key)
+    }
+    fn perform(
+        &self,
+        key: ThreadKey,
+        action: String,
+    ) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
+        self.thread_actions().perform_action(key, action)
+    }
+    fn rename(
+        &self,
+        key: ThreadKey,
+        title: String,
+    ) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
+        self.thread_actions().rename_thread(key, title)
+    }
+}
+
+/// Rows use the host's client; a mount over another client (a fake environment) provides it.
+#[derive(Clone)]
+pub struct RowThreadActionsRuntime(pub std::rc::Rc<dyn RowThreadActions>);
 type Project = Memo<Option<Shared<OrchestrationProjectShell>>>;
 
 /// Supplied by the sidebar's selection/draft/snooze stores, never inferred from run state.
@@ -366,14 +408,21 @@ pub fn sidebar_thread_row(
     let key = computed(move || item.with(|i| i.as_ref().map(|i| i.key.clone())));
     // SB-ACTIONS-1's thread menu over the client's operations (thread_ops binding). The menu's
     // availability follows the thread's shell (pin, settle, unread), which this memo reads.
-    let client = rt().backend().client();
+    let client = use_context::<RowThreadActionsRuntime>()
+        .map(|runtime| runtime.0)
+        .or_else(|| {
+            rt().backend()
+                .client()
+                .map(|client| std::rc::Rc::new(client) as std::rc::Rc<dyn RowThreadActions>)
+        });
     let menu_client = client.clone();
     let menu = computed(move || {
         thread.with(|_| ());
         let client = menu_client.as_ref()?;
-        key.get()
-            .map(|key| crate::runtime::services::thread_ops::thread_action_menu(client, &key))
+        key.get().map(|key| client.menu(&key))
     });
+    // The rename input and the action menu go as their work starts; the row outlives both.
+    let tasks = TaskOwner::here();
     let renaming = signal(false);
     let rename_draft = signal(String::new());
     let config = environment_config(key);
@@ -470,8 +519,8 @@ pub fn sidebar_thread_row(
             renaming.set(true);
             return;
         }
-        spawn(async move {
-            if let Err(error) = client.thread_actions().perform_action(key, id.clone()).await {
+        tasks.spawn(async move {
+            if let Err(error) = client.perform(key, id.clone()).await {
                 failed(&id, error);
             }
         });
@@ -484,8 +533,8 @@ pub fn sidebar_thread_row(
             return;
         };
         let title = rename_draft.get_untracked();
-        spawn(async move {
-            if let Err(error) = client.thread_actions().rename_thread(key, title).await {
+        tasks.spawn(async move {
+            if let Err(error) = client.rename(key, title).await {
                 failed("rename", error);
             }
         });

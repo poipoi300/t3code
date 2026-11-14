@@ -9,10 +9,7 @@
 //! "unavailable" where a platform has none, so no platform branch is needed.
 //!
 //! Not built yet, each named in reports/ui-sh-notify.md: notification sounds (the web's two mp3
-//! assets and an audio context; NSH's audio API is not wired), hidden-thread filtering
-//! (`hiddenThreadKeysAtom` has no client selector yet), subagent requests and delegated-under-
-//! parent sets (no client selectors yet: treated as empty, so linked-task requests do not notify
-//! the parent).
+//! assets), hidden-thread filtering (`hiddenThreadKeysAtom` has no client producer yet).
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,7 +26,9 @@ use t3_client::thread_views::threads::notification_center::{
 use t3_client::thread_views::threads::notifications::{
     BackgroundMemory, BackgroundThread, next_background_announcement, resolve_background_request,
 };
-use t3_client::types::{EnvironmentId, SyncStatus, ThreadKey};
+use t3_client::services::models::PendingSubagentRequest;
+use t3_client::thread_views::threads::shell::{PendingChildRequest, ThreadShellViews};
+use t3_client::types::{EnvironmentId, SyncStatus, ThreadId, ThreadKey};
 use t3_client::view_logic::session::text::thread_notification_tag;
 use t3_contracts::settings::{ClientSettingsSchema, NotificationMode};
 
@@ -39,22 +38,36 @@ use crate::state::nav::{Route, navigator};
 use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::toast::{Action, ThreadToastData, ToastOptions, Variant, toast_manager};
 
-/// The client settings the notifications follow, provided at the app root
+/// The client settings the notifications follow and the client's thread shell views (requests
+/// of tasks, threads shown under a parent), provided at the app root
 /// (`app::provide_client_services`).
 #[derive(Clone)]
-pub struct NotificationSettings {
+pub struct NotificationServices {
     current: Rc<dyn Fn() -> Rc<ClientSettingsSchema>>,
     changes: Rc<dyn Fn() -> futures::stream::LocalBoxStream<'static, ()>>,
+    shells: Rc<dyn Fn() -> Rc<ThreadShellViews>>,
 }
 
-pub fn notification_settings<P: t3_client::platform::Platform + Clone + 'static>(
+pub fn notification_services<P: t3_client::platform::Platform + Clone + 'static>(
     client: &t3_client::composition::ClientRuntime<P>,
-) -> NotificationSettings {
+) -> NotificationServices {
     let current = client.settings();
     let changes = current.clone();
-    NotificationSettings {
+    let threads = client.thread_header();
+    NotificationServices {
         current: Rc::new(move || current.client_settings()),
         changes: Rc::new(move || changes.changes()),
+        shells: Rc::new(move || threads.shell_views()),
+    }
+}
+
+/// `pendingSubagentRequestsAtom`: a task's request, as its parent hears of it.
+fn parent_request(request: PendingChildRequest) -> PendingSubagentRequest {
+    match request {
+        PendingChildRequest::Approval => PendingSubagentRequest::Approval,
+        PendingChildRequest::UserInput | PendingChildRequest::UserOnlyInput => {
+            PendingSubagentRequest::UserInput
+        }
     }
 }
 
@@ -62,11 +75,11 @@ pub fn notification_settings<P: t3_client::platform::Platform + Clone + 'static>
 pub fn thread_notifications() -> impl IntoElement {
     let runtime = rt();
     let nav = navigator();
-    let Some(settings_service) = use_context::<NotificationSettings>() else {
+    let Some(settings_service) = use_context::<NotificationServices>() else {
         // The demo backend has no settings or live environments to watch.
         debug_assert!(
             runtime.backend().client().is_none(),
-            "NotificationSettings is not provided: app::provide_client_services provides it with the client"
+            "NotificationServices is not provided: app::provide_client_services provides it with the client"
         );
         return view().app_class(crate::theme::tw("hidden"));
     };
@@ -105,6 +118,7 @@ pub fn thread_notifications() -> impl IntoElement {
     let observe_center = center.clone();
     let observe_show = show.clone();
     let observe_background = background.clone();
+    let shells = settings_service.shells.clone();
     effect(move || {
         let current = settings.get();
         let enabled = current.notification_mode != NotificationMode::Off
@@ -119,6 +133,7 @@ pub fn thread_notifications() -> impl IntoElement {
         let mut center = observe_center.borrow_mut();
         center.retain_environments(&environments);
         let now = nsh_core::time::unix_ms() as u64;
+        let views = shells();
         let mut shown = Vec::new();
         let mut listed = Vec::new();
         for environment in snapshot.environments.keys() {
@@ -127,12 +142,18 @@ pub fn thread_notifications() -> impl IntoElement {
                 .is_some_and(|state| state.status == SyncStatus::Live);
             match (live, shell) {
                 (true, Some(shell)) => {
+                    let requests: BTreeMap<ThreadId, PendingSubagentRequest> = views
+                        .pending_child_requests
+                        .iter()
+                        .filter(|(key, _)| &key.environment == environment)
+                        .map(|(key, request)| (key.thread.clone(), parent_request(*request)))
+                        .collect();
                     if environments.contains(environment) {
                         shown.extend(center.observe(
                             environment,
                             &shell.0.threads,
-                            &BTreeMap::new(),
-                            &BTreeSet::new(),
+                            &requests,
+                            &views.delegated_under_parent,
                             now,
                         ));
                     }
@@ -141,12 +162,28 @@ pub fn thread_notifications() -> impl IntoElement {
                             .0
                             .threads
                             .iter()
-                            .filter(|thread| thread.archived_at.is_none())
+                            // Tasks and side chats have no row; their requests reach the parent.
+                            .filter(|thread| {
+                                thread.archived_at.is_none()
+                                    && !t3_client::view_logic::shell::sidebar::is_hidden_thread(
+                                        &thread.lineage,
+                                    )
+                            })
                             .map(|thread| {
                                 let view = t3_client::services::models::present_thread_shell(
                                     environment.clone(),
                                     thread.clone(),
+                                    requests.get(&thread.id).copied(),
+                                );
+                                let shelf = t3_client::view_logic::shell::sidebar::presentation::ThreadInput::from_environment_shell(
+                                    &view,
                                     None,
+                                    &t3_client::time::epoch_ms,
+                                )
+                                .shelf;
+                                let snoozed = t3_client::thread_views::shelves::effective_snoozed(
+                                    &shelf,
+                                    now as i64,
                                 );
                                 let (request, request_id) = resolve_background_request(
                                     view.has_pending_approvals,
@@ -178,7 +215,7 @@ pub fn thread_notifications() -> impl IntoElement {
                                         .map(
                                             t3_contracts::orchestration_v2_id_table::IdOrIndex::Id,
                                         ),
-                                    snoozed: false,
+                                    snoozed,
                                 }
                             }),
                     );

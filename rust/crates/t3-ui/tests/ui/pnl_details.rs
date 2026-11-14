@@ -299,6 +299,44 @@ struct FakeDetails {
     scripts: Rc<Broadcast<ProjectScriptsSnapshot>>,
     recorded: Signal<String>,
     refuse: Signal<bool>,
+    replies: Replies,
+}
+
+/// Replies held back until the test releases them, as a server answering after a menu or dialog
+/// has closed; each held operation records `settled:<what>` once it is answered.
+#[derive(Clone, Default)]
+struct Replies(Rc<RefCell<Option<Vec<futures::channel::oneshot::Sender<()>>>>>);
+
+impl Replies {
+    fn hold(&self) {
+        *self.0.borrow_mut() = Some(Vec::new());
+    }
+    fn release(&self) {
+        let held = self.0.borrow_mut().as_mut().map(std::mem::take);
+        for sender in held.unwrap_or_default() {
+            let _ = sender.send(());
+        }
+    }
+    fn answer<T: 'static>(
+        &self,
+        recorded: Signal<String>,
+        what: String,
+        value: T,
+    ) -> LocalBoxFuture<'static, T> {
+        let Some(held) = self.0.borrow_mut().as_mut().map(|held| {
+            let (sender, answered) = futures::channel::oneshot::channel();
+            held.push(sender);
+            answered
+        }) else {
+            return ready(value);
+        };
+        async move {
+            let _ = held.await;
+            recorded.set(format!("settled:{what}"));
+            value
+        }
+        .boxed_local()
+    }
 }
 
 fn ready<T: 'static>(value: T) -> LocalBoxFuture<'static, T> {
@@ -342,7 +380,7 @@ impl ThreadDetailsBackend for FakeDetails {
                 .map(|(id, _, visible)| ((*id).to_owned(), *visible))
                 .collect()
         });
-        ready(Ok(()))
+        self.replies.answer(self.recorded, "reset".into(), Ok(()))
     }
     fn editor_picker(&self, _: &ThreadKey) -> Rc<dyn EditorPickerBackend> {
         Rc::new(self.clone())
@@ -359,7 +397,8 @@ impl EditorPickerBackend for FakeDetails {
     fn select_editor(&self, editor: EditorId) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         self.record(format!("preferred:{editor:?}"));
         self.editors.change(|s| s.preferred = Some(editor));
-        ready(Ok(()))
+        self.replies
+            .answer(self.recorded, format!("preferred:{editor:?}"), Ok(()))
     }
     fn open_editor(&self, editor: EditorId) -> LocalBoxFuture<'static, Result<bool, ClientError>> {
         self.record(format!(
@@ -407,18 +446,27 @@ impl ProjectScriptsBackend for FakeDetails {
         self.record(format!("deleted:{id}"));
         self.scripts
             .change(|s| s.scripts.retain(|script| script.id.0 != id));
-        ready(Ok(()))
+        self.replies
+            .answer(self.recorded, format!("deleted:{id}"), Ok(()))
     }
     fn import(
         &self,
         script: t3_contracts::t3_project_file::T3ProjectFileScript,
     ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         self.record(format!("imported:{}", script.name.0));
-        ready(self.refused())
+        self.replies.answer(
+            self.recorded,
+            format!("imported:{}", script.name.0),
+            self.refused(),
+        )
     }
     fn run(&self, id: String) -> LocalBoxFuture<'static, Result<String, ClientError>> {
         self.record(format!("ran:{id}"));
-        ready(Ok("script-terminal".into()))
+        self.replies.answer(
+            self.recorded,
+            format!("ran:{id}"),
+            Ok("script-terminal".into()),
+        )
     }
 }
 
@@ -525,6 +573,7 @@ fn ServicesFixture(props: ServicesFixtureProps) -> impl IntoElement {
         }),
         recorded: signal("no call".into()),
         refuse: signal(false),
+        replies: Replies::default(),
     };
     provide_context(thread_details_runtime(Rc::new(fake.clone())));
     let key = ThreadKey {
@@ -535,6 +584,7 @@ fn ServicesFixture(props: ServicesFixtureProps) -> impl IntoElement {
     let revoke = fake.clone();
     let refuse = fake.clone();
     let hide_all = fake.clone();
+    let (holding, releasing) = (fake.replies.clone(), fake.replies.clone());
     t3_ui::ui::toast::toast_provider(
         view()
             .w_full()
@@ -543,6 +593,8 @@ fn ServicesFixture(props: ServicesFixtureProps) -> impl IntoElement {
                 revoke.scripts.change(|s| s.can_run = false)
             }))
             .child(control("Refuse writes", move || refuse.refuse.set(true)))
+            .child(control("Hold replies", move || holding.hold()))
+            .child(control("Release replies", move || releasing.release()))
             .child(control("Hide everything", move || {
                 hide_all
                     .visibility
@@ -734,4 +786,79 @@ fn a_short_card_drops_the_environment_row_then_open_in() {
         !short.screen().shows("Open in VS Code"),
         "essential drops open in"
     );
+}
+
+// Rule 7: each action below closes its menu or dialog when pressed; the client answers later.
+#[test]
+fn a_menu_choice_of_editor_answered_after_the_menu_closed_still_settles() {
+    let mut app = services(DESKTOP, Services::Empty, 600.0);
+    app.press("role:button[Hold replies]").expect("hold");
+    app.press("role:button[Choose editor]").expect("menu");
+    app.press("role:menuitem[Zed]").expect("choose Zed");
+    app.wait_for_gone("role:menuitem[Zed]", nsh_testing::WAIT)
+        .expect("menu closed");
+    app.press("role:button[Release replies]").expect("answer");
+    app.wait_for("text:settled:preferred:Zed")
+        .expect("the choice's answer was handled");
+}
+
+#[test]
+fn a_delete_answered_after_its_dialogs_closed_still_settles() {
+    let mut app = services(DESKTOP, Services::WithScript, 600.0);
+    app.press("role:button[Hold replies]").expect("hold");
+    app.press("role:button[Script actions]").expect("menu");
+    app.press("role:button[Edit Test]").expect("edit");
+    app.press("role:button[Delete]").expect("delete");
+    app.wait_for("This action cannot be undone.")
+        .expect("confirmation");
+    app.press("role:button[Delete action]").expect("confirm");
+    app.wait_for_gone("This action cannot be undone.", nsh_testing::WAIT)
+        .expect("dialogs closed");
+    app.press("role:button[Release replies]").expect("answer");
+    app.wait_for("text:settled:deleted:test")
+        .expect("the delete's answer was handled");
+}
+
+#[test]
+fn an_import_refused_after_the_menu_closed_still_reopens_the_editor() {
+    let mut app = services(DESKTOP, Services::Imports, 600.0);
+    app.press("role:button[Refuse writes]").expect("refuse");
+    app.press("role:button[Hold replies]").expect("hold");
+    app.press("role:button[Choose project action]")
+        .expect("actions menu");
+    app.press("role:menuitem[Lint]").expect("import");
+    app.wait_for_gone("role:menuitem[Lint]", nsh_testing::WAIT)
+        .expect("menu closed");
+    app.press("role:button[Release replies]").expect("answer");
+    app.wait_for("text:settled:imported:Lint")
+        .expect("the import's answer was handled");
+    app.wait_for("Add Action")
+        .expect("editor with the failed import");
+}
+
+#[test]
+fn a_reset_answered_after_the_menu_closed_still_settles() {
+    let mut app = services(DESKTOP, Services::Empty, 600.0);
+    app.press("role:button[Hide everything]").expect("hide");
+    app.press("role:button[Hold replies]").expect("hold");
+    app.press("role:button[Choose what to show]").expect("menu");
+    app.press("role:menuitem[Reset to default]").expect("reset");
+    app.wait_for_gone("role:menuitem[Reset to default]", nsh_testing::WAIT)
+        .expect("menu closed");
+    app.press("role:button[Release replies]").expect("answer");
+    app.wait_for("text:settled:reset")
+        .expect("the reset's answer was handled");
+}
+
+#[test]
+fn a_run_from_the_menu_answered_after_it_closed_still_settles() {
+    let mut app = services(DESKTOP, Services::WithScript, 600.0);
+    app.press("role:button[Hold replies]").expect("hold");
+    app.press("role:button[Script actions]").expect("menu");
+    app.press("role:menuitem[Test]").expect("run");
+    app.wait_for_gone("role:menuitem[Test]", nsh_testing::WAIT)
+        .expect("menu closed");
+    app.press("role:button[Release replies]").expect("answer");
+    app.wait_for("text:settled:ran:test")
+        .expect("the run's answer was handled");
 }

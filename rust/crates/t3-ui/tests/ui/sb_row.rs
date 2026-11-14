@@ -277,3 +277,165 @@ fn provider_glyphs_follow_client_config_and_project_icons_use_the_shared_avatar(
         .expect("missing current instance removes the stack");
     }
 }
+
+// ---- Rule 7: the row's rename and menu actions reach a client paired with a fake environment ----
+
+use futures::{FutureExt, StreamExt};
+use t3_client::composition::{ClientRuntime, Spawner};
+use t3_client::testing::environment::{self, FakeEnvironment};
+use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+use t3_ui::screens::sidebar::row::RowThreadActionsRuntime;
+
+const DISPATCH: &str = "orchestration.dispatchCommand";
+
+#[component]
+fn ConnectedRowFixture() -> impl IntoElement {
+    t3_ui::theme::install(&Default::default());
+    let store = t3_client::ClientStore::default();
+    provide_context(Rt::new(
+        store.clone(),
+        Rc::new(t3_ui::runtime::backend::Unavailable("fixture".into())),
+        Choice::Demo,
+    ));
+    let owner = Owner::current();
+    let spawner: Spawner = Rc::new(move |future| {
+        owner.run(|| {
+            spawn(future);
+        });
+    });
+    let server = FakeEnvironment::new("env", spawner.clone());
+    server.set_shell(environment::shell(&[("thread-a", "Port the row")]));
+    let client = ClientRuntime::new(
+        server.platform(),
+        store.clone(),
+        OrchestrationV2CreationSource::Web,
+        spawner.clone(),
+    );
+    provide_context(RowThreadActionsRuntime(Rc::new(client.clone())));
+    let key = ThreadKey {
+        environment: EnvironmentId("env".into()),
+        thread: ThreadId("thread-a".into()),
+    };
+    let pairing = client.pair(server.pairing());
+    spawner(
+        async move {
+            let _ = pairing.await;
+        }
+        .boxed_local(),
+    );
+    let ready = signal(false);
+    {
+        let (client, key) = (client.clone(), key.clone());
+        let mut changes = store.subscribe();
+        spawn(async move {
+            while changes.next().await.is_some() {
+                let session = client
+                    .client(&key.environment)
+                    .and_then(|connected| connected.session())
+                    .is_some();
+                let menu = client.thread_actions().thread_action_menu(&key);
+                ready.set(session && menu.unavailable_reason.is_none());
+            }
+        });
+    }
+    let dispatches = signal(Vec::<serde_json::Value>::new());
+    let nav = Navigator::new(Route::NewThread);
+    view()
+        .w_full()
+        .h_full()
+        .child(
+            nsh_base::button()
+                .test_id("read-server")
+                .on_press(move || dispatches.set(server.calls(DISPATCH)))
+                .child(text("Read server")),
+        )
+        .child(text(move || {
+            format!("Dispatches {}", dispatches.with(Vec::len))
+        }))
+        .child(text(move || {
+            format!(
+                "Last dispatch {}",
+                dispatches.with(|calls| calls.last().map(ToString::to_string).unwrap_or_default())
+            )
+        }))
+        .child(dynamic(move || {
+            let key = key.clone();
+            ready.get().then(|| {
+                untracked(move || {
+                    let mut shell = source("running");
+                    shell.id = ThreadId("thread-a".into());
+                    let row = computed(move || Some(Shared(Rc::new(shell.clone()))));
+                    let item = computed(move || {
+                        Some(SidebarItem {
+                            key: key.clone(),
+                            title: "Port the row".into(),
+                            project: "Project".into(),
+                            activity_at: None,
+                            variant: RowVariant::Card,
+                        })
+                    });
+                    sidebar_thread_row(
+                        item,
+                        row,
+                        computed(|| None),
+                        computed(RowExtras::default),
+                        nav,
+                    )
+                })
+            })
+        }))
+}
+
+fn connected_row() -> Headless {
+    let mut config = EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(DESKTOP.0), px(DESKTOP.1)),
+        ..EngineConfig::new(Root::of::<ConnectedRowFixture>())
+    };
+    config.environment.os = nsh_core::platform::Os::Linux;
+    config.environment.idiom = nsh_core::platform::Idiom::Desktop;
+    let mut app = Headless::start(config).expect("connected row fixture starts");
+    app.wait_for("id:sidebar-row-card")
+        .expect("paired, and the row mounted");
+    app
+}
+
+#[test]
+fn renaming_a_row_sends_the_new_title() {
+    let mut app = connected_row();
+    app.right_click("id:sidebar-row-card")
+        .expect("open the row menu");
+    app.press("role:menuitem[Rename thread]")
+        .expect("start renaming");
+    app.wait_for("label:Thread title").expect("rename input");
+    app.clear("label:Thread title").expect("replace title");
+    app.type_text("label:Thread title", "Renamed row")
+        .expect("edit title");
+    app.press_key("enter").expect("commit the rename");
+    app.wait_for_gone("label:Thread title", nsh_testing::WAIT)
+        .expect("the input closed");
+    app.press("id:read-server").expect("read the server");
+    app.wait_for("Dispatches 1")
+        .expect("the rename reached the server");
+    let last = app
+        .screen()
+        .texts()
+        .into_iter()
+        .find(|text| text.starts_with("Last dispatch"))
+        .map(str::to_owned)
+        .unwrap_or_default();
+    assert!(last.contains("Renamed row"), "{last}");
+}
+
+#[test]
+fn a_row_menu_action_reaches_the_server_after_the_menu_closed() {
+    let mut app = connected_row();
+    app.right_click("id:sidebar-row-card")
+        .expect("open the row menu");
+    app.press("role:menuitem[Mark unread]").expect("mark unread");
+    app.wait_for_gone("role:menuitem[Mark unread]", nsh_testing::WAIT)
+        .expect("menu closed");
+    app.press("id:read-server").expect("read the server");
+    app.wait_for("Dispatches 1")
+        .expect("the action reached the server");
+}

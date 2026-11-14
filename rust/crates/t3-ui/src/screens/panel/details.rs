@@ -25,6 +25,7 @@ pub use project_scripts::ProjectScriptsBackend;
 
 use super::{Action, PanelHost, panel_target};
 use crate::i18n::{Text, Value, t, tr};
+use crate::runtime::tasks::TaskOwner;
 use crate::runtime::{Shared, rt};
 use crate::theme::tw;
 use crate::ui::icon::{Icon, icon_with_class};
@@ -189,6 +190,8 @@ pub fn thread_details_panel(
 ) -> impl IntoElement {
     let runtime = rt();
     let details = use_context::<ThreadDetailsRuntime>();
+    // The items menus close, and "Choose what to show" goes, as their choices apply.
+    let owner = TaskOwner::here();
     debug_assert!(
         details.is_some() || runtime.backend().client().is_none(),
         "ThreadDetailsRuntime is not provided: app::provide_client_services provides it with the client"
@@ -394,7 +397,7 @@ pub fn thread_details_panel(
         .child(items_runtime.clone().map(|runtime| {
             when(
                 move || !show.with(|s| s.any()),
-                move || choose_what_to_show(runtime.clone(), menu_open),
+                move || choose_what_to_show(runtime.clone(), menu_open, owner),
             )
         }));
     let card = thread_details_card(max_height, content);
@@ -407,7 +410,7 @@ pub fn thread_details_panel(
                 ..Default::default()
             },
             || false,
-            menu::menu_popup_with(move || thread_details_items_menu_items(runtime.clone())),
+            menu::menu_popup_with(move || thread_details_items_menu_items(runtime.clone(), owner)),
         )
         .into_element(),
         None => card.into_element(),
@@ -415,7 +418,11 @@ pub fn thread_details_panel(
 }
 
 /// The empty card's "Choose what to show" row.
-fn choose_what_to_show(runtime: ThreadDetailsRuntime, open: Signal<bool>) -> impl IntoElement {
+fn choose_what_to_show(
+    runtime: ThreadDetailsRuntime,
+    open: Signal<bool>,
+    owner: TaskOwner,
+) -> impl IntoElement {
     view().app_class(tw("p-2")).child(menu::menu(
         nsh_base::button()
             .accessibility_label(t("Choose what to show"))
@@ -427,12 +434,15 @@ fn choose_what_to_show(runtime: ThreadDetailsRuntime, open: Signal<bool>) -> imp
             align: Align::Start,
             ..Default::default()
         },
-        menu::menu_popup_with(move || thread_details_items_menu_items(runtime.clone())),
+        menu::menu_popup_with(move || thread_details_items_menu_items(runtime.clone(), owner)),
     ))
 }
 
 /// Port of chat/ThreadDetailsItemsMenu.tsx ThreadDetailsItemsMenuItems.
-pub fn thread_details_items_menu_items(runtime: ThreadDetailsRuntime) -> impl IntoElement {
+pub fn thread_details_items_menu_items(
+    runtime: ThreadDetailsRuntime,
+    owner: TaskOwner,
+) -> impl IntoElement {
     let backend = stored(runtime.backend.clone());
     let visibility = runtime.visibility;
     view()
@@ -456,7 +466,7 @@ pub fn thread_details_items_menu_items(runtime: ThreadDetailsRuntime) -> impl In
                                 text(t(label)),
                                 move |checked| {
                                     let backend = backend.get();
-                                    spawn(async move {
+                                    owner.spawn(async move {
                                         let _ = backend.set_item(id.to_owned(), checked).await;
                                     });
                                 },
@@ -476,7 +486,7 @@ pub fn thread_details_items_menu_items(runtime: ThreadDetailsRuntime) -> impl In
             text(t("Reset to default")),
             move || {
                 let backend = backend.get();
-                spawn(async move {
+                owner.spawn(async move {
                     let _ = backend.reset_items().await;
                 });
             },

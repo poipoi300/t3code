@@ -476,6 +476,7 @@ fn shelf_marker(
     expansion: Signal<ShelfExpansion>,
     store: Stored<Option<crate::runtime::services::shell::SidebarShelvesStore>>,
 ) -> AnyElement {
+    let tasks = crate::runtime::tasks::TaskOwner::here();
     let header = |label: &'static str, count: ShelfCount, anchored: ShelfAnchored| {
         let class_name = items
             .with_untracked(|list| anchored(list))
@@ -496,6 +497,7 @@ fn shelf_marker(
                         store.get(),
                         marker,
                         expanded,
+                        tasks,
                     )
                 },
             ),
@@ -631,7 +633,11 @@ pub fn sidebar() -> impl IntoElement {
     let sections = computed(move || {
         model.with(|model| {
             (
-                model.rows.iter().map(|row| row.source.section).collect::<Vec<_>>(),
+                model
+                    .rows
+                    .iter()
+                    .map(|row| row.source.section)
+                    .collect::<Vec<_>>(),
                 model.rows.iter().position(|row| row.source.active),
             )
         })
@@ -747,9 +753,9 @@ pub fn sidebar() -> impl IntoElement {
         // A recycled cell rebuilds only when its kind changes (row, marker, Show more); a row
         // cell reads its row through the memos above.
         dynamic(move || match kind.get() {
-            Some(SidebarListItem::Marker(marker)) => untracked(|| {
-                shelf_marker(marker, shelf_items, expansion, shelves_store)
-            }),
+            Some(SidebarListItem::Marker(marker)) => {
+                untracked(|| shelf_marker(marker, shelf_items, expansion, shelves_store))
+            }
             Some(_) => untracked(|| {
                 shelves::sidebar_settled_more(
                     Prop::bind(move || expansion.get().settled),

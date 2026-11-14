@@ -51,6 +51,7 @@ pub fn sidebar_width_store<P: Platform + Clone + 'static>(
 /// `chat_thread_sidebar_width` record. Without a client (the demo backend) the width still
 /// resizes and is not stored, as the web's failed `setLocalStorageItem` leaves it.
 pub fn thread_sidebar_rail(width: Signal<f32>, store: Option<SidebarWidthStore>) -> RailResize {
+    let tasks = crate::runtime::tasks::TaskOwner::here();
     RailResize {
         width,
         bounds: Rc::new(|| {
@@ -71,7 +72,7 @@ pub fn thread_sidebar_rail(width: Signal<f32>, store: Option<SidebarWidthStore>)
         on_resize: Some(Rc::new(move |final_width: f32| {
             if let Some(store) = &store {
                 let save = store.0.save(f64::from(final_width));
-                spawn(async move {
+                tasks.spawn(async move {
                     if let Err(error) = save.await {
                         log::error!("Could not persist sidebar width. {error}");
                     }
@@ -151,11 +152,12 @@ pub fn toggle_sidebar_shelf(
     store: Option<SidebarShelvesStore>,
     marker: Marker,
     expanded: bool,
+    tasks: crate::runtime::tasks::TaskOwner,
 ) {
     expansion.update(|current| *current = current.with(marker, expanded));
     if let Some(store) = store {
         let save = (store.save)(marker, expanded);
-        spawn(async move {
+        tasks.spawn(async move {
             if let Err(error) = save.await {
                 log::error!("Could not persist the sidebar shelf. {error}");
             }

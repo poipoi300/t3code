@@ -10,6 +10,7 @@ use t3_client::types::ThreadKey;
 use t3_client::workspace::ProjectKey;
 
 use crate::i18n::{Text, t};
+use crate::runtime::tasks::TaskOwner;
 use crate::screens::composer::attachments::{
     ComposerAttachments, composer_attach_button, composer_attachment_strip,
 };
@@ -171,7 +172,7 @@ pub fn index_draft_landing(target: Target) -> AnyElement {
     let current = signal(Rc::new(NewThreadView::Loading));
     let error = signal(None::<Text>);
     let link_busy = signal(false);
-    let owner = Owner::current();
+    let owner = TaskOwner::here();
     let nav = navigator();
     let navigation = LinkNavigation {
         urls: use_context::<crate::state::url::UrlState>(),
@@ -227,8 +228,8 @@ pub fn index_draft_landing(target: Target) -> AnyElement {
         .child(dynamic(move || {
             let (kind, _) = page.get();
             untracked(move || match kind {
-                1 => no_projects_hero(current, client, error),
-                2 => draft_start_error(client, target, error),
+                1 => no_projects_hero(current, client, error, owner),
+                2 => draft_start_error(client, target, error, owner),
                 3 => view()
                     .flex_1()
                     .child(dynamic(move || {
@@ -286,7 +287,7 @@ fn link_choices(
     target: Stored<Target>,
     error: Signal<Option<Text>>,
     busy: Signal<bool>,
-    owner: Owner,
+    owner: TaskOwner,
     navigation: LinkNavigation,
 ) -> AnyElement {
     let nav = navigator();
@@ -304,10 +305,10 @@ fn link_choices(
                     let Target::Link(search)=target.get() else{return;};
                     busy.set(true);error.set(None);let operation=client.get().link_action(search,action);
                     let origin=origin.clone();
-                    owner.run(move||spawn(async move {
+                    owner.spawn(async move {
                         let result=operation.await;busy.set(false);
                         match result {Ok(Some(destination)) if nav.top()==origin=>open_destination(nav,navigation,destination),Ok(_)=>{},Err(message)=>error.set(Some(message))}
-                    }));
+                    });
                 }));
         }
         view().app_class(tw("flex min-w-0 flex-1 flex-col items-center justify-center text-center gap-6 p-6 md:p-12"))
@@ -322,13 +323,13 @@ fn opened_link(
     client: Stored<Rc<dyn NewThreadClient>>,
     target: Stored<Target>,
     error: Signal<Option<Text>>,
-    owner: Owner,
+    owner: TaskOwner,
 ) -> AnyElement {
     view().app_class(tw("flex min-w-0 flex-1 flex-col items-center justify-center text-center gap-6 p-6 md:p-12"))
         .child(text(t("This link is open")).app_class(tw("font-semibold text-xl")))
         .child(button(ButtonContent::Label(t("Open it again")),ButtonVariant::Outline,ButtonSize::Sm,||false,move||{
             error.set(None);let operation=client.get().retry(target.get());
-            owner.run(move||spawn(async move{if let Err(message)=operation.await {error.set(Some(message));}}));
+            owner.spawn(async move{if let Err(message)=operation.await {error.set(Some(message));}});
         })).into_element()
 }
 
@@ -346,6 +347,7 @@ fn no_projects_hero(
     current: Signal<Rc<NewThreadView>>,
     client: Stored<Rc<dyn NewThreadClient>>,
     error: Signal<Option<Text>>,
+    owner: TaskOwner,
 ) -> AnyElement {
     let nav = navigator();
     view().app_class(tw("flex min-w-0 flex-1 flex-col items-center justify-center text-center gap-6 p-6 md:p-12"))
@@ -362,7 +364,7 @@ fn no_projects_hero(
                         button(ButtonContent::IconLabel { icon: Icon::MessageSquareDashed, label: t("Start without a project") }, ButtonVariant::Outline, ButtonSize::Sm,
                             || false, move || {
                                 let operation = client.get().start_scratch(None);
-                                spawn(async move { if let Err(message) = operation.await { error.set(Some(message)); } });
+                                owner.spawn(async move { if let Err(message) = operation.await { error.set(Some(message)); } });
                             })
                     })
                 })))).into_element()
@@ -373,6 +375,7 @@ fn draft_start_error(
     client: Stored<Rc<dyn NewThreadClient>>,
     target: Stored<Target>,
     error: Signal<Option<Text>>,
+    owner: TaskOwner,
 ) -> AnyElement {
     view()
         .app_class(tw(
@@ -396,7 +399,7 @@ fn draft_start_error(
                     move || {
                         error.set(None);
                         let operation = client.get().retry(target.get());
-                        spawn(async move {
+                        owner.spawn(async move {
                             if let Err(message) = operation.await {
                                 error.set(Some(message));
                             }
@@ -464,7 +467,7 @@ fn draft_chat_view(
         .attachments(&initial.id)
         .map(|session| ComposerAttachments::new(session, disabled));
     let busy = signal(false);
-    let submit_owner = Owner::current();
+    let submit_owner = TaskOwner::here();
     let nav = navigator();
     let origin = nav.top();
     let submit = Rc::new(move |mode| {
@@ -480,16 +483,14 @@ fn draft_chat_view(
         error.set(None);
         let operation = client.get().submit(value.id.clone(), value.revision, mode);
         let origin = origin.clone();
-        submit_owner.run(move || {
-            spawn(async move {
-                let result = operation.await;
-                busy.set(false);
-                match result {
-                    Ok(key) if nav.top() == origin => nav.open(Route::Thread(key)),
-                    Ok(_) => {}
-                    Err(message) => error.set(Some(message)),
-                }
-            })
+        submit_owner.spawn(async move {
+            let result = operation.await;
+            busy.set(false);
+            match result {
+                Ok(key) if nav.top() == origin => nav.open(Route::Thread(key)),
+                Ok(_) => {}
+                Err(message) => error.set(Some(message)),
+            }
         });
     });
     let key_submit = submit.clone();
@@ -604,7 +605,12 @@ fn draft_chat_view(
                                         .child(dynamic(move || {
                                             let _ = headline_mode.get();
                                             untracked(|| {
-                                                draft_hero_headline(current, client, error)
+                                                draft_hero_headline(
+                                                    current,
+                                                    client,
+                                                    error,
+                                                    submit_owner,
+                                                )
                                             })
                                         })),
                                 )
@@ -631,13 +637,17 @@ fn draft_hero_headline(
     current: Signal<Rc<NewThreadView>>,
     client: Stored<Rc<dyn NewThreadClient>>,
     error: Signal<Option<Text>>,
+    owner: TaskOwner,
 ) -> AnyElement {
     let nav = navigator();
     let picker = popover_create_handle();
     let query = signal(String::new());
+    // The rows rebuild with the project list, not with every draft update.
+    let projects = computed(move || draft(current).map(|value| value.projects.clone()));
     let trigger = nsh_base::button().accessibility_label(Some(t("Choose a project").into()))
         .on_press(move || {
-            if draft(current).is_some_and(|value| !value.projects.is_empty()) { query.set(String::new()); picker.set_open(!picker.is_open()); }
+            // The popover toggles itself on this press; toggling here as well closed it again.
+            if draft(current).is_some_and(|value| !value.projects.is_empty()) { query.set(String::new()); }
             else { nav.open(Route::AddProject); }
         }).on_layout(move |bounds: &Bounds<Points>| picker.measure_anchor(*bounds))
         .app_class(tw("pointer-events-auto min-w-0 max-w-full cursor-pointer border-muted-foreground/35 border-b border-dotted text-muted-foreground/60 transition-colors hover:border-muted-foreground/60 hover:text-muted-foreground/80 focus-visible:rounded-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
@@ -656,12 +666,12 @@ fn draft_hero_headline(
             ))
             .child(scroll().child(dynamic(move || {
                 let mut rows = view();
-                let Some(value) = draft(current) else {
+                let Some(projects) = projects.get() else {
                     return rows;
                 };
                 let search = query.get().trim().to_lowercase();
                 let mut matched = false;
-                for choice in &value.projects {
+                for choice in &projects {
                     if !search.is_empty() && !choice.title.to_lowercase().contains(&search) {
                         continue;
                     }
@@ -681,7 +691,7 @@ fn draft_hero_headline(
                                 }
                                 let operation =
                                     client.get().select_project(value.id.clone(), key.clone());
-                                spawn(async move {
+                                owner.spawn(async move {
                                     if let Err(message) = operation.await {
                                         error.set(Some(message));
                                     }
@@ -729,15 +739,19 @@ fn draft_hero_headline(
     } else {
         text(t("Add a project to start")).app_class(tw("w-full text-center font-normal text-2xl text-foreground tracking-tight sm:text-3xl")).into_element()
     };
+    let scratch_draft = computed(move || {
+        draft(current)
+            .filter(|value| value.can_start_scratch && !value.is_scratch)
+            .map(|value| value.id.clone())
+    });
     view().app_class(tw("mx-auto flex w-full max-w-5xl flex-col items-center"))
         .child(heading)
-        .child(dynamic(move || draft(current).filter(|value| value.can_start_scratch && !value.is_scratch).map(|value| {
-            let id = value.id.clone();
+        .child(dynamic(move || scratch_draft.get().map(|id| {
             nsh_base::button().accessibility_label(Some(t("or start without a project").into()))
                 .app_class(tw("pointer-events-auto mt-2 flex h-6 w-full items-center justify-center text-sm"))
                 .on_press(move || {
                     let operation = client.get().start_scratch(Some(id.clone()));
-                    spawn(async move { if let Err(message) = operation.await { error.set(Some(message)); } });
+                    owner.spawn(async move { if let Err(message) = operation.await { error.set(Some(message)); } });
                 }).child(text(t("or start without a project")))
         }))).into_element()
 }

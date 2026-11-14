@@ -15,6 +15,7 @@ use t3_contracts::orchestration_v2::SearchThreadInputSkillsItem;
 use super::blocks::flatten::{Block, BlockDelta, BlockId, BlockKind, SourceRange, StreamBlocks};
 use super::viewport::{TimelineFollow, TimelineNavigation, TimelineViewport};
 use crate::i18n::{t, ts};
+use crate::runtime::tasks::TaskOwner;
 use crate::theme::{cn, tw};
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::Icon;
@@ -381,6 +382,7 @@ pub struct ThreadFind {
     row_index: Stored<BlockRowIndex>,
     input: ElementRef,
     request: Signal<u64>,
+    tasks: TaskOwner,
 }
 
 impl ThreadFind {
@@ -404,6 +406,7 @@ impl ThreadFind {
             row_index: stored(Rc::new(row_index)),
             input: element_ref(),
             request: signal(0),
+            tasks: TaskOwner::here(),
         };
         let open = computed(move || this.state.with(|state| state.open));
         // Find suspends the external viewport's live follow, including end-band re-arming.
@@ -546,7 +549,7 @@ impl ThreadFind {
     fn restart_from_viewport(self) {
         self.request.update(|request| *request += 1);
         let request = self.request.get_untracked();
-        spawn(async move {
+        self.tasks.spawn(async move {
             let position = self.viewport.element.measure_scroll_position().await;
             if self.request.get_untracked() != request
                 || !self.state.with_untracked(|state| state.open)

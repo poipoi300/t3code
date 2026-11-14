@@ -70,14 +70,15 @@ fn snoozed(mut thread: serde_json::Value) -> serde_json::Value {
     thread
 }
 
-/// A task `t1` started (a subagent created through MCP), still running and asking for input.
-fn subagent_asking_for_input() -> serde_json::Value {
+/// A task `t1` started (a subagent created through MCP), still running and asking to run a
+/// command. (A task's plain input question goes to its parent agent, not to the user.)
+fn subagent_asking_for_approval() -> serde_json::Value {
     let mut child = thread_t1("running", None);
     child["id"] = json!("sub-1");
     child["title"] = json!("Run the tests");
     child["creationSource"] = json!("mcp");
     child["lineage"] = json!({"rootThreadId":"t1","parentThreadId":"t1","relationshipToParent":"subagent"});
-    child["pendingRuntimeRequest"] = json!({"id":"q","kind":"user_input","createdAt":NOW});
+    child["pendingRuntimeRequest"] = json!({"id":"q","kind":"command","createdAt":NOW});
     child
 }
 
@@ -440,12 +441,6 @@ fn AppTree(props: TreeProps) -> impl IntoElement {
                 .child(text("Complete the turn")),
         )
         .child(shell_button(
-            "Subagent asks for input",
-            store.clone(),
-            session,
-            vec![thread_t1("running", None), subagent_asking_for_input()],
-        ))
-        .child(shell_button(
             "Snooze the thread",
             store.clone(),
             session,
@@ -700,24 +695,105 @@ fn a_completed_background_turn_raises_a_toast_that_opens_the_thread() {
         .expect("the thread opened");
 }
 
+// The root tree over a client paired with a connectable fake environment: the client's
+// registry lists it, as pairing does in the app (the thread shell views read the registry).
+#[component]
+fn PairedTree() -> impl IntoElement {
+    use futures::FutureExt;
+    use t3_client::testing::environment::FakeEnvironment;
+    let store = ClientStore::default();
+    let owner = Owner::current();
+    let spawner: t3_client::composition::Spawner = Rc::new(move |future| {
+        owner.run(|| {
+            spawn(future);
+        });
+    });
+    let server = FakeEnvironment::new("env", spawner.clone());
+    let snapshot = serde_json::to_value(&shell_items_of(vec![thread_t1("running", None)])[0])
+        .expect("snapshot item");
+    server.set_shell(snapshot["snapshot"].clone());
+    let client = ClientRuntime::new(
+        server.platform(),
+        store.clone(),
+        OrchestrationV2CreationSource::Web,
+        spawner.clone(),
+    );
+    let pairing = client.pair(server.pairing());
+    spawner(
+        async move {
+            pairing.await.expect("paired");
+        }
+        .boxed_local(),
+    );
+    let backend: Rc<dyn Backend> = Rc::new(client.clone());
+    let runtime = Rt::new(store.clone(), backend, Choice::Client);
+    let services = client.clone();
+    let enabling = client.clone();
+    let asking = store.clone();
+    view()
+        .w_full()
+        .h_full()
+        .child(
+            nsh_base::button()
+                .accessibility_label(Some(SharedString::from("Enable in-app notifications")))
+                .on_press(move || {
+                    let mut patch = serde_json::Map::new();
+                    patch.insert("inAppNotificationsEnabled".into(), json!(true));
+                    let write = enabling.settings().update_client(patch);
+                    spawn(async move {
+                        write.await.expect("device settings write");
+                    });
+                })
+                .child(text("Enable in-app notifications")),
+        )
+        .child(
+            nsh_base::button()
+                .accessibility_label(Some(SharedString::from("Subagent asks for approval")))
+                .on_press(move || {
+                    // The environment's next shell snapshot, on the client's live session.
+                    let session = asking
+                        .snapshot()
+                        .environments
+                        .get(&environment())
+                        .expect("paired environment")
+                        .session;
+                    asking.apply_shell(
+                        &environment(),
+                        session,
+                        shell_items_of(vec![
+                            thread_t1("running", None),
+                            subagent_asking_for_approval(),
+                        ]),
+                    );
+                })
+                .child(text("Subagent asks for approval")),
+        )
+        .child(t3_ui::app::app_tree(runtime, Route::Home, move || {
+            t3_ui::app::provide_client_services(&services)
+        }))
+}
+
 /// The web's `pendingSubagentRequestsAtom`: a task's request is the parent's notification; the
 /// task, shown under its parent, has none of its own.
 #[test]
-fn a_subagent_asking_for_input_notifies_its_parent_once() {
-    let mut app = start_app_tree(DESKTOP, None, Route::Home, "running");
+fn a_subagent_asking_for_approval_notifies_its_parent_once() {
+    let mut app = Headless::start(config(DESKTOP, None, Root::of::<PairedTree>()))
+        .expect("paired tree");
+    app.wait_for("Working")
+        .expect("paired: the running thread is shelved");
     app.press("role:button[Enable in-app notifications]")
         .expect("enable");
     app.settle();
-    app.press("role:button[Subagent asks for input]")
+    app.press("role:button[Subagent asks for approval]")
         .expect("the task asks");
-    app.wait_for("Input needed")
+    app.wait_for("Approval needed")
         .expect("the parent's in-app notification");
     app.settle();
     let toasts = app
         .screen()
         .texts()
         .into_iter()
-        .filter(|text| *text == "Input needed")
+        .filter(|text| *text == "Approval needed")
         .count();
     assert_eq!(toasts, 1, "one notification, the parent's");
 }

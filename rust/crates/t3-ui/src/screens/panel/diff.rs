@@ -27,6 +27,7 @@ use t3_contracts::settings::{DiffLayout, TimestampFormat};
 use super::{Action, PanelHost, PanelRegistration, SurfaceContext, SurfaceKind};
 use crate::i18n::{Value, t, tr};
 use crate::runtime::Shared;
+use crate::runtime::tasks::TaskOwner;
 use crate::theme::{cn, tw};
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::{Icon, icon_with_class};
@@ -86,8 +87,8 @@ pub fn diff_panel_registration(runtime: DiffPanelRuntime, host: PanelHost) -> Pa
 
 /// Saved preferences report their own failures through the client's error state; a failed
 /// write leaves the in-memory choice, as the web's `useLocalStorage` does.
-fn run(future: LocalBoxFuture<'static, Result<(), ClientError>>) {
-    spawn(async move {
+fn run(owner: TaskOwner, future: LocalBoxFuture<'static, Result<(), ClientError>>) {
+    owner.spawn(async move {
         if let Err(error) = future.await {
             log::warn!("Diff panel preference was not saved: {error}");
         }
@@ -252,6 +253,10 @@ fn diff_panel_header(
     let read = move |f: &dyn Fn(&DiffPanelSnapshot) -> bool| {
         snapshot.with(|s| s.as_ref().is_some_and(|s| f(s)))
     };
+    // The toolbar's toggles are rebuilt by the snapshots their own changes publish.
+    let tasks = TaskOwner::here();
+    let test_files =
+        computed(move || snapshot.with(|s| s.as_ref().map_or(0, |s| s.test_file_count)));
     let header_commit = computed(move || {
         snapshot.with(|s| s.as_ref().and_then(|s| s.resolved.header_commit.clone()))
     });
@@ -410,8 +415,8 @@ fn diff_panel_header(
                     },
                     || false,
                     move |value| match value.first().map(String::as_str) {
-                        Some("stacked") => run(layout_runtime.0.set_layout(DiffLayout::Stacked)),
-                        Some("split") => run(layout_runtime.0.set_layout(DiffLayout::Split)),
+                        Some("stacked") => run(tasks, layout_runtime.0.set_layout(DiffLayout::Stacked)),
+                        Some("split") => run(tasks, layout_runtime.0.set_layout(DiffLayout::Split)),
                         _ => {}
                     },
                 ))
@@ -456,7 +461,7 @@ fn diff_panel_header(
                     ),
                 ))
                 .child(dynamic(move || {
-                    let count = snapshot.with(|s| s.as_ref().map_or(0, |s| s.test_file_count));
+                    let count = test_files.get();
                     let runtime = tests_runtime.clone();
                     (count > 0).then(|| {
                         with_tooltip(
@@ -479,7 +484,7 @@ fn diff_panel_header(
                                 toggle::Size::Sm,
                                 move || read(&|s| s.hide_test_files),
                                 || false,
-                                move |pressed| run(runtime.0.set_hide_test_files(pressed)),
+                                move |pressed| run(tasks, runtime.0.set_hide_test_files(pressed)),
                             ),
                         )
                     })
@@ -504,7 +509,7 @@ fn diff_panel_header(
                                 toggle::Size::Sm,
                                 move || read(&|s| s.file_tree_open),
                                 || false,
-                                move |pressed| run(runtime.0.set_file_tree_open(pressed)),
+                                move |pressed| run(tasks, runtime.0.set_file_tree_open(pressed)),
                             ),
                         )
                     })
@@ -555,11 +560,12 @@ fn diff_scope_menu(
         })
     };
     let open = signal(false);
+    let tasks = TaskOwner::here();
     let select = {
         let runtime = runtime.clone();
         let key = key.clone();
         Rc::new(move |value: String| {
-            run(runtime.0.select_scope(&key, &value));
+            run(tasks, runtime.0.select_scope(&key, &value));
             open.set(false);
         })
     };

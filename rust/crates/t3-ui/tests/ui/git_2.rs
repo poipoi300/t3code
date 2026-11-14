@@ -67,6 +67,8 @@ struct FakeBranches {
     senders: Rc<RefCell<Vec<mpsc::UnboundedSender<Rc<BranchSelectorState>>>>>,
     recorded: Signal<String>,
     refuse: Signal<bool>,
+    /// Answers held back until released, as a server replying after the picker closed.
+    held: Rc<RefCell<Option<Vec<futures::channel::oneshot::Sender<()>>>>>,
 }
 
 impl FakeBranches {
@@ -82,7 +84,15 @@ impl FakeBranches {
     fn answer(&self, call: String) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         self.recorded.set(call);
         let refused = self.refuse.get_untracked();
+        let held = self.held.borrow_mut().as_mut().map(|held| {
+            let (sender, answered) = futures::channel::oneshot::channel();
+            held.push(sender);
+            answered
+        });
         async move {
+            if let Some(answered) = held {
+                let _ = answered.await;
+            }
             if refused {
                 Err(ClientError::PermissionDenied {
                     method: "vcs.switchRef".into(),
@@ -143,7 +153,9 @@ fn BranchFixture() -> impl IntoElement {
         senders: Rc::default(),
         recorded: signal("no call".into()),
         refuse: signal(false),
+        held: Rc::default(),
     };
+    let (holding, releasing) = (fake.held.clone(), fake.held.clone());
     let not_repo = fake.clone();
     let scratch = fake.clone();
     let creatable = fake.clone();
@@ -191,6 +203,14 @@ fn BranchFixture() -> impl IntoElement {
                 })
             }))
             .child(control("Refuse", move || refuse.refuse.set(true)))
+            .child(control("Hold replies", move || {
+                *holding.borrow_mut() = Some(Vec::new());
+            }))
+            .child(control("Release replies", move || {
+                for sender in releasing.borrow_mut().take().unwrap_or_default() {
+                    let _ = sender.send(());
+                }
+            }))
             .child(control("Checked out elsewhere", move || {
                 renamed.change(|s| s.branch = Some("feature".into()))
             }))
@@ -311,4 +331,21 @@ fn paging_status_and_non_repositories_follow_the_web() {
         !scratch.screen().shows("Branch: main"),
         "the scratch folder never offers git"
     );
+}
+
+// Rule 7: choosing a ref closes the picker; the client's refusal arrives after that.
+#[test]
+fn a_ref_switch_refused_after_the_picker_closed_still_reports_the_toast() {
+    let mut app = start(DESKTOP);
+    app.press("role:button[Refuse]").expect("refuse");
+    app.press("role:button[Hold replies]").expect("hold");
+    app.press("role:combobox[Branch: main]").expect("open");
+    app.press("role:option[feature]").expect("select");
+    app.wait_for("text:selected:feature")
+        .expect("client switch");
+    app.wait_for_gone("role:option[feature]", nsh_testing::WAIT)
+        .expect("picker closed");
+    app.press("role:button[Release replies]").expect("answer");
+    app.wait_for("This connection cannot change the thread's branch.")
+        .expect("the refusal reached the toast");
 }

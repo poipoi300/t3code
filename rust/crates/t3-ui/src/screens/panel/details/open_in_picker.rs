@@ -9,6 +9,7 @@ use t3_client::workspace::git_panel::editors::{EditorPickerSnapshot, RemoteOpenS
 use t3_contracts::editor::EditorId;
 
 use crate::i18n::{Value, t, tr};
+use crate::runtime::tasks::TaskOwner;
 use crate::screens::panel::git_actions::thread_details_control;
 use crate::theme::tw;
 use crate::ui::icon::{Icon, icon_with_class};
@@ -82,6 +83,8 @@ pub(super) fn open_in_picker(
     snapshot: Signal<Option<Rc<EditorPickerSnapshot>>>,
 ) -> impl IntoElement {
     let menu_open = signal(false);
+    // Choosing an editor closes the menu that made the choice.
+    let owner = TaskOwner::here();
     let current = move || snapshot.get().unwrap_or_else(empty_snapshot);
     let label = computed(move || primary_label(&current()));
     // Retained details content closes its menu when the host can no longer operate the editor.
@@ -130,7 +133,7 @@ pub(super) fn open_in_picker(
                             return;
                         };
                         let backend = backend.get();
-                        spawn(async move {
+                        owner.spawn(async move {
                             if let Ok(true) = backend.open_editor(editor).await {
                                 announce_for_accessibility(tr("Opened in {editor}", &[("editor", Value::Text(name))]));
                             }
@@ -162,7 +165,7 @@ pub(super) fn open_in_picker(
                         align: Align::End,
                         ..Default::default()
                     },
-                    menu::menu_popup_with(move || editor_items(backend, current())),
+                    menu::menu_popup_with(move || editor_items(backend, owner, current())),
                 )),
         )
 }
@@ -185,6 +188,7 @@ fn empty_snapshot() -> Rc<EditorPickerSnapshot> {
 /// `editorItems` with the toolbar presentation: choosing an item sets the preferred editor.
 fn editor_items(
     backend: Stored<Rc<dyn EditorPickerBackend>>,
+    owner: TaskOwner,
     snapshot: Rc<EditorPickerSnapshot>,
 ) -> AnyElement {
     if let Some(reason) = unavailable_reason(&snapshot) {
@@ -223,7 +227,7 @@ fn editor_items(
                     .child(shortcut.map(menu::menu_shortcut)),
                 move || {
                     let backend = backend.get();
-                    spawn(async move {
+                    owner.spawn(async move {
                         let _ = backend.select_editor(editor).await;
                     });
                 },
