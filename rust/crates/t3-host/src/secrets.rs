@@ -121,40 +121,68 @@ impl SecretCheck {
     pub fn new(backend: Arc<dyn SecretBackend>) -> Self {
         Self { backend }
     }
+    async fn provider_label(&self, reference: &SecretReference) -> String {
+        self.backend
+            .label(reference)
+            .await
+            .ok()
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or_else(|| reference.provider.0.clone())
+    }
     pub async fn check(&self, reference: &SecretReference) -> Result<SecretSourceCheckResult> {
         let values = self
             .backend
             .read(std::slice::from_ref(reference), true)
-            .await?;
+            .await
+            .unwrap_or_default();
         let Some(value) = values
             .first()
             .and_then(Option::as_ref)
             .filter(|v| !v.expose().trim().is_empty())
         else {
-            let label = self.backend.label(reference).await?;
+            let label = self.provider_label(reference).await;
             return Ok(SecretSourceCheckResult::Failed {
                 detail: format!(
                     "Could not read this secret from \"{label}\". Check the provider's settings and that its store is unlocked."
                 ),
             });
         };
-        self.backend
+        if self
+            .backend
             .apply_secret_and_refresh(reference, value)
-            .await?;
+            .await
+            .is_err()
+        {
+            let label = self.provider_label(reference).await;
+            return Ok(SecretSourceCheckResult::Failed {
+                detail: format!(
+                    "Could not refresh providers after reading this secret from \"{label}\". Try again."
+                ),
+            });
+        }
         Ok(SecretSourceCheckResult::Resolved)
     }
     pub async fn require_settings_secret(&self, value: &SettingsSecretValue) -> Result<Secret> {
         match value {
             SettingsSecretValue::Literal(value) => Ok(Secret::new(value)),
-            SettingsSecretValue::Reference(reference) => self
-                .backend
-                .read(std::slice::from_ref(reference), false)
-                .await?
-                .into_iter()
-                .next()
-                .flatten()
-                .filter(|v| !v.expose().trim().is_empty())
-                .ok_or(Error::Refused("settings secret could not be resolved")),
+            SettingsSecretValue::Reference(reference) => {
+                let resolved = self
+                    .backend
+                    .read(std::slice::from_ref(reference), false)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .next()
+                    .flatten()
+                    .filter(|v| !v.expose().trim().is_empty());
+                if let Some(value) = resolved {
+                    return Ok(value);
+                }
+                Err(Error::SettingsSecretUnresolved(t3_contracts::settings_secret_value::SettingsSecretUnresolvedError{
+                    _tag:t3_contracts::settings_secret_value::SettingsSecretUnresolvedErrorTag::SettingsSecretUnresolvedError,
+                    provider:self.provider_label(reference).await,
+                }))
+            }
         }
     }
     pub async fn resolve_settings_secrets(
@@ -168,7 +196,12 @@ impl SecretCheck {
                 _ => None,
             })
             .collect();
-        let mut resolved = self.backend.read(&references, false).await?.into_iter();
+        let mut resolved = self
+            .backend
+            .read(&references, false)
+            .await
+            .unwrap_or_default()
+            .into_iter();
         Ok(values
             .iter()
             .map(|v| match v {

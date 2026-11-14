@@ -9,7 +9,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     task::{Context, Poll},
 };
 pub use t3_cloud::Secret as GuestToken;
@@ -119,12 +119,12 @@ struct Session {
 struct Reply {
     key: String,
     text: String,
-    sources: Option<Vec<String>>,
+    sources: OnceLock<Vec<String>>,
 }
 struct Sent {
     share: GuestShareId,
     open_streams: usize,
-    replies: Vec<Reply>,
+    replies: Vec<Arc<Reply>>,
 }
 type SentReplies = Arc<Mutex<VecDeque<Sent>>>;
 pub struct GuestShareContent {
@@ -371,14 +371,18 @@ impl GuestShareContent {
                 sharing,
                 session,
                 tokio::time::interval_at(
-                    tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+                    tokio::time::Instant::now(),
                     std::time::Duration::from_secs(30),
                 ),
             ),
             |(mut output, sharing, session, mut interval)| async move {
                 use futures_util::StreamExt;
                 loop {
-                    tokio::select! {frame=output.next()=>{let frame=frame?.ok()?;if sharing.check(&session).await.is_err(){return None;}return Some((Ok(frame),(output,sharing,session,interval)));},_=interval.tick()=>{if sharing.check(&session).await.is_err(){return None;}}}
+                    tokio::select! {
+                        biased;
+                        _=interval.tick()=>{if sharing.check(&session).await.is_err(){return None;}},
+                        frame=output.next()=>{return Some((Ok(frame?.ok()?),(output,sharing,session,interval)));}
+                    }
                 }
             },
         )))
@@ -398,24 +402,9 @@ impl GuestShareContent {
         let context = self.authorize(session).await?;
         let mime = guest_host_image_type(path).ok_or_else(unavailable)?;
         let named = path.to_str().ok_or_else(unavailable)?;
-        let visible = {
-            let mut records = self
-                .sent
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            records
-                .iter_mut()
-                .find(|r| r.share == context.share)
-                .is_some_and(|record| {
-                    record.replies.iter_mut().any(|reply| {
-                        reply
-                            .sources
-                            .get_or_insert_with(|| self.content.host_image_paths(&reply.text))
-                            .iter()
-                            .any(|source| source == named)
-                    })
-                })
-        };
+        let visible = visible_image(&self.sent, &context.share, named, |text| {
+            self.content.host_image_paths(text)
+        });
         if !visible {
             return Err(unavailable());
         }
@@ -431,6 +420,40 @@ impl GuestShareContent {
         }
         Ok((path.to_owned(), mime.into()))
     }
+}
+fn visible_image(
+    sent: &SentReplies,
+    share: &GuestShareId,
+    named: &str,
+    parse: impl Fn(&str) -> Vec<String>,
+) -> bool {
+    let replies = sent
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|r| r.share == *share)
+        .map(|r| r.replies.clone())
+        .unwrap_or_default();
+    for reply in replies {
+        if reply
+            .sources
+            .get_or_init(|| parse(&reply.text))
+            .iter()
+            .any(|source| source == named)
+        {
+            let records = sent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if records
+                .iter()
+                .find(|r| r.share == *share)
+                .is_some_and(|r| r.replies.iter().any(|current| Arc::ptr_eq(current, &reply)))
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 struct UploadRollback<'a> {
     store: &'a dyn GuestUploadStore,
@@ -498,17 +521,21 @@ fn remember(sent: &SentReplies, share: &GuestShareId, item: &OrchestrationV2Turn
         };
         let key = format!("{}\0{}", thread.0, id.0);
         let text = &item.text;
+        let replacement =
+            (text.contains("![") || text.to_ascii_lowercase().contains("<img")).then(|| {
+                Arc::new(Reply {
+                    key: key.clone(),
+                    text: text.clone(),
+                    sources: OnceLock::new(),
+                })
+            });
         let mut records = sent
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if text.contains("![") || text.to_ascii_lowercase().contains("<img") {
+        if let Some(reply) = replacement {
             let record = sent_record(&mut records, share);
             record.replies.retain(|r| r.key != key);
-            record.replies.push(Reply {
-                key,
-                text: text.clone(),
-                sources: None,
-            });
+            record.replies.push(reply);
         } else if let Some(record) = records.iter_mut().find(|r| &r.share == share) {
             record.replies.retain(|r| r.key != key);
         }
@@ -613,4 +640,116 @@ pub fn guest_share_view(
         messages: share.messages.clone(),
         model,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn markdown_parsing_does_not_hold_the_shared_reply_mutex() {
+        let share = GuestShareId("share".into());
+        let sent = Arc::new(Mutex::new(VecDeque::from([Sent {
+            share: share.clone(),
+            open_streams: 0,
+            replies: vec![Arc::new(Reply {
+                key: "item".into(),
+                text: "![x](/host.png)".into(),
+                sources: OnceLock::new(),
+            })],
+        }])));
+        assert!(visible_image(&sent, &share, "/host.png", |_| {
+            assert!(
+                sent.try_lock().is_ok(),
+                "parsing must not block unrelated shares"
+            );
+            vec!["/host.png".into()]
+        }));
+        let edited = Arc::new(Mutex::new(VecDeque::from([Sent {
+            share: share.clone(),
+            open_streams: 0,
+            replies: vec![Arc::new(Reply {
+                key: "item".into(),
+                text: "![x](/host.png)".into(),
+                sources: OnceLock::new(),
+            })],
+        }])));
+        assert!(
+            !visible_image(&edited, &share, "/host.png", |_| {
+                edited
+                    .try_lock()
+                    .expect("parser must run outside the cache lock")[0]
+                    .replies
+                    .clear();
+                vec!["/host.png".into()]
+            }),
+            "a reply edited during parsing no longer authorizes its old image"
+        );
+    }
+    #[test]
+    fn completed_streams_release_cache_pins_and_closed_shares_are_evicted() {
+        use futures_util::{FutureExt, StreamExt};
+        let sent = Arc::new(Mutex::new(VecDeque::new()));
+        let active_id = GuestShareId("active".into());
+        let ended_id = GuestShareId("ended".into());
+        let mut active = RecordedStream {
+            inner: Box::pin(futures_util::stream::pending()),
+            share: active_id.clone(),
+            sent: sent.clone(),
+            started: false,
+            finished: false,
+        };
+        assert!(active.next().now_or_never().is_none());
+        let mut ended = RecordedStream {
+            inner: Box::pin(futures_util::stream::iter([GuestStreamEvent::Ended])),
+            share: ended_id.clone(),
+            sent: sent.clone(),
+            started: false,
+            finished: false,
+        };
+        assert!(matches!(
+            ended.next().now_or_never(),
+            Some(Some(GuestStreamEvent::Ended))
+        ));
+        assert_eq!(
+            sent.lock()
+                .unwrap()
+                .iter()
+                .find(|r| r.share == ended_id)
+                .unwrap()
+                .open_streams,
+            0
+        );
+        for n in 0..65 {
+            sent_record(
+                &mut sent.lock().unwrap(),
+                &GuestShareId(format!("share-{n}")),
+            );
+        }
+        {
+            let records = sent.lock().unwrap();
+            assert_eq!(records.len(), 64);
+            assert!(records.iter().any(|r| r.share == active_id));
+            assert!(!records.iter().any(|r| r.share == ended_id));
+        }
+        drop(ended);
+        assert_eq!(
+            sent.lock()
+                .unwrap()
+                .iter()
+                .find(|r| r.share == active_id)
+                .unwrap()
+                .open_streams,
+            1
+        );
+        drop(active);
+        assert_eq!(
+            sent.lock()
+                .unwrap()
+                .iter()
+                .find(|r| r.share == active_id)
+                .unwrap()
+                .open_streams,
+            0
+        );
+    }
 }

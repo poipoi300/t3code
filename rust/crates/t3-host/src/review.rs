@@ -23,9 +23,9 @@ impl ReviewService {
     async fn assert_workspace(&self, cwd: &str) -> Result<t3_git::Git> {
         let canonical = |path: &Path| match dunce::canonicalize(path) {
             Ok(path) => Ok(path),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                std::path::absolute(path).map_err(|_| Error::Io)
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::path::absolute(path)
+                .map(|path| normalize_missing_path(&path))
+                .map_err(|_| Error::Io),
             Err(_) => Err(Error::Io),
         };
         let candidate = canonical(Path::new(cwd))?;
@@ -102,5 +102,34 @@ impl ReviewService {
         git.review_diff_file_contents(input)
             .await
             .map_err(|_| Error::Service)
+    }
+}
+fn normalize_missing_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match normalized.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    normalized.pop();
+                }
+                _ if !normalized.has_root() => normalized.push(component.as_os_str()),
+                _ => {}
+            },
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn missing_path_fallback_removes_parent_components_before_authorization() {
+        assert_eq!(
+            normalize_missing_path(Path::new("/allowed/missing/../../outside")),
+            Path::new("/outside")
+        );
     }
 }

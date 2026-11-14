@@ -6,12 +6,47 @@ use t3_contracts::{
     settings::ServerSettings,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "_tag")]
+pub struct ManagedPolicyRefusedError {
+    pub organization: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+impl std::fmt::Display for ManagedPolicyRefusedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}'s policy does not allow {}",
+            self.organization, self.action
+        )?;
+        if let Some(detail) = &self.detail {
+            write!(f, ", {detail}")?;
+        }
+        f.write_str(".")
+    }
+}
+impl std::error::Error for ManagedPolicyRefusedError {}
+
 pub struct ManagedPolicy {
     pub document: Option<ManagedPolicyDocument>,
     pub providers: t3_provider::policy::ManagedProviders,
     settings: Vec<(Vec<String>, Value, bool)>,
 }
 impl ManagedPolicy {
+    fn refuse(&self, action: &str, detail: Option<String>) -> Error {
+        ManagedPolicyRefusedError {
+            organization: self
+                .document
+                .as_ref()
+                .map_or("Your organization", |d| d.organization.0.as_str())
+                .into(),
+            action: action.into(),
+            detail,
+        }
+        .into()
+    }
     pub fn load(path: &Path) -> Result<Self> {
         let policy = t3_config::policy::ManagedPolicy::load_file(path)
             .map_err(|_| Error::Refused("managed policy could not be read or decoded"))?;
@@ -166,16 +201,37 @@ impl ManagedPolicy {
         host: Option<&str>,
         tailscale_serve: bool,
     ) -> Result<String> {
+        let cannot_listen = || {
+            self.refuse(
+                "remote clients",
+                Some(format!(
+                    "so the server cannot listen on {}",
+                    if host == Some("") {
+                        "every interface"
+                    } else {
+                        host.unwrap_or("this host")
+                    }
+                )),
+            )
+        };
         if !self.allows_auth_policy(&auth) {
-            return Err(Error::Refused(
-                "managed policy forbids this authentication mode",
-            ));
+            return Err(match auth {
+                ServerAuthPolicy::RemoteReachable => cannot_listen(),
+                ServerAuthPolicy::DesktopManagedLocal => self.refuse("the desktop app", None),
+                ServerAuthPolicy::LoopbackBrowser => self.refuse("browsers on this machine", None),
+                ServerAuthPolicy::UnsafeNoAuth => {
+                    self.refuse("running without authentication", None)
+                }
+            });
         }
         if self.allows_remote_clients() {
             return Ok(host.unwrap_or("127.0.0.1").into());
         }
         if tailscale_serve {
-            return Err(Error::Refused("managed policy forbids Tailscale Serve"));
+            return Err(self.refuse(
+                "remote clients",
+                Some("so Tailscale Serve cannot be turned on".into()),
+            ));
         }
         let host = host.unwrap_or("127.0.0.1");
         if host.eq_ignore_ascii_case("localhost") {
@@ -185,9 +241,9 @@ impl ManagedPolicy {
             .trim_start_matches('[')
             .trim_end_matches(']')
             .parse::<IpAddr>()
-            .map_err(|_| Error::Refused("managed policy requires a loopback literal"))?;
+            .map_err(|_| cannot_listen())?;
         if !ip.is_loopback() {
-            return Err(Error::Refused("managed policy forbids this bind address"));
+            return Err(cannot_listen());
         }
         Ok(ip.to_string())
     }
@@ -216,11 +272,21 @@ impl ManagedPolicy {
             .and_then(|l| l.updates.as_ref())
         {
             if updates.mode == ManagedUpdatesMode::Off {
-                return Err(Error::Refused("managed policy disables updates"));
+                return Err(Error::ManagedUpdateRefused(format!(
+                    "{} manages T3 Code updates.",
+                    self.document
+                        .as_ref()
+                        .map_or("Your organization", |d| d.organization.0.as_str())
+                )));
             }
             if updates.allow_nightly == Some(false) && target_channel.is_some_and(|c| c != "stable")
             {
-                return Err(Error::Refused("managed policy disables nightly updates"));
+                return Err(Error::ManagedUpdateRefused(format!(
+                    "{} manages T3 Code updates. Only stable releases can be installed.",
+                    self.document
+                        .as_ref()
+                        .map_or("Your organization", |d| d.organization.0.as_str())
+                )));
             }
         }
         Ok(())

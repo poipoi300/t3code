@@ -104,6 +104,7 @@ pub fn read_published_themes(directory: &Path) -> Vec<EnvironmentTheme> {
             accent: file.accent,
             colors: file.colors,
             variants: file.variants,
+            css: file.css,
         });
     }
     result

@@ -260,8 +260,7 @@ impl SecretRequests {
             }
             return Ok(file);
         }
-        let mut temp = tempfile::NamedTempFile::new_in(&directory)
-            .map_err(|_| RequestError(Reason::StoreFailed))?;
+        let mut temp = secret_temp(&directory, suffix)?;
         private_permissions(temp.path(), false)?;
         temp.write_all(value.expose().as_bytes())
             .map_err(|_| RequestError(Reason::StoreFailed))?;
@@ -312,7 +311,9 @@ impl SecretRequests {
             Err(_) => return Err(RequestError(Reason::ReadFailed)),
         };
         for entry in entries {
-            let entry = entry.map_err(|_| RequestError(Reason::ReadFailed))?;
+            let Ok(entry) = entry else {
+                continue;
+            };
             let name = entry.file_name().to_string_lossy().into_owned();
             let Some(suffix) = name
                 .strip_prefix("secret-request-")
@@ -327,23 +328,24 @@ impl SecretRequests {
                 .ok()
                 .and_then(|b| serde_json::from_slice::<StoredSecret>(&b).ok());
             if stored.is_none_or(|s| self.clock.now_ms().saturating_sub(s.saved_at) > TTL_MS) {
-                self.store
-                    .remove(name.trim_end_matches(".bin"))
-                    .map_err(|_| RequestError(Reason::ConsumeFailed))?;
-                removed += 1;
+                if self.store.remove(name.trim_end_matches(".bin")).is_ok() {
+                    removed += 1;
+                }
             }
         }
         let files = self.directory.join("files");
         if let Ok(entries) = fs::read_dir(&files) {
             for entry in entries {
-                let entry = entry.map_err(|_| RequestError(Reason::ReadFailed))?;
+                let Ok(entry) = entry else {
+                    continue;
+                };
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if Self::name(&format!("secret-ref:{}", name.trim_end_matches(".partial"))).is_err()
-                {
+                if !secret_file_name(&name) {
                     continue;
                 }
-                let metadata = fs::symlink_metadata(entry.path())
-                    .map_err(|_| RequestError(Reason::ReadFailed))?;
+                let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+                    continue;
+                };
                 if !metadata.is_file() {
                     continue;
                 }
@@ -355,13 +357,51 @@ impl SecretRequests {
                         i128::from(self.clock.now_ms()) - d.as_millis() as i128 > i128::from(TTL_MS)
                     });
                 if expired {
-                    fs::remove_file(entry.path())
-                        .map_err(|_| RequestError(Reason::ConsumeFailed))?;
-                    removed += 1;
+                    if fs::remove_file(entry.path()).is_ok() {
+                        removed += 1;
+                    }
                 }
             }
         }
         Ok(removed)
+    }
+}
+fn secret_temp(directory: &Path, suffix: &str) -> Result<tempfile::NamedTempFile> {
+    match fs::remove_file(directory.join(format!("{suffix}.partial"))) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(RequestError(Reason::StoreFailed)),
+    }
+    tempfile::Builder::new()
+        .prefix(suffix)
+        .suffix(".partial")
+        .rand_bytes(0)
+        .tempfile_in(directory)
+        .map_err(|_| RequestError(Reason::StoreFailed))
+}
+fn secret_file_name(name: &str) -> bool {
+    let legacy = name.strip_prefix(".tmp").is_some_and(|suffix| {
+        suffix.len() == 6 && suffix.bytes().all(|b| b.is_ascii_alphanumeric())
+    });
+    legacy
+        || SecretRequests::name(&format!(
+            "secret-ref:{}",
+            name.strip_suffix(".partial").unwrap_or(name)
+        ))
+        .is_ok()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn plaintext_temporary_file_name_is_recognized_by_the_expiry_sweep() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut temp = secret_temp(directory.path(), "0123456789abcdef0123456789abcdef").unwrap();
+        temp.write_all(b"sensitive plaintext").unwrap();
+        assert!(
+            secret_file_name(temp.path().file_name().unwrap().to_str().unwrap()),
+            "a crash must leave a sweepable plaintext file"
+        );
     }
 }
 fn private_permissions(path: &Path, directory: bool) -> Result<()> {

@@ -96,7 +96,9 @@ service-definition renderers and state/environment helpers.
 - `CleanupHost` must supply current settings/projections including deleted and
   archived owners, live providers, starting/running terminals, pending deletion
   effects, project roots, managed roots and the SAME workspace lease used for
-  provider startup/checkpoint restore. Cleanup never deletes projection rows:
+  provider startup/checkpoint restore. Its `storage_cleanup_settings` method
+  must read only settings, without loading projections, before expired file
+  deletion. Directory scanning/deletion runs on the blocking pool. Cleanup never deletes projection rows:
   the TS source retains branch/worktree paths after removing a checkout.
   Call `request_automatic_sweep` on source-equivalent activity/settings events.
 - `SecretRefresh` must rebuild provider state from the exact freshly resolved
@@ -106,7 +108,9 @@ service-definition renderers and state/environment helpers.
 - `GuestThreads::stream` remains the existing cloud/orchestration seam. It MUST
   produce the guest view, bound snapshots to 600 rows / 20 user turns, subscribe
   without a snapshot/live gap, coalesce live events, and terminate on share
-  replacement/closure. Host adds periodic and per-event authorization checks.
+  replacement/closure. Command output checks access when opened and every
+  30 seconds, independently of frame rate. Guest image parsing runs outside the
+  shared reply-cache mutex; an edited reply is rechecked before authorizing media.
   `GuestContent` supplies existing wire/detail projectors, timeline/fork queries,
   HTML render extraction and the shared Markdown parser/host path decoder.
   `GuestUploadStore` reuses the attachment owner's validated IDs/paths, bounds
@@ -150,10 +154,14 @@ service-definition renderers and state/environment helpers.
    returns unit; unexpanded compact IDs are refused. New guest service tests use
    real signed sessions and private disk key storage. Snapshot/projection/parser
    semantics still depend on the adapters described above.
-4. Secret file publication uses random no-clobber temporary files rather than
-   deterministic .partial names. Unix 0700/0600 protection matches the source;
+4. Secret file publication uses ref-named `.partial` staging with no-clobber
+   final publication. The expiry sweep also recognizes legacy `.tmp` leftovers
+   in its dedicated plaintext-files directory. Failed per-file removals do not
+   stop remaining expiry work; TS already continues ref-removal failures, but
+   its plaintext-file loop stops on a removal failure. This is deliberate hardening. Unix 0700/0600 protection matches the source;
    Windows uses the source's inherited ACL behavior. Errors carry static reason
-   codes, never OS/provider causes or supplied secret values. Diagnostics omit
+   codes or tagged managed-policy/settings-secret data, never OS/provider causes
+   or supplied secret values. Diagnostics omit
    source logging/telemetry spans. Settings/ref wire types come from contracts;
    persisted JSON uses contracts::stored serializers.
 5. Triage stale staging removal fails closed if capability-safe removal fails;
@@ -168,8 +176,9 @@ service-definition renderers and state/environment helpers.
 7. Service launchers additionally reject unsupported Windows argument quoting
    and control characters. Dotenv compatibility is covered for source-tested
    quoting/multiline/protected variables; it is a native parser, not Node's
-   parseEnv. ServiceState/ServiceUpdate are local persisted launcher types to
-   consider moving to t3-contracts; other local types are host adapters, not
+   parseEnv. ServiceState/ServiceUpdate are local persisted launcher types and
+   ManagedPolicyRefusedError is a local tagged service error to consider moving
+   to t3-contracts; other local types are host adapters, not
    replacement wire contracts.
 8. Rust strings cannot represent lone UTF-16 surrogates; date parsing has Chrono's
    range. Existing sibling behavior is not re-ported or certified here. POSIX
@@ -201,27 +210,45 @@ transitions; no sleep polling is used. Test files correspond to source behavior:
 | environmentTheme.test.ts | archive_theme.rs |
 | attachmentStore.test.ts, imageMime.test.ts | existing t3-workspace owner |
 
-Final command results are recorded below after verification. This is not a claim
-that every TypeScript test or native integration has been ported.
+## Independent review follow-up
 
-Verification on Windows (2026-11-13), target
-`D:\t3code-rust-target\server-j`, workspace Cargo jobs unchanged:
+Reviewed against the TypeScript source before each behavior fix. Regressions were
+observed failing before their fixes. Details, red/green evidence and source line
+references are in the external review-fix report at
+`D:\t3code-rust-target\server-j\t3-host-review-fixes.md`.
 
-- `cargo fmt -p t3-host`: passed.
-- `cargo test -p t3-host`: **52 passed**, zero failed/ignored; archive/theme 6,
-  background 4, desktop update 5, guest 5, keep-awake 2, policy 8,
-  review/worktrees 2, secrets 5, launcher/triage 6, cleanup 9.
-- Exact `cargo clippy -p t3-host --all-targets -- -D warnings`: blocked by 57
-  existing large-error/large-enum diagnostics in `t3-codex-app-server`, outside
-  this crate's edit ownership. Log:
-  `D:\t3code-rust-target\server-j\t3-host-clippy.log`.
-- `cargo clippy -p t3-host --all-targets --no-deps -- -D warnings` passed on all
-  current implementation code before the final policy route regression test
-  was added. The subsequent attempt including that test was blocked by new
-  sibling compile failures in `t3-provider/src/cursor_auth.rs`: E0507 moving
-  `api_key_expires_at_ms`, and E0063 missing `accepts_callback`.
+| Finding | Disposition and regression |
+| --- | --- |
+| 1 Output access per frame | Fixed: 100 frames cause no extra access reads; revocation at 30 seconds |
+| 2 Full snapshot per expired file / blocking walk | Fixed: one projection read, settings-only checks, blocking-pool scan/deletion |
+| 3 Windows data-read open for measurement | Fixed: reuse metadata-only query; real locked file and hardlinks |
+| 4 Preview remote calls and lease | Fixed: remote eligibility conservatively kept; refs, PR calls and lease unchanged |
+| 5 Policy organisation/tag shape | Fixed reachability tag/action/detail and update organisation messages; rejected tagged-update claim because TS returns strings |
+| 6 Unswept plaintext temporary files | Fixed ref.partial staging and legacy tmp recognition; production-name and orphan expiry tests |
+| 7 One failed expiry deletion aborts sweep | Fixed both loops; bad ref and Windows-locked file tests; TS file-loop distinction noted above |
+| 8 Windows path case fallback | Fixed case keys plus original/canonical spelling checks; missing terminal/provider/project cwd tests |
+| 9 Orphan full clone skipped | Fixed second-level reporting while first-level checkout remains excluded |
+| 10 Worktree report path order | Fixed projection insertion order, with live groups before deleted-only groups |
+| 11 Linked cleanup root counted failed | Fixed kept outcome; outside target bytes remain untouched |
+| 12 Settings-secret error shape/check failure | Fixed contract tag/provider label and failed-result behavior for backend errors |
+| 13 Missing-path parent components | Fixed lexical normalisation before authorization; platform-neutral regression; native Unix not run |
+| 14 Markdown under shared mutex | Fixed immutable reply cache with per-reply parse cache and post-parse edit check; lock/race and cache lifecycle tests |
 
-The required full-Clippy pass is NOT claimed. No sibling lint was suppressed,
-no sibling code was edited, no independent child review was spawned, and no
-commit was made. Resume verification after those owners repair their crates;
-full launcher and composition gaps above remain explicit incomplete work.
+Deletion tests additionally cover tracked-changes `git clean -ffdx`, settings/
+thread/pending-deletion changes at lease acquisition, deleted ownership with idle
+subagents, ancestor settlement and grace, integrated branch eligibility, exact-head
+merged PR eligibility, and forced submodule removal with dirty files/unpushed
+stored history protected. Nested registered orphan worktrees and guest cache pin/
+eviction have focused coverage too. No live service or live T3 data is used.
+
+Verification of the review fixes: `cargo fmt -p t3-host` passed and
+`cargo test -p t3-host` passed **69 tests**, zero failed/ignored: library 4,
+archive/theme 6, background 4, desktop update 5, guest 5, keep-awake 2, policy 8,
+review/worktrees 2, secrets 7, launcher/triage 6, cleanup 20. All commands used
+`D:\t3code-rust-target\server-j` and the workspace's two-job setting unchanged.
+The temporary direct-source guest harness also passed 2 unit and 5 integration
+tests while a sibling import was broken; the complete crate suite subsequently
+passed, so the harness is not a substitute for crate verification.
+
+Exact Clippy is being verified separately; no dependency warnings are suppressed
+and no sibling crate was edited. No commit was made.

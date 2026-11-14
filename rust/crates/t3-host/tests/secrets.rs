@@ -18,17 +18,29 @@ struct Resolver {
     value: Mutex<Option<Secret>>,
     applied: Mutex<Option<Secret>>,
     fresh: AtomicBool,
+    fail_read: AtomicBool,
+    fail_label: AtomicBool,
+    fail_refresh: AtomicBool,
 }
 #[async_trait]
 impl SecretBackend for Resolver {
     async fn read(&self, refs: &[SecretReference], fresh: bool) -> Result<Vec<Option<Secret>>> {
+        if self.fail_read.load(Ordering::SeqCst) {
+            return Err(t3_host::Error::Service);
+        }
         self.fresh.store(fresh, Ordering::SeqCst);
         Ok(vec![self.value.lock().await.clone(); refs.len()])
     }
     async fn label(&self, _: &SecretReference) -> Result<String> {
+        if self.fail_label.load(Ordering::SeqCst) {
+            return Err(t3_host::Error::Service);
+        }
         Ok("Locked vault".into())
     }
     async fn apply_secret_and_refresh(&self, _: &SecretReference, value: &Secret) -> Result<()> {
+        if self.fail_refresh.load(Ordering::SeqCst) {
+            return Err(t3_host::Error::Service);
+        }
         *self.applied.lock().await = Some(value.clone());
         Ok(())
     }
@@ -67,6 +79,9 @@ fn resolver() -> Arc<Resolver> {
         value: Mutex::new(Some(Secret::new("sensitive-value"))),
         applied: Mutex::new(None),
         fresh: AtomicBool::new(false),
+        fail_read: AtomicBool::new(false),
+        fail_label: AtomicBool::new(false),
+        fail_refresh: AtomicBool::new(false),
     })
 }
 fn answer(value: &str) -> SecretRequestAnswerInput {
@@ -97,11 +112,21 @@ async fn fresh_check_refreshes_from_same_value_and_unresolved_references_fail_cl
     *backend.value.lock().await = Some(Secret::new(" \n"));
     let failure = check.check(&reference).await.unwrap();
     assert!(matches!(failure, SecretSourceCheckResult::Failed { .. }));
-    assert!(
-        check
-            .require_settings_secret(&SettingsSecretValue::Reference(reference.clone()))
-            .await
-            .is_err()
+    let unresolved = check
+        .require_settings_secret(&SettingsSecretValue::Reference(reference.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        unresolved.to_string(),
+        "Could not read the credential from the secret provider \"Locked vault\". Unlock or fix it in Settings, then try again."
+    );
+    assert!(format!("{unresolved:?}").contains("SettingsSecretUnresolvedError"));
+    let t3_host::Error::SettingsSecretUnresolved(error) = unresolved else {
+        panic!("typed unresolved secret error required")
+    };
+    assert_eq!(
+        t3_contracts::stored::to_value(&error).unwrap(),
+        serde_json::json!({"_tag":"SettingsSecretUnresolvedError","provider":"Locked vault"})
     );
     assert_eq!(
         check
@@ -110,6 +135,31 @@ async fn fresh_check_refreshes_from_same_value_and_unresolved_references_fail_cl
             .unwrap(),
         vec![SettingsSecretValue::Reference(reference)]
     );
+}
+
+#[tokio::test]
+async fn secret_check_returns_failed_results_when_backend_operations_fail() {
+    let backend = resolver();
+    let check = SecretCheck::new(backend.clone());
+    let reference: SecretReference =
+        serde_json::from_value(serde_json::json!({"provider":"vault","reference":"op://v/i/f"}))
+            .unwrap();
+    backend.fail_read.store(true, Ordering::SeqCst);
+    let result = check
+        .check(&reference)
+        .await
+        .expect("source checks must return a result, not fail the RPC");
+    assert!(matches!(result, SecretSourceCheckResult::Failed { .. }));
+    backend.fail_label.store(true, Ordering::SeqCst);
+    let result = check.check(&reference).await.unwrap();
+    assert!(
+        matches!(result,SecretSourceCheckResult::Failed{ref detail} if detail.contains("vault"))
+    );
+    backend.fail_read.store(false, Ordering::SeqCst);
+    backend.fail_refresh.store(true, Ordering::SeqCst);
+    let result = check.check(&reference).await.unwrap();
+    assert!(matches!(result, SecretSourceCheckResult::Failed { .. }));
+    assert!(!format!("{result:?}").contains("sensitive-value"));
 }
 #[test]
 fn secret_values_are_redacted_in_every_formatter() {
@@ -261,7 +311,84 @@ async fn pasted_files_are_private_idempotent_and_namespaced() {
         );
     }
     filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(-86_401, 0)).unwrap();
+    let partial = temp
+        .path()
+        .join("files")
+        .join(format!("{}.partial", "a".repeat(32)));
+    let legacy = temp.path().join("files/.tmpABC123");
+    let recent = temp
+        .path()
+        .join("files")
+        .join(format!("{}.partial", "b".repeat(32)));
+    for expired in [&partial, &legacy] {
+        std::fs::write(expired, "crash left plaintext").unwrap();
+        filetime::set_file_mtime(expired, filetime::FileTime::from_unix_time(-86_401, 0)).unwrap();
+    }
+    std::fs::write(&recent, "still in flight").unwrap();
+    filetime::set_file_mtime(&recent, filetime::FileTime::from_unix_time(0, 0)).unwrap();
     let service = Arc::new(service);
     let _worker = service.start().await;
     assert!(!path.exists());
+    assert!(!partial.exists() && !legacy.exists());
+    assert!(recent.exists());
+}
+
+#[tokio::test]
+async fn expiry_sweep_continues_after_an_undeletable_ref() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = SecretRequests::new(
+        dir.path().into(),
+        Arc::new(Time(AtomicI64::new(86_400_001))),
+        Arc::new(Cards {
+            status: Mutex::new("pending".into()),
+            fail: AtomicBool::new(false),
+            file: false,
+        }),
+        resolver(),
+    )
+    .unwrap();
+    let blocked = dir
+        .path()
+        .join(format!("secret-request-{}.bin", "0".repeat(32)));
+    std::fs::create_dir(&blocked).unwrap();
+    std::fs::write(blocked.join("keep"), "do not recurse").unwrap();
+    let expired = dir
+        .path()
+        .join(format!("secret-request-{}.bin", "f".repeat(32)));
+    std::fs::write(&expired, "malformed expired value").unwrap();
+    assert_eq!(
+        service
+            .sweep_expired()
+            .await
+            .expect("one ref deletion failure must not stop other entries"),
+        1
+    );
+    assert!(blocked.join("keep").exists());
+    assert!(!expired.exists());
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let files = dir.path().join("files");
+        std::fs::create_dir(&files).unwrap();
+        let locked = files.join("1".repeat(32));
+        let next = files.join("e".repeat(32));
+        for path in [&locked, &next] {
+            std::fs::write(path, "expired plaintext").unwrap();
+            filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(0, 0)).unwrap();
+        }
+        let _lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&locked)
+            .unwrap();
+        assert_eq!(
+            service
+                .sweep_expired()
+                .await
+                .expect("one locked plaintext file must not stop the sweep"),
+            1
+        );
+        assert!(locked.exists());
+        assert!(!next.exists());
+    }
 }

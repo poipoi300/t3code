@@ -76,6 +76,8 @@ struct Host {
     thread: Mutex<OrchestrationV2AppThread>,
     item: Mutex<OrchestrationV2TurnItem>,
     enabled: AtomicBool,
+    access_checks: AtomicUsize,
+    output: Mutex<Vec<OrchestrationV2CommandOutputFrame>>,
     fail_submit: AtomicBool,
     submitted: Mutex<Vec<InternalCommandThreadGuestMessageSubmit>>,
     reads: AtomicUsize,
@@ -99,6 +101,8 @@ impl Host {
             thread: Mutex::new(serde_json::from_value(value).unwrap()),
             item: Mutex::new(item("assistant_message", "hello")),
             enabled: AtomicBool::new(true),
+            access_checks: AtomicUsize::new(0),
+            output: Mutex::new(vec![]),
             fail_submit: AtomicBool::new(false),
             submitted: Mutex::new(vec![]),
             reads: AtomicUsize::new(0),
@@ -120,6 +124,7 @@ impl Host {
 #[async_trait]
 impl GuestThreads for Host {
     async fn enabled(&self) -> Result<bool> {
+        self.access_checks.fetch_add(1, Ordering::SeqCst);
         Ok(self.enabled.load(Ordering::SeqCst))
     }
     async fn connect_hostname(&self) -> Result<Option<String>> {
@@ -182,7 +187,11 @@ impl GuestContent for Host {
         Ok(serde_json::from_value(json!({"snapshotSequence":1,"items":[{"position":0,"visibility":"local","sourceThreadId":"thread","sourceItemId":"item","item":item}],"nextCursor":null,"hasMoreHistory":false})).unwrap())
     }
     async fn command_output(&self, _: &ThreadId, _: &TurnItemId) -> Result<CommandOutput> {
-        Ok(Box::pin(futures_util::stream::pending()))
+        let frames = std::mem::take(&mut *self.output.lock().unwrap());
+        Ok(Box::pin(
+            futures_util::stream::iter(frames.into_iter().map(Ok))
+                .chain(futures_util::stream::pending()),
+        ))
     }
     async fn message_attachment(
         &self,
@@ -317,7 +326,22 @@ async fn output_only_opens_command_rows_and_terminates_when_access_is_revoked() 
     let f = fixture().await;
     assert!(f.service.command_output(&f.token, "item").await.is_err());
     *f.host.item.lock().unwrap() = item("command_execution", "");
+    let frame: OrchestrationV2CommandOutputFrame = serde_json::from_value(
+        json!({"kind":"append","text":"output","truncated":false,"running":true}),
+    )
+    .unwrap();
+    *f.host.output.lock().unwrap() = vec![frame.clone(); 100];
     let mut output = f.service.command_output(&f.token, "item").await.unwrap();
+    assert_eq!(output.next().await.unwrap().unwrap(), frame);
+    let checks = f.host.access_checks.load(Ordering::SeqCst);
+    for _ in 1..100 {
+        assert_eq!(output.next().await.unwrap().unwrap(), frame);
+    }
+    assert_eq!(
+        f.host.access_checks.load(Ordering::SeqCst),
+        checks,
+        "streaming frames must not reread access state"
+    );
     let mut stream = f.service.stream(&f.token).await.unwrap();
     assert!(stream.next().now_or_never().is_none());
     assert!(output.next().now_or_never().is_none());

@@ -29,6 +29,21 @@ fn local_only_policy_checks_auth_before_bind_and_connect() {
     assert!(!p.allows_connect());
     assert!(!p.allows_auth_policy(&ServerAuthPolicy::UnsafeNoAuth));
     assert!(!p.allows_auth_policy(&ServerAuthPolicy::RemoteReachable));
+    let error = p
+        .check_server_reachability(ServerAuthPolicy::RemoteReachable, Some("0.0.0.0"), false)
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Org's policy does not allow remote clients, so the server cannot listen on 0.0.0.0."
+    );
+    assert!(format!("{error:?}").contains("ManagedPolicyRefusedError"));
+    let t3_host::Error::ManagedPolicyRefused(refusal) = error else {
+        panic!("tagged managed policy error required")
+    };
+    assert_eq!(
+        t3_contracts::stored::to_value(&refusal).unwrap(),
+        json!({"_tag":"ManagedPolicyRefusedError","organization":"Org","action":"remote clients","detail":"so the server cannot listen on 0.0.0.0"})
+    );
     for host in [
         "0.0.0.0",
         "",
@@ -125,7 +140,17 @@ fn runtime_ceiling_and_update_gates_use_policy_not_environment() {
         Some(("Org", "https://mirror.example/releases"))
     );
     assert!(p.check_update(Some("stable")).is_ok());
-    assert!(p.check_update(Some("nightly")).is_err());
+    assert_eq!(
+        p.check_update(Some("nightly")).unwrap_err().to_string(),
+        "Org manages T3 Code updates. Only stable releases can be installed."
+    );
+    let off = policy(
+        json!({"schemaVersion":1,"organization":"Admin","limits":{"updates":{"mode":"off"}}}),
+    );
+    assert_eq!(
+        off.check_update(None).unwrap_err().to_string(),
+        "Admin manages T3 Code updates."
+    );
     assert_eq!(p.denied_by("telemetry"), Some("Org"));
 }
 

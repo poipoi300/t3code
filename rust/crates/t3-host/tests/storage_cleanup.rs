@@ -4,7 +4,7 @@ use std::{
     path::Path,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
     },
 };
 use t3_contracts::{orchestration_v2::OrchestrationV2ThreadShell, settings::*};
@@ -20,20 +20,47 @@ struct Host {
     state: Mutex<CleanupSnapshot>,
     lease: Arc<Mutex<()>>,
     open_terminal_on_lease: AtomicBool,
+    snapshot_reads: AtomicUsize,
+    lease_acquisitions: AtomicUsize,
+    pr_lookups: AtomicUsize,
+    lease_change: Mutex<Option<&'static str>>,
+    pull_request: Mutex<Option<MergedPullRequest>>,
 }
 #[async_trait]
 impl CleanupHost for Host {
     async fn snapshot(&self) -> Result<CleanupSnapshot> {
+        self.snapshot_reads.fetch_add(1, Ordering::SeqCst);
         Ok(self.state.lock().await.clone())
     }
+    async fn storage_cleanup_settings(&self) -> Result<StorageCleanupSettings> {
+        Ok(self.state.lock().await.settings.storage_cleanup.clone())
+    }
     async fn acquire_workspace_lease(&self, path: &Path) -> Result<OwnedMutexGuard<()>> {
+        self.lease_acquisitions.fetch_add(1, Ordering::SeqCst);
+        if let Some(change) = self.lease_change.lock().await.take() {
+            let mut state = self.state.lock().await;
+            match change {
+                "settings" => state.settings.storage_cleanup.worktree_after_days = None,
+                "thread" => {
+                    state.threads[0].shell.active_run_id = Some(t3_contracts::base_schemas::RunId(
+                        "started-during-check".into(),
+                    ))
+                }
+                "deletion" => {
+                    let id = state.threads[0].shell.id.clone();
+                    state.pending_deletion_threads.insert(id);
+                }
+                _ => unreachable!(),
+            }
+        }
         if self.open_terminal_on_lease.swap(false, Ordering::SeqCst) {
             self.state.lock().await.terminal_paths.push(path.into());
         }
         Ok(self.lease.clone().lock_owned().await)
     }
     async fn branch_pull_request(&self, _: &Path, _: &str) -> Result<Option<MergedPullRequest>> {
-        Ok(None)
+        self.pr_lookups.fetch_add(1, Ordering::SeqCst);
+        Ok(self.pull_request.lock().await.clone())
     }
     async fn invalidate_git_status(&self, _: &Path) {}
 }
@@ -50,6 +77,11 @@ fn host() -> Arc<Host> {
         }),
         lease: Arc::new(Mutex::new(())),
         open_terminal_on_lease: AtomicBool::new(false),
+        snapshot_reads: AtomicUsize::new(0),
+        lease_acquisitions: AtomicUsize::new(0),
+        pr_lookups: AtomicUsize::new(0),
+        lease_change: Mutex::new(None),
+        pull_request: Mutex::new(None),
     })
 }
 fn write_old(path: &Path, bytes: &[u8], at: i64) {
@@ -78,7 +110,11 @@ async fn file_retention_is_strict_recursive_only_for_logs_and_dry_run_does_not_p
         s.settings.storage_cleanup.logs_after_days = Some(1);
         s.settings.storage_cleanup.browser_artifacts_after_days = Some(1);
     }
-    let service = StorageCleanup::new(temp.path().into(), h, Arc::new(Time(AtomicI64::new(NOW))));
+    let service = StorageCleanup::new(
+        temp.path().into(),
+        h.clone(),
+        Arc::new(Time(AtomicI64::new(NOW))),
+    );
     let mut stream = service.reports().await;
     assert!(stream.recv().await.unwrap().is_none());
     for (name, at) in [
@@ -97,7 +133,13 @@ async fn file_retention_is_strict_recursive_only_for_logs_and_dry_run_does_not_p
     assert!(temp.path().join("browser-artifacts/old.png").exists());
     assert!(service.latest_report().await.is_none());
     assert!(stream.try_recv().is_err());
+    h.snapshot_reads.store(0, Ordering::SeqCst);
     let report = service.run_now().await.unwrap();
+    assert_eq!(
+        h.snapshot_reads.load(Ordering::SeqCst),
+        1,
+        "expired files only need fresh settings, not fresh projections"
+    );
     assert_eq!(report.bytes_freed, WireNumber::Finite(9.into()));
     assert!(!temp.path().join("logs/nested/a.log.1").exists());
     assert!(!temp.path().join("browser-artifacts/old.png").exists());
@@ -135,7 +177,8 @@ async fn junction_or_symlink_cleanup_roots_refuse_outside_deletion() {
         .logs_after_days = Some(1);
     let service = StorageCleanup::new(data.path().into(), h, Arc::new(Time(AtomicI64::new(NOW))));
     let report = service.run_now().await.unwrap();
-    assert_eq!(report.counts.failed, WireNumber::Finite(1.into()));
+    assert_eq!(report.counts.failed, WireNumber::Finite(0.into()));
+    assert_eq!(report.counts.kept, WireNumber::Finite(1.into()));
     assert!(
         report
             .entries
@@ -233,12 +276,15 @@ fn activity_ignores_metadata_refreshes_and_merge_requires_exact_head() {
     ));
 }
 async fn git(cwd: &Path, args: &[&str]) {
+    git_text(cwd, args).await;
+}
+async fn git_text(cwd: &Path, args: &[&str]) -> String {
     let mut options = t3_process::ProcessOptions::new("git").args(args.iter().copied());
     options.cwd = Some(cwd.into());
     for (k, v) in [("GIT_CONFIG_GLOBAL", "NUL"), ("GIT_CONFIG_NOSYSTEM", "1")] {
         options.env.insert(k.into(), Some(v.into()));
     }
-    t3_process::run(options).await.unwrap();
+    t3_process::run(options).await.unwrap().stdout_text()
 }
 #[tokio::test]
 async fn real_linked_worktree_is_removed_only_when_clean_and_inside_managed_roots() {
@@ -372,6 +418,612 @@ async fn real_linked_worktree_is_removed_only_when_clean_and_inside_managed_root
     );
 }
 
+async fn linked_repository(
+    temp: &Path,
+) -> (
+    std::path::PathBuf,
+    std::path::PathBuf,
+    Arc<Host>,
+    StorageCleanup,
+) {
+    let repo = temp.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-b", "main"]).await;
+    std::fs::write(repo.join("tracked"), "base\n").unwrap();
+    git(&repo, &["add", "tracked"]).await;
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "root",
+        ],
+    )
+    .await;
+    let path = temp.join("worktrees/repo/feature");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    git(
+        &repo,
+        &["worktree", "add", "-b", "feature", path.to_str().unwrap()],
+    )
+    .await;
+    let h = host();
+    {
+        let mut state = h.state.lock().await;
+        state.managed_roots = vec![temp.join("worktrees")];
+        state.project_roots = vec![repo.clone()];
+        state.threads = vec![CleanupThread {
+            shell: shell(&path),
+            deleted: false,
+            project_path: repo.clone(),
+        }];
+        state.settings.storage_cleanup.worktree_after_days = Some(1);
+    }
+    let service = StorageCleanup::new(
+        temp.join("state"),
+        h.clone(),
+        Arc::new(Time(AtomicI64::new(NOW))),
+    );
+    (repo, path, h, service)
+}
+
+#[tokio::test]
+async fn preview_never_fetches_resolves_remote_eligibility_or_takes_a_workspace_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let (repo, path, h, service) = linked_repository(temp.path()).await;
+    let remote = temp.path().join("origin.git");
+    std::fs::create_dir(&remote).unwrap();
+    git(&remote, &["init", "--bare", "-b", "main"]).await;
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    )
+    .await;
+    git(&repo, &["push", "origin", "main"]).await;
+    git(&repo, &["update-ref", "-d", "refs/remotes/origin/main"]).await;
+    {
+        let mut state = h.state.lock().await;
+        state.settings.storage_cleanup.worktree_after_days = None;
+        state.settings.storage_cleanup.worktree_on_merge = true;
+        state.settings.storage_cleanup.worktree_unchanged = false;
+    }
+    service.preview().await.unwrap();
+    let refs = t3_git::Git::new(&repo)
+        .execute(
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/main",
+            ],
+            t3_git::ExecuteOptions {
+                allow_nonzero: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_ne!(refs.code, Some(0), "preview must not fetch remote refs");
+    assert_eq!(h.pr_lookups.load(Ordering::SeqCst), 0);
+    h.state
+        .lock()
+        .await
+        .settings
+        .storage_cleanup
+        .worktree_after_days = Some(1);
+    let report = service.preview().await.unwrap();
+    assert!(
+        report
+            .entries
+            .iter()
+            .any(|e| e.reason.starts_with("Would remove:"))
+    );
+    assert_eq!(h.lease_acquisitions.load(Ordering::SeqCst), 0);
+    assert!(path.exists());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn missing_case_variant_terminal_provider_and_project_paths_prevent_removal() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_, path, h, service) = linked_repository(temp.path()).await;
+    let spelling =
+        std::path::PathBuf::from(path.to_string_lossy().to_uppercase()).join("missing-child");
+    for kind in ["terminal", "provider", "project"] {
+        {
+            let mut state = h.state.lock().await;
+            match kind {
+                "terminal" => state.terminal_paths.push(spelling.clone()),
+                "provider" => {
+                    state.terminal_paths.clear();
+                    state.live_provider_paths.push(spelling.clone());
+                }
+                _ => {
+                    state.live_provider_paths.clear();
+                    state.project_roots.push(spelling.clone());
+                }
+            }
+        }
+        let report = service.run_now().await.unwrap();
+        assert!(
+            path.exists(),
+            "{kind} cwd must protect missing paths: raw={}, canonical root={}, cwd={}",
+            path.display(),
+            dunce::canonicalize(path.parent().unwrap())
+                .unwrap()
+                .display(),
+            spelling.display()
+        );
+        assert_eq!(report.counts.removed, WireNumber::Finite(0.into()));
+    }
+}
+
+#[tokio::test]
+async fn orphan_report_includes_second_level_full_clones_but_skips_first_level_checkouts() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = temp.path().join("worktrees/first");
+    let second = temp.path().join("worktrees/repo/branch");
+    for path in [&first, &second] {
+        std::fs::create_dir_all(path).unwrap();
+        git(path, &["init", "-b", "main"]).await;
+        filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(0, 0)).unwrap();
+    }
+    let h = host();
+    {
+        let mut state = h.state.lock().await;
+        state.managed_roots = vec![temp.path().join("worktrees")];
+        state.settings.storage_cleanup.worktree_after_days = Some(1);
+    }
+    let service = StorageCleanup::new(
+        temp.path().join("state"),
+        h,
+        Arc::new(Time(AtomicI64::new(NOW))),
+    );
+    let report = service.run_now().await.unwrap();
+    assert!(report.entries.iter().any(
+        |e| e.path.as_deref() == Some(dunce::canonicalize(&second).unwrap().to_str().unwrap())
+    ));
+    assert!(
+        !report
+            .entries
+            .iter()
+            .any(|e| e.path.as_deref()
+                == Some(dunce::canonicalize(&first).unwrap().to_str().unwrap()))
+    );
+    assert!(first.exists() && second.exists());
+}
+
+#[tokio::test]
+async fn orphan_report_finds_nested_registered_worktrees_without_deleting_the_container() {
+    let temp = tempfile::tempdir().unwrap();
+    let (repo, _, h, service) = linked_repository(temp.path()).await;
+    let container = temp.path().join("worktrees/other/container");
+    let nested = container.join("nested");
+    std::fs::create_dir_all(&container).unwrap();
+    git(
+        &repo,
+        &["worktree", "add", "-b", "orphan", nested.to_str().unwrap()],
+    )
+    .await;
+    filetime::set_file_mtime(&nested, filetime::FileTime::from_unix_time(0, 0)).unwrap();
+    h.state.lock().await.threads.clear();
+    let report = service.run_now().await.unwrap();
+    let canonical = dunce::canonicalize(&nested).unwrap();
+    let container = dunce::canonicalize(&container).unwrap();
+    assert!(report.entries.iter().any(|e| {
+        e.path
+            .as_deref()
+            .is_some_and(|path| Path::new(path) == canonical)
+            && e.reason.contains("No thread uses this worktree")
+    }));
+    assert!(!report.entries.iter().any(|e| {
+        e.path
+            .as_deref()
+            .is_some_and(|path| Path::new(path) == container)
+    }));
+    assert!(nested.join(".git").is_file());
+    assert_eq!(report.counts.removed, WireNumber::Finite(0.into()));
+}
+
+#[tokio::test]
+async fn worktree_report_entries_preserve_projection_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let h = host();
+    {
+        let mut state = h.state.lock().await;
+        state.managed_roots = vec![temp.path().join("worktrees")];
+        state.settings.storage_cleanup.worktree_after_days = Some(1);
+        for id in ["z-first", "a-second"] {
+            let path = temp.path().join("worktrees/repo").join(id);
+            std::fs::create_dir_all(&path).unwrap();
+            let mut row = shell(&path);
+            row.id = t3_contracts::base_schemas::ThreadId(id.into());
+            row.status = t3_contracts::orchestration_v2::OrchestrationV2ShellThreadStatus::Running;
+            state.threads.push(CleanupThread {
+                shell: row,
+                deleted: false,
+                project_path: temp.path().join("project"),
+            });
+        }
+    }
+    let service = StorageCleanup::new(
+        temp.path().join("state"),
+        h,
+        Arc::new(Time(AtomicI64::new(NOW))),
+    );
+    let report = service.run_now().await.unwrap();
+    let ids: Vec<_> = report
+        .entries
+        .iter()
+        .filter_map(|e| e.thread_id.as_ref().map(|id| id.0.as_str()))
+        .collect();
+    assert_eq!(ids, vec!["z-first", "a-second"]);
+}
+
+#[tokio::test]
+async fn tracked_changes_cleanup_removes_ignored_and_untracked_files_only_after_the_lease_recheck()
+{
+    for change in [Some("settings"), Some("thread"), Some("deletion"), None] {
+        let temp = tempfile::tempdir().unwrap();
+        let (_, path, h, service) = linked_repository(temp.path()).await;
+        std::fs::write(path.join(".gitignore"), "ignored\n").unwrap();
+        std::fs::write(path.join("ignored"), "valuable ignored file").unwrap();
+        std::fs::write(path.join("untracked"), "valuable untracked file").unwrap();
+        h.state
+            .lock()
+            .await
+            .settings
+            .storage_cleanup
+            .worktree_keep_when = WorktreeKeepWhen::TrackedChanges;
+        *h.lease_change.lock().await = change;
+        let report = service.run_now().await.unwrap();
+        if change.is_some() {
+            assert!(path.exists());
+            assert_eq!(
+                std::fs::read_to_string(path.join("ignored")).unwrap(),
+                "valuable ignored file"
+            );
+            assert!(path.join("untracked").exists());
+            assert_eq!(report.counts.removed, WireNumber::Finite(0.into()));
+        } else {
+            assert!(!path.exists());
+            assert_eq!(report.counts.removed, WireNumber::Finite(1.into()));
+        }
+    }
+}
+
+#[tokio::test]
+async fn deleted_owner_keeps_idle_subagents_until_pending_deletion_finishes() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_, path, h, service) = linked_repository(temp.path()).await;
+    {
+        let mut state = h.state.lock().await;
+        state.settings.storage_cleanup.worktree_after_days = None;
+        state.settings.storage_cleanup.worktree_on_delete = true;
+        state.settings.storage_cleanup.worktree_on_merge = false;
+        state.settings.storage_cleanup.worktree_unchanged = false;
+        state.threads[0].deleted = true;
+        let mut child = t3_contracts::stored::to_value(&state.threads[0].shell).unwrap();
+        child["id"] = serde_json::json!("child");
+        child["lineage"] = serde_json::json!({"rootThreadId":"thread","parentThreadId":"thread","relationshipToParent":"subagent"});
+        let project_path = state.threads[0].project_path.clone();
+        state.threads.push(CleanupThread {
+            shell: serde_json::from_value(child).unwrap(),
+            deleted: false,
+            project_path,
+        });
+        state
+            .pending_deletion_threads
+            .insert(t3_contracts::base_schemas::ThreadId("thread".into()));
+    }
+    let report = service.run_now().await.unwrap();
+    assert!(path.exists());
+    assert!(
+        report
+            .entries
+            .iter()
+            .any(|e| e.reason.contains("deletion is still pending"))
+    );
+    h.state.lock().await.pending_deletion_threads.clear();
+    let report = service.run_now().await.unwrap();
+    assert!(!path.exists());
+    assert_eq!(report.counts.removed, WireNumber::Finite(1.into()));
+    assert_eq!(report.entries[0].thread_id.as_ref().unwrap().0, "thread");
+    assert!(
+        h.state
+            .lock()
+            .await
+            .threads
+            .iter()
+            .all(|t| t.shell.worktree_path.is_some())
+    );
+}
+
+#[tokio::test]
+async fn integrated_branch_cleanup_requires_integration_and_archived_or_settled_ownership() {
+    let temp = tempfile::tempdir().unwrap();
+    let (repo, path, h, service) = linked_repository(temp.path()).await;
+    std::fs::write(path.join("feature"), "feature").unwrap();
+    git(&path, &["add", "feature"]).await;
+    git(
+        &path,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "feature",
+        ],
+    )
+    .await;
+    {
+        let mut state = h.state.lock().await;
+        state.settings.storage_cleanup.worktree_after_days = None;
+        state.settings.storage_cleanup.worktree_on_merge = false;
+        state.settings.storage_cleanup.worktree_unchanged = true;
+        state.threads[0].shell.archived_at = Some(t3_contracts::wire::WireDateTime(
+            "2020-01-01T00:00:00.000Z".into(),
+        ));
+    }
+    service.run_now().await.unwrap();
+    assert!(path.exists(), "unintegrated feature commits must survive");
+    git(&repo, &["merge", "--ff-only", "feature"]).await;
+    let report = service.run_now().await.unwrap();
+    assert!(!path.exists());
+    assert_eq!(report.counts.removed, WireNumber::Finite(1.into()));
+}
+
+#[tokio::test]
+async fn settled_subagent_only_inherits_an_idle_ancestor_after_the_grace_period() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_, path, h, service) = linked_repository(temp.path()).await;
+    {
+        let mut state = h.state.lock().await;
+        state.settings.storage_cleanup.worktree_after_days = None;
+        state.settings.storage_cleanup.worktree_on_merge = false;
+        state.settings.storage_cleanup.worktree_unchanged = false;
+        state.settings.storage_cleanup.worktree_settled_after_days = Some(1);
+        let mut parent = state.threads[0].clone();
+        parent.shell.id = t3_contracts::base_schemas::ThreadId("parent".into());
+        parent.shell.worktree_path = None;
+        parent.shell.lineage.root_thread_id = t3_contracts::base_schemas::ThreadId("parent".into());
+        parent.shell.settled_at = Some(t3_contracts::wire::WireDateTime(
+            "2020-01-01T00:00:00.000Z".into(),
+        ));
+        parent.shell.status =
+            t3_contracts::orchestration_v2::OrchestrationV2ShellThreadStatus::Running;
+        let mut child = t3_contracts::stored::to_value(&state.threads[0].shell).unwrap();
+        child["lineage"] = serde_json::json!({"rootThreadId":"parent","parentThreadId":"parent","relationshipToParent":"subagent"});
+        state.threads[0].shell = serde_json::from_value(child).unwrap();
+        state.threads.push(parent);
+    }
+    service.run_now().await.unwrap();
+    assert!(path.exists());
+    {
+        let mut state = h.state.lock().await;
+        state.threads[1].shell.status =
+            t3_contracts::orchestration_v2::OrchestrationV2ShellThreadStatus::Idle;
+        state.threads[1].shell.updated_at = t3_contracts::wire::WireDateTime(
+            chrono::DateTime::from_timestamp_millis(NOW)
+                .unwrap()
+                .to_rfc3339(),
+        );
+    }
+    service.run_now().await.unwrap();
+    assert!(
+        path.exists(),
+        "recent ancestor settlement must keep the worktree"
+    );
+    h.state.lock().await.threads[1].shell.updated_at =
+        t3_contracts::wire::WireDateTime("2020-01-01T00:00:00.000Z".into());
+    let report = service.run_now().await.unwrap();
+    assert!(!path.exists());
+    assert_eq!(report.counts.removed, WireNumber::Finite(1.into()));
+}
+
+#[tokio::test]
+async fn pull_request_cleanup_requires_the_merged_record_for_the_exact_unintegrated_head() {
+    let temp = tempfile::tempdir().unwrap();
+    let (repo, path, h, service) = linked_repository(temp.path()).await;
+    let remote = temp.path().join("origin.git");
+    std::fs::create_dir(&remote).unwrap();
+    git(&remote, &["init", "--bare", "-b", "main"]).await;
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    )
+    .await;
+    git(&repo, &["push", "origin", "main"]).await;
+    git(
+        &repo,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    )
+    .await;
+    std::fs::write(path.join("feature"), "new commit").unwrap();
+    git(&path, &["add", "feature"]).await;
+    git(
+        &path,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "feature",
+        ],
+    )
+    .await;
+    let head = git_text(&path, &["rev-parse", "HEAD"])
+        .await
+        .trim()
+        .to_owned();
+    {
+        let mut state = h.state.lock().await;
+        state.settings.storage_cleanup.worktree_after_days = None;
+        state.settings.storage_cleanup.worktree_on_merge = true;
+        state.settings.storage_cleanup.worktree_unchanged = false;
+    }
+    for (state, sha) in [("open", head.clone()), ("merged", "0".repeat(40))] {
+        *h.pull_request.lock().await = Some(MergedPullRequest {
+            state: state.into(),
+            head_ref: "feature".into(),
+            base_ref: "main".into(),
+            head_sha: sha,
+        });
+        service.run_now().await.unwrap();
+        assert!(path.exists());
+    }
+    *h.pull_request.lock().await = Some(MergedPullRequest {
+        state: "merged".into(),
+        head_ref: "feature".into(),
+        base_ref: "main".into(),
+        head_sha: head,
+    });
+    let report = service.run_now().await.unwrap();
+    assert!(!path.exists());
+    assert_eq!(report.counts.removed, WireNumber::Finite(1.into()));
+    assert!(h.pr_lookups.load(Ordering::SeqCst) >= 3);
+}
+
+#[tokio::test]
+async fn forced_submodule_removal_keeps_dirty_files_and_unpushed_stored_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let (repo, path, _, service) = linked_repository(temp.path()).await;
+    let source = temp.path().join("submodule-origin");
+    std::fs::create_dir(&source).unwrap();
+    git(&source, &["init", "-b", "main"]).await;
+    std::fs::write(source.join("subfile"), "original\n").unwrap();
+    git(&source, &["add", "subfile"]).await;
+    git(
+        &source,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "submodule",
+        ],
+    )
+    .await;
+    git(
+        &repo,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            source.to_str().unwrap(),
+            "nested",
+        ],
+    )
+    .await;
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-am",
+            "add submodule",
+        ],
+    )
+    .await;
+    git(&path, &["reset", "--hard", "main"]).await;
+    git(
+        &path,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+        ],
+    )
+    .await;
+    let nested = path.join("nested");
+    std::fs::write(nested.join("subfile"), "uncommitted value").unwrap();
+    service.run_now().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(nested.join("subfile")).unwrap(),
+        "uncommitted value"
+    );
+    git(&nested, &["add", "subfile"]).await;
+    git(
+        &nested,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "unpushed",
+        ],
+    )
+    .await;
+    let admin = git_text(&nested, &["rev-parse", "--absolute-git-dir"])
+        .await
+        .trim()
+        .to_owned();
+    git(&path, &["submodule", "deinit", "--force", "nested"]).await;
+    let report = service.run_now().await.unwrap();
+    assert!(path.exists());
+    assert!(
+        report
+            .entries
+            .iter()
+            .any(|e| e.reason.contains("commits not on a remote-tracking ref"))
+    );
+    git(
+        &repo,
+        &[
+            "--git-dir",
+            &admin,
+            "reset",
+            "--soft",
+            "refs/remotes/origin/main",
+        ],
+    )
+    .await;
+    git(
+        &repo,
+        &[
+            "--git-dir",
+            &admin,
+            "reflog",
+            "expire",
+            "--expire=all",
+            "--all",
+        ],
+    )
+    .await;
+    let report = service.run_now().await.unwrap();
+    assert!(
+        !path.exists(),
+        "a safe deinitialized submodule requires forced worktree removal"
+    );
+    assert_eq!(report.counts.removed, WireNumber::Finite(1.into()));
+    assert_eq!(
+        std::fs::read_to_string(source.join("subfile")).unwrap(),
+        "original\n"
+    );
+}
+
 #[test]
 fn worktree_measurement_excludes_shared_hardlinks_and_pnpm_store_blocks() {
     let temp = tempfile::tempdir().unwrap();
@@ -382,6 +1034,20 @@ fn worktree_measurement_excludes_shared_hardlinks_and_pnpm_store_blocks() {
     assert_eq!(measure_worktree(&root, false).unwrap(), 0);
     std::fs::remove_file(root.join("two")).unwrap();
     assert!(measure_worktree(&root, false).unwrap() >= 4096);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let _locked = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(root.join("one"))
+            .unwrap();
+        assert!(
+            measure_worktree(&root, false)
+                .expect("metadata inspection must not request file read access")
+                >= 4096
+        );
+    }
     let store = temp.path().join("store");
     std::fs::create_dir(&store).unwrap();
     let virtual_store = root.join("node_modules/.pnpm");

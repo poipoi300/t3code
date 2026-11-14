@@ -45,6 +45,7 @@ pub trait CleanupHost: Send + Sync {
     /// Read current projection/settings, including archived and deleted ownership,
     /// live sessions, starting/running terminals and unfinished deletion effects.
     async fn snapshot(&self) -> Result<CleanupSnapshot>;
+    async fn storage_cleanup_settings(&self) -> Result<StorageCleanupSettings>;
     /// Must be the same lease provider turn startup and checkpoint restore use.
     async fn acquire_workspace_lease(&self, path: &Path) -> Result<OwnedMutexGuard<()>>;
     async fn branch_pull_request(
@@ -312,7 +313,12 @@ impl StorageCleanup {
                     &mut removed,
                 )
                 .await;
-            entry.outcome = if result.is_err() {
+            entry.outcome = if matches!(
+                &result,
+                Err(Error::Refused("cleanup folder is a symbolic link"))
+            ) {
+                StorageCleanupReportEntryOutcome::Kept
+            } else if result.is_err() {
                 StorageCleanupReportEntryOutcome::Failed
             } else if removed.0 > 0 && !dry_run {
                 StorageCleanupReportEntryOutcome::Removed
@@ -419,29 +425,41 @@ impl StorageCleanup {
                 "cleanup folder is outside the data directory",
             ));
         }
-        let cap =
-            Dir::open_ambient_dir(&real, cap_std::ambient_authority()).map_err(|_| Error::Io)?;
+        let cap = Arc::new(
+            Dir::open_ambient_dir(&real, cap_std::ambient_authority()).map_err(|_| Error::Io)?,
+        );
         let mut pending = vec![PathBuf::new()];
         let threshold = now.saturating_sub(days.saturating_mul(DAY_MS));
         while let Some(relative) = pending.pop() {
             let directory = real.join(&relative);
-            for entry in fs::read_dir(&directory).map_err(|_| Error::Io)? {
-                let entry = entry.map_err(|_| Error::Io)?;
-                let path = entry.path();
-                let metadata = fs::symlink_metadata(&path).map_err(|_| Error::Io)?;
-                if metadata.file_type().is_symlink()
-                    || dunce::canonicalize(&path).map_err(|_| Error::Io)? != path
-                {
-                    continue;
-                }
-                let child = relative.join(entry.file_name());
+            let entries = tokio::task::spawn_blocking(move || {
+                fs::read_dir(&directory)
+                    .map_err(|_| Error::Io)?
+                    .map(|entry| {
+                        let entry = entry.map_err(|_| Error::Io)?;
+                        let path = entry.path();
+                        let metadata = fs::symlink_metadata(&path).map_err(|_| Error::Io)?;
+                        if metadata.file_type().is_symlink()
+                            || dunce::canonicalize(&path).map_err(|_| Error::Io)? != path
+                        {
+                            return Ok(None);
+                        }
+                        Ok(Some((relative.join(entry.file_name()), metadata)))
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .await
+            .map_err(|_| Error::Service)??;
+            for (child, metadata) in entries.into_iter().flatten() {
                 if metadata.is_dir() {
                     if logs {
                         pending.push(child);
                     }
                     continue;
                 }
-                if !metadata.is_file() || logs && !rotated_log(&entry.file_name().to_string_lossy())
+                if !metadata.is_file()
+                    || logs
+                        && !rotated_log(&child.file_name().ok_or(Error::Invalid)?.to_string_lossy())
                 {
                     continue;
                 }
@@ -456,7 +474,7 @@ impl StorageCleanup {
                 if modified.is_none_or(|ms| ms >= i128::from(threshold)) {
                     continue;
                 }
-                let settings = self.host.snapshot().await?.settings.storage_cleanup;
+                let settings = self.host.storage_cleanup_settings().await?;
                 if (if logs {
                     settings.logs_after_days
                 } else {
@@ -466,7 +484,11 @@ impl StorageCleanup {
                     return Ok(());
                 }
                 if !dry_run {
-                    cap.remove_file(&child).map_err(|_| Error::Io)?;
+                    let cap = cap.clone();
+                    tokio::task::spawn_blocking(move || cap.remove_file(&child))
+                        .await
+                        .map_err(|_| Error::Service)?
+                        .map_err(|_| Error::Io)?;
                 }
                 removed.0 += 1;
                 removed.1 = removed.1.saturating_add(metadata.len());
@@ -489,12 +511,22 @@ impl StorageCleanup {
         {
             return;
         }
-        let mut groups: BTreeMap<PathBuf, Vec<&CleanupThread>> = BTreeMap::new();
-        for thread in &snapshot.threads {
+        let mut groups: Vec<(PathBuf, Vec<&CleanupThread>)> = Vec::new();
+        let mut group_indices = BTreeMap::new();
+        for thread in snapshot
+            .threads
+            .iter()
+            .filter(|t| !t.deleted)
+            .chain(snapshot.threads.iter().filter(|t| t.deleted))
+        {
             if let Some(path) = &thread.shell.worktree_path {
                 let path = PathBuf::from(&path.0);
                 let key = dunce::canonicalize(&path).unwrap_or(path);
-                groups.entry(key).or_default().push(thread);
+                let index = *group_indices.entry(key.clone()).or_insert_with(|| {
+                    groups.push((key, Vec::new()));
+                    groups.len() - 1
+                });
+                groups[index].1.push(thread);
             }
         }
         for (path, group) in groups {
@@ -645,6 +677,7 @@ impl StorageCleanup {
         validate_cleanup_worktree(Path::new(&requested.0), &snapshot.managed_roots)?;
         validate_cleanup_worktree(path, &snapshot.managed_roots)?;
         protect(snapshot, path)?;
+        protect(snapshot, Path::new(&requested.0))?;
         let git = t3_git::Git::new(path);
         let head = read_git(&git, &["rev-parse", "HEAD"]).await?;
         check_branch(&git, &branch.0).await?;
@@ -663,6 +696,11 @@ impl StorageCleanup {
             let project_git = t3_git::Git::new(&owner.project_path);
             let remotes = read_git(&project_git, &["remote"]).await?;
             let names: Vec<_> = remotes.lines().collect();
+            if dry_run && !names.is_empty() {
+                return Err(Error::Refused(
+                    "preview requires remote eligibility checks; keeping worktree",
+                ));
+            }
             let default = if names.is_empty() {
                 read_git(&project_git, &["symbolic-ref", "--quiet", "HEAD"])
                     .await?
@@ -785,11 +823,15 @@ impl StorageCleanup {
         .await
         .map_err(|_| Error::Refused("worktree inspection timed out"))?
         .map_err(|_| Error::Service)??;
+        if dry_run {
+            return Ok((format!("Would remove: {reason}"), Some(bytes)));
+        }
         let _lease = self.host.acquire_workspace_lease(path).await?;
         let latest = self.snapshot().await?;
         validate_cleanup_worktree(Path::new(&requested.0), &latest.managed_roots)?;
         validate_cleanup_worktree(path, &latest.managed_roots)?;
         protect(&latest, path)?;
+        protect(&latest, Path::new(&requested.0))?;
         if latest.settings != snapshot.settings
             || group.iter().any(|old| !latest.threads.contains(old))
             || latest
@@ -885,7 +927,7 @@ impl StorageCleanup {
                     if referenced.iter().any(|p| p == &path) {
                         continue;
                     }
-                    if path.join(".git").is_dir() {
+                    if depth == 0 && path.join(".git").is_dir() {
                         continue;
                     }
                     if depth == 0 && !path.join(".git").exists() {
@@ -1016,8 +1058,34 @@ fn rotated_log(name: &str) -> bool {
     })
 }
 fn occupies(root: &Path, path: &Path) -> bool {
-    let candidate = dunce::canonicalize(path).unwrap_or_else(|_| path.to_owned());
-    candidate == root || candidate.starts_with(root)
+    let roots = [
+        path_key(root),
+        dunce::canonicalize(root)
+            .map(|p| path_key(&p))
+            .unwrap_or_else(|_| path_key(root)),
+    ];
+    let targets = [
+        path_key(path),
+        dunce::canonicalize(path)
+            .map(|p| path_key(&p))
+            .unwrap_or_else(|_| path_key(path)),
+    ];
+    roots.iter().any(|root| {
+        targets
+            .iter()
+            .any(|target| target == root || target.starts_with(root))
+    })
+}
+fn path_key(path: &Path) -> PathBuf {
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
+    #[cfg(windows)]
+    {
+        PathBuf::from(path.to_string_lossy().to_lowercase())
+    }
+    #[cfg(not(windows))]
+    {
+        path
+    }
 }
 fn protect(snapshot: &CleanupSnapshot, path: &Path) -> Result<()> {
     if snapshot.project_roots.iter().any(|p| occupies(path, p)) {
@@ -1462,6 +1530,9 @@ fn measure_with_repositories(
         return Err(Error::Refused("network paths cannot be inspected"));
     }
     let root = dunce::canonicalize(root).map_err(|_| Error::Io)?;
+    #[cfg(windows)]
+    let root_directory =
+        Dir::open_ambient_dir(&root, cap_std::ambient_authority()).map_err(|_| Error::Io)?;
     let mut pending = vec![root.clone()];
     let mut entries = 0;
     let mut bytes = 0_u64;
@@ -1472,7 +1543,15 @@ fn measure_with_repositories(
         if entries > 2_000_000 {
             return Err(Error::Refused("worktree could not be fully inspected"));
         }
+        #[cfg(not(windows))]
         let metadata = fs::symlink_metadata(&path).map_err(|_| Error::Io)?;
+        #[cfg(windows)]
+        let metadata = if path == root {
+            root_directory.dir_metadata()
+        } else {
+            root_directory.symlink_metadata(path.strip_prefix(&root).map_err(|_| Error::Invalid)?)
+        }
+        .map_err(|_| Error::Io)?;
         if metadata.file_type().is_symlink() {
             continue;
         }
@@ -1521,9 +1600,7 @@ fn measure_with_repositories(
             #[cfg(not(unix))]
             {
                 use cap_fs_ext::MetadataExt;
-                let file = std::fs::File::open(&path).map_err(|_| Error::Io)?;
-                let info = cap_std::fs::Metadata::from_file(&file).map_err(|_| Error::Io)?;
-                if info.nlink() == 1 {
+                if metadata.nlink() == 1 {
                     bytes = bytes.saturating_add(metadata.len());
                 }
             }

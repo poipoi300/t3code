@@ -18,6 +18,12 @@ pub mod zip_archive;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    ManagedPolicyRefused(#[from] policy::ManagedPolicyRefusedError),
+    #[error("{0}")]
+    ManagedUpdateRefused(String),
+    #[error("Could not read the credential from the secret provider \"{}\". Unlock or fix it in Settings, then try again.",.0.provider)]
+    SettingsSecretUnresolved(t3_contracts::settings_secret_value::SettingsSecretUnresolvedError),
     #[error("invalid timestamp")]
     Timestamp,
     #[error("host filesystem operation failed")]
