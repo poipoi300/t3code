@@ -927,10 +927,11 @@ fn toast_action(
 }
 
 fn copy_error_button(source: String) -> impl IntoElement {
-    // ButtonSize lacks the web's icon-micro seam; use the fixed 12px glyph in its 24px target.
+    // ButtonSize lacks icon-micro; the source's fixed equivalent is a 20px target and 12px glyph.
     // NSH's clipboard write is fire-and-forget: do not claim success without an acknowledgement.
     nsh_base::button().accessibility_label(Some(SharedString::from(t("Copy error"))))
-        .app_class(tw("inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground/80 hover:bg-transparent hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
+        .app_class(tw("inline-flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground/80 hover:bg-transparent hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
+        .hit_slop(move || EdgeInsets::all(px(((crate::theme::metrics().hit_target - 20.0) / 2.0).max(0.0))))
         .on_press(move || {
             if !source.is_empty() { set_clipboard(source.clone()); }
         })

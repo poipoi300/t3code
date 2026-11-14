@@ -392,6 +392,7 @@ pub async fn run_action(
 }
 
 pub async fn read_detail(ready: &Ready, device: &DeviceSummary) -> Result<DeviceDetail> {
+    validate_selector(device.id.as_ref(), "device id")?;
     let run = ready.commands.as_ref();
     let id = device.id.as_ref();
     let mut settings = serde_json::Map::new();

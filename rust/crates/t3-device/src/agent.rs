@@ -128,23 +128,8 @@ pub struct FileLaunchers {
     pub cli_provider: Option<Arc<dyn crate::host::AgentCliProvider>>,
     pub commands: Arc<dyn crate::io::Commands>,
 }
-#[async_trait]
-impl Launchers for FileLaunchers {
-    async fn configure(
-        &self,
-        host: &str,
-        device: Option<&str>,
-        endpoint: &AgentEndpoint,
-    ) -> Result<String> {
-        let path = config_path(&self.state, host, device);
-        write_config(&path, endpoint).await?;
-        Ok(path.to_string_lossy().into_owned())
-    }
-    async fn bind(&self, name: &str, args: &[String]) -> Result<String> {
-        if !name.starts_with("t3-") || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        {
-            return Err(crate::error::invalid("launcher session"));
-        }
+impl FileLaunchers {
+    pub async fn ensure_shim(&self) -> Result<PathBuf> {
         let cli = if let Some(provider) = &self.cli_provider {
             provider.ensure().await?
         } else {
@@ -153,7 +138,16 @@ impl Launchers for FileLaunchers {
                 entry: self.entry.clone(),
             }
         };
-        let dir = self.state.join("device/targets").join(name);
+        let dir = self.state.join("device/bin");
+        self.write_launcher(dir.clone(), &cli, &[]).await?;
+        Ok(dir)
+    }
+    async fn write_launcher(
+        &self,
+        dir: PathBuf,
+        cli: &crate::host::AgentCli,
+        args: &[String],
+    ) -> Result<String> {
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|_| Error::Unavailable("Could not create agent launcher.".into()))?;
@@ -198,6 +192,37 @@ impl Launchers for FileLaunchers {
         }
         Ok(script.to_string_lossy().into_owned())
     }
+}
+#[async_trait]
+impl Launchers for FileLaunchers {
+    async fn configure(
+        &self,
+        host: &str,
+        device: Option<&str>,
+        endpoint: &AgentEndpoint,
+    ) -> Result<String> {
+        let path = config_path(&self.state, host, device);
+        write_config(&path, endpoint).await?;
+        Ok(path.to_string_lossy().into_owned())
+    }
+    async fn bind(&self, name: &str, args: &[String]) -> Result<String> {
+        if !name.starts_with("t3-") || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return Err(crate::error::invalid("launcher session"));
+        }
+        let cli = if let Some(provider) = &self.cli_provider {
+            provider.ensure().await?
+        } else {
+            crate::host::AgentCli {
+                node: self.node.clone(),
+                entry: self.entry.clone(),
+            }
+        };
+        self.write_launcher(self.state.join("device/bin"), &cli, &[])
+            .await?;
+        self.write_launcher(self.state.join("device/targets").join(name), &cli, args)
+            .await
+    }
     async fn release(&self, launcher: &str) -> Result<()> {
         let parent = Path::new(launcher)
             .parent()
@@ -216,7 +241,10 @@ impl Launchers for FileLaunchers {
         command
             .env
             .insert("ELECTRON_RUN_AS_NODE".into(), Some(Secret::new("1")));
-        let _ = self.commands.run(command).await;
+        let output = self.commands.run(command).await?;
+        if output.code != 0 && !output.stderr.contains("SESSION_NOT_FOUND") {
+            return Err(Error::command("close agent session", output.code));
+        }
         Ok(())
     }
     async fn prune(&self, live: &BTreeSet<String>) -> Result<()> {

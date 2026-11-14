@@ -339,6 +339,7 @@ pub struct FakeLaunchers {
     pub bound: Mutex<Vec<(String, Vec<String>)>>,
     pub released: Mutex<Vec<String>>,
     pub bind_gate: StdMutex<Option<Arc<Gate>>>,
+    pub fail_release: AtomicBool,
 }
 impl FakeLaunchers {
     pub fn new() -> Arc<Self> {
@@ -346,6 +347,7 @@ impl FakeLaunchers {
             bound: Mutex::new(vec![]),
             released: Mutex::new(vec![]),
             bind_gate: StdMutex::new(None),
+            fail_release: AtomicBool::new(false),
         })
     }
 }
@@ -364,6 +366,9 @@ impl t3_device::agent::Launchers for FakeLaunchers {
     }
     async fn release(&self, launcher: &str) -> Result<()> {
         self.released.lock().await.push(launcher.into());
+        if self.fail_release.load(Ordering::SeqCst) {
+            return Err(Error::Unavailable("launcher release failed".into()));
+        }
         Ok(())
     }
     async fn prune(&self, _: &BTreeSet<String>) -> Result<()> {

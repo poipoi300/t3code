@@ -2,7 +2,7 @@
 mod common;
 use common::*;
 use serde_json::json;
-use std::sync::atomic::Ordering;
+use std::sync::{Arc, atomic::Ordering};
 use t3_contracts::{base_schemas::ThreadId, device::*};
 use t3_device::{Error, host::OpenContext};
 
@@ -439,28 +439,172 @@ async fn state_subscription_contains_initial_snapshot_then_all_revisions() {
 
 #[tokio::test]
 async fn background_host_reconnects_reach_state_subscribers() {
-    let host = FakeHost::new("local", FakeOps::new("local", DevicePlatform::Ios, true), FakeCommands::encoder(), None);
+    let host = FakeHost::new(
+        "local",
+        FakeOps::new("local", DevicePlatform::Ios, true),
+        FakeCommands::encoder(),
+        None,
+    );
     let service = service(vec![host.clone()], true, false).await;
     service.readiness(None).await.unwrap();
     let mut updates = service.state_stream().await;
     let initial = updates.recv().await.unwrap();
-    host.phase.lock().unwrap().as_ref().unwrap()(DeviceHostStatus::Starting, Some("Reconnecting".into()));
+    host.phase.lock().unwrap().as_ref().unwrap()(
+        DeviceHostStatus::Starting,
+        Some("Reconnecting".into()),
+    );
     let update = updates.recv().await.unwrap();
     assert_eq!(update.host_status, DeviceHostStatus::Starting);
-    assert_eq!(update.host_status_detail.flatten().as_deref(), Some("Reconnecting"));
+    assert_eq!(
+        update.host_status_detail.flatten().as_deref(),
+        Some("Reconnecting")
+    );
     assert_eq!(update.revision, initial.revision + 1);
     host.phase.lock().unwrap().as_ref().unwrap()(DeviceHostStatus::Ready, None);
-    assert_eq!(updates.recv().await.unwrap().host_status, DeviceHostStatus::Ready);
+    assert_eq!(
+        updates.recv().await.unwrap().host_status,
+        DeviceHostStatus::Ready
+    );
 }
 
 #[tokio::test]
 async fn cloud_summaries_are_split_for_wire_compatibility() {
     let mut state = service(vec![], false, false).await.state().await;
-    for (id, kind) in [("local", DeviceHostKind::Local), ("ssh", DeviceHostKind::Ssh), ("eas", DeviceHostKind::Eas), ("pool", DeviceHostKind::Simlock)] {
-        state.hosts.push(t3_device::host::summary(id, id, kind, vec![]));
+    for (id, kind) in [
+        ("local", DeviceHostKind::Local),
+        ("ssh", DeviceHostKind::Ssh),
+        ("eas", DeviceHostKind::Eas),
+        ("pool", DeviceHostKind::Simlock),
+    ] {
+        state
+            .hosts
+            .push(t3_device::host::summary(id, id, kind, vec![]));
     }
     let wire = serde_json::to_value(t3_device::service::wire_state(state)).unwrap();
-    assert_eq!(wire["hosts"].as_array().unwrap().iter().map(|h|h["id"].as_str().unwrap()).collect::<Vec<_>>(), ["local", "ssh"]);
+    assert_eq!(
+        wire["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["local", "ssh"]
+    );
     assert_eq!(wire["easHosts"][0]["id"], "eas");
     assert_eq!(wire["simlockHosts"][0]["id"], "pool");
+}
+
+struct SelfHostFactory;
+#[async_trait::async_trait]
+impl t3_device::host::HostFactory for SelfHostFactory {
+    async fn create(
+        &self,
+        _: &DeviceHostConfig,
+    ) -> t3_device::Result<Arc<dyn t3_device::host::DeviceHost>> {
+        panic!("self-host must not create a remote host")
+    }
+    async fn test(&self, _: &SshDeviceHostConfig) -> t3_device::Result<DeviceHostSummary> {
+        panic!("self-host must not probe SSH")
+    }
+    async fn is_local(&self, _: &SshDeviceHostConfig) -> bool {
+        true
+    }
+}
+#[tokio::test]
+async fn testing_an_ssh_alias_for_this_machine_returns_local_summary_without_starting_tools() {
+    let host = FakeHost::new(
+        "local",
+        FakeOps::new("local", DevicePlatform::Ios, true),
+        FakeCommands::encoder(),
+        None,
+    );
+    let service = t3_device::DeviceService::new(
+        vec![host.clone()],
+        settings(false, false),
+        Some(Arc::new(SelfHostFactory)),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let config = serde_json::from_value(
+        json!({"kind":"ssh","id":"alias","label":"Alias","target":"localhost"}),
+    )
+    .unwrap();
+    let summary = service.test_host(config).await.unwrap();
+    assert_eq!(summary.id.as_ref(), "local");
+    assert_eq!(summary.kind, DeviceHostKind::Local);
+    assert_eq!(host.starts.load(Ordering::SeqCst), 0);
+    let Error::EasAccount(error) = service
+        .eas_account(serde_json::from_value(json!({})).unwrap())
+        .await
+        .unwrap_err()
+    else {
+        panic!("account error tag required")
+    };
+    assert_eq!(
+        serde_json::to_value(error).unwrap()["_tag"],
+        "DeviceEasAccountError"
+    );
+    let Error::SimlockIdentity(error) = service
+        .simlock_identity(serde_json::from_value(json!({})).unwrap())
+        .await
+        .unwrap_err()
+    else {
+        panic!("identity error tag required")
+    };
+    assert_eq!(
+        serde_json::to_value(error).unwrap()["_tag"],
+        "DeviceSimlockIdentityError"
+    );
+}
+
+#[tokio::test]
+async fn failed_launcher_close_retains_claim_until_release_succeeds() {
+    let host = FakeHost::new(
+        "local",
+        FakeOps::new("local", DevicePlatform::Ios, true),
+        FakeCommands::encoder(),
+        None,
+    );
+    let launchers = FakeLaunchers::new();
+    let service = t3_device::DeviceService::new(
+        vec![host],
+        settings(true, true),
+        None,
+        Some(launchers.clone()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    service
+        .open(
+            open("local", "phone", "t", DevicePlatform::Ios),
+            OpenContext::default(),
+        )
+        .await
+        .unwrap();
+    let target = t3_device::agent::AgentTarget {
+        agent_device_id: Some("phone".into()),
+        session: "session".into(),
+        args: vec![],
+        install_directory: None,
+        host_session: false,
+    };
+    assert!(
+        service
+            .agent_launcher(&"t".into(), "local", "phone", &target, &[])
+            .await
+            .unwrap()
+            .is_some()
+    );
+    launchers.fail_release.store(true, Ordering::SeqCst);
+    assert!(service.close(close("t", false)).await.is_err());
+    assert_eq!(service.sessions_for_thread(&"t".into()).await.len(), 1);
+    launchers.fail_release.store(false, Ordering::SeqCst);
+    service.close(close("t", false)).await.unwrap();
+    assert!(service.sessions_for_thread(&"t".into()).await.is_empty());
+    assert_eq!(launchers.released.lock().await.len(), 2);
 }

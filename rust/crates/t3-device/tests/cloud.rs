@@ -550,43 +550,93 @@ async fn simlock_catalog_filters_unavailable_workers_and_non_mobile_models() {
     host.stop().await.unwrap();
 }
 
-struct InstalledCli { calls: AtomicUsize, fail: AtomicBool }
+#[tokio::test]
+async fn simlock_refuses_option_like_or_control_character_models_before_cli_calls() {
+    let (_temp, host, commands, _) = simlock_fixture(1, false).await;
+    for model in ["--help", "bad\nmodel", "bad\0model", ""] {
+        let mut target = host.list().await.unwrap().devices[0].clone();
+        target.id = format!("simlock:ios:{model}").into();
+        assert!(host.boot(&target, &OpenContext::default()).await.is_err());
+    }
+    assert!(commands.calls.lock().unwrap().is_empty());
+    host.stop().await.unwrap();
+}
+
+struct InstalledCli {
+    calls: AtomicUsize,
+    fail: AtomicBool,
+}
 #[async_trait]
 impl t3_device::host::AgentCliProvider for InstalledCli {
     async fn ensure(&self) -> Result<t3_device::host::AgentCli> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        if self.fail.load(Ordering::SeqCst) { return Err(Error::Unavailable("install failed".into())); }
-        Ok(t3_device::host::AgentCli { node: "bound-node".into(), entry: "/installed/agent.mjs".into() })
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(Error::Unavailable("install failed".into()));
+        }
+        Ok(t3_device::host::AgentCli {
+            node: "bound-node".into(),
+            entry: "/installed/agent.mjs".into(),
+        })
     }
 }
 #[tokio::test]
 async fn simlock_installs_lazily_retries_failures_and_uses_the_installed_cli() {
     let (temp, previous, commands, pool) = simlock_fixture(1, false).await;
     previous.stop().await.unwrap();
-    let provider = Arc::new(InstalledCli { calls: AtomicUsize::new(0), fail: AtomicBool::new(true) });
+    let provider = Arc::new(InstalledCli {
+        calls: AtomicUsize::new(0),
+        fail: AtomicBool::new(true),
+    });
     let config = serde_json::from_value(json!({"kind":"simlock","id":"pool","label":"Pool","gatewayUrl":"https://simlock.test:4700","agentToken":"agent-token"})).unwrap();
-    let host = SimlockHost::new(SimlockOptions { config, state: temp.path().into(), node: "wrong-node".into(), agent_entry: "/wrong-entry".into(), cli_provider: Some(provider.clone()), commands: commands.clone(), http: pool, secrets: Arc::new(LiteralSecrets), environment: BTreeMap::new() }).unwrap();
+    let host = SimlockHost::new(SimlockOptions {
+        config,
+        state: temp.path().into(),
+        node: "wrong-node".into(),
+        agent_entry: "/wrong-entry".into(),
+        cli_provider: Some(provider.clone()),
+        commands: commands.clone(),
+        http: pool,
+        secrets: Arc::new(LiteralSecrets),
+        environment: BTreeMap::new(),
+    })
+    .unwrap();
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     assert!(host.ensure_ready(Arc::new(|_, _| {})).await.is_err());
     assert!(host.current().await.is_none());
     assert!(commands.calls.lock().unwrap().is_empty());
     provider.fail.store(false, Ordering::SeqCst);
-    for _ in 0..2 { assert_eq!(host.ensure_ready(Arc::new(|_, _| {})).await.unwrap().node_path, "bound-node"); }
+    for _ in 0..2 {
+        assert_eq!(
+            host.ensure_ready(Arc::new(|_, _| {}))
+                .await
+                .unwrap()
+                .node_path,
+            "bound-node"
+        );
+    }
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     let device = host.list().await.unwrap().devices[0].clone();
     let id = host.boot(&device, &OpenContext::default()).await.unwrap();
-    assert_eq!(host.agent_endpoint(&id).await.unwrap().unwrap().entry_path, PathBuf::from("/installed/agent.mjs"));
+    assert_eq!(
+        host.agent_endpoint(&id).await.unwrap().unwrap().entry_path,
+        PathBuf::from("/installed/agent.mjs")
+    );
     let call = commands.calls.lock().unwrap()[0].clone();
     assert_eq!(call.program, "bound-node");
     assert_eq!(call.args[0], "/installed/agent.mjs");
     host.stop().await.unwrap();
 }
 
-struct GatedOpen { commands: Arc<FakeCommands>, gate: Arc<Gate> }
+struct GatedOpen {
+    commands: Arc<FakeCommands>,
+    gate: Arc<Gate>,
+}
 #[async_trait]
 impl t3_device::io::Commands for GatedOpen {
     async fn run(&self, command: Command) -> Result<CommandOutput> {
-        if command.args.get(1).is_some_and(|arg| arg == "open") { self.gate.wait().await; }
+        if command.args.get(1).is_some_and(|arg| arg == "open") {
+            self.gate.wait().await;
+        }
         t3_device::io::Commands::run(self.commands.as_ref(), command).await
     }
 }
@@ -596,7 +646,21 @@ async fn simlock_stop_during_open_closes_the_partial_session_and_removes_its_sta
     previous.stop().await.unwrap();
     let gate = Gate::new();
     let config = serde_json::from_value(json!({"kind":"simlock","id":"pool","label":"Pool","gatewayUrl":"https://simlock.test:4700","agentToken":"agent-token"})).unwrap();
-    let host = SimlockHost::new(SimlockOptions { config, state: temp.path().into(), node: "node".into(), agent_entry: "/entry".into(), cli_provider: None, commands: Arc::new(GatedOpen { commands: commands.clone(), gate: gate.clone() }), http: pool, secrets: Arc::new(LiteralSecrets), environment: BTreeMap::new() }).unwrap();
+    let host = SimlockHost::new(SimlockOptions {
+        config,
+        state: temp.path().into(),
+        node: "node".into(),
+        agent_entry: "/entry".into(),
+        cli_provider: None,
+        commands: Arc::new(GatedOpen {
+            commands: commands.clone(),
+            gate: gate.clone(),
+        }),
+        http: pool,
+        secrets: Arc::new(LiteralSecrets),
+        environment: BTreeMap::new(),
+    })
+    .unwrap();
     host.ensure_ready(Arc::new(|_, _| {})).await.unwrap();
     let device = host.list().await.unwrap().devices[0].clone();
     let copy = host.clone();
@@ -604,9 +668,19 @@ async fn simlock_stop_during_open_closes_the_partial_session_and_removes_its_sta
     gate.entered.notified().await;
     host.stop().await.unwrap();
     assert!(opening.await.unwrap().is_err());
-    let calls = commands.calls.lock().unwrap();
-    assert_eq!(calls.iter().map(|call|call.args[1].as_str()).collect::<Vec<_>>(), ["connect", "close"]);
-    let mut entries = tokio::fs::read_dir(temp.path().join("device/simlock/pool")).await.unwrap();
+    {
+        let calls = commands.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call.args[1].as_str())
+                .collect::<Vec<_>>(),
+            ["connect", "close"]
+        );
+    }
+    let mut entries = tokio::fs::read_dir(temp.path().join("device/simlock/pool"))
+        .await
+        .unwrap();
     assert!(entries.next_entry().await.unwrap().is_none());
 }
 #[tokio::test]

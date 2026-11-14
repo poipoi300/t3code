@@ -37,6 +37,23 @@ async fn bound_launcher_preserves_arguments_overrides_environment_and_exit_code(
         "t3-a".into(),
     ];
     let launcher = launchers.bind("t3-a", &args).await.unwrap();
+    let unbound = launchers.state.join("device/bin").join(if cfg!(windows) {
+        "agent-device.cmd"
+    } else {
+        "agent-device"
+    });
+    let result = NativeCommands
+        .run(Command::new(
+            unbound.to_string_lossy(),
+            ["help", "snapshot"],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result.code, 23);
+    assert_eq!(
+        serde_json::from_str::<Value>(&result.stdout).unwrap(),
+        json!({"args":["help","snapshot"]})
+    );
     for (input, expected) in [
         (
             vec!["snapshot", "-i"],
@@ -139,6 +156,51 @@ async fn bound_launcher_preserves_arguments_overrides_environment_and_exit_code(
         .unwrap();
     assert!(std::path::Path::new(&launcher).exists());
     assert!(!launchers.state.join("device/targets/t3-ended").exists());
+}
+
+#[tokio::test]
+async fn launcher_close_distinguishes_missing_sessions_from_failed_releases() {
+    let dir = tempfile::tempdir().unwrap();
+    let entry = dir.path().join("fake-close.mjs");
+    let launchers = FileLaunchers {
+        state: dir.path().into(),
+        node: runtime().await,
+        entry: entry.clone(),
+        cli_provider: None,
+        commands: Arc::new(NativeCommands),
+    };
+    let launcher = launchers
+        .bind(
+            "t3-close",
+            &[
+                "--config".into(),
+                "/fixture.json".into(),
+                "--session".into(),
+                "t3-close".into(),
+            ],
+        )
+        .await
+        .unwrap();
+    for (code, stderr, success) in [
+        (0, "", true),
+        (1, "SESSION_NOT_FOUND", true),
+        (1, "private-token", false),
+    ] {
+        tokio::fs::write(
+            &entry,
+            format!(
+                "process.stderr.write({});process.exitCode={code};",
+                serde_json::to_string(stderr).unwrap()
+            ),
+        )
+        .await
+        .unwrap();
+        let result = launchers.release(&launcher).await;
+        assert_eq!(result.is_ok(), success);
+        if let Err(error) = result {
+            assert!(!format!("{error:?}").contains("private-token"));
+        }
+    }
 }
 #[tokio::test]
 async fn missing_bound_runtime_reports_recovery_guidance() {

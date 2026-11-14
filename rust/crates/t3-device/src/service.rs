@@ -221,7 +221,9 @@ impl DeviceService {
     }
     async fn status(&self, entry: &HostEntry, status: DeviceHostStatus, detail: Option<String>) {
         let mut state = self.inner.state.lock().await;
-        if state.wire.host_status == DeviceHostStatus::Disabled && status != DeviceHostStatus::Disabled {
+        if state.wire.host_status == DeviceHostStatus::Disabled
+            && status != DeviceHostStatus::Disabled
+        {
             return;
         }
         if !state
@@ -435,7 +437,13 @@ impl DeviceService {
         Ok(self.state().await)
     }
     pub async fn list_request(&self, input: DeviceListInput) -> Result<DeviceServiceState> {
-        if input.inspect_only.flatten() == Some(true) && input.update_tool.as_ref().and_then(|v| v.as_ref()).is_none() {
+        if input.inspect_only.flatten() == Some(true)
+            && input
+                .update_tool
+                .as_ref()
+                .and_then(|v| v.as_ref())
+                .is_none()
+        {
             return self.inspect().await;
         }
         if let Some(tool) = input.update_tool.flatten() {
@@ -766,8 +774,8 @@ impl DeviceService {
                         .await?;
                 }
             }
+            self.release_launchers(&ending).await?;
             if shutdown {
-                self.release_launchers(&ending).await?;
                 for session in &closing {
                     let ready = self
                         .current_readiness(Some(session.host_id.as_ref()))
@@ -1095,27 +1103,35 @@ impl DeviceService {
         factory.test(&input).await
     }
     pub async fn eas_account(&self, input: DeviceEasAccountInput) -> Result<DeviceEasAccount> {
-        self.inner
-            .accounts
-            .as_ref()
-            .ok_or_else(|| {
-                Error::Unavailable("EAS accounts are unavailable in this device service.".into())
-            })?
-            .eas_account(input)
-            .await
+        let result = match &self.inner.accounts {
+            Some(accounts) => accounts.eas_account(input).await,
+            None => Err(Error::Unavailable(
+                "EAS accounts are unavailable in this device service.".into(),
+            )),
+        };
+        result.map_err(|error| {
+            Error::EasAccount(DeviceEasAccountError {
+                _tag: DeviceEasAccountErrorTag::Error,
+                reason: error.to_string(),
+            })
+        })
     }
     pub async fn simlock_identity(
         &self,
         input: DeviceSimlockIdentityInput,
     ) -> Result<DeviceSimlockIdentity> {
-        self.inner
-            .accounts
-            .as_ref()
-            .ok_or_else(|| {
-                Error::Unavailable("Simlock hosts are unavailable in this device service.".into())
-            })?
-            .simlock_identity(input)
-            .await
+        let result = match &self.inner.accounts {
+            Some(accounts) => accounts.simlock_identity(input).await,
+            None => Err(Error::Unavailable(
+                "Simlock hosts are unavailable in this device service.".into(),
+            )),
+        };
+        result.map_err(|error| {
+            Error::SimlockIdentity(DeviceSimlockIdentityError {
+                _tag: DeviceSimlockIdentityErrorTag::Error,
+                reason: error.to_string(),
+            })
+        })
     }
     pub async fn reconcile(&self, configs: Vec<DeviceHostConfig>) -> Result<()> {
         let Some(factory) = &self.inner.factory else {

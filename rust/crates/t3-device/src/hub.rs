@@ -259,6 +259,7 @@ impl DeviceOperations for HubOperations {
         Ok(id.into())
     }
     async fn attach(&self, device: &DeviceSummary) -> Result<()> {
+        crate::error::validate_selector(device.id.as_ref(), "device id")?;
         if device.platform == DevicePlatform::Ios {
             self.start_stream(device.id.as_ref()).await?;
         }
@@ -289,6 +290,7 @@ impl DeviceOperations for HubOperations {
         }
     }
     async fn screenshot(&self, device: &DeviceSummary) -> Result<Vec<u8>> {
+        crate::error::validate_selector(device.id.as_ref(), "device id")?;
         let prefix = if device.platform == DevicePlatform::Ios {
             "serve-sim"
         } else {

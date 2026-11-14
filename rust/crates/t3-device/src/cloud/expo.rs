@@ -253,7 +253,17 @@ fn decode_error(operation: &str) -> ExpoError {
     }
 }
 fn session_status(value: &Value) -> Option<&str> {
-    value.as_str().filter(|status| ["ERRORED", "IN_PROGRESS", "NEW", "QUEUED", "STARTING", "STOPPED"].contains(status))
+    value.as_str().filter(|status| {
+        [
+            "ERRORED",
+            "IN_PROGRESS",
+            "NEW",
+            "QUEUED",
+            "STARTING",
+            "STOPPED",
+        ]
+        .contains(status)
+    })
 }
 fn nullable_string(value: Option<&Value>) -> bool {
     value.is_some_and(|value| value.is_null() || value.is_string())
@@ -265,13 +275,19 @@ impl ExpoApi for ExpoHttp {
             .call("T3ExpoViewer", "read the signed-in account", json!({}))
             .await?;
         let actor = &v["meActor"];
-        let typename = actor["__typename"].as_str().ok_or_else(|| decode_error("read the signed-in account"))?;
+        let typename = actor["__typename"]
+            .as_str()
+            .ok_or_else(|| decode_error("read the signed-in account"))?;
         let name = match typename {
-            "User" | "SSOUser" => actor["username"].as_str().ok_or_else(|| decode_error("read the signed-in account"))?,
+            "User" | "SSOUser" => actor["username"]
+                .as_str()
+                .ok_or_else(|| decode_error("read the signed-in account"))?,
             "Robot" => {
-                if !nullable_string(actor.get("firstName")) { return Err(decode_error("read the signed-in account")); }
+                if !nullable_string(actor.get("firstName")) {
+                    return Err(decode_error("read the signed-in account"));
+                }
                 actor["firstName"].as_str().unwrap_or(typename)
-            },
+            }
             _ => typename,
         };
         let mut apps = Vec::new();
@@ -279,7 +295,9 @@ impl ExpoApi for ExpoHttp {
             .as_array()
             .ok_or_else(|| decode_error("read the signed-in account"))?
         {
-            if !account["name"].is_string() { return Err(decode_error("read the signed-in account")); }
+            if !account["name"].is_string() {
+                return Err(decode_error("read the signed-in account"));
+            }
             for edge in account["appsPaginated"]["edges"]
                 .as_array()
                 .ok_or_else(|| decode_error("read the signed-in account"))?
@@ -325,12 +343,18 @@ impl ExpoApi for ExpoHttp {
             )
             .await?;
         let s = &v["deviceRunSessions"]["byId"];
-        let remote = s.get("remoteConfig").ok_or_else(|| decode_error("read a simulator session"))?;
-        if !remote.is_null() && !remote["__typename"].is_string() { return Err(decode_error("read a simulator session")); }
+        let remote = s
+            .get("remoteConfig")
+            .ok_or_else(|| decode_error("read a simulator session"))?;
+        if !remote.is_null() && !remote["__typename"].is_string() {
+            return Err(decode_error("read a simulator session"));
+        }
         let mut agent = None;
         let mut preview = None;
         if remote["__typename"] == "AgentDeviceRunSessionRemoteConfig" {
-            if !nullable_string(remote.get("previewApiUrl")) || !nullable_string(remote.get("webPreviewToken")) {
+            if !nullable_string(remote.get("previewApiUrl"))
+                || !nullable_string(remote.get("webPreviewToken"))
+            {
                 return Err(decode_error("read a simulator session"));
             }
             let url = remote["agentDeviceRemoteSessionUrl"]

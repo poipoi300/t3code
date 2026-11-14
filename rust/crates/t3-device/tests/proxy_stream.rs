@@ -397,7 +397,16 @@ async fn real_loopback_proxy_preserves_binary_admission_and_input_frames() {
     let upstream_addr = upstream.local_addr().unwrap();
     let hub = tokio::spawn(async move {
         let (socket, _) = upstream.accept().await.unwrap();
-        let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async_with_config(
+            socket,
+            Some(
+                tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+                    .max_frame_size(None)
+                    .max_message_size(None),
+            ),
+        )
+        .await
+        .unwrap();
         socket
             .send(Message::Binary(Bytes::from_static(&[0x83])))
             .await
@@ -410,6 +419,10 @@ async fn real_loopback_proxy_preserves_binary_admission_and_input_frames() {
                 .await
                 .unwrap();
         }
+        let payload = socket.next().await.unwrap().unwrap().into_data();
+        assert_eq!(payload.len(), 17 * 1024 * 1024);
+        assert!(payload.iter().all(|byte| *byte == 7));
+        socket.send(Message::Binary(payload)).await.unwrap();
         let _ = socket.close(None).await;
     });
     let mut host = FakeHost::new(
@@ -441,9 +454,17 @@ async fn real_loopback_proxy_preserves_binary_admission_and_input_frames() {
             .await
             .unwrap();
     });
-    let (mut client, _) = tokio_tungstenite::connect_async(format!(
-        "ws://{address}/api/device-hub/vendor/serve-sim/helper/ws?device=phone&wsTicket=private"
-    ))
+    let (mut client, _) = tokio_tungstenite::connect_async_with_config(
+        format!(
+            "ws://{address}/api/device-hub/vendor/serve-sim/helper/ws?device=phone&wsTicket=private"
+        ),
+        Some(
+            tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+                .max_frame_size(None)
+                .max_message_size(None),
+        ),
+        false,
+    )
     .await
     .unwrap();
     assert_eq!(
@@ -460,6 +481,9 @@ async fn real_loopback_proxy_preserves_binary_admission_and_input_frames() {
             frame
         );
     }
+    let payload = Bytes::from(vec![7; 17 * 1024 * 1024]);
+    client.send(Message::Binary(payload.clone())).await.unwrap();
+    assert_eq!(client.next().await.unwrap().unwrap().into_data(), payload);
     let _ = client.close(None).await;
     drop(client);
     hub.await.unwrap();

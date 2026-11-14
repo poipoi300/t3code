@@ -122,10 +122,16 @@ impl Http for NativeHttp {
         if let Some(body) = request.body_stream {
             builder = builder.body(reqwest::Body::wrap_stream(body));
         }
-        let response = builder
-            .send()
-            .await
-            .map_err(|_| Error::Unavailable("Device HTTP request failed.".into()))?;
+        let response = builder.send().await.map_err(|error| {
+            Error::Unavailable(
+                if error.is_timeout() {
+                    "Device HTTP request timed out."
+                } else {
+                    "Device HTTP request failed."
+                }
+                .into(),
+            )
+        })?;
         let status = response.status().as_u16();
         let headers = response
             .headers()
@@ -137,7 +143,7 @@ impl Http for NativeHttp {
             let mut stream = response.bytes_stream();
             let mut received = 0usize;
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| Error::Unavailable("Device HTTP body failed.".into()))?;
+                let chunk = chunk.map_err(|error| Error::Unavailable(if error.is_timeout() { "Device HTTP request timed out." } else { "Device HTTP body failed." }.into()))?;
                 received = received.saturating_add(chunk.len());
                 if max.is_some_and(|max| received > max) { Err(crate::error::invalid("response size"))?; }
                 yield chunk;

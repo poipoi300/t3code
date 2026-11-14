@@ -264,6 +264,8 @@ async fn handle(
         url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
             .map_err(|_| crate::error::invalid("WebSocket URL"))?;
         return Ok(upgrade
+            .max_message_size(100 * 1024 * 1024)
+            .max_frame_size(100 * 1024 * 1024)
             .on_upgrade(move |client| async move {
                 let _ = proxy_socket(
                     client,
@@ -390,9 +392,13 @@ impl SocketConnector for NativeSocketConnector {
                 .map_err(|_| crate::error::invalid("WebSocket protocol"))?,
             );
         }
+        // Node's global WebSocket has no application-level upstream payload ceiling.
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(None)
+            .max_frame_size(None);
         let (upstream, _) = tokio::time::timeout(
             Duration::from_secs(10),
-            tokio_tungstenite::connect_async(request),
+            tokio_tungstenite::connect_async_with_config(request, Some(config), false),
         )
         .await
         .map_err(|_| Error::Unavailable("Device stream connection timed out.".into()))?

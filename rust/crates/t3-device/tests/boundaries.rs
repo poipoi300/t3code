@@ -729,6 +729,8 @@ async fn credentials_follow_saved_env_login_precedence_and_reject_unsafe_headers
         assert!(!error.to_string().contains(token));
         assert!(error.to_string().contains("not a usable Expo credential"));
     }
+    let settings: t3_device::service::DeviceSettings = serde_json::from_value(json!({"enabled":true,"agent_access_enabled":true,"onboarding_completed":true,"hosts":[{"kind":"simlock","id":"pool","label":"Pool","gatewayUrl":"https://pool.test","agentToken":"private-agent-token"}]})).unwrap();
+    assert!(!format!("{settings:?}").contains("private-agent-token"));
 }
 #[tokio::test]
 async fn expo_rejection_classification_does_not_free_uncertain_creates() {
@@ -822,7 +824,12 @@ async fn expo_refuses_malformed_session_shapes_and_unknown_statuses() {
         json!({"id":"s","status":"NEW","remoteConfig":{}}),
         json!({"id":"s","status":"IN_PROGRESS","remoteConfig":{"__typename":"AgentDeviceRunSessionRemoteConfig","agentDeviceRemoteSessionUrl":"https://agent.test","agentDeviceRemoteSessionToken":"secret","previewApiUrl":42,"webPreviewToken":null}}),
     ] {
-        let api = ExpoHttp::new(FakeHttp::new([(200, json!({"data":{"deviceRunSessions":{"byId":session}}}))]), resolve_credential("private-token", None, home.path()).await.unwrap());
+        let api = ExpoHttp::new(
+            FakeHttp::new([(200, json!({"data":{"deviceRunSessions":{"byId":session}}}))]),
+            resolve_credential("private-token", None, home.path())
+                .await
+                .unwrap(),
+        );
         let error = api.session("s").await.err().expect("schema refusal");
         assert!(!error.rejected);
         assert!(!format!("{error:?}").contains("secret"));
@@ -887,6 +894,37 @@ fn url_and_command_boundaries_refuse_option_injection_and_credential_urls() {
         assert!(t3_device::error::validate_selector(id, "id").is_err());
     }
     assert!(t3_device::error::validate_selector("simlock:ios:iPhone 17 Pro", "id").is_ok());
+}
+
+#[tokio::test]
+async fn detail_and_screenshot_refuse_hostile_discovered_identifiers_before_io() {
+    let commands = FakeCommands::encoder();
+    let http = FakeHttp::new([]);
+    let hub = t3_device::hub::HubOperations {
+        host_id: "local".into(),
+        origin: "http://hub.test".into(),
+        http: http.clone(),
+        commands: commands.clone(),
+        platforms: vec![DevicePlatform::Ios],
+    };
+    let host = FakeHost::new(
+        "local",
+        FakeOps::new("local", DevicePlatform::Ios, true),
+        commands.clone(),
+        None,
+    );
+    for id in ["--help", "bad\nidentifier", "bad\0identifier", ""] {
+        let mut device = device("local", "phone", DevicePlatform::Ios, true);
+        device.id = id.into();
+        assert!(read_detail(&host.ready, &device).await.is_err());
+        assert!(
+            t3_device::host::DeviceOperations::screenshot(&hub, &device)
+                .await
+                .is_err()
+        );
+    }
+    assert!(commands.calls.lock().unwrap().is_empty());
+    assert!(http.requests.lock().await.is_empty());
 }
 
 struct FakeMachine {

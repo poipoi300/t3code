@@ -404,6 +404,7 @@ impl SimlockHost {
                     "This Simlock device is no longer leased. Open it again from the list.",
                 )
             })?;
+        crate::error::validate_selector(target.1, "Simlock model")?;
         let token = self.token().await?;
         let dir = self
             .inner

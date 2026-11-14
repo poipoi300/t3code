@@ -320,7 +320,10 @@ impl Http for ScriptedHealth {
     async fn execute(&self, _: HttpRequest) -> Result<HttpResponse> {
         let healthy = self.replies.lock().unwrap().pop_front().unwrap_or(true);
         let _ = self.probed.send(healthy);
-        Ok(HttpResponse::bytes(if healthy { 200 } else { 503 }, b"ok".to_vec()))
+        Ok(HttpResponse::bytes(
+            if healthy { 200 } else { 503 },
+            b"ok".to_vec(),
+        ))
     }
 }
 #[tokio::test(start_paused = true)]
@@ -328,30 +331,61 @@ async fn ssh_reconnects_after_three_consecutive_misses_and_resets_on_success() {
     let (tx, mut probes) = tokio::sync::mpsc::unbounded_channel();
     let spawner = FakeSpawner::new();
     let host = SshDeviceHost::new(SshOptions {
-        config: ssh_config(), owner: t3_device::ssh::owner("env", "state", "remote"),
+        config: ssh_config(),
+        owner: t3_device::ssh::owner("env", "state", "remote"),
         commands: ssh_commands(),
-        http: Arc::new(ScriptedHealth { replies: std::sync::Mutex::new([true, false, false, true, false, false, false].into()), probed: tx }),
-        spawner: spawner.clone(), ports: Arc::new(FakePorts(AtomicU16::new(8500))),
-    }).unwrap();
+        http: Arc::new(ScriptedHealth {
+            replies: std::sync::Mutex::new([true, false, false, true, false, false, false].into()),
+            probed: tx,
+        }),
+        spawner: spawner.clone(),
+        ports: Arc::new(FakePorts(AtomicU16::new(8500))),
+    })
+    .unwrap();
     let (tx, mut phases) = tokio::sync::mpsc::unbounded_channel();
-    host.ensure_ready(Arc::new(move |status, detail| { let _ = tx.send((status, detail)); })).await.unwrap();
+    host.ensure_ready(Arc::new(move |status, detail| {
+        let _ = tx.send((status, detail));
+    }))
+    .await
+    .unwrap();
     assert_eq!(probes.recv().await, Some(true));
-    while let Ok((phase, _)) = phases.try_recv() { assert_ne!(phase, DeviceHostStatus::Failed); }
+    while let Ok((phase, _)) = phases.try_recv() {
+        assert_ne!(phase, DeviceHostStatus::Failed);
+    }
     for expected in [false, false, true, false, false] {
         assert_eq!(probes.recv().await, Some(expected));
         assert_eq!(spawner.calls.lock().await.len(), 1);
-        assert_eq!(spawner.children.lock().await[0].stops.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            spawner.children.lock().await[0]
+                .stops
+                .load(Ordering::SeqCst),
+            0
+        );
     }
     assert_eq!(probes.recv().await, Some(false));
     let (phase, detail) = phases.recv().await.unwrap();
     assert_eq!(phase, DeviceHostStatus::Starting);
     assert!(detail.unwrap().contains("Reconnecting"));
-    loop { if phases.recv().await.unwrap().0 == DeviceHostStatus::Ready { break } }
+    loop {
+        if phases.recv().await.unwrap().0 == DeviceHostStatus::Ready {
+            break;
+        }
+    }
     assert_eq!(spawner.calls.lock().await.len(), 2);
-    assert_eq!(spawner.children.lock().await[0].stops.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        spawner.children.lock().await[0]
+            .stops
+            .load(Ordering::SeqCst),
+        1
+    );
     assert!(host.current().await.is_some());
     host.stop().await.unwrap();
-    assert_eq!(spawner.children.lock().await[1].stops.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        spawner.children.lock().await[1]
+            .stops
+            .load(Ordering::SeqCst),
+        1
+    );
 }
 #[tokio::test]
 async fn ssh_forward_owns_stdin_disables_multiplexing_and_cleans_up() {
