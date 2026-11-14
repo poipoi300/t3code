@@ -382,6 +382,8 @@ impl Platform for NativePlatform {
             discarded_secure_records: report.discarded_secure_records,
             replaced_unreadable_key: report.replaced_unreadable_key,
             recreated_database: report.recreated_database,
+            retained_secure_records: report.retained_secure_records,
+            recovered_secure_records: report.recovered_secure_records,
         }
     }
     fn app_url(&self) -> HostFuture<'_, Option<String>> {

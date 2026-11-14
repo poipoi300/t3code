@@ -17,6 +17,7 @@ pub(crate) struct SystemProxy {
 }
 
 impl SystemProxy {
+    #[cfg(any(target_os = "windows", test))]
     /// Windows' `ProxyServer` (`host:port`, or `http=host:port;https=host:port;…`) and
     /// `ProxyOverride` (`;`-separated patterns and `<local>`), read when `ProxyEnable` is set.
     pub(crate) fn from_windows(server: &str, overrides: &str) -> Self {
