@@ -122,13 +122,14 @@ pub fn is_image_path(path: &str) -> bool {
 }
 
 pub struct SearchIndex {
-    cwd: PathBuf,
+    pub(crate) cwd: PathBuf,
     picker: SharedFilePicker,
     frecency: SharedFrecency,
     ignored: RwLock<HashSet<String>>,
     incomplete: bool,
-    scope: crate::scoped::ScopedDir,
-    internal: paths::InternalPaths,
+    pub(crate) scope: crate::scoped::ScopedDir,
+    pub(crate) internal: paths::InternalPaths,
+    symlinks: Arc<crate::symlinks::SymlinkCache>,
 }
 fn fff_error(e: impl std::fmt::Display) -> Error {
     Error::Search(e.to_string())
@@ -177,6 +178,7 @@ impl SearchIndex {
                 incomplete: !complete,
                 scope,
                 internal,
+                symlinks: Arc::default(),
             });
             if !complete && variant == IndexVariant::Content {
                 return Err(Error::ScanTimeout);
@@ -186,6 +188,7 @@ impl SearchIndex {
         .await
     }
     pub async fn refresh(self: &Arc<Self>) -> Result<()> {
+        self.symlinks.invalidate();
         let this = self.clone();
         blocking(move || {
             this.picker
@@ -205,6 +208,7 @@ impl SearchIndex {
         limit: usize,
         kind: Option<ProjectEntryKind>,
         images: bool,
+        symlinks: &crate::symlinks::SymlinkScan,
     ) -> Result<ProjectSearchEntriesResult> {
         let guard = self.picker.read().map_err(fff_error)?;
         let picker = guard
@@ -292,6 +296,7 @@ impl SearchIndex {
                 .into_iter()
                 .filter(|e| {
                     !ignored(&ignored_set, &e.path.0)
+                        && !symlinks.paths.contains(&e.path.0)
                         && self.safe_entry(&e.path.0, e.kind == ProjectEntryKind::File)
                 })
                 .collect();
@@ -301,7 +306,7 @@ impl SearchIndex {
             if visible.len() >= requested
                 || fetched >= total
                 || size >= PAGE_CAP
-                || ignored_set.is_empty()
+                || (ignored_set.is_empty() && symlinks.paths.is_empty())
             {
                 break (
                     visible
@@ -324,8 +329,38 @@ impl SearchIndex {
             } else {
                 total > limit
             };
-        entries.truncate(limit);
-        Ok(ProjectSearchEntriesResult { entries, truncated })
+        let mut indexed = entries.into_iter().peekable();
+        let mut links: Vec<_> = symlinks
+            .entries
+            .iter()
+            .filter(|e| {
+                !ignored(&ignored_set, &e.path.0)
+                    && kind.as_ref().is_none_or(|kind| &e.kind == kind)
+                    && (!images || (e.kind == ProjectEntryKind::File && is_image_path(&e.path.0)))
+            })
+            .filter_map(|e| {
+                crate::symlinks::score(&e.path.0, query).map(|score| (e.clone(), score))
+            })
+            .collect();
+        links.sort_by_key(|(_, score)| *score);
+        let mut merged = Vec::new();
+        for (entry, score) in links {
+            while indexed.peek().is_some_and(|e| {
+                crate::symlinks::score(&e.path.0, query).unwrap_or(usize::MAX) <= score
+            }) {
+                if let Some(entry) = indexed.next() {
+                    merged.push(entry);
+                }
+            }
+            merged.push(entry);
+        }
+        merged.extend(indexed);
+        let truncated = truncated || merged.len() > limit;
+        merged.truncate(limit);
+        Ok(ProjectSearchEntriesResult {
+            entries: merged,
+            truncated,
+        })
     }
     pub async fn search(
         self: &Arc<Self>,
@@ -347,16 +382,86 @@ impl SearchIndex {
         kind: Option<ProjectEntryKind>,
         images: bool,
     ) -> Result<ProjectSearchEntriesResult> {
+        let symlinks = self.list_symlinks().await?;
         let this = self.clone();
         blocking(move || {
             let query = raw_query.replace('[', "");
-            let mut result = this.search_sync(&query, limit, kind.clone(), images)?;
+            let mut result = this.search_sync(&query, limit, kind.clone(), images, &symlinks)?;
             if result.entries.is_empty() && query.contains('{') {
-                result = this.search_sync(&query.replace('{', ""), limit, kind, images)?;
+                result =
+                    this.search_sync(&query.replace('{', ""), limit, kind, images, &symlinks)?;
             }
             Ok(result)
         })
         .await
+    }
+    pub(crate) fn symlink_directories(&self) -> Result<(Vec<String>, bool)> {
+        let guard = self.picker.read().map_err(fff_error)?;
+        let picker = guard
+            .as_ref()
+            .ok_or_else(|| Error::Search("index closed".into()))?;
+        let parser = QueryParser::new(fff_search::DirSearchConfig);
+        let query = parser.parse("");
+        let mut directories = vec![String::new()];
+        for offset in (0..MAX_ENTRIES).step_by(1000) {
+            let page = picker.fuzzy_search_directories(
+                &query,
+                FuzzySearchOptions {
+                    project_path: Some(picker.base_path()),
+                    pagination: PaginationArgs {
+                        offset,
+                        limit: 1000,
+                    },
+                    ..Default::default()
+                },
+            );
+            for item in &page.items {
+                let path = normalize_path(&item.relative_path(picker))
+                    .trim_end_matches('/')
+                    .to_owned();
+                if !path.is_empty() {
+                    directories.push(path);
+                }
+            }
+            if page.items.len() < 1000 {
+                break;
+            }
+        }
+        directories.sort();
+        directories.dedup();
+        Ok((directories, !picker.is_scan_active()))
+    }
+    async fn list_symlinks(self: &Arc<Self>) -> Result<Arc<crate::symlinks::SymlinkScan>> {
+        let watching = self.symlinks.watcher.lock().map_err(fff_error)?.is_some();
+        if watching {
+            let this = self.clone();
+            return self
+                .symlinks
+                .read(true, move || crate::symlinks::scan(this))
+                .await;
+        }
+        let this = self.clone();
+        let watched = blocking(move || {
+            let mut watcher = this.symlinks.watcher.lock().map_err(fff_error)?;
+            if watcher.is_none() {
+                let cache = Arc::downgrade(&this.symlinks);
+                let root = this.cwd.clone();
+                *watcher = this
+                    .picker
+                    .watch("", Default::default(), move |_, events| {
+                        if let Some(cache) = cache.upgrade() {
+                            cache.on_events(&root, events);
+                        }
+                    })
+                    .ok();
+            }
+            Ok(watcher.is_some())
+        })
+        .await?;
+        let this = self.clone();
+        self.symlinks
+            .read(watched, move || crate::symlinks::scan(this))
+            .await
     }
     pub async fn list(self: &Arc<Self>) -> Result<ProjectListEntriesResult> {
         let result = self
@@ -773,6 +878,48 @@ impl SearchIndexes {
 #[cfg(test)]
 mod review_tests {
     use super::*;
+    #[tokio::test(flavor = "current_thread")]
+    async fn picker_lock_contention_does_not_block_the_async_executor() {
+        use std::{future::Future, task::Poll};
+        let temp = tempfile::tempdir().expect("fixture");
+        std::fs::write(temp.path().join("file.txt"), "needle").expect("file");
+        let index = SearchIndex::new(
+            temp.path().into(),
+            IndexVariant::Paths,
+            paths::InternalPaths {
+                state_dir: temp.path().join("state"),
+                secrets_dir: temp.path().join("secrets"),
+            },
+        )
+        .await
+        .expect("index");
+        let _watch = index.watch("file.txt".into()).await.expect("watcher ready");
+        index.list().await.expect("initial scan");
+        let picker = index.picker.clone();
+        let (release, gate) = std::sync::mpsc::channel();
+        let (held_tx, held) = tokio::sync::oneshot::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = picker.write().expect("lock");
+            held_tx.send(()).expect("held");
+            gate.recv().expect("release");
+        });
+        held.await.expect("held");
+        let mut search = Box::pin(index.search("file".into(), 10, None, false));
+        let mut content=Box::pin(index.search_contents(serde_json::from_value(serde_json::json!({"cwd":temp.path(),"query":"needle","limit":10,"caseSensitive":false,"wholeWord":false,"useRegex":false})).expect("input")));
+        let mut refresh = Box::pin(index.refresh());
+        std::future::poll_fn(|cx| {
+            assert!(search.as_mut().poll(cx).is_pending());
+            assert!(content.as_mut().poll(cx).is_pending());
+            assert!(refresh.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        release.send(()).expect("release");
+        assert!(!search.await.expect("search").entries.is_empty());
+        assert_eq!(content.await.expect("content").matches.len(), 1);
+        refresh.await.expect("refresh");
+        holder.join().expect("holder");
+    }
     #[test]
     fn a_stalled_watcher_retains_at_most_32_batches() {
         let (sender, mut receiver) = watch_event_channel();

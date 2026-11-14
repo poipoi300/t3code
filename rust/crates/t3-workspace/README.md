@@ -14,8 +14,9 @@ directories supplied by the caller. This crate never opens an application databa
   roots. Neither accepts filesystem roots as grants.
 - `WorkspaceEntries::{browse, list, search, search_contents, list_ignored_files}`
   implement host directory completion, workspace trees, mention/palette search
-  and grep. Share its indexes with `WorkspaceFileSystem` so new files refresh
-  existing indexes. `SearchIndex::watch` returns an owned subscription.
+  and grep. Ignored-file queries trim and validate at 256 UTF-16 units, then
+  filter paths case-insensitively before the 200-file cap. Share its indexes with
+  `WorkspaceFileSystem` so new files refresh existing indexes. `SearchIndex::watch` returns an owned subscription.
 - `SearchIndexes` retains separate path/content indexes for 15 minutes after
   access; `evict_idle` also allows a server timer to reclaim idle indexes without
   another search. Initialization uses a separate cell per key, with at most 16
@@ -31,6 +32,10 @@ directories supplied by the caller. This crate never opens an application databa
   markers, shell readiness, output callbacks and completion receivers.
   Supply scripts after `resolve_scripts` applies settings inheritance. Keep the
   runner alive for its background observers; dropping it cancels those observers.
+- `restore::WorktreeRestore::restore` restores managed missing/leftover checkouts
+  and direct scratch children, under the supplied shared `WorkspaceLeases`.
+  Supply authoritative project roots, current/previous managed roots and the
+  configured `<base>/scratch` root; callers still validate cwd before launch.
 - `WorkspaceLeases` and `WorkspaceReservations` provide exclusive workspace
   operations and overlapping restore/start reservations with cancellation cleanup.
 - `AssetSigner` requires at least 32 supplied bytes of the existing
@@ -64,6 +69,16 @@ cleanup match TypeScript. Upload and asset payload formats are version 1 JSON,
 base64url without padding, signed with HMAC-SHA256. Native icon cache files remain
 `<providerStatusCacheDir>/native-app-icons/<sha256>.png`.
 
+Path search/listing supplements fff with internal file and directory links,
+without descending through linked trees. It applies nearest `.ignore` NFA rules
+and each nested repository's Git rules, rejects external and `.git` targets,
+corrects watcher-indexed link kinds, and scans sixteen directories at a time.
+Concurrent scans coalesce. Watcher events invalidate links; ordinary file edits
+do not. Unwatched/incomplete scans expire after two seconds. The first read waits
+for completion; subsequent reads wait five milliseconds before using the last
+finished scan. fff search, progress, watcher setup and refresh run off the async
+executor. The existing content-search containment/budget policy remains in force.
+
 Search depends on **`fff-search = 0.11.0`**, the published Rust core of the pinned
 `@ff-labs/fff-node` **0.11.0**. Both artifacts identify upstream commit
 `95fd777c2529fc7b4d7572dabff64cc07268f2c5`. The Node wrapper passes no frecency
@@ -85,8 +100,9 @@ Source: [published core](https://crates.io/crates/fff-search/0.11.0),
   remain orchestration responsibilities. Actual clone-to-directory is implemented
   by `sourceControl/SourceControlRepositoryService.ts`, outside this crate's port.
   `ManagedProjectFolders.ts`, `ScratchThreadPromotion.ts`, `RepositoryIdentityResolver.ts`,
-  `WorktreeSetupTracker.ts`, agent-session import/scanning and
-  `workspace/restoreMissingWorktree.ts` have not been ported here.
+  `WorktreeSetupTracker.ts` and agent-session import/scanning have not been ported
+  here. Orchestration send/start and terminal-recovery adapters must bind the
+  shared worktree restore service and propagate recreation failures.
 - The document parsers behind `provider/DocumentText.ts` are not implemented;
   the caller must provide `DocumentText`. The attachment claim plan does not
   perform database commits, claim journaling or authorization of thread mutations.

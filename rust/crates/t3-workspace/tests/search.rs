@@ -80,6 +80,200 @@ async fn git(root: &Path, args: &[&str]) {
 }
 
 #[tokio::test]
+async fn ignored_file_query_filters_before_cap_and_is_trimmed_and_case_insensitive() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let root = temp.path();
+    git(root, &["init"]).await;
+    put(root, ".gitignore", "*.secret\n");
+    for i in 1..=205 {
+        put(root, &format!("file-{i:03}.secret"), "s");
+    }
+    let service = entries(root);
+    let listed = service
+        .list_ignored_files(ProjectListIgnoredFilesInput {
+            cwd: text(root),
+            query: None,
+        })
+        .await
+        .expect("listing");
+    assert_eq!(listed.files.len(), 200);
+    assert!(listed.truncated);
+    let filtered = service
+        .list_ignored_files(ProjectListIgnoredFilesInput {
+            cwd: text(root),
+            query: Some(TrimmedString("  FILE-205  ".into())),
+        })
+        .await
+        .expect("query");
+    assert_eq!(filtered.files.len(), 1);
+    assert_eq!(filtered.files[0].path.0, "file-205.secret");
+    assert!(!filtered.truncated);
+    assert!(
+        service
+            .list_ignored_files(ProjectListIgnoredFilesInput {
+                cwd: text(root),
+                query: Some(TrimmedString("x".repeat(257)))
+            })
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn searches_internal_symlinks_without_descending_or_leaking_external_and_git_targets() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let root = temp.path();
+    let outside = tempfile::tempdir().expect("outside");
+    git(root, &["init"]).await;
+    put(root, "src/index.ts", "export {};");
+    #[cfg(windows)]
+    let dir_link = std::os::windows::fs::symlink_dir;
+    #[cfg(unix)]
+    let dir_link = std::os::unix::fs::symlink;
+    #[cfg(windows)]
+    let file_link = std::os::windows::fs::symlink_file;
+    #[cfg(unix)]
+    let file_link = std::os::unix::fs::symlink;
+    dir_link(root.join("src"), root.join("src-link")).expect("dir link");
+    file_link(root.join("src/index.ts"), root.join("index-link.ts")).expect("file link");
+    dir_link(outside.path().to_path_buf(), root.join("outside-link")).expect("outside link");
+    dir_link(root.join(".git"), root.join("git-link")).expect("git link");
+    dir_link(root.join("src"), root.join("custom-link")).expect("ignored link");
+    put(root, ".ignore", "custom-link\nfolder-link/\n");
+    dir_link(root.join("src"), root.join("folder-link")).expect("folder link");
+    let service = entries(root);
+    let result = service
+        .search(search(root, "link", 100, None, false))
+        .await
+        .expect("search");
+    let paths: Vec<_> = result.entries.iter().map(|e| e.path.0.as_str()).collect();
+    for path in ["src-link", "index-link.ts", "folder-link"] {
+        assert!(paths.contains(&path), "{path}: {paths:?}");
+    }
+    for path in [
+        "outside-link",
+        "git-link",
+        "custom-link",
+        "src-link/index.ts",
+    ] {
+        assert!(!paths.contains(&path), "{path}");
+    }
+    assert_eq!(
+        result
+            .entries
+            .iter()
+            .find(|e| e.path.0 == "src-link")
+            .expect("link")
+            .kind,
+        ProjectEntryKind::Directory
+    );
+    let files = service
+        .search(search(
+            root,
+            "link",
+            100,
+            Some(ProjectEntryKind::File),
+            false,
+        ))
+        .await
+        .expect("files");
+    assert!(files.entries.iter().any(|e| e.path.0 == "index-link.ts"));
+    assert!(
+        !files
+            .entries
+            .iter()
+            .any(|e| ["src-link", "folder-link"].contains(&e.path.0.as_str()))
+    );
+}
+
+#[tokio::test]
+async fn symlink_ignore_precedence_tracked_paths_and_nested_repository_ownership() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let root = temp.path();
+    git(root, &["init"]).await;
+    put(root, "src/index.ts", "");
+    put(root, "keep-real.ts", "");
+    put(root, "sub/hide-real.ts", "");
+    #[cfg(windows)]
+    let file_link = std::os::windows::fs::symlink_file;
+    #[cfg(unix)]
+    let file_link = std::os::unix::fs::symlink;
+    for (target, path) in [
+        ("src/index.ts", "tracked-link.ts"),
+        ("keep-real.ts", "keep-link.ts"),
+        ("sub/hide-real.ts", "sub/hide-link.ts"),
+        ("src/index.ts", "blink"),
+    ] {
+        file_link(root.join(target), root.join(path)).expect("link");
+    }
+    git(root, &["add", "tracked-link.ts"]).await;
+    put(root, ".gitignore", "tracked-link.ts\n*keep*\nblink\n");
+    put(root, ".ignore", "!*keep*\n*hide*\n!link\n");
+    put(root, "sub/.ignore", "!*hide*\n");
+    let nested = root.join("vendor/sub");
+    put(&nested, "a.ts", "");
+    git(&nested, &["init"]).await;
+    git(&nested, &["add", "a.ts"]).await;
+    git(
+        &nested,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+    )
+    .await;
+    git(root, &["add", "vendor/sub"]).await;
+    file_link(nested.join("a.ts"), nested.join("sublink.ts")).expect("nested link");
+    let service = entries(root);
+    let list = service
+        .list(ProjectListEntriesInput {
+            cwd: text(root),
+            directory_path: None,
+        })
+        .await
+        .expect("list");
+    let names: Vec<_> = list.entries.iter().map(|e| e.path.0.as_str()).collect();
+    for path in ["sub/hide-link.ts", "vendor/sub/sublink.ts"] {
+        assert!(names.contains(&path), "{path}: {names:?}");
+    }
+    for path in ["keep-link.ts", "tracked-link.ts", "blink"] {
+        assert!(!names.contains(&path), "{path}");
+    }
+}
+
+#[tokio::test]
+async fn symlink_scan_paginates_past_one_thousand_indexed_directories() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let root = temp.path();
+    for i in 0..1001 {
+        put(root, &format!("dir-{i:04}/a.txt"), "");
+    }
+    put(root, "late/a.ts", "");
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(root.join("late/a.ts"), root.join("late/link.ts"))
+        .expect("link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join("late/a.ts"), root.join("late/link.ts")).expect("link");
+    let service = entries(root);
+    let result = service
+        .search(search(
+            root,
+            "late/link",
+            1,
+            Some(ProjectEntryKind::File),
+            false,
+        ))
+        .await
+        .expect("search");
+    assert_eq!(result.entries[0].path.0, "late/link.ts");
+}
+
+#[tokio::test]
 async fn immediate_listing_ignored_empty_directories_and_metadata_hidden() {
     let temp = tempfile::tempdir().expect("test fixture");
     let root = temp.path();
@@ -371,7 +565,7 @@ async fn content_search_case_regex_unicode_whole_words_and_utf16_ranges() {
         .await
         .expect("test fixture");
     assert!(fallback.regex_fallback_error.is_some());
-    assert!(fallback.matches.len() >= 2);
+    assert!(fallback.matches.len() >= 2, "{fallback:?}");
     let digits = service
         .search_contents(content(root, r"\d+", false, false, true, 100))
         .await

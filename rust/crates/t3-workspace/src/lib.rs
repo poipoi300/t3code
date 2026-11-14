@@ -4,14 +4,17 @@ pub mod assets;
 pub mod attachments;
 pub mod entries;
 pub mod filesystem;
+pub mod ignore_patterns;
 pub mod image;
 pub mod leases;
 pub mod native_icons;
 pub mod paths;
 pub mod project;
+pub mod restore;
 mod scoped;
 pub mod scripts;
 pub mod search;
+mod symlinks;
 
 use std::{io, path::PathBuf};
 
@@ -38,6 +41,19 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
+    #[error(
+        "Could not recreate branch '{branch}' at {path}: the project workspace has no commit to start it from."
+    )]
+    WorktreeRecreateNoBase { path: PathBuf, branch: String },
+    #[error("Could not recreate the worktree for branch '{branch}' at {path}.")]
+    WorktreeRecreate {
+        path: PathBuf,
+        branch: String,
+        #[source]
+        source: Box<Error>,
+    },
+    #[error(transparent)]
+    Git(#[from] t3_git::GitError),
     #[error("search failed: {0}")]
     Search(String),
     #[error("content index scan did not finish within 15 seconds")]

@@ -298,6 +298,9 @@ impl WorkspaceEntries {
         &self,
         input: ProjectListIgnoredFilesInput,
     ) -> Result<ProjectListIgnoredFilesResult> {
+        let query = input.query.as_ref().map(|q| q.0.trim()).unwrap_or("");
+        paths::bound_text(query, 256, true, "ignored-file query")?;
+        let query = query.to_lowercase();
         paths::bound_text(&input.cwd.0, 32768, false, "workspace root")?;
         let cwd = paths::normalize_root(&input.cwd.0, &self.home, false).await?;
         let known = self.known.load().await?;
@@ -335,7 +338,7 @@ impl WorkspaceEntries {
         let mut paths: Vec<_> = out
             .stdout_text()
             .split('\0')
-            .filter(|s| !s.is_empty() && !s.ends_with('/'))
+            .filter(|s| !s.is_empty() && !s.ends_with('/') && s.to_lowercase().contains(&query))
             .map(str::to_owned)
             .collect();
         paths.sort();

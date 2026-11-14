@@ -78,6 +78,8 @@ pub struct PrimaryActionState {
 #[derive(Clone)]
 pub struct PrimaryActionsProps {
     pub state: Prop<PrimaryActionState>,
+    /// The source's dictation slot, before the primary action in every branch.
+    pub children: Option<Rc<dyn Fn() -> AnyElement>>,
     pub on_submit_message: Rc<dyn Fn(ComposerDispatchMode)>,
     pub on_interrupt: Option<Rc<dyn Fn()>>,
     pub on_resume: Option<Rc<dyn Fn()>>,
@@ -98,6 +100,7 @@ impl PrimaryActionsProps {
     ) -> Self {
         Self {
             state: state.into(),
+            children: None,
             on_submit_message: Rc::new(on_submit_message),
             on_interrupt: None,
             on_resume: None,
@@ -405,13 +408,18 @@ pub fn composer_primary_actions(props: PrimaryActionsProps) -> impl IntoElement 
                     && !state.has_sendable_content
                     && !state.is_editing_queued_message
                 {
-                    return stop_generation_button(props, stop, false).into_element();
+                    return view()
+                        .app_class(tw("flex items-center gap-2"))
+                        .child(props.children.as_ref().map(|render| render()))
+                        .child(stop_generation_button(props, stop, false))
+                        .into_element();
                 }
                 let mut actions = view().app_class(tw("flex items-center gap-2"));
                 if compact_tokens(&state).is_some() && !state.hide_compact_toggle {
                     actions = actions.child(compact_toggle(props.clone()));
                 }
                 actions
+                    .child(props.children.as_ref().map(|render| render()))
                     .child(send_button(props.clone(), stop))
                     .child(
                         matches!(phase, StopPhase::Pending | StopPhase::TimedOut)
@@ -447,6 +455,7 @@ fn pending_actions(
                     && let Some(action) = &previous.on_previous_pending_question { action(); }
             },
         )))
+        .child(props.children.as_ref().map(|render| render()))
         .child(nsh_base::button()
             .accessibility_label(Some(pending_primary_action_label(state, pending).into()))
             .app_class(tw(&cn([
