@@ -17,4 +17,18 @@ fn without_an_environment_server_rows_are_inert_and_auto_settle_is_hidden() {
     assert!(!app.screen().shows("Auto-settle"));
     // A server row's control is inert with the web's reason, never a switch that does nothing.
     assert!(!app.screen().shows("role:switch[Resume after usage limits]"));
+    // New threads defaults, with no environment to read providers from.
+    for row in [
+        "New threads",
+        "Model",
+        "Fallback model",
+        "Permissions",
+        "Workspace",
+    ] {
+        assert!(app.screen().shows(row), "{row}");
+    }
+    app.press("role:button[Advanced]").expect("open the fold");
+    app.wait_for("Thread title instructions")
+        .expect("title instructions row");
+    assert!(app.screen().shows("Response streaming"));
 }

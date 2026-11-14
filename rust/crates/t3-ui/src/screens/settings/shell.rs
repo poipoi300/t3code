@@ -74,6 +74,17 @@ pub trait SettingsService {
         entries: Vec<ProjectOverrideEntry>,
         keys: Vec<&'static str>,
     ) -> LocalBoxFuture<'static, SettingsUpdateOutcome>;
+    fn text_generation_targets(
+        &self,
+        view: &SettingsScopeView,
+    ) -> t3_client::services::settings::models::TextGenerationTargets;
+    fn model_disabled_reason(
+        &self,
+        view: &SettingsScopeView,
+        instance: &t3_contracts::provider_instance::ProviderInstanceId,
+        model: &str,
+        text_generation: bool,
+    ) -> Option<SettingsText>;
     fn last_enabled_grouping_mode(&self) -> LocalBoxFuture<'static, &'static str>;
     fn remember_enabled_grouping_mode(&self, mode: &str) -> LocalBoxFuture<'static, ()>;
     fn search_availability(&self) -> SettingsSearchAvailability;
@@ -205,6 +216,7 @@ struct ViewRef(Rc<SettingsScopeView>);
 #[derive(Clone, Copy)]
 pub struct SettingsContext {
     pub page: SettingsPage,
+    revision: Signal<u64>,
     runtime: Stored<Option<SettingsRuntime>>,
     location: SettingsLocation,
     view: Memo<Option<ViewRef>>,
@@ -255,6 +267,7 @@ impl SettingsContext {
         });
         Self {
             page,
+            revision,
             runtime,
             location,
             view,
@@ -315,6 +328,11 @@ impl SettingsContext {
         }
     }
 
+    /// Opens another settings page with a scope (the web's `navigate({ to, search })`).
+    pub fn open_page(self, page: SettingsPage, search: SettingsScopeSearch) {
+        self.location.navigate(page, Some(&search), "");
+    }
+
     /// `selectScope(next)`.
     pub fn select_scope(self, next: SettingsScopeSearch) {
         self.location.navigate(self.page, Some(&next), "");
@@ -363,6 +381,39 @@ impl SettingsContext {
         spawn(async move { show_outcome(&outcome.await) });
     }
 
+    /// Bumped by every client change, including reads `view()` compares equal (model lists).
+    pub fn revision(self) -> u64 {
+        self.revision.get()
+    }
+
+    /// `useTextGenerationTargets` for this scope's representative environment.
+    pub fn text_generation_targets(
+        self,
+    ) -> t3_client::services::settings::models::TextGenerationTargets {
+        self.revision();
+        match (self.runtime.get(), self.view()) {
+            (Some(runtime), Some(view)) => runtime.0.text_generation_targets(&view),
+            _ => Default::default(),
+        }
+    }
+
+    /// `useScopedModelDisabledReason`.
+    pub fn model_disabled_reason(
+        self,
+        instance: &t3_contracts::provider_instance::ProviderInstanceId,
+        model: &str,
+        text_generation: bool,
+    ) -> Option<SettingsText> {
+        match (self.runtime.get(), self.view_untracked()) {
+            (Some(runtime), Some(view)) => {
+                runtime
+                    .0
+                    .model_disabled_reason(&view, instance, model, text_generation)
+            }
+            _ => None,
+        }
+    }
+
     pub fn last_enabled_grouping_mode(self) -> Option<LocalBoxFuture<'static, &'static str>> {
         self.runtime
             .get()
@@ -393,22 +444,24 @@ fn show_outcome(outcome: &SettingsUpdateOutcome) {
     let Some(toast) = &outcome.toast else {
         return;
     };
+    let description = toast
+        .description
+        .iter()
+        .map(settings_text)
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+    // Translated here with their arguments: content to the toast.
     toast_manager().add(ToastOptions {
         variant: if toast.error {
             ToastVariant::Error
         } else {
             ToastVariant::Warning
         },
-        title: settings_text(&toast.title).into(),
-        description: Some(
-            toast
-                .description
-                .iter()
-                .map(settings_text)
-                .collect::<Vec<_>>()
-                .join("\n")
-                .into(),
-        ),
+        title: Text::content(settings_text(&toast.title)),
+        description: Some(Text::content(description)),
         ..Default::default()
     });
 }
@@ -1169,6 +1222,8 @@ pub struct SettingsRowProps {
     pub id: &'static str,
     pub title: Text,
     pub description: Option<Box<dyn Fn() -> Text>>,
+    /// A line under the description (`status`); `None` from the closure shows nothing.
+    pub status: Option<Box<dyn Fn() -> Option<Text>>>,
     /// The reset button and when to show it (`resetAction`).
     pub reset: Option<RowReset>,
     pub control: Option<Box<dyn Fn() -> AnyElement>>,
@@ -1178,6 +1233,8 @@ pub struct SettingsRowProps {
     pub managed_paths: &'static [&'static str],
     /// Why policy turns this row's control off (`managed`), from the contract's denial helpers.
     pub managed: Option<Text>,
+    /// Content below the title and control (`children`), inert when the row is unavailable.
+    pub children: Option<Box<dyn Fn() -> AnyElement>>,
     /// Not the first row of its group: draws the divider (`[&>*+*]:border-t`).
     pub divided: bool,
 }
@@ -1190,17 +1247,30 @@ impl SettingsRowProps {
             id: anchor,
             title: Text::client_key(title),
             description: None,
+            status: None,
             reset: None,
             control: None,
             server_scoped: false,
             setting_keys: &[],
             managed_paths: &[],
             managed: None,
+            children: None,
             divided: true,
         }
     }
+    /// A row with a plain anchor and title (the web's `id=` and `title=` without a search item).
+    pub fn titled(id: &'static str, title: Text) -> Self {
+        let mut props = Self::searchable("language");
+        props.id = id;
+        props.title = title;
+        props
+    }
     pub fn description(mut self, description: impl Fn() -> Text + 'static) -> Self {
         self.description = Some(Box::new(description));
+        self
+    }
+    pub fn status(mut self, status: impl Fn() -> Option<Text> + 'static) -> Self {
+        self.status = Some(Box::new(status));
         self
     }
     pub fn control<E: IntoElement>(mut self, control: impl Fn() -> E + 'static) -> Self {
@@ -1222,6 +1292,10 @@ impl SettingsRowProps {
     }
     pub fn managed(mut self, reason: Text) -> Self {
         self.managed = Some(reason);
+        self
+    }
+    pub fn children<E: IntoElement>(mut self, children: impl Fn() -> E + 'static) -> Self {
+        self.children = Some(Box::new(move || children().into_element()));
         self
     }
     pub fn first(mut self) -> Self {
@@ -1259,12 +1333,14 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
         id,
         title,
         description,
+        status,
         reset,
         control,
         server_scoped,
         setting_keys,
         managed_paths,
         managed,
+        children,
         divided,
     } = props;
     let lockable: Vec<&'static str> = setting_keys.iter().chain(managed_paths).copied().collect();
@@ -1331,6 +1407,8 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
     let reset = reset.map(Rc::new);
     let title_text = title.clone();
     let (target, highlighted) = search_target(context, id);
+    let has_children = children.is_some();
+    let children = children.map(Rc::new);
     view()
         .test_id(id)
         .element_ref(&target)
@@ -1338,7 +1416,8 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
         .on_layout(move |_: &Bounds<Points>| reveal_if_target(context, id, target, highlighted))
         .app_class(move || {
             Some(tw(&cn([
-                Some("rounded-xl px-3 sm:px-4 py-3 outline-none"),
+                Some("rounded-xl px-3 sm:px-4 outline-none"),
+                Some(if has_children { "pt-3 pb-1" } else { "py-3" }),
                 divided.then_some("rounded-none border-t border-border/50"),
                 highlighted.get().then_some("ring-2 ring-inset ring-primary/40"),
             ])))
@@ -1423,6 +1502,15 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
                         .child(description.map(|description| {
                             text(move || description().resolve())
                                 .app_class(tw("max-w-2xl text-xs leading-normal text-muted-foreground"))
+                        }))
+                        .child(status.map(|status| {
+                            let status = Rc::new(status);
+                            dynamic(move || {
+                                status().map(|line| {
+                                    text(line.resolve())
+                                        .app_class(tw("pt-0.5 text-xs text-muted-foreground"))
+                                })
+                            })
                         })),
                 )
                 .child(control.map(|control| {
@@ -1444,6 +1532,22 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
                         }))
                 })),
         )
+        .child(children.map(|children| {
+            dynamic(move || {
+                let inert = server_scoped && state.with(|(access, ..)| *access != SettingsWriteAccess::Writable);
+                let children = children.clone();
+                let content = untracked(|| children());
+                if inert {
+                    view()
+                        .pointer_events(PointerEvents::None)
+                        .app_class(tw("opacity-50"))
+                        .child(content)
+                        .into_element()
+                } else {
+                    content
+                }
+            })
+        }))
 }
 
 /// `inertControl`: the control dimmed and unreachable, with the reason as a tooltip.

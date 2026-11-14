@@ -61,6 +61,22 @@ impl<P: Platform + Clone + 'static> SettingsService for SettingsBinding<P> {
     ) -> LocalBoxFuture<'static, SettingsUpdateOutcome> {
         self.0.clear_project_overrides(view, &entries, &keys)
     }
+    fn text_generation_targets(
+        &self,
+        view: &SettingsScopeView,
+    ) -> t3_client::services::settings::models::TextGenerationTargets {
+        self.0.text_generation_targets(view)
+    }
+    fn model_disabled_reason(
+        &self,
+        view: &SettingsScopeView,
+        instance: &t3_contracts::provider_instance::ProviderInstanceId,
+        model: &str,
+        text_generation: bool,
+    ) -> Option<t3_client::services::settings::scoped::SettingsText> {
+        self.0
+            .model_disabled_reason(view, instance, model, text_generation)
+    }
     fn last_enabled_grouping_mode(&self) -> LocalBoxFuture<'static, &'static str> {
         self.0.last_enabled_grouping_mode()
     }

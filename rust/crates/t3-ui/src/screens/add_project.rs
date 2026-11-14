@@ -230,7 +230,10 @@ pub struct AddProjectRuntime(pub Rc<dyn AddProjectClient>);
 pub fn screen() -> AnyElement {
     let Some(client) = use_context::<AddProjectRuntime>() else {
         // The demo has no creation service; no unsupported message is invented here.
-        debug_assert!(use_context::<crate::runtime::Rt>().is_none_or(|rt| rt.backend().client().is_none()), "AddProjectRuntime is not provided: app::provide_client_services provides it with the client");
+        debug_assert!(
+            use_context::<crate::runtime::Rt>().is_none_or(|rt| rt.backend().client().is_none()),
+            "AddProjectRuntime is not provided: app::provide_client_services provides it with the client"
+        );
         return view().flex_1().into_element();
     };
     command_palette_add_project(client.0)
@@ -339,6 +342,7 @@ fn new_project_publication(
 }
 
 pub fn command_palette_add_project(client: Rc<dyn AddProjectClient>) -> AnyElement {
+    let owner = Owner::current();
     let mut changes = client.watch();
     let mut completed = client.completed();
     let mut publishing = client.publishing();
@@ -393,8 +397,10 @@ pub fn command_palette_add_project(client: Rc<dyn AddProjectClient>) -> AnyEleme
             error.set(None);
             let operation = client.get().submit(value.revision);
             let complete = complete.clone();
-            spawn(async move {
-                complete(operation.await);
+            owner.run(move || {
+                spawn(async move {
+                    complete(operation.await);
+                })
             });
         })
     };
@@ -466,7 +472,7 @@ pub fn command_palette_add_project(client: Rc<dyn AddProjectClient>) -> AnyEleme
                                         busy.set(true); error.set(None);
                                         let operation = client.get().select_item(&id);
                                         let complete = complete.clone();
-                                        spawn(async move { complete(operation.await); });
+                                        owner.run(move||spawn(async move { complete(operation.await); }));
                                     })
                                     .app_class(tw("flex min-h-8 cursor-default select-none items-center gap-2 rounded-sm px-2 py-1 text-base outline-none hover:bg-accent disabled:opacity-64 sm:min-h-7 sm:text-sm"))
                                     .child(view().app_class(tw("flex h-5 shrink-0 items-center self-start pt-0.5"))
@@ -492,7 +498,7 @@ pub fn command_palette_add_project(client: Rc<dyn AddProjectClient>) -> AnyEleme
                                 busy.set(true); error.set(None);
                                 let operation = client.get().pick_folder(value.revision);
                                 let complete = complete.clone();
-                                spawn(async move { complete(operation.await); });
+                                owner.run(move||spawn(async move { complete(operation.await); }));
                             })
                     })
                 })).into_element()

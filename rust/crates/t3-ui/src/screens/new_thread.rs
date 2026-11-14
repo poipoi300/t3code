@@ -162,7 +162,10 @@ pub fn new_thread_link_route(search: &str) -> AnyElement {
 pub fn index_draft_landing(target: Target) -> AnyElement {
     let Some(client) = use_context::<NewThreadRuntime>() else {
         // The demo has no draft service; an unobserved shell cannot prove emptiness.
-        debug_assert!(use_context::<crate::runtime::Rt>().is_none_or(|rt| rt.backend().client().is_none()), "NewThreadRuntime is not provided: app::provide_client_services provides it with the client");
+        debug_assert!(
+            use_context::<crate::runtime::Rt>().is_none_or(|rt| rt.backend().client().is_none()),
+            "NewThreadRuntime is not provided: app::provide_client_services provides it with the client"
+        );
         return view().flex_1().into_element();
     };
     let current = signal(Rc::new(NewThreadView::Loading));
@@ -239,7 +242,7 @@ pub fn index_draft_landing(target: Target) -> AnyElement {
                     .into_element(),
                 4 => draft_chat_view(current, client, error),
                 5 => link_choices(current, client, target, error, link_busy, owner, navigation),
-                6 => opened_link(client, target, error),
+                6 => opened_link(client, target, error, owner),
                 _ => view().into_element(),
             })
         }))
@@ -319,8 +322,8 @@ fn opened_link(
     client: Stored<Rc<dyn NewThreadClient>>,
     target: Stored<Target>,
     error: Signal<Option<Text>>,
+    owner: Owner,
 ) -> AnyElement {
-    let owner = Owner::current();
     view().app_class(tw("flex min-w-0 flex-1 flex-col items-center justify-center text-center gap-6 p-6 md:p-12"))
         .child(text(t("This link is open")).app_class(tw("font-semibold text-xl")))
         .child(button(ButtonContent::Label(t("Open it again")),ButtonVariant::Outline,ButtonSize::Sm,||false,move||{
