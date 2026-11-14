@@ -452,3 +452,18 @@ All-target dependency-inclusive Clippy with warnings denied and scoped formattin
 passed. The Unix broker's post-create integration case is included but could not
 run on Windows; the portable directory-invariant matrix passes here. The three
 transport/parser caps and malformed managed-agent uninstall IDs are covered.
+
+
+Review round 2 producer verification on Windows: 278 provider tests/doctests
+passed, one opt-in provider probe ignored; all-target dependency-inclusive Clippy
+with warnings denied and scoped formatting passed. Codex probe caches include
+negative results and are invalidated by executable fingerprints; managed and
+local version grammars now match the TypeScript checks. Ledger cleanup continues
+past bad records. Archive tests cover links, aggregate expansion and ZIP metadata.
+JWT tests cover algorithm confusion, ambiguous keys and required-claim shapes.
+Nine server provider socket tests also pass, including reconnect/import redaction
+and scope refusal; an initial t3-project dependency declaration failure cleared
+on that owner's repair and the unchanged retry. No build/test remains running.
+The native Linux/Darwin ledger bridge and server startup wiring remain the named
+cross-crate obligations above; the production native process bridge was not
+exercised by the fake ledger backend on Windows.
