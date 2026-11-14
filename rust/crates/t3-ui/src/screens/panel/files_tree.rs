@@ -233,6 +233,9 @@ pub fn file_browser_panel(runtime: FilesRuntime, props: FileBrowserProps) -> imp
     let project_name = props.project_name.clone();
     let host_folder = props.host_folder;
 
+    let toggle_state = computed(move || {
+        view_state.with(|v| (v.has_directories && !host_folder, v.expand_all || v.all_expanded, v.all_expanded))
+    });
     let subheader = view()
         .app_class(tw("flex h-10 min-h-10 shrink-0 items-center gap-1 border-b border-border/60 bg-background px-2"))
         .child(refresh_files_button(
@@ -246,22 +249,21 @@ pub fn file_browser_panel(runtime: FilesRuntime, props: FileBrowserProps) -> imp
             move |value| handle.with(|h| h.set_query(value)),
         ))
         .child(dynamic(move || {
-            (view_state.with(|v| v.has_directories) && !host_folder).then(|| {
-                let expanded = computed(move || view_state.with(|v| v.expand_all || v.all_expanded));
-                let all = computed(move || view_state.with(|v| v.all_expanded));
+            // Rebuilt only when the button's own state changes, never per tree change, so a press
+            // during folder loading reaches a mounted control.
+            let (shown, expanded, all) = toggle_state.get();
+            shown.then(|| {
                 untracked(|| {
-                    let label = move || if expanded.get() { t("Collapse all folders") } else { t("Expand all folders") };
+                    let label = move || if expanded { t("Collapse all folders") } else { t("Expand all folders") };
                     with_tooltip(
                         label,
                         button(
                             ButtonContent::Custom {
                                 label: label(),
-                                child: dynamic(move || {
-                                    Some(icon_with_class(
-                                        if all.get() { Icon::ChevronsDownUp } else { Icon::ChevronsUpDown },
-                                        "size-3.5",
-                                    ))
-                                })
+                                child: icon_with_class(
+                                    if all { Icon::ChevronsDownUp } else { Icon::ChevronsUpDown },
+                                    "size-3.5",
+                                )
                                 .into_element(),
                             },
                             ButtonVariant::Ghost,

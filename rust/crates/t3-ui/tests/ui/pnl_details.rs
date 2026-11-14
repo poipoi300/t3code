@@ -251,11 +251,11 @@ use std::collections::BTreeMap;
 use futures::channel::mpsc;
 use futures::{FutureExt, StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
 use t3_client::ClientError;
+use t3_client::workspace::ProjectKey;
 use t3_client::workspace::git_panel::editors::{
     EditorOption, EditorPickerSnapshot, RemoteOpenState,
 };
 use t3_client::workspace::git_panel::scripts::{NewProjectScriptInput, ProjectScriptsSnapshot};
-use t3_client::workspace::ProjectKey;
 use t3_contracts::editor::EditorId;
 use t3_ui::screens::panel::details::{
     EditorPickerBackend, ProjectScriptsBackend, ThreadDetailsBackend, thread_details_runtime,
@@ -325,7 +325,11 @@ impl ThreadDetailsBackend for FakeDetails {
     fn visibility(&self) -> LocalBoxStream<'static, BTreeMap<String, bool>> {
         self.visibility.watch()
     }
-    fn set_item(&self, id: String, visible: bool) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    fn set_item(
+        &self,
+        id: String,
+        visible: bool,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         self.visibility.change(|v| {
             v.insert(id, visible);
         });
@@ -358,7 +362,10 @@ impl EditorPickerBackend for FakeDetails {
         ready(Ok(()))
     }
     fn open_editor(&self, editor: EditorId) -> LocalBoxFuture<'static, Result<bool, ClientError>> {
-        self.record(format!("opened:{editor:?}:{}", self.editors.get().target_path.unwrap_or_default()));
+        self.record(format!(
+            "opened:{editor:?}:{}",
+            self.editors.get().target_path.unwrap_or_default()
+        ));
         ready(Ok(true))
     }
 }
@@ -367,7 +374,10 @@ impl ProjectScriptsBackend for FakeDetails {
     fn watch(&self) -> LocalBoxStream<'static, Result<ProjectScriptsSnapshot, ClientError>> {
         self.scripts.watch().map(Ok).boxed_local()
     }
-    fn add(&self, input: NewProjectScriptInput) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    fn add(
+        &self,
+        input: NewProjectScriptInput,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         self.record(format!(
             "added:{}|{}|{:?}|keys:{:?}",
             input.script.name.0, input.script.command.0, input.script.icon, input.keybinding
@@ -382,16 +392,27 @@ impl ProjectScriptsBackend for FakeDetails {
         self.scripts.change(|s| s.scripts.push(script));
         ready(Ok(()))
     }
-    fn update(&self, id: String, input: NewProjectScriptInput) -> LocalBoxFuture<'static, Result<(), ClientError>> {
-        self.record(format!("updated:{id}:{}|keys:{:?}", input.script.name.0, input.keybinding));
+    fn update(
+        &self,
+        id: String,
+        input: NewProjectScriptInput,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        self.record(format!(
+            "updated:{id}:{}|keys:{:?}",
+            input.script.name.0, input.keybinding
+        ));
         ready(self.refused())
     }
     fn delete(&self, id: String) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         self.record(format!("deleted:{id}"));
-        self.scripts.change(|s| s.scripts.retain(|script| script.id.0 != id));
+        self.scripts
+            .change(|s| s.scripts.retain(|script| script.id.0 != id));
         ready(Ok(()))
     }
-    fn import(&self, script: t3_contracts::t3_project_file::T3ProjectFileScript) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    fn import(
+        &self,
+        script: t3_contracts::t3_project_file::T3ProjectFileScript,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         self.record(format!("imported:{}", script.name.0));
         ready(self.refused())
     }
@@ -404,8 +425,16 @@ impl ProjectScriptsBackend for FakeDetails {
 fn editor_snapshot(remote: RemoteOpenState) -> EditorPickerSnapshot {
     EditorPickerSnapshot {
         options: vec![
-            EditorOption { editor: EditorId::Vscode, label: "VS Code".into(), icon_identity: "vscode".into() },
-            EditorOption { editor: EditorId::Zed, label: "Zed".into(), icon_identity: "zed".into() },
+            EditorOption {
+                editor: EditorId::Vscode,
+                label: "VS Code".into(),
+                icon_identity: "vscode".into(),
+            },
+            EditorOption {
+                editor: EditorId::Zed,
+                label: "Zed".into(),
+                icon_identity: "zed".into(),
+            },
         ],
         preferred: Some(EditorId::Vscode),
         can_open: remote != RemoteOpenState::RemoteUnavailable,
@@ -418,7 +447,10 @@ fn editor_snapshot(remote: RemoteOpenState) -> EditorPickerSnapshot {
     }
 }
 
-fn scripts_snapshot(scripts: serde_json::Value, importable: serde_json::Value) -> ProjectScriptsSnapshot {
+fn scripts_snapshot(
+    scripts: serde_json::Value,
+    importable: serde_json::Value,
+) -> ProjectScriptsSnapshot {
     ProjectScriptsSnapshot {
         project: ProjectKey {
             environment: EnvironmentId("first".into()),
@@ -461,7 +493,11 @@ fn ServicesFixture(props: ServicesFixtureProps) -> impl IntoElement {
     let session = store.begin_session(first.clone());
     publish_shell(&store, &first, session, 1);
     assert!(store.set_config(&first, session, config("first", "Build machine")));
-    provide_context(Rt::new(store.clone(), Rc::new(DemoBackend::new(store.clone())), Choice::Demo));
+    provide_context(Rt::new(
+        store.clone(),
+        Rc::new(DemoBackend::new(store.clone())),
+        Choice::Demo,
+    ));
     let fake = FakeDetails {
         visibility: Broadcast::new(
             t3_client::workspace::git_panel::details::DETAILS_ITEMS
@@ -469,24 +505,32 @@ fn ServicesFixture(props: ServicesFixtureProps) -> impl IntoElement {
                 .map(|(id, _, visible)| ((*id).to_owned(), *visible))
                 .collect(),
         ),
-        editors: Broadcast::new(editor_snapshot(if props.services == Services::Unreachable {
-            RemoteOpenState::RemoteUnavailable
-        } else {
-            RemoteOpenState::LocalExec
-        })),
+        editors: Broadcast::new(editor_snapshot(
+            if props.services == Services::Unreachable {
+                RemoteOpenState::RemoteUnavailable
+            } else {
+                RemoteOpenState::LocalExec
+            },
+        )),
         scripts: Broadcast::new(match props.services {
             Services::WithScript => scripts_snapshot(
                 json!([{"id":"test","name":"Test","command":"bun test","icon":"test","runOnWorktreeCreate":false}]),
                 json!([]),
             ),
-            Services::Imports => scripts_snapshot(json!([]), json!([{"name":"Lint","command":"bun lint","icon":"lint"}])),
+            Services::Imports => scripts_snapshot(
+                json!([]),
+                json!([{"name":"Lint","command":"bun lint","icon":"lint"}]),
+            ),
             _ => scripts_snapshot(json!([]), json!([])),
         }),
         recorded: signal("no call".into()),
         refuse: signal(false),
     };
     provide_context(thread_details_runtime(Rc::new(fake.clone())));
-    let key = ThreadKey { environment: first, thread: ThreadId("same-thread".into()) };
+    let key = ThreadKey {
+        environment: first,
+        thread: ThreadId("same-thread".into()),
+    };
     let host = PanelHost::new(PanelStore::default(), |_| {});
     let revoke = fake.clone();
     let refuse = fake.clone();
@@ -495,10 +539,14 @@ fn ServicesFixture(props: ServicesFixtureProps) -> impl IntoElement {
         view()
             .w_full()
             .h_full()
-            .child(control("Revoke run", move || revoke.scripts.change(|s| s.can_run = false)))
+            .child(control("Revoke run", move || {
+                revoke.scripts.change(|s| s.can_run = false)
+            }))
             .child(control("Refuse writes", move || refuse.refuse.set(true)))
             .child(control("Hide everything", move || {
-                hide_all.visibility.change(|v| v.values_mut().for_each(|visible| *visible = false))
+                hide_all
+                    .visibility
+                    .change(|v| v.values_mut().for_each(|visible| *visible = false))
             }))
             .child(text(move || fake.recorded.get()))
             .child(view().w(px(280.0)).child(thread_details_target(
@@ -516,7 +564,10 @@ fn services(window: (f32, f32), services: Services, height: f32) -> Headless {
     let mut app = Headless::start(EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
-        ..EngineConfig::new(Root::new::<ServicesFixture>(move || ServicesFixtureProps { services, height }))
+        ..EngineConfig::new(Root::new::<ServicesFixture>(move || ServicesFixtureProps {
+            services,
+            height,
+        }))
     })
     .expect("services fixture starts");
     app.wait_for("no call").expect("details mounted");
@@ -527,25 +578,38 @@ fn services(window: (f32, f32), services: Services, height: f32) -> Headless {
 fn open_in_opens_the_preferred_editor_and_the_menu_changes_it() {
     for window in [DESKTOP, PHONE] {
         let mut app = services(window, Services::Empty, 600.0);
-        app.wait_for("role:button[Open in VS Code]").expect("client snapshot");
+        app.wait_for("role:button[Open in VS Code]")
+            .expect("client snapshot");
         app.press("role:button[Open in VS Code]").expect("primary");
-        app.wait_for("text:opened:Vscode:/repo").expect("client opened the checkout");
+        app.wait_for("text:opened:Vscode:/repo")
+            .expect("client opened the checkout");
         app.press("role:button[Choose editor]").expect("menu");
         app.press("role:menuitem[Zed]").expect("choose Zed");
-        app.wait_for("text:preferred:Zed").expect("preference saved through the client");
-        app.wait_for("role:button[Open in Zed]").expect("primary follows the preference");
+        app.wait_for("text:preferred:Zed")
+            .expect("preference saved through the client");
+        app.wait_for("role:button[Open in Zed]")
+            .expect("primary follows the preference");
     }
 }
 
 #[test]
 fn an_unreachable_host_disables_open_and_says_why() {
     let mut app = services(DESKTOP, Services::Unreachable, 600.0);
-    app.wait_for("role:button[Open in VS Code]").expect("primary");
-    assert!(!app.screen().enabled("role:button[Open in VS Code]").expect("exists"));
+    app.wait_for("role:button[Open in VS Code]")
+        .expect("primary");
+    assert!(
+        !app.screen()
+            .enabled("role:button[Open in VS Code]")
+            .expect("exists")
+    );
     let _ = app.press("role:button[Open in VS Code]");
-    assert!(app.screen().shows("no call"), "a disabled open never reaches the client");
+    assert!(
+        app.screen().shows("no call"),
+        "a disabled open never reaches the client"
+    );
     app.press("role:button[Choose editor]").expect("menu");
-    app.wait_for("No SSH route to Build machine").expect("the web's reason");
+    app.wait_for("No SSH route to Build machine")
+        .expect("the web's reason");
     assert!(!app.screen().shows("Zed"), "no choices without a route");
 }
 
@@ -554,17 +618,23 @@ fn adding_a_script_saves_through_the_client_and_keeps_input_on_refusal() {
     for window in [DESKTOP, PHONE] {
         let mut app = services(window, Services::Empty, 600.0);
         app.press("role:button[Refuse writes]").expect("refuse");
-        app.wait_for("role:button[Add project script]").expect("client snapshot");
-        app.press("role:button[Add project script]").expect("add row");
+        app.wait_for("role:button[Add project script]")
+            .expect("client snapshot");
+        app.press("role:button[Add project script]")
+            .expect("add row");
         app.wait_for("Add Action").expect("editor dialog");
         app.press("role:button[Save action]").expect("save empty");
         app.wait_for("Name is required.").expect("validation");
         assert!(app.screen().shows("no call"));
         app.type_text("id:script-name", "Dev").expect("name");
-        app.type_text("id:script-command", "bun dev").expect("command");
-        app.press("role:button[Save action]").unwrap_or_else(|e| panic!("save at {window:?}: {e}"));
-        app.wait_for("text:added:Dev|bun dev|Play|keys:Some(None)").expect("canonical input");
-        app.wait_for("Settings write refused").expect("server error in the dialog");
+        app.type_text("id:script-command", "bun dev")
+            .expect("command");
+        app.press("role:button[Save action]")
+            .unwrap_or_else(|e| panic!("save at {window:?}: {e}"));
+        app.wait_for("text:added:Dev|bun dev|Play|keys:Some(None)")
+            .expect("canonical input");
+        app.wait_for("Settings write refused")
+            .expect("server error in the dialog");
         assert_eq!(app.screen().input_text("id:script-name"), Ok(Some("Dev")));
     }
 }
@@ -572,16 +642,21 @@ fn adding_a_script_saves_through_the_client_and_keeps_input_on_refusal() {
 #[test]
 fn a_saved_script_becomes_the_run_control_and_closes_the_dialog() {
     let mut app = services(DESKTOP, Services::Empty, 600.0);
-    app.wait_for("role:button[Add project script]").expect("client snapshot");
-    app.press("role:button[Add project script]").expect("add row");
+    app.wait_for("role:button[Add project script]")
+        .expect("client snapshot");
+    app.press("role:button[Add project script]")
+        .expect("add row");
     app.type_text("id:script-name", "Dev").expect("name");
-    app.type_text("id:script-command", "bun dev").expect("command");
+    app.type_text("id:script-command", "bun dev")
+        .expect("command");
     app.press("role:button[Save action]").expect("save");
-    app.wait_for("role:button[Run Dev]").expect("primary script row");
+    app.wait_for("role:button[Run Dev]")
+        .expect("primary script row");
     app.wait_for_gone("Add Action", nsh_testing::WAIT)
         .expect("a successful save closes the dialog");
     app.press("role:button[Run Dev]").expect("run");
-    app.wait_for("text:ran:added").expect("client opened a terminal");
+    app.wait_for("text:ran:added")
+        .expect("client opened a terminal");
 }
 
 #[test]
@@ -593,25 +668,38 @@ fn running_needs_the_terminal_grant_and_edit_and_delete_go_through_the_client() 
     app.press("role:button[Script actions]").expect("menu");
     app.press("role:button[Edit Test]").expect("edit");
     app.wait_for("Edit Action").expect("edit dialog");
-    assert!(app.screen().shows("no call"), "editing does not run the script");
-    assert_eq!(app.screen().input_text("id:script-command"), Ok(Some("bun test")));
+    assert!(
+        app.screen().shows("no call"),
+        "editing does not run the script"
+    );
+    assert_eq!(
+        app.screen().input_text("id:script-command"),
+        Ok(Some("bun test"))
+    );
     app.press("role:button[Delete]").expect("delete");
-    app.wait_for("This action cannot be undone.").expect("confirmation");
+    app.wait_for("This action cannot be undone.")
+        .expect("confirmation");
     app.press("role:button[Delete action]").expect("confirm");
     app.wait_for("text:deleted:test").expect("client delete");
-    app.wait_for("role:button[Add project script]").expect("empty project again");
+    app.wait_for("role:button[Add project script]")
+        .expect("empty project again");
 }
 
 #[test]
 fn a_failed_t3_json_import_reopens_the_editor_with_its_payload() {
     let mut app = services(DESKTOP, Services::Imports, 600.0);
     app.press("role:button[Refuse writes]").expect("refuse");
-    app.press("role:button[Choose project action]").expect("actions menu");
+    app.press("role:button[Choose project action]")
+        .expect("actions menu");
     app.wait_for("From t3.json").expect("import group");
     app.press("role:menuitem[Lint]").expect("import");
     app.wait_for("text:imported:Lint").expect("client import");
-    app.wait_for("Add Action").expect("editor with the failed import");
-    assert_eq!(app.screen().input_text("id:script-command"), Ok(Some("bun lint")));
+    app.wait_for("Add Action")
+        .expect("editor with the failed import");
+    assert_eq!(
+        app.screen().input_text("id:script-command"),
+        Ok(Some("bun lint"))
+    );
 }
 
 #[test]
@@ -619,19 +707,31 @@ fn an_emptied_card_offers_choose_what_to_show_and_refills_from_the_menu() {
     let mut app = services(DESKTOP, Services::Empty, 600.0);
     assert!(!app.screen().shows("Choose what to show"));
     app.press("role:button[Hide everything]").expect("hide");
-    app.wait_for("role:button[Choose what to show]").expect("refill row");
+    app.wait_for("role:button[Choose what to show]")
+        .expect("refill row");
     assert!(!app.screen().shows("Open in VS Code"));
     app.press("role:button[Choose what to show]").expect("menu");
-    app.press("role:menuitemcheckbox[Open in editor]").expect("show open in");
-    app.wait_for("role:button[Open in VS Code]").expect("row back");
+    app.press("role:menuitemcheckbox[Open in editor]")
+        .expect("show open in");
+    app.wait_for("role:button[Open in VS Code]")
+        .expect("row back");
 }
 
 #[test]
 fn a_short_card_drops_the_environment_row_then_open_in() {
     let mut app = services(DESKTOP, Services::Empty, 600.0);
-    app.wait_for("role:button[Open in VS Code]").expect("full density");
+    app.wait_for("role:button[Open in VS Code]")
+        .expect("full density");
     let mut short = services(DESKTOP, Services::Empty, 60.0);
-    short.wait_for("role:button[Add project script]").expect("scripts stay at every density");
-    assert!(!short.screen().shows("Build machine"), "compact drops the environment row");
-    assert!(!short.screen().shows("Open in VS Code"), "essential drops open in");
+    short
+        .wait_for("role:button[Add project script]")
+        .expect("scripts stay at every density");
+    assert!(
+        !short.screen().shows("Build machine"),
+        "compact drops the environment row"
+    );
+    assert!(
+        !short.screen().shows("Open in VS Code"),
+        "essential drops open in"
+    );
 }

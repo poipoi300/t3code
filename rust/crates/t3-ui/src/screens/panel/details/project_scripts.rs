@@ -31,15 +31,18 @@ use crate::ui::tooltip::{Variant as TooltipVariant, tooltip_popup};
 pub trait ProjectScriptsBackend {
     /// The current snapshot first, then after every change.
     fn watch(&self) -> LocalBoxStream<'static, Result<ProjectScriptsSnapshot, ClientError>>;
-    fn add(&self, input: NewProjectScriptInput) -> LocalBoxFuture<'static, Result<(), ClientError>>;
+    fn add(&self, input: NewProjectScriptInput)
+    -> LocalBoxFuture<'static, Result<(), ClientError>>;
     fn update(
         &self,
         id: String,
         input: NewProjectScriptInput,
     ) -> LocalBoxFuture<'static, Result<(), ClientError>>;
     fn delete(&self, id: String) -> LocalBoxFuture<'static, Result<(), ClientError>>;
-    fn import(&self, script: T3ProjectFileScript)
-    -> LocalBoxFuture<'static, Result<(), ClientError>>;
+    fn import(
+        &self,
+        script: T3ProjectFileScript,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>>;
     /// Opens a terminal running the script and answers its terminal id.
     fn run(&self, id: String) -> LocalBoxFuture<'static, Result<String, ClientError>>;
 }
@@ -100,7 +103,8 @@ fn editor_request_for_script(
             command: script.command.0.clone(),
             icon: script.icon.clone(),
             run_on_worktree_create: script.run_on_worktree_create,
-            wait_for_setup: script.run_on_worktree_create && script.r#async.flatten() == Some(false),
+            wait_for_setup: script.run_on_worktree_create
+                && script.r#async.flatten() == Some(false),
             run_on_settle: script.run_on_settle.flatten().unwrap_or(false),
             stop_on_settle: script.stop_on_settle.flatten().unwrap_or(false),
             keybinding: script_keybinding_value(&snapshot.keybindings, &script.id.0),
@@ -269,7 +273,10 @@ fn run_script(backend: Backend, snapshot: Snapshot, script: ProjectScript) {
         if let Err(error) = backend.run(script.id.0.clone()).await {
             // The source reports this on the thread's error banner (useChatTerminalActions.ts).
             show_error(
-                tr("Failed to run script \"{name}\".", &[("name", Value::Text(script.name.0))]),
+                tr(
+                    "Failed to run script \"{name}\".",
+                    &[("name", Value::Text(script.name.0))],
+                ),
                 error,
             );
         }
@@ -297,8 +304,12 @@ pub(super) fn project_scripts_control(backend: Backend, snapshot: Snapshot) -> i
         .child(dynamic(move || {
             let mode = mode.get();
             Some(untracked(|| match mode {
-                Mode::Primary => primary_group(backend, snapshot, request, scripts_open).into_element(),
-                Mode::Actions => actions_group(backend, snapshot, request, scripts_open).into_element(),
+                Mode::Primary => {
+                    primary_group(backend, snapshot, request, scripts_open).into_element()
+                }
+                Mode::Actions => {
+                    actions_group(backend, snapshot, request, scripts_open).into_element()
+                }
                 Mode::Add => add_row(request).into_element(),
             }))
         }))
@@ -421,17 +432,28 @@ fn actions_group(
             false,
             view()
                 .app_class(tw("flex min-w-0 items-center gap-2.5"))
-                .child(icon_with_class(Icon::Wrench, "size-4 shrink-0 text-muted-foreground"))
+                .child(icon_with_class(
+                    Icon::Wrench,
+                    "size-4 shrink-0 text-muted-foreground",
+                ))
                 .child(text(t("Actions")).app_class(tw("min-w-0 truncate"))),
             move || open.set(true),
         ))
         .child(split_separator(open))
-        .child(scripts_menu(backend, snapshot, request, open, "Choose project action"))
+        .child(scripts_menu(
+            backend,
+            snapshot,
+            request,
+            open,
+            "Choose project action",
+        ))
 }
 
 fn add_row(request: Signal<Option<EditorRequest>>) -> impl IntoElement {
     view()
-        .tooltip(tooltip_popup(TooltipVariant::Default, text(t("Add project script"))).into_element())
+        .tooltip(
+            tooltip_popup(TooltipVariant::Default, text(t("Add project script"))).into_element(),
+        )
         .child(thread_details_control(
             "row",
             t("Add project script").into(),
@@ -441,7 +463,13 @@ fn add_row(request: Signal<Option<EditorRequest>>) -> impl IntoElement {
                 .app_class(tw("flex min-w-0 items-center gap-2.5"))
                 .child(icon_with_class(Icon::Plus, "size-3.5"))
                 .child(text(t("Add project script")).app_class(tw("ml-0.5"))),
-            move || request.set(Some(EditorRequest { script_id: None, initial: ScriptForm::default(), error: None })),
+            move || {
+                request.set(Some(EditorRequest {
+                    script_id: None,
+                    initial: ScriptForm::default(),
+                    error: None,
+                }))
+            },
         ))
 }
 
@@ -475,20 +503,28 @@ fn script_items(
                     .child(menu::menu_item_label(label))
                     .child(
                         view()
-                            .app_class(tw("relative ms-auto flex h-6 min-w-6 items-center justify-end gap-1"))
+                            .app_class(tw(
+                                "relative ms-auto flex h-6 min-w-6 items-center justify-end gap-1",
+                            ))
                             .child(shortcut.map(menu::menu_shortcut))
                             // Hover-only reveal needs the row's hover state; the button stays shown.
                             .child(button(
                                 ButtonContent::Icon {
                                     icon: Icon::Settings,
-                                    label: tr("Edit {name}", &[("name", Value::Text(script.name.0.clone()))]),
+                                    label: tr(
+                                        "Edit {name}",
+                                        &[("name", Value::Text(script.name.0.clone()))],
+                                    ),
                                 },
                                 ButtonVariant::Ghost,
                                 ButtonSize::IconXs,
                                 || false,
                                 move || {
                                     open.set(false);
-                                    request.set(Some(editor_request_for_script(&edit, &edit_snapshot)));
+                                    request.set(Some(editor_request_for_script(
+                                        &edit,
+                                        &edit_snapshot,
+                                    )));
                                 },
                             )),
                     ),
@@ -501,7 +537,8 @@ fn script_items(
         if !current.scripts.is_empty() {
             items.push(menu::menu_separator().into_element());
         }
-        let mut imports: Vec<AnyElement> = vec![menu::menu_group_label(t("From t3.json"), false).into_element()];
+        let mut imports: Vec<AnyElement> =
+            vec![menu::menu_group_label(t("From t3.json"), false).into_element()];
         for file in &current.importable_scripts {
             let script = file.clone();
             let can_edit_keybindings = current.can_edit_keybindings;
@@ -511,7 +548,10 @@ fn script_items(
                     ItemOptions::default(),
                     view()
                         .app_class(tw("flex w-full items-center gap-2"))
-                        .child(script_icon(file.icon.clone().unwrap_or(ProjectScriptIcon::Play), "size-4"))
+                        .child(script_icon(
+                            file.icon.clone().unwrap_or(ProjectScriptIcon::Play),
+                            "size-4",
+                        ))
                         .child(menu::menu_item_label(file.name.0.clone()))
                         .child(
                             view()
@@ -527,7 +567,8 @@ fn script_items(
                             match backend.import(script).await {
                                 Ok(()) | Err(ClientError::Cancelled) => {}
                                 Err(error) => {
-                                    request.set(Some(request_from_input(payload, error.to_string())));
+                                    request
+                                        .set(Some(request_from_input(payload, error.to_string())));
                                 }
                             }
                         });
@@ -546,7 +587,13 @@ fn script_items(
                 .app_class(tw("flex w-full items-center gap-2"))
                 .child(icon_with_class(Icon::Plus, "size-4"))
                 .child(menu::menu_item_label(t("Add project script"))),
-            move || request.set(Some(EditorRequest { script_id: None, initial: ScriptForm::default(), error: None })),
+            move || {
+                request.set(Some(EditorRequest {
+                    script_id: None,
+                    initial: ScriptForm::default(),
+                    error: None,
+                }))
+            },
         )
         .into_element(),
     );
@@ -697,28 +744,59 @@ fn delete_confirmation(
     dialog::alert_dialog(open, move |state| {
         dialog::alert_dialog_popup(state, Default::default(), move || {
             view()
-                .child(dialog::alert_dialog_header(state, view()
-                    .child(dialog::alert_dialog_title(state, move || tr("Delete action \"{name}\"?", &[("name", Value::Text(form.with(|f| f.name.clone())))])))
-                    .child(dialog::dialog_description(state, || "This action cannot be undone.".into()))))
-                .child(dialog::alert_dialog_footer(state, FooterVariant::Default, view().app_class(tw("flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"))
-                    .child(dialog::dialog_close(state, ButtonContent::Label(t("Cancel")), ButtonVariant::Outline, ButtonSize::Default, || false))
-                    .child(button(ButtonContent::Label(t("Delete action")), ButtonVariant::Destructive, ButtonSize::Default, move || !can_edit.get(), move || {
-                        let Some(id) = request.with_untracked(|r| r.as_ref().and_then(|r| r.script_id.clone())) else {
-                            return;
-                        };
-                        if !can_edit.get_untracked() {
-                            error.set(Some(t("This connection cannot change project actions.")));
-                            return;
-                        }
-                        open.set(false);
-                        request.set(None);
-                        let backend = backend.get();
-                        spawn(async move {
-                            if let Err(failure) = backend.delete(id).await {
-                                show_error(t("Failed to delete action."), failure);
-                            }
-                        });
-                    }))))
+                .child(dialog::alert_dialog_header(
+                    state,
+                    view()
+                        .child(dialog::alert_dialog_title(state, move || {
+                            tr(
+                                "Delete action \"{name}\"?",
+                                &[("name", Value::Text(form.with(|f| f.name.clone())))],
+                            )
+                        }))
+                        .child(dialog::dialog_description(state, || {
+                            "This action cannot be undone.".into()
+                        })),
+                ))
+                .child(dialog::alert_dialog_footer(
+                    state,
+                    FooterVariant::Default,
+                    view()
+                        .app_class(tw("flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"))
+                        .child(dialog::dialog_close(
+                            state,
+                            ButtonContent::Label(t("Cancel")),
+                            ButtonVariant::Outline,
+                            ButtonSize::Default,
+                            || false,
+                        ))
+                        .child(button(
+                            ButtonContent::Label(t("Delete action")),
+                            ButtonVariant::Destructive,
+                            ButtonSize::Default,
+                            move || !can_edit.get(),
+                            move || {
+                                let Some(id) = request.with_untracked(|r| {
+                                    r.as_ref().and_then(|r| r.script_id.clone())
+                                }) else {
+                                    return;
+                                };
+                                if !can_edit.get_untracked() {
+                                    error.set(Some(t(
+                                        "This connection cannot change project actions.",
+                                    )));
+                                    return;
+                                }
+                                open.set(false);
+                                request.set(None);
+                                let backend = backend.get();
+                                spawn(async move {
+                                    if let Err(failure) = backend.delete(id).await {
+                                        show_error(t("Failed to delete action."), failure);
+                                    }
+                                });
+                            },
+                        )),
+                ))
         })
     })
 }
@@ -800,8 +878,10 @@ fn icon_picker(form: Signal<ScriptForm>, disabled: Prop<bool>) -> impl IntoEleme
         button(
             ButtonContent::Custom {
                 label: t("Choose icon"),
-                child: dynamic(move || Some(script_icon(form.with(|f| f.icon.clone()), "size-4.5")))
-                    .into_element(),
+                child: dynamic(move || {
+                    Some(script_icon(form.with(|f| f.icon.clone()), "size-4.5"))
+                })
+                .into_element(),
             },
             ButtonVariant::Outline,
             ButtonSize::Icon,
@@ -883,19 +963,39 @@ mod tests {
 
     #[test]
     fn the_keybinding_is_sent_only_when_new_or_changed() {
-        let new = submit_payload(&request(None, None), &form(" Test ", " bun test ", None), true, true)
-            .expect("valid");
+        let new = submit_payload(
+            &request(None, None),
+            &form(" Test ", " bun test ", None),
+            true,
+            true,
+        )
+        .expect("valid");
         assert_eq!(new.script.name.0, "Test");
         assert_eq!(new.script.command.0, "bun test");
-        assert_eq!(new.keybinding, Some(None), "a new script clears any stale shortcut");
-        let read_only_keys = submit_payload(&request(None, None), &form("Test", "x", None), true, false)
-            .expect("valid");
+        assert_eq!(
+            new.keybinding,
+            Some(None),
+            "a new script clears any stale shortcut"
+        );
+        let read_only_keys =
+            submit_payload(&request(None, None), &form("Test", "x", None), true, false)
+                .expect("valid");
         assert_eq!(read_only_keys.keybinding, None);
-        let unchanged = submit_payload(&request(Some("test"), Some("mod+t")), &form("Test", "x", Some(" mod+t ")), true, false)
-            .expect("unchanged shortcut needs no keybinding grant");
+        let unchanged = submit_payload(
+            &request(Some("test"), Some("mod+t")),
+            &form("Test", "x", Some(" mod+t ")),
+            true,
+            false,
+        )
+        .expect("unchanged shortcut needs no keybinding grant");
         assert_eq!(unchanged.keybinding, None);
-        let cleared = submit_payload(&request(Some("test"), Some("mod+t")), &form("Test", "x", Some("")), true, true)
-            .expect("valid");
+        let cleared = submit_payload(
+            &request(Some("test"), Some("mod+t")),
+            &form("Test", "x", Some("")),
+            true,
+            true,
+        )
+        .expect("valid");
         assert_eq!(cleared.keybinding, Some(None));
     }
 
@@ -917,6 +1017,9 @@ mod tests {
             "id":"setup","name":"Setup","command":"bun i","icon":"configure","runOnWorktreeCreate":true,"runOnSettle":true
         }))
         .expect("script");
-        assert_eq!(project_script_menu_label(&script), "Setup (setup, on settle)");
+        assert_eq!(
+            project_script_menu_label(&script),
+            "Setup (setup, on settle)"
+        );
     }
 }

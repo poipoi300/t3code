@@ -44,8 +44,11 @@ pub struct VersionControlSlots {
 pub trait ThreadDetailsBackend {
     /// The resolved item visibility first, then after every settings change.
     fn visibility(&self) -> LocalBoxStream<'static, BTreeMap<String, bool>>;
-    fn set_item(&self, id: String, visible: bool)
-    -> LocalBoxFuture<'static, Result<(), ClientError>>;
+    fn set_item(
+        &self,
+        id: String,
+        visible: bool,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>>;
     fn reset_items(&self) -> LocalBoxFuture<'static, Result<(), ClientError>>;
     fn editor_picker(&self, key: &ThreadKey) -> Rc<dyn EditorPickerBackend>;
     fn project_scripts(&self, key: &ThreadKey) -> Rc<dyn ProjectScriptsBackend>;
@@ -86,7 +89,9 @@ fn item_visible(runtime: Option<&ThreadDetailsRuntime>, id: &str) -> bool {
         Some(runtime) => runtime
             .visibility
             .with(|v| v.get(id).copied().unwrap_or(false)),
-        None => DETAILS_ITEMS.iter().any(|(item, _, visible)| *item == id && *visible),
+        None => DETAILS_ITEMS
+            .iter()
+            .any(|(item, _, visible)| *item == id && *visible),
     }
 }
 
@@ -279,14 +284,18 @@ pub fn thread_details_panel(
             scripts: visible("scripts") && scripts_snapshot.with(Option::is_some),
             // The branch row hides itself outside a git checkout that offers git.
             branch: has_branch && visible("branch") && located.get(),
-            git: has_git
-                && (visible("gitActions") || visible("changes"))
-                && located.get(),
+            git: has_git && (visible("gitActions") || visible("changes")) && located.get(),
         }
     });
 
     let workspace = view()
-        .app_class(move || Some(tw(if show.with(|s| s.workspace()) { "" } else { "hidden" })))
+        .app_class(move || {
+            Some(tw(if show.with(|s| s.workspace()) {
+                ""
+            } else {
+                "hidden"
+            }))
+        })
         .child(thread_details_section(
             Text::from("Workspace"),
             false.into(),
@@ -334,12 +343,20 @@ pub fn thread_details_panel(
                     .app_class(tw("flex flex-col"))
                     .child(version_control.branch.map(|branch| {
                         view()
-                            .app_class(move || Some(tw(if show.with(|s| s.branch) { "" } else { "hidden" })))
+                            .app_class(move || {
+                                Some(tw(if show.with(|s| s.branch) {
+                                    ""
+                                } else {
+                                    "hidden"
+                                }))
+                            })
                             .child(branch)
                     }))
                     .child(version_control.git_actions.map(|git| {
                         view()
-                            .app_class(move || Some(tw(if show.with(|s| s.git) { "" } else { "hidden" })))
+                            .app_class(move || {
+                                Some(tw(if show.with(|s| s.git) { "" } else { "hidden" }))
+                            })
                             .child(git)
                     })),
             ))
@@ -449,9 +466,7 @@ pub fn thread_details_items_menu_items(runtime: ThreadDetailsRuntime) -> impl In
         .child(menu::menu_item(
             t("Reset to default"),
             ItemOptions {
-                disabled: Prop::bind(move || {
-                    visibility.with(is_default_thread_details_visibility)
-                }),
+                disabled: Prop::bind(move || visibility.with(is_default_thread_details_visibility)),
                 ..Default::default()
             },
             text(t("Reset to default")),
@@ -573,8 +588,26 @@ mod tests {
     #[test]
     fn the_choose_row_shows_only_when_no_rendered_section_has_content() {
         assert!(!Show::default().any());
-        assert!(Show { scripts: true, ..Default::default() }.any());
-        assert!(Show { git: true, ..Default::default() }.any());
-        assert!(!Show { branch: true, ..Default::default() }.workspace());
+        assert!(
+            Show {
+                scripts: true,
+                ..Default::default()
+            }
+            .any()
+        );
+        assert!(
+            Show {
+                git: true,
+                ..Default::default()
+            }
+            .any()
+        );
+        assert!(
+            !Show {
+                branch: true,
+                ..Default::default()
+            }
+            .workspace()
+        );
     }
 }

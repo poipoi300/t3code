@@ -82,7 +82,9 @@ impl GitActionsBackend for FakeGit {
         let resource = self.resource.clone();
         self.resource
             .observe(0)
-            .filter_map(move |_| futures::future::ready(resource.snapshot().value.as_deref().cloned()))
+            .filter_map(move |_| {
+                futures::future::ready(resource.snapshot().value.as_deref().cloned())
+            })
             .boxed_local()
     }
     fn refresh(&self, _: &GitActionsScope) -> LocalBoxFuture<'static, Result<(), ClientError>> {
@@ -262,7 +264,8 @@ fn publish_and_changes_flow_runs_from_the_projection_at_both_widths() {
             app.screen().input_text("id:publish-repository-path"),
             Ok(Some("alice/"))
         );
-        app.clear("id:publish-repository-path").expect("clear the account prefill");
+        app.clear("id:publish-repository-path")
+            .expect("clear the account prefill");
         app.type_text("id:publish-repository-path", "alice/project")
             .expect("repository");
         app.press("role:button[Publish]").expect("publish");
@@ -293,8 +296,10 @@ fn commit_exclusion_message_failure_and_editor_root_follow_the_component() {
     app.press_key("ctrl+shift+f")
         .expect("server refusal while dialog stays open");
     app.press("role:button[Commit]").expect("commit");
-    app.wait_for("text:ran:Commit;feature:false;files:a.ts;message:Keep my typed message;env:first")
-        .expect("selected files only");
+    app.wait_for(
+        "text:ran:Commit;feature:false;files:a.ts;message:Keep my typed message;env:first",
+    )
+    .expect("selected files only");
     open_commit(&mut app);
     assert_eq!(
         app.screen().input_text("id:git-commit-message"),
@@ -389,7 +394,8 @@ fn unsupported_publish_stays_on_the_form_and_does_not_claim_success() {
     app.press("role:button[Publish repository]")
         .expect("publish");
     app.press("role:button[Next]").expect("next");
-    app.clear("id:publish-repository-path").expect("clear the account prefill");
+    app.clear("id:publish-repository-path")
+        .expect("clear the account prefill");
     app.type_text("id:publish-repository-path", "alice/project")
         .expect("path");
     app.press("role:button[Publish]").expect("submit");

@@ -3,21 +3,22 @@
 //! `orchestration.dispatchCommand` with `thread.create`). For UI proofs while the UI has no
 //! new-thread flow. On a dev-mode server, `devReplay` / `showcase` gives a free replayed turn.
 //!
-//! cargo run --example seed_thread -- <origin> <pairing-token> <scratch-data-dir> <thread-id> <title> <instance> <model>
+//! cargo run --example seed_thread -- <origin> <pairing-token> <scratch-data-dir> <thread-id> <title> <instance> <model> [runtime-mode, default full-access]
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [origin, token, dir, thread, title, instance, model] = args.as_slice() else {
-        return Err("usage: seed_thread <origin> <pairing-token> <scratch-data-dir> <thread-id> <title> <instance> <model>".into());
+    let [origin, token, dir, thread, title, instance, model, rest @ ..] = args.as_slice() else {
+        return Err("usage: seed_thread <origin> <pairing-token> <scratch-data-dir> <thread-id> <title> <instance> <model> [runtime-mode]".into());
     };
+    let mode = rest.first().map_or("full-access", String::as_str);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
     tokio::task::LocalSet::new().block_on(
         &runtime,
-        seed(origin, token, dir, thread, title, instance, model),
+        seed(origin, token, dir, thread, title, instance, model, mode),
     )
 }
 
@@ -30,6 +31,7 @@ async fn seed(
     title: &str,
     instance: &str,
     model: &str,
+    mode: &str,
 ) -> Result<(), String> {
     use t3_client::authorization::Sensitive;
     use t3_client::connection::{ServerCredential, connect};
@@ -66,7 +68,7 @@ async fn seed(
         "type": "thread.create", "createdBy": "user", "creationSource": "web",
         "commandId": format!("{thread}-create"), "threadId": thread, "projectId": project.0,
         "title": title, "modelSelection": {"instanceId": instance, "model": model},
-        "runtimeMode": "full-access", "interactionMode": "default",
+        "runtimeMode": mode, "interactionMode": "default",
         "branch": null, "worktreePath": null
     }))
     .map_err(|error| format!("thread.create command: {error}"))?;

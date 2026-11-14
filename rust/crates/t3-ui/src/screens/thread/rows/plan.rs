@@ -750,7 +750,7 @@ fn workspace_description(workspace: Memo<Option<String>>) -> impl IntoElement {
             Some(Document::new(vec![TextBlock::paragraph(vec![
                 Inline::text(before),
                 Inline::Code {
-                    code: workspace.get().unwrap_or_else(|| t("the workspace")).into(),
+                    code: workspace.get().unwrap_or_else(|| t("the workspace")),
                 },
                 Inline::text(after),
             ])]))

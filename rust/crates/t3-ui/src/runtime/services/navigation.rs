@@ -308,6 +308,7 @@ fn destination(target: client_new::Destination) -> ui_new::Destination {
 }
 fn new_view(view: &client_new::NewThreadView) -> ui_new::NewThreadView {
     match view {
+        client_new::NewThreadView::LinkOpened => ui_new::NewThreadView::LinkOpened,
         client_new::NewThreadView::Loading => ui_new::NewThreadView::Loading,
         client_new::NewThreadView::Empty { can_start_scratch } => ui_new::NewThreadView::Empty {
             can_start_scratch: *can_start_scratch,
@@ -388,6 +389,16 @@ fn link_action_to_ui(action: client_new::LinkAction) -> ui_new::LinkAction {
     }
 }
 impl<P: Platform + Clone + 'static> ui_new::NewThreadClient for NewThreadBinding<P> {
+    fn watch_link(
+        &self,
+        search: String,
+        entry: String,
+    ) -> LocalBoxStream<'static, Rc<ui_new::NewThreadView>> {
+        self.0
+            .watch_link(search, entry)
+            .map(|v| Rc::new(new_view(&v)))
+            .boxed_local()
+    }
     fn watch(&self, target: ui_new::Target) -> LocalBoxStream<'static, Rc<ui_new::NewThreadView>> {
         self.0
             .watch(new_target(target))

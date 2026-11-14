@@ -179,18 +179,21 @@ pub fn git_actions_registration<P: Platform + Clone + 'static>(
         move |key: t3_client::types::ThreadKey| {
             let service = service.clone();
             let thread = key.clone();
-            let scope = crate::runtime::rt()
-                .store
-                .shell_state(key.environment.clone(), move |_| {
-                    service.workspace_context(&thread, None).map(|context| GitActionsScope {
-                        thread: thread.clone(),
-                        cwd: checkout_dir(
-                            context.worktree_path.as_deref(),
-                            &context.project.workspace_root.0,
-                        ),
-                        draft_id: context.draft_id.clone(),
-                    })
-                });
+            let scope =
+                crate::runtime::rt()
+                    .store
+                    .shell_state(key.environment.clone(), move |_| {
+                        service
+                            .workspace_context(&thread, None)
+                            .map(|context| GitActionsScope {
+                                thread: thread.clone(),
+                                cwd: checkout_dir(
+                                    context.worktree_path.as_deref(),
+                                    &context.project.workspace_root.0,
+                                ),
+                                draft_id: context.draft_id.clone(),
+                            })
+                    });
             let host = crate::screens::panel::workspace_panel_host();
             let mut props =
                 GitActionsControlProps::new(nsh_core::prelude::Prop::bind(move || scope.get()));
@@ -260,9 +263,9 @@ impl<P: Platform + Clone + 'static> BranchSelectorBackend for BranchLeaseBinding
 pub fn thread_details_runtime<P: Platform + Clone + 'static>(
     service: GitPanel<P>,
 ) -> ThreadDetailsRuntime {
-    crate::screens::panel::details::thread_details_runtime(Rc::new(DetailsBinding(
-        thread_details(service),
-    )))
+    crate::screens::panel::details::thread_details_runtime(Rc::new(DetailsBinding(thread_details(
+        service,
+    ))))
 }
 
 struct DetailsBinding<P: Platform + Clone + 'static>(GitPanel<P>);

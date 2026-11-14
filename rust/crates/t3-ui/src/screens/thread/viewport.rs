@@ -133,11 +133,13 @@ pub fn timeline_row_keys(
     })
 }
 
+type RowIndexLookup = Rc<dyn Fn(&str) -> Option<usize>>;
+
 #[derive(Clone)]
 struct IndexedRows {
     count: Memo<usize>,
     key: Rc<dyn Fn(usize) -> Option<SharedString>>,
-    index: Rc<dyn Fn(&str) -> Option<usize>>,
+    index: RowIndexLookup,
 }
 
 struct Visit {

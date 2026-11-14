@@ -37,6 +37,7 @@ pub struct UrlState {
     pub can_go_back: Signal<bool>,
     pub can_go_forward: Signal<bool>,
     history_index: Signal<u64>,
+    history_entry: Signal<Option<String>>,
     tracker: Stored<MainAppLocation>,
     requests: Stored<mpsc::UnboundedSender<UrlRequest>>,
 }
@@ -51,6 +52,7 @@ impl UrlState {
             can_go_back: signal(false),
             can_go_forward: signal(false),
             history_index: signal(0),
+            history_entry: signal(None),
             tracker: stored(MainAppLocation::default()),
             requests: stored(requests),
         };
@@ -86,6 +88,7 @@ impl UrlState {
                     .tracker
                     .with(|tracker| tracker.record(&location, change.history_index));
                 batch(|| {
+                    state.history_entry.set(Some(change.entry_identity()));
                     state.history_index.set(change.history_index);
                     state.can_go_back.set(change.can_go_back);
                     state.can_go_forward.set(change.can_go_forward);
@@ -93,6 +96,14 @@ impl UrlState {
                 });
             }
             batch(|| {
+                if state.history_entry.get_untracked().is_none() {
+                    state
+                        .history_entry
+                        .set(Some(t3_client::navigation::history_entry_identity(
+                            None,
+                            state.history_index.get_untracked(),
+                        )));
+                }
                 state.available.set(false);
                 state.can_go_back.set(false);
                 state.can_go_forward.set(false);
@@ -119,6 +130,10 @@ impl UrlState {
         });
         provide_context(state);
         state
+    }
+
+    pub fn entry_identity(self) -> Option<String> {
+        self.history_entry.get()
     }
 
     pub fn request(self, request: UrlRequest) {

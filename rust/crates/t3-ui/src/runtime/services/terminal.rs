@@ -1,6 +1,6 @@
 //! Binding of the client's terminal service (`t3_client::services::terminal_sessions`) to the
 //! terminal lane (TERM-*). Pure delegation: the rules live in the client.
-use futures::future::LocalBoxFuture;
+use futures::{future::LocalBoxFuture, stream::LocalBoxStream};
 use std::rc::Rc;
 use t3_client::{
     ClientError,
@@ -27,6 +27,10 @@ pub trait TerminalClient {
     ) -> TerminalSessionLease;
     fn can_operate(&self, key: &ThreadKey) -> bool;
     fn can_read(&self, key: &ThreadKey) -> bool;
+    /// Whether the thread's drawer is open (its persisted tabs).
+    fn is_open(&self, key: &ThreadKey) -> bool;
+    /// Fires when any thread's tabs change.
+    fn ui_changes(&self) -> LocalBoxStream<'static, ()>;
     fn set_open(&self, key: &ThreadKey, open: bool);
     fn toggle(&self, key: &ThreadKey);
     fn set_height(&self, key: &ThreadKey, height: f64);
@@ -81,6 +85,12 @@ impl<P: Platform + Clone + 'static> TerminalClient for TerminalSessions<P> {
     }
     fn can_read(&self, key: &ThreadKey) -> bool {
         TerminalSessions::can_read(self, &key.environment)
+    }
+    fn is_open(&self, key: &ThreadKey) -> bool {
+        self.ui_state(key).terminal_open
+    }
+    fn ui_changes(&self) -> LocalBoxStream<'static, ()> {
+        TerminalSessions::ui_changes(self)
     }
     fn set_open(&self, key: &ThreadKey, open: bool) {
         TerminalSessions::set_open(self, key, open);

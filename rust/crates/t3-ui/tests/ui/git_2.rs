@@ -41,7 +41,14 @@ fn repository() -> BranchSelectorState {
     ];
     BranchSelectorState {
         branch: Some("main".into()),
-        filtered: refs.iter().cloned().map(|reference| BranchItem { reference, disabled_reason: None }).collect(),
+        filtered: refs
+            .iter()
+            .cloned()
+            .map(|reference| BranchItem {
+                reference,
+                disabled_reason: None,
+            })
+            .collect(),
         refs,
         total_count: 3,
         can_write: true,
@@ -77,7 +84,9 @@ impl FakeBranches {
         let refused = self.refuse.get_untracked();
         async move {
             if refused {
-                Err(ClientError::PermissionDenied { method: "vcs.switchRef".into() })
+                Err(ClientError::PermissionDenied {
+                    method: "vcs.switchRef".into(),
+                })
             } else {
                 Ok(())
             }
@@ -110,7 +119,10 @@ impl BranchSelectorBackend for FakeBranches {
     fn create_ref(&self, name: String) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         self.answer(format!("created:{name}"))
     }
-    fn set_start_from_origin(&self, value: bool) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    fn set_start_from_origin(
+        &self,
+        value: bool,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         self.change(|s| s.start_from_origin = value);
         self.answer(format!("from remote:{value}"))
     }
@@ -144,22 +156,50 @@ fn BranchFixture() -> impl IntoElement {
         view()
             .w_full()
             .h_full()
-            .child(control("Not a repository", move || not_repo.change(|s| s.is_repo = Some(false))))
-            .child(control("Scratch folder", move || scratch.change(|s| s.offers_git = false)))
-            .child(control("Offer create", move || creatable.change(|s| { s.filtered.clear(); s.create_name = Some("new-thing".into()); })))
-            .child(control("Block worktrees", move || blocked.change(|s| {
-                s.filtered = vec![item("other", json!({"worktreePath":"/w/other"}), Some("Stop the current turn to switch worktrees."))];
-            })))
-            .child(control("New worktree", move || worktree.change(|s| {
-                s.env_mode = EnvMode::Worktree;
-                s.selecting_worktree_base = true;
-                s.branch = Some("main".into());
-            })))
-            .child(control("More pages", move || paged.change(|s| { s.total_count = 120; s.next_cursor = Some(100); })))
+            .child(control("Not a repository", move || {
+                not_repo.change(|s| s.is_repo = Some(false))
+            }))
+            .child(control("Scratch folder", move || {
+                scratch.change(|s| s.offers_git = false)
+            }))
+            .child(control("Offer create", move || {
+                creatable.change(|s| {
+                    s.filtered.clear();
+                    s.create_name = Some("new-thing".into());
+                })
+            }))
+            .child(control("Block worktrees", move || {
+                blocked.change(|s| {
+                    s.filtered = vec![item(
+                        "other",
+                        json!({"worktreePath":"/w/other"}),
+                        Some("Stop the current turn to switch worktrees."),
+                    )];
+                })
+            }))
+            .child(control("New worktree", move || {
+                worktree.change(|s| {
+                    s.env_mode = EnvMode::Worktree;
+                    s.selecting_worktree_base = true;
+                    s.branch = Some("main".into());
+                })
+            }))
+            .child(control("More pages", move || {
+                paged.change(|s| {
+                    s.total_count = 120;
+                    s.next_cursor = Some(100);
+                })
+            }))
             .child(control("Refuse", move || refuse.refuse.set(true)))
-            .child(control("Checked out elsewhere", move || renamed.change(|s| s.branch = Some("feature".into()))))
+            .child(control("Checked out elsewhere", move || {
+                renamed.change(|s| s.branch = Some("feature".into()))
+            }))
             .child(text(move || fake.recorded.get()))
-            .child(view().w(px(280.0)).child(branch_toolbar_branch_selector(Rc::new(fake.clone())))),
+            .child(
+                view()
+                    .w(px(280.0))
+                    .child(branch_toolbar_branch_selector(Rc::new(fake.clone()))),
+            ),
         t3_ui::ui::toast::Position::TopRight,
     )
 }
@@ -171,7 +211,8 @@ fn start(window: (f32, f32)) -> Headless {
         ..EngineConfig::new(Root::of::<BranchFixture>())
     })
     .expect("branch fixture starts");
-    app.wait_for("role:combobox[Branch: main]").expect("current branch");
+    app.wait_for("role:combobox[Branch: main]")
+        .expect("current branch");
     app
 }
 
@@ -180,16 +221,24 @@ fn choosing_a_listed_ref_switches_through_the_client_at_both_widths() {
     for window in [DESKTOP, PHONE] {
         let mut app = start(window);
         app.press("role:combobox[Branch: main]").expect("open");
-        app.wait_for("text:refreshed").expect("refs refreshed on open");
+        app.wait_for("text:refreshed")
+            .expect("refs refreshed on open");
         app.wait_for("role:option[feature]").expect("listed ref");
         app.wait_for("remote").expect("remote badge");
         app.type_text("id:branch-search", "feat").expect("query");
-        app.wait_for("text:query:feat").expect("query reaches the client");
+        app.wait_for("text:query:feat")
+            .expect("query reaches the client");
         app.press("role:option[feature]").expect("select");
-        app.wait_for("text:selected:feature").expect("client switch");
-        assert!(!app.screen().shows("Search refs..."), "the picker closes on selection");
-        app.press("role:button[Checked out elsewhere]").expect("client state");
-        app.wait_for("role:combobox[Branch: feature]").expect("label follows the client");
+        app.wait_for("text:selected:feature")
+            .expect("client switch");
+        assert!(
+            !app.screen().shows("Search refs..."),
+            "the picker closes on selection"
+        );
+        app.press("role:button[Checked out elsewhere]")
+            .expect("client state");
+        app.wait_for("role:combobox[Branch: feature]")
+            .expect("label follows the client");
     }
 }
 
@@ -208,10 +257,14 @@ fn a_new_ref_is_created_from_the_query_and_refusal_reports_the_web_toast() {
     app.press("role:button[Refuse]").expect("refuse");
     app.press("role:button[Offer create]").expect("create item");
     app.press("role:combobox[Branch: main]").expect("open");
-    app.press("role:option[Create new ref \"new-thing\"]").expect("create");
-    app.wait_for("text:created:new-thing").expect("client create");
-    app.wait_for("Action unavailable").expect("permission toast");
-    app.wait_for("This connection cannot change the thread's branch.").expect("reason");
+    app.press("role:option[Create new ref \"new-thing\"]")
+        .expect("create");
+    app.wait_for("text:created:new-thing")
+        .expect("client create");
+    app.wait_for("Action unavailable")
+        .expect("permission toast");
+    app.wait_for("This connection cannot change the thread's branch.")
+        .expect("reason");
 }
 
 #[test]
@@ -219,7 +272,8 @@ fn a_ref_blocked_by_a_running_turn_is_disabled_with_the_notice() {
     let mut app = start(DESKTOP);
     app.press("role:button[Block worktrees]").expect("blocked");
     app.press("role:combobox[Branch: main]").expect("open");
-    app.wait_for("Stop the current turn to switch worktrees.").expect("notice");
+    app.wait_for("Stop the current turn to switch worktrees.")
+        .expect("notice");
     assert!(!app.screen().enabled("role:option[other]").expect("listed"));
     let _ = app.press("role:option[other]");
     assert!(!app.screen().shows("selected:other"));
@@ -228,11 +282,15 @@ fn a_ref_blocked_by_a_running_turn_is_disabled_with_the_notice() {
 #[test]
 fn a_new_worktree_offers_start_from_remote_and_labels_its_base() {
     let mut app = start(DESKTOP);
-    app.press("role:button[New worktree]").expect("worktree draft");
-    app.wait_for("role:combobox[Branch: From main]").expect("base label");
+    app.press("role:button[New worktree]")
+        .expect("worktree draft");
+    app.wait_for("role:combobox[Branch: From main]")
+        .expect("base label");
     app.press("role:combobox[Branch: From main]").expect("open");
-    app.press("role:switch[Start worktree from remote]").expect("toggle");
-    app.wait_for("text:from remote:true").expect("client setting");
+    app.press("role:switch[Start worktree from remote]")
+        .expect("toggle");
+    app.wait_for("text:from remote:true")
+        .expect("client setting");
 }
 
 #[test]
@@ -242,9 +300,15 @@ fn paging_status_and_non_repositories_follow_the_web() {
     app.press("role:combobox[Branch: main]").expect("open");
     app.wait_for("Showing 3 of 120 refs").expect("status text");
     app.press_key("escape").expect("close");
-    app.press("role:button[Not a repository]").expect("not a repo");
+    app.press("role:button[Not a repository]")
+        .expect("not a repo");
     assert!(!app.screen().shows("Branch: main"));
     let mut scratch = start(PHONE);
-    scratch.press("role:button[Scratch folder]").expect("scratch");
-    assert!(!scratch.screen().shows("Branch: main"), "the scratch folder never offers git");
+    scratch
+        .press("role:button[Scratch folder]")
+        .expect("scratch");
+    assert!(
+        !scratch.screen().shows("Branch: main"),
+        "the scratch folder never offers git"
+    );
 }

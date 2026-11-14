@@ -178,10 +178,12 @@ struct LinkFake {
     action: LinkAction,
     disabled: bool,
     success: bool,
+    opened: bool,
     calls: Signal<usize>,
 }
 impl NewThreadClient for LinkFake {
     fn watch(&self, _: Target) -> LocalBoxStream<'static, Rc<NewThreadView>> {
+        if self.opened {return futures::stream::once(futures::future::ready(Rc::new(NewThreadView::LinkOpened))).chain(futures::stream::pending()).boxed_local();}
         futures::stream::once(futures::future::ready(Rc::new(NewThreadView::LinkChoice {
             title: Text::content("Source link"),
             message: Text::content("Read before sending"),
@@ -194,7 +196,12 @@ impl NewThreadClient for LinkFake {
         .chain(futures::stream::pending())
         .boxed_local()
     }
-    fn retry(&self, _: Target) -> LocalBoxFuture<'static, Result<(), Text>> {
+    fn retry(&self, target: Target) -> LocalBoxFuture<'static, Result<(), Text>> {
+        if self.opened {
+            assert_eq!(target,Target::Link(LINK_QUERY.into()));
+            self.calls.update(|calls|*calls+=1);
+            return futures::future::ready(Err(Text::content("Reopen failed"))).boxed_local();
+        }
         unused()
     }
     fn start_scratch(&self, _: Option<String>) -> LocalBoxFuture<'static, Result<(), Text>> {
@@ -245,6 +252,7 @@ struct LinkHarnessProps {
     action: String,
     disabled: bool,
     success: bool,
+    opened: bool,
 }
 #[component]
 fn LinkHarness(props: LinkHarnessProps) -> impl IntoElement {
@@ -267,11 +275,18 @@ fn LinkHarness(props: LinkHarnessProps) -> impl IntoElement {
     }
     let calls = signal(0usize);
     provide_context(NewThreadRuntime(Rc::new(LinkFake {
-        action: [LinkAction::CloneRepository, LinkAction::UseWithoutProject, LinkAction::CheckoutPullRequest, LinkAction::ReplaceDraft]
-            .into_iter().find(|action| choice_label(*action) == props.action)
-            .expect("known fixture action"),
+        action: [
+            LinkAction::CloneRepository,
+            LinkAction::UseWithoutProject,
+            LinkAction::CheckoutPullRequest,
+            LinkAction::ReplaceDraft,
+        ]
+        .into_iter()
+        .find(|action| choice_label(*action) == props.action)
+        .expect("known fixture action"),
         disabled: props.disabled,
         success: props.success,
+        opened: props.opened,
         calls,
     })));
     view()
@@ -300,6 +315,7 @@ fn every_link_choice_delegates_raw_search_and_respects_the_latest_disabled_state
                         action: choice_label(action).into(),
                         disabled,
                         success: false,
+                        opened: false,
                     }))
                 })
                 .expect("link harness");
@@ -327,6 +343,7 @@ fn link_url(path: String) -> UrlSnapshot {
     UrlSnapshot {
         path,
         history_index: 0,
+        entry_key: None,
         can_go_back: false,
         can_go_forward: false,
         policy: RoutePolicy {
@@ -364,13 +381,28 @@ fn an_accepted_link_replaces_its_url_instead_of_trapping_back_navigation() {
                 action: choice_label(LinkAction::ReplaceDraft).into(),
                 disabled: false,
                 success: true,
+                opened: false,
             }))
         })
         .expect("link URL harness");
         app.wait_for("Source link").expect("replacement choice");
         app.press("role:button[Replace draft]")
             .expect("accept prompt");
-        app.wait_for("Link URL requests: [Replace(\"/draft/created\")]")
+        app.wait_for(r#"Link URL requests: [Replace("/draft/created")]"#)
             .expect("replace the source URL");
+    }
+}
+
+#[test]
+fn an_opened_link_exposes_the_source_reopen_action_and_retains_a_failure() {
+    for window in [DESKTOP,PHONE] {
+        let mut app=Headless::start(EngineConfig {
+            ui_sets:t3_ui::registries(),viewport:size(px(window.0),px(window.1)),
+            ..EngineConfig::new(Root::new::<LinkHarness>(||LinkHarnessProps {action:choice_label(LinkAction::ReplaceDraft).into(),disabled:false,success:false,opened:true}))
+        }).expect("opened link harness");
+        app.wait_for("This link is open").expect("opened entry view");
+        app.press("role:button[Open it again]").expect("explicit reopen");
+        app.wait_for("Reopen failed").expect("reopen error");
+        assert!(app.screen().shows("Link actions: 1"));
     }
 }

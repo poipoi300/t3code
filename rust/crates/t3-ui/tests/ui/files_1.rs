@@ -256,7 +256,10 @@ fn a_failed_folder_read_shows_the_server_reason_and_retries() {
 fn expand_all_opens_every_folder_and_collapses_them_again() {
     let mut app = start(DESKTOP, false);
     app.wait_for("text:README.md").expect("root listed");
+    app.press("role:button[Refresh workspace files]").expect("refresh");
+    app.wait_for("text:lists:2").expect("refresh re-reads the root");
     app.press("role:button[Expand all folders]").expect("expand all");
+    app.wait_for("label:Collapse all folders").expect("the button now collapses");
     app.wait_for("text:mod.rs").expect("nested folder opened");
     app.press("role:button[Collapse all folders]").expect("collapse all");
     app.wait_for_gone("text:main.rs", std::time::Duration::from_secs(5)).expect("collapsed");

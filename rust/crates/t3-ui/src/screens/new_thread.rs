@@ -84,6 +84,7 @@ pub enum NewThreadView {
         title: Text,
         message: Text,
     },
+    LinkOpened,
     LinkChoice {
         title: Text,
         message: Text,
@@ -111,6 +112,13 @@ pub struct LinkChoice {
 pub trait NewThreadClient {
     /// Emits the current view first; dropping the stream releases the session demand.
     fn watch(&self, target: Target) -> LocalBoxStream<'static, Rc<NewThreadView>>;
+    fn watch_link(
+        &self,
+        search: String,
+        _entry: String,
+    ) -> LocalBoxStream<'static, Rc<NewThreadView>> {
+        self.watch(Target::Link(search))
+    }
     fn retry(&self, target: Target) -> LocalBoxFuture<'static, Result<(), Text>>;
     fn start_scratch(&self, draft: Option<String>) -> LocalBoxFuture<'static, Result<(), Text>>;
     fn select_project(
@@ -156,27 +164,45 @@ pub fn index_draft_landing(target: Target) -> AnyElement {
         // The frozen Backend has no draft service; an unobserved shell cannot prove emptiness.
         return view().flex_1().into_element();
     };
-    let mut changes = client.0.watch(target.clone());
     let current = signal(Rc::new(NewThreadView::Loading));
     let error = signal(None::<Text>);
     let link_busy = signal(false);
     let owner = Owner::current();
     let nav = navigator();
-    let link_urls=matches!(&target,Target::Link(_)).then(||use_context::<crate::state::url::UrlState>()).flatten();
+    let navigation = LinkNavigation {
+        urls: use_context::<crate::state::url::UrlState>(),
+        pending: signal(None),
+    };
     let origin = nav.top();
-    spawn(async move {
-        while let Some(next) = changes.next().await {
-            if let NewThreadView::Navigate(destination) = next.as_ref() {
-                if nav.top() == origin {
-                    open_destination(nav,link_urls,destination.clone());
-                }
-            } else {
-                current.set(next);
-            }
-        }
-    });
     let client = stored(client.0);
     let target = stored(target);
+    effect(move || {
+        if nav.top() != origin {
+            return;
+        }
+        let mut changes = match (target.get(), navigation.urls) {
+            (Target::Link(search), Some(urls)) => {
+                let Some(entry) = urls.entry_identity() else {
+                    return;
+                };
+                client.get().watch_link(search, entry)
+            }
+            (target, _) => client.get().watch(target),
+        };
+        navigation.pending.set(None);
+        let origin = origin.clone();
+        let task = spawn(async move {
+            while let Some(next) = changes.next().await {
+                current.set(next.clone());
+                if let NewThreadView::Navigate(destination) = next.as_ref()
+                    && nav.top() == origin
+                {
+                    open_destination(nav, navigation, destination.clone());
+                }
+            }
+        });
+        cleanup(move || task.cancel());
+    });
     // Prompt edits update bindings, never remount the editor and its undo history.
     let page = computed(move || match current.get().as_ref() {
         NewThreadView::Loading | NewThreadView::Navigate(_) => (0, None),
@@ -185,6 +211,7 @@ pub fn index_draft_landing(target: Target) -> AnyElement {
         NewThreadView::LinkFailed { .. } => (3, None),
         NewThreadView::Draft(draft) => (4, Some(draft.id.clone())),
         NewThreadView::LinkChoice { .. } => (5, None),
+        NewThreadView::LinkOpened => (6, None),
     });
     view()
         .app_class(tw(
@@ -207,7 +234,8 @@ pub fn index_draft_landing(target: Target) -> AnyElement {
                     }))
                     .into_element(),
                 4 => draft_chat_view(current, client, error),
-                5 => link_choices(current, client, target, error, link_busy, owner,link_urls),
+                5 => link_choices(current, client, target, error, link_busy, owner, navigation),
+                6 => opened_link(client, target, error),
                 _ => view().into_element(),
             })
         }))
@@ -221,11 +249,28 @@ pub fn index_draft_landing(target: Target) -> AnyElement {
         .into_element()
 }
 
-fn open_destination(nav:crate::state::nav::Navigator,urls:Option<crate::state::url::UrlState>,destination:Destination) {
-    let route=destination.route();
-    if let Some(urls)=urls && let Some(path)=route.address() {
+#[derive(Clone, Copy)]
+struct LinkNavigation {
+    urls: Option<crate::state::url::UrlState>,
+    pending: Signal<Option<Route>>,
+}
+fn open_destination(
+    nav: crate::state::nav::Navigator,
+    navigation: LinkNavigation,
+    destination: Destination,
+) {
+    let route = destination.route();
+    if navigation.pending.get_untracked().as_ref() == Some(&route) {
+        return;
+    }
+    navigation.pending.set(Some(route.clone()));
+    if let Some(urls) = navigation.urls
+        && let Some(path) = route.address()
+    {
         urls.request(crate::state::url::UrlRequest::Replace(path));
-    }else{nav.open(route);}
+    } else {
+        nav.open(route);
+    }
 }
 
 fn link_choices(
@@ -235,7 +280,7 @@ fn link_choices(
     error: Signal<Option<Text>>,
     busy: Signal<bool>,
     owner: Owner,
-    link_urls:Option<crate::state::url::UrlState>,
+    navigation: LinkNavigation,
 ) -> AnyElement {
     let nav = navigator();
     let origin = nav.top();
@@ -254,7 +299,7 @@ fn link_choices(
                     let origin=origin.clone();
                     owner.run(move||spawn(async move {
                         let result=operation.await;busy.set(false);
-                        match result {Ok(Some(destination)) if nav.top()==origin=>open_destination(nav,link_urls,destination),Ok(_)=>{},Err(message)=>error.set(Some(message))}
+                        match result {Ok(Some(destination)) if nav.top()==origin=>open_destination(nav,navigation,destination),Ok(_)=>{},Err(message)=>error.set(Some(message))}
                     }));
                 }));
         }
@@ -264,6 +309,20 @@ fn link_choices(
                 .child(text(message.resolve()).app_class(tw("mt-1 text-muted-foreground text-sm")))
                 .child(buttons)).into_element()
     })).into_element()
+}
+
+fn opened_link(
+    client: Stored<Rc<dyn NewThreadClient>>,
+    target: Stored<Target>,
+    error: Signal<Option<Text>>,
+) -> AnyElement {
+    let owner = Owner::current();
+    view().app_class(tw("flex min-w-0 flex-1 flex-col items-center justify-center text-center gap-6 p-6 md:p-12"))
+        .child(text(t("This link is open")).app_class(tw("font-semibold text-xl")))
+        .child(button(ButtonContent::Label(t("Open it again")),ButtonVariant::Outline,ButtonSize::Sm,||false,move||{
+            error.set(None);let operation=client.get().retry(target.get());
+            owner.run(move||spawn(async move{if let Err(message)=operation.await {error.set(Some(message));}}));
+        })).into_element()
 }
 
 fn empty(title: Text, message: Text) -> AnyElement {
@@ -398,7 +457,7 @@ fn draft_chat_view(
         .attachments(&initial.id)
         .map(|session| ComposerAttachments::new(session, disabled));
     let busy = signal(false);
-    let submit_owner=Owner::current();
+    let submit_owner = Owner::current();
     let nav = navigator();
     let origin = nav.top();
     let submit = Rc::new(move |mode| {
@@ -414,15 +473,17 @@ fn draft_chat_view(
         error.set(None);
         let operation = client.get().submit(value.id.clone(), value.revision, mode);
         let origin = origin.clone();
-        submit_owner.run(move||spawn(async move {
-            let result = operation.await;
-            busy.set(false);
-            match result {
-                Ok(key) if nav.top() == origin => nav.open(Route::Thread(key)),
-                Ok(_) => {}
-                Err(message) => error.set(Some(message)),
-            }
-        }));
+        submit_owner.run(move || {
+            spawn(async move {
+                let result = operation.await;
+                busy.set(false);
+                match result {
+                    Ok(key) if nav.top() == origin => nav.open(Route::Thread(key)),
+                    Ok(_) => {}
+                    Err(message) => error.set(Some(message)),
+                }
+            })
+        });
     });
     let key_submit = submit.clone();
     let editor_ui = composer_prompt_editor_tiptap(

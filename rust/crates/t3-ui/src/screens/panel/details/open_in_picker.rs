@@ -65,9 +65,10 @@ fn can_open_editor(snapshot: &EditorPickerSnapshot) -> bool {
 fn unavailable_reason(snapshot: &EditorPickerSnapshot) -> Option<String> {
     let environment = Value::Text(snapshot.environment_label.clone());
     match snapshot.remote {
-        RemoteOpenState::RemoteUnavailable => {
-            Some(tr("No SSH route to {environment}", &[("environment", environment)]))
-        }
+        RemoteOpenState::RemoteUnavailable => Some(tr(
+            "No SSH route to {environment}",
+            &[("environment", environment)],
+        )),
         RemoteOpenState::RemoteLinks { .. } if snapshot.options.is_empty() => Some(tr(
             "Open from a computer to edit on {environment}",
             &[("environment", environment)],
@@ -209,7 +210,14 @@ fn editor_items(
                 view()
                     .app_class(tw("flex w-full items-center gap-2"))
                     .child(editor_icon(editor, &option.label).map(|icon| {
-                        icon_with_class(icon, if editor == EditorId::FileManager { "size-4 text-muted-foreground" } else { "size-4 text-foreground opacity-100" })
+                        icon_with_class(
+                            icon,
+                            if editor == EditorId::FileManager {
+                                "size-4 text-muted-foreground"
+                            } else {
+                                "size-4 text-foreground opacity-100"
+                            },
+                        )
                     }))
                     .child(menu::menu_item_label(option.label.clone()))
                     .child(shortcut.map(menu::menu_shortcut)),
@@ -227,7 +235,10 @@ fn editor_items(
         items.push(
             disabled_item(tr(
                 "Opens over SSH. Needs your key on {environment}",
-                &[("environment", Value::Text(snapshot.environment_label.clone()))],
+                &[(
+                    "environment",
+                    Value::Text(snapshot.environment_label.clone()),
+                )],
             ))
             .into_element(),
         );
@@ -280,9 +291,15 @@ mod tests {
         assert!(!can_open_editor(&denied));
         let unreachable = snapshot(RemoteOpenState::RemoteUnavailable, false);
         assert!(!host_editor_denied(&unreachable));
-        assert_eq!(unavailable_reason(&unreachable), Some("No SSH route to Studio".into()));
+        assert_eq!(
+            unavailable_reason(&unreachable),
+            Some("No SSH route to Studio".into())
+        );
         let mut links = snapshot(
-            RemoteOpenState::RemoteLinks { host: "studio".into(), username: None },
+            RemoteOpenState::RemoteLinks {
+                host: "studio".into(),
+                username: None,
+            },
             true,
         );
         assert_eq!(unavailable_reason(&links), None);

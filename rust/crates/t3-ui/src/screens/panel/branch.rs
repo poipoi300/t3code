@@ -30,8 +30,10 @@ pub trait BranchSelectorBackend {
     fn load_next(&self) -> LocalBoxFuture<'static, Result<(), ClientError>>;
     fn select_ref(&self, name: String) -> LocalBoxFuture<'static, Result<(), ClientError>>;
     fn create_ref(&self, name: String) -> LocalBoxFuture<'static, Result<(), ClientError>>;
-    fn set_start_from_origin(&self, value: bool)
-    -> LocalBoxFuture<'static, Result<(), ClientError>>;
+    fn set_start_from_origin(
+        &self,
+        value: bool,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>>;
 }
 
 #[derive(Clone, PartialEq)]
@@ -65,15 +67,26 @@ fn trigger_label(state: &BranchSelectorState) -> SharedString {
     match state.branch.as_deref().filter(|b| !b.is_empty()) {
         None => Text::from("Select ref").resolve(),
         Some(branch) if label == branch => Text::content(label).resolve(),
-        Some(branch) if label.ends_with(" (remote)") => {
-            tr("From {branch} (remote)", &[("branch", Value::Text(branch.to_owned()))]).into()
-        }
-        Some(branch) => tr("From {branch}", &[("branch", Value::Text(branch.to_owned()))]).into(),
+        Some(branch) if label.ends_with(" (remote)") => tr(
+            "From {branch} (remote)",
+            &[("branch", Value::Text(branch.to_owned()))],
+        )
+        .into(),
+        Some(branch) => tr(
+            "From {branch}",
+            &[("branch", Value::Text(branch.to_owned()))],
+        )
+        .into(),
     }
 }
 
 fn picker_items(state: &BranchSelectorState) -> Vec<PickerItem> {
-    let mut items: Vec<_> = state.filtered.iter().cloned().map(PickerItem::Ref).collect();
+    let mut items: Vec<_> = state
+        .filtered
+        .iter()
+        .cloned()
+        .map(PickerItem::Ref)
+        .collect();
     if let Some(name) = &state.create_name {
         items.push(PickerItem::Create(name.clone()));
     }
@@ -136,12 +149,10 @@ pub fn branch_toolbar_branch_selector(backend: Rc<dyn BranchSelectorBackend>) ->
             state.set(next);
         }
     });
-    view()
-        .app_class(tw("flex w-full flex-col"))
-        .child(when(
-            move || state.with(|s| shows_branch(s)),
-            move || branch_picker(backend, state),
-        ))
+    view().app_class(tw("flex w-full flex-col")).child(when(
+        move || state.with(|s| shows_branch(s)),
+        move || branch_picker(backend, state),
+    ))
 }
 
 fn show_branch_error(error: ClientError, failure_title: &'static str) {
@@ -291,7 +302,9 @@ fn branch_picker(
 
 /// Port of ui/combobox.tsx ComboboxStatus.
 fn combobox_status(content: String) -> impl IntoElement {
-    text(content).app_class(tw("px-3 pt-2 pb-2.5 text-muted-foreground text-xs font-medium"))
+    text(content).app_class(tw(
+        "px-3 pt-2 pb-2.5 text-muted-foreground text-xs font-medium",
+    ))
 }
 
 fn picker_row(
@@ -301,9 +314,17 @@ fn picker_row(
 ) -> impl IntoElement {
     match item.clone() {
         PickerItem::Create(name) => combobox_item(
-            tr("Create new ref \"{name}\"", &[("name", Value::Text(name.clone()))]),
+            tr(
+                "Create new ref \"{name}\"",
+                &[("name", Value::Text(name.clone()))],
+            ),
             false,
-            text(tr("Create new ref \"{name}\"", &[("name", Value::Text(name))])).app_class(tw("truncate")).into_element(),
+            text(tr(
+                "Create new ref \"{name}\"",
+                &[("name", Value::Text(name))],
+            ))
+            .app_class(tw("truncate"))
+            .into_element(),
             move || select(item.clone()),
         ),
         PickerItem::Ref(reference) => {
@@ -315,12 +336,21 @@ fn picker_row(
                 disabled,
                 view()
                     .app_class(tw("flex w-full min-w-0 items-center justify-between gap-2"))
-                    .child(view().app_class(tw("flex-1 min-w-0")).child(middle_truncate_with_font(
-                        move || SharedString::from(name.clone()),
-                        Options::default(),
-                        || Font { size: 14.0, ..Default::default() },
-                    )))
-                    .child(badge.map(|badge| text(t(badge)).app_class(tw("shrink-0 text-3xs text-muted-foreground/45"))))
+                    .child(
+                        view()
+                            .app_class(tw("flex-1 min-w-0"))
+                            .child(middle_truncate_with_font(
+                                move || SharedString::from(name.clone()),
+                                Options::default(),
+                                || Font {
+                                    size: 14.0,
+                                    ..Default::default()
+                                },
+                            )),
+                    )
+                    .child(badge.map(|badge| {
+                        text(t(badge)).app_class(tw("shrink-0 text-3xs text-muted-foreground/45"))
+                    }))
                     .into_element(),
                 move || select(item.clone()),
             )
@@ -476,7 +506,9 @@ mod tests {
 
     fn reference(mut value: serde_json::Value) -> VcsRef {
         let fields = value.as_object_mut().expect("object");
-        fields.entry("worktreePath").or_insert(serde_json::Value::Null);
+        fields
+            .entry("worktreePath")
+            .or_insert(serde_json::Value::Null);
         serde_json::from_value(value).expect("canonical ref")
     }
 
@@ -491,11 +523,17 @@ mod tests {
     fn ref_badges_follow_branch_picker_ref_item_precedence() {
         let current = item(serde_json::json!({"name":"main","current":true,"isDefault":true}));
         assert_eq!(ref_badge(&current, Some("/repo")), Some("current"));
-        let worktree = item(serde_json::json!({"name":"f","current":false,"isRemote":true,"isDefault":false,"worktreePath":"/w/f"}));
+        let worktree = item(
+            serde_json::json!({"name":"f","current":false,"isRemote":true,"isDefault":false,"worktreePath":"/w/f"}),
+        );
         assert_eq!(ref_badge(&worktree, Some("/repo")), Some("worktree"));
-        let same_root = item(serde_json::json!({"name":"f","current":false,"isDefault":false,"worktreePath":"/repo"}));
+        let same_root = item(
+            serde_json::json!({"name":"f","current":false,"isDefault":false,"worktreePath":"/repo"}),
+        );
         assert_eq!(ref_badge(&same_root, Some("/repo")), None);
-        let remote = item(serde_json::json!({"name":"origin/f","current":false,"isRemote":true,"isDefault":false}));
+        let remote = item(
+            serde_json::json!({"name":"origin/f","current":false,"isRemote":true,"isDefault":false}),
+        );
         assert_eq!(ref_badge(&remote, Some("/repo")), Some("remote"));
         let default = item(serde_json::json!({"name":"trunk","current":false,"isDefault":true}));
         assert_eq!(ref_badge(&default, None), Some("default"));
@@ -509,7 +547,9 @@ mod tests {
         };
         assert_eq!(status_text(&state), Some(t("Loading refs...")));
         state.loading = false;
-        state.refs = vec![reference(serde_json::json!({"name":"main","current":true,"isDefault":true}))];
+        state.refs = vec![reference(
+            serde_json::json!({"name":"main","current":true,"isDefault":true}),
+        )];
         state.total_count = 120;
         state.next_cursor = Some(100);
         assert_eq!(status_text(&state), Some("Showing 1 of 120 refs".into()));
@@ -526,7 +566,10 @@ mod tests {
             offers_git: true,
             ..Default::default()
         };
-        assert!(shows_branch(&state), "an unknown status counts as a repository");
+        assert!(
+            shows_branch(&state),
+            "an unknown status counts as a repository"
+        );
         state.is_repo = Some(false);
         assert!(!shows_branch(&state));
         state.is_repo = Some(true);

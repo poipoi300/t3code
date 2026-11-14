@@ -220,43 +220,47 @@ fn preference_bool(files: &FilesRuntime, key: &'static str, default: bool) -> Si
     value
 }
 
-/// FileSurfaceAction: a ghost icon button, or a pressed-state toggle, with its tooltip.
-fn file_surface_action(
-    label: impl Fn() -> String + 'static,
-    icon: impl Fn() -> Icon + 'static,
-    pressed: Option<Memo<bool>>,
-    on_press: impl Fn() + 'static,
-) -> impl IntoElement {
-    let label = Rc::new(label);
+/// FileSurfaceAction: a ghost icon button with its tooltip.
+fn file_surface_action(label: String, icon: Icon, on_press: impl Fn() + 'static) -> impl IntoElement {
     let caption = label.clone();
-    let glyph = dynamic(move || Some(icon_with_class(icon(), "size-3.5")));
-    let control = match pressed {
-        None => button(
-            ButtonContent::Custom { label: label(), child: glyph.into_element() },
+    view()
+        .app_class(tw("inline-flex shrink-0"))
+        .tooltip(tooltip(tooltip_create_handle(), TooltipOptions::default(), text(caption)))
+        .child(button(
+            ButtonContent::Custom { label, child: icon_with_class(icon, "size-3.5").into_element() },
             ButtonVariant::Ghost,
             ButtonSize::IconSm,
             || false,
             on_press,
-        )
-        .into_element(),
-        Some(pressed) => toggle(
-            toggle::Content::slot(label(), glyph),
-            toggle::Variant::Ghost,
-            toggle::Size::Sm,
-            move || pressed.get(),
-            || false,
-            move |_| on_press(),
-        )
-        .into_element(),
-    };
-    view()
-        .app_class(tw("inline-flex shrink-0"))
-        .tooltip(tooltip(
-            tooltip_create_handle(),
-            TooltipOptions::default(),
-            text(move || SharedString::from(caption())),
         ))
-        .child(control)
+}
+
+/// FileSurfaceAction with `pressed`: a ghost toggle whose name and glyph follow its state. NSH's
+/// toggle takes a fixed name and a press must not dispose its own control, so both states stay
+/// mounted and the inactive one is hidden (as rows/plan.rs keeps both of its buttons).
+fn file_surface_toggle(
+    pressed: Memo<bool>,
+    label: impl Fn(bool) -> String,
+    icon: impl Fn(bool) -> Icon,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    let on_press = Rc::new(on_press);
+    let half = |state: bool| {
+        let on_press = on_press.clone();
+        let name = label(state);
+        view()
+            .app_class(move || Some(tw(if pressed.get() == state { "inline-flex shrink-0" } else { "hidden" })))
+            .tooltip(tooltip(tooltip_create_handle(), TooltipOptions::default(), text(name.clone())))
+            .child(toggle(
+                toggle::Content::slot(name, icon_with_class(icon(state), "size-3.5")),
+                toggle::Variant::Ghost,
+                toggle::Size::Sm,
+                move || state,
+                || false,
+                move |_| on_press(),
+            ))
+    };
+    view().app_class(tw("inline-flex shrink-0")).child(half(false)).child(half(true))
 }
 
 const FILE_SURFACE_SUBHEADER_CLASS: &str =
@@ -371,10 +375,10 @@ fn file_surface(props: SurfaceProps) -> impl IntoElement {
                 let files = files_for_toggle.clone();
                 let path = target.relative_path.clone();
                 let request = target.reveal_request_id;
-                file_surface_action(
-                    move || t(mode.toggle_label(rendered.get())),
-                    move || if rendered.get() { Icon::CodeXml } else if mode == RenderedMode::Table { Icon::Table2 } else { Icon::Eye },
-                    Some(rendered),
+                file_surface_toggle(
+                    rendered,
+                    move |on| t(mode.toggle_label(on)),
+                    move |on| if on { Icon::CodeXml } else if mode == RenderedMode::Table { Icon::Table2 } else { Icon::Eye },
                     move || {
                         let pressed = !rendered.get_untracked();
                         pref.set(pressed);
@@ -384,10 +388,10 @@ fn file_surface(props: SurfaceProps) -> impl IntoElement {
                 )
             }))
             .child(when(move || shows_raw_text.get(), move || {
-                file_surface_action(
-                    move || if word_wrap.get() { t("Disable word wrap") } else { t("Enable word wrap") },
-                    || Icon::TextWrap,
-                    Some(computed(move || word_wrap.get())),
+                file_surface_toggle(
+                    computed(move || word_wrap.get()),
+                    |on| if on { t("Disable word wrap") } else { t("Enable word wrap") },
+                    |_| Icon::TextWrap,
                     move || word_wrap.set(!word_wrap.get_untracked()),
                 )
             }))
@@ -395,10 +399,10 @@ fn file_surface(props: SurfaceProps) -> impl IntoElement {
                 let files = files_for_toggle.clone();
                 when(move || preview_path.with(Option::is_some), move || {
                     let files = files.clone();
-                    file_surface_action(
-                        move || if explorer_open.get() { t("Hide file explorer") } else { t("Show file explorer") },
-                        || Icon::FolderTree,
-                        Some(computed(move || explorer_open.get())),
+                    file_surface_toggle(
+                        computed(move || explorer_open.get()),
+                        |on| if on { t("Hide file explorer") } else { t("Show file explorer") },
+                        |_| Icon::FolderTree,
                         move || {
                             let next = !explorer_open.get_untracked();
                             explorer_open.set(next);
@@ -769,11 +773,11 @@ fn workspace_image_preview(
                                 .child(
                                     view()
                                         .app_class(tw("flex items-center gap-1"))
-                                        .child(file_surface_action(|| t("Zoom out"), || Icon::Minus, None, move || change(1.0 / 1.25)))
+                                        .child(file_surface_action(t("Zoom out"), Icon::Minus, move || change(1.0 / 1.25)))
                                         .child(text(move || SharedString::from(format!("{}%", (scale.get() * 100.0).round()))).app_class(tw("min-w-10 text-center tabular-nums")))
-                                        .child(file_surface_action(|| t("Zoom in"), || Icon::Plus, None, move || change(1.25)))
-                                        .child(file_surface_action(|| t("Fit image"), || Icon::Scan, Some(computed(move || zoom.get().is_none())), move || zoom.set(None)))
-                                        .child(file_surface_action(|| t("Actual image size"), || Icon::Maximize, Some(computed(move || zoom.get() == Some(1.0))), move || zoom.set(Some(1.0)))),
+                                        .child(file_surface_action(t("Zoom in"), Icon::Plus, move || change(1.25)))
+                                        .child(file_surface_toggle(computed(move || zoom.get().is_none()), |_| t("Fit image"), |_| Icon::Scan, move || zoom.set(None)))
+                                        .child(file_surface_toggle(computed(move || zoom.get() == Some(1.0)), |_| t("Actual image size"), |_| Icon::Maximize, move || zoom.set(Some(1.0)))),
                                 ),
                         )
                         .child(

@@ -129,7 +129,12 @@ fn failed_add_preserves_the_typed_folder_for_a_retry() {
         app.press("role:button[Add]").expect("submit");
         app.wait_for("Could not create the project")
             .expect("failure displayed");
-        assert_eq!(app.screen().input_text("label:Command palette").expect("path input"),Some("~/projects/existing"));
+        assert_eq!(
+            app.screen()
+                .input_text("label:Command palette")
+                .expect("path input"),
+            Some("~/projects/existing")
+        );
         assert!(app.screen().shows("Project mutation calls: 1"));
         app.press("role:button[Add]")
             .expect("retry remains possible");
@@ -146,7 +151,12 @@ fn denied_add_and_unsupported_clone_do_not_dispatch() {
         let _ = app.press("role:button[Add]");
         let _ = app.press("role:button[Git URL]");
         assert!(app.screen().shows("Project mutation calls: 0"));
-        assert_eq!(app.screen().input_text("label:Command palette").expect("path input"),Some("~/projects/existing"));
+        assert_eq!(
+            app.screen()
+                .input_text("label:Command palette")
+                .expect("path input"),
+            Some("~/projects/existing")
+        );
     }
 }
 
@@ -314,7 +324,12 @@ fn optional_publication_control_delegates_and_retains_a_failure() {
             .expect("enable publication");
         app.wait_for("Publication denied")
             .expect("failure remains visible");
-        assert!(app.screen().shows("~/clone"));
+        assert_eq!(
+            app.screen()
+                .input_text("label:Command palette")
+                .expect("clone path input"),
+            Some("~/clone")
+        );
         assert!(!app.screen().shows("Closed project flow"));
     }
 }
