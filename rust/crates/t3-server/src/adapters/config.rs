@@ -51,7 +51,11 @@ pub struct LocalServices {
     owner: std::sync::Mutex<ServerOwner>,
 }
 impl LocalServices {
-    pub async fn open(mut config: ResolvedConfig, port: u16) -> crate::Result<Self> {
+    pub async fn open(
+        mut config: ResolvedConfig,
+        port: u16,
+        policy: Option<t3_contracts::managed_policy::ManagedPolicyDocument>,
+    ) -> crate::Result<Self> {
         config.port = port;
         config.ensure_directories().map_err(service_error)?;
         let owner = ServerOwner::acquire(&config.paths)
@@ -61,7 +65,7 @@ impl LocalServices {
         let id = t3_config::environment::environment_id(&config.paths)
             .await
             .map_err(service_error)?;
-        let auth = AuthService::new(&config, id.0.clone(), database.clone()).await?;
+        let auth = AuthService::new(&config, id.0.clone(), database.clone(), policy).await?;
         let environment = serde_json::from_value(json!({
             "environmentId": id, "label": config.cwd.file_name().and_then(|s| s.to_str()).unwrap_or("T3 Code"),
             "platform": {"os": if cfg!(windows) {"windows"} else if cfg!(target_os="macos") {"darwin"} else {"linux"},
@@ -484,4 +488,64 @@ pub fn discover_static_dir() -> Option<std::path::PathBuf> {
                 &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/server/src"),
             )
         })
+}
+
+/// The organisation's managed policy file (`policy/ManagedPolicy.ts`). Source builds may name
+/// another file with `T3CODE_DEV_MANAGED_POLICY_PATH`; release builds never do. A policy that
+/// cannot be read or decoded refuses start. TypeScript also reads the Windows Group Policy
+/// registry key and macOS managed preferences (`readPlatformPolicy`); those are not ported.
+pub fn managed_policy(
+    env: &std::collections::BTreeMap<String, String>,
+) -> crate::Result<Option<t3_contracts::managed_policy::ManagedPolicyDocument>> {
+    let platform = match std::env::consts::OS {
+        "windows" => "win32",
+        "macos" => "darwin",
+        other => other,
+    };
+    let path = t3_config::policy::selected_policy_path(platform, cfg!(debug_assertions), env);
+    t3_config::policy::ManagedPolicy::load_file(&path)
+        .map(|policy| policy.document)
+        .map_err(|error| {
+            crate::Error::Service(format!(
+                "The managed policy at {} cannot be read: {error}",
+                path.display()
+            ))
+        })
+}
+
+/// `checkServerReachability`, before binding: the address to listen on, or the organisation's
+/// refusal. Without the host services the policy cannot be checked, so a policy refuses start.
+pub fn reachable_host(
+    policy: Option<&t3_contracts::managed_policy::ManagedPolicyDocument>,
+    config: &ResolvedConfig,
+) -> crate::Result<String> {
+    let Some(document) = policy else {
+        return Ok(config.host.clone().unwrap_or_else(|| "127.0.0.1".into()));
+    };
+    #[cfg(feature = "host")]
+    {
+        use t3_contracts::auth::ServerAuthPolicy;
+        let remote = t3_auth::utils::loopback_bind_address(config.host.as_deref()).is_none();
+        let auth = if remote {
+            ServerAuthPolicy::RemoteReachable
+        } else if config.mode == RuntimeMode::Desktop {
+            ServerAuthPolicy::DesktopManagedLocal
+        } else {
+            ServerAuthPolicy::LoopbackBrowser
+        };
+        let policy = t3_host::policy::ManagedPolicy::from_document(Some(document.clone()))
+            .map_err(|error| crate::Error::Service(error.to_string()))?;
+        policy
+            .check_server_reachability(
+                auth,
+                config.host.as_deref(),
+                config.tailscale_serve_enabled,
+            )
+            .map_err(|error| crate::Error::Service(error.to_string()))
+    }
+    #[cfg(not(feature = "host"))]
+    Err(crate::Error::Service(format!(
+        "{} manages this machine, and this server cannot enforce its policy.",
+        document.organization.0
+    )))
 }

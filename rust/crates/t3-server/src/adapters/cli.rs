@@ -72,7 +72,8 @@ async fn mint(
     .map_err(service_error)?;
     let result = async {
         let id = std::fs::read_to_string(config.paths.environment_id())?;
-        let auth = AuthService::new(&config, id.trim().to_owned(), db.clone()).await?;
+        let policy = crate::adapters::config::managed_policy(&inputs.env)?;
+        let auth = AuthService::new(&config, id.trim().to_owned(), db.clone(), policy).await?;
         auth.inner()
             .create_pairing_link(
                 &standard_scopes(),

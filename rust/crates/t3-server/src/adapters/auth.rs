@@ -24,6 +24,7 @@ impl AuthService {
         config: &super::config::ResolvedConfig,
         environment_id: String,
         db: Database,
+        policy: Option<t3_contracts::managed_policy::ManagedPolicyDocument>,
     ) -> crate::Result<Self> {
         let secrets = ServerSecretStore::open(config.paths.secrets())
             .await
@@ -40,7 +41,7 @@ impl AuthService {
             dev_allowed_origins: config.dev_allowed_origins.clone(),
             ..Default::default()
         };
-        let inner = EnvironmentAuth::new(db, secrets, auth_config, None, SystemClock::new())
+        let inner = EnvironmentAuth::new(db, secrets, auth_config, policy, SystemClock::new())
             .await
             .map_err(service_error)?;
         let (links_enabled, links) = tokio::sync::watch::channel(false);

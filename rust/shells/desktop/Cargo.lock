@@ -3348,6 +3348,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
+dependencies = [
+ "bitflags 2.13.2",
+ "memchr",
+ "unicase",
+]
+
+[[package]]
 name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4197,6 +4208,7 @@ dependencies = [
  "sha2",
  "t3-contracts",
  "t3-rpc",
+ "t3-shared",
  "thiserror 2.0.21",
  "unicode-general-category",
  "unicode-normalization",
@@ -4278,6 +4290,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "t3-shared"
+version = "0.0.0"
+dependencies = [
+ "pulldown-cmark",
+ "regex",
+ "serde",
+ "serde_json",
+ "t3-contracts",
+ "thiserror 2.0.21",
+ "unicode-general-category",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "t3-theme"
 version = "0.1.0"
 dependencies = [
@@ -4294,17 +4320,21 @@ name = "t3-ui"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "jni",
+ "libc",
  "log",
  "nsh-base",
  "nsh-core",
  "percent-encoding",
  "serde_json",
+ "syntect",
  "t3-client",
  "t3-contracts",
  "t3-i18n",
  "t3-platform",
  "t3-theme",
  "tokio",
+ "two-face",
 ]
 
 [[package]]
@@ -4741,6 +4771,12 @@ dependencies = [
  "tempfile",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "unicase"
+version = "2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
 
 [[package]]
 name = "unicode-bidi"
