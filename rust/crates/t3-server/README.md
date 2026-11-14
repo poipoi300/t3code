@@ -109,6 +109,9 @@ server's own origin; `t3 pair` prints TypeScript's link on the dev URL and a
   applied.
 - Not ported or refused at start: LAN fencing (`--lan`), Tailscale Serve, the desktop bootstrap
   descriptor, project auto-bootstrap from the working directory.
+- A checkpoint file restore refuses while the thread has a live terminal (setup scripts run in
+  terminals), naming it; terminal opens, input and setup scripts for the thread wait until the
+  restore returns (`adapters/terminal.rs`, t3-git H-2). TypeScript restores under live writers.
 - Request bodies time out per read (300 s idle) rather than over the whole request.
 - WebSocket permessage-deflate is absent (an optional extension no client requires).
 - MCP access tokens carry an audience the Rust endpoint verifies; agents re-authorise once after

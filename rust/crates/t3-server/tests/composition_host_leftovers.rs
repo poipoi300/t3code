@@ -1096,3 +1096,144 @@ async fn peer_links_are_listed_linked_with_the_requested_access_and_unlinked() {
     server.runtime.shutdown().await.unwrap();
     task.abort();
 }
+
+// ---------------------------------------------------------------------------------------------
+// agentSessions.{scan, import}
+
+fn recent_file(path: &Path, contents: String) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, contents).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .unwrap();
+}
+fn same_dir(a: &str, b: &Path) -> bool {
+    std::fs::canonicalize(a).unwrap() == std::fs::canonicalize(b).unwrap()
+}
+
+/// The server's own home holds Claude and Codex sessions (no settings: both default instances);
+/// scan finds them with TypeScript's fields, import creates the threads once.
+#[tokio::test]
+async fn agent_sessions_are_scanned_and_imported_once_from_the_server_home() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let workspace = home.join("work").join("agent-project");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let claude_id = "33333333-3333-4333-8333-333333333333";
+    let codex_id = "019a0000-0000-7000-8000-0000000000aa";
+    recent_file(
+        &home.join(".claude").join("projects").join("-agent-project").join(format!("{claude_id}.jsonl")),
+        [
+            json!({"type": "user", "cwd": workspace, "sessionId": claude_id, "timestamp": "2026-11-13T12:00:00.000Z", "message": {"role": "user", "content": "Fix the project"}}),
+            json!({"type": "assistant", "sessionId": claude_id, "timestamp": "2026-11-13T12:01:00.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Done"}]}}),
+        ]
+        .iter()
+        .map(|r| format!("{r}\n"))
+        .collect(),
+    );
+    recent_file(
+        &home.join(".codex").join("sessions").join("2026").join("11").join("13").join(format!("rollout-2026-11-13T10-00-00-{codex_id}.jsonl")),
+        [
+            json!({"type": "session_meta", "payload": {"id": codex_id, "cwd": workspace}}),
+            json!({"type": "event_msg", "timestamp": "2026-11-13T10:00:00.000Z", "payload": {"type": "user_message", "message": "Review this code"}}),
+            json!({"type": "response_item", "timestamp": "2026-11-13T10:01:00.000Z", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Looks good"}]}}),
+        ]
+        .iter()
+        .map(|r| format!("{r}\n"))
+        .collect(),
+    );
+    let server = start(home, Default::default(), StartOptions::default()).await;
+    server.served(&["agentSessions.scan", "agentSessions.import"]);
+    let (mut socket, mut client) = server.socket(&server.admin).await;
+
+    let scanned = ok(unary(&mut socket, &mut client, "agentSessions.scan", json!({})).await);
+    let candidates = scanned["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 1, "{scanned}");
+    let candidate = &candidates[0];
+    assert!(same_dir(candidate["path"].as_str().unwrap(), &workspace), "{candidate}");
+    assert_eq!(candidate["title"], "agent-project");
+    assert_eq!(candidate["threadCount"], 2);
+    assert_eq!(candidate["alreadyImported"], false);
+    assert_eq!(candidate["git"], Value::Null);
+    let mut sources: Vec<_> = candidate["sources"].as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_owned()).collect();
+    sources.sort();
+    assert_eq!(sources, ["claudeAgent", "codex"]);
+    assert!(scanned["scannedAt"].is_string());
+
+    // The project a ProjectService commit would have written.
+    let layout = t3_config::home::HomeLayout {
+        base_dir: home.into(),
+        state_dir: home.join("userdata"),
+    };
+    t3_persistence::rusqlite::Connection::open(layout.database())
+        .unwrap()
+        .execute(
+            "INSERT INTO projection_projects
+             (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+             VALUES ('project:agents', 'Agents', ?1, '[]', '2026-11-14T12:00:00.000Z', '2026-11-14T12:00:00.000Z')",
+            [workspace.to_string_lossy()],
+        )
+        .unwrap();
+    let scanned = ok(unary(&mut socket, &mut client, "agentSessions.scan", json!({})).await);
+    assert_eq!(scanned["candidates"][0]["alreadyImported"], true, "{scanned}");
+    assert_eq!(scanned["candidates"][0]["projectId"], "project:agents");
+
+    let imported = ok(unary(&mut socket, &mut client, "agentSessions.import", json!({"projectId": "project:agents"})).await);
+    assert_eq!(imported, json!({"importedCount": 2, "skippedCount": 0}));
+    let snapshot = |id: String| {
+        let (http, base, cookie) = (server.http.clone(), server.base.clone(), server.admin.clone());
+        async move {
+            http.get(format!("{base}/api/orchestration/threads/{id}"))
+                .header("cookie", cookie)
+                .header("x-t3-orchestration-protocol", "2")
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let claude = snapshot(format!("import:claudeAgent:{claude_id}")).await;
+    let text = claude.to_string();
+    assert!(text.contains("Fix the project") && text.contains("Done"), "{text}");
+    let codex = snapshot(format!("import:codex:{codex_id}")).await;
+    assert!(codex.to_string().contains("Review this code"), "{codex}");
+
+    // A second import finds both already imported and adds nothing.
+    let again = ok(unary(&mut socket, &mut client, "agentSessions.import", json!({"projectId": "project:agents"})).await);
+    assert_eq!(again, json!({"importedCount": 2, "skippedCount": 0}));
+    let messages = |snapshot: &Value| snapshot.to_string().matches("Fix the project").count();
+    assert_eq!(messages(&snapshot(format!("import:claudeAgent:{claude_id}")).await), messages(&claude));
+
+    // TypeScript's typed failures.
+    let error = failure(unary(&mut socket, &mut client, "agentSessions.import", json!({"projectId": "project:absent"})).await);
+    assert_eq!(error["_tag"], "AgentSessionImportProjectNotFoundError", "{error}");
+    assert_eq!(error["projectId"], "project:absent");
+    let error = failure(
+        unary(
+            &mut socket,
+            &mut client,
+            "agentSessions.import",
+            json!({"projectId": "project:agents", "expectedWorkspaceRoot": home.join("elsewhere").display().to_string()}),
+        )
+        .await,
+    );
+    assert_eq!(error["_tag"], "AgentSessionImportProjectChangedError", "{error}");
+
+    // Missing scopes: scan needs orchestration:read, import orchestration:operate.
+    let none = server.cookie(&["access:read"]).await;
+    let (mut other, mut other_client) = server.socket(&none).await;
+    missing_scope(unary(&mut other, &mut other_client, "agentSessions.scan", json!({})).await, "orchestration:read");
+    let reader = server.cookie(&["orchestration:read"]).await;
+    let (mut other, mut other_client) = server.socket(&reader).await;
+    missing_scope(
+        unary(&mut other, &mut other_client, "agentSessions.import", json!({"projectId": "project:agents"})).await,
+        "orchestration:operate",
+    );
+    drop((socket, other));
+    server.runtime.shutdown().await.unwrap();
+}

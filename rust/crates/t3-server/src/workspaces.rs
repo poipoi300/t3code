@@ -189,7 +189,7 @@ mod authority {
         }
 
         /// `managedWorktreesDirectories`: the default folder, the setting and its predecessors.
-        async fn managed_directories(&self) -> Vec<PathBuf> {
+        pub async fn managed_directories(&self) -> Vec<PathBuf> {
             let mut directories = vec![self.default_worktrees.clone()];
             if let Ok(settings) = self.settings.snapshot().await {
                 let configured = std::iter::once(settings.worktrees_directory)

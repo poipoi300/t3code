@@ -722,3 +722,78 @@ async fn workflow_scripts_are_read_only_inside_the_claude_projects_folder() {
     assert_eq!(error["requiredPermission"], "orchestration:read", "{error}");
     s.runtime.take().unwrap().shutdown().await.unwrap();
 }
+
+/// TypeScript's launch publishes the setup script into the tracker: started (name, command,
+/// terminal), its output tail, then `done` on exit 0 or `failed` with "Setup script exited with
+/// N." otherwise (the run fails with it; the worktree stays, as the thread recorded it).
+#[tokio::test]
+async fn setup_scripts_publish_output_and_their_end_on_the_setup_stream() {
+    let mut s = Server::start().await;
+    let script = |command: &str| {
+        json!([{"id":"setup","name":"Setup","command":command,"icon":"configure","runOnWorktreeCreate":true,"async":false}]).to_string()
+    };
+    let passing = s.home().join("passing");
+    repository(&passing);
+    s.insert_project("project-pass", &passing, &script("echo t3-setup-output"));
+    let failing = s.home().join("failing");
+    repository(&failing);
+    let exit_three = if cfg!(windows) {
+        "cmd /c exit 3"
+    } else {
+        "sh -c 'exit 3'"
+    };
+    s.insert_project("project-fail", &failing, &script(exit_three));
+
+    let setup = s.subscribe("subscribeWorktreeSetup", json!({"threadId": "thread:pass"}));
+    assert_eq!(s.next(&setup).await.unwrap(), Value::Null);
+    ok(s.call(
+        "orchestration.launchThread",
+        launch(
+            "thread:pass",
+            "project-pass",
+            json!({"type": "worktree", "baseRef": "main", "branch": "feature/pass"}),
+            "auto-accept-edits",
+        ),
+    )
+    .await);
+    let started = s
+        .until(&setup, |snapshot| snapshot["setupScript"].is_object())
+        .await;
+    assert_eq!(started["setupScript"]["name"], "Setup", "{started}");
+    assert_eq!(started["setupScript"]["command"], "echo t3-setup-output");
+    let done = s
+        .until(&setup, |snapshot| snapshot["phase"] != "running")
+        .await;
+    assert_eq!(done["phase"], "done", "{done}");
+    let script_stage = stage(&done, "setup-script");
+    assert_eq!(script_stage["status"], "done", "{done}");
+    assert_eq!(script_stage["detail"], "exited with 0", "{done}");
+    assert!(
+        script_stage["tail"].to_string().contains("t3-setup-output"),
+        "{done}"
+    );
+    assert_eq!(stage(&done, "agent")["status"], "done", "{done}");
+    first_turn_completes(&mut s, "thread:pass").await;
+
+    let setup = s.subscribe("subscribeWorktreeSetup", json!({"threadId": "thread:fail"}));
+    assert_eq!(s.next(&setup).await.unwrap(), Value::Null);
+    ok(s.call(
+        "orchestration.launchThread",
+        launch(
+            "thread:fail",
+            "project-fail",
+            json!({"type": "worktree", "baseRef": "main", "branch": "feature/fail"}),
+            "auto-accept-edits",
+        ),
+    )
+    .await);
+    let failed = s
+        .until(&setup, |snapshot| snapshot["phase"] != "running")
+        .await;
+    assert_eq!(failed["phase"], "failed", "{failed}");
+    assert_eq!(failed["error"], "Setup script exited with 3.", "{failed}");
+    let script_stage = stage(&failed, "setup-script");
+    assert_eq!(script_stage["status"], "failed", "{failed}");
+    assert_eq!(script_stage["detail"], "exited with 3", "{failed}");
+    s.runtime.take().unwrap().shutdown().await.unwrap();
+}

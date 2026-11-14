@@ -464,7 +464,10 @@ async fn start_domains(
     };
     #[cfg(all(feature = "git-actions", feature = "local-services"))]
     let launch_ports = launch.as_ref().map(|launch| launch.ports());
-    #[cfg(all(feature = "orchestration", not(all(feature = "git-actions", feature = "local-services"))))]
+    #[cfg(all(
+        feature = "orchestration",
+        not(all(feature = "git-actions", feature = "local-services"))
+    ))]
     let launch_ports = None;
     // A file restore holds the thread's terminals, setup scripts included (t3-git H-2).
     #[cfg(all(feature = "orchestration", feature = "terminal", feature = "workspace"))]
@@ -474,8 +477,15 @@ async fn start_domains(
             Arc::new(crate::adapters::terminal::TerminalWriters(terminal))
                 as Arc<dyn t3_orchestration::api::ThreadWriters>
         });
-    #[cfg(all(feature = "orchestration", not(all(feature = "terminal", feature = "workspace"))))]
+    #[cfg(all(
+        feature = "orchestration",
+        not(all(feature = "terminal", feature = "workspace"))
+    ))]
     let writers = None;
+    #[cfg(all(feature = "orchestration", feature = "workspace"))]
+    let managed_worktrees = authority.managed_directories().await;
+    #[cfg(all(feature = "orchestration", not(feature = "workspace")))]
+    let managed_worktrees = vec![context.local.config.paths.worktrees()];
     #[cfg(feature = "orchestration")]
     domains.insert_runtime(
         crate::adapters::orchestration::OrchestrationAdapter::start(
@@ -486,6 +496,7 @@ async fn start_domains(
             titles,
             launch_ports,
             writers,
+            managed_worktrees,
         )
         .await?,
     )?;
@@ -666,7 +677,9 @@ async fn start_domains(
         &terminal,
     ) {
         domains.insert(setup)?;
-        if let Some(actions) = crate::adapters::git_actions::GitActionsAdapter::start(&context, domains) {
+        if let Some(actions) =
+            crate::adapters::git_actions::GitActionsAdapter::start(&context, domains)
+        {
             domains.insert(actions)?;
         }
     }

@@ -764,6 +764,7 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
             has_run(chunk, "scheduled-task-message:task:interval:", "completed")
         })
         .await;
+    eprintln!("PHASE A-before-launch-wait");
     // The unbound task launched its thread in the same pass, bound it, and its first turn ran.
     let launched = admin
         .until(&tasks, |list| {
@@ -776,6 +777,7 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
         .unwrap()
         .to_owned();
     assert_eq!(task(&launched, "task:launch")["runCount"], 1, "{launched}");
+    eprintln!("PHASE B-launched");
     let first = admin.stream(
         "orchestration.subscribeThread",
         json!({"threadId": launched_thread}),
@@ -785,6 +787,7 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
             has_run(chunk, "scheduled-task-message:task:launch:", "completed")
         })
         .await;
+    eprintln!("PHASE C-first-turn");
     assert_eq!(thread_count(&home, Some("task:launch")), 1);
 
     // A session without orchestration:operate cannot create, toggle or run tasks.
@@ -836,6 +839,7 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
         .unwrap();
     assert_eq!(stale, 2);
 
+    eprintln!("PHASE D-before-restart");
     // Restart at T0+90 under a ceiling below the thread's full access. Only `task:once` is due;
     // the dispatch ceiling refuses its turn as it refuses a client's, with TypeScript's text.
     let policy = temp.path().join("policy.json");
@@ -877,6 +881,7 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
     );
     // The unbound task saved above the new ceiling fires and is refused at thread creation, as
     // a client's create is: nothing is launched or bound.
+    eprintln!("PHASE E-before-fresh");
     let fresh = admin
         .until(&tasks, |list| {
             task(list, "task:fresh")["lastRunStatus"] == "failed"

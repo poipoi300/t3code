@@ -232,7 +232,11 @@ async fn a_restore_hold_and_a_terminal_start_never_interleave() {
     let hold = hold.await.unwrap();
     // `early` for its thread and `late` for the folder.
     assert_eq!(hold.running.len(), 2, "{:?}", hold.running);
-    assert!(hold.running.iter().any(|name| name.contains("early")), "{:?}", hold.running);
+    assert!(
+        hold.running.iter().any(|name| name.contains("early")),
+        "{:?}",
+        hold.running
+    );
     drop(hold);
     adapter.manager.shutdown().await.unwrap();
 }

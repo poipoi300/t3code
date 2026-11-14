@@ -524,7 +524,9 @@ pub fn managed_policy(
     t3_config::policy_sources::read_selected_managed_policy(platform, dev_build, env, known_drivers)
         .map(|policy| policy.document)
         .map_err(|error| match error {
-            t3_config::Error::ManagedPolicy { .. } => crate::Error::ManagedPolicy(error.to_string()),
+            t3_config::Error::ManagedPolicy { .. } => {
+                crate::Error::ManagedPolicy(error.to_string())
+            }
             error => crate::Error::ManagedPolicy(format!(
                 "The managed policy at {} cannot be read: {error}",
                 t3_config::policy::selected_policy_path(platform, dev_build, env).display()

@@ -95,8 +95,6 @@ async fn session(origin: &str, credential: &Value) -> (String, Value) {
 /// silently drops out, or a method that starts being served, fails here: move it in this list
 /// together with `briefs/server-unserved.md`.
 const UNSERVED_WITHOUT_NODE: &[&str] = &[
-    "agentSessions.import",
-    "agentSessions.scan",
     "device.action",
     "device.close",
     "device.configure",
@@ -135,8 +133,6 @@ const UNSERVED_WITHOUT_NODE: &[&str] = &[
 ];
 /// With Node and the preview edge present, the devices and preview groups are served too.
 const UNSERVED_WITH_NODE: &[&str] = &[
-    "agentSessions.import",
-    "agentSessions.scan",
     "guestShare.create",
     "orchestration.getNativeChildWork",
     "provider.chatgpt.handoff.subscribe",

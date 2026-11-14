@@ -140,6 +140,12 @@ fn fake_glab(bin: &Path, published: &Path) {
         "source_branch": "feature", "target_branch": "main",
     });
     std::fs::write(bin.join("mr.json"), request.to_string()).unwrap();
+    let mut listed = request.clone();
+    listed["source_project_id"] = json!(42);
+    listed["target_project_id"] = json!(42);
+    listed["source_project"] = json!({"path_with_namespace": "acme/web"});
+    listed["target_project"] = json!({"path_with_namespace": "acme/web"});
+    std::fs::write(bin.join("mr-list.json"), json!([listed]).to_string()).unwrap();
     if cfg!(windows) {
         std::fs::write(
             bin.join("glab.cmd"),
@@ -147,8 +153,13 @@ fn fake_glab(bin: &Path, published: &Path) {
              >>\"%~dp0glab-calls.txt\" echo %GITLAB_HOST% %1 %2\r\n\
              if \"%~1\"==\"--version\" (\r\n echo glab version 1.0.0\r\n exit /b 0\r\n)\r\n\
              if \"%~1\"==\"auth\" exit /b 1\r\n\
+             if \"%~1 %~2\"==\"mr list\" goto list\r\n\
              if \"%~1\"==\"mr\" (\r\n type \"%~dp0mr.json\"\r\n exit /b 0\r\n)\r\n\
-             type \"%~dp0project.json\"\r\n",
+             type \"%~dp0project.json\"\r\n\
+             exit /b 0\r\n\
+             :list\r\n\
+             echo %*| findstr /c:\"logged-out\" >nul && (echo glab auth login 1>&2& exit /b 1)\r\n\
+             type \"%~dp0mr-list.json\"\r\n",
         )
         .unwrap();
     } else {
@@ -156,6 +167,8 @@ fn fake_glab(bin: &Path, published: &Path) {
         std::fs::write(
             &script,
             "#!/bin/sh\nd=$(dirname \"$0\")\necho \"$GITLAB_HOST $1 $2\" >> \"$d/glab-calls.txt\"\n\
+             case \"$1 $2 $3\" in *logged-out*) echo 'glab auth login' >&2; exit 1;; esac\n\
+             case \"$1 $2\" in \"mr list\") cat \"$d/mr-list.json\"; exit 0;; esac\n\
              case \"$1\" in --version) echo 'glab version 1.0.0';; auth) exit 1;; \
              mr) cat \"$d/mr.json\";; *) cat \"$d/project.json\";; esac\n",
         )
@@ -1025,6 +1038,108 @@ async fn discovery_probes_once_for_calls_close_together() {
         .filter(|call| call.ends_with("--version"))
         .count();
     assert_eq!(probes, 1);
+    s.socket.close(None).await.unwrap();
+    s.runtime.shutdown().await.unwrap();
+}
+
+/// The next status value of the open stream that carries a remote part.
+async fn remote_status(s: &mut Server) -> Value {
+    loop {
+        let event = s.chunk().await;
+        if !event["remote"].is_null() {
+            return event["remote"].clone();
+        }
+    }
+}
+
+/// VCS status carries the branch's pull request from the checkout's own forge, as TypeScript's
+/// status does; a checkout with no forge, or a forge CLI that is signed out, leaves status working
+/// with no pull request and the stream open.
+#[tokio::test]
+async fn vcs_status_carries_the_pull_request_from_the_checkouts_forge() {
+    let (github, _) = github_stand_in().await;
+    // Status fetches the upstream remote: `false` as ssh fails it locally, so gitlab.com is
+    // never contacted.
+    let mut s = Server::start_with(&github, |_| {
+        (vec![("GIT_SSH_COMMAND".into(), "false".into())], Vec::new())
+    })
+    .await;
+    let published = |branch: &str, name: &str, s: &Server| {
+        let repo = s.home().join(name);
+        repository(&repo);
+        git(&repo, &["switch", "-q", "-c", branch]);
+        git(
+            &repo,
+            &["remote", "add", "origin", "git@gitlab.com:acme/web.git"],
+        );
+        git(
+            &repo,
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{branch}"),
+                "HEAD",
+            ],
+        );
+        git(
+            &repo,
+            &["branch", &format!("--set-upstream-to=origin/{branch}")],
+        );
+        repo
+    };
+    let with_request = published("feature", "with-request", &s);
+    s.insert_project("with-request", &with_request);
+    let cwd = json!({"cwd": with_request.to_string_lossy()});
+    s.client
+        .start("subscribeVcsStatus", cwd.clone(), CallKind::Stream)
+        .unwrap();
+    let remote = remote_status(&mut s).await;
+    assert_eq!(remote["pr"]["number"], 7, "{remote}");
+    assert_eq!(remote["pr"]["state"], "open", "{remote}");
+    assert_eq!(remote["pr"]["headRef"], "feature", "{remote}");
+    let refreshed = ok(s.call("vcs.refreshStatus", cwd).await);
+    assert_eq!(refreshed["pr"]["number"], 7, "{refreshed}");
+    assert!(
+        glab_calls(s.home())
+            .iter()
+            .any(|call| call == "gitlab.com mr list"),
+        "{:?}",
+        glab_calls(s.home())
+    );
+
+    for (name, setup) in [("no-forge", None), ("signed-out", Some("logged-out"))] {
+        let repo = match setup {
+            None => {
+                let repo = s.home().join(name);
+                repository(&repo);
+                repo
+            }
+            Some(branch) => published(branch, name, &s),
+        };
+        s.insert_project(name, &repo);
+        s.reconnect_with(&["orchestration:read", "orchestration:operate"])
+            .await;
+        let cwd = json!({"cwd": repo.to_string_lossy()});
+        s.client
+            .start("subscribeVcsStatus", cwd.clone(), CallKind::Stream)
+            .unwrap();
+        let remote = remote_status(&mut s).await;
+        assert!(remote["pr"].is_null(), "{name}: {remote}");
+        let refreshed = ok(s.call("vcs.refreshStatus", cwd).await);
+        assert!(refreshed["pr"].is_null(), "{name}: {refreshed}");
+        // The stream is still open: a local change reaches it.
+        std::fs::write(repo.join("new.txt"), "new\n").unwrap();
+        ok(s.call(
+            "vcs.refreshStatus",
+            json!({"cwd": repo.to_string_lossy(), "localOnly": true}),
+        )
+        .await);
+        loop {
+            let event = s.chunk().await;
+            if event["local"]["hasWorkingTreeChanges"] == true {
+                break;
+            }
+        }
+    }
     s.socket.close(None).await.unwrap();
     s.runtime.shutdown().await.unwrap();
 }

@@ -173,6 +173,7 @@ impl OrchestrationAdapter {
         titles: Option<Arc<dyn t3_orchestration::api::TitleGenerator>>,
         launch: Option<LaunchPorts>,
         writers: Option<Arc<dyn t3_orchestration::api::ThreadWriters>>,
+        managed_worktrees: Vec<std::path::PathBuf>,
     ) -> crate::Result<Arc<Self>> {
         use t3_orchestration::{
             composition::{OrchestrationRuntime, RandomIds, RuntimePorts},
@@ -209,15 +210,29 @@ impl OrchestrationAdapter {
         let checkpoints = Arc::new(GitCheckpointBackend::new(t3_git::Git::new));
         let mut ports = RuntimePorts::new(
             StoreDatabase(context.database.clone()),
-            Arc::new(AdapterRegistry::from_instance_source(provider_source.clone())),
+            Arc::new(AdapterRegistry::from_instance_source(
+                provider_source.clone(),
+            )),
             checkpoints.clone(),
             clock,
         );
+        // Checkpoint rollback with its worktree recovery; without it every rollback is refused.
+        // The managed folders are those at start: a recovery outside them is refused.
+        ports.rollback_workspaces = Some(Arc::new(
+            t3_orchestration::runtime::checkpoints::GitRollbackWorkspaceRecovery {
+                backend: checkpoints.clone(),
+                database: StoreDatabase(context.database.clone()),
+                managed_roots: managed_worktrees,
+            },
+        ));
         // `orchestration.launchThread` and launch workspace preparation (`adapters/launch.rs`).
         if let Some((workspaces, host)) = launch {
             ports.workspaces = workspaces;
             ports.launch = Some(Arc::new(
-                t3_orchestration::runtime::checkpoints::GitLaunchEnvironment::new(checkpoints, host),
+                t3_orchestration::runtime::checkpoints::GitLaunchEnvironment::new(
+                    checkpoints,
+                    host,
+                ),
             ));
         }
         ports.settings = Arc::new(
@@ -231,8 +246,9 @@ impl OrchestrationAdapter {
         // `orchestration.getWorkflowScript`: contained reads under `<home>/.claude/projects`.
         #[cfg(feature = "workspace")]
         {
-            ports.workflow_files =
-                Some(crate::adapters::workflow_files::workflow_files(&context.account_home));
+            ports.workflow_files = Some(crate::adapters::workflow_files::workflow_files(
+                &context.account_home,
+            ));
         }
         // Each provider session opens with its thread's MCP credential (`adapters/mcp.rs`).
         ports.credentials = credentials;
@@ -275,7 +291,9 @@ impl OrchestrationAdapter {
     pub fn subscribe_events(
         &self,
     ) -> Option<
-        tokio::sync::broadcast::Receiver<Arc<t3_contracts::application_event::ApplicationStoredEvent>>,
+        tokio::sync::broadcast::Receiver<
+            Arc<t3_contracts::application_event::ApplicationStoredEvent>,
+        >,
     > {
         t3_orchestration::api::EventCommitter::subscribe_shared(self.events.as_ref()).ok()
     }

@@ -65,7 +65,8 @@ impl ScriptedAdapter {
         Self {
             instance: ProviderInstanceId("replay".into()),
             capabilities: {
-                let mut capabilities = sample("OrchestrationV2ProviderSession")["capabilities"].clone();
+                let mut capabilities =
+                    sample("OrchestrationV2ProviderSession")["capabilities"].clone();
                 // The conversation rewinds with the files (`rollback` below).
                 capabilities["threads"]["canRollbackThread"] = true.into();
                 serde_json::from_value(capabilities).expect("capabilities")
@@ -1193,7 +1194,6 @@ async fn thread_outcome(
             CallEvent::Chunk { id, values } if id == *subscription => {
                 client.acknowledge(id);
                 let text = Value::Array(values).to_string();
-                eprintln!("DIAG chunk {}", if text.contains("rollback") || text.contains("metadata-updated") || text.contains("rolled") { text.as_str() } else { &text[..text.len().min(120)] });
                 if let Some(outcome) = outcomes
                     .iter()
                     .find(|parts| parts.iter().all(|part| text.contains(part)))
@@ -1203,7 +1203,10 @@ async fn thread_outcome(
             }
             CallEvent::Chunk { id, .. } => client.acknowledge(id),
             CallEvent::Exit { id, exit } if id == *subscription => {
-                panic!("subscription ended: {}", serde_json::to_value(exit).unwrap())
+                panic!(
+                    "subscription ended: {}",
+                    serde_json::to_value(exit).unwrap()
+                )
             }
             _ => {}
         }
@@ -1371,7 +1374,10 @@ async fn a_file_restore_refuses_while_the_thread_has_a_live_terminal() {
             &mut socket,
             &mut client,
             &subscription,
-            &[&["still writing to its folder: terminal `"], &["\"rolled_back\""]],
+            &[
+                &["still writing to its folder: terminal `"],
+                &["\"rolled_back\""]
+            ],
         )
         .await,
         "still writing to its folder: terminal `",
