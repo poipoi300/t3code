@@ -31,6 +31,11 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 tracing = "0.1"
 url = "2"
 regex = "1"
+t3-shared = { path = "../t3-shared" }
+zstd = "0.13"
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -3,6 +3,8 @@
 pub mod clones;
 pub mod enrichment;
 pub mod identity;
+pub mod import_store;
+pub mod inventory;
 pub mod managed;
 mod projection;
 pub mod promotion;

@@ -59,6 +59,15 @@ fn main() -> ExitCode {
         ("a_driver_the_policy_disallows_has_no_turn_adapter", || {
             Box::pin(disallowed_driver())
         }),
+        ("codex_below_the_compatible_version_is_refused", || {
+            Box::pin(codex_version_gate())
+        }),
+        ("claude_model_selection_compiles_as_typescript_does", || {
+            Box::pin(async { claude_model_compiler() })
+        }),
+        ("claude_entrypoint_comes_from_the_instance_settings_file", || {
+            Box::pin(claude_entrypoint())
+        }),
     ];
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.iter().any(|argument| argument == "--list") {
@@ -135,10 +144,14 @@ impl Provider {
             Self::Claude => "claudeAgent",
         }
     }
-    fn model(self) -> &'static str {
+    /// The thread's model selection. Claude selects an alias and an effort, so the launch shows
+    /// the catalogue's compile (`compileClaudeModelSelection`).
+    fn selection(self) -> Value {
         match self {
-            Self::Codex => "gpt-6-sol",
-            Self::Claude => "claude-sonnet-4-6",
+            Self::Codex => json!({"instanceId":"codex","model":"gpt-6-sol"}),
+            Self::Claude => {
+                json!({"instanceId":"claudeAgent","model":"haiku","options":[{"id":"effort","value":"low"}]})
+            }
         }
     }
     fn transcript(self) -> PathBuf {
@@ -430,7 +443,7 @@ mod harness {
             provider: Provider,
             mode: &str,
         ) -> Result<Value, Value> {
-            self.dispatch(json!({"type":"thread.create","commandId":"command:thread","threadId":THREAD,"projectId":"project:native","title":"Native thread","modelSelection":{"instanceId":provider.instance(),"model":provider.model()},"runtimeMode":mode,"interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"})).await
+            self.dispatch(json!({"type":"thread.create","commandId":"command:thread","threadId":THREAD,"projectId":"project:native","title":"Native thread","modelSelection":provider.selection(),"runtimeMode":mode,"interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"})).await
         }
 
         pub fn subscribe(&mut self) {
@@ -716,6 +729,18 @@ async fn provider_turn(provider: Provider) {
         json!(home.join(format!("{}-home", provider.instance()))),
         "{launches:?}"
     );
+    let args: Vec<&str> = launches[0]["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|arg| arg.as_str().unwrap())
+        .collect();
+    if provider == Provider::Claude {
+        // `haiku` at `low` compiles to the catalogue slug and that effort.
+        assert!(args.contains(&"--model=claude-haiku-5-5"), "{args:?}");
+        assert!(args.contains(&"--effort=low"), "{args:?}");
+    }
+    assert!(!args.iter().any(|arg| arg.contains(SECRET)), "{args:?}");
     let (home, received) = server.stop().await;
     assert!(!received.contains(SECRET));
     assert!(!snapshot.to_string().contains(SECRET));
@@ -958,6 +983,181 @@ async fn disallowed_driver() {
     server.stop().await;
 }
 
+/// The manifest marks Codex below 0.149.0 `broken` for this release: the session is refused at
+/// initialize with TypeScript's setup error (`CodexInstallation.compatibility`), the run fails
+/// with it, and no turn reaches the provider.
+async fn codex_version_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().to_path_buf();
+    let mut codex = instance(Provider::Codex, &home, None, true);
+    codex["environment"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"T3_FAKE_USER_AGENT","value":"codex_cli_rs/0.140.0 (Windows 11)","sensitive":false}));
+    let mut server = Server::start(&home, &settings_with(json!({ "codex": codex })), None).await;
+    server
+        .create_thread(Provider::Codex, "approval-required")
+        .await
+        .unwrap();
+    server.subscribe();
+    server
+        .send("first", "Write the fixture file.")
+        .await
+        .unwrap();
+    let status = server
+        .until(|values| {
+            run_status(values)
+                .filter(|status| !matches!(status.as_str(), "queued" | "starting" | "running"))
+        })
+        .await;
+    assert_eq!(status, "failed", "{:?}", server.thread);
+    let streamed = Value::Array(server.thread.clone()).to_string();
+    assert!(
+        streamed.contains(
+            "Codex 0.140.0 does not work with this T3 Code release. Update Codex to >=0.159.0, then retry."
+        ),
+        "{streamed}"
+    );
+    let wire = std::fs::read_dir(home.join("reports"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().to_string_lossy().ends_with(".wire.log"))
+        .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+        .collect::<String>();
+    assert!(!wire.contains("\"turn/start\""), "{wire}");
+    server.stop().await;
+}
+
+/// TypeScript's `claudeModelOptions.test.ts`, case for case, against the bundled manifest: the
+/// model, effort and settings a selection compiles to are what the Claude adapter launches with.
+fn claude_model_compiler() {
+    use t3_server::adapters::native_providers::claude_models::{
+        claude_catalog, compile, scoped_catalog,
+    };
+    let bundled = claude_catalog(&t3_provider::catalog::Manifest::bundled().unwrap());
+    let selection = |model: &str,
+                     options: Value|
+     -> t3_contracts::model_selection::ModelSelection {
+        serde_json::from_value(json!({"instanceId":"claude_test","model":model,"options":options}))
+            .unwrap()
+    };
+    let settings = |value: Value| value.as_object().unwrap().clone();
+
+    // "compiles context, effort, and settings together"
+    let compiled = compile(
+        &bundled,
+        &selection(
+            "claude-opus-4-6",
+            json!([{"id":"contextWindow","value":"1m"},{"id":"effort","value":"max"},{"id":"fastMode","value":true}]),
+        ),
+    );
+    assert_eq!(compiled.api_model_id, "claude-opus-4-6[1m]");
+    assert_eq!(compiled.effort.as_deref(), Some("max"));
+    assert_eq!(compiled.settings.get("fastMode"), Some(&json!(true)));
+
+    // "runs Ultracode at the chosen effort and reads the old Ultracode effort as xhigh"
+    let compiled = compile(
+        &bundled,
+        &selection(
+            "claude-opus-5-5",
+            json!([{"id":"effort","value":"high"},{"id":"ultracode","value":true}]),
+        ),
+    );
+    assert_eq!(compiled.effort.as_deref(), Some("high"));
+    assert_eq!(compiled.settings.get("ultracode"), Some(&json!(true)));
+    let compiled = compile(
+        &bundled,
+        &selection(
+            "claude-opus-5-5",
+            json!([{"id":"effort","value":"ultracode"}]),
+        ),
+    );
+    assert_eq!(compiled.effort.as_deref(), Some("xhigh"));
+    assert_eq!(compiled.settings.get("ultracode"), Some(&json!(true)));
+    let turned_off = compile(
+        &bundled,
+        &selection(
+            "claude-opus-5-5",
+            json!([{"id":"effort","value":"ultracode"},{"id":"ultracode","value":false}]),
+        ),
+    );
+    assert_eq!(turned_off.effort.as_deref(), Some("xhigh"));
+    assert_eq!(turned_off.settings.get("ultracode"), Some(&json!(false)));
+    let plain = compile(
+        &bundled,
+        &selection("claude-opus-5-5", json!([{"id":"effort","value":"high"}])),
+    );
+    assert!(!plain.settings.contains_key("ultracode"), "{plain:?}");
+
+    // "keeps old Ultracode defaults and selections at Extra High on custom models"
+    let custom = |slug: &str, choices: &[&str]| {
+        json!({"slug":slug,"name":slug,"capabilities":{"optionDescriptors":[{
+            "id":"effort","label":"Reasoning","type":"select","currentValue":"ultracode",
+            "options": choices.iter().map(|id| json!({"id":id,"label":id,"isDefault":*id=="ultracode"})).collect::<Vec<_>>(),
+        }]}})
+    };
+    let scoped = scoped_catalog(
+        bundled.clone(),
+        &[
+            custom("claude-custom-tuned", &["high", "xhigh", "ultracode"]),
+            custom("claude-custom-no-xhigh", &["high", "ultracode"]),
+        ],
+    );
+    for model in ["claude-custom-tuned", "claude-custom-no-xhigh"] {
+        for options in [json!([]), json!([{"id":"effort","value":"ultracode"}])] {
+            let compiled = compile(&scoped, &selection(model, options));
+            assert_eq!(compiled.effort.as_deref(), Some("xhigh"), "{model}");
+            assert_eq!(
+                compiled.settings,
+                settings(json!({"ultracode":true})),
+                "{model}"
+            );
+        }
+    }
+
+    // "uses the model default SDK effort alongside prompt-injected effort"
+    let compiled = compile(
+        &bundled,
+        &selection(
+            "claude-sonnet-4-6",
+            json!([{"id":"effort","value":"ultrathink"}]),
+        ),
+    );
+    assert_eq!(compiled.effort.as_deref(), Some("high"));
+    assert_eq!(compiled.prompt_effort.as_deref(), Some("ultrathink"));
+
+    // "keeps explicit effort for models missing from the local catalog"
+    let missing = |options| {
+        compile(
+            &bundled,
+            &selection("claude-pool-model-not-in-catalog", options),
+        )
+    };
+    assert_eq!(
+        missing(json!([{"id":"effort","value":"max"}]))
+            .effort
+            .as_deref(),
+        Some("max")
+    );
+    assert_eq!(missing(json!([])).effort, None);
+    assert_eq!(
+        missing(json!([])).api_model_id,
+        "claude-pool-model-not-in-catalog"
+    );
+
+    // An alias resolves to the catalogue slug, as `resolveClaudeCatalogApiModelId` does, and a
+    // custom slug that claims a built-in alias stops it resolving to the built-in model.
+    assert_eq!(
+        compile(&bundled, &selection("haiku", json!([]))).api_model_id,
+        "claude-haiku-5-5"
+    );
+    let claimed = scoped_catalog(bundled.clone(), &[json!("haiku")]);
+    assert_eq!(
+        compile(&claimed, &selection("haiku", json!([]))).api_model_id,
+        "haiku"
+    );
+}
+
 mod fake {
     //! The fake provider process: replays one recorded transcript over stdio.
     use serde_json::{Value, json};
@@ -1012,6 +1212,8 @@ mod fake {
                 "secret": std::env::var("T3_FAKE_SECRET").ok().as_deref() == Some(super::SECRET),
                 "home": home,
                 "pid": std::process::id(),
+                "args": std::env::args().skip(1).collect::<Vec<_>>(),
+                "entrypoint": std::env::var("CLAUDE_CODE_ENTRYPOINT").ok(),
             })
             .to_string(),
         )
@@ -1059,6 +1261,11 @@ mod fake {
                     .and_then(VecDeque::pop_front)
                     .unwrap_or_else(|| json!({"result": {}}));
                 reply["id"] = message["id"].clone();
+                if method == "initialize"
+                    && let Ok(agent) = std::env::var("T3_FAKE_USER_AGENT")
+                {
+                    reply["result"]["userAgent"] = json!(agent);
+                }
                 wire.write(&reply);
             }
         };
