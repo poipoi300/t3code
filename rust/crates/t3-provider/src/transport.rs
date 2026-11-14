@@ -65,9 +65,21 @@ pub struct ReqwestTransport {
     client: reqwest::Client,
 }
 impl ReqwestTransport {
+    /// Node fetch's behaviour, as TypeScript's provider and usage HTTP has it: ambient
+    /// `HTTP(S)_PROXY`/`ALL_PROXY` are ignored, and the bundled roots are trusted plus every
+    /// certificate in the PEM file `NODE_EXTRA_CA_CERTS` names (an unreadable file adds none).
     pub fn new() -> ServiceResult<Self> {
+        let extra = std::env::var_os("NODE_EXTRA_CA_CERTS")
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|pem| reqwest::Certificate::from_pem_bundle(&pem).ok())
+            .unwrap_or_default();
+        let builder = extra
+            .into_iter()
+            .fold(reqwest::Client::builder().no_proxy(), |builder, root| {
+                builder.add_root_certificate(root)
+            });
         Ok(Self {
-            client: reqwest::Client::builder()
+            client: builder
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(crate::diagnostics::mapped(
