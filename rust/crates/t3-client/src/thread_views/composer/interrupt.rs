@@ -10,8 +10,8 @@ impl RpcEndpoint for Observed<'_> {
     fn call<M: RpcMethod>(&self, input: M::Input) -> LocalBoxFuture<'_, Result<M::Output, ClientError>> { self.endpoint.call::<M>(input) }
     fn subscribe<M: RpcMethod>(&self, input: M::Input) -> LocalBoxStream<'static, Result<M::Output, ClientError>> { self.endpoint.subscribe::<M>(input) }
     fn command<M: RpcMethod>(&self, input: M::Input) -> LocalBoxFuture<'_, Result<M::Output, RpcCallError>> where M::Output: 'static {
-        async move {
-            match self.endpoint.command::<M>(input).await {
+        let pending = self.endpoint.command::<M>(input); async move {
+            match pending.await {
                 Err(RpcCallError::NotSent(error)) => {
                     *self.error.borrow_mut() = Some(error);
                     Err(RpcCallError::NotSent(ClientError::Cancelled))
@@ -23,7 +23,7 @@ impl RpcEndpoint for Observed<'_> {
 }
 
 pub async fn interrupt_thread<P: Platform>(platform: &P, store: &ClientStore, endpoint: SessionEndpoint, key: &ThreadKey, supports_thread_stop: bool) -> Result<(), ClientError> {
-    if endpoint.destination() != key.environment { return Err(ClientError::EnvironmentMismatch); }
+    if endpoint.destination() != Some(key.environment.clone()) { return Err(ClientError::EnvironmentMismatch); }
     let input = InterruptInput { command_id: operations::allocate_command_id(platform, None)?, thread_id: key.thread.clone(), run_id: None, subagent_id: None, legacy_turn_id: None };
     let mut projections = BTreeMap::new();
     let snapshot = store.snapshot();

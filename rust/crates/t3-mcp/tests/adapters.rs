@@ -33,6 +33,110 @@ mod scheduler {
         }
     }
     #[tokio::test]
+    async fn webhook_urls_require_a_live_caller_and_modes_covering_the_task() {
+        use std::sync::RwLock;
+        use t3_contracts::{provider_instance::ProviderInstanceId, provider_policy::RuntimeMode};
+        struct CallerStore(RwLock<ThreadShell>);
+        #[async_trait]
+        impl AccessStore for CallerStore {
+            async fn thread_shell(&self, _: &ThreadId) -> Result<Option<ThreadShell>> {
+                Ok(Some(self.0.read().unwrap().clone()))
+            }
+        }
+        let database = tokio::task::spawn_blocking(|| t3_persistence::Database::open(":memory:"))
+            .await
+            .unwrap()
+            .unwrap();
+        let service = Arc::new(
+            t3_scheduler::ScheduledTaskService::new(
+                database,
+                Arc::new(t3_scheduler::TokioClock::new(
+                    "2026-01-01T00:00:00Z".parse().unwrap(),
+                )),
+                Arc::new(Execution),
+                t3_scheduler::SchedulerOptions {
+                    relay_hook_base_url: Some("https://relay.test/v1/hooks/key".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        for (id, mode) in [("supervised", "approval-required"), ("full", "full-access")] {
+            service.upsert(serde_json::from_value(json!({"id":id,"title":"Webhook","prompt":"Review work","enabled":true,"schedule":{"type":"webhook"},"projectId":"project","workspaceStrategy":{"type":"root"},"modelSelection":{"instanceId":"codex","model":"test"},"runtimeMode":mode,"interactionMode":"default"})).unwrap()).await.unwrap();
+        }
+        let adapter = Arc::new(SchedulerAdapter {
+            service: service.clone(),
+            #[cfg(feature = "orchestration")]
+            reader: None,
+        });
+        let store = Arc::new(CallerStore(RwLock::new(ThreadShell {
+            id: ThreadId("caller".into()),
+            modes: Modes::full(),
+            deleted: false,
+            archived: false,
+            active: true,
+            provider_instance_id: Some(ProviderInstanceId("codex".into())),
+            background_subagent_providers: vec![],
+            link_origin: None,
+        })));
+        let server = McpServer::new(
+            Services {
+                orchestrator: adapter,
+                ..Services::default()
+            },
+            store.clone(),
+        );
+        let scope:InvocationScope=serde_json::from_value(json!({"environmentId":"environment","requestNamespace":"webhook","issuedAt":0,"capabilities":["orchestration"],"thread":{"threadId":"caller","providerInstanceId":"codex","providerSessionId":"session"}})).unwrap();
+        for (state, visible) in [
+            ("live", true),
+            ("plan", false),
+            ("ended", false),
+            ("readonly", false),
+        ] {
+            {
+                let mut caller = store.0.write().unwrap();
+                caller.modes = Modes::full();
+                caller.active = true;
+                if state == "plan" {
+                    caller.modes.interaction_mode =
+                        t3_contracts::provider_policy::ProviderInteractionMode::Plan;
+                    caller.modes.runtime_mode = RuntimeMode::ApprovalRequired;
+                }
+                if state == "ended" {
+                    caller.active = false;
+                }
+            }
+            let mut caller = scope.clone();
+            if state == "readonly" {
+                caller.thread = None;
+                caller.client = Some(ClientCaller {
+                    session_id: "external".into(),
+                    label: "External".into(),
+                    access: ClientAccess::ReadOnly,
+                    linked: false,
+                    narrowed_to: None,
+                    sender_thread: None,
+                });
+            }
+            let result = server
+                .call(
+                    caller,
+                    "list_scheduled_tasks",
+                    json!({"projectId":"project"}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result["isError"], false, "{state}: {result}");
+            let tasks = result["structuredContent"]["tasks"].as_array().unwrap();
+            assert_eq!(tasks.len(), 2);
+            for task in tasks {
+                assert_eq!(task["webhookUrl"].is_string(), visible, "{state}: {task}");
+            }
+        }
+        service.shutdown().await;
+    }
+    #[tokio::test]
     async fn native_schedule_updates_runs_and_deletes_preserve_mode_limits() {
         let database = tokio::task::spawn_blocking(|| t3_persistence::Database::open(":memory:"))
             .await
@@ -116,7 +220,7 @@ async fn context(owner: &str) -> CallContext {
         Arc::new(Store),
         scope,
         AccessRule::Reads,
-        "probe",
+        "t3_thread_read",
         &json!({}),
         false,
     )

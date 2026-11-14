@@ -32,8 +32,8 @@ impl<P: Platform + 'static> ComposerDraftService<P> {
             else { draft_key(&message.thread_key()) };
         self.update(|document| {
             let receipt = serde_json::to_value(&message.command_id)?;
-            if document["recoveredMessages"].get(&message.message_id.0) == Some(&receipt) { return Ok(()); }
-            if document.get("recoveredMessages").is_some_and(|v| !v.is_object()) {
+            if document["draftsByThreadKey"][&key]["recoveredMessages"].get(&message.message_id.0) == Some(&receipt) { return Ok(()); }
+            if document["draftsByThreadKey"][&key].get("recoveredMessages").is_some_and(|v| !v.is_object()) {
                 return Err(ClientError::InvalidPayload("Unreadable draft recovery receipts were retained.".into()));
             }
             let mut incoming = message.extra.get("composerDraft").cloned().unwrap_or_else(|| json!({"prompt":message.text}));
@@ -44,13 +44,13 @@ impl<P: Platform + 'static> ComposerDraftService<P> {
             next["prompt"] = json!(merge_text(prior["prompt"].as_str().unwrap_or_default(), incoming["prompt"].as_str().unwrap_or_default()));
             document["draftsByThreadKey"][&key] = next;
             web_content::add_images(document, &key, incoming["images"].as_array().map_or(&[], Vec::as_slice), false);
-            web_content::add_files(document, &key, incoming["files"].as_array().map_or(&[], Vec::as_slice));
+            web_content::add_files(document, &key, incoming["files"].as_array().map_or(&[], Vec::as_slice), false, false);
             for kind in [Kind::Terminal, Kind::Preview, Kind::Review, Kind::Thread, Kind::Environment] {
                 web_context::add(document, &key, kind, incoming[kind.field()].as_array().map_or(&[], Vec::as_slice), &message.thread_id.0,
                     Placement { append_reference: false, allow_duplicate_reference: false, insertion: None });
             }
-            if !document["recoveredMessages"].is_object() { document["recoveredMessages"] = json!({}); }
-            document["recoveredMessages"][&message.message_id.0] = receipt;
+            if !document["draftsByThreadKey"][&key]["recoveredMessages"].is_object() { document["draftsByThreadKey"][&key]["recoveredMessages"] = json!({}); }
+            document["draftsByThreadKey"][&key]["recoveredMessages"][&message.message_id.0] = receipt;
             Ok(())
         })?;
         self.flush().await?;

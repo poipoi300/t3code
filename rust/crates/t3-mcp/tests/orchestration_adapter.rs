@@ -82,6 +82,9 @@ fn adapter() -> Arc<OrchestrationAdapter> {
             database: database.stores,
             settings: Arc::new(FakeSettingsService::default()),
             hydrator: Arc::new(NoLegacyTranscript),
+            worktree_restore: Arc::new(
+                t3_orchestration::testing::FakeThreadWorktreeRestore::default(),
+            ),
             signals: sink.signals(),
             clock,
         }),
@@ -165,6 +168,57 @@ async fn metadata_ids_replay_and_dispatch_rechecks_the_target_mode_in_sqlite() {
         "{error}"
     );
     assert!(adapter.shell(ThreadId("target".into())).await.unwrap()["pinnedAt"].is_null());
+}
+
+#[tokio::test]
+async fn management_rename_refuses_runtime_and_interaction_raises_after_admission() {
+    for kind in ["runtime", "interaction"] {
+        let adapter = adapter();
+        create(&adapter, "caller").await;
+        create(&adapter, "target").await;
+        if kind == "interaction" {
+            dispatch(&adapter,json!({"type":"thread.interaction-mode.set","commandId":"plan","threadId":"target","interactionMode":"plan"})).await;
+        }
+        let input = json!({"threadId":"target","action":"rename","title":"Forbidden"});
+        let admitted = context(adapter.clone(), "t3_thread_update", &input).await;
+        let admitted = if kind == "interaction" {
+            let mut scope = admitted.scope;
+            scope.client.as_mut().unwrap().narrowed_to = Some(Modes {
+                interaction_mode: t3_contracts::provider_policy::ProviderInteractionMode::Plan,
+                ..admitted.limits
+            });
+            access::authorize(
+                adapter.clone(),
+                scope,
+                access::tool_rule("t3_thread_update", &input).unwrap(),
+                "t3_thread_update",
+                &input,
+                false,
+            )
+            .await
+            .unwrap()
+        } else {
+            admitted
+        };
+        let change = if kind == "runtime" {
+            json!({"type":"thread.runtime-mode.set","commandId":"elevate","threadId":"target","runtimeMode":"full-access"})
+        } else {
+            json!({"type":"thread.interaction-mode.set","commandId":"elevate","threadId":"target","interactionMode":"default"})
+        };
+        dispatch(&adapter, change).await;
+        assert!(
+            adapter
+                .t3_thread_update(admitted, decode_input("t3_thread_update", input).unwrap())
+                .await
+                .is_err(),
+            "{kind}"
+        );
+        assert_eq!(
+            adapter.shell(ThreadId("target".into())).await.unwrap()["title"],
+            "Before",
+            "{kind}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -23,4 +23,4 @@ pub use native::{
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 #[cfg(target_arch = "wasm32")]
-pub use web::{WebConfig, WebPlatform};
+pub use web::{WebConfig, WebPlatform, browser_identity};

@@ -216,6 +216,7 @@ impl OrchestrationAdapter {
             database: s.database.clone(),
             settings: s.settings.clone(),
             hydrator: s.hydrator.clone(),
+            worktree_restore: s.worktree_restore.clone(),
             signals: s.signals.clone(),
             clock: s.clock.clone(),
         })

@@ -171,7 +171,15 @@ mod tests {
                     stack.push(path);
                 } else if path.extension().is_some_and(|e| e == "rs") {
                     let source = std::fs::read_to_string(&path).unwrap_or_default();
-                    for (number, line) in source.lines().enumerate() {
+                    // A file's trailing test module builds fixture text, not user-facing copy.
+                    let lines: Vec<&str> = source.lines().collect();
+                    let end = lines
+                        .windows(2)
+                        .position(|pair| {
+                            pair[0].trim() == "#[cfg(test)]" && pair[1].trim_start().starts_with("mod ")
+                        })
+                        .unwrap_or(lines.len());
+                    for (number, line) in lines[..end].iter().enumerate() {
                         let code = line.split("//").next().unwrap_or("");
                         if CALLS.iter().any(|call| code.contains(call)) {
                             offences.push(format!(

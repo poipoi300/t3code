@@ -1,6 +1,7 @@
 //! Composed workspace services used by the details panel on every client.
 pub mod actions;
 pub mod providers;
+mod context;
 
 use crate::{
     ClientError, composition::{ClientRuntime, Spawner}, platform::Platform,
@@ -17,6 +18,7 @@ pub(crate) struct GitPanelState {
     source: SourceControl,
     actions: VcsActionManager,
     checkouts: RefCell<BTreeMap<CheckoutKey, Weak<Checkout>>>,
+    diff: RefCell<crate::view_logic::shell::diff_state::DiffStore>,
 }
 
 #[derive(Clone)]

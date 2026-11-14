@@ -29,6 +29,15 @@ endpoint and headers. `PeerService` and `ArtifactStore` are integration seams fo
 linked environments and saved screenshots. Service implementations must call
 `CallContext::check_dispatch` under their command lock before thread writes;
 environment writes recheck with `recheck_environment` after waiting for a lock.
+Hosts implementing `delegate_task` or `create_threads` must additionally resolve
+each requested runtime/interaction mode (including inherited modes and per-thread
+overrides) and call `access::check_modes(context.limits, requested)` before
+starting any child. An acts-as-caller declaration alone does not enforce those
+requested-mode limits. Thread writes must still recheck under the dispatch lock.
+Forwarding loads the local caller even for reads, checks toolkit capabilities,
+and refuses origins paired below full access before `PeerService::call`. Peer
+implementations preserve caller identity and limits, namespace retry IDs, remove
+the destination `environmentId`, and derive sender metadata from that caller.
 
 The catalog includes every toolkit: attachment 3, device 4, environment 2, HTML 2,
 message 1, orchestrator 20, preview 12, preview controls 2, project 7, pull requests 9,
@@ -63,6 +72,14 @@ Rust `tools/list` values and SDK serialization are compared with these fixtures.
 Instruction fixtures cover Codex browser/device contexts, Claude system prompt
 assembly, ACP interaction/capability transitions, and shared runtime/prompt text.
 No production model-facing wording is changed by this port.
+Toolkit discovery follows imports in the real HTTP registration; export fails if
+definition keys and registered names differ. Bindings include the observed
+TypeScript access declaration and predicate cases, compared to every Rust rule.
+Unknown tool rules fail closed. Cargo checks `fixtures/source-hashes.json`
+against the imported TypeScript/JSON sources, exporter and generated JSON, so a
+Cargo-only run fails with a regeneration instruction when those snapshots drift.
+`access::tool_rule` now returns `Result<AccessRule>`; host callers propagate its
+error before passing the rule to `access::authorize`.
 
 The SDK is pinned to `rmcp = 3.10.0`, the latest stable version reported by
 https://crates.io/api/v1/crates/rmcp on 2026-11-13. Its upstream is
@@ -172,6 +189,23 @@ The generated JSON decoder preserves the exported schema, string trimming,
 option-record conversion, JSON-text schedules and clamped read limits, and
 validates decoded constraints including UTF-16 string limits,
 but does not claim equivalence of every Effect refinement or decode-error text.
+Lone UTF-16 surrogates remain a known wire difference: rmcp and serde_json use
+Unicode scalar strings and reject them while TypeScript accepts them. Valid
+surrogate pairs and JavaScript UTF-16 length boundaries are tested. Preserving
+lone surrogates would require changing the SDK/JSON and contract string boundary;
+replacement characters would silently change the caller's input.
+Thread wait receives rmcp's request cancellation token; the real HTTP cancellation
+test verifies the token reaches the service and the outstanding response closes.
+Scheduler lists load caller modes and redact webhook URLs for ended turns,
+plan-mode callers, read-only clients and tasks above the caller's modes.
+
+Remaining review seam (L1): `t3-orchestration::Error::Rejected` carries only a
+reason string. The management dispatch path cannot return typed mode-escalation
+codes; the direct path still recognizes the native reason text. Both require a
+typed mode-refusal variant from `Dispatcher::dispatch_with_limit` before this
+crate can preserve the refusal code without parsing human text. The sibling API
+request is recorded in the shared orchestration seam notes. Mode admission still
+fails closed in the native dispatcher; the gap is its public error code.
 Local MCP scope, access, catalog, and inline input wrappers are crate API types;
 no replacement domain contract types need moving to `t3-contracts`.
 
@@ -181,14 +215,14 @@ t3-mcp`. Tests use fixtures, service fakes, isolated SQLite, and ephemeral HTTP;
 they never access provider stores or live T3 state. Windows is the verified host.
 
 Current specification: TypeScript merged at `817a9186f9`, including the theme
-supplement. Fixture regeneration check, formatting, default Clippy with warnings
-denied, and all 36 default Rust tests pass. TypeScript's AgentContextBudget test
-also passes (two cases). New witnesses cover verbatim message output, UTF-16
-boundaries, plan/caller liveness, theme authority and rechecking, mixed-version
-`next`, always-load metadata, budgets and exact modern/legacy HTTP tool lists.
-The current `cargo check --all-features` also passes. The earlier optional-adapter
-run passed 35 tests before this catalog refresh;
-SQLite integration covers metadata/stop replay, mode changes under dispatch,
-public project mapping, uploads and schedules. Paid model evals were not
-run: descriptions, model instructions and acknowledgement text are extracted
-from the current production source without authored wording changes.
+supplement. The fixture regeneration comparison and all 48 Rust tests with
+`--all-features` pass, including real OAuth refusals, HTTP cancellation,
+forwarding fences/capabilities, deleted HTML paths, hidden sub-agent tools,
+caller-dependent webhook URL redaction and both management mode-raise refusals
+against SQLite. The declaration guard covers every tool and every exported rule
+branch; the source hash guard was observed failing after an exporter edit and
+passing after regeneration. Budget checks compute production Rust output sizes
+against the current TypeScript budget file. Formatting and all-feature Clippy
+with warnings denied also pass. Paid model evals were not
+run: descriptions, instructions and acknowledgement text are mechanically
+extracted from production, with no authored model-facing wording changes.

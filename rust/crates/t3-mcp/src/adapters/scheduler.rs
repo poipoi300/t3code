@@ -139,7 +139,8 @@ impl OrchestratorService for SchedulerAdapter {
             {
                 continue;
             }
-            let may_run = context.caller_may_start() && self.check_task(&context, &task).await.is_ok();
+            let may_run =
+                context.caller_may_start() && self.check_task(&context, &task).await.is_ok();
             tasks.push(summary(task, may_run)?);
         }
         Ok(OrchestratorMcpListScheduledTasksResult { tasks })

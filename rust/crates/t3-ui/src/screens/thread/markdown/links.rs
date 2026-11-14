@@ -1,13 +1,16 @@
 //! Port of apps/web/src/components/chat/{MarkdownFileLink,MarkdownExternalLink,MarkdownThreadLink}.tsx.
 
-use std::{collections::BTreeSet, rc::Rc};
+use std::{collections::{BTreeMap, BTreeSet}, rc::Rc};
+
+use futures::{StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
 
 use nsh_base::text_view::{
     Block, CustomNode, Document, Inline, MarkdownPlugin, ParseContext, Parser, TextViewClasses,
     mdast,
 };
 use nsh_core::prelude::*;
-use t3_client::types::{EnvironmentId, ThreadKey};
+use t3_client::types::{EnvironmentId, ThreadId, ThreadKey};
+use t3_contracts::orchestration_v2::OrchestrationV2ThreadLinkMetadata;
 use t3_client::view_logic::session::links::{
     MarkdownFileLinkMeta, is_windows_absolute, resolve_inline_code_file_link_meta,
     resolve_markdown_file_link_meta,
@@ -25,6 +28,24 @@ use crate::theme::{cn, tw};
 use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::menu::{ItemOptions, MenuOptions, context_menu, menu_item, menu_popup_with};
 use crate::ui::tooltip::{TooltipOptions, Variant, tooltip, tooltip_create_handle};
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThreadLinkLookup {
+    pub settled: bool,
+    pub metadata: BTreeMap<ThreadId, OrchestrationV2ThreadLinkMetadata>,
+}
+
+/// Bound by runtime/services/thread_ops.rs to the destination client's query/host services.
+pub trait MarkdownLinkService {
+    fn thread_link_metadata(&self, environment: EnvironmentId, threads: Vec<ThreadId>)
+        -> LocalBoxStream<'static, ThreadLinkLookup>;
+
+    fn resolve_file(&self, thread: ThreadKey, meta: MarkdownFileLinkMeta)
+        -> LocalBoxFuture<'static, Result<MarkdownFileLinkMeta, t3_client::ClientError>>;
+}
+
+#[derive(Clone)]
+pub struct MarkdownLinkRuntime(pub Rc<dyn MarkdownLinkService>);
 
 /// Message/file context, captured once for a bounded prose block; authored values are content.
 #[derive(Clone, Debug, Default)]
@@ -68,8 +89,8 @@ impl MarkdownPlugin for MarkdownLinkPlugin {
         };
         self.link_inline(href, content, inline_code)
             .map(|mut inline| {
-                if let (Inline::Link { title, .. }, mdast::Node::Link(link)) = (&mut inline, node) {
-                    *title = link.title.clone();
+                if let mdast::Node::Link(link) = node {
+                    set_link_title(&mut inline, link.title.clone());
                 }
                 inline
             })
@@ -110,21 +131,36 @@ impl MarkdownLinkPlugin {
                 .iter()
                 .all(|item| matches!(item, Inline::Text { .. }))
                 .then(|| content.iter().map(Inline::plain_text).collect::<String>());
-            return Some(Inline::Link {
-                url: if href.starts_with("//") {
+            let url = if href.starts_with("//") {
                     format!("https:{href}")
                 } else {
                     href.into()
-                },
-                title: None,
-                content: markdown_external_link_content(&host, plain.as_deref(), content),
-            });
+                };
+            let label = content.iter().map(Inline::plain_text).collect::<String>();
+            return Some(Inline::Custom(CustomNode::new("markdown-external-link")
+                .with_attribute("href", url)
+                .with_text(label)
+                .with_content(markdown_external_link_content(&host, plain.as_deref(), content))));
         }
         None
     }
 
     fn render_link(&self, node: &CustomNode) -> Option<AnyElement> {
         match node.name.as_str() {
+            "markdown-external-link" => {
+                let content = Document::new(vec![Block::paragraph(node.content.clone())]);
+                let plugin = self.clone();
+                // TextView names a custom inline U+FFFC; the native link supplies the authored name.
+                Some(nsh_base::link()
+                    .href(Some(SharedString::from(node.attributes.get("href")?.clone())))
+                    .title(node.attributes.get("title").cloned().map(SharedString::from))
+                    .accessibility_label(Some(SharedString::from(node.text.clone())))
+                    .app_class(tw("min-w-0 max-w-full text-info-foreground no-underline"))
+                    .child(nsh_base::text_view().document(Some(content))
+                        .classes(TextViewClasses { paragraph: Some(tw("m-0")), ..Default::default() })
+                        .render_custom(move |node| plugin.render(node).unwrap_or_else(|| view().into_element())))
+                    .into_element())
+            }
             "markdown-file-link" => {
                 let href = node.attributes.get("href")?;
                 let meta = self.context.file(
@@ -232,9 +268,7 @@ impl MarkdownLinkPlugin {
                     let title = title.clone();
                     let replacement = self.link_inline(url, content.clone(), false);
                     replacement.map(|mut inline| {
-                        if let Inline::Link { title: current, .. } = &mut inline {
-                            *current = title;
-                        }
+                        set_link_title(&mut inline, title);
                         inline
                     })
                 }
@@ -258,6 +292,18 @@ impl MarkdownLinkPlugin {
                 *inline = replacement;
             }
         }
+    }
+}
+
+fn set_link_title(inline: &mut Inline, title: Option<String>) {
+    match inline {
+        Inline::Link { title: current, .. } => *current = title,
+        Inline::Custom(node) if node.name == "markdown-external-link" => {
+            if let Some(title) = title {
+                node.attributes.insert("title".into(), title);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -399,10 +445,10 @@ fn markdown_file_link_in_context(
     thread: Option<ThreadKey>,
 ) -> impl IntoElement {
     let panel = use_context::<crate::screens::panel::PanelHost>();
-    // Ambiguous citations need guarded lookup; out-of-workspace media need the media service.
-    let panel_target = thread
-        .zip(panel)
-        .filter(|_| meta.workspace_lookup_path.is_none() && meta.workspace_relative_path.is_some());
+    let service = use_context::<MarkdownLinkRuntime>();
+    let owner = Owner::current();
+    let open_task = stored(None::<Spawned<()>>);
+    let panel_target = thread.zip(panel).filter(|_| meta.workspace_relative_path.is_some());
     let meta = Rc::new(meta);
     let label = file_link_label(&meta, None);
     let accessible = tr(
@@ -414,11 +460,7 @@ fn markdown_file_link_in_context(
     let tooltip_path = meta.target_path.clone();
     let popup_meta = meta.clone();
     let trigger = if let Some((thread, panel)) = panel_target {
-        let path = meta
-            .workspace_relative_path
-            .clone()
-            .unwrap_or_else(|| meta.file_path.clone());
-        let line = meta.line.map(|line| line as f64);
+        let target = meta.clone();
         nsh_base::link()
             .direction(LayoutDirection::Ltr)
             .href(Some(SharedString::from(meta.target_path.clone())))
@@ -426,7 +468,20 @@ fn markdown_file_link_in_context(
             .accessibility_label(Some(SharedString::from(label.clone())))
             .app_class(tw("inline-block max-w-full items-center gap-[0.2em] font-medium leading-[normal] text-(--context-chip-mention) cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-current rounded-sm disabled:cursor-default"))
             .child(file_tag_chip_content(&meta.file_path, Text::content(label), hovered))
-            .on_open(move |_: &SharedString| panel.apply(&thread, crate::screens::panel::Action::OpenFile { path: path.clone(), line }))
+            .on_open(move |_: &SharedString| {
+                if let Some(task) = open_task.replace(None) { task.cancel(); }
+                let thread = thread.clone();
+                let target = target.clone();
+                if let Some(service) = service.clone() {
+                    owner.run(|| { open_task.replace(Some(spawn(async move {
+                        if let Ok(meta) = service.0.resolve_file(thread.clone(), target.as_ref().clone()).await {
+                            open_file_in_panel(panel, &thread, &meta);
+                        }
+                    }))); });
+                } else {
+                    open_file_in_panel(panel, &thread, &target);
+                }
+            })
             .into_element()
     } else {
         nsh_base::button()
@@ -459,6 +514,14 @@ fn markdown_file_link_in_context(
             text(SharedString::from(tooltip_path)),
         ))
         .child(context_menu(trigger, options, || false, make_popup()))
+}
+
+fn open_file_in_panel(panel: crate::screens::panel::PanelHost, thread: &ThreadKey, meta: &MarkdownFileLinkMeta) {
+    if let Some(path) = meta.workspace_relative_path.as_ref() {
+        panel.apply(thread, crate::screens::panel::Action::OpenFile {
+            path: path.clone(), line: meta.line.map(|line| line as f64),
+        });
+    }
 }
 
 fn file_copy_menu(meta: &MarkdownFileLinkMeta) -> impl IntoElement + use<> {
@@ -537,6 +600,7 @@ fn thread_chip(
     environment: &EnvironmentId,
     link: &ThreadLink,
     label: Option<&Text>,
+    lookup: &ThreadLinkLookup,
 ) -> ThreadChip {
     let written_environment = link.environment.as_ref().unwrap_or(environment);
     let reachable = shells
@@ -548,9 +612,9 @@ fn thread_chip(
             .find(|(environment, _)| *environment == key.environment)
             .and_then(|(_, shell)| shell.as_ref())
             .and_then(|shell| shell.threads.iter().find(|thread| thread.id == key.thread))
-            .cloned()
+            .map(|thread| OrchestrationV2ThreadLinkMetadata { title: thread.title.clone(), project_id: Some(thread.project_id.clone()) })
     };
-    let refs: Vec<_> = if reachable {
+    let refs: Vec<_> = if reachable && !lookup.settled {
         Vec::new()
     } else {
         shells
@@ -564,15 +628,14 @@ fn thread_chip(
             })
             .collect()
     };
-    // Backend lacks the unloaded-thread metadata query; cached shells are the available metadata.
     let resolution =
         t3_client::view_logic::session::markdown_link_presentation::resolve_thread_link(
             link,
             environment,
             reachable,
-            false,
+            lookup.settled,
             &refs,
-            find,
+            |key| lookup.metadata.get(&key.thread).cloned().or_else(|| find(key)),
             find,
         );
     let unknown = Text::client_key(unknown_thread_link_label(link, environment));
@@ -601,7 +664,7 @@ fn thread_chip(
                     shell
                         .projects
                         .iter()
-                        .find(|project| project.id == thread.project_id)
+                        .find(|project| Some(&project.id) == thread.project_id.as_ref())
                 })
                 .cloned()
         })
@@ -747,7 +810,7 @@ mod tests {
                 vec![
                     Inline::text(&url),
                     Inline::Strong {
-                        content: vec![Inline::text(" details")],
+                        content: vec![Inline::text(String::from(" details"))],
                     },
                 ],
             );
@@ -775,7 +838,7 @@ mod tests {
         assert_eq!(json.matches("markdown-file-link").count(), 2);
         assert!(json.contains("markdown-thread-link"));
         assert!(json.contains("provider%3A1"));
-        assert!(json.contains("Settings"));
+        assert!(document.plain_text().contains("Settings"));
         assert!(json.contains("AGENTS.md"));
         let plugin = MarkdownLinkPlugin {
             context: MarkdownLinkContext {
@@ -788,17 +851,14 @@ mod tests {
         let Block::Paragraph { content } = &resolved.blocks[0] else {
             panic!("paragraph");
         };
-        let Inline::Link {
-            title,
-            content: external,
-            ..
-        } = &content[0]
+        let Inline::Custom(external) = &content[0]
         else {
             panic!("external link");
         };
-        assert_eq!(title.as_deref(), Some("Authored title"));
+        assert_eq!(external.name, "markdown-external-link");
+        assert_eq!(external.attributes.get("title").map(String::as_str), Some("Authored title"));
         assert_eq!(
-            external.iter().map(Inline::plain_text).collect::<String>(),
+            external.content.iter().map(Inline::plain_text).collect::<String>(),
             "Settings"
         );
         let Inline::Custom(file) = &content[2] else {

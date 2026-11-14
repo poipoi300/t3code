@@ -270,13 +270,100 @@ async fn request(
         let line = text
             .lines()
             .filter_map(|line| line.strip_prefix("data: "))
-            .next_back()
-            .unwrap();
-        serde_json::from_str(line).unwrap()
+            .rfind(|line| !line.is_empty());
+        line.map_or(Value::Null, |line| serde_json::from_str(line).unwrap())
     } else {
         serde_json::from_str(&text).unwrap_or_else(|_| json!({"raw":text}))
     };
     (status, headers, value)
+}
+
+#[tokio::test]
+async fn sdk_cancel_notification_cancels_the_thread_wait_context() {
+    struct Waiter {
+        entered: Arc<tokio::sync::Notify>,
+        cancelled: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait]
+    impl services::OrchestratorService for Waiter {
+        async fn t3_thread_wait(
+            &self,
+            context: CallContext,
+            _: t3_contracts::orchestrator_mcp::OrchestratorMcpThreadWaitInput,
+        ) -> Result<t3_contracts::orchestrator_mcp::OrchestratorMcpThreadWaitResult> {
+            self.entered.notify_one();
+            context.cancellation.cancelled().await;
+            self.cancelled.notify_one();
+            Err(McpError::failure("cancelled", "The wait was cancelled."))
+        }
+    }
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let cancelled = Arc::new(tokio::sync::Notify::new());
+    let server = Arc::new(McpServer::new(
+        Services {
+            orchestrator: Arc::new(Waiter {
+                entered: entered.clone(),
+                cancelled: cancelled.clone(),
+            }),
+            ..Services::default()
+        },
+        Arc::new(Store),
+    ));
+    let registry = Arc::new(SessionRegistry::new(
+        EnvironmentId("environment-fixture".into()),
+        None,
+    ));
+    let credential = registry
+        .issue(CredentialRequest {
+            thread_id: ThreadId("thread-fixture".into()),
+            provider_instance_id: ProviderInstanceId("codex".into()),
+            browser_tools_available: false,
+            capabilities: Some(scope(false, true, false).capabilities),
+            subagent: false,
+        })
+        .unwrap();
+    let router = transport::router(
+        server,
+        Arc::new(transport::HttpState {
+            registry,
+            clients: None,
+            linked_environments_enabled: std::sync::atomic::AtomicBool::new(true),
+            runtime_ceiling: None,
+        }),
+    );
+    let (_,headers,_)=request(router.clone(),Some(&credential.authorization_header),None,"","initialize",json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cancellation-test","version":"1"}})).await;
+    let session = headers
+        .get("mcp-session-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let pending = {
+        let router = router.clone();
+        let token = credential.authorization_header.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            request(
+                router,
+                Some(&token),
+                Some(&session),
+                "2025-06-18",
+                "tools/call",
+                json!({"name":"t3_thread_wait","arguments":{"threadId":"thread-fixture"}}),
+            )
+            .await
+        })
+    };
+    entered.notified().await;
+    use tower::ServiceExt;
+    let response=router.oneshot(http::Request::builder().method("POST").uri("/mcp").header("host","127.0.0.1").header("content-type","application/json").header("accept","application/json, text/event-stream").header("authorization",&credential.authorization_header).header("mcp-session-id",session).header("mcp-protocol-version","2025-06-18").body(axum::body::Body::from(json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1,"reason":"User cancelled"}}).to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::ACCEPTED);
+    cancelled.notified().await;
+    let (_, _, body) = pending.await.unwrap();
+    assert!(
+        body.is_null() || body["error"].is_object() || body["result"]["isError"] == true,
+        "{body}"
+    );
 }
 
 #[tokio::test]

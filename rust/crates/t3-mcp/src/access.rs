@@ -35,7 +35,7 @@ pub trait AccessStore: Send + Sync {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all="camelCase")]
+#[serde(rename_all = "camelCase")]
 pub enum AccessRule {
     Reads,
     ReadsAsCaller,
@@ -65,9 +65,15 @@ pub fn tool_rule(name: &str, input: &Value) -> Result<AccessRule> {
         | "t3_preview_close"
         | "device_open"
         | "device_close" => ActsAsCaller,
-        "preview_open" | "preview_navigate" | "preview_act" | "preview_evaluate"
-        | "preview_recording_start" | "preview_recording_stop" | "preview_dialog"
-        | "preview_resize" | "preview_set_appearance" => ActsAsCaller,
+        "preview_open"
+        | "preview_navigate"
+        | "preview_act"
+        | "preview_evaluate"
+        | "preview_recording_start"
+        | "preview_recording_stop"
+        | "preview_dialog"
+        | "preview_resize"
+        | "preview_set_appearance" => ActsAsCaller,
         "t3_environment_preferences_update"
         | "t3_project_create"
         | "t3_project_update"
@@ -104,11 +110,26 @@ pub fn tool_rule(name: &str, input: &Value) -> Result<AccessRule> {
         | "unlink_pull_requests"
         | "watch_pull_request"
         | "unwatch_pull_request" => WritesThreads,
-        "orchestrator_capabilities" | "list_scheduled_tasks" | "t3_thread_list" | "t3_thread_read"
-        | "t3_thread_wait" | "t3_environment_links" | "t3_thread_search" | "t3_project_list"
-        | "t3_project_read" | "t3_environment_read" | "t3_theme_read" | "t3_worktree_list"
-        | "list_thread_pull_requests" | "read_pull_request_guide" => Reads,
-        _ => return Err(McpError::failure("invalid_request",format!("Tool '{name}' has no registered access declaration."))),
+        "orchestrator_capabilities"
+        | "list_scheduled_tasks"
+        | "t3_thread_list"
+        | "t3_thread_read"
+        | "t3_thread_wait"
+        | "t3_environment_links"
+        | "t3_thread_search"
+        | "t3_project_list"
+        | "t3_project_read"
+        | "t3_environment_read"
+        | "t3_theme_read"
+        | "t3_worktree_list"
+        | "list_thread_pull_requests"
+        | "read_pull_request_guide" => Reads,
+        _ => {
+            return Err(McpError::failure(
+                "invalid_request",
+                format!("Tool '{name}' has no registered access declaration."),
+            ));
+        }
     })
 }
 
@@ -158,16 +179,32 @@ pub struct CallContext {
 }
 
 impl CallContext {
-    pub fn caller_may_start(&self)->bool {
+    pub fn caller_may_start(&self) -> bool {
         self.scope.thread.as_ref().map_or_else(
-            ||self.scope.client.as_ref().is_none_or(|client|client.access!=ClientAccess::ReadOnly),
-            |owner|self.caller.as_ref().is_some_and(|caller|live_caller(caller,owner)),
+            || {
+                self.scope
+                    .client
+                    .as_ref()
+                    .is_none_or(|client| client.access != ClientAccess::ReadOnly)
+            },
+            |owner| {
+                self.caller
+                    .as_ref()
+                    .is_some_and(|caller| live_caller(caller, owner))
+            },
         )
     }
-    pub fn check_forwarding(&self)->Result<()> {
+    pub fn check_forwarding(&self) -> Result<()> {
         self.scope.require_capability(Capability::Orchestration)?;
-        if let Some(origin)=self.link_origin.as_ref().filter(|origin|origin.access!=ClientAccess::FullAccess) {
-            return Err(outside_link(origin,"it cannot use this environment's links."));
+        if let Some(origin) = self
+            .link_origin
+            .as_ref()
+            .filter(|origin| origin.access != ClientAccess::FullAccess)
+        {
+            return Err(outside_link(
+                origin,
+                "it cannot use this environment's links.",
+            ));
         }
         Ok(())
     }
@@ -233,9 +270,14 @@ impl CallContext {
     }
 }
 
-fn live_caller(shell:&ThreadShell,caller:&crate::ThreadCaller)->bool {
-    !shell.deleted && !shell.archived && shell.provider_instance_id.as_ref()==Some(&caller.provider_instance_id)
-        && (shell.active || shell.background_subagent_providers.contains(&caller.provider_instance_id))
+fn live_caller(shell: &ThreadShell, caller: &crate::ThreadCaller) -> bool {
+    !shell.deleted
+        && !shell.archived
+        && shell.provider_instance_id.as_ref() == Some(&caller.provider_instance_id)
+        && (shell.active
+            || shell
+                .background_subagent_providers
+                .contains(&caller.provider_instance_id))
 }
 
 fn outside_link(origin: &LinkOrigin, message: &str) -> McpError {
@@ -286,7 +328,7 @@ pub async fn authorize(
             "This credential cannot control threads.",
         ));
     }
-    let caller = if writing || remote || tool=="list_scheduled_tasks" {
+    let caller = if writing || remote || tool == "list_scheduled_tasks" {
         if let Some(caller) = &scope.thread {
             let shell = store
                 .thread_shell(&caller.thread_id)
@@ -296,7 +338,7 @@ pub async fn authorize(
                 .ok_or_else(|| {
                     McpError::failure("thread_not_found", "The calling thread was not found.")
                 })?;
-            if writing && !live_caller(&shell,caller) {
+            if writing && !live_caller(&shell, caller) {
                 return Err(McpError::failure(
                     "parent_not_active",
                     "The calling provider no longer owns an active thread run.",
@@ -335,7 +377,7 @@ pub async fn authorize(
         scope,
         caller,
         limits,
-        cancellation:tokio_util::sync::CancellationToken::new(),
+        cancellation: tokio_util::sync::CancellationToken::new(),
         started_modes: None,
         link_origin,
         store,

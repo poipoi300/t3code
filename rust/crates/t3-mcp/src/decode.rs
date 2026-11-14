@@ -85,8 +85,9 @@ pub fn decode_input(name: &str, mut value: Value) -> Result<DecodedInput> {
             if unknown.len() == 1 { "" } else { "s" }
         )));
     }
-    let definition = &catalog().definitions[name];
-    validators()[name]
+    let definition = catalog().definitions.get(name).ok_or(McpError::Internal)?;
+    let validator = validators().get(name).ok_or(McpError::Internal)?;
+    validator
         .encoded
         .validate(&value)
         .map_err(|error| McpError::InvalidInput(error.to_string()))?;
@@ -122,7 +123,7 @@ pub fn decode_input(name: &str, mut value: Value) -> Result<DecodedInput> {
             }
         }
     }
-    validators()[name]
+    validator
         .decoded
         .validate(&value)
         .map_err(|error| McpError::InvalidInput(error.to_string()))?;

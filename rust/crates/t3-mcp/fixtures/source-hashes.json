@@ -823,7 +823,7 @@
   "packages/ssh/src/errors.ts": "10429ec8710b1e0c007b6d441dcf7d24a0f4a2bb1206d408aae846ccc268a7fb",
   "packages/tailscale/src/index.ts": "86d1c2aa19182a24a4e77036e833d6d069c164bebc1fc5ee96d63fcfe9322629",
   "packages/tailscale/src/tailscale.ts": "8d3e31b8e7f8e18810d576da441cc28b9f95b34b67a91d213239ab9d30ba2689",
-  "rust/crates/t3-mcp/export.ts": "cb44c54d00e25b36f424b9f67147f255f3d466763e3fbe410c04e120d6f6c87f",
+  "rust/crates/t3-mcp/export.ts": "7a99f98b1c7db32e81cce69d0012d3da4955e8d361959baa43962e7b80d7f7f3",
   "rust/crates/t3-mcp/fixtures/tools.json": "d928e05dd6a1be1471698a41e79ffc5bf6c0891f50353809ab67462454982082",
   "rust/crates/t3-mcp/fixtures/decoders.json": "d42d4a4c96f1fbae1bd443d7c94c128e5fe0e7dbb3e0b67bec1017968be8272a",
   "rust/crates/t3-mcp/fixtures/bindings.json": "dfb9579d95e29adbaf6a549ba5e42e6f21126148abadabd2c1240057f3238aab",

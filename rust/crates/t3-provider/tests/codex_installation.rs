@@ -27,11 +27,12 @@ impl ProviderClock for Clock {
 struct Transport {
     archive: PathBuf,
     corrupt: AtomicBool,
+    upstream: std::sync::Mutex<Option<ReleaseAsset>>,
 }
 #[async_trait]
 impl ReleaseTransport for Transport {
     async fn latest(&self, _: &str) -> ServiceResult<Option<ReleaseAsset>> {
-        Err(ServiceError::Network)
+        Ok(self.upstream.lock().unwrap().clone())
     }
     async fn download(
         &self,
@@ -59,6 +60,11 @@ impl CodexExecutableValidator for Validator {
     }
 }
 async fn setup() -> (tempfile::TempDir, Arc<CodexInstallation>, Arc<Transport>) {
+    setup_with_local(Arc::new(NoLocalCodex)).await
+}
+async fn setup_with_local(
+    local: Arc<dyn LocalCodex>,
+) -> (tempfile::TempDir, Arc<CodexInstallation>, Arc<Transport>) {
     let directory = tempfile::tempdir().unwrap();
     let package = directory.path().join("package");
     std::fs::create_dir_all(package.join("bin")).unwrap();
@@ -110,6 +116,7 @@ async fn setup() -> (tempfile::TempDir, Arc<CodexInstallation>, Arc<Transport>) 
     let transport = Arc::new(Transport {
         archive,
         corrupt: AtomicBool::new(false),
+        upstream: std::sync::Mutex::new(None),
     });
     let installation = CodexInstallation::new(
         InstallationOptions {
@@ -122,7 +129,7 @@ async fn setup() -> (tempfile::TempDir, Arc<CodexInstallation>, Arc<Transport>) 
         },
         transport.clone(),
         Arc::new(Validator),
-        Arc::new(NoLocalCodex),
+        local,
         Arc::new(Clock),
     );
     (directory, installation, transport)
@@ -346,4 +353,45 @@ async fn setup_router_enforces_managed_instances_and_protects_configured_executa
         router.remove(input("work")).await.unwrap().phase,
         ProviderInstallPhase::Idle
     );
+}
+
+struct ChangingLocal(std::sync::Mutex<Option<CodexExecutable>>);
+#[async_trait]
+impl LocalCodex for ChangingLocal {
+    async fn resolve(&self) -> ServiceResult<Option<CodexExecutable>> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+}
+#[tokio::test]
+async fn fresh_and_disappeared_local_installs_keep_the_build_pin_despite_newer_upstream() {
+    for local_version in [None, Some("0.170.0")] {
+        let local = Arc::new(ChangingLocal(std::sync::Mutex::new(local_version.map(
+            |version| CodexExecutable {
+                path: PathBuf::from("fixture-local-codex"),
+                version: version.into(),
+                source: t3_contracts::provider_setup::ProviderInstallSource::Local,
+                managed_directory: None,
+            },
+        ))));
+        let (_directory, installation, transport) = setup_with_local(local.clone()).await;
+        installation.initialize().await.unwrap();
+        *local.0.lock().unwrap() = None;
+        *transport.upstream.lock().unwrap() = Some(ReleaseAsset {
+            version: "0.169.0".into(),
+            target: "fixture".into(),
+            url: "https://example.invalid/upstream.tar.gz".into(),
+            sha256: "upstream-not-the-pin".into(),
+            archive_bytes: None,
+        });
+        installation.check_for_update().await;
+        assert_eq!(
+            installation.state().version.as_ref().map(|v| v.0.as_str()),
+            Some("0.166.0"),
+            "local baseline: {local_version:?}"
+        );
+        installation.start().await.unwrap();
+        installation.wait().await;
+        assert_eq!(installation.state().phase, ProviderInstallPhase::Succeeded);
+        assert_eq!(installation.resolve().await.unwrap().version, "0.166.0");
+    }
 }

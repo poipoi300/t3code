@@ -104,6 +104,12 @@ async fn send_to_user_preserves_mid_turn_markdown_in_plan_and_read_only_sandboxe
 
 #[test]
 fn send_to_user_length_is_javascript_utf16_without_trimming() {
+    assert!(serde_json::from_str::<Value>(r#"{"message":"\ud800"}"#).is_err());
+    let paired: Value = serde_json::from_str(r#"{"message":"\ud83d\ude00"}"#).unwrap();
+    assert_eq!(
+        decode_input("send_to_user", paired).unwrap().value()["message"],
+        "😀"
+    );
     for message in [" ".into(), "a".repeat(4000), "😀".repeat(2000)] {
         let input = decode_input("send_to_user", json!({"message":message})).unwrap();
         assert_eq!(input.value()["message"], message);
@@ -115,25 +121,36 @@ fn send_to_user_length_is_javascript_utf16_without_trimming() {
 
 #[test]
 fn context_budgets_and_always_load_metadata_match_the_current_typescript() {
-    let fixture = instructions::fixture();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../apps/server/src/provider/agentContextBudget.json");
+    let budget: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     assert_eq!(
-        fixture["budgetContexts"]["claude"].as_str().unwrap().len(),
-        fixture["contextBudget"]["claudeSystemAppendBytes"]
-            .as_u64()
-            .unwrap() as usize
+        instructions::claude(true, false).len(),
+        budget["claudeSystemAppendBytes"].as_u64().unwrap() as usize
     );
     assert_eq!(
-        fixture["budgetContexts"]["codex"].as_str().unwrap().len(),
-        fixture["contextBudget"]["codexAdditionalContextBytes"]
-            .as_u64()
-            .unwrap() as usize
+        instructions::codex(
+            &instructions::RuntimeInfo {
+                harness: "Codex",
+                model: "gpt-6.1-sol",
+                model_name: "GPT-6.1 Sol",
+                reasoning_effort: "high",
+                pull_request_linking: true
+            },
+            true,
+            true
+        )
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|entry| entry["value"].as_str().unwrap().len())
+        .sum::<usize>(),
+        budget["codexAdditionalContextBytes"].as_u64().unwrap() as usize
     );
     let tools=catalog().tools.iter().filter(|tool|tool.name!="tool_search").map(|tool|json!({"name":tool.name,"description":tool.description,"inputSchema":tool.input_schema})).collect::<Vec<_>>();
     assert_eq!(
         serde_json::to_vec(&tools).unwrap().len(),
-        fixture["contextBudget"]["mcpToolListJsonBytes"]
-            .as_u64()
-            .unwrap() as usize
+        budget["mcpToolListJsonBytes"].as_u64().unwrap() as usize
     );
     let always_load = catalog()
         .tools

@@ -649,7 +649,7 @@ async fn every_tool_decodes_and_dispatches_to_its_own_service_method_once() {
         Arc::new(Store),
         scope,
         AccessRule::Reads,
-        "probe",
+        "t3_thread_read",
         &json!({}),
         false,
     )

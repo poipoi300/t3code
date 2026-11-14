@@ -25,6 +25,25 @@ pub const DEFAULT_DATABASE: &str = "t3code:client";
 /// The legacy source name the web host answers for.
 pub const LEGACY_SOURCE: &str = "web";
 
+/// What this browser says about itself (user agent, platform, touch points), for
+/// `t3_client::connection::presentation::web`. Empty fields where the page has no window.
+pub fn browser_identity() -> t3_client::connection::presentation::BrowserIdentity {
+    let navigator = web_sys::window().map(|window| window.navigator());
+    t3_client::connection::presentation::BrowserIdentity {
+        user_agent: navigator
+            .as_ref()
+            .and_then(|navigator| navigator.user_agent().ok())
+            .unwrap_or_default(),
+        platform: navigator
+            .as_ref()
+            .and_then(|navigator| navigator.platform().ok())
+            .unwrap_or_default(),
+        max_touch_points: navigator.map_or(0, |navigator| {
+            u32::try_from(navigator.max_touch_points()).unwrap_or(0)
+        }),
+    }
+}
+
 pub struct WebConfig {
     pub database: String,
     pub presentation: Option<AuthClientPresentationMetadata>,
@@ -336,6 +355,9 @@ impl Platform for WebPlatform {
             .map_or_else(|| js_sys::Date::now() as u64, |p| p.now() as u64)
     }
 
+    fn external_url_surface(&self) -> t3_client::persistence::external_links::ExternalUrlSurface {
+        t3_client::persistence::external_links::ExternalUrlSurface::Web
+    }
     fn random_bytes(&self, length: usize) -> Result<Vec<u8>, PlatformError> {
         let crypto = self
             .inner

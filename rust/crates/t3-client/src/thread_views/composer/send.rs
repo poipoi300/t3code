@@ -618,7 +618,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         }
         let captured_draft = self.capture_web_draft(key, &text);
         if let Some(validation) = super::submission::get_composer_prompt_length_validation_message(&text)? {
-            return Err(ClientError::Rejected { message: validation.message(), detail: None });
+            return Err(ClientError::Rejected { message: format!("Prompt is {} {} over the 120,000-character limit. Shorten or split it before sending.", validation.excess, if validation.excess == 1 { "character" } else { "characters" }), detail: None });
         }
         self.load().await?;
         let settings = options

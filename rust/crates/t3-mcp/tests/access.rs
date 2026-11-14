@@ -10,7 +10,7 @@ use t3_contracts::{
     provider_instance::ProviderInstanceId,
     provider_policy::{ProviderInteractionMode, RuntimeMode},
 };
-use t3_mcp::{access::authorize, *};
+use t3_mcp::*;
 
 #[derive(Default)]
 struct Store(RwLock<HashMap<String, ThreadShell>>);
@@ -68,6 +68,31 @@ fn code(result: Result<CallContext>) -> String {
         Err(McpError::Failure { code, .. }) => code,
         Err(error) => panic!("{error}"),
     }
+}
+
+fn tool_for(rule: AccessRule) -> &'static str {
+    match rule {
+        AccessRule::Reads => "t3_thread_read",
+        AccessRule::ReadsAsCaller => "preview_status",
+        AccessRule::ActsAsCaller => "send_to_user",
+        AccessRule::Writes => "delete_scheduled_task",
+        AccessRule::WritesWithCapability => "write_pull_request_guides",
+        AccessRule::WritesThreads => "t3_thread_send",
+        AccessRule::StartsThreads => "t3_thread_launch",
+        AccessRule::WritesEnvironment => "t3_theme_set",
+    }
+}
+async fn authorize(
+    store: Arc<Store>,
+    scope: InvocationScope,
+    rule: AccessRule,
+    tool: &str,
+    input: &Value,
+    remote: bool,
+) -> Result<CallContext> {
+    let actual = access::tool_rule(tool, input).unwrap();
+    assert_eq!(actual, rule, "{tool}");
+    access::authorize(store, scope, actual, tool, input, remote).await
 }
 
 #[tokio::test]
@@ -223,7 +248,7 @@ async fn typescript_access_matrix_for_modes_liveness_clients_and_background_owne
     ];
     for (rule, scope, input, expected) in cases {
         assert_eq!(
-            code(authorize(store.clone(), scope, rule, "probe", &input, false).await),
+            code(authorize(store.clone(), scope, rule, tool_for(rule), &input, false).await),
             expected,
             "{rule:?}"
         );
@@ -241,7 +266,7 @@ async fn typescript_access_matrix_for_modes_liveness_clients_and_background_owne
                     store.clone(),
                     client(ReadOnly),
                     rule,
-                    "probe",
+                    tool_for(rule),
                     &json!({}),
                     false
                 )
@@ -258,7 +283,7 @@ async fn typescript_access_matrix_for_modes_liveness_clients_and_background_owne
                 store.clone(),
                 preview.clone(),
                 Writes,
-                "probe",
+                tool_for(AccessRule::Writes),
                 &json!({}),
                 false
             )
@@ -272,7 +297,7 @@ async fn typescript_access_matrix_for_modes_liveness_clients_and_background_owne
                 store.clone(),
                 preview,
                 WritesWithCapability,
-                "probe",
+                tool_for(AccessRule::WritesWithCapability),
                 &json!({}),
                 false
             )
@@ -305,7 +330,7 @@ async fn linked_writes_are_fenced_reads_are_open_and_remote_caller_checks_do_not
                     store.clone(),
                     linked.clone(),
                     rule,
-                    "probe",
+                    tool_for(rule),
                     &json!({}),
                     false
                 )
@@ -320,7 +345,7 @@ async fn linked_writes_are_fenced_reads_are_open_and_remote_caller_checks_do_not
                 store.clone(),
                 linked.clone(),
                 AccessRule::Reads,
-                "probe",
+                tool_for(AccessRule::Reads),
                 &json!({}),
                 false
             )
@@ -334,7 +359,7 @@ async fn linked_writes_are_fenced_reads_are_open_and_remote_caller_checks_do_not
                 store.clone(),
                 linked.clone(),
                 AccessRule::WritesThreads,
-                "probe",
+                tool_for(AccessRule::WritesThreads),
                 &json!({"threadId":"target"}),
                 false
             )
@@ -354,7 +379,7 @@ async fn linked_writes_are_fenced_reads_are_open_and_remote_caller_checks_do_not
                 store.clone(),
                 linked.clone(),
                 AccessRule::WritesThreads,
-                "probe",
+                tool_for(AccessRule::WritesThreads),
                 &json!({"threadId":"target"}),
                 false
             )
@@ -368,7 +393,7 @@ async fn linked_writes_are_fenced_reads_are_open_and_remote_caller_checks_do_not
                 store,
                 linked,
                 AccessRule::WritesThreads,
-                "probe",
+                tool_for(AccessRule::WritesThreads),
                 &json!({"threadId":"remote-unknown"}),
                 true
             )

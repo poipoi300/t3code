@@ -77,7 +77,7 @@ impl<P: Platform + Clone + 'static> GitPanel<P> {
                 feature_branch: request.feature_branch.then_some(Some(true)),
                 file_paths: request.file_paths.map(Some),
                 thread_id: thread.as_ref().map(|t| Some(t.id.clone())),
-                project_id: if thread.is_none() { return Err(ClientError::Unsupported("draft context is not loaded")); } else { None },
+                project_id: if thread.is_none() { service.workspace_context(&scope.thread, scope.draft_id.as_deref()).map(|c| Some(c.project.id.clone())) } else { None },
             };
             let target = CheckoutKey { environment: scope.thread.environment.clone(), cwd: scope.cwd.clone() };
             let result = service.state.actions.run_stacked_action(&service.state.source, &target, &endpoint, &service.platform, input, |_| Ok(())).await.map_err(|error| match error {
@@ -93,7 +93,11 @@ impl<P: Platform + Clone + 'static> GitPanel<P> {
     pub fn sync_branch(&self, scope: &GitActionsScope, branch: Option<String>, expected: Option<String>, _manual: bool) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         let service = self.clone(); let scope = scope.clone();
         async move {
-            if service.thread(&scope.thread).is_none() { return Err(ClientError::Unsupported("draft context is not loaded")); }
+            if service.thread(&scope.thread).is_none() {
+                let context = service.workspace_context(&scope.thread, scope.draft_id.as_deref()).ok_or(ClientError::Cancelled)?;
+                if context.branch == branch { return Ok(()); }
+                return service.update_draft_context(&scope.thread, scope.draft_id.as_deref(), serde_json::json!({"branch":branch,"worktreePath":context.worktree_path,"environmentSelection":if _manual || context.manual || context.branch.is_some() {"manual"} else {"auto"}})).await;
+            }
             let command = serde_json::from_value(serde_json::json!({"type":"thread.metadata.update","commandId":crate::operations::allocate_command_id(&service.platform, None)?,"threadId":scope.thread.thread,"branch":branch,"expectedBranch":expected}))?;
             service.session(&scope.thread.environment)?.call::<WsOrchestrationV2DispatchCommandRpc>(command).await?;
             Ok(())
