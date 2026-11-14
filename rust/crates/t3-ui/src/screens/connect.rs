@@ -199,7 +199,7 @@ async fn pair_from_link(
     };
     let message = tr(
         "Add the backend at {origin}?",
-        &[("origin", Value::Text(origin.into()))],
+        &[("origin", Value::Text(origin))],
     );
     // No mounted confirm host is no confirmation: the token is not spent.
     let confirmed = match request_confirm_dialog(message, None) {
@@ -308,7 +308,7 @@ fn storage_notice_toast(notice: &t3_client::composition::StorageNotice) -> Toast
 /// Port of apps/web/src/components/ui/standalone-page.tsx StandalonePage, until UI-WIZARD's
 /// `ui/wizard.rs` provides it. `items-center-safe` centres while the card fits and top-aligns it
 /// when it does not; the page scroll gives the same. `scrollbar-gutter-both` has no NSH meaning.
-fn standalone_page(children: impl IntoElement) -> impl IntoElement {
+pub(crate) fn standalone_page(children: impl IntoElement) -> impl IntoElement {
     scroll().w_full().h_full().app_class(tw("bg-background text-foreground")).child(
         view()
             .app_class(tw("flex min-h-full items-center justify-center px-4 py-10 sm:px-6"))
@@ -321,8 +321,26 @@ fn standalone_page(children: impl IntoElement) -> impl IntoElement {
     )
 }
 
-/// Port of standalone-page.tsx StandalonePageHeader.
+/// Port of standalone-page.tsx StandalonePageHeader, without its `context`.
 fn standalone_page_header(
+    title: impl Fn() -> String + 'static,
+    description: impl Fn() -> String + 'static,
+) -> impl IntoElement {
+    standalone_page_header_parts(None::<fn() -> String>, title, description)
+}
+
+/// Port of standalone-page.tsx StandalonePageHeader with its `context` (the small label on the
+/// wordmark's line, such as "Agent sign-in").
+pub(crate) fn standalone_page_header_with_context(
+    context: impl Fn() -> String + 'static,
+    title: impl Fn() -> String + 'static,
+    description: impl Fn() -> String + 'static,
+) -> impl IntoElement {
+    standalone_page_header_parts(Some(context), title, description)
+}
+
+fn standalone_page_header_parts(
+    context: Option<impl Fn() -> String + 'static>,
     title: impl Fn() -> String + 'static,
     description: impl Fn() -> String + 'static,
 ) -> impl IntoElement {
@@ -343,7 +361,8 @@ fn standalone_page_header(
                                 .accessible(false),
                         )
                         .child(text(t("Code")).app_class(tw("text-lg font-medium tracking-tight"))),
-                ),
+                )
+                .child(context.map(|context| text(context).app_class(tw("text-sm")))),
         )
         .child(
             text(title)
@@ -360,7 +379,7 @@ fn t3_wordmark() -> ImageSrc {
     )
 }
 
-fn error_alert(message: impl Fn() -> String + 'static) -> impl IntoElement {
+pub(crate) fn error_alert(message: impl Fn() -> String + 'static) -> impl IntoElement {
     alert(
         alert::Props {
             variant: alert::Variant::Error,
@@ -415,7 +434,7 @@ fn hosted_pairing_route_surface(launch: HostedLaunch) -> impl IntoElement {
                     message.try_set(Text::content(if label.is_empty() {
                         t("The environment is saved in this browser.")
                     } else {
-                        tr("{label} is saved in this browser.", &[("label", Value::Text(label.into()))])
+                        tr("{label} is saved in this browser.", &[("label", Value::Text(label))])
                     }));
                 }
                 Err(failure) => {
@@ -424,7 +443,7 @@ fn hosted_pairing_route_surface(launch: HostedLaunch) -> impl IntoElement {
                     can_retry.try_set(true);
                     message.try_set(Text::content(tr(
                         "{error} If the backend accepted this one-time token, request a new pairing link before retrying.",
-                        &[("error", Value::Text(failure_message(&failure).into()))],
+                        &[("error", Value::Text(failure_message(&failure)))],
                     )));
                 }
             }
@@ -552,7 +571,7 @@ fn pairing_route_surface(connection: Option<Rc<dyn ConnectionActions>>) -> impl 
                                 description: Some(
                                     tr(
                                         "{label} now has another way to connect.",
-                                        &[("label", Value::Text(target.label.clone().into()))],
+                                        &[("label", Value::Text(target.label.clone()))],
                                     )
                                     .into(),
                                 ),
@@ -741,7 +760,7 @@ fn pairing_route_surface(connection: Option<Rc<dyn ConnectionActions>>) -> impl 
         view()
             .child(standalone_page_header(
                 move || match route_target.get() {
-                    Some(target) => tr("Add a route to {label}", &[("label", Value::Text(target.label.into()))]),
+                    Some(target) => tr("Add a route to {label}", &[("label", Value::Text(target.label))]),
                     None => t("Connect to T3 Code"),
                 },
                 move || match route_target.get() {
@@ -821,9 +840,7 @@ fn saved_environments(
 fn status_text(text: &StatusText) -> String {
     match text {
         StatusText::Key(key) => t(key),
-        StatusText::WithReason { key, reason } => {
-            tr(key, &[("reason", Value::Text(t(reason).into()))])
-        } // reason: client English key
+        StatusText::WithReason { key, reason } => tr(key, &[("reason", Value::Text(t(reason)))]), // reason: client English key
         StatusText::Content(content) => content.clone(),
     }
 }
@@ -890,7 +907,7 @@ fn saved_backend_list_row(
         let Some(actions) = actions.get() else { return };
         let message = tr(
             "Remove {label} from this device?\nThis forgets its pairing, credentials, and cached threads here. Switch it off instead to keep it saved.",
-            &[("label", Value::Text(e.label.clone().into()))],
+            &[("label", Value::Text(e.label.clone()))],
         );
         let Some(confirmation) = request_confirm_dialog(
             message,
@@ -953,7 +970,7 @@ fn saved_backend_list_row(
     let more_label = move || {
         tr(
             "More actions for {label}",
-            &[("label", Value::Text(label().into()))],
+            &[("label", Value::Text(label()))],
         )
     };
     view()

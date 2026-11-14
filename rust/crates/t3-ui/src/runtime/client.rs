@@ -261,14 +261,15 @@ mod host {
             let root =
                 std::env::temp_dir().join(format!("t3-ui-memory-dir-{}", std::process::id()));
             let persistent = root.join("client");
-            std::fs::create_dir_all(&persistent).unwrap();
-            std::fs::write(persistent.join("client-storage.sqlite"), b"saved").unwrap();
-            std::fs::create_dir_all(root.join("client-memory")).unwrap();
+            std::fs::create_dir_all(&persistent).expect("test directory");
+            std::fs::write(persistent.join("client-storage.sqlite"), b"saved")
+                .expect("test directory");
+            std::fs::create_dir_all(root.join("client-memory")).expect("test directory");
             std::fs::write(
                 root.join("client-memory").join("client-storage.sqlite"),
                 b"last run",
             )
-            .unwrap();
+            .expect("test directory");
             let memory = fresh_in_memory_dir(&persistent);
             assert_eq!(memory, root.join("client-memory"));
             assert!(
@@ -276,10 +277,10 @@ mod host {
                 "the last run's in-memory rows are gone before it opens"
             );
             assert_eq!(
-                std::fs::read(persistent.join("client-storage.sqlite")).unwrap(),
+                std::fs::read(persistent.join("client-storage.sqlite")).expect("test directory"),
                 b"saved"
             );
-            std::fs::remove_dir_all(&root).unwrap();
+            std::fs::remove_dir_all(&root).expect("test directory");
         }
 
         // Integration 3 (U13): Android was given in-memory keys even with a working Keystore, so
