@@ -182,11 +182,18 @@ impl crate::services::AttachmentService for OrchestrationAdapter {
                 creation_source: decoded(json!("mcp"))?,
             })
             .await
+            // TS: a claim failure is `orchestration_error` with its message; anything else is
+            // "could not be completed". An unbound backend names this tool.
             .map_err(|error| match error {
                 t3_orchestration::error::Error::Unsupported(method) => {
                     not_available("t3_thread_send_attachments", method)
                 }
-                error => failure(error),
+                t3_orchestration::error::Error::Service { operation, detail }
+                    if operation == "AttachmentClaims.claimPendingAttachments" =>
+                {
+                    McpError::failure("orchestration_error", detail)
+                }
+                _ => McpError::unavailable(),
             })?;
         Ok(
             json!({"threadId":thread,"messageId":result.message.id,"runId":result.run.id,"status":result.run.status}),

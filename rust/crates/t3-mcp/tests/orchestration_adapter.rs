@@ -49,6 +49,11 @@ impl RecoveryService for Recovery {
     }
 }
 fn adapter() -> Arc<OrchestrationAdapter> {
+    adapter_with(None)
+}
+fn adapter_with(
+    attachments: Option<Arc<dyn t3_orchestration::api::AttachmentBackend>>,
+) -> Arc<OrchestrationAdapter> {
     let database = TestDatabase::memory().unwrap();
     let reader = Arc::new(ProjectionStore::new(database.stores.clone()));
     let clock = Arc::new(ManualClock::new(TEST_TIME));
@@ -94,7 +99,7 @@ fn adapter() -> Arc<OrchestrationAdapter> {
             }),
             dispatcher,
             stop: None,
-            attachments: None,
+            attachments,
         }),
     })
 }
@@ -432,6 +437,48 @@ async fn dispatch_failures_keep_typescripts_codes_and_cut() {
                 message,
                 "Provider instance \"codex\" is disabled for project project."
             );
+        }
+        other => panic!("{other}"),
+    }
+}
+
+/// Review L4: an intake whose attachment backend is unbound answers `available: false` naming the
+/// tool the agent called, before any message is sent.
+#[tokio::test]
+async fn an_unbound_attachment_backend_names_the_attachment_tool() {
+    struct Unbound;
+    #[async_trait]
+    impl t3_orchestration::api::AttachmentBackend for Unbound {
+        async fn resolve(
+            &self,
+            _: ThreadId,
+            _: Vec<t3_contracts::chat_attachment::ChatAttachment>,
+        ) -> error::Result<Vec<t3_contracts::chat_attachment::ChatAttachment>> {
+            Err(error::Error::Unsupported("AttachmentBackend.resolve"))
+        }
+        async fn claim(&self, _: ThreadId, _: Vec<String>) -> error::Result<()> {
+            Err(error::Error::Unsupported("AttachmentBackend.claim"))
+        }
+        async fn release(&self, _: ThreadId, _: Vec<String>) -> error::Result<()> {
+            Err(error::Error::Unsupported("AttachmentBackend.release"))
+        }
+    }
+    let adapter = adapter_with(Some(Arc::new(Unbound)));
+    create(&adapter, "caller").await;
+    create(&adapter, "target").await;
+    let input = json!({"threadId":"target","attachments":[{"type":"file","id":"pending-00000000-0000-4000-8000-000000000000","name":"notes.txt","mimeType":"text/plain","sizeBytes":3}]});
+    let admitted = context(adapter.clone(), "t3_thread_send_attachments", &input).await;
+    let error = adapter
+        .t3_thread_send_attachments(
+            admitted,
+            decode_input("t3_thread_send_attachments", input).unwrap(),
+        )
+        .await
+        .unwrap_err();
+    match error {
+        McpError::NotAvailable { tool, method } => {
+            assert_eq!(tool, "t3_thread_send_attachments");
+            assert!(method.starts_with("AttachmentBackend."), "{method}");
         }
         other => panic!("{other}"),
     }
