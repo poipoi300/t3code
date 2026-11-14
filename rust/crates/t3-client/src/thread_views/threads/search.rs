@@ -207,7 +207,7 @@ pub fn visible_thread_search(
 }
 
 fn message_search_has_long_token(query: &str) -> bool {
-    query.trim_matches(|c| matches!(c, '\"' | '\'' | '`' | '“' | '”' | '‘' | '’')).split(crate::view_logic::is_js_whitespace).any(|t| {let count=t.chars().count();count>=3 || (count==2 && t.chars().any(|c| matches!(u32::from(c),0x3040..=0x30ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff)))})
+    !t3_shared::search_policy::message_tokens(query).0.is_empty()
 }
 
 pub fn thread_search_subject(
