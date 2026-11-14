@@ -1494,6 +1494,30 @@ pub enum TextGeneratorKind {
     Anthropic,
 }
 pub type TextGeneratorBaseUrl = crate::base_schemas::TrimmedNonEmptyString;
+/// TypeScript's `TextGeneratorBaseUrl`: at most 2,048 units, and an http(s) URL without user
+/// info, query or fragment as WHATWG `new URL` reads it (an empty `?` or `#` is allowed).
+pub fn text_generator_base_url_valid(value: &str) -> bool {
+    value.encode_utf16().count() <= 2048
+        && url::Url::parse(value).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.username().is_empty()
+                && url.password().is_none_or(str::is_empty)
+                && url.query().is_none_or(str::is_empty)
+                && url.fragment().is_none_or(str::is_empty)
+        })
+}
+fn deserialize_text_generator_base_url<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<TextGeneratorBaseUrl, D::Error> {
+    let value = TextGeneratorBaseUrl::deserialize(deserializer)?;
+    if text_generator_base_url_valid(&value.0) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "expected an http(s) URL without user info, query or fragment",
+        ))
+    }
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextGeneratorConfig {
@@ -1505,7 +1529,7 @@ pub struct TextGeneratorConfig {
         with = "crate::wire::double_option"
     )]
     pub label: Option<Option<crate::base_schemas::TrimmedNonEmptyString>>,
-    #[serde()]
+    #[serde(deserialize_with = "deserialize_text_generator_base_url")]
     pub base_url: TextGeneratorBaseUrl,
     #[serde(default = "text_generator_config_api_key_default")]
     pub api_key: crate::settings_secret_value::SettingsSecretValue,
