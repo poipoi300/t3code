@@ -14,6 +14,28 @@ pub struct SourceConfig {
     pub url: String,
     pub management_key: String,
     pub enabled: bool,
+    /// The saved key is a secret-provider reference, so an empty key means it could not be read.
+    pub key_is_reference: bool,
+}
+impl SourceConfig {
+    /// TypeScript `missingManagementKey`.
+    fn missing_key(&self) -> &'static str {
+        if self.key_is_reference {
+            "Could not read the management key from its secret provider."
+        } else {
+            "No management key configured."
+        }
+    }
+}
+const HUB_CEILING: std::time::Duration = std::time::Duration::from_secs(15);
+const STALLED: &str = "The hub did not answer within 15 seconds.";
+/// The `UsageLimitSourceError` detail a probe failure carries. A probe's `Error::Probe` text is
+/// published to clients, so it must be client-safe (the hub client's fixed texts are).
+fn detail(error: Error) -> String {
+    match error {
+        Error::Probe(detail) => detail,
+        _ => "The hub management request failed.".into(),
+    }
 }
 
 pub struct UsageLimitSources {
@@ -135,19 +157,21 @@ impl UsageLimitSources {
             snapshot["origin"] = json!(url.origin().ascii_serialization());
         }
         if config.management_key.is_empty() {
-            snapshot["error"] = json!("No management key configured.");
+            snapshot["error"] = json!(config.missing_key());
         } else {
+            // The hub client bounds each request; this ceiling also bounds a probe that stalls.
             match tokio::time::timeout(
-                std::time::Duration::from_secs(15),
+                HUB_CEILING,
                 self.probe.accounts(&config.url, &config.management_key),
             )
             .await
             {
                 Ok(Ok(accounts)) => snapshot["accounts"] = serde_json::to_value(accounts)?,
-                _ => {
-                    tracing::warn!("Usage limit source request failed");
-                    snapshot["error"] = json!("The hub management request failed.");
+                Ok(Err(error)) => {
+                    tracing::debug!("usage limit source read failed");
+                    snapshot["error"] = json!(detail(error));
                 }
+                Err(_) => snapshot["error"] = json!(STALLED),
             }
         }
         Ok(serde_json::from_value(snapshot)?)
@@ -176,16 +200,16 @@ impl UsageLimitSources {
             .find(|c| c.id == source_id && c.enabled)
             .ok_or_else(|| Error::Probe("The usage limit source is missing or disabled.".into()))?;
         if config.management_key.is_empty() {
-            return Err(Error::Probe("No management key configured.".into()));
+            return Err(Error::Probe(config.missing_key().into()));
         }
         let result = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            HUB_CEILING,
             self.probe
                 .consume(&config.url, &config.management_key, account_id, credit_id),
         )
         .await
-        .map_err(|_| Error::Probe("The hub did not answer within 15 seconds.".into()))?
-        .map_err(|_| Error::Probe("The hub management request failed.".into()))?;
+        .map_err(|_| Error::Probe(STALLED.into()))?
+        .map_err(|error| Error::Probe(detail(error)))?;
         let snapshot = self.read_source(config, checked_at).await?;
         let next = self
             .current()

@@ -311,6 +311,7 @@ async fn one_constructor_supplies_live_history_config_changes_and_captureable_en
             url: "https://hub.test/path".into(),
             management_key: "fixture-only".into(),
             enabled: true,
+            key_is_reference: false,
         }])
         .await
         .unwrap();

@@ -215,7 +215,7 @@ async fn stalled_hub_requests_time_out_and_release_the_refresh_lock() {
     sources.refresh(&configs, AT).await.unwrap();
     assert_eq!(
         json!(sources.current())[0]["error"],
-        "The hub management request failed."
+        "The hub did not answer within 15 seconds."
     );
     assert!(
         sources
@@ -239,9 +239,7 @@ impl LimitSourceProbe for Probe {
         Box::pin(async move {
             self.reads.fetch_add(1, Ordering::Relaxed);
             if url.contains("fail") {
-                return Err(Error::Probe(
-                    "unreachable fixture hub; secret-key=private; prompt=private".into(),
-                ));
+                return Err(Error::Probe("The hub answered with HTTP 502.".into()));
             }
             Ok(vec![serde_json::from_value(json!({"id":"account-1","driver":"codex","email":"test@example.invalid","usageLimits":{"checkedAt":AT,"windows":[]}})).unwrap()])
         })
@@ -266,6 +264,7 @@ fn config(id: &str, url: &str) -> SourceConfig {
         label: String::new(),
         management_key: "fixture-management-key".into(),
         enabled: true,
+        key_is_reference: false,
     }
 }
 #[tokio::test]
@@ -295,7 +294,7 @@ async fn refresh_preserves_order_reports_errors_and_publishes_only_changes() {
     assert_eq!(current[0]["label"], "hub.invalid:8317");
     assert_eq!(current[0]["origin"], "https://hub.invalid:8317");
     assert_eq!(current[0]["accounts"][0]["id"], "account-1");
-    assert!(current[1]["error"] == "The hub management request failed.");
+    assert!(current[1]["error"] == "The hub answered with HTTP 502.");
     sources
         .refresh(
             &[
