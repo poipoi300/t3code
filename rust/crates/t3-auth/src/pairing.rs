@@ -502,6 +502,7 @@ fn to_link(record: &PairingRecord) -> AuthPairingLink {
             .map(TrimmedNonEmptyString),
         created_at: record.created_at.clone(),
         expires_at: record.grant.expires_at.clone(),
+        connect_device_request: None,
     }
 }
 const COLUMNS: &str = "id,method,scopes,subject,label,proof_key_thumbprint,created_at,expires_at,consumed_at,revoked_at";
