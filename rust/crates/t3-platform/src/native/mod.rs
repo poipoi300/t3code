@@ -290,12 +290,19 @@ impl Platform for NativePlatform {
         self.inner.epoch.elapsed().as_millis() as u64
     }
 
+    fn external_url_surface(&self) -> t3_client::persistence::external_links::ExternalUrlSurface {
+        if cfg!(any(target_os = "android", target_os = "ios")) {
+            t3_client::persistence::external_links::ExternalUrlSurface::Mobile
+        } else {
+            t3_client::persistence::external_links::ExternalUrlSurface::Desktop
+        }
+    }
     fn random_bytes(&self, length: usize) -> Result<Vec<u8>, PlatformError> {
         use ring::rand::SecureRandom;
         let mut bytes = vec![0; length];
         ring::rand::SystemRandom::new()
             .fill(&mut bytes)
-            .map_err(|_| PlatformError::Unsupported("OS randomness is unavailable".into()))?;
+            .map_err(|_| PlatformError::RandomUnavailable)?;
         Ok(bytes)
     }
 

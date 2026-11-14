@@ -124,23 +124,21 @@ pub(crate) async fn open_dpop(
     Ok(result?.unchecked_into())
 }
 
-pub(crate) async fn put_value(
+/// Stores `value` only if `key` is absent; `false` when the add did not commit (another writer
+/// created the key first, or the write failed), so the caller reads back what is stored.
+pub(crate) async fn add_value(
     database: &IdbDatabase,
     store: &str,
     key: &str,
     value: &JsValue,
-    mode: IdbTransactionMode,
-) -> Result<(), PlatformError> {
-    let transaction = transaction(database, &[store], mode)?;
+) -> Result<bool, PlatformError> {
+    let transaction = transaction(database, &[store], IdbTransactionMode::Readwrite)?;
     let done = ending(&transaction)?;
     transaction
         .object_store(store)
-        .and_then(|store| store.put_with_key(value, &JsValue::from_str(key)))
-        .map_err(storage("write key"))?;
-    match done.await? {
-        Ending::Complete => Ok(()),
-        Ending::Failed => Err(PlatformError::Storage("key write failed".into())),
-    }
+        .and_then(|store| store.add_with_key(value, &JsValue::from_str(key)))
+        .map_err(storage("add key"))?;
+    Ok(matches!(done.await?, Ending::Complete))
 }
 
 /// Opens a database only if it already exists; never creates or upgrades someone else's store.

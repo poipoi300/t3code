@@ -51,9 +51,27 @@ pub(crate) fn unsupported(action: &HostAction) -> PlatformError {
     ))
 }
 
+#[cfg(any(
+    target_arch = "wasm32",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "linux"
+))]
 pub(crate) const TEXT_PLAIN: &str = "text/plain";
+#[cfg(any(
+    target_arch = "wasm32",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "linux"
+))]
 pub(crate) const TEXT_HTML: &str = "text/html";
 
+#[cfg(any(
+    target_arch = "wasm32",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "linux"
+))]
 pub(crate) fn mime_essence(mime: &str) -> String {
     mime.split(';')
         .next()
@@ -62,16 +80,20 @@ pub(crate) fn mime_essence(mime: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Only web and mail links leave the app; anything else could launch arbitrary handlers.
-pub(crate) fn validate_open_url(raw: &str) -> Result<String, PlatformError> {
-    let url = url::Url::parse(raw).map_err(|_| PlatformError::InvalidData("URL".into()))?;
-    match url.scheme() {
-        "http" | "https" if url.host_str().is_some() => Ok(url.into()),
-        "mailto" => Ok(url.into()),
-        scheme => Err(PlatformError::Denied(format!(
-            "opening {scheme}: URLs is not allowed"
-        ))),
-    }
+#[cfg(any(
+    target_arch = "wasm32",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "linux"
+))]
+/// The client's one opener policy for this surface; anything else could launch arbitrary
+/// handlers.
+pub(crate) fn validate_open_url(
+    raw: &str,
+    surface: t3_client::persistence::external_links::ExternalUrlSurface,
+) -> Result<String, PlatformError> {
+    t3_client::persistence::external_links::safe_external_url(raw, surface)
+        .ok_or_else(|| PlatformError::Denied("opening this link is not allowed".into()))
 }
 
 pub(crate) fn uuid_v4(mut bytes: [u8; 16]) -> String {
@@ -149,20 +171,6 @@ mod tests {
             URL_SAFE_NO_PAD.encode(Sha256::digest(serde_json::to_vec(&ordered).unwrap()));
         assert_eq!(dpop_thumbprint(&x, &y), expected);
         assert_ne!(dpop_thumbprint(&x, &y), dpop_thumbprint(&y, &x));
-    }
-
-    #[test]
-    fn open_url_allows_only_web_and_mail_links() {
-        assert!(validate_open_url("https://t3.codes/a?b=c").is_ok());
-        assert!(validate_open_url("mailto:someone@example.com").is_ok());
-        for denied in [
-            "file:///etc/passwd",
-            "javascript:alert(1)",
-            "ms-settings:",
-            "http://",
-        ] {
-            assert!(validate_open_url(denied).is_err(), "{denied}");
-        }
     }
 
     #[test]

@@ -125,7 +125,7 @@ async fn load_dpop_key(platform: &NativePlatform) -> Result<Rc<EcdsaKeyPair>, Pl
     let bytes = load_or_create(platform, dpop_key(), || {
         let document =
             EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &SystemRandom::new())
-                .map_err(|_| PlatformError::Unsupported("OS randomness is unavailable".into()))?;
+                .map_err(|_| PlatformError::RandomUnavailable)?;
         let payload = serde_json::json!({ "pkcs8": URL_SAFE_NO_PAD.encode(document.as_ref()) });
         Record::new(DPOP_KIND, None, DPOP_RECORD, 1, payload)
             .encode()
@@ -256,7 +256,10 @@ mod desktop {
         platform: &NativePlatform,
         url: String,
     ) -> Result<HostReply, PlatformError> {
-        let url = validate_open_url(&url)?;
+        let url = validate_open_url(
+            &url,
+            t3_client::persistence::external_links::ExternalUrlSurface::Desktop,
+        )?;
         platform
             .inner
             .runtime

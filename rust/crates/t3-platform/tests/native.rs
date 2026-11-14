@@ -706,10 +706,25 @@ async fn unanswerable_host_actions_are_typed_unsupported_or_go_to_the_shell_exte
             other => panic!("{name}: {other:?}"),
         }
     }
-    assert!(matches!(
-        platform.open_url("file:///etc/passwd".into()).await,
-        Err(PlatformError::Denied(_))
-    ));
+    // Review L2: the host applies the client's one predicate for its surface, so a link the
+    // client refuses is refused by the host too. Only refusals run here: an allowed link would
+    // open a real browser.
+    use t3_client::persistence::external_links::{ExternalUrlSurface, safe_external_url};
+    assert_eq!(platform.external_url_surface(), ExternalUrlSurface::Desktop);
+    for refused in ["file:///etc/passwd", "mailto:someone@example.com", "javascript:alert(1)", "zed://file/x"] {
+        assert!(safe_external_url(refused, ExternalUrlSurface::Desktop).is_none());
+        assert!(
+            matches!(platform.open_url(refused.into()).await, Err(PlatformError::InvalidData(_))),
+            "{refused}"
+        );
+        assert!(
+            matches!(
+                platform.host(HostAction::OpenUrl(refused.into())).await,
+                Err(PlatformError::Denied(_))
+            ),
+            "{refused}"
+        );
+    }
 
     let dir = tempfile::tempdir().unwrap();
     let secrets = Arc::new(EphemeralSecretStore::default());
@@ -733,4 +748,78 @@ async fn legacy_storage_without_a_shell_source_is_unsupported() {
         platform.list_legacy("mobile".into(), "secure".into()).await,
         Err(PlatformError::Unsupported(_))
     ));
+}
+
+/// A key store whose saved key reads back damaged, until something stores a new one.
+struct DamagedSecrets {
+    inner: Arc<EphemeralSecretStore>,
+    damage: std::sync::Mutex<Option<fn(Vec<u8>) -> Result<Vec<u8>, t3_platform::SecretStoreError>>>,
+}
+impl t3_platform::SecretKeyStore for DamagedSecrets {
+    fn load(
+        &self,
+        id: &str,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, t3_platform::SecretStoreError> {
+        let loaded = self.inner.load(id)?;
+        match (loaded, *self.damage.lock().unwrap()) {
+            (Some(secret), Some(damage)) => damage(secret.to_vec()).map(|s| Some(zeroize::Zeroizing::new(s))),
+            (loaded, _) => Ok(loaded),
+        }
+    }
+    fn store(&self, id: &str, secret: &[u8]) -> Result<(), t3_platform::SecretStoreError> {
+        self.damage.lock().unwrap().take();
+        self.inner.store(id, secret)
+    }
+}
+
+#[tokio::test]
+async fn an_unreadable_or_wrong_length_storage_key_is_replaced_instead_of_failing_every_launch() {
+    // Platform review M1. A truncated Android wrapped key reads as `Corrupt`.
+    let damages: [fn(Vec<u8>) -> Result<Vec<u8>, t3_platform::SecretStoreError>; 2] = [
+        |secret| Ok(secret[..16].to_vec()),
+        |_| Err(t3_platform::SecretStoreError::Corrupt),
+    ];
+    for damage in damages {
+        let (platform, dir, secrets) = platform().await;
+        let secure = key("connection-credential", "c");
+        platform.write(StorageArea::Secure, vec![put(&secure, b"token")]).await.unwrap();
+        drop(platform);
+        let damaged = DamagedSecrets {
+            inner: secrets.clone(),
+            damage: std::sync::Mutex::new(Some(damage)),
+        };
+        let mut config = config(dir.path(), &secrets);
+        config.secrets = Box::new(damaged);
+        let reopened = NativePlatform::open(config).await.expect("opens with a new key");
+        let report = reopened.open_report();
+        assert_eq!(report.discarded_secure_records, 1);
+        assert!(report.replaced_unreadable_key);
+        assert_eq!(reopened.get(StorageArea::Secure, secure.clone()).await.unwrap(), None);
+        reopened.write(StorageArea::Secure, vec![put(&secure, b"new")]).await.unwrap();
+        assert_eq!(
+            reopened.get(StorageArea::Secure, secure).await.unwrap().as_deref(),
+            Some(&b"new"[..])
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_file_that_is_not_a_database_is_moved_aside_and_storage_starts_afresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(EphemeralSecretStore::default());
+    std::fs::write(dir.path().join("client-storage.sqlite"), b"this is not sqlite at all").unwrap();
+    let platform = NativePlatform::open(config(dir.path(), &secrets))
+        .await
+        .expect("opens a fresh database");
+    assert!(platform.open_report().recreated_database);
+    let aside: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+        .collect();
+    assert_eq!(aside.len(), 1, "the damaged file is kept for diagnosis");
+    assert_eq!(std::fs::read(aside[0].path()).unwrap(), b"this is not sqlite at all");
+    let ordinary = key("thread", "t");
+    platform.write(StorageArea::Ordinary, vec![put(&ordinary, b"x")]).await.unwrap();
+    assert_eq!(platform.get(StorageArea::Ordinary, ordinary).await.unwrap().as_deref(), Some(&b"x"[..]));
 }

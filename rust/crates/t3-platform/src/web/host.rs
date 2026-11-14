@@ -5,7 +5,7 @@ use js_sys::{Array, Function, Reflect, Uint8Array};
 use t3_client::platform::{HostAction, HostReply, MimeData, Platform, PlatformError};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{CryptoKey, IdbTransactionMode};
+use web_sys::CryptoKey;
 
 /// The TypeScript web client's keys, used in place so a browser profile keeps its identity.
 const DPOP_DATABASE: &str = "t3code:cloud-auth";
@@ -32,7 +32,10 @@ pub(super) async fn dispatch(
         HostAction::ClipboardRead => clipboard_read(platform).await,
         HostAction::ClipboardWrite(data) => clipboard_write(platform, data).await,
         HostAction::OpenUrl(url) => {
-            let url = validate_open_url(&url)?;
+            let url = validate_open_url(
+                &url,
+                t3_client::persistence::external_links::ExternalUrlSurface::Web,
+            )?;
             // With noopener the browser returns null even on success, so blocking is invisible.
             platform
                 .inner
@@ -213,15 +216,18 @@ async fn dpop_key(platform: &WebPlatform) -> Result<BrowserDpopKey, PlatformErro
         Some(value) => stored_key(&value)?,
         None => {
             let (record, key) = generate_dpop_key(platform).await?;
-            idb::put_value(
-                &database,
-                DPOP_STORE,
-                DPOP_KEY_ID,
-                &record,
-                IdbTransactionMode::Readwrite,
-            )
-            .await?;
-            key
+            // Two tabs can both find no key; the first add wins and the other uses its key,
+            // so neither caches a key that is no longer stored.
+            if idb::add_value(&database, DPOP_STORE, DPOP_KEY_ID, &record).await? {
+                key
+            } else {
+                match idb::legacy_value(&database, DPOP_STORE, DPOP_KEY_ID).await? {
+                    Some(value) => stored_key(&value)?,
+                    None => {
+                        return Err(PlatformError::Storage("could not save the DPoP key".into()));
+                    }
+                }
+            }
         }
     };
     database.close();
