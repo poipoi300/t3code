@@ -426,6 +426,7 @@ struct Pool {
     requests: Mutex<Vec<HttpRequest>>,
     catalog: Mutex<Value>,
     renew_404: AtomicBool,
+    renew_500: AtomicBool,
     renewed: tokio::sync::Notify,
     closed: Arc<tokio::sync::Notify>,
 }
@@ -441,6 +442,8 @@ impl Http for Pool {
             (
                 if self.renew_404.load(Ordering::SeqCst) {
                     404
+                } else if self.renew_500.load(Ordering::SeqCst) {
+                    500
                 } else {
                     200
                 },
@@ -476,6 +479,14 @@ async fn simlock_fixture_with_minutes(
     failed: bool,
     minutes: u64,
 ) -> (tempfile::TempDir, SimlockHost, Arc<FakeCommands>, Arc<Pool>) {
+    simlock_fixture_with_record(limit, failed, minutes, None).await
+}
+async fn simlock_fixture_with_record(
+    limit: u64,
+    failed: bool,
+    minutes: u64,
+    record: Option<String>,
+) -> (tempfile::TempDir, SimlockHost, Arc<FakeCommands>, Arc<Pool>) {
     let temp = tempfile::tempdir().unwrap();
     let leases = Arc::new(AtomicUsize::new(0));
     let count = leases.clone();
@@ -497,7 +508,8 @@ async fn simlock_fixture_with_minutes(
             std::fs::write(
                 dir.join("remote-connections")
                     .join(format!("{session}.json")),
-                json!({"leaseId":format!("lease-{id}")}).to_string(),
+                json!({"leaseId":record.clone().unwrap_or_else(||format!("lease-{id}"))})
+                    .to_string(),
             )
             .unwrap();
         }
@@ -516,6 +528,7 @@ async fn simlock_fixture_with_minutes(
         requests: Mutex::new(vec![]),
         catalog: Mutex::new(pool_catalog()),
         renew_404: AtomicBool::new(false),
+        renew_500: AtomicBool::new(false),
         renewed: tokio::sync::Notify::new(),
         closed,
     });
@@ -791,6 +804,24 @@ async fn simlock_empty_platform_catalog_is_not_cached() {
     assert_eq!(pool.requests.lock().await.len(), 2);
     host.stop().await.unwrap();
 }
+#[tokio::test]
+async fn simlock_refuses_hostile_lease_records_and_closes_partial_sessions() {
+    for id in ["--help", ".", "..", "bad/id", "bad\\id", "bad\0id"] {
+        let (_temp, host, commands, _) =
+            simlock_fixture_with_record(1, false, 60, Some(id.into())).await;
+        let device = host.list().await.unwrap().devices[0].clone();
+        assert!(
+            host.boot(&device, &OpenContext::default()).await.is_err(),
+            "{id}"
+        );
+        assert!(host.list().await.unwrap().devices.iter().all(|d| !d.booted));
+        assert_eq!(
+            commands.calls.lock().unwrap().last().unwrap().args[1],
+            "close"
+        );
+        host.stop().await.unwrap();
+    }
+}
 
 #[tokio::test]
 async fn simlock_renews_without_overriding_gateway_ttl_and_forgets_a_lost_lease() {
@@ -808,6 +839,18 @@ async fn simlock_renews_without_overriding_gateway_ttl_and_forgets_a_lost_lease(
             .iter()
             .any(|d| d.id.as_ref() == id)
     );
+    pool.renew_500.store(true, Ordering::SeqCst);
+    tokio::time::advance(std::time::Duration::from_secs(120)).await;
+    pool.renewed.notified().await;
+    assert!(
+        host.list()
+            .await
+            .unwrap()
+            .devices
+            .iter()
+            .any(|d| d.id.as_ref() == id)
+    );
+    pool.renew_500.store(false, Ordering::SeqCst);
     pool.renew_404.store(true, Ordering::SeqCst);
     tokio::time::advance(std::time::Duration::from_secs(120)).await;
     pool.renewed.notified().await;

@@ -82,14 +82,16 @@ pub async fn gateway_json(
         Error::Unavailable(format!("Could not reach the Simlock gateway at {base}."))
     })?;
     if status == 401 || status == 403 {
-        return Err(Error::Unavailable(
-            "The Simlock gateway refused the agent token for this environment.".into(),
-        ));
+        return Err(Error::GatewayStatus {
+            status,
+            reason: "The Simlock gateway refused the agent token for this environment.".into(),
+        });
     }
     if !(200..300).contains(&status) {
-        return Err(Error::Unavailable(format!(
-            "The Simlock gateway at {base} answered HTTP {status}."
-        )));
+        return Err(Error::GatewayStatus {
+            status,
+            reason: format!("The Simlock gateway at {base} answered HTTP {status}."),
+        });
     }
     serde_json::from_slice(&bytes).map_err(|_| {
         Error::Unavailable(format!(
@@ -482,6 +484,10 @@ impl SimlockHost {
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| crate::error::invalid("Simlock lease id"))?
                 .to_owned();
+            crate::error::validate_selector(&id, "Simlock lease id")?;
+            if matches!(id.as_str(), "." | "..") || id.contains(['/', '\\']) {
+                return Err(crate::error::invalid("Simlock lease id"));
+            }
             if self.inner.state.lock().await.epoch != epoch {
                 return Err(
                     self.unavailable("Device support stopped while the device was opening.")
@@ -525,11 +531,7 @@ impl SimlockHost {
                             Some(&json!({})),
                         )
                         .await;
-                        if result
-                            .as_ref()
-                            .err()
-                            .is_some_and(|e| e.to_string().contains("HTTP 404"))
-                        {
+                        if matches!(result, Err(Error::GatewayStatus { status: 404, .. })) {
                             host.inner.state.lock().await.leases.remove(&renewal.id);
                             let _ = tokio::fs::remove_dir_all(&renewal.dir).await;
                             return;

@@ -770,13 +770,20 @@ async fn device_environment(
     }
     if let Some(root) = &sdk.root {
         env.insert("ANDROID_HOME".into(), root.to_string_lossy().into_owned());
-        let path = env
-            .get("PATH")
-            .or(env.get("Path"))
-            .cloned()
-            .unwrap_or_default();
+        let path_key = if machine.platform() == "win32" {
+            env.keys()
+                .find(|key| key.eq_ignore_ascii_case("path"))
+                .cloned()
+                .unwrap_or_else(|| "PATH".into())
+        } else {
+            "PATH".into()
+        };
+        let path = env.get(&path_key).cloned().unwrap_or_default();
+        if machine.platform() == "win32" {
+            env.retain(|key, _| !key.eq_ignore_ascii_case("path") || *key == path_key);
+        }
         env.insert(
-            "PATH".into(),
+            path_key,
             format!(
                 "{}{}{}{}{}",
                 root.join("platform-tools").display(),

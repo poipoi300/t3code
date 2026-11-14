@@ -4,6 +4,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum Error {
+    #[error("{reason}")]
+    GatewayStatus { status: u16, reason: String },
     #[error("{}", .0.reason)]
     EasAccount(DeviceEasAccountError),
     #[error("{}", .0.reason)]

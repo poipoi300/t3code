@@ -195,10 +195,15 @@ pub async fn json_request(
     if !(200..300).contains(&status) {
         return Err(Error::operation(
             operation,
-            t3_contracts::device::DeviceOperationErrorReason::HubRejected,
+            t3_contracts::device::DeviceOperationErrorReason::RequestFailed,
         ));
     }
-    serde_json::from_slice(&bytes).map_err(|_| crate::error::invalid(operation))
+    serde_json::from_slice(&bytes).map_err(|_| {
+        Error::operation(
+            operation,
+            t3_contracts::device::DeviceOperationErrorReason::RequestFailed,
+        )
+    })
 }
 
 #[derive(Clone)]

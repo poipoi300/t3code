@@ -244,6 +244,7 @@ struct Connection {
 pub struct SshDeviceHost {
     options: Arc<SshOptions>,
     connection: Arc<Mutex<Option<Connection>>>,
+    startup: Arc<Mutex<()>>,
     summary: Arc<Mutex<DeviceHostSummary>>,
     activated: Arc<Mutex<bool>>,
     stopped: Arc<std::sync::atomic::AtomicBool>,
@@ -260,6 +261,7 @@ impl SshDeviceHost {
         Ok(Self {
             options: Arc::new(options),
             connection: Arc::new(Mutex::new(None)),
+            startup: Arc::new(Mutex::new(())),
             summary: Arc::new(Mutex::new(summary)),
             activated: Arc::new(Mutex::new(false)),
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -271,6 +273,7 @@ impl SshDeviceHost {
         agent: bool,
     ) -> futures_util::future::BoxFuture<'_, Result<Ready>> {
         Box::pin(async move {
+            let _startup = self.startup.lock().await;
             let mut connection = self.connection.lock().await;
             if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(Error::host(self.id(), None, "Device host was stopped."));
@@ -281,7 +284,9 @@ impl SshDeviceHost {
             {
                 return Ok(current.ready.clone());
             }
-            if let Some(old) = connection.take() {
+            let old = connection.take();
+            drop(connection);
+            if let Some(old) = old {
                 old.cancel.cancel();
                 let _ = old.task.await;
             }
@@ -306,7 +311,7 @@ impl SshDeviceHost {
                 match result {
                     Ok(next) => {
                         let ready = next.ready.clone();
-                        *connection = Some(next);
+                        *self.connection.lock().await = Some(next);
                         phase(DeviceHostStatus::Ready, None);
                         return Ok(ready);
                     }
@@ -469,6 +474,7 @@ impl SshDeviceHost {
         let health_origin = origin;
         let daemon_health = ready.agent.as_ref().map(|a| a.base_url.clone());
         let weak_connection = Arc::downgrade(&self.connection);
+        let weak_startup = Arc::downgrade(&self.startup);
         let weak_summary = Arc::downgrade(&self.summary);
         let weak_activated = Arc::downgrade(&self.activated);
         let stopped = self.stopped.clone();
@@ -514,8 +520,9 @@ impl SshDeviceHost {
             let mut delay = 1000;
             loop {
                 tokio::select! {biased;_=stop.cancelled()=>return,_=tokio::time::sleep(Duration::from_millis(delay))=>()}
-                let (Some(connection), Some(summary), Some(activated)) = (
+                let (Some(connection), Some(startup), Some(summary), Some(activated)) = (
                     weak_connection.upgrade(),
+                    weak_startup.upgrade(),
                     weak_summary.upgrade(),
                     weak_activated.upgrade(),
                 ) else {
@@ -537,11 +544,13 @@ impl SshDeviceHost {
                 let host = SshDeviceHost {
                     options: options.clone(),
                     connection,
+                    startup,
                     summary,
                     activated,
                     stopped: stopped.clone(),
                 };
-                match host.connect(phase.clone(), wants_agent).await {
+                let result = tokio::select! {biased; _=stop.cancelled()=>return, result=host.connect(phase.clone(), wants_agent)=>result};
+                match result {
                     Ok(_) => return,
                     Err(error) => phase(DeviceHostStatus::Failed, Some(error.to_string())),
                 }

@@ -49,12 +49,31 @@ impl HubOperations {
         )
     }
     async fn post(&self, path: &str, body: Value, op: &str, seconds: u64) -> Result<Value> {
-        json_request(
+        let value = json_request(
             self.http.as_ref(),
             self.req(Method::POST, path, seconds)?.json(&body)?,
             op,
         )
         .await
+        .map_err(|_| Error::operation(op, DeviceOperationErrorReason::RequestFailed))?;
+        if !value["ok"].is_boolean()
+            || ["id", "serial", "error"]
+                .iter()
+                .any(|key| value.get(key).is_some_and(|v| !v.is_string()))
+            || value.get("errors").is_some_and(|errors| {
+                errors.as_array().is_none_or(|errors| {
+                    errors.iter().any(|e| {
+                        !e["message"].is_string() || e.get("error").is_some_and(|v| !v.is_string())
+                    })
+                })
+            })
+        {
+            return Err(Error::operation(
+                op,
+                DeviceOperationErrorReason::RequestFailed,
+            ));
+        }
+        Ok(value)
     }
     async fn start_stream(&self, id: &str) -> Result<()> {
         self.post(
@@ -105,10 +124,11 @@ impl DeviceOperations for HubOperations {
                     ..Default::default()
                 });
             }
-            Ok(value) => value?,
+            Ok(value) => value
+                .map_err(|_| Error::operation("list", DeviceOperationErrorReason::RequestFailed))?,
         };
-        let list: HubList =
-            serde_json::from_value(value).map_err(|_| crate::error::invalid("list"))?;
+        let list: HubList = serde_json::from_value(value)
+            .map_err(|_| Error::operation("list", DeviceOperationErrorReason::RequestFailed))?;
         let ios_missing = list.simulators.is_empty()
             && list
                 .errors
@@ -116,8 +136,6 @@ impl DeviceOperations for HubOperations {
                 .any(|w| simulator_list_failed(&w.message));
         let mut devices = Vec::new();
         for device in list.simulators.into_iter().chain(list.emulators) {
-            crate::error::validate_selector(&device.id, "device id")?;
-            crate::error::validate_selector(&device.name, "device name")?;
             devices.push(DeviceSummary {
                 host_id: self.host_id.as_str().into(),
                 id: device.id.into(),
@@ -172,7 +190,6 @@ impl DeviceOperations for HubOperations {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                 {
-                    crate::error::validate_selector(name, "AVD name")?;
                     if !devices
                         .iter()
                         .any(|d| d.platform == DevicePlatform::Android && d.name.as_ref() == name)
@@ -230,13 +247,16 @@ impl DeviceOperations for HubOperations {
                 }
             }
             let diagnostics = diagnostics.join("\n\n");
-            let lower = diagnostics.to_lowercase();
-            let reason = if lower.contains("no space left")
-                || ((lower.contains("insufficient") || lower.contains("not enough"))
-                    && (lower.contains("disk") || lower.contains("space")))
-            {
+            // JavaScript's non-Unicode /i folds ASCII and its dot excludes four line terminators.
+            let disk = regex::Regex::new(
+                r"(?i-u:insufficient)[^\r\n\u{2028}\u{2029}]*(?i-u:disk|space)|(?i-u:not enough)[^\r\n\u{2028}\u{2029}]*(?i-u:disk|space)|(?i-u:no space left)",
+            )
+            .map_err(|_| crate::error::invalid("boot classification"))?;
+            let timeout = regex::Regex::new(r"(?i-u:timed? out|timeout)")
+                .map_err(|_| crate::error::invalid("boot classification"))?;
+            let reason = if disk.is_match(&diagnostics) {
                 DeviceBootErrorReason::DiskSpace
-            } else if lower.contains("timeout") || lower.contains("timed out") {
+            } else if timeout.is_match(&diagnostics) {
                 DeviceBootErrorReason::Timeout
             } else {
                 DeviceBootErrorReason::LaunchFailed
@@ -269,7 +289,7 @@ impl DeviceOperations for HubOperations {
         crate::error::validate_selector(id, "shutdown")?;
         if platform == DevicePlatform::Ios {
             if let Err(error) = self
-                .post_shutdown("/vendor/serve-sim/api/shutdown", json!({"udid":id}))
+                .post_shutdown("/vendor/serve-sim/grid/api/shutdown", json!({"udid":id}))
                 .await
                 && !self
                     .list()
@@ -305,7 +325,11 @@ impl DeviceOperations for HubOperations {
             .url
             .query_pairs_mut()
             .append_pair("device", device.id.as_ref());
-        let (status, bytes) = request_bytes(self.http.as_ref(), request).await?;
+        let (status, bytes) = request_bytes(self.http.as_ref(), request)
+            .await
+            .map_err(|_| {
+                Error::operation("screenshot", DeviceOperationErrorReason::RequestFailed)
+            })?;
         if (200..300).contains(&status) {
             return Ok(bytes);
         }

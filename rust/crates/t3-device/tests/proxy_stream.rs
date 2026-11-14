@@ -210,6 +210,16 @@ async fn blocked_proxy_paths_never_authenticate_or_reach_upstream() {
         ("/vendor/serve-sim/exec", "POST", 404),
         ("/vendor/serve-emu/api", "POST", 405),
         ("/vendor/serve-emu/webrtc/offer", "GET", 405),
+        ("/vendor/serve-sim/helper/../config", "GET", 404),
+        ("/vendor/serve-sim/helper/%2e%2e/config", "GET", 404),
+        ("/vendor/serve-sim/helper/%2E%2e/config", "GET", 404),
+        ("/vendor/serve-sim/helper/%252e%252E/config", "GET", 404),
+        (
+            "/vendor/serve-sim/helper/..\\..\\anything/config",
+            "GET",
+            404,
+        ),
+        ("/vendor/serve-sim/helper/%5c..%5c/config", "GET", 404),
     ] {
         let (router, http, auth) = fixture(true).await;
         let response = router
@@ -515,4 +525,100 @@ async fn cancelling_connecting_websocket_drops_owned_tcp_connection() {
     };
     assert!(error.is_cancelled());
     assert_eq!(accepted.read(&mut request).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn upstream_payload_ceiling_rejects_an_oversize_header_before_its_body() {
+    use tokio::io::AsyncWriteExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopping) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let mut header = vec![0x82, 127];
+        header.extend_from_slice(&(100u64 * 1024 * 1024 + 1).to_be_bytes());
+        socket.get_mut().write_all(&header).await.unwrap();
+        let _ = stopping.await;
+    });
+    let mut connection = t3_device::proxy::NativeSocketConnector
+        .connect(format!("ws://{address}"), BTreeMap::new(), vec![])
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), connection.stream.next())
+        .await
+        .expect("must reject the declared length without waiting for a body");
+    assert!(result.unwrap().is_err());
+    let _ = stop.send(());
+    server.await.unwrap();
+}
+
+struct PendingSocket;
+#[async_trait]
+impl SocketConnector for PendingSocket {
+    async fn connect(
+        &self,
+        _: String,
+        _: BTreeMap<String, Secret>,
+        _: Vec<Secret>,
+    ) -> Result<SocketConnection> {
+        use futures_util::SinkExt;
+        Ok(SocketConnection {
+            sink: Box::pin(
+                futures_util::sink::drain()
+                    .sink_map_err(|never: std::convert::Infallible| match never {}),
+            ),
+            stream: Box::pin(futures_util::stream::pending()),
+        })
+    }
+}
+#[tokio::test]
+async fn client_payload_ceiling_rejects_an_oversize_header_before_its_body() {
+    use tokio::io::AsyncWriteExt;
+    let host = FakeHost::new(
+        "local",
+        FakeOps::new("local", DevicePlatform::Ios, true),
+        FakeCommands::encoder(),
+        None,
+    );
+    let router = DeviceHubProxy {
+        service: service(vec![host], true, false).await,
+        http: FakeHttp::new([]),
+        auth: Arc::new(Auth {
+            operate: false,
+            requests: Mutex::new(vec![]),
+        }),
+        sockets: Arc::new(PendingSocket),
+    }
+    .router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopping) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = stopping.await;
+            })
+            .await
+            .unwrap();
+    });
+    let (mut client, _) =
+        tokio_tungstenite::connect_async(format!("ws://{address}/api/device-hub/api/devices/ws"))
+            .await
+            .unwrap();
+    let mut header = vec![0x82, 0xff];
+    header.extend_from_slice(&(100u64 * 1024 * 1024 + 1).to_be_bytes());
+    header.extend_from_slice(&[0; 4]);
+    client.get_mut().write_all(&header).await.unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+        .await
+        .expect("must reject the declared length without waiting for a body");
+    assert!(!matches!(
+        result,
+        Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(_)
+            | tokio_tungstenite::tungstenite::Message::Text(_)))
+    ));
+    drop(client);
+    let _ = stop.send(());
+    server.await.unwrap();
 }

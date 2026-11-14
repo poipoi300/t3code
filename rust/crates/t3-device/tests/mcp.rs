@@ -141,6 +141,34 @@ fn quick_start_matches_typescript_generated_goldens() {
     }
 }
 #[tokio::test]
+async fn missing_device_messages_keep_platform_and_explicit_target() {
+    let (adapter, access, _, _, _) = fixture(true).await;
+    let error = adapter
+        .device_open(
+            context(access.clone(), "device_open", true).await,
+            serde_json::from_value(json!({"platform":"android"})).unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("No android devices were found on host local. Call device_list to see why.")
+    );
+    let error = adapter
+        .device_screenshot(
+            context(access, "device_screenshot", true).await,
+            serde_json::from_value(json!({"deviceId":"missing"})).unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Device missing is not open in this thread. Call device_open first.")
+    );
+}
+#[tokio::test]
 async fn mcp_open_returns_post_boot_binding_and_screenshot_and_close_target_the_thread() {
     let (adapter, access, _ops, _host, launchers) = fixture(false).await;
     let opened = adapter

@@ -32,7 +32,11 @@ async fn simlock_identity_never_echoes_credentials_from_a_role_error() {
     let accounts = t3_device::cloud::AccountService {
         settings: settings(false, false),
         secrets: Arc::new(LiteralSecrets),
-        http: FakeHttp::new([(200, json!({"role":"worker-private-token","name":"test"}))]),
+        http: FakeHttp::new([
+            (200, json!({"role":"worker-private-token","name":"test"})),
+            (200, json!({"role":"agent","name":"Local QA"})),
+            (200, json!({"role":"agent","name":"Local QA"})),
+        ]),
         environment: BTreeMap::new(),
         expo_home: home.path().into(),
     };
@@ -43,6 +47,17 @@ async fn simlock_identity_never_echoes_credentials_from_a_role_error() {
     let error = accounts.simlock_identity(input).await.unwrap_err();
     assert!(!format!("{error:?}").contains("private-token"));
     assert!(error.to_string().contains("--role agent"));
+    for gateway in ["http://127.0.0.1:4700", "http://169.254.1.1:4700"] {
+        let identity = accounts
+            .simlock_identity(
+                serde_json::from_value(json!({"gatewayUrl":gateway,"agentToken":"private-token"}))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(identity.gateway_url, gateway);
+        assert_eq!(identity.signed_in_as, "Local QA");
+    }
 }
 
 #[tokio::test]
@@ -109,6 +124,7 @@ async fn hub_discovery_merges_avds_without_duplicate_running_name() {
     );
     assert!(!listing.devices[1].booted);
     assert!(!listing.android_discovery_incomplete);
+    assert_eq!(http.requests.lock().await[0].url.path(), "/api/devices");
     assert_eq!(
         http.requests.lock().await[0].timeout,
         Some(Duration::from_secs(40))
@@ -131,6 +147,37 @@ async fn failed_avd_listing_keeps_discovered_devices_and_marks_incomplete() {
     assert_eq!(listing.devices.len(), 1);
     assert!(listing.android_discovery_incomplete);
     assert!(listing.detail.unwrap().contains("exit code 1"));
+}
+#[tokio::test]
+async fn display_names_do_not_hide_other_devices_and_selectors_are_checked_at_execution() {
+    let mut named = raw_device("phone", "ios");
+    named["name"] = json!("-QA");
+    let http = FakeHttp::new([(
+        200,
+        json!({"simulators":[named],"emulators":[raw_device("emulator-5554","android")]}),
+    )]);
+    let commands = FakeCommands::new(|_| {
+        Ok(CommandOutput {
+            stdout: "-AVD\nPixel_API_36\n".into(),
+            ..Default::default()
+        })
+    });
+    let hub = hub(http.clone(), commands);
+    let listing = hub.list().await.unwrap();
+    assert_eq!(
+        listing
+            .devices
+            .iter()
+            .map(|d| d.id.as_ref())
+            .collect::<Vec<_>>(),
+        ["phone", "emulator-5554", "-AVD", "Pixel_API_36"]
+    );
+    assert!(
+        hub.boot(&listing.devices[2], &OpenContext::default())
+            .await
+            .is_err()
+    );
+    assert_eq!(http.requests.lock().await.len(), 1);
 }
 #[tokio::test]
 async fn simulator_discovery_warning_marks_incomplete_and_hides_only_deleted_plists() {
@@ -171,11 +218,14 @@ async fn ios_shutdown_does_not_accept_missing_or_still_booted_device() {
         .shutdown("phone", DevicePlatform::Ios)
         .await;
         assert_eq!(result.is_ok(), state == Some(false));
-        assert!(
-            http.requests.lock().await[0]
-                .url
-                .path()
-                .ends_with("/vendor/serve-sim/api/shutdown")
+        let requests = http.requests.lock().await;
+        assert_eq!(
+            requests[0].url.path(),
+            "/vendor/serve-sim/grid/api/shutdown"
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(requests[0].body.as_ref().unwrap()).unwrap(),
+            json!({"udid":"phone"})
         );
     }
 }
@@ -200,7 +250,11 @@ async fn ios_screenshot_fallback_is_limited_to_hub_rejection_on_old_runtimes() {
         });
         let mut d = device("local", "phone", DevicePlatform::Ios, true);
         d.version = version.into();
-        let result = hub(http, commands.clone()).screenshot(&d).await;
+        let result = hub(http.clone(), commands.clone()).screenshot(&d).await;
+        let requests = http.requests.lock().await;
+        assert_eq!(requests[0].method, Method::POST);
+        assert_eq!(requests[0].url.path(), "/vendor/serve-sim/api/screenshot");
+        assert_eq!(requests[0].url.query(), Some("device=phone"));
         assert_eq!(result.is_ok(), expected);
         assert_eq!(!commands.calls.lock().unwrap().is_empty(), fallback);
         if fallback {
@@ -212,7 +266,28 @@ async fn ios_screenshot_fallback_is_limited_to_hub_rejection_on_old_runtimes() {
 async fn hub_boot_classifies_diagnostics_and_uses_serial() {
     for (text, reason) in [
         ("insufficient disk space", DeviceBootErrorReason::DiskSpace),
+        ("INSUFFICIENT DISK SPACE", DeviceBootErrorReason::DiskSpace),
+        (
+            "insufficient dis\u{212a}",
+            DeviceBootErrorReason::LaunchFailed,
+        ),
+        (
+            "in\u{17f}ufficient disk",
+            DeviceBootErrorReason::LaunchFailed,
+        ),
         ("device timed out", DeviceBootErrorReason::Timeout),
+        ("device time out", DeviceBootErrorReason::Timeout),
+        ("disk is insufficient", DeviceBootErrorReason::LaunchFailed),
+        ("not enough\nspace", DeviceBootErrorReason::LaunchFailed),
+        ("not enough\rspace", DeviceBootErrorReason::LaunchFailed),
+        (
+            "not enough\u{2028}space",
+            DeviceBootErrorReason::LaunchFailed,
+        ),
+        (
+            "not enough\u{2029}space",
+            DeviceBootErrorReason::LaunchFailed,
+        ),
         (
             "emulator launch failed",
             DeviceBootErrorReason::LaunchFailed,
@@ -328,6 +403,11 @@ async fn agent_close_accepts_only_ok_or_confirmed_missing_session() {
         let body: Value = serde_json::from_slice(request.body.as_ref().unwrap()).unwrap();
         assert_eq!(body["params"]["session"], "session");
         assert_eq!(body["params"]["command"], "close");
+        assert_eq!(request.url.as_str(), "http://agent.test/rpc");
+        assert_eq!(
+            body,
+            json!({"jsonrpc":"2.0","id":"session","method":"agent_device.command","params":{"command":"close","session":"session","positionals":[],"flags":{}}})
+        );
         assert!(!format!("{endpoint:?}").contains("secret"));
     }
 }
@@ -547,6 +627,43 @@ async fn unsupported_actions_and_missing_helpers_execute_no_commands() {
         assert!(commands.calls.lock().unwrap().is_empty());
     }
 }
+#[tokio::test]
+async fn url_arguments_are_checked_after_action_support_and_before_spawning() {
+    let commands = FakeCommands::encoder();
+    let host = FakeHost::new(
+        "local",
+        FakeOps::new("local", DevicePlatform::Ios, true),
+        commands.clone(),
+        None,
+    );
+    for url in ["", " ", "--help", "app://screen\0bad", "app://screen\nbad"] {
+        let mut input: DeviceActionInput = serde_json::from_value(
+            json!({"type":"openUrl","deviceId":"phone","url":"app://screen"}),
+        )
+        .unwrap();
+        let DeviceActionInput::DeviceOpenUrlAction(action) = &mut input else {
+            panic!("url action")
+        };
+        action.url = url.into();
+        assert!(
+            run_action(&host.ready, DevicePlatform::Ios, &input)
+                .await
+                .is_err()
+        );
+    }
+    let input = serde_json::from_value(json!({"type":"shake","deviceId":"--help"})).unwrap();
+    let Error::Device { wire, .. } = run_action(&host.ready, DevicePlatform::Ios, &input)
+        .await
+        .unwrap_err()
+    else {
+        panic!("unsupported action")
+    };
+    assert!(matches!(
+        *wire,
+        DeviceError::DeviceActionUnavailableError(_)
+    ));
+    assert!(commands.calls.lock().unwrap().is_empty());
+}
 #[test]
 fn shell_word_preserves_hostile_android_values() {
     for raw in [
@@ -568,6 +685,60 @@ fn shell_word_preserves_hostile_android_values() {
         t3_device::actions::shell_word("com.example.app"),
         "com.example.app"
     );
+}
+
+#[tokio::test]
+async fn action_errors_keep_typescript_operation_names() {
+    for platform in [DevicePlatform::Ios, DevicePlatform::Android] {
+        for (fields, expected) in [
+            (json!({"type":"setAppearance","value":"dark"}),"appearance"),
+            (json!({"type":"setTextSize","value":"small"}),"text size"),
+            (json!({"type":"setLocation","latitude":1,"longitude":2}),"location"),
+            (json!({"type":"setPermission","appId":"app","permission":"camera","decision":"grant"}),"permission"),
+            (json!({"type":"openUrl","url":"example://screen"}),"open url"),
+            (json!({"type":"launchApp","appId":"app"}),"launch"),
+            (json!({"type":"terminateApp","appId":"app"}),"terminate"),
+        ].into_iter().chain(if platform == DevicePlatform::Ios {
+            vec![(json!({"type":"setToggle","setting":"increaseContrast","value":true}),"increase contrast"),
+            (json!({"type":"setToggle","setting":"reduceMotion","value":true}),"accessibility"),
+            (json!({"type":"setLiquidGlass","value":"clear"}),"accessibility"),
+            (json!({"type":"setColorFilter","value":"none"}),"accessibility"),
+            (json!({"type":"clearLocation"}),"location"),(json!({"type":"sendPush","appId":"app","payload":"text"}),"push")]
+        } else {
+            vec![(json!({"type":"setOrientation","value":"portrait"}),"orientation"),
+            (json!({"type":"setToggle","setting":"networkEnabled","value":true}),"network"),
+            (json!({"type":"setToggle","setting":"reduceMotion","value":true}),"reduce motion")]
+        }) {
+            let commands = FakeCommands::new(|_|Ok(CommandOutput{code:17,..Default::default()}));
+            let host = FakeHost::new("local",FakeOps::new("local",platform.clone(),true),commands,None);
+            let mut fields=fields;fields["deviceId"]=json!("phone");
+            let error=run_action(&host.ready,platform.clone(),&serde_json::from_value(fields).unwrap()).await.unwrap_err();
+            let Error::Device{wire,..}=error else {panic!("typed operation required")};
+            let DeviceError::DeviceOperationError(error)=*wire else {panic!("operation error required")};
+            assert_eq!(error.operation,expected);assert_eq!(error.reason,DeviceOperationErrorReason::CommandFailed);
+        }
+    }
+}
+#[tokio::test]
+async fn hub_transport_and_schema_errors_are_request_failed() {
+    for (status, body) in [(503, json!({})), (200, json!(null))] {
+        let hub = hub(FakeHttp::new([(status, body)]), FakeCommands::encoder());
+        let error = hub
+            .boot(
+                &device("local", "phone", DevicePlatform::Android, false),
+                &OpenContext::default(),
+            )
+            .await
+            .unwrap_err();
+        let Error::Device { wire, .. } = error else {
+            panic!("typed operation required")
+        };
+        let DeviceError::DeviceOperationError(error) = *wire else {
+            panic!("operation error required")
+        };
+        assert_eq!(error.operation, "boot");
+        assert_eq!(error.reason, DeviceOperationErrorReason::RequestFailed);
+    }
 }
 
 #[test]
@@ -931,6 +1102,41 @@ struct FakeMachine {
     files: BTreeSet<PathBuf>,
     env: BTreeMap<String, String>,
     platform: &'static str,
+}
+#[tokio::test]
+async fn native_http_refuses_redirects_and_unsafe_urls() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for raw in [
+        "file:///private",
+        "ftp://host.test",
+        "http://user:secret@host.test",
+        "http://host.test/\n",
+        "http://",
+    ] {
+        assert!(t3_device::io::validated_url(raw).is_err());
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        assert!(socket.read(&mut request).await.unwrap() > 0);
+        socket.write_all(format!("HTTP/1.1 302 Found\r\nLocation: http://{address}/must-not-follow\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+    });
+    let response = t3_device::io::NativeHttp::new()
+        .unwrap()
+        .execute(
+            HttpRequest::new(
+                Method::GET,
+                &format!("http://{address}/redirect"),
+                Duration::from_secs(5),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status, 302);
+    server.await.unwrap();
 }
 use std::path::{Path, PathBuf};
 #[async_trait]

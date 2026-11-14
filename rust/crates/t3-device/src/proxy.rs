@@ -71,6 +71,25 @@ impl DeviceHubProxy {
     }
 }
 pub fn policy(path: &str, method: &Method, upgrade: bool) -> std::result::Result<Scope, u16> {
+    let mut decoded = path.to_owned();
+    for depth in 0..=8 {
+        if decoded.contains('\\')
+            || decoded.chars().any(char::is_control)
+            || decoded.split('/').any(|part| matches!(part, "." | ".."))
+        {
+            return Err(404);
+        }
+        let next = percent_encoding::percent_decode_str(&decoded)
+            .decode_utf8()
+            .map_err(|_| 404u16)?;
+        if next == decoded {
+            break;
+        }
+        if depth == 8 || next.matches('/').count() != decoded.matches('/').count() {
+            return Err(404);
+        }
+        decoded = next.into_owned();
+    }
     static READ: OnceLock<regex::RegexSet> = OnceLock::new();
     static MUTATE: OnceLock<regex::RegexSet> = OnceLock::new();
     let read=READ.get_or_init(||regex::RegexSet::new([
@@ -392,10 +411,9 @@ impl SocketConnector for NativeSocketConnector {
                 .map_err(|_| crate::error::invalid("WebSocket protocol"))?,
             );
         }
-        // Node's global WebSocket has no application-level upstream payload ceiling.
         let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-            .max_message_size(None)
-            .max_frame_size(None);
+            .max_message_size(Some(100 * 1024 * 1024))
+            .max_frame_size(Some(100 * 1024 * 1024));
         let (upstream, _) = tokio::time::timeout(
             Duration::from_secs(10),
             tokio_tungstenite::connect_async_with_config(request, Some(config), false),

@@ -60,6 +60,37 @@ pub async fn run_action(
     let value = serde_json::to_value(input).map_err(|_| crate::error::invalid("action"))?;
     let text = |key| value.get(key).and_then(Value::as_str).unwrap_or("");
     let op = text("type");
+    let setting = text("setting");
+    let supported = match platform {
+        DevicePlatform::Ios => {
+            !matches!(op, "setOrientation" | "shake")
+                && (op != "setToggle"
+                    || [
+                        "increaseContrast",
+                        "reduceMotion",
+                        "reduceTransparency",
+                        "showBorders",
+                        "voiceOver",
+                    ]
+                    .contains(&setting))
+        }
+        DevicePlatform::Android => {
+            !matches!(
+                op,
+                "setLiquidGlass" | "setColorFilter" | "sendPush" | "shake"
+            ) && (op != "setToggle" || ["reduceMotion", "networkEnabled"].contains(&setting))
+        }
+    };
+    if !supported {
+        return Err(Error::unsupported(op, platform, false));
+    }
+    if op == "openUrl" {
+        let url = text("url");
+        validate_selector(url, "open url")?;
+        if url.trim().is_empty() {
+            return Err(crate::error::invalid("open url"));
+        }
+    }
     if op == "setLocation" {
         for (key, limit) in [("latitude", 90.0), ("longitude", 180.0)] {
             if !value[key]
@@ -78,7 +109,23 @@ pub async fn run_action(
     }
     let selected = text("value");
     let toggle = value.get("value").and_then(Value::as_bool).unwrap_or(false);
-    let setting = text("setting");
+    let wire_op = match op {
+        "setAppearance" => "appearance",
+        "setTextSize" => "text size",
+        "setLocation" | "clearLocation" => "location",
+        "setPermission" => "permission",
+        "openUrl" => "open url",
+        "launchApp" => "launch",
+        "terminateApp" => "terminate",
+        "setOrientation" => "orientation",
+        "setToggle" if platform == DevicePlatform::Ios && setting == "increaseContrast" => {
+            "increase contrast"
+        }
+        "setToggle" | "setLiquidGlass" | "setColorFilter" if platform == DevicePlatform::Ios => {
+            "accessibility"
+        }
+        _ => op,
+    };
     let unsupported = || Error::unsupported(op, platform.clone(), false);
     let run = ready.commands.as_ref();
     if platform == DevicePlatform::Ios {
@@ -168,7 +215,7 @@ pub async fn run_action(
                 ]
                 .contains(&permission)
                 {
-                    return Err(unsupported());
+                    return Err(Error::unsupported("permission", platform.clone(), false));
                 }
                 words(&["privacy", id, decision, permission, app])
             }
@@ -189,7 +236,7 @@ pub async fn run_action(
             _ => return Err(unsupported()),
         };
         args.insert(0, "simctl".into());
-        checked(run, Command::new("xcrun", args), op).await?;
+        checked(run, Command::new("xcrun", args), wire_op).await?;
         return Ok(());
     }
     let args = match op {
@@ -273,14 +320,14 @@ pub async fn run_action(
                     run,
                     id,
                     words(&["settings", "put", "system", "accelerometer_rotation", "1"]),
-                    op,
+                    wire_op,
                 )
                 .await?;
                 shell(
                     run,
                     id,
                     words(&["cmd", "window", "user-rotation", "free"]),
-                    op,
+                    wire_op,
                 )
                 .await?;
                 adb(
@@ -293,7 +340,7 @@ pub async fn run_action(
                         "acceleration",
                         ["0:9.81:0", "9.81:0:0", "0:-9.81:0", "-9.81:0:0"][rotation],
                     ]),
-                    op,
+                    wire_op,
                 )
                 .await?;
                 return Ok(());
@@ -333,7 +380,7 @@ pub async fn run_action(
                 "location" => &["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"],
                 "notifications" => &["POST_NOTIFICATIONS"],
                 "motion" => &["ACTIVITY_RECOGNITION"],
-                _ => return Err(unsupported()),
+                _ => return Err(Error::unsupported("permission", platform.clone(), false)),
             };
             let mut failure = None;
             let mut success = false;
@@ -387,7 +434,7 @@ pub async fn run_action(
         "terminateApp" => words(&["am", "force-stop", app]),
         _ => return Err(unsupported()),
     };
-    shell(run, id, args, op).await?;
+    shell(run, id, args, wire_op).await?;
     Ok(())
 }
 

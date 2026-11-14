@@ -252,7 +252,7 @@ impl t3_mcp::services::DeviceService for DeviceAdapter {
                     "Both iOS and Android devices are available; pass platform or deviceId.".into(),
                 )));
             }
-            candidates.iter().find(|d|d.booted).or(candidates.first()).map(|d|(*d).clone()).ok_or_else(||mapped(Error::Unavailable(state.host_statuses.get(&DeviceHostId::from(id)).and_then(|s|s.detail.clone().flatten()).unwrap_or_else(||"No simulators or emulators were found. Call device_list to see why.".into()))))?
+            candidates.iter().find(|d|d.booted).or(candidates.first()).map(|d|(*d).clone()).ok_or_else(||mapped(Error::Unavailable(state.host_statuses.get(&DeviceHostId::from(id)).filter(|s|s.status==DeviceHostStatus::Failed).and_then(|s|s.detail.clone().flatten()).unwrap_or_else(||match platform {Some(platform)=>format!("No {} devices were found on host {id}. Call device_list to see why.",if platform==DevicePlatform::Ios{"ios"}else{"android"}),None=>"No simulators or emulators were found. Call device_list to see why.".into()}))))?
         };
         if self
             .service
@@ -338,6 +338,7 @@ impl t3_mcp::services::DeviceService for DeviceAdapter {
         context: CallContext,
         input: DeviceToolTargetInput,
     ) -> t3_mcp::Result<DeviceToolScreenshotResult> {
+        let selected_device = input.device_id.clone().flatten();
         let thread = caller(&context)?;
         let state = self.service.state().await;
         let host = resolve_host(
@@ -364,7 +365,17 @@ impl t3_mcp::services::DeviceService for DeviceAdapter {
         }
         .ok_or_else(|| {
             mapped(Error::Unavailable(
-                "No device is open in this thread. Call device_open first.".into(),
+                selected_device
+                    .as_ref()
+                    .map(|id| {
+                        format!(
+                            "Device {} is not open in this thread. Call device_open first.",
+                            id.as_ref()
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        "No device is open in this thread. Call device_open first.".into()
+                    }),
             ))
         })?;
         let (device, png) = self

@@ -118,8 +118,12 @@ Differences from TypeScript:
   owned children. Old local tools may require their own normal shutdown path.
 - HTTP URLs must be HTTP(S), have no userinfo/control characters, and Simlock
   gateways must be origins with no query or fragment. Redirects are refused.
+  Proxy paths also reject encoded or nested-encoded dot segments and separators
+  before authorization. Local and private-network Simlock origins remain supported.
   Option-like, empty, NUL/CR/LF selectors and unsafe Windows launcher paths are
   refused before execution, including externally supplied EAS IDs and Simlock models.
+  Lease records reject path segments and command-like IDs; URL actions reject
+  empty, NUL/CR/LF and option-like arguments. Odd display names stay visible.
 - Public errors retain contract tags where available but omit raw causes,
   command output and credentials. Some guidance is shorter; host ambiguity uses
   Rust list formatting. Account checks carry the contract account/identity error
@@ -132,7 +136,8 @@ Differences from TypeScript:
   to distinguish replacements during stale-list reconciliation. Session names,
   IDs and on-disk formats otherwise retain their TypeScript forms.
 - Readiness and mutation commits share a service lock; discovery is limited to
-  four concurrent hosts. Fan-out is an unbounded per-subscriber channel; consumers
+  four concurrent hosts, matching TypeScript's lifecycle serialization. SSH endpoint
+  snapshots use a separate short-lived lock from startup. Fan-out is an unbounded per-subscriber channel; consumers
   must drain or drop it. The MJPEG tracker copies bounded buffers instead of
   retaining zero-copy chunk views.
 - The static project scanner is conservative and may refuse dynamic/ambiguous
@@ -144,18 +149,21 @@ Differences from TypeScript:
   bounded at 8 MiB per stream (screenshot fallback allows 64 MiB). Exact native
   process error text and termination timing are not TypeScript-compatible.
 - Socket upgrade/framing uses Axum/tungstenite; connection is bounded to ten
-  seconds. Client messages retain the Node server's 100 MiB limit; the upstream
-  client has no application-level payload ceiling, as with Node's global
-  WebSocket. WebSocket compression is not negotiated, unlike the TypeScript
+  seconds. Both directions enforce a 100 MiB frame/message limit. The upstream
+  cap is stricter than Node's global WebSocket. WebSocket compression is not negotiated, unlike the TypeScript
   server's optional permessage-deflate; the Axum/tungstenite bridge does not
   implement that extension. Framework-specific rejection bodies,
   fragmentation safeguards and WebSocket close reasons can differ. HTTP proxy
   streams deliberately retain the TypeScript's lack of a total
   deadline; dropping the downstream body cancels its upstream read.
+- Windows SDK PATH merging respects the existing key's case; pruning compares
+  active Windows paths without case sensitivity and accepts either separator.
+  Maintenance unlock normally awaits asynchronous filesystem operations, with
+  blocking-pool cleanup if its future is cancelled.
 
 ## Verification
 
-The default suite has 97 tests; enabling `mcp` adds six (103 total).
+The default suite has 107 tests; enabling `mcp` adds seven (114 total).
 
 Tests use fakes and recorded TypeScript outputs for every device/tool/API seam,
 paused Tokio clocks for renewals/reconnects, and explicit events for concurrency.

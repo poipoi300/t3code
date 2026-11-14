@@ -79,6 +79,75 @@ impl Ports for FakePorts {
     }
 }
 struct Mac;
+struct WindowsMachine {
+    sdk: PathBuf,
+    key: String,
+}
+#[async_trait]
+impl Machine for WindowsMachine {
+    fn platform(&self) -> &str {
+        "win32"
+    }
+    fn environment(&self) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            (
+                "ANDROID_HOME".into(),
+                self.sdk.to_string_lossy().into_owned(),
+            ),
+            (self.key.clone(), "inherited-path".into()),
+        ])
+    }
+    async fn exists(&self, _: &Path) -> bool {
+        true
+    }
+    async fn real_path(&self, path: &Path) -> Option<PathBuf> {
+        Some(path.into())
+    }
+}
+#[tokio::test]
+async fn windows_sdk_prepend_replaces_the_existing_path_key() {
+    for key in ["Path", "pAtH", "PATH"] {
+        let temp = tempfile::tempdir().unwrap();
+        installed(temp.path(), Tool::Hub).await;
+        let commands = FakeCommands::encoder();
+        let spawner = FakeSpawner::new();
+        let sdk = temp.path().join("sdk");
+        let host = LocalDeviceHost::new(LocalOptions {
+            state: temp.path().join("state"),
+            cwd: temp.path().into(),
+            node: "node".into(),
+            tools: Arc::new(Toolchain::new(temp.path().into(), commands.clone())),
+            http: Arc::new(Health {
+                unhealthy_port: AtomicU16::new(0),
+            }),
+            commands,
+            spawner: spawner.clone(),
+            ports: Arc::new(FakePorts(AtomicU16::new(8700))),
+            machine: Arc::new(WindowsMachine {
+                sdk: sdk.clone(),
+                key: key.into(),
+            }),
+        });
+        host.ensure_ready(Arc::new(|_, _| {})).await.unwrap();
+        let calls = spawner.calls.lock().await;
+        let paths = calls[0]
+            .env
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("path"))
+            .collect::<Vec<_>>();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(
+            paths[0].1.as_ref().unwrap().expose(),
+            format!(
+                "{};{};inherited-path",
+                sdk.join("platform-tools").display(),
+                sdk.join("emulator").display()
+            )
+        );
+        drop(calls);
+        host.stop().await.unwrap();
+    }
+}
 #[async_trait]
 impl Machine for Mac {
     fn platform(&self) -> &str {
@@ -314,6 +383,55 @@ fn ssh_commands() -> Arc<FakeCommands> {
 struct ScriptedHealth {
     replies: std::sync::Mutex<std::collections::VecDeque<bool>>,
     probed: tokio::sync::mpsc::UnboundedSender<bool>,
+}
+struct PausedBootstrap {
+    commands: Arc<FakeCommands>,
+    gate: Arc<Gate>,
+}
+#[async_trait]
+impl t3_device::io::Commands for PausedBootstrap {
+    async fn run(&self, command: Command) -> Result<CommandOutput> {
+        if command
+            .stdin
+            .as_ref()
+            .is_some_and(|bytes| String::from_utf8_lossy(bytes).contains("const mode=\"start\""))
+        {
+            self.gate.wait().await;
+        }
+        t3_device::io::Commands::run(self.commands.as_ref(), command).await
+    }
+}
+#[tokio::test]
+async fn ssh_current_does_not_wait_for_bootstrap() {
+    let gate = Gate::new();
+    let host = Arc::new(
+        SshDeviceHost::new(SshOptions {
+            config: ssh_config(),
+            owner: t3_device::ssh::owner("env", "state", "remote"),
+            commands: Arc::new(PausedBootstrap {
+                commands: ssh_commands(),
+                gate: gate.clone(),
+            }),
+            http: Arc::new(Health {
+                unhealthy_port: AtomicU16::new(0),
+            }),
+            spawner: FakeSpawner::new(),
+            ports: Arc::new(FakePorts(AtomicU16::new(8600))),
+        })
+        .unwrap(),
+    );
+    let copy = host.clone();
+    let starting = tokio::spawn(async move { copy.ensure_ready(Arc::new(|_, _| {})).await });
+    gate.entered.notified().await;
+    let mut current = Box::pin(host.current());
+    assert!(matches!(
+        futures_util::poll!(&mut current),
+        std::task::Poll::Ready(None)
+    ));
+    gate.release.notify_one();
+    starting.await.unwrap().unwrap();
+    assert!(host.current().await.is_some());
+    host.stop().await.unwrap();
 }
 #[async_trait]
 impl Http for ScriptedHealth {

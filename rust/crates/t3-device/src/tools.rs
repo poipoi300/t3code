@@ -82,10 +82,47 @@ struct MaintenanceLock {
     path: PathBuf,
     owner: String,
 }
+impl MaintenanceLock {
+    async fn release(mut self) -> Result<()> {
+        match tokio::fs::remove_file(self.path.join(&self.owner)).await {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(_) => return Err(crate::error::invalid("maintenance unlock")),
+        }
+        match tokio::fs::remove_dir(&self.path).await {
+            Ok(()) => (),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::DirectoryNotEmpty
+                        | std::io::ErrorKind::AlreadyExists
+                        | std::io::ErrorKind::PermissionDenied
+                ) => {}
+            Err(_) => return Err(crate::error::invalid("maintenance unlock")),
+        }
+        self.owner.clear();
+        Ok(())
+    }
+}
 impl Drop for MaintenanceLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(self.path.join(&self.owner));
-        let _ = std::fs::remove_dir(&self.path);
+        if self.owner.is_empty() {
+            return;
+        }
+        let path = self.path.clone();
+        let owner = self.owner.clone();
+        let cleanup = move || {
+            let _ = std::fs::remove_file(path.join(owner));
+            let _ = std::fs::remove_dir(path);
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            drop(runtime.spawn_blocking(cleanup));
+        } else {
+            let _ = std::thread::Builder::new()
+                .name("device-maintenance-cleanup".into())
+                .spawn(cleanup);
+        }
     }
 }
 async fn maintenance_lock(
@@ -224,9 +261,20 @@ impl Toolchain {
     }
     pub async fn prune(&self, tool: Tool, inventory: &dyn ProcessInventory) -> Result<()> {
         let root = self.base.join("tools");
-        let _guard = maintenance_lock(&root, inventory).await?;
+        let guard = maintenance_lock(&root, inventory).await?;
+        let result = self.prune_locked(tool, inventory).await;
+        let cleanup = guard.release().await;
+        result.and(cleanup)
+    }
+    async fn prune_locked(&self, tool: Tool, inventory: &dyn ProcessInventory) -> Result<()> {
+        let root = self.base.join("tools");
         let Some(commands) = inventory.command_lines().await else {
             return Ok(());
+        };
+        let commands = if cfg!(windows) {
+            commands.to_lowercase().replace('\\', "/")
+        } else {
+            commands
         };
         let parent = root.join(tool.name());
         let mut entries = match tokio::fs::read_dir(&parent).await {
@@ -272,9 +320,15 @@ impl Toolchain {
             .max_by(|(av, _, at), (bv, _, bt)| at.cmp(bt).then_with(|| natural_version_cmp(av, bv)))
             .map(|(v, _, _)| v.clone());
         for (version, path, _) in completed {
+            let needle = format!("{}{}", path.display(), std::path::MAIN_SEPARATOR);
+            let needle = if cfg!(windows) {
+                needle.to_lowercase().replace('\\', "/")
+            } else {
+                needle
+            };
             if version == tool.version()
                 || previous.as_ref() == Some(&version)
-                || commands.contains(&format!("{}{}", path.display(), std::path::MAIN_SEPARATOR))
+                || commands.contains(&needle)
             {
                 continue;
             }

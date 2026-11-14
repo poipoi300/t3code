@@ -225,11 +225,20 @@ async fn maintenance_keeps_required_previous_incomplete_and_active_installs() {
     let active = Tool::Hub.paths(temp.path(), "0.1.0");
     let tools = Arc::new(Toolchain::new(temp.path().into(), FakeCommands::encoder()));
     let inventory = Inventory {
-        scan: Some(format!(
-            "{}{}helper",
-            active.install.display(),
-            std::path::MAIN_SEPARATOR
-        )),
+        scan: Some(if cfg!(windows) {
+            format!(
+                "{}{}helper",
+                active.install.display(),
+                std::path::MAIN_SEPARATOR
+            )
+            .to_uppercase()
+        } else {
+            format!(
+                "{}{}helper",
+                active.install.display(),
+                std::path::MAIN_SEPARATOR
+            )
+        }),
     };
     tools.prune(Tool::Hub, &inventory).await.unwrap();
     assert!(active.install.exists());

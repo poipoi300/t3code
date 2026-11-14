@@ -1,6 +1,6 @@
 # ACP and replay package status
 
-Package 12 has 176 populated and 6 empty mapped leaves. Native provider and
+Package 12 has 178 populated and 4 empty mapped leaves. Native provider and
 host-composition seams still block source-complete integration suites. Nonempty
 mapped files are not automatically complete ports. The exact 182-row audit is external at
 `C:/Users/Administrator/t3code-rust-notes/briefs/orch-e-remaining.md`.
@@ -32,8 +32,11 @@ conversation history. This matches the TypeScript dev agent's restart behavior.
 
 - Replay registration, complete turn, streamed text, approval interrupt, native
   thread serialization, new registry/session and resumed next turn all pass
-  through the real registry and ACP seam. This is adapter restart recovery;
-  the integrator owns the composed durable-runtime milestone.
+  through the real registry and ACP seam. The composed runtime's Replay/restart
+  milestone also passes and its ignore has been removed from tests/runtime.rs.
+  Shared ACP setup now opens a native session for an existing provider-thread
+  record without a native ID, retaining its durable ID. A regression reproduces
+  the original failure and verifies reuse and forced replacement.
 - A registry lifecycle regression found stale model selection: the ACP client
   does not update its negotiated model cache after `set_model`. The adapter now
   remembers successful selections and current-model notifications. Switching
@@ -42,12 +45,12 @@ conversation history. This matches the TypeScript dev agent's restart behavior.
   compare to the actual TypeScript exports. All 76 materialized command lists,
   IDs and ordered barriers compare exactly to TypeScript. The oracle includes
   193 input/shared exports. Registry metadata matches all 97 scenarios and
-  160 provider variants, independently of the 171 raw recording files.
+  159 provider variants, independently of the 170 raw recording files.
 - Deterministic fixture IDs reproduce Effect's ISAAC random UUID sequence for
   seeds 0, 1, 0x12345678 and 0xffffffff across generation boundaries. The clock
   begins at Effect TestClock's Unix epoch. Fixture metadata allocates canonical
   derived IDs with the same random consumption order.
-- Runtime-instruction rewriting matches the TypeScript algorithm on all 171
+- Runtime-instruction rewriting matches the TypeScript algorithm on all 170
   source recordings, including model changes, prompt success/failure, slash
   compaction, explicit compaction updates and Kiro compact responses. Its
   authoritative text builder is injected from the provider-core host.
@@ -82,9 +85,11 @@ conversation history. This matches the TypeScript dev agent's restart behavior.
   background clearing, event-observed session release, relative clock movement,
   and deterministic insertion-order dispatch error collection. No wait polls.
 - CommandOutputRecorder records before forwarding append, counts chunks and
-  clones snapshots using an injected immutable terminal fold. `run_with_command_output`
-  attaches its snapshot. The concrete transport CommandOutputHub now implements
-  the append trait; shared ANSI fold and ingestion wiring remain named seams.
+  clones snapshots using an injected immutable terminal fold. `with_terminal_fold`
+  consumes package 09's TerminalOutputFold directly; fold failure leaves state
+  and chunk count unchanged and prevents forwarding. The concrete transport
+  CommandOutputHub implements the append trait. Package 09 owns the authoritative
+  ANSI implementation; packages 06/09 own provider ingestion wiring.
 - NDJSON decoding trims JavaScript whitespace before parsing, including BOMs,
   and rejects NEL-only lines. The dev player retains its source behavior of
   checking blank lines without trimming the JSON it parses. Both mismatches
@@ -92,7 +97,7 @@ conversation history. This matches the TypeScript dev agent's restart behavior.
 - Pull-request shell fixture construction uses canonical contract types and UTC
   date normalization. Both offset-date/optional-link cases match actual TypeScript.
 
-The focused suite contains 49 passing tests, including six actual TypeScript
+The focused suite contains 53 passing tests, including six actual TypeScript
 fixture compatibility oracles plus usage, diff and HTTP-route oracles. The final
 verification and package-wide blockers are recorded below. Set `CARGO_TARGET_DIR` to
 `D:/t3code-rust-target/orch-e`; the resumed round uses two Cargo jobs. The external focused
@@ -120,17 +125,23 @@ The original brief excludes per-provider packages from this checklist.
 - Pi/Muse: native RPC/SDK adapter factories inject the owned JSONL controller.
   Muse needs initialize/initialized handshake and granted-capability mapping.
 - Command-output recorder: the concrete transport CommandOutputHub append bridge
-  is connected. Shared ANSI screen fold/normalizer/plain-text operations remain
-  an explicit host dependency. The client raw-chunk terminal
-  buffer is a different implementation and cannot substitute for that fold.
+  and TerminalOutputFold consumer are connected. Package 09 supplies the shared
+  ANSI fold; terminal plain-text assertions need its authoritative view. The
+  client raw-chunk terminal buffer cannot substitute for that fold.
 - Full replay fixture harness: `scenario_services_for_runtime` now uses admitted
   dispatch and the real composed worker. `start_fixture_runtime` calls the marked
   `ReplayFixtureHostFactory` for production checkpoint/workspace/policy/attachment/
-  continuation bindings and settings. Native factories and the shared ANSI fold
-  remain required; fixture metadata and owned output dispatch are already ported.
-- Codex native replay is now supplied by package 10. Its full mapped fixture suite
-  still needs the host binding above and provider-batch transaction observations
-  for the source assertion of 6 writes, with no batch larger than 3.
+  continuation bindings and settings. GitReplayFixtureHost binds existing real
+  Git checkpoint/recovery services, isolated Git settings and fixture policy
+  overrides under git-backend. It initializes the baseline before SDK bootstrap.
+  OS Git runs on a live Tokio clock while scenario timers remain virtual.
+  Advanced attachment/worktree/continuation services remain named dependencies;
+  unsupported continuation and batch requests fail explicitly.
+- Codex native replay is supplied by package 10. The recorded simple case passes
+  through the actual native adapter, composed runtime, output assertions and
+  real Git checkpoints. Its full table still needs advanced host services and
+  provider-batch transaction observations for exactly 6 writes, with no batch
+  larger than 3 (owners 03/06).
 
 ## Generic ACP implementation and remaining gaps
 
@@ -152,7 +163,7 @@ The generic adapter remains incomplete for native history projection,
 attachments, full update/context-usage/compaction mapping, option/reasoning policies,
 runtime instruction delivery, vendor extensions and capability negotiation.
 Snapshots reflect in-process observed messages. The fixture registry has all
-171 raw recordings, typed inputs, complete source registry metadata, and all
+170 raw recordings, typed inputs, complete source registry metadata, and all
 owned output assertion dispatch. Full native scenario execution is not ported
 without the named native/host bindings. Check the audit instead of treating
 populated modules as completion.
@@ -162,11 +173,11 @@ runner, coalescer and 13 tests. Earlier continuation added SQLite projection
 replay verification/rebuild (paged logs, rollback, position recovery), strict ACP
 harnesses and permission/identity regressions. Replaced inherited incorrect
 sandbox-type fallback, writable-root containment, legacy item-identity restore,
-scenario cancellation cleanup and JavaScript numeric matching. No other owner's
-files were changed.
+scenario cancellation cleanup and JavaScript numeric matching. The only
+authorized shared-test edit removes Replay's ignore in tests/runtime.rs.
 
 Provider order confirmed by the coordinator: generic ACP/registry, Cursor,
-OpenCode, Grok, Kiro, Pi, Muse, fx. The six empty leaves and every partial suite
+OpenCode, Grok, Kiro, Pi, Muse, fx. The four empty leaves and every partial suite
 are individually identified in the external audit; the Claude leaf is reserved
 to its concurrent owner. No controller test is counted as full native integration.
 
@@ -197,28 +208,83 @@ the existing real native CodexReplayAdapter under codex-adapter, including stric
 completion/shutdown and outbound-only exact workspace placeholders; no fake
 native adapter replaces it. ACP's generic bridge preserves its strict transport.
 
-Latest completed focused run: 49 passed, 0 failed, 0 skipped, with acp-adapter and
-codex-adapter, under D:/t3code-rust-target/orch-e. Source conformance functions
-that require factories remain unexecuted. Verification resumed after the service
-exit uses CARGO_BUILD_JOBS=2; package compilation and final Clippy results are
-being checked. The earlier http_test.rs:22 blocker is repaired by its owner,
+The pre-merge focused run passed 51 tests (0 failed, 0 ignored), including the
+native Codex/Git case. The default library build also passes without ACP.
+Scoped library Clippy passed without diagnostics with
+acp-adapter,codex-adapter,git-backend. Owned-file rustfmt passed. All use
+D:/t3code-rust-target/orch-e and CARGO_BUILD_JOBS=2. Source conformance functions
+that require factories remain unexecuted. The earlier http_test.rs:22 blocker is repaired by its owner,
 09-transport (explicit EnvironmentId). No package-12 edit was made to that file.
+The earlier unscoped all-targets Clippy attempt stopped in sibling
+t3-codex-app-server on result_large_err/large_enum_variant diagnostics; those
+files belong to that crate's owner. Scoped Clippy above checked this library.
 
-The six empty leaves are KiroAdapterV2.test, the concurrently owned Claude replay
-suite, restart-background-note, provider-switch, thread-fork and merge-back.
+The four empty leaves are KiroAdapterV2.test, restart-background-note,
+thread-fork and merge-back. Claude native-child refusal and provider-switch
+handoff now have compiled conformance entry points for the upstream drift;
+their full source suites remain partial and require fixture/host bindings.
 Kiro now has an exact callback shim for cancel-held/decided/written milestones;
 its full native cases still need the native factory and extension mappings.
 Exact per-file stopping points and requested owner signatures are external in
 orch-e-remaining.md and orchestration-seam-requests.md. Cursor remains first in
 the confirmed native-integration order. At the latest inspection its native
-factory and the common host factory still have no implementation, so a complete
-ACP provider cannot yet be integrated. The authoritative ANSI fold remains an
-external dependency; no second implementation is added.
+factory still has no implementation, so a complete ACP provider cannot yet be
+integrated. The basic Git fixture host is available. The authoritative ANSI fold
+remains package 09's dependency; no second implementation is added.
+
+The real-socket Replay test passed on retry (1 passed, 0 failed) using
+--ignored --exact. It remains ignored in
+t3-server/tests/composition_orchestration.rs, owned by package A/composition;
+that owner can now remove its ignore. The initial build exhausted machine
+commit memory, but the retry completed successfully. The orchestration runtime
+Replay/restart test already passes enabled.
 
 No live provider, live profile, dev server, commit, manifest or frozen seam edit
 is used. All types added here are test/harness interfaces rather than replacement
 wire contracts. Source quirks and the earlier inherited corrections remain as
 recorded above.
+
+## Upstream drift after merge 817a9186f9
+
+The specification is dea07a1b12 (migration head 91). The generated registry now
+matches all 97 TypeScript scenarios and 159 variants; 170 raw recordings remain.
+Only Grok's message-steering variant was removed. fx and ACP Registry still use
+assertGrokMessageSteeringOutput, so its dispatch mapping, owned-name entry and
+assertion implementation are retained. The metadata oracle checks that distinction.
+
+Grok's adapter capabilities and persisted session capabilities disable steering
+by interrupt/restart. Other ACP drivers retain the source generic capability.
+A real-source turn-capability oracle and real command-policy regression verify
+that automatic and explicit steer follow-ups queue for Grok while Stop remains
+available; fx/registry explicit steering retains its restart path.
+
+All four new OpenCode2 resumed/joined-call scripts (96 replay entries) and exact
+per-call final answers match the actual upstream test. The compiled native
+conformance runner waits for completed calls by native task ID and an empty root
+roster, checks the whole result map and strict transcript completeness. Its
+ResumedCallFactory binding belongs to the native OpenCode2/provider owner;
+these four native executions have not run.
+
+Claude's native-child message/metadata-continuation refusal checks now cover
+unchanged event sequence, messages, zero runs and title. The provider-switch
+handoff entry point waits for the committed waiting state, drains again, then
+checks completed run, interrupted/timestamped tool and no pending work. These
+are compiled conformance entry points, not executed integration passes: native
+child/held-session fixture binding and the full-projection shared pending-work
+helper remain required, together with owners 04/05/06/08's continuation and
+session-detach behavior. Rust's canonical Rejected reason carries the TypeScript
+native-child error meaning rather than cloning its internal error class.
+
+The per-owner hand-out confirms the same five drift paths across all 141
+upstream commits. Exact stopping points and signatures are in the external audit
+and dated seam requests. The initial contract ThreadVisitRecorded build break
+was repaired mechanically by the contracts owner; its projection/fanout behavior
+remains those owners' work. The current focused rerun passes all 53 tests, and the owned-test all-targets
+--no-deps Clippy -D warnings run passes. The default library check passes.
+Library Clippy reports no package-12 diagnostics; two package-08 diagnostics
+block its -D warnings result (pull_request_sync_reactor.rs:605 and
+thread_settlement_service.rs:843). Composed runtime verification is running.
+No sccache failure occurred in these commands.
 
 ## ISAAC redistribution notices
 
