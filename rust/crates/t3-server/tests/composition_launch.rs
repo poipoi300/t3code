@@ -875,7 +875,6 @@ async fn cancelling_a_launch_ends_its_setup_scripts_child_processes() {
     );
 }
 
-
 /// The server's saved repository bindings (`<state>/repository-bindings.json`).
 fn bindings_file(s: &Server) -> PathBuf {
     s.home().join("userdata").join("repository-bindings.json")
@@ -964,7 +963,9 @@ async fn a_repository_planted_at_the_bound_project_root_refuses_a_worktree_launc
     );
     let error = launch_refused(launched, "no longer belongs to the repository");
     assert!(
-        error.to_string().contains("checkpoint.git.repository-changed"),
+        error
+            .to_string()
+            .contains("checkpoint.git.repository-changed"),
         "{error}"
     );
     s.runtime.take().unwrap().shutdown().await.unwrap();
@@ -989,7 +990,10 @@ async fn a_launched_worktree_is_bound_before_its_setup_script_runs() {
     };
     let scripts = json!([{"id":"setup","name":"Setup","command":command,"icon":"configure","runOnWorktreeCreate":true,"async":false}]).to_string();
     s.insert_project("project-bound", &project, &scripts);
-    let setup = s.subscribe("subscribeWorktreeSetup", json!({"threadId": "thread:bound"}));
+    let setup = s.subscribe(
+        "subscribeWorktreeSetup",
+        json!({"threadId": "thread:bound"}),
+    );
     ok(s.call(
         "orchestration.launchThread",
         launch(
@@ -1014,6 +1018,10 @@ async fn a_launched_worktree_is_bound_before_its_setup_script_runs() {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    assert!(std::fs::read_to_string(bindings_file(&s)).unwrap().contains(&leaf));
+    assert!(
+        std::fs::read_to_string(bindings_file(&s))
+            .unwrap()
+            .contains(&leaf)
+    );
     s.runtime.take().unwrap().shutdown().await.unwrap();
 }

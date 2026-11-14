@@ -267,7 +267,8 @@ impl Inner {
     /// bindings were kept) is bound now, at first sight.
     async fn bound_root(&self, root: &Path) -> Result<t3_git::Git> {
         let orchestration = &self.late()?.orchestration;
-        let read = |e: crate::adapters::orchestration::OrchestrationError| failure("read-binding", e);
+        let read =
+            |e: crate::adapters::orchestration::OrchestrationError| failure("read-binding", e);
         let saved = match orchestration.repository_binding(root).await.map_err(read)? {
             Some(saved) => saved,
             None => {
@@ -276,7 +277,11 @@ impl Inner {
                     .ok_or(Error::Unsupported("orchestration runtime not started"))?
                     .bind_repository(root.to_owned())
                     .await?;
-                orchestration.repository_binding(root).await.map_err(read)?.flatten()
+                orchestration
+                    .repository_binding(root)
+                    .await
+                    .map_err(read)?
+                    .flatten()
             }
         };
         let Some(binding) = saved else {
@@ -303,17 +308,24 @@ impl Inner {
             return Ok(());
         };
         let Ok(late) = self.late() else { return Ok(()) };
-        if late.projects.managed().is_scratch_project(&project.project_id).await {
+        if late
+            .projects
+            .managed()
+            .is_scratch_project(&project.project_id)
+            .await
+        {
             return Ok(());
         }
         let root = PathBuf::from(&project.workspace_root);
         match late.orchestration.repository_binding(&root).await {
-            Ok(Some(Some(binding))) => match self.git.at(&root).with_repository_binding(binding).await {
-                Err(t3_git::GitError::RepositoryChanged { detail, .. }) => {
-                    Err(repository_changed(detail).to_string())
+            Ok(Some(Some(binding))) => {
+                match self.git.at(&root).with_repository_binding(binding).await {
+                    Err(t3_git::GitError::RepositoryChanged { detail, .. }) => {
+                        Err(repository_changed(detail).to_string())
+                    }
+                    _ => Ok(()),
                 }
-                _ => Ok(()),
-            },
+            }
             Ok(Some(None)) if tokio::fs::symlink_metadata(root.join(".git")).await.is_ok() => Err(
                 repository_changed("a repository appeared where none was recorded.").to_string(),
             ),

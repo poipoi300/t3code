@@ -36,8 +36,6 @@ fn workspace_unavailable(registry: &mut HandlerRegistry) -> crate::Result<()> {
     registry.unimplemented::<WsFilesystemBrowseRpc>()?;
     registry.unimplemented::<WsAssetsCreateUrlRpc>()?;
     registry.unimplemented::<WsAssetsPersistChatAttachmentsRpc>()?;
-    registry.unimplemented::<WsAttachmentsCreateUploadUrlRpc>()?;
-    registry.unimplemented::<WsAttachmentsDeleteRpc>()?;
     Ok(())
 }
 fn terminal_unavailable(registry: &mut HandlerRegistry) -> crate::Result<()> {
@@ -152,46 +150,30 @@ pub fn register_workspace(
         }
     })?;
     let service = adapter.clone();
-    registry.register::<WsAssetsCreateUrlRpc, _, _>(move |_, input| {
+    registry.register::<WsAssetsCreateUrlRpc, _, _>(move |ctx, input| {
         let service = service.clone();
+        let now = clock(&ctx.services);
         async move {
             service
-                .create_url(input, now_ms())
+                .create_url(input, now)
                 .await
                 .map_err(|error| Failure::Typed(WsAssetsCreateUrlError::AssetAccessError(error)))
         }
     })?;
-    let service = adapter.clone();
-    registry.register::<WsAttachmentsCreateUploadUrlRpc, _, _>(move |_, input| {
-        let service = service.clone();
-        async move {
-            service
-                .create_upload_url(input, now_ms())
-                .await
-                .map_err(|error| {
-                    Failure::Typed(
-                        WsAttachmentsCreateUploadUrlError::AttachmentUploadSigningKeyError(
-                            Box::new(t3_contracts::assets::AttachmentUploadSigningKeyError {
-                                tag:
-                                    t3_contracts::assets::AttachmentUploadSigningKeyErrorTag::Error,
-                                cause: error.to_string().into(),
-                            }),
-                        ),
-                    )
-                })
-        }
-    })?;
-    registry.register::<WsAttachmentsDeleteRpc, _, _>(move |_, input| {
-        let service = adapter.clone();
-        async move {
-            service.delete_attachment(input).await.map_err(|error| {
-                Failure::Defect(ServerDefect::Internal {
-                    message: error.to_string(),
-                })
-            })
-        }
-    })?;
+    // `attachments.createUploadUrl` and `attachments.delete`: `handlers/attachments.rs`.
     Ok(())
+}
+
+/// The attachment ledger's clock (tests drive it), else the system clock.
+#[cfg(feature = "workspace")]
+fn clock(services: &crate::services::ServiceRegistry) -> u64 {
+    #[cfg(feature = "orchestration")]
+    if let Some(attachments) = services.domain::<crate::adapters::attachments::AttachmentsAdapter>()
+    {
+        return attachments.now();
+    }
+    let _ = services;
+    now_ms()
 }
 
 #[cfg(feature = "workspace")]
@@ -342,7 +324,7 @@ mod http_transport {
         else {
             return StatusCode::NOT_FOUND.into_response();
         };
-        match adapter.resolve_asset(token, suffix, now_ms()).await {
+        match adapter.resolve_asset(token, suffix, clock(&services)).await {
             Ok(Some(asset)) => asset_response(asset, &method, &headers)
                 .await
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
@@ -364,7 +346,7 @@ mod http_transport {
         else {
             return StatusCode::NOT_FOUND.into_response();
         };
-        let now = now_ms();
+        let now = clock(&services);
         let Some(claims) = adapter.validate_upload(token, now) else {
             return StatusCode::NOT_FOUND.into_response();
         };

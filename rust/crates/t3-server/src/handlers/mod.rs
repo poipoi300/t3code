@@ -1,4 +1,5 @@
 pub mod acp_registry;
+pub mod attachments;
 pub mod cloud;
 pub mod core;
 pub mod device;
@@ -40,6 +41,7 @@ pub fn registry_with(domains: &Domains) -> crate::Result<HandlerRegistry> {
     #[cfg(not(feature = "orchestration"))]
     orchestration::register_unavailable(&mut registry)?;
     workspace_terminal::register_with(&mut registry, domains)?;
+    attachments::register_with(&mut registry, domains)?;
     source_control::register_with(&mut registry, domains)?;
     optional_services::register_with(&mut registry, domains)?;
     telemetry::register_with(&mut registry, domains)?;

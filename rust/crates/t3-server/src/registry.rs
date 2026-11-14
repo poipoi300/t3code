@@ -202,8 +202,13 @@ impl HandlerRegistry {
             Arc::new(move |ctx, payload| {
                 let handler = handler.clone();
                 let input = decode::<M>(&ctx, payload)?;
+                // A pending upload this call sends is claimed as the calling session.
+                let claimer =
+                    crate::adapters::attachments::Principal::Session(ctx.session_id.0.clone());
                 Ok(futures::stream::once(async move {
-                    Response::Exit(match handler(ctx, input).await {
+                    let exit =
+                        crate::adapters::attachments::as_claimer(claimer, handler(ctx, input));
+                    Response::Exit(match exit.await {
                         Ok(value) => encode_success(value),
                         Err(e) => e.exit(),
                     })

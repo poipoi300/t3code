@@ -187,6 +187,7 @@ impl OrchestrationAdapter {
         titles: Option<Arc<dyn t3_orchestration::api::TitleGenerator>>,
         launch: Option<LaunchPorts>,
         restore: RestorePorts,
+        attachments: Option<Arc<dyn t3_orchestration::api::AttachmentBackend>>,
     ) -> crate::Result<Arc<Self>> {
         use t3_orchestration::{
             composition::{OrchestrationRuntime, RandomIds, RuntimePorts},
@@ -295,6 +296,10 @@ impl OrchestrationAdapter {
                 None,
             )
         };
+        // Pending uploads claimed on send (`adapters/attachments.rs`).
+        if let Some(attachments) = attachments {
+            ports.attachments = attachments;
+        }
         let runtime = OrchestrationRuntime::start(ports)
             .await
             .map_err(|e| service(&e))?;

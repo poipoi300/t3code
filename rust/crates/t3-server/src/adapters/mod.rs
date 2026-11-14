@@ -20,6 +20,7 @@ pub mod git_actions;
 pub mod host;
 #[cfg(feature = "host")]
 pub mod host_leftovers;
+pub mod attachments;
 #[cfg(all(feature = "git-actions", feature = "local-services"))]
 pub mod launch;
 #[cfg(feature = "mcp")]

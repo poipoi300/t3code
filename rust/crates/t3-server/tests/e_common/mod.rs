@@ -192,6 +192,13 @@ impl Fixture {
         let terminal = terminal(temp.path());
         let mut domains = Domains::default();
         domains.insert(workspace.clone()).unwrap();
+        #[cfg(feature = "orchestration")]
+        domains
+            .insert(t3_server::adapters::attachments::AttachmentsAdapter::new(
+                workspace.attachments.clone(),
+                Default::default(),
+            ))
+            .unwrap();
         domains.insert_runtime(terminal.clone()).unwrap();
         // Viewer-isolation tests use explicit socket IDs; this fixture only drives RPC policy.
         domains
@@ -206,6 +213,7 @@ impl Fixture {
             .unwrap();
         let mut handlers = HandlerRegistry::default();
         workspace_terminal::register_with(&mut handlers, &domains).unwrap();
+        t3_server::handlers::attachments::register_with(&mut handlers, &domains).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let mut config = t3_server::adapters::config::resolve(&inputs(temp.path())).unwrap();

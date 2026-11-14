@@ -169,6 +169,10 @@ impl SessionRuntime for ScriptedSession {
     fn background_tasks_end_with_process(&self) -> bool {
         true
     }
+    /// Its turns run nothing after they end.
+    fn leaves_no_background_work(&self) -> bool {
+        true
+    }
     async fn subscribe(&self) -> ProviderResult<EventSubscription> {
         let (sender, events) = mpsc::channel(64);
         self.subscribers

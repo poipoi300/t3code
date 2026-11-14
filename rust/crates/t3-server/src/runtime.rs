@@ -106,6 +106,8 @@ pub struct StartOptions {
     /// The editor process edge and a slot for the started adapter (`adapters/host_leftovers.rs`).
     #[cfg(feature = "host")]
     pub host_leftovers: crate::adapters::host_leftovers::HostLeftoversOptions,
+    /// The upload ledger's clock (`adapters/attachments.rs`).
+    pub attachments: crate::adapters::attachments::AttachmentOptions,
 }
 
 pub async fn start(inputs: crate::adapters::config::ConfigInputs) -> crate::Result<RunningServer> {
@@ -422,6 +424,19 @@ async fn start_domains(
     let authority = workspaces.clone();
     #[cfg(feature = "workspace")]
     domains.insert(crate::workspaces::workspace_adapter(&context, workspaces).await?)?;
+    // Pending uploads, their issuers and the runtime's claim port (`adapters/attachments.rs`).
+    #[cfg(all(feature = "workspace", feature = "orchestration"))]
+    let attachments = match domains.get::<crate::adapters::workspace::WorkspaceAdapter>() {
+        Some(workspace) => {
+            let attachments = crate::adapters::attachments::AttachmentsAdapter::new(
+                workspace.attachments.clone(),
+                options.attachments.clone(),
+            );
+            domains.insert(attachments.clone())?;
+            Some(attachments)
+        }
+        None => None,
+    };
     #[cfg(feature = "terminal")]
     {
         domains.insert_runtime(crate::adapters::terminal::TerminalAdapter::start(
@@ -494,6 +509,12 @@ async fn start_domains(
     let managed_worktrees = authority.managed_directories().await;
     #[cfg(all(feature = "orchestration", not(feature = "workspace")))]
     let managed_worktrees = vec![context.local.config.paths.worktrees()];
+    #[cfg(all(feature = "workspace", feature = "orchestration"))]
+    let attachment_port = attachments
+        .clone()
+        .map(|a| a as Arc<dyn t3_orchestration::api::AttachmentBackend>);
+    #[cfg(all(feature = "orchestration", not(feature = "workspace")))]
+    let attachment_port = None;
     #[cfg(feature = "orchestration")]
     domains.insert_runtime(
         crate::adapters::orchestration::OrchestrationAdapter::start(
@@ -507,9 +528,19 @@ async fn start_domains(
                 writers,
                 managed_worktrees,
             },
+            attachment_port,
         )
         .await?,
     )?;
+    #[cfg(all(feature = "workspace", feature = "orchestration"))]
+    if let (Some(attachments), Some(runtime)) = (
+        &attachments,
+        domains
+            .get::<crate::adapters::orchestration::OrchestrationAdapter>()
+            .and_then(|orchestration| orchestration.composed().cloned()),
+    ) {
+        attachments.bind_projections(runtime.projections.clone());
+    }
     #[cfg(all(feature = "workspace", feature = "orchestration"))]
     if let Some(events) = domains
         .get::<crate::adapters::orchestration::OrchestrationAdapter>()
