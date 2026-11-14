@@ -314,7 +314,6 @@ impl McpAdapter {
         let access: Arc<dyn AccessStore> = Arc::new(ProjectionAccess(projections.clone()));
 
         let mut adapters = ServiceAdapters::default();
-        #[cfg(feature = "mcp-orchestration")]
         {
             // Thread writes go through `commands_for(caller)`: the caller's modes, a requested
             // escalation and the link fence are checked under the command lock.

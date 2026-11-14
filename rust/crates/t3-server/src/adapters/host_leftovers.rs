@@ -22,6 +22,8 @@ pub struct HostLeftoversAdapter {
     pub secrets: Option<Arc<secrets::Secrets>>,
     #[cfg(all(feature = "cloud", feature = "project"))]
     pub peers: Option<Arc<peers::Peers>>,
+    #[cfg(feature = "project")]
+    pub sessions: Option<Arc<agent_sessions::AgentSessions>>,
 }
 
 impl HostLeftoversAdapter {
@@ -42,6 +44,8 @@ impl HostLeftoversAdapter {
                 .map(Arc::new),
             #[cfg(all(feature = "cloud", feature = "project"))]
             peers: peers::Peers::start(context, domains).await?.map(Arc::new),
+            #[cfg(feature = "project")]
+            sessions: agent_sessions::AgentSessions::start(context, domains).map(Arc::new),
         });
         if let Some(slot) = &options.started {
             let _ = slot.set(adapter.clone());
@@ -609,6 +613,81 @@ pub mod peers {
                 .resolve(&root, false)
                 .await
                 .map(|identity| identity.canonical_key.0))
+        }
+    }
+}
+
+/// `agentSessions.{scan, import}` (`project/AgentSessionScanner.ts`, `AgentSessionImporter.ts`):
+/// the provider session stores named by each enabled instance's settings and the host
+/// environment, read under the inventory's bounds. A client chooses only the project to import
+/// into; the stores, the account home and every limit come from the server.
+#[cfg(feature = "project")]
+pub mod agent_sessions {
+    use std::sync::Arc;
+    use t3_project::{
+        import_store::RuntimeImportStore,
+        inventory::{InventoryPaths, NativeSessionInventory},
+        sessions::{AgentSessionImporter, AgentSessionScanner},
+    };
+
+    pub struct AgentSessions {
+        pub scanner: AgentSessionScanner,
+        pub importer: AgentSessionImporter,
+    }
+
+    impl AgentSessions {
+        #[cfg(feature = "local-services")]
+        pub fn start(
+            context: &crate::services::DomainContext<'_>,
+            domains: &crate::services::Domains,
+        ) -> Option<Self> {
+            let projects = domains.get::<crate::adapters::project::ProjectAdapter>()?;
+            let runtime = domains
+                .get::<crate::adapters::orchestration::OrchestrationAdapter>()?
+                .composed()
+                .cloned()?;
+            let paths = &context.local.config.paths;
+            let ceiling = context
+                .local
+                .managed_policy
+                .as_ref()
+                .and_then(|policy| policy.limits.as_ref())
+                .and_then(|limits| limits.max_runtime_mode);
+            let store = Arc::new(RuntimeImportStore::new(
+                t3_orchestration::stores::StoreDatabase(context.database.clone()),
+                context.local.settings.clone(),
+                ceiling,
+            ));
+            let home = context.account_home.clone();
+            let temporary_root = std::env::temp_dir();
+            let inventory = Arc::new(NativeSessionInventory::new(
+                InventoryPaths {
+                    home: home.clone(),
+                    temporary_root: temporary_root.clone(),
+                    base_dir: paths.base_dir.clone(),
+                    worktrees_dir: paths.worktrees(),
+                },
+                context.environment.clone(),
+                store.clone(),
+            ));
+            let scanner = AgentSessionScanner {
+                inventory: Arc::new(inventory),
+                projects: projects.service().clone(),
+                clock: runtime.clock(),
+                home,
+                temporary_root,
+                base_dir: paths.base_dir.clone(),
+                worktrees_dir: paths.worktrees(),
+            };
+            let importer = AgentSessionImporter {
+                scanner: scanner.clone(),
+                projects: projects.service().clone(),
+                projections: runtime.projections.clone(),
+                sink: Arc::new(runtime.events.clone()),
+                runtimes: store,
+                lanes: runtime.thread_lanes(),
+            };
+            Some(Self { scanner, importer })
         }
     }
 }

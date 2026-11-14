@@ -555,8 +555,36 @@ impl StatusStream for t3_git::VcsStatusSubscription {
 #[cfg(feature = "local-services")]
 impl<S: StatusStream> Revocable<S> {
     pub async fn recv(&mut self) -> Option<Result<S::Item, Error>> {
-        let value = self.subscription.as_mut()?.0.next_value().await?;
-        self.still_granted(value).await
+        enum Next<T> {
+            Value(Option<T>),
+            Changed(bool),
+        }
+        loop {
+            let next = {
+                let subscription = &mut self.subscription.as_mut()?.0;
+                let changes = &mut self.changes;
+                tokio::select! {
+                    value = subscription.next_value() => Next::Value(value),
+                    open = async {
+                        match changes {
+                            Some(changes) => changes.changed().await.is_ok(),
+                            None => std::future::pending().await,
+                        }
+                    } => Next::Changed(open),
+                }
+            };
+            match next {
+                Next::Value(value) => return self.still_granted(value?).await,
+                // The authority dropped its signal: values alone re-check from now on.
+                Next::Changed(false) => self.changes = None,
+                Next::Changed(true) => {
+                    if let Err(error) = self.adapter.directory(&self.session, &self.cwd).await {
+                        self.subscription = None;
+                        return Some(Err(error));
+                    }
+                }
+            }
+        }
     }
 
     async fn still_granted<T>(&mut self, value: T) -> Option<Result<T, Error>> {

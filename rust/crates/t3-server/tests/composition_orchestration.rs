@@ -1193,6 +1193,7 @@ async fn thread_outcome(
             CallEvent::Chunk { id, values } if id == *subscription => {
                 client.acknowledge(id);
                 let text = Value::Array(values).to_string();
+                eprintln!("DIAG chunk {}", if text.contains("rollback") || text.contains("metadata-updated") || text.contains("rolled") { text.as_str() } else { &text[..text.len().min(120)] });
                 if let Some(outcome) = outcomes
                     .iter()
                     .find(|parts| parts.iter().all(|part| text.contains(part)))

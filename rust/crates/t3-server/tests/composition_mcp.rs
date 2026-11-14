@@ -935,6 +935,95 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
             ),
         "{raised}"
     );
+    // Orchestration tools act through `commands_for(caller)`: this thread's limits, checked again
+    // under the command lock.
+    const PEER: &str = "thread:mcp-peer";
+    command(&mut socket, &mut client, json!({"type":"thread.create","commandId":"create:peer","threadId":PEER,"projectId":"project:mcp","title":"Peer","modelSelection":model,"runtimeMode":"approval-required","interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"})).await;
+    let unavailable = |body: &Value| body["result"]["structuredContent"]["available"] == false;
+    let renamed = mcp
+        .call(
+            &token,
+            "t3_thread_update",
+            json!({"threadId":PEER,"action":"rename","title":"Renamed by caller"}),
+        )
+        .await;
+    assert!(!is_error(&renamed), "{renamed}");
+    let peer = mcp
+        .call(&token, "t3_thread_read", json!({"threadId": PEER}))
+        .await;
+    assert_eq!(
+        peer["result"]["structuredContent"]["thread"]["title"], "Renamed by caller",
+        "{peer}"
+    );
+    let sent_peer = mcp
+        .call(
+            &token,
+            "t3_thread_send",
+            json!({"threadId":PEER,"message":"Hello peer"}),
+        )
+        .await;
+    assert!(!is_error(&sent_peer), "{sent_peer}");
+    let raised_send = mcp
+        .call(
+            &token,
+            "t3_thread_send",
+            json!({"threadId":OTHER,"message":"Above my modes"}),
+        )
+        .await;
+    assert!(
+        is_error(&raised_send)
+            && raised_send
+                .to_string()
+                .contains("runtime_mode_escalation_denied"),
+        "{raised_send}"
+    );
+    let raised_interrupt = mcp
+        .call(&token, "t3_thread_interrupt", json!({"threadId": OTHER}))
+        .await;
+    assert!(
+        raised_interrupt
+            .to_string()
+            .contains("runtime_mode_escalation_denied"),
+        "{raised_interrupt}"
+    );
+    for (tool, input) in [
+        ("t3_thread_wait", json!({"threadId":PEER,"timeoutMs":1})),
+        ("t3_thread_organize", json!({"threadId":PEER,"action":"pin"})),
+        ("t3_pending_request", json!({"action":"list"})),
+        ("t3_queue", json!({"action":"list"})),
+        ("t3_thread_transfer", json!({"action":"status","threadId":PEER})),
+        ("t3_thread_configure", json!({"threadId":PEER})),
+        ("t3_project_list", json!({})),
+        ("t3_project_read", json!({"projectId":"project:mcp"})),
+        ("t3_background_wait", json!({"taskIds":["task:none"]})),
+        ("t3_thread_interrupt", json!({"threadId":PEER})),
+        ("t3_worktree_list", json!({})),
+        ("t3_workflow_stop", json!({"threadId":PEER,"subagentId":"subagent:none"})),
+    ] {
+        let body = mcp.call(&token, tool, input).await;
+        assert!(!unavailable(&body), "{tool} is bound: {body}");
+        eprintln!("{tool}: {body}");
+    }
+    let projects = mcp.call(&token, "t3_project_list", json!({})).await;
+    assert!(projects.to_string().contains("project:mcp"), "{projects}");
+    let background = mcp
+        .call(&token, "t3_background_wait", json!({"taskIds":["task:none"]}))
+        .await;
+    assert!(!is_error(&background), "{background}");
+    let missing_project = mcp
+        .call(&token, "t3_project_read", json!({"projectId":"project:absent"}))
+        .await;
+    assert!(is_error(&missing_project), "{missing_project}");
+    // Attachment sends need the runtime's attachment backend, which the server does not bind.
+    let attachments = mcp
+        .call(
+            &token,
+            "t3_thread_send_attachments",
+            json!({"threadId":PEER,"attachments":[]}),
+        )
+        .await;
+    assert!(is_error(&attachments), "{attachments}");
+
     // A credential for B, whose provider holds no run, cannot write as B.
     let registry = sessions.registry().unwrap();
     let other = registry

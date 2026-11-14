@@ -12,9 +12,6 @@ fn register_pending(registry: &mut HandlerRegistry) -> crate::Result<()> {
     // ThreadMessageIntake::launch_thread (ThreadLaunchService::launch exists, its intake wrapper does not).
     // native_child_work_query::get_native_child_work.
     registry.unimplemented::<WsOrchestrationV2GetNativeChildWorkRpc>()?;
-    // AgentSessionScanner::scan, AgentSessionImporter::import_recent_agent_threads.
-    registry.unimplemented::<WsAgentSessionsScanRpc>()?;
-    registry.unimplemented::<WsAgentSessionsImportRpc>()?;
     Ok(())
 }
 

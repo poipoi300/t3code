@@ -1,5 +1,5 @@
-//! `shell.openInEditor`, `server.checkSecretSource`, `secrets.answerRequest` and `peerLinks.*`
-//! (`adapters/host_leftovers.rs`). A part whose domains are absent leaves its methods unserved.
+//! `shell.openInEditor`, `server.checkSecretSource`, `secrets.answerRequest`, `peerLinks.*` and
+//! `agentSessions.*` (`adapters/host_leftovers.rs`). A part whose domains are absent leaves its methods unserved.
 use crate::{registry::HandlerRegistry, services::Domains};
 use t3_contracts::rpc::*;
 
@@ -12,6 +12,7 @@ pub fn register_with(registry: &mut HandlerRegistry, domains: &Domains) -> crate
     let mut checks = false;
     let mut requests = false;
     let mut peers = false;
+    let mut sessions = false;
     #[cfg(feature = "host")]
     if let Some(adapter) = adapter {
         use crate::registry::{Failure, ServerDefect};
@@ -68,6 +69,11 @@ pub fn register_with(registry: &mut HandlerRegistry, domains: &Domains) -> crate
             peers = true;
             peer_links::register(registry, links, cloud)?;
         }
+        #[cfg(feature = "project")]
+        if let Some(agents) = adapter.sessions.clone() {
+            sessions = true;
+            agent_sessions::register(registry, agents)?;
+        }
     }
     if !editors {
         registry.unimplemented::<WsShellOpenInEditorRpc>()?;
@@ -77,6 +83,10 @@ pub fn register_with(registry: &mut HandlerRegistry, domains: &Domains) -> crate
     }
     if !requests {
         registry.unimplemented::<WsSecretsAnswerRequestRpc>()?;
+    }
+    if !sessions {
+        registry.unimplemented::<WsAgentSessionsScanRpc>()?;
+        registry.unimplemented::<WsAgentSessionsImportRpc>()?;
     }
     if !peers {
         registry.unimplemented::<WsPeerLinksListRpc>()?;
@@ -248,6 +258,99 @@ mod peer_links {
                             Box::new(request_error(error)),
                         ))
                     })
+            }
+        })?;
+        Ok(())
+    }
+}
+
+/// `agentSessions.*` (`ws.ts`): scan needs `orchestration:read`, import `orchestration:operate`.
+/// Failures carry fixed causes; no path, file content or provider value reaches the client.
+#[cfg(all(feature = "host", feature = "project"))]
+mod agent_sessions {
+    use crate::{
+        adapters::host_leftovers::agent_sessions::AgentSessions,
+        registry::{Failure, HandlerRegistry, ServerDefect},
+    };
+    use std::sync::Arc;
+    use t3_contracts::{agent_sessions::*, base_schemas::ProjectId, rpc::*};
+    use t3_project::Error;
+
+    fn scan_error(error: &Error) -> Option<AgentSessionScanError> {
+        let operation = match error {
+            Error::Operation {
+                operation: "read-settings",
+                ..
+            } => AgentSessionScanOperation::ReadSettings,
+            Error::Operation {
+                operation: "read-projects",
+                ..
+            }
+            | Error::Orchestration(_) => AgentSessionScanOperation::ReadProjects,
+            _ => return None,
+        };
+        tracing::warn!(?operation, "agent session scan failed");
+        Some(AgentSessionScanError {
+            _tag: AgentSessionScanErrorTag::Error,
+            operation,
+            cause: serde_json::json!({"message": "The provider sessions could not be read."}),
+        })
+    }
+    fn defect<E>() -> Failure<E> {
+        Failure::Defect(ServerDefect::Internal {
+            message: "Agent sessions could not be imported.".into(),
+        })
+    }
+
+    pub fn register(registry: &mut HandlerRegistry, agents: Arc<AgentSessions>) -> crate::Result<()> {
+        let a = agents.clone();
+        registry.register::<WsAgentSessionsScanRpc, _, _>(move |_, _| {
+            let a = a.clone();
+            async move {
+                a.scanner.scan().await.map_err(|error| match scan_error(&error) {
+                    Some(typed) => {
+                        Failure::Typed(WsAgentSessionsScanError::AgentSessionScanError(Box::new(typed)))
+                    }
+                    None => {
+                        tracing::warn!("agent session scan failed");
+                        defect()
+                    }
+                })
+            }
+        })?;
+        registry.register::<WsAgentSessionsImportRpc, _, _>(move |_, input| {
+            let a = agents.clone();
+            async move {
+                let project_id: ProjectId = input.project_id.clone();
+                a.importer.import(input).await.map_err(|error| match &error {
+                    Error::NotFound(_) => Failure::Typed(
+                        WsAgentSessionsImportError::AgentSessionImportProjectNotFoundError(Box::new(
+                            AgentSessionImportProjectNotFoundError {
+                                _tag: AgentSessionImportProjectNotFoundErrorTag::Error,
+                                project_id,
+                            },
+                        )),
+                    ),
+                    Error::Invalid(message) if message == "The project's workspace root changed." => {
+                        Failure::Typed(
+                            WsAgentSessionsImportError::AgentSessionImportProjectChangedError(
+                                Box::new(AgentSessionImportProjectChangedError {
+                                    _tag: AgentSessionImportProjectChangedErrorTag::Error,
+                                    project_id,
+                                }),
+                            ),
+                        )
+                    }
+                    _ => match scan_error(&error) {
+                        Some(typed) => Failure::Typed(
+                            WsAgentSessionsImportError::AgentSessionScanError(Box::new(typed)),
+                        ),
+                        None => {
+                            tracing::warn!("agent session import failed");
+                            defect()
+                        }
+                    },
+                })
             }
         })?;
         Ok(())
