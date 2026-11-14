@@ -41,6 +41,14 @@ async fn execute(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 print!("{}:{arg}", arg.len());
             }
         }
+        // Reports its argument vector, each NUL-terminated, to a loopback listener.
+        Some("argv-socket") => {
+            let mut socket = TcpStream::connect(&args[1])?;
+            for arg in std::env::args_os().skip(3) {
+                socket.write_all(arg.to_string_lossy().as_bytes())?;
+                socket.write_all(&[0])?;
+            }
+        }
         Some("helper") => {
             let mut socket = TcpStream::connect(&args[1])?;
             socket.write_all(b"ready")?;

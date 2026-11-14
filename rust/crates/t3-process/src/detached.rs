@@ -19,9 +19,14 @@ pub enum DetachedConsole {
 /// child's pid once the OS created it; spawn failures are returned. On Unix the child leads a
 /// new session and Tokio reaps it when it exits. On Windows it leaves a job the caller runs in
 /// when that job allows breakaway, and otherwise stays in it.
+///
+/// With `verbatim`, Windows appends each argument to the command line unchanged, for a program
+/// that parses its own command line (Explorer's `/select,"<path>"`); the caller guarantees the
+/// text is in that program's syntax. Elsewhere arguments are always discrete.
 pub async fn spawn_detached(
     options: &ProcessOptions,
     console: DetachedConsole,
+    verbatim: bool,
 ) -> Result<u32, ProcessError> {
     if options.cancellation.is_cancelled() {
         return Err(ProcessError::Cancelled);
@@ -39,7 +44,19 @@ pub async fn spawn_detached(
     let spawned = tokio::task::spawn_blocking(move || {
         let build = || {
             CommandWrap::with_new(&resolved.program, |command| {
-                command.args(&resolved.args);
+                #[cfg(windows)]
+                if verbatim {
+                    for arg in &resolved.args {
+                        command.raw_arg(arg);
+                    }
+                } else {
+                    command.args(&resolved.args);
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = verbatim;
+                    command.args(&resolved.args);
+                }
                 if let Some(cwd) = &cwd {
                     command.current_dir(cwd);
                 }
