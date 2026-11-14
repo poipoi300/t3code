@@ -2,9 +2,7 @@
 //! existing `provider_session_runtime` table (no schema change), plus the inventory's host:
 //! settings and the imported-transcript records it reads.
 use crate::{
-    Error, Result,
-    inventory::InventoryHost,
-    sessions::SessionImportStore,
+    Error, Result, inventory::InventoryHost, sessions::SessionImportStore,
     transcript::SessionThread,
 };
 use async_trait::async_trait;
@@ -27,7 +25,9 @@ pub struct RuntimeImportStore {
 
 /// `decodeImportedTranscriptPayload`: `{cwd?, importedTranscripts?}`, or nothing when the payload
 /// does not decode as a whole.
-fn imported_payload(payload: Option<&str>) -> Option<(Option<String>, Vec<AgentSessionImportSource>)> {
+fn imported_payload(
+    payload: Option<&str>,
+) -> Option<(Option<String>, Vec<AgentSessionImportSource>)> {
     let value: Value = serde_json::from_str(payload?).ok()?;
     let object = value.as_object()?;
     let cwd = match object.get("cwd") {
@@ -50,7 +50,11 @@ fn comparison_key(value: &str) -> String {
     } else {
         value
     };
-    if cfg!(windows) { value.to_lowercase() } else { value }
+    if cfg!(windows) {
+        value.to_lowercase()
+    } else {
+        value
+    }
 }
 
 impl RuntimeImportStore {
@@ -90,14 +94,20 @@ impl RuntimeImportStore {
 
 #[async_trait]
 impl SessionImportStore for RuntimeImportStore {
-    async fn completed_sources(&self, workspace_root: &str) -> Result<Vec<AgentSessionImportSource>> {
+    async fn completed_sources(
+        &self,
+        workspace_root: &str,
+    ) -> Result<Vec<AgentSessionImportSource>> {
         let root = comparison_key(workspace_root);
         Ok(self
             .payloads()
             .await?
             .iter()
             .filter_map(|payload| imported_payload(payload.as_deref()))
-            .filter(|(cwd, _)| cwd.as_deref().is_some_and(|cwd| comparison_key(cwd) == root))
+            .filter(|(cwd, _)| {
+                cwd.as_deref()
+                    .is_some_and(|cwd| comparison_key(cwd) == root)
+            })
             .flat_map(|(_, sources)| sources)
             .collect())
     }
@@ -243,16 +253,20 @@ impl SessionImportStore for RuntimeImportStore {
         let Some(ceiling) = self.ceiling else {
             return Ok(None);
         };
-        let settings = self.settings.snapshot().await.map_err(|_| Error::Operation {
-            operation: "read-settings",
-            detail: "unavailable".into(),
-        })?;
+        let settings = self
+            .settings
+            .snapshot()
+            .await
+            .map_err(|_| Error::Operation {
+                operation: "read-settings",
+                detail: "unavailable".into(),
+            })?;
         let resolved =
             t3_shared::project_settings::resolve_project_settings(&settings, Some(project), None)
                 .map_err(|_| Error::Operation {
-                    operation: "read-settings",
-                    detail: "unavailable".into(),
-                })?;
+                operation: "read-settings",
+                detail: "unavailable".into(),
+            })?;
         let mode = resolved.settings.default_runtime_mode;
         Ok(Some(
             if t3_orchestration::ports::decisions::dispatch_mode_limit::is_runtime_mode_above(
@@ -269,10 +283,14 @@ impl SessionImportStore for RuntimeImportStore {
 #[async_trait]
 impl InventoryHost for RuntimeImportStore {
     async fn settings(&self) -> Result<Value> {
-        let settings = self.settings.snapshot().await.map_err(|_| Error::Operation {
-            operation: "read-settings",
-            detail: "unavailable".into(),
-        })?;
+        let settings = self
+            .settings
+            .snapshot()
+            .await
+            .map_err(|_| Error::Operation {
+                operation: "read-settings",
+                detail: "unavailable".into(),
+            })?;
         Ok(serde_json::to_value(settings)?)
     }
     async fn imported_transcripts(&self) -> Result<Vec<(String, AgentSessionImportSource)>> {

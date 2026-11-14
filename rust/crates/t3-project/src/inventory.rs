@@ -122,7 +122,11 @@ fn comparison_key(value: &str) -> String {
     } else {
         value
     };
-    if cfg!(windows) { value.to_lowercase() } else { value }
+    if cfg!(windows) {
+        value.to_lowercase()
+    } else {
+        value
+    }
 }
 
 /// What the scan never offers as a project (`isExcludedProjectPath`).
@@ -401,7 +405,8 @@ fn retain(source: &AgentSessionSource, record: &Value) -> bool {
     match source {
         AgentSessionSource::Pi => true,
         AgentSessionSource::ClaudeAgent => {
-            if hidden_claude(record) || !matches!(record["type"].as_str(), Some("user" | "assistant"))
+            if hidden_claude(record)
+                || !matches!(record["type"].as_str(), Some("user" | "assistant"))
             {
                 return false;
             }
@@ -415,17 +420,26 @@ fn retain(source: &AgentSessionSource, record: &Value) -> bool {
         }
         AgentSessionSource::Codex => {
             decoded_cwd(record).is_some()
-                || matches!(record["type"].as_str(), Some("session_meta" | "turn_context"))
+                || matches!(
+                    record["type"].as_str(),
+                    Some("session_meta" | "turn_context")
+                )
                 || record["type"] == "event_msg" && record["payload"]["type"] == "user_message"
                 || record["type"] == "response_item"
                     && record["payload"]["type"] == "message"
-                    && matches!(record["payload"]["role"].as_str(), Some("user" | "assistant"))
+                    && matches!(
+                        record["payload"]["role"].as_str(),
+                        Some("user" | "assistant")
+                    )
         }
     }
 }
 fn pi_conversation(record: &Value) -> bool {
     record["type"] == "message"
-        && matches!(record["message"]["role"].as_str(), Some("user" | "assistant"))
+        && matches!(
+            record["message"]["role"].as_str(),
+            Some("user" | "assistant")
+        )
 }
 
 /// `ClaudeFields`: Claude repeats session fields on records that need not be retained.
@@ -441,7 +455,12 @@ impl ClaudeFields {
         if hidden_claude(record) {
             return;
         }
-        let trimmed = |v: &Value| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
+        let trimmed = |v: &Value| {
+            v.as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
         if let Some(id) = trimmed(&record["sessionId"]) {
             self.session_id = Some(id);
         }
@@ -496,7 +515,11 @@ impl ClaudeWindow {
             return 0;
         }
         match self.recent.pop_front() {
-            Some((evicted, _, _)) if self.first_user.as_ref().is_some_and(|(f, _)| *f == evicted) => 0,
+            Some((evicted, _, _))
+                if self.first_user.as_ref().is_some_and(|(f, _)| *f == evicted) =>
+            {
+                0
+            }
             Some((_, _, bytes)) => {
                 self.dropped += 1;
                 bytes
@@ -518,9 +541,7 @@ impl ClaudeWindow {
 
 /// `codexHistoryBase`: a rewound rollout inherits a byte prefix of the one it replaced.
 fn codex_history_base(records: &[Value]) -> Option<(String, u64)> {
-    let base = &records
-        .iter()
-        .find(|r| r["type"] == "session_meta")?["payload"]["history_base"];
+    let base = &records.iter().find(|r| r["type"] == "session_meta")?["payload"]["history_base"];
     let thread = base["thread_id"].as_str()?;
     let offset = base["end_byte_offset"].as_f64()?;
     (offset >= 0.0 && offset.fract() == 0.0 && offset <= 9_007_199_254_740_991.0)
@@ -682,9 +703,8 @@ pub mod git_config {
     /// `parseOriginUrlFromGitConfig`: origin's first URL, else the first other remote's.
     pub fn origin_url(text: &str) -> Option<String> {
         static CONTINUATION: LazyLock<Regex> = LazyLock::new(|| regex(r"\\\r?\n[ \t]*"));
-        static HEADER: LazyLock<Regex> = LazyLock::new(|| {
-            regex(r#"(?i)^\[\s*remote(?:\s+"([^"]+)"|\.([^\]\s]+))\s*\](.*)$"#)
-        });
+        static HEADER: LazyLock<Regex> =
+            LazyLock::new(|| regex(r#"(?i)^\[\s*remote(?:\s+"([^"]+)"|\.([^\]\s]+))\s*\](.*)$"#));
         static URL: LazyLock<Regex> = LazyLock::new(|| regex(r"(?i)^url\s*=\s*(.*)$"));
         let joined = CONTINUATION.replace_all(text, "");
         let mut section: Option<String> = None;
@@ -877,7 +897,11 @@ impl NativeSessionInventory {
     }
 
     /// The configured store roots per source, in TypeScript's order and with its fallbacks.
-    fn homes(&self, settings: &Value, source: &AgentSessionSource) -> Vec<(PathBuf, ProviderInstanceId)> {
+    fn homes(
+        &self,
+        settings: &Value,
+        source: &AgentSessionSource,
+    ) -> Vec<(PathBuf, ProviderInstanceId)> {
         let name = source_name(source);
         let empty = serde_json::Map::new();
         let configured = settings["providerInstances"].as_object().unwrap_or(&empty);
@@ -942,7 +966,9 @@ impl NativeSessionInventory {
                     }
                 }
                 AgentSessionSource::ClaudeAgent => {
-                    let Some(configured) = text("homePath") else { continue };
+                    let Some(configured) = text("homePath") else {
+                        continue;
+                    };
                     if !configured.trim().is_empty() {
                         resolve(Path::new(&expand_home(configured.trim(), home)))
                     } else if let Some(env) =
@@ -954,7 +980,8 @@ impl NativeSessionInventory {
                     }
                 }
                 AgentSessionSource::Codex => {
-                    let (Some(mut home_path), Some(shadow)) = (text("homePath"), text("shadowHomePath"))
+                    let (Some(mut home_path), Some(shadow)) =
+                        (text("homePath"), text("shadowHomePath"))
                     else {
                         continue;
                     };
@@ -1070,18 +1097,28 @@ impl NativeSessionInventory {
                         truncated = true;
                         break;
                     }
-                    for month in sorted(read_dir(&sessions.join(&year), &mut operations, &mut truncated)) {
+                    for month in sorted(read_dir(
+                        &sessions.join(&year),
+                        &mut operations,
+                        &mut truncated,
+                    )) {
                         if operations == 0 {
                             truncated = true;
                             break 'years;
                         }
-                        for day in sorted(read_dir(&sessions.join(&year).join(&month), &mut operations, &mut truncated)) {
+                        for day in sorted(read_dir(
+                            &sessions.join(&year).join(&month),
+                            &mut operations,
+                            &mut truncated,
+                        )) {
                             if operations == 0 {
                                 truncated = true;
                                 break 'years;
                             }
                             let directory = sessions.join(&year).join(&month).join(&day);
-                            for entry in sorted(read_dir(&directory, &mut operations, &mut truncated)) {
+                            for entry in
+                                sorted(read_dir(&directory, &mut operations, &mut truncated))
+                            {
                                 if !entry.starts_with("rollout-")
                                     || !(entry.ends_with(".jsonl") || compressed(&entry))
                                 {
@@ -1153,7 +1190,9 @@ impl NativeSessionInventory {
                 Ok((row.get::<_, Sql>(0)?, row.get::<_, Sql>(1)?))
             });
             for row in rows?.flatten() {
-                let (Sql::Text(id), Sql::Text(path)) = row else { continue };
+                let (Sql::Text(id), Sql::Text(path)) = row else {
+                    continue;
+                };
                 if path.trim().is_empty() {
                     continue;
                 }
@@ -1168,7 +1207,11 @@ impl NativeSessionInventory {
     }
 
     /// `readCwd`: the first recorded cwd within the metadata budgets.
-    fn read_cwd(source: &AgentSessionSource, transcript: &Transcript, budget: &mut Budget) -> Option<String> {
+    fn read_cwd(
+        source: &AgentSessionSource,
+        transcript: &Transcript,
+        budget: &mut Budget,
+    ) -> Option<String> {
         if transcript.identity.size == 0 {
             return None;
         }
@@ -1179,7 +1222,11 @@ impl NativeSessionInventory {
         budget.operations -= 1;
         let (file, _) = open_regular(Path::new(&transcript.file_path))?;
         let mut reader = transcript_reader(file, &transcript.file_path).ok()?;
-        let size = if compressed(&transcript.file_path) { u64::MAX } else { transcript.identity.size };
+        let size = if compressed(&transcript.file_path) {
+            u64::MAX
+        } else {
+            transcript.identity.size
+        };
         let max = MAX_TRANSCRIPT_SCAN_BYTES.min(size);
         let mut read = 0u64;
         let mut records = 0usize;
@@ -1238,21 +1285,33 @@ impl NativeSessionInventory {
         settings: &Value,
         imported: &[(String, AgentSessionImportSource)],
     ) -> Collected {
-        let mut imported_by_file: HashMap<(String, String), Vec<(String, AgentSessionImportSource)>> =
-            HashMap::new();
+        let mut imported_by_file: HashMap<
+            (String, String),
+            Vec<(String, AgentSessionImportSource)>,
+        > = HashMap::new();
         for (cwd, source) in imported {
             imported_by_file
-                .entry((source.provider_instance_id.0.clone(), source.file_path.0.clone()))
+                .entry((
+                    source.provider_instance_id.0.clone(),
+                    source.file_path.0.clone(),
+                ))
                 .or_default()
                 .push((cwd.clone(), source.clone()));
         }
         let mut raw = vec![];
         let mut truncated = false;
         let mut metadata_truncated = false;
-        for source in [AgentSessionSource::ClaudeAgent, AgentSessionSource::Codex, AgentSessionSource::Pi] {
+        for source in [
+            AgentSessionSource::ClaudeAgent,
+            AgentSessionSource::Codex,
+            AgentSessionSource::Pi,
+        ] {
             let homes = self.homes(settings, &source);
             let count = homes.len().max(1);
-            let (base, extra) = (MAX_DISCOVERY_OPERATIONS_PER_SOURCE / count, MAX_DISCOVERY_OPERATIONS_PER_SOURCE % count);
+            let (base, extra) = (
+                MAX_DISCOVERY_OPERATIONS_PER_SOURCE / count,
+                MAX_DISCOVERY_OPERATIONS_PER_SOURCE % count,
+            );
             let mut transcripts = vec![];
             for (index, (home, instance)) in homes.iter().enumerate() {
                 let budget = base + usize::from(index < extra);
@@ -1264,12 +1323,17 @@ impl NativeSessionInventory {
                 truncated |= cut;
                 transcripts.extend(found);
             }
-            transcripts.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms).then_with(|| a.file_path.cmp(&b.file_path)));
+            transcripts.sort_by(|a, b| {
+                b.mtime_ms
+                    .cmp(&a.mtime_ms)
+                    .then_with(|| a.file_path.cmp(&b.file_path))
+            });
             if transcripts.len() > MAX_TRANSCRIPTS_PER_SOURCE {
                 truncated = true;
             }
             // Round-robin across instances so one large home cannot take the whole budget.
-            let mut queues: Vec<(ProviderInstanceId, std::collections::VecDeque<Transcript>)> = vec![];
+            let mut queues: Vec<(ProviderInstanceId, std::collections::VecDeque<Transcript>)> =
+                vec![];
             for transcript in transcripts {
                 match queues.iter_mut().find(|(id, _)| *id == transcript.instance) {
                     Some((_, queue)) => queue.push_back(transcript),
@@ -1277,7 +1341,9 @@ impl NativeSessionInventory {
                 }
             }
             let mut selected = vec![];
-            while selected.len() < MAX_TRANSCRIPTS_PER_SOURCE && queues.iter().any(|(_, q)| !q.is_empty()) {
+            while selected.len() < MAX_TRANSCRIPTS_PER_SOURCE
+                && queues.iter().any(|(_, q)| !q.is_empty())
+            {
                 for (_, queue) in &mut queues {
                     if selected.len() == MAX_TRANSCRIPTS_PER_SOURCE {
                         break;
@@ -1298,7 +1364,10 @@ impl NativeSessionInventory {
                 // Unchanged imported transcripts keep their import cwd and spend no budget; Codex
                 // rereads its first record, whose subagent marker must still exclude it.
                 let recorded = (source != AgentSessionSource::Codex)
-                    .then(|| imported_by_file.get(&(transcript.instance.0.clone(), transcript.file_path.clone())))
+                    .then(|| {
+                        imported_by_file
+                            .get(&(transcript.instance.0.clone(), transcript.file_path.clone()))
+                    })
                     .flatten()
                     .and_then(|entries| {
                         entries
@@ -1306,11 +1375,16 @@ impl NativeSessionInventory {
                             .find(|(_, s)| s.provider == source && transcript.identity.matches(s))
                             .map(|(cwd, _)| cwd.clone())
                     });
-                let Some(cwd) = recorded.or_else(|| Self::read_cwd(&source, &transcript, &mut budget)) else {
+                let Some(cwd) =
+                    recorded.or_else(|| Self::read_cwd(&source, &transcript, &mut budget))
+                else {
                     continue;
                 };
                 let cwd = self.project_cwd(&cwd, transcript.project_roots.as_deref());
-                match groups.iter_mut().find(|g| g.instance == transcript.instance && g.cwd == cwd) {
+                match groups
+                    .iter_mut()
+                    .find(|g| g.instance == transcript.instance && g.cwd == cwd)
+                {
                     Some(group) => {
                         group.last_active_ms = group.last_active_ms.max(transcript.mtime_ms);
                         group.transcripts.push(transcript);
@@ -1339,7 +1413,10 @@ impl NativeSessionInventory {
     fn project_cwd(&self, cwd: &str, roots: Option<&[String]>) -> String {
         match roots.and_then(|r| r.first()) {
             Some(first)
-                if self.excluded(&resolve(Path::new(&expand_home(cwd.trim(), &self.paths.home)))) =>
+                if self.excluded(&resolve(Path::new(&expand_home(
+                    cwd.trim(),
+                    &self.paths.home,
+                )))) =>
             {
                 first.clone()
             }
@@ -1359,9 +1436,10 @@ impl NativeSessionInventory {
             .await
             .map_err(|_| scan_error("read-projects"))?;
         let this = self.clone();
-        let collected = tokio::task::spawn_blocking(move || this.collect_sync(&settings, &imported))
-            .await
-            .map_err(|_| Error::Unavailable("session inventory"))?;
+        let collected =
+            tokio::task::spawn_blocking(move || this.collect_sync(&settings, &imported))
+                .await
+                .map_err(|_| Error::Unavailable("session inventory"))?;
         *self.cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(collected.clone());
         Ok(collected)
     }
@@ -1380,13 +1458,15 @@ impl NativeSessionInventory {
         if self.excluded(directory) || !std::fs::metadata(directory).is_ok_and(|m| m.is_dir()) {
             return false;
         }
-        let real = t3_workspace::paths::canonicalize(directory).unwrap_or_else(|_| directory.to_owned());
+        let real =
+            t3_workspace::paths::canonicalize(directory).unwrap_or_else(|_| directory.to_owned());
         local_absolute(&real.to_string_lossy()) && !self.excluded(&real)
     }
 
     /// `directoryIdentity`: the real path, compared as TypeScript compares project paths.
     fn directory_identity(directory: &Path) -> String {
-        let real = t3_workspace::paths::canonicalize(directory).unwrap_or_else(|_| directory.to_owned());
+        let real =
+            t3_workspace::paths::canonicalize(directory).unwrap_or_else(|_| directory.to_owned());
         format!("path:{}", comparison_key(&real.to_string_lossy()))
     }
 
@@ -1415,7 +1495,9 @@ impl NativeSessionInventory {
                     let read = tokio::task::spawn_blocking(move || {
                         let (file, _) = open_regular(&target)?;
                         let mut text = String::new();
-                        file.take(MAX_GIT_FILE_BYTES).read_to_string(&mut text).ok()?;
+                        file.take(MAX_GIT_FILE_BYTES)
+                            .read_to_string(&mut text)
+                            .ok()?;
                         Some(text)
                     });
                     match tokio::time::timeout(GIT_FILE_READ_DEADLINE, read).await {
@@ -1464,16 +1546,23 @@ impl NativeSessionInventory {
                 Err(_) => {
                     identities.insert(directory.clone(), GitIdentity::NotGit);
                 }
-                Ok(m) if m.file_type().is_dir() => repositories.push((directory.clone(), git, None)),
+                Ok(m) if m.file_type().is_dir() => {
+                    repositories.push((directory.clone(), git, None))
+                }
                 Ok(_) => pointers.push((directory.clone(), git)),
             }
         }
-        let texts = self.read_git_files(pointers.iter().map(|(_, g)| g.clone()).collect()).await;
+        let texts = self
+            .read_git_files(pointers.iter().map(|(_, g)| g.clone()).collect())
+            .await;
         let mut linked = vec![];
         for (directory, git_path) in pointers {
             let target = texts
                 .get(&git_path)
-                .and_then(|t| t.lines().find_map(|l| l.trim_start().strip_prefix("gitdir:")))
+                .and_then(|t| {
+                    t.lines()
+                        .find_map(|l| l.trim_start().strip_prefix("gitdir:"))
+                })
                 .and_then(|t| Self::pointed(&directory, t));
             let Some(git_dir) = target else {
                 identities.insert(directory, GitIdentity::NotGit);
@@ -1489,19 +1578,41 @@ impl NativeSessionInventory {
                 repositories.push((directory, git_dir, None));
             }
         }
-        let texts = self.read_git_files(linked.iter().map(|(_, g)| g.join("commondir")).collect()).await;
+        let texts = self
+            .read_git_files(linked.iter().map(|(_, g)| g.join("commondir")).collect())
+            .await;
         for (directory, git_dir) in linked {
-            let common = texts.get(&git_dir.join("commondir")).map(|t| t.trim().to_owned()).unwrap_or_default();
+            let common = texts
+                .get(&git_dir.join("commondir"))
+                .map(|t| t.trim().to_owned())
+                .unwrap_or_default();
             match Self::pointed(&git_dir, &common) {
                 Some(common) => repositories.push((directory, common, Some(git_dir))),
                 None => {
-                    identities.insert(directory, GitIdentity::Worktree { git_dir, main_checkout: None, git: None });
+                    identities.insert(
+                        directory,
+                        GitIdentity::Worktree {
+                            git_dir,
+                            main_checkout: None,
+                            git: None,
+                        },
+                    );
                 }
             }
         }
-        let texts = self.read_git_files(repositories.iter().map(|(_, g, _)| g.join("config")).collect()).await;
+        let texts = self
+            .read_git_files(
+                repositories
+                    .iter()
+                    .map(|(_, g, _)| g.join("config"))
+                    .collect(),
+            )
+            .await;
         for (directory, git_dir, worktree) in repositories {
-            let config = texts.get(&git_dir.join("config")).cloned().unwrap_or_default();
+            let config = texts
+                .get(&git_dir.join("config"))
+                .cloned()
+                .unwrap_or_default();
             let origin = git_config::origin_url(&config);
             let git = Some(AgentSessionProjectGit {
                 remote_key: origin.as_deref().map(t3_git::remote_repository_key),
@@ -1514,9 +1625,10 @@ impl NativeSessionInventory {
                         directory,
                         GitIdentity::Worktree {
                             git_dir: worktree,
-                            main_checkout: (!config.is_empty() && git_dir.file_name().is_some_and(|n| n == ".git"))
-                                .then(|| git_dir.parent().map(Path::to_owned))
-                                .flatten(),
+                            main_checkout: (!config.is_empty()
+                                && git_dir.file_name().is_some_and(|n| n == ".git"))
+                            .then(|| git_dir.parent().map(Path::to_owned))
+                            .flatten(),
                             git,
                         },
                     );
@@ -1530,8 +1642,16 @@ impl NativeSessionInventory {
     }
 
     /// `resolveDirectoryProjects`: a linked worktree counts toward its main checkout.
-    async fn directory_projects(&self, directories: &[PathBuf]) -> HashMap<PathBuf, Option<DirectoryProject>> {
-        let unique: Vec<PathBuf> = directories.iter().cloned().collect::<BTreeSet<_>>().into_iter().collect();
+    async fn directory_projects(
+        &self,
+        directories: &[PathBuf],
+    ) -> HashMap<PathBuf, Option<DirectoryProject>> {
+        let unique: Vec<PathBuf> = directories
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let this_paths = unique.clone();
         let exclusions = self.exclusions.clone();
         let existing: Vec<(PathBuf, bool)> = tokio::task::spawn_blocking(move || {
@@ -1542,16 +1662,33 @@ impl NativeSessionInventory {
                 let real = t3_workspace::paths::canonicalize(d).unwrap_or_else(|_| d.to_owned());
                 local_absolute(&real.to_string_lossy()) && !exclusions.excluded(&real)
             };
-            this_paths.into_iter().map(|d| { let ok = check(&d); (d, ok) }).collect()
+            this_paths
+                .into_iter()
+                .map(|d| {
+                    let ok = check(&d);
+                    (d, ok)
+                })
+                .collect()
         })
         .await
         .unwrap_or_default();
-        let present: Vec<PathBuf> = existing.iter().filter(|(_, ok)| *ok).map(|(d, _)| d.clone()).collect();
+        let present: Vec<PathBuf> = existing
+            .iter()
+            .filter(|(_, ok)| *ok)
+            .map(|(d, _)| d.clone())
+            .collect();
         let identities = self.git_identities(&present).await;
         let mut projects = HashMap::new();
         for (directory, ok) in existing {
             let project = match (ok, identities.get(&directory)) {
-                (true, Some(GitIdentity::Worktree { git_dir, main_checkout, git })) => main_checkout
+                (
+                    true,
+                    Some(GitIdentity::Worktree {
+                        git_dir,
+                        main_checkout,
+                        git,
+                    }),
+                ) => main_checkout
                     .as_ref()
                     .filter(|main| self.project_directory(main))
                     .map(|main| DirectoryProject {
@@ -1586,12 +1723,20 @@ impl NativeSessionInventory {
             return HashMap::new();
         }
         let mut bytes = vec![];
-        if file.take(MAX_CODEX_SESSION_INDEX_BYTES).read_to_end(&mut bytes).is_err() {
+        if file
+            .take(MAX_CODEX_SESSION_INDEX_BYTES)
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
             return HashMap::new();
         }
         let text = String::from_utf8_lossy(&bytes);
         // A tail read can start mid-record.
-        let text = if start > 0 { text.split_once('\n').map_or("", |(_, rest)| rest) } else { &text };
+        let text = if start > 0 {
+            text.split_once('\n').map_or("", |(_, rest)| rest)
+        } else {
+            &text
+        };
         parse_codex_thread_names(text)
     }
 }
@@ -1614,10 +1759,15 @@ fn read_transcript(
 ) -> Option<Snapshot> {
     let is_compressed = compressed(path);
     let read_bytes = prefix.map_or(
-        if is_compressed { MAX_IMPORTED_TRANSCRIPT_BYTES } else { expected.size },
+        if is_compressed {
+            MAX_IMPORTED_TRANSCRIPT_BYTES
+        } else {
+            expected.size
+        },
         |(end, _)| end,
     );
-    if (!is_compressed && read_bytes > expected.size) || read_bytes > MAX_IMPORTED_TRANSCRIPT_BYTES {
+    if (!is_compressed && read_bytes > expected.size) || read_bytes > MAX_IMPORTED_TRANSCRIPT_BYTES
+    {
         return None;
     }
     let (file, identity) = open_regular(Path::new(path))?;
@@ -1668,7 +1818,8 @@ fn read_transcript(
                 let valid_links = value.as_object().is_some_and(|o| {
                     o.get("type").is_none_or(Value::is_string)
                         && o.get("id").is_none_or(Value::is_string)
-                        && o.get("parentId").is_none_or(|v| v.is_string() || v.is_null())
+                        && o.get("parentId")
+                            .is_none_or(|v| v.is_string() || v.is_null())
                 });
                 if valid_links {
                     let mut kept = serde_json::Map::new();
@@ -1693,7 +1844,9 @@ fn read_transcript(
                 AgentSessionSource::ClaudeAgent => {
                     history = history + bytes - window.push(value, bytes);
                 }
-                AgentSessionSource::Pi if value["type"] == "message" && !pi_conversation(&value) => {
+                AgentSessionSource::Pi
+                    if value["type"] == "message" && !pi_conversation(&value) =>
+                {
                     // Tool output can dwarf the conversation; keep only the tree links.
                     let mut links = value;
                     if let Some(object) = links.as_object_mut() {
@@ -1717,11 +1870,20 @@ fn read_transcript(
         return None;
     }
     let dropped = window.dropped;
-    let mut records = if *source == AgentSessionSource::ClaudeAgent { window.records() } else { records };
+    let mut records = if *source == AgentSessionSource::ClaudeAgent {
+        window.records()
+    } else {
+        records
+    };
     if *source == AgentSessionSource::ClaudeAgent {
         records.push(fields.record());
     }
-    Some(Snapshot { records, dropped, cwd, history_bytes: history })
+    Some(Snapshot {
+        records,
+        dropped,
+        cwd,
+        history_bytes: history,
+    })
 }
 
 #[async_trait]
@@ -1736,17 +1898,26 @@ impl SessionInventory for Arc<NativeSessionInventory> {
         let projects = self.directory_projects(&directories).await;
         let mut candidates = vec![];
         for candidate in collected.candidates {
-            let Some(directory) = self.candidate_directory(&candidate.cwd) else { continue };
-            let Some(Some(project)) = projects.get(&directory) else { continue };
+            let Some(directory) = self.candidate_directory(&candidate.cwd) else {
+                continue;
+            };
+            let Some(Some(project)) = projects.get(&directory) else {
+                continue;
+            };
             candidates.push(SessionCandidate {
                 workspace_root: project.path.clone(),
                 source: candidate.source,
                 thread_count: candidate.transcripts.len() as u64,
-                last_active_at: Some(t3_contracts::wire::WireDateTime(iso(candidate.last_active_ms))),
+                last_active_at: Some(t3_contracts::wire::WireDateTime(iso(
+                    candidate.last_active_ms
+                ))),
                 git: project.git.clone(),
             });
         }
-        Ok(SessionCandidates { candidates, truncated: collected.truncated })
+        Ok(SessionCandidates {
+            candidates,
+            truncated: collected.truncated,
+        })
     }
 
     async fn recent_threads(
@@ -1769,7 +1940,11 @@ impl SessionInventory for Arc<NativeSessionInventory> {
         let now = inventory.host.now_ms();
         let cutoff = now - RECENT_THREAD_WINDOW_MS;
         // Imports recorded since a budget-truncated collection can free budget it cut off.
-        let cached = inventory.cache.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let cached = inventory
+            .cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let collected = match cached {
             Some(collected) if !collected.metadata_truncated => collected,
             _ => inventory.collect().await?,
@@ -1782,9 +1957,14 @@ impl SessionInventory for Arc<NativeSessionInventory> {
         let projects = inventory.directory_projects(&directories).await;
         let mut eligible = vec![];
         for candidate in &candidates {
-            let Some(directory) = inventory.candidate_directory(&candidate.cwd) else { continue };
+            let Some(directory) = inventory.candidate_directory(&candidate.cwd) else {
+                continue;
+            };
             let belongs = NativeSessionInventory::directory_identity(&directory) == root_identity
-                || projects.get(&directory).and_then(Option::as_ref).is_some_and(|p| p.key == root_identity);
+                || projects
+                    .get(&directory)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|p| p.key == root_identity);
             if !belongs {
                 continue;
             }
@@ -1795,11 +1975,19 @@ impl SessionInventory for Arc<NativeSessionInventory> {
                 eligible.push((candidate.clone(), transcript.clone()));
             }
         }
-        eligible.sort_by(|(_, a), (_, b)| b.mtime_ms.cmp(&a.mtime_ms).then_with(|| a.file_path.cmp(&b.file_path)));
-        let mut completed_by_file: HashMap<(String, String), Vec<AgentSessionImportSource>> = HashMap::new();
+        eligible.sort_by(|(_, a), (_, b)| {
+            b.mtime_ms
+                .cmp(&a.mtime_ms)
+                .then_with(|| a.file_path.cmp(&b.file_path))
+        });
+        let mut completed_by_file: HashMap<(String, String), Vec<AgentSessionImportSource>> =
+            HashMap::new();
         for source in completed {
             completed_by_file
-                .entry((source.provider_instance_id.0.clone(), source.file_path.0.clone()))
+                .entry((
+                    source.provider_instance_id.0.clone(),
+                    source.file_path.0.clone(),
+                ))
                 .or_default()
                 .push(source.clone());
         }
@@ -1809,7 +1997,10 @@ impl SessionInventory for Arc<NativeSessionInventory> {
             .flat_map(|c| {
                 c.transcripts.iter().filter_map(move |t| {
                     let (thread, rollout) = codex_rollout_ids(&t.file_path)?;
-                    Some(((c.instance.0.clone(), rollout.unwrap_or(thread)), t.file_path.clone()))
+                    Some((
+                        (c.instance.0.clone(), rollout.unwrap_or(thread)),
+                        t.file_path.clone(),
+                    ))
                 })
             })
             .collect();
@@ -1826,18 +2017,21 @@ impl SessionInventory for Arc<NativeSessionInventory> {
             bytes_remaining: MAX_IMPORT_BYTES,
             transcripts_remaining: MAX_IMPORT_TRANSCRIPTS,
         };
-        Ok(Box::pin(futures_util::stream::unfold(state, |mut state| async move {
-            loop {
-                let (candidate, transcript) = state.eligible.pop_front()?;
-                let lock = state.inventory.import_lock.clone();
-                let _guard = lock.lock().await;
-                match state.next(candidate, transcript).await {
-                    Ok(Some(outcome)) => return Some((Ok(outcome), state)),
-                    Ok(None) => continue,
-                    Err(error) => return Some((Err(error), state)),
+        Ok(Box::pin(futures_util::stream::unfold(
+            state,
+            |mut state| async move {
+                loop {
+                    let (candidate, transcript) = state.eligible.pop_front()?;
+                    let lock = state.inventory.import_lock.clone();
+                    let _guard = lock.lock().await;
+                    match state.next(candidate, transcript).await {
+                        Ok(Some(outcome)) => return Some((Ok(outcome), state)),
+                        Ok(None) => continue,
+                        Err(error) => return Some((Err(error), state)),
+                    }
                 }
-            }
-        })))
+            },
+        )))
     }
 }
 
@@ -1861,8 +2055,14 @@ impl RecentState {
             return true;
         }
         if !self.projects.contains_key(directory) {
-            let resolved = self.inventory.directory_projects(&[directory.to_owned()]).await;
-            self.projects.insert(directory.to_owned(), resolved.get(directory).cloned().flatten());
+            let resolved = self
+                .inventory
+                .directory_projects(&[directory.to_owned()])
+                .await;
+            self.projects.insert(
+                directory.to_owned(),
+                resolved.get(directory).cloned().flatten(),
+            );
         }
         self.projects
             .get(directory)
@@ -1875,19 +2075,32 @@ impl RecentState {
             return known.clone();
         }
         let git_dir = (NativeSessionInventory::directory_identity(directory) != self.root_identity)
-            .then(|| self.projects.get(directory).cloned().flatten().and_then(|p| p.worktree_git_dir))
+            .then(|| {
+                self.projects
+                    .get(directory)
+                    .cloned()
+                    .flatten()
+                    .and_then(|p| p.worktree_git_dir)
+            })
             .flatten();
         let mut worktree = None;
         if let Some(git_dir) = git_dir {
             let head_path = git_dir.join("HEAD");
             let heads = self.inventory.read_git_files(vec![head_path.clone()]).await;
-            let head = heads.get(&head_path).map(|h| h.trim().to_owned()).unwrap_or_default();
+            let head = heads
+                .get(&head_path)
+                .map(|h| h.trim().to_owned())
+                .unwrap_or_default();
             worktree = Some(SessionWorktree {
                 path: directory.to_string_lossy().into_owned(),
-                branch: head.strip_prefix("ref: refs/heads/").filter(|b| !b.is_empty()).map(str::to_owned),
+                branch: head
+                    .strip_prefix("ref: refs/heads/")
+                    .filter(|b| !b.is_empty())
+                    .map(str::to_owned),
             });
         }
-        self.worktrees.insert(directory.to_owned(), worktree.clone());
+        self.worktrees
+            .insert(directory.to_owned(), worktree.clone());
         worktree
     }
 
@@ -1904,7 +2117,11 @@ impl RecentState {
         let mut base = codex_history_base(records);
         while let Some((thread, end)) = base {
             let path = (!visited.contains(&thread))
-                .then(|| self.rollouts.get(&(instance.0.clone(), thread.clone())).cloned())
+                .then(|| {
+                    self.rollouts
+                        .get(&(instance.0.clone(), thread.clone()))
+                        .cloned()
+                })
                 .flatten()?;
             if end > self.bytes_remaining {
                 return None;
@@ -1923,31 +2140,44 @@ impl RecentState {
             base = codex_history_base(&inherited.records);
             prefixes.insert(
                 0,
-                inherited.records.into_iter().filter(|r| r["type"] != "session_meta").collect(),
+                inherited
+                    .records
+                    .into_iter()
+                    .filter(|r| r["type"] != "session_meta")
+                    .collect(),
             );
         }
         Some(prefixes.into_iter().flatten().collect())
     }
 
-    async fn next(&mut self, candidate: RawCandidate, transcript: Transcript) -> Result<Option<RecentSession>> {
+    async fn next(
+        &mut self,
+        candidate: RawCandidate,
+        transcript: Transcript,
+    ) -> Result<Option<RecentSession>> {
         let key = (candidate.instance.0.clone(), transcript.file_path.clone());
         let completed = self.completed_by_file.get(&key).cloned();
         if completed.is_none() && (self.transcripts_remaining == 0 || self.bytes_remaining == 0) {
             return Ok(Some(RecentSession::Skipped));
         }
         let path = transcript.file_path.clone();
-        let Some((_, identity)) = tokio::task::spawn_blocking(move || open_regular(Path::new(&path)))
-            .await
-            .ok()
-            .flatten()
+        let Some((_, identity)) =
+            tokio::task::spawn_blocking(move || open_regular(Path::new(&path)))
+                .await
+                .ok()
+                .flatten()
         else {
             return Ok(Some(RecentSession::Skipped));
         };
-        if let Some(done) = completed
-            .as_ref()
-            .and_then(|sources| sources.iter().find(|s| s.provider == candidate.source && identity.matches(s)))
-        {
-            let session = (done.provider_instance_id.0.clone(), done.provider_session_id.0.clone());
+        if let Some(done) = completed.as_ref().and_then(|sources| {
+            sources
+                .iter()
+                .find(|s| s.provider == candidate.source && identity.matches(s))
+        }) {
+            let session = (
+                done.provider_instance_id.0.clone(),
+                done.provider_session_id.0.clone(),
+            );
             if !self.imported_sessions.insert(session) {
                 return Ok(None);
             }
@@ -1961,18 +2191,25 @@ impl RecentState {
         }
         self.transcripts_remaining -= 1;
         self.bytes_remaining -= identity.size;
-        let (path, expected, source) = (transcript.file_path.clone(), identity.clone(), candidate.source.clone());
-        let Some(snapshot) = tokio::task::spawn_blocking(move || read_transcript(&path, &expected, &source, None))
-            .await
-            .ok()
-            .flatten()
+        let (path, expected, source) = (
+            transcript.file_path.clone(),
+            identity.clone(),
+            candidate.source.clone(),
+        );
+        let Some(snapshot) =
+            tokio::task::spawn_blocking(move || read_transcript(&path, &expected, &source, None))
+                .await
+                .ok()
+                .flatten()
         else {
             return Ok(Some(RecentSession::Skipped));
         };
         let Some(cwd) = &snapshot.cwd else {
             return Ok(Some(RecentSession::Skipped));
         };
-        let cwd = self.inventory.project_cwd(cwd, transcript.project_roots.as_deref());
+        let cwd = self
+            .inventory
+            .project_cwd(cwd, transcript.project_roots.as_deref());
         let Some(directory) = self.inventory.candidate_directory(&cwd) else {
             return Ok(Some(RecentSession::Skipped));
         };
@@ -1981,7 +2218,12 @@ impl RecentState {
         }
         let worktree = self.worktree(&directory).await;
         let inherited = if candidate.source == AgentSessionSource::Codex {
-            self.codex_history_base(&candidate.instance, &snapshot.records, snapshot.history_bytes).await
+            self.codex_history_base(
+                &candidate.instance,
+                &snapshot.records,
+                snapshot.history_bytes,
+            )
+            .await
         } else {
             None
         };
@@ -1992,7 +2234,11 @@ impl RecentState {
             }
             None => snapshot.records,
         };
-        let suffix = if compressed(&transcript.file_path) { COMPRESSED_SUFFIX } else { ".jsonl" };
+        let suffix = if compressed(&transcript.file_path) {
+            COMPRESSED_SUFFIX
+        } else {
+            ".jsonl"
+        };
         let fallback = Path::new(&transcript.file_path)
             .file_name()
             .map(|n| n.to_string_lossy().trim_end_matches(suffix).to_owned())
@@ -2010,23 +2256,40 @@ impl RecentState {
         if candidate.source == AgentSessionSource::Codex {
             if !self.names.contains_key(&candidate.home_path) {
                 let home = candidate.home_path.clone();
-                let names = tokio::task::spawn_blocking(move || NativeSessionInventory::read_codex_thread_names(&home))
-                    .await
-                    .unwrap_or_default();
+                let names = tokio::task::spawn_blocking(move || {
+                    NativeSessionInventory::read_codex_thread_names(&home)
+                })
+                .await
+                .unwrap_or_default();
                 self.names.insert(candidate.home_path.clone(), names);
             }
-            if let Some(title) = self.names.get(&candidate.home_path).and_then(|n| n.get(&thread.provider_session_id)) {
+            if let Some(title) = self
+                .names
+                .get(&candidate.home_path)
+                .and_then(|n| n.get(&thread.provider_session_id))
+            {
                 thread.title = title.clone();
             }
         }
-        let Some(source) = identity.source(candidate.source.clone(), thread.provider_instance_id.clone(), &thread.provider_session_id) else {
+        let Some(source) = identity.source(
+            candidate.source.clone(),
+            thread.provider_instance_id.clone(),
+            &thread.provider_session_id,
+        ) else {
             return Ok(Some(RecentSession::Skipped));
         };
-        let session = (thread.provider_instance_id.0.clone(), thread.provider_session_id.clone());
+        let session = (
+            thread.provider_instance_id.0.clone(),
+            thread.provider_session_id.clone(),
+        );
         if !self.imported_sessions.insert(session) {
             return Ok(Some(RecentSession::Duplicate(source)));
         }
-        Ok(Some(RecentSession::Importable { thread: Box::new(thread), source, worktree }))
+        Ok(Some(RecentSession::Importable {
+            thread: Box::new(thread),
+            source,
+            worktree,
+        }))
     }
 }
 
@@ -2056,18 +2319,30 @@ mod tests {
     #[test]
     fn origin_url_bare_and_repository_path_follow_git() {
         let config = "[core]\n\tbare = false\n[remote \"upstream\"]\n\turl = git@github.com:up/stream.git\n[remote \"origin\"]\n\turl = https://github.com/acme/widgets.git\n";
-        assert_eq!(git_config::origin_url(config).as_deref(), Some("https://github.com/acme/widgets.git"));
+        assert_eq!(
+            git_config::origin_url(config).as_deref(),
+            Some("https://github.com/acme/widgets.git")
+        );
         assert!(!git_config::is_bare(config));
         assert!(git_config::is_bare("[core]\n\tbare\n"));
         assert!(git_config::is_bare("[core] bare = yes\n"));
         assert!(git_config::is_bare("[core]\n\tbare = 1\n"));
         assert!(!git_config::is_bare("[core]\n\tbare = 0\n"));
         assert_eq!(
-            git_config::origin_url("[remote \"fork\"]\n\turl = \"git@gitlab.com:g/s/p.git\" ; note\n").as_deref(),
+            git_config::origin_url(
+                "[remote \"fork\"]\n\turl = \"git@gitlab.com:g/s/p.git\" ; note\n"
+            )
+            .as_deref(),
             Some("git@gitlab.com:g/s/p.git")
         );
-        assert_eq!(git_config::repository_path(Some("https://github.com/acme/widgets.git")).as_deref(), Some("acme/widgets"));
-        assert_eq!(git_config::repository_path(Some("git@gitlab.com:g/s/p.git")).as_deref(), Some("g/s/p"));
+        assert_eq!(
+            git_config::repository_path(Some("https://github.com/acme/widgets.git")).as_deref(),
+            Some("acme/widgets")
+        );
+        assert_eq!(
+            git_config::repository_path(Some("git@gitlab.com:g/s/p.git")).as_deref(),
+            Some("g/s/p")
+        );
         assert_eq!(git_config::repository_path(Some("/local/path")), None);
         assert_eq!(git_config::repository_path(None), None);
     }
@@ -2081,9 +2356,14 @@ mod tests {
         assert!(!names.contains_key("b"));
         let id = "019a0000-0000-7000-8000-000000000001";
         let rollout = "019a0000-0000-7000-8000-000000000002";
-        assert_eq!(codex_rollout_ids(&format!("rollout-2026-01-01T00-00-00-{id}.jsonl")), Some((id.into(), None)));
         assert_eq!(
-            codex_rollout_ids(&format!("rollout-2026-01-01T00-00-00-{id}_{rollout}.jsonl.zst")),
+            codex_rollout_ids(&format!("rollout-2026-01-01T00-00-00-{id}.jsonl")),
+            Some((id.into(), None))
+        );
+        assert_eq!(
+            codex_rollout_ids(&format!(
+                "rollout-2026-01-01T00-00-00-{id}_{rollout}.jsonl.zst"
+            )),
             Some((id.into(), Some(rollout.into())))
         );
     }
@@ -2091,14 +2371,23 @@ mod tests {
     #[test]
     fn subagent_rollouts_stop_the_cwd_scan() {
         assert_eq!(
-            extract_cwd(r#"{"type":"session_meta","payload":{"cwd":"/p","source":{"subagent":{}}}}"#, &AgentSessionSource::Codex),
+            extract_cwd(
+                r#"{"type":"session_meta","payload":{"cwd":"/p","source":{"subagent":{}}}}"#,
+                &AgentSessionSource::Codex
+            ),
             Some(None)
         );
         assert_eq!(
-            extract_cwd(r#"{"type":"session_meta","payload":{"cwd":"/p"}}"#, &AgentSessionSource::Codex),
+            extract_cwd(
+                r#"{"type":"session_meta","payload":{"cwd":"/p"}}"#,
+                &AgentSessionSource::Codex
+            ),
             Some(Some("/p".into()))
         );
-        assert_eq!(extract_cwd(r#"{"cwd":"  "}"#, &AgentSessionSource::ClaudeAgent), None);
+        assert_eq!(
+            extract_cwd(r#"{"cwd":"  "}"#, &AgentSessionSource::ClaudeAgent),
+            None
+        );
         assert_eq!(extract_cwd("[]", &AgentSessionSource::ClaudeAgent), None);
     }
 
