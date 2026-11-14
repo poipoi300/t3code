@@ -369,6 +369,7 @@ async fn cancellation_after_restore_still_resets_the_index_before_returning() ->
                     Some(listener.local_addr()?.to_string().into()),
                 ),
                 ("T3_GIT_GATE_COMMAND".into(), Some("clean".into())),
+                ("T3_GIT_GATE_ARG".into(), Some("-fd".into())),
             ]
             .into(),
         );
@@ -579,7 +580,15 @@ async fn sparse_restore_checks_changed_and_source_only_paths_outside_the_cone() 
     std::fs::create_dir(&outside)?;
     junction::create(&outside, repo.root().join("b"))?;
     let index = repo.index()?;
-    let result = repo.git.restore_checkpoint(&checkpoint, false).await;
+    let trace = repo.temp.path().join("sparse-restore-trace.jsonl");
+    let git = repo.git.clone().with_environment(
+        [(
+            "GIT_TRACE2_EVENT".into(),
+            Some(trace.as_os_str().to_owned()),
+        )]
+        .into(),
+    );
+    let result = git.restore_checkpoint(&checkpoint, false).await;
     junction::delete(repo.root().join("b"))?;
     assert!(
         matches!(result, Err(GitError::UnsafeRestore(_))),
@@ -587,6 +596,29 @@ async fn sparse_restore_checks_changed_and_source_only_paths_outside_the_cone() 
     );
     assert!(std::fs::read_dir(&outside)?.next().is_none());
     assert_eq!(repo.index()?, index);
+    let commands: Vec<Vec<serde_json::Value>> = std::fs::read_to_string(&trace)?
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["event"] == "start")
+        .filter_map(|event| event["argv"].as_array().cloned())
+        .collect();
+    let index_queries: Vec<_> = commands
+        .iter()
+        .filter(|args| {
+            args.iter().any(|arg| arg == "ls-files") && args.iter().any(|arg| arg == "--stage")
+        })
+        .collect();
+    assert!(!index_queries.is_empty());
+    assert!(
+        index_queries
+            .iter()
+            .all(|args| args.iter().any(|arg| arg == "--sparse"))
+    );
+    assert!(
+        commands
+            .iter()
+            .all(|args| args.iter().all(|arg| arg != "check-rules"))
+    );
     Ok(())
 }
 
@@ -812,7 +844,16 @@ async fn a_later_clean_refusal_names_the_path_and_reports_restored_tracked_files
         .expect_err("new ignore rules expose unsafe clean ancestor")
         .to_string();
     assert!(error.contains("Tracked files were restored"), "{error}");
-    assert!(error.contains("d"), "{error}");
+    let shown_path = error
+        .rsplit(" at ")
+        .next()
+        .expect("refusal path")
+        .trim_end_matches('.');
+    assert_eq!(
+        std::path::Path::new(shown_path).file_name(),
+        Some(std::ffi::OsStr::new("d")),
+        "{error}"
+    );
     assert_eq!(
         std::fs::read_to_string(repo.root().join("safe"))?,
         "checkpoint\n"

@@ -192,7 +192,7 @@ async fn ignored_links_use_all_git_ignore_sources_without_exposing_targets() -> 
 }
 
 #[tokio::test]
-async fn restore_refuses_an_untracked_nonignored_external_link() -> TestResult {
+async fn restore_cleans_untracked_nonignored_links_without_following_targets() -> TestResult {
     let repo = Repository::new().await?;
     repo.write("safe", "base\n")?;
     repo.commit("base").await?;
@@ -207,20 +207,13 @@ async fn restore_refuses_an_untracked_nonignored_external_link() -> TestResult {
         let link = repo.root().join(name);
         kind.create(&target, &link).await?;
         let result = repo.git.restore_checkpoint(&reference, false).await;
-        let cleanup = kind.remove(&link);
-        if cleanup
-            .as_ref()
-            .is_err_and(|error| error.kind() != std::io::ErrorKind::NotFound)
-        {
-            cleanup?;
+        let removed = std::fs::symlink_metadata(&link)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        if !removed {
+            kind.remove(&link)?;
         }
-        #[cfg(windows)]
-        assert!(
-            matches!(result, Err(GitError::UnsafeRestore(_))),
-            "{name}: {result:?}"
-        );
-        #[cfg(unix)]
         assert!(matches!(result, Ok(true)), "{name}: {result:?}");
+        assert!(removed, "Git did not unlink {name}");
     }
     assert_eq!(
         std::fs::read(target.join("marker"))?,

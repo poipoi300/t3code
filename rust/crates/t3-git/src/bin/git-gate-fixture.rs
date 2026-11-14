@@ -11,15 +11,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = Vec::new();
     std::io::stdin().read_to_end(&mut input)?;
     let command_gate = std::env::var("T3_GIT_GATE_COMMAND").ok();
+    let argument_gate = std::env::var("T3_GIT_GATE_ARG").ok();
     let nested_gate = command_gate.is_none()
         && args
             .get(1)
             .is_some_and(|cwd| std::path::Path::new(cwd).ends_with("empty nested"))
         && args.iter().any(|arg| arg == "HEAD^{commit}");
     if nested_gate
-        || command_gate
-            .as_ref()
-            .is_some_and(|command| args.iter().any(|arg| arg == command.as_str()))
+        || command_gate.as_ref().is_some_and(|command| {
+            args.iter().any(|arg| arg == command.as_str())
+                && argument_gate
+                    .as_ref()
+                    .is_none_or(|required| args.iter().any(|arg| arg == required.as_str()))
+        })
     {
         let mut socket = std::net::TcpStream::connect(std::env::var("T3_GIT_GATE_ADDRESS")?)?;
         socket.write_all(b"ready")?;

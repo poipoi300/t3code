@@ -1146,7 +1146,7 @@ impl Git {
             GitError::UnsafeRestore(message) if mutated => GitError::UnsafeRestore(format!(
                 "{}: {message}",
                 if tracked_restored {
-                    "Tracked files were restored before cleanup was refused"
+                    "Tracked files were restored before a later operation was refused"
                 } else {
                     "Workspace cleanup had already started before refusal"
                 }

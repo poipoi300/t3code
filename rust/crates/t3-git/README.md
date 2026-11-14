@@ -86,20 +86,25 @@ grace through `t3-process`; Windows job termination remains immediate.
 
 ### Checkpoint filesystem boundary
 
-Restore and clean never write or delete through a link: immediately before each
-command, Git supplies its candidate paths and the filesystem validates their
-ancestor directories. A destination junction/mount point is refused. Directories
-Git is about to clear or remove are checked for contained junctions/mount points;
-true symlinks may be replaced or unlinked without following them.
-Tracked symlinks are captured and restored as links; nested repositories and
-submodules remain Git leaves (`--no-recurse-submodules` overrides recursion config).
-These are preflight checks, not an atomic filesystem
-transaction: callers must serialize mutations, and an unrelated process changing
-paths after the final check remains outside that guarantee.
+Restore checks the paths Git selects and refuses unsafe junctions, mount points
+and other name-surrogate reparse points found at check time. It checks candidate
+ancestors and directories Git will replace; true symlink and file ancestors are
+left for Git to replace without following. Submodules remain non-recursive leaves.
+Clean always checks selected paths' ancestors. Git for Windows 2.23.0 and newer
+[unlink junctions without traversing them](https://github.com/git-for-windows/git/releases/tag/v2.23.0.windows.1),
+so listed clean paths are leaves on recognized supported releases. Older or
+unrecognized Windows builds retain the stricter selected-directory walk.
 
-Capture reads what `git add` reads. Known inherited behavior: Git for Windows may
-read through a junction during `add -A`, as the TypeScript driver does. Capture
-has no link scan, ignore enumeration, explicit file list or link removal.
+A fresh clean preflight runs before mutation. Each clean pass is checked again;
+a later safety refusal names the path and says when tracked files were restored.
+These checks do not prevent a process from swapping a directory for a junction
+after its check or while Git is running. Callers must stop or quiesce the thread's
+own watchers, dev servers and other writers before restore, and hold that state
+through restore, clean and index finalization.
+
+Capture reads what `git add` reads. Git for Windows may read through a junction
+during `add -A`, as the TypeScript driver does. Capture has no link scan, ignore
+enumeration, explicit file list or link removal.
 
 Restore ownership compares the canonical deepest existing ancestor plus missing
 suffix components, with Windows case folding; missing scopes/owners cannot evade

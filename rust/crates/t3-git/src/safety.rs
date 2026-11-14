@@ -316,10 +316,9 @@ impl PathRecords {
                     return Err(GitError::InvalidOutput("Git index path record".into()));
                 }
                 let gitlink = record.get(2..8) == Some(b"160000".as_slice());
-                if !gitlink
-                    && !(include_skipped && record[0] == b'S')
-                    && !record[0].is_ascii_lowercase()
-                {
+                let flagged =
+                    record[0].is_ascii_lowercase() || include_skipped && record[0] == b'S';
+                if !gitlink && !flagged {
                     return Ok(());
                 }
                 let separator = record
@@ -535,6 +534,7 @@ impl Git {
                 Err(error @ GitError::Process(t3_process::ProcessError::Cancelled)) => Err(error),
                 Ok(output)
                     if output.code == Some(0)
+                        && !output.timed_out
                         && !output.stdout_truncated
                         && !output.stdout_invalid_utf8 =>
                 {
@@ -614,10 +614,10 @@ impl Git {
                         "Git touch path is outside the top-level.".into(),
                     ));
                 }
-                if let Some(parent) = path.parent().filter(|path| path.starts_with(&root)) {
-                    if !check_directories(&root, parent, &mut checked, &cancellation, true)? {
-                        continue;
-                    }
+                if let Some(parent) = path.parent().filter(|path| path.starts_with(&root))
+                    && !check_directories(&root, parent, &mut checked, &cancellation, true)?
+                {
+                    continue;
                 }
                 if !skip_leaves.contains(&path) {
                     if native_clean_guard {
