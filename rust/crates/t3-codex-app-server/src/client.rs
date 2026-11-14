@@ -673,7 +673,11 @@ async fn route_frame(frame: &[u8], inner: &Arc<Inner>) -> Result<()> {
             inner.preceding_events_processed().await?;
             let pending = inner.state().pending.remove(&id.to_string());
             if let Some((method, reply)) = pending {
-                let _ = reply.send(result.map_err(|error| Error::Rpc { id, method, error }));
+                let _ = reply.send(result.map_err(|error| Error::Rpc {
+                    id,
+                    method,
+                    error: Box::new(error),
+                }));
             }
         }
         Message::Notification(raw) => {

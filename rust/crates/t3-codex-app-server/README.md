@@ -116,10 +116,15 @@ Run from `rust/`:
 
 ```powershell
 cargo fmt -p t3-codex-app-server --check
-cargo clippy -p t3-codex-app-server --all-targets -- -D warnings
+cargo clippy -p t3-codex-app-server --all-targets --all-features -- -D warnings
+cargo clippy -p t3-codex-app-server --all-targets --all-features --features serde_json/preserve_order -- -D warnings
 cargo test -p t3-codex-app-server
+cargo test -p t3-codex-app-server --all-features --features serde_json/preserve_order
 cargo test -p t3-codex-app-server --test live -- --ignored --nocapture
 ```
+
+Consumers unify `serde_json/preserve_order`, which enlarges inline JSON values;
+the second Clippy/test configuration checks that layout as well as the standalone one.
 
 The ignored probe accepts `CODEX_BINARY`, otherwise uses the installed OpenAI
 Windows binary or `codex` on PATH. It creates a temporary `CODEX_HOME`, initializes

@@ -53,7 +53,7 @@ pub enum Error {
     Rpc {
         id: crate::wire::RequestId,
         method: String,
-        error: RpcError,
+        error: Box<RpcError>,
     },
     #[error("Server request has already been resolved")]
     RequestResolved,

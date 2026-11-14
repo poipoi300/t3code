@@ -151,7 +151,7 @@ impl Session {
                 match result {
                     Ok(value) => assert_eq!(actual.unwrap(), value),
                     Err(error) => assert!(
-                        matches!(actual, Err(Error::Rpc { error: actual, .. }) if actual == error)
+                        matches!(actual, Err(Error::Rpc { error: actual, .. }) if *actual == error)
                     ),
                 }
             }

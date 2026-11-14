@@ -7,6 +7,11 @@ pub trait Audit {
 }
 macro_rules! leaves { ($($t:ty),*) => { $(impl Audit for $t { fn audit(&self, _: &mut BTreeSet<String>) {} })* }; }
 leaves!(String, bool, i64, u32, f64, Value);
+impl<T: Audit> Audit for Box<T> {
+    fn audit(&self, f: &mut BTreeSet<String>) {
+        self.as_ref().audit(f);
+    }
+}
 impl<T: Audit> Audit for Option<T> {
     fn audit(&self, f: &mut BTreeSet<String>) {
         if let Some(v) = self {

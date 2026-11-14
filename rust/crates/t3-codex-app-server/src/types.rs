@@ -886,7 +886,7 @@ open_union! { ItemBody ("type") {
         #[serde(default, skip_serializing_if = "Field::is_missing")]
         read_only_hint: Field<bool>,
         #[serde(default, skip_serializing_if = "Field::is_missing")]
-        result: Field<Value>,
+        result: Field<Box<Value>>,
         server: String,
         status: String,
         tool: String,
