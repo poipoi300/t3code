@@ -39,12 +39,18 @@ impl KiroMetadata for ProcessKiroMetadata {
     async fn template(&self, spawn: ResolvedRegistryAgent) -> ServiceResult<Sensitive<Value>> {
         let connection = AcpConnection::spawn(&spawn, Arc::new(SetupHandler { consent: None }))
             .await
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         let result = async {
             connection
                 .initialize("t3-code-provider-probe", false)
                 .await
-                .map_err(|_| ServiceError::Response)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
             connection
                 .request(
                     "_kiro/config/template",
@@ -52,7 +58,10 @@ impl KiroMetadata for ProcessKiroMetadata {
                     AcpRegistryOperationErrorReason::ProbeFailed,
                 )
                 .await
-                .map_err(|_| ServiceError::Response)
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))
         }
         .await;
         connection.close().await;
@@ -153,7 +162,10 @@ impl KiroProvider {
         if let Some(color) = &self.spec.accent_color {
             value["accentColor"] = json!(color);
         }
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
     pub fn into_managed(
         self,
@@ -190,7 +202,10 @@ impl KiroProvider {
         )));
         let output = t3_process::run(options)
             .await
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         if output.stdout_truncated {
             return Err(ServiceError::Response);
         }
@@ -236,7 +251,10 @@ impl KiroProvider {
         if !self.spec.enabled {
             return Ok(initial);
         }
-        let mut value = serde_json::to_value(initial).map_err(|_| ServiceError::Response)?;
+        let mut value = serde_json::to_value(initial).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         let environment = self.environment();
         let version = self
             .executables
@@ -252,7 +270,10 @@ impl KiroProvider {
             Err(_) => {
                 value["status"] = json!("error");
                 value["message"] = json!("Failed to run `kiro-cli --version`.");
-                return serde_json::from_value(value).map_err(|_| ServiceError::Response);
+                return serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ));
             }
         };
         value["installed"] = json!(version.installed);
@@ -271,7 +292,10 @@ impl KiroProvider {
             } else {
                 "Kiro CLI is installed but failed to run."
             });
-            return serde_json::from_value(value).map_err(|_| ServiceError::Response);
+            return serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ));
         }
         let whoami = self.command(&["whoami", "--format", "json"]).await.ok();
         let auth = models::kiro_auth_from_whoami(
@@ -281,7 +305,10 @@ impl KiroProvider {
                 .map(|output| output.stdout.expose().as_str()),
             &environment,
         )
-        .map_err(|_| ServiceError::Response)?;
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         value["auth"] = json!(auth);
         value
             .as_object_mut()
@@ -316,7 +343,10 @@ impl KiroProvider {
         ) {
             value["compatibilityAdvisory"] = json!(advisory);
         }
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
 }
 #[async_trait]

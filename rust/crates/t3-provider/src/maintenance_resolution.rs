@@ -744,7 +744,10 @@ impl NativeMaintenance {
     pub async fn latest(&self, fresh: bool) -> ServiceResult<Option<String>> {
         let resolved = self.resolved(fresh).await?;
         let bytes = serde_json::to_vec(&self.context.environment.iter().collect::<Vec<_>>())
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         let channel = if matches!(resolved.lookup, Lookup::NativeClaude) {
             claude_update_channel(
                 &self.context.host_environment,

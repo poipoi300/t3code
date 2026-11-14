@@ -115,16 +115,28 @@ impl ProfileStore for ConfigProfileStore {
             .await
     }
     async fn load(&self) -> ServiceResult<SavedProfiles> {
-        let sessions = match self.sessions.get().map_err(|_| ServiceError::Storage)? {
+        let sessions = match self.sessions.get().map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))? {
             None => Sessions::default(),
             Some(bytes) => {
                 let value: Value =
-                    serde_json::from_slice(&bytes).map_err(|_| ServiceError::Storage)?;
+                    serde_json::from_slice(&bytes).map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Storage,
+                    ))?;
                 if value.get("sessions").is_some() {
-                    serde_json::from_value(value).map_err(|_| ServiceError::Storage)?
+                    serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Storage,
+                    ))?
                 } else {
                     let record: Credentials =
-                        serde_json::from_value(value).map_err(|_| ServiceError::Storage)?;
+                        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                            concat!(module_path!(), "::error"),
+                            ServiceError::Storage,
+                        ))?;
                     Sessions {
                         active_client_id: Some(record.client_id.clone()),
                         sessions: vec![record],
@@ -135,17 +147,28 @@ impl ProfileStore for ConfigProfileStore {
         let registrations = match self
             .registrations
             .get()
-            .map_err(|_| ServiceError::Storage)?
-        {
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))? {
             None => Registrations::default(),
             Some(bytes) => {
                 let value: Value =
-                    serde_json::from_slice(&bytes).map_err(|_| ServiceError::Storage)?;
+                    serde_json::from_slice(&bytes).map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Storage,
+                    ))?;
                 if value.get("profiles").is_some() {
-                    serde_json::from_value(value).map_err(|_| ServiceError::Storage)?
+                    serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Storage,
+                    ))?
                 } else {
                     let record: ChatGptReconnectProfile =
-                        serde_json::from_value(value).map_err(|_| ServiceError::Storage)?;
+                        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                            concat!(module_path!(), "::error"),
+                            ServiceError::Storage,
+                        ))?;
                     Registrations {
                         last_client_id: Some(record.client_id.clone()),
                         profiles: vec![record],
@@ -159,19 +182,34 @@ impl ProfileStore for ConfigProfileStore {
         })
     }
     async fn save(&self, profiles: &SavedProfiles) -> ServiceResult<()> {
-        let registrations =
-            serde_json::to_vec(&profiles.registrations).map_err(|_| ServiceError::Storage)?;
+        let registrations = serde_json::to_vec(&profiles.registrations).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Storage),
+        )?;
         self.registrations
             .set(&registrations)
             .await
-            .map_err(|_| ServiceError::Storage)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
         if profiles.sessions.sessions.is_empty() {
-            self.sessions.remove().map_err(|_| ServiceError::Storage)?;
+            self.sessions.remove().map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
         } else {
             self.sessions
-                .set(&serde_json::to_vec(&profiles.sessions).map_err(|_| ServiceError::Storage)?)
+                .set(&serde_json::to_vec(&profiles.sessions).map_err(
+                    crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Storage,
+                    ),
+                )?)
                 .await
-                .map_err(|_| ServiceError::Storage)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ))?;
         }
         Ok(())
     }
@@ -215,7 +253,10 @@ pub struct RandomEntropy;
 impl Entropy for RandomEntropy {
     fn bytes(&self, size: usize) -> ServiceResult<Vec<u8>> {
         let mut bytes = vec![0; size];
-        getrandom::fill(&mut bytes).map_err(|_| ServiceError::Response)?;
+        getrandom::fill(&mut bytes).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         Ok(bytes)
     }
 }
@@ -311,8 +352,9 @@ impl ChatGptAuth {
         if !(200..300).contains(&response.status) {
             return Err(ServiceError::Network);
         }
-        let metadata: Discovery = serde_json::from_value(response.body.into_inner())
-            .map_err(|_| ServiceError::Response)?;
+        let metadata: Discovery = serde_json::from_value(response.body.into_inner()).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+        )?;
         if metadata.issuer != "https://auth.openai.com"
             || [
                 &metadata.authorization_endpoint,
@@ -460,8 +502,9 @@ impl ChatGptAuth {
                 _ => ServiceError::Response,
             });
         }
-        let tokens: TokenResponse = serde_json::from_value(response.body.into_inner())
-            .map_err(|_| ServiceError::Response)?;
+        let tokens: TokenResponse = serde_json::from_value(response.body.into_inner()).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+        )?;
         if tokens.access_token.expose().is_empty()
             || tokens.expires_in == 0
             || tokens
@@ -553,9 +596,15 @@ impl ChatGptAuth {
                     .find(|p| p.client_id == credentials.client_id)
                     .ok_or(ServiceError::Unavailable)?;
                 let credentials = serde_json::from_value(
-                    serde_json::to_value(credentials).map_err(|_| ServiceError::Response)?,
+                    serde_json::to_value(credentials).map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Response,
+                    ))?,
                 )
-                .map_err(|_| ServiceError::Response)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
                 Ok(Sensitive::new(ChatGptTransferredProfile {
                     registration: registration.clone(),
                     credentials,
@@ -564,7 +613,10 @@ impl ChatGptAuth {
             .await
     }
     pub async fn begin(&self, method: &str, redirect_uri: String) -> ServiceResult<PendingLogin> {
-        let redirect = url::Url::parse(&redirect_uri).map_err(|_| ServiceError::Callback)?;
+        let redirect = url::Url::parse(&redirect_uri).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Callback,
+        ))?;
         if redirect.scheme() != "http"
             || redirect.host_str() != Some("127.0.0.1")
             || redirect.port().is_none()
@@ -608,8 +660,9 @@ impl ChatGptAuth {
         let nonce = URL_SAFE_NO_PAD.encode(self.entropy.bytes(32)?);
         let verifier = URL_SAFE_NO_PAD.encode(self.entropy.bytes(64)?);
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        let mut url = url::Url::parse(&metadata.authorization_endpoint)
-            .map_err(|_| ServiceError::Identity)?;
+        let mut url = url::Url::parse(&metadata.authorization_endpoint).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Identity),
+        )?;
         {
             let mut query = url.query_pairs_mut();
             query.clear();
@@ -722,7 +775,7 @@ impl ChatGptAuth {
                     serde_json::from_value(
                         json!({"clientId":client,"redirectUri":pending.redirect_uri}),
                     )
-                    .map_err(|_| ServiceError::Response)?,
+                    .map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response))?,
                 );
                 lease.check()?;
                 self.store.save(&saved).await?;
@@ -761,9 +814,9 @@ impl ChatGptAuth {
                 return Err(ServiceError::Identity);
             }
             if let Some(original) = existing.redirect_uri.as_ref() {
-                let original = url::Url::parse(original).map_err(|_| ServiceError::Identity)?;
+                let original = url::Url::parse(original).map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Identity))?;
                 let current =
-                    url::Url::parse(&pending.redirect_uri).map_err(|_| ServiceError::Identity)?;
+                    url::Url::parse(&pending.redirect_uri).map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Identity))?;
                 if original.scheme() != current.scheme()
                     || original.host_str() != current.host_str()
                     || original.path() != current.path()
@@ -774,7 +827,7 @@ impl ChatGptAuth {
         }
         let scopes: Vec<_> = tokens.scope.split_whitespace().map(str::to_owned).collect();
         let sharing = scopes.iter().any(|s| s == REQUIRED_SCOPE);
-        Self::save_registration(&mut saved, serde_json::from_value(json!({"clientId":client,"redirectUri":pending.redirect_uri,"sharingEnabled":sharing,"subject":identity.subject,"email":identity.email})).map_err(|_|ServiceError::Response)?);
+        Self::save_registration(&mut saved, serde_json::from_value(json!({"clientId":client,"redirectUri":pending.redirect_uri,"sharingEnabled":sharing,"subject":identity.subject,"email":identity.email})).map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response))?);
         let activate = sharing || Self::active(&saved).is_none();
         Self::save_credentials(
             &mut saved,
@@ -807,7 +860,10 @@ impl ChatGptAuth {
             record.subject,
             record.id_token.as_ref().map(|s| s.expose())
         ]))
-        .map_err(|_| ServiceError::Response)?;
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         Ok(format!("{:x}", Sha256::digest(tuple)))
     }
     pub async fn access(
@@ -817,7 +873,10 @@ impl ChatGptAuth {
         let this = self.clone();
         tokio::spawn(async move { this.access_inner(expected_profile.as_deref()).await })
             .await
-            .map_err(|_| ServiceError::Refresh)?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Refresh,
+            ))?
     }
     async fn access_inner(&self, expected: Option<&str>) -> ServiceResult<Credentials> {
         let _gate = self.gate.lock().await;
@@ -862,7 +921,10 @@ impl ChatGptAuth {
                     ),
                 )
                 .await
-                .map_err(|_| ServiceError::Refresh)??;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Refresh,
+                ))??;
                 if tokens.refresh_token.is_none()
                     || !tokens.token_type.eq_ignore_ascii_case("bearer")
                 {
@@ -888,11 +950,17 @@ impl ChatGptAuth {
 }
 
 pub fn validate_callback(value: &str, redirect: &str, state: &str) -> ServiceResult<url::Url> {
-    let expected = url::Url::parse(redirect).map_err(|_| ServiceError::Callback)?;
+    let expected = url::Url::parse(redirect).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Callback,
+    ))?;
     let pasted = value.trim_start();
     let callback = url::Url::parse(if pasted.contains("://") { pasted } else { "" })
         .or_else(|_| url::Url::parse(&format!("{}://{pasted}", expected.scheme())))
-        .map_err(|_| ServiceError::Callback)?;
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Callback,
+        ))?;
     let single = |key: &str| -> ServiceResult<Option<String>> {
         let values: Vec<_> = callback
             .query_pairs()
@@ -949,7 +1017,10 @@ impl AuthBackend for ChatGptAuth {
                 .unwrap_or_else(|| format!("Connection {}", index + 1));
             methods.push(json!({"id":format!("chatgpt-profile:{}",profile.client_id),"canRemove":profile.subject.is_none() && !saved.sessions.sessions.iter().any(|s|s.client_id == profile.client_id),"name":format!("{} · {label}",profile.email.as_ref().and_then(Option::as_ref).map_or("ChatGPT account",String::as_str)),"description":"Reuse this account's original sign-in registration.","type":"agent"}));
         }
-        serde_json::from_value(json!(methods)).map_err(|_| ServiceError::Response)
+        serde_json::from_value(json!(methods)).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
     async fn authenticate(&self, method: &str, mut context: AuthContext) -> ServiceResult<()> {
         let mut listener = if context.callback_mode == Some(ProviderAuthCallbackMode::Client) {
@@ -1155,9 +1226,15 @@ impl AuthBackend for ChatGptAuth {
                 let mut saved = self.store.load().await?;
                 Self::save_registration(&mut saved, profile.registration);
                 let record: Credentials = serde_json::from_value(
-                    serde_json::to_value(credentials).map_err(|_| ServiceError::Response)?,
+                    serde_json::to_value(credentials).map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Response,
+                    ))?,
                 )
-                .map_err(|_| ServiceError::Response)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
                 Self::save_credentials(&mut saved, record, true);
                 lease.check()?;
                 self.store.save(&saved).await

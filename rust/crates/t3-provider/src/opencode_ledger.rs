@@ -140,18 +140,36 @@ impl OpenCodeLedger {
         };
         let directory = self.state.join("opencode-servers");
         let path = directory.join(format!("{pid}.json"));
-        let bytes = serde_json::to_vec(&entry).map_err(|_| ServiceError::Storage)?;
+        let bytes = serde_json::to_vec(&entry).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
         let target = path.clone();
         tokio::task::spawn_blocking(move || {
-            std::fs::create_dir_all(&directory).map_err(|_| ServiceError::Storage)?;
+            std::fs::create_dir_all(&directory).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
             let mut file =
-                tempfile::NamedTempFile::new_in(&directory).map_err(|_| ServiceError::Storage)?;
-            std::io::Write::write_all(&mut file, &bytes).map_err(|_| ServiceError::Storage)?;
-            file.persist(target).map_err(|_| ServiceError::Storage)?;
+                tempfile::NamedTempFile::new_in(&directory).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ))?;
+            std::io::Write::write_all(&mut file, &bytes).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
+            file.persist(target).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
             Ok::<_, ServiceError>(())
         })
         .await
-        .map_err(|_| ServiceError::Storage)??;
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))??;
         Ok(Some(LedgerLease(path)))
     }
     async fn stop_orphan(&self, entry: &Entry) -> ServiceResult<()> {
@@ -196,45 +214,69 @@ impl OpenCodeLedger {
         while let Some(file) = files
             .next_entry()
             .await
-            .map_err(|_| ServiceError::Storage)?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?
         {
-            let name = file.file_name();
-            let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
-                continue;
-            };
-            if stem.is_empty() || !stem.bytes().all(|byte| byte.is_ascii_digit()) {
-                continue;
+            if let Err(error) = self.reap_entry(file).await {
+                crate::diagnostics::failure(
+                    "OpenCodeLedger.reap_entry",
+                    ServiceError::Storage,
+                    error,
+                );
             }
-            let metadata = file.metadata().await.map_err(|_| ServiceError::Storage)?;
-            if !file
-                .file_type()
-                .await
-                .map_err(|_| ServiceError::Storage)?
-                .is_file()
-                || metadata.len() > 65536
-            {
-                continue;
-            }
-            let bytes = tokio::fs::read(file.path())
-                .await
-                .map_err(|_| ServiceError::Storage)?;
-            if let Ok(entry) = serde_json::from_slice::<Entry>(&bytes)
-                && entry.version == 1
-                && entry.pgid > 0
-                && entry.pid > 0
-                && entry.state_dir == self.state
-            {
-                let owner = self.processes.observe(entry.owner.pid).await?;
-                if owner.is_some_and(|row| !row.zombie && row.start_time == entry.owner.start_time)
-                {
-                    continue;
-                }
-                self.stop_orphan(&entry).await?;
-            }
-            tokio::fs::remove_file(file.path())
-                .await
-                .map_err(|_| ServiceError::Storage)?;
         }
+        Ok(())
+    }
+    async fn reap_entry(&self, file: tokio::fs::DirEntry) -> ServiceResult<()> {
+        let name = file.file_name();
+        let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
+            return Ok(());
+        };
+        if stem.is_empty() || !stem.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Ok(());
+        }
+        let metadata = file.metadata().await.map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
+        if !file
+            .file_type()
+            .await
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?
+            .is_file()
+            || metadata.len() > 65536
+        {
+            return Ok(());
+        }
+        let bytes = tokio::fs::read(file.path())
+            .await
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
+        if let Ok(entry) = serde_json::from_slice::<Entry>(&bytes)
+            && entry.version == 1
+            && entry.pgid > 0
+            && entry.pid > 0
+            && entry.state_dir == self.state
+        {
+            let owner = self.processes.observe(entry.owner.pid).await?;
+            if owner.is_some_and(|row| !row.zombie && row.start_time == entry.owner.start_time) {
+                return Ok(());
+            }
+            self.stop_orphan(&entry).await?;
+        }
+        tokio::fs::remove_file(file.path())
+            .await
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
         Ok(())
     }
 }

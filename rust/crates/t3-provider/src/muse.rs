@@ -69,7 +69,10 @@ impl CatalogRequest {
         options.cwd = Some(self.cwd.clone());
         t3_process::spawn_non_blocking(&options)
             .await
-            .map_err(|_| ServiceError::Unavailable)
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Unavailable,
+            ))
     }
 }
 impl std::fmt::Debug for CatalogRequest {
@@ -170,7 +173,10 @@ impl MuseProvider {
         if let Some(color) = &self.spec.accent_color {
             value["accentColor"] = json!(color);
         }
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
     pub fn into_managed(
         self,
@@ -189,7 +195,10 @@ impl MuseProvider {
         if !self.spec.enabled {
             return Ok(initial);
         }
-        let mut value = serde_json::to_value(initial).map_err(|_| ServiceError::Response)?;
+        let mut value = serde_json::to_value(initial).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         let environment = self.environment();
         let version = self
             .executables
@@ -208,7 +217,10 @@ impl MuseProvider {
                 value["message"] = json!(
                     "Failed to execute Muse Code CLI. Check its binary path on this T3 server host."
                 );
-                return serde_json::from_value(value).map_err(|_| ServiceError::Response);
+                return serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ));
             }
         };
         value["installed"] = json!(version.installed);
@@ -294,7 +306,10 @@ impl MuseProvider {
         ) {
             value["compatibilityAdvisory"] = json!(advisory);
         }
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
 }
 #[async_trait]

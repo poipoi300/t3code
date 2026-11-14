@@ -46,7 +46,10 @@ impl ExecutableProbe for ProcessExecutableProbe {
     ) -> ServiceResult<VersionProbe> {
         discovery::probe_version(driver, Some(binary), environment, Some(cwd))
             .await
-            .map_err(|_| ServiceError::Response)
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))
     }
 }
 #[derive(Clone)]
@@ -181,7 +184,10 @@ impl NativeProvider {
         );
         let home = self.spec.config["homePath"].as_str().unwrap_or_default();
         value["continuation"] = json!({"groupKey":if driver==Driver::Codex{crate::environment::codex_home_layout(home,self.spec.config["shadowHomePath"].as_str().unwrap_or_default(),&self.context.home,&self.context.cwd).continuation_key}else{format!("claude:home:{}",crate::environment::claude_home(home,&environment,&self.context.home,&self.context.cwd).display())}});
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
     pub fn into_managed(
         self,
@@ -257,7 +263,10 @@ impl NativeProvider {
         self.stamp(&mut value, &checked, &models);
         if !self.spec.enabled {
             return Ok((
-                serde_json::from_value(value).map_err(|_| ServiceError::Response)?,
+                serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?,
                 false,
             ));
         }
@@ -335,7 +344,10 @@ impl NativeProvider {
         if !version.installed || version.status == t3_contracts::server::ServerProviderState::Error
         {
             return Ok((
-                serde_json::from_value(value).map_err(|_| ServiceError::Response)?,
+                serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?,
                 false,
             ));
         }
@@ -370,7 +382,10 @@ impl NativeProvider {
             value["slashCommands"] = json!([{"name":"compact","description":"Summarize the conversation and reduce context usage"}]);
             value["models"] = json!(models);
             return Ok((
-                serde_json::from_value(value).map_err(|_| ServiceError::Response)?,
+                serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?,
                 false,
             ));
         }
@@ -626,7 +641,10 @@ impl NativeProvider {
                 .remove("compatibilityAdvisory");
         }
         Ok((
-            serde_json::from_value(value).map_err(|_| ServiceError::Response)?,
+            serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?,
             pending,
         ))
     }
@@ -892,7 +910,10 @@ impl ProviderInstanceService for NativeProvider {
                         |error| error.settled(),
                     )
                     .await
-                    .map_err(|_| ServiceError::Response)?
+                    .map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Response,
+                    ))?
             }
             _ => return Err(ServiceError::Unsupported),
         };

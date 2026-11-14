@@ -64,7 +64,10 @@ fn link_state(path: &Path) -> ServiceResult<Option<fs::Metadata>> {
 fn unlink(path: &Path) -> ServiceResult<()> {
     fs::remove_file(path)
         .or_else(|_| fs::remove_dir(path))
-        .map_err(|_| ServiceError::Storage)
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))
 }
 fn create_link(target: &Path, link: &Path) -> ServiceResult<()> {
     #[cfg(windows)]
@@ -80,7 +83,10 @@ fn create_link(target: &Path, link: &Path) -> ServiceResult<()> {
         std::io::ErrorKind::Unsupported,
         "symlinks unavailable",
     ));
-    result.map_err(|_| ServiceError::Storage)
+    result.map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))
 }
 fn comparable(path: &Path) -> PathBuf {
     #[cfg(windows)]
@@ -106,22 +112,39 @@ pub fn materialize_codex_shadow(layout: &CodexHomeLayout) -> ServiceResult<Vec<H
     if comparable(shadow) == comparable(&layout.shared_home) {
         return Err(ServiceError::Identity);
     }
-    fs::create_dir_all(&layout.shared_home).map_err(|_| ServiceError::Storage)?;
-    fs::create_dir_all(shadow).map_err(|_| ServiceError::Storage)?;
-    let shared_canonical =
-        fs::canonicalize(&layout.shared_home).map_err(|_| ServiceError::Storage)?;
-    let shadow_canonical = fs::canonicalize(shadow).map_err(|_| ServiceError::Storage)?;
+    fs::create_dir_all(&layout.shared_home).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
+    fs::create_dir_all(shadow).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
+    let shared_canonical = fs::canonicalize(&layout.shared_home).map_err(
+        crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Storage),
+    )?;
+    let shadow_canonical = fs::canonicalize(shadow).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
     if shared_canonical == shadow_canonical {
         return Err(ServiceError::Identity);
     }
     for directory in SHARED {
-        fs::create_dir_all(layout.shared_home.join(directory))
-            .map_err(|_| ServiceError::Storage)?;
+        fs::create_dir_all(layout.shared_home.join(directory)).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Storage),
+        )?;
     }
     let mut entries: BTreeSet<_> = SHARED.iter().map(|s| s.to_string()).collect();
-    for entry in fs::read_dir(&layout.shared_home).map_err(|_| ServiceError::Storage)? {
+    for entry in fs::read_dir(&layout.shared_home).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))? {
         let entry = entry
-            .map_err(|_| ServiceError::Storage)?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?
             .file_name()
             .to_str()
             .ok_or(ServiceError::Storage)?
@@ -143,7 +166,10 @@ pub fn materialize_codex_shadow(layout: &CodexHomeLayout) -> ServiceResult<Vec<H
         match link_state(&link)? {
             None => create_link(&target, &link)?,
             Some(metadata) if metadata.file_type().is_symlink() => {
-                let existing = fs::read_link(&link).map_err(|_| ServiceError::Storage)?;
+                let existing = fs::read_link(&link).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ))?;
                 let resolved = absolute_path(&existing, shadow);
                 if comparable(&resolved) != comparable(&target) {
                     unlink(&link)?;
@@ -162,8 +188,16 @@ pub fn materialize_codex_shadow(layout: &CodexHomeLayout) -> ServiceResult<Vec<H
                 }
                 if entry == "thread-writer-locks" {
                     let mut live = false;
-                    for entry in fs::read_dir(&link).map_err(|_| ServiceError::Storage)? {
-                        let name = entry.map_err(|_| ServiceError::Storage)?.file_name();
+                    for entry in fs::read_dir(&link).map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Storage,
+                    ))? {
+                        let name = entry
+                            .map_err(crate::diagnostics::mapped(
+                                concat!(module_path!(), "::error"),
+                                ServiceError::Storage,
+                            ))?
+                            .file_name();
                         let name = name.to_string_lossy();
                         if name.ends_with(".lock") && name != ".coordination.lock" {
                             live = true;
@@ -175,7 +209,10 @@ pub fn materialize_codex_shadow(layout: &CodexHomeLayout) -> ServiceResult<Vec<H
                         continue;
                     }
                 }
-                let resolved = fs::canonicalize(&link).map_err(|_| ServiceError::Storage)?;
+                let resolved = fs::canonicalize(&link).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ))?;
                 if resolved == shadow_canonical || !resolved.starts_with(&shadow_canonical) {
                     return Err(ServiceError::Identity);
                 }
@@ -184,7 +221,10 @@ pub fn materialize_codex_shadow(layout: &CodexHomeLayout) -> ServiceResult<Vec<H
                 } else {
                     fs::remove_file(&link)
                 }
-                .map_err(|_| ServiceError::Storage)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ))?;
                 create_link(&target, &link)?;
             }
         }

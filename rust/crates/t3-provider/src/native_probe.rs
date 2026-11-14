@@ -46,7 +46,10 @@ impl Drop for Task {
 async fn spawn(options: t3_process::ProcessOptions) -> ServiceResult<t3_process::SpawnedProcess> {
     t3_process::spawn_non_blocking(&options)
         .await
-        .map_err(|_| ServiceError::Response)
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
 }
 fn drain_stderr(process: &mut t3_process::SpawnedProcess) -> Option<Task> {
     process.stderr.take().map(|mut stderr| {
@@ -148,23 +151,38 @@ impl NativeProbe for ProcessProbes {
             client
                 .initialize(&InitializeParams::probe(&self.server_version))
                 .await
-                .map_err(|_| ServiceError::Response)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
             client
                 .initialized()
                 .await
-                .map_err(|_| ServiceError::Response)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
             let response = client
                 .request_raw(
                     "account/rateLimitResetCredit/consume",
                     Params::Present(json!({"idempotencyKey":key})),
                 )
                 .await
-                .map_err(|_| ServiceError::Response)?;
-            serde_json::from_value(response["outcome"].clone()).map_err(|_| ServiceError::Response)
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
+            serde_json::from_value(response["outcome"].clone()).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))
         };
         let result = tokio::time::timeout(Duration::from_secs(20), work)
             .await
-            .map_err(|_| ServiceError::Response)
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))
             .and_then(|r| r);
         let _ = tokio::time::timeout(Duration::from_secs(2), client.shutdown()).await;
         finish(&mut process).await;
@@ -203,16 +221,25 @@ impl NativeProbe for ProcessProbes {
             let initialized = client
                 .initialize(&InitializeParams::probe(&self.server_version))
                 .await
-                .map_err(|_| ServiceError::Response)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
             client
                 .initialized()
                 .await
-                .map_err(|_| ServiceError::Response)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
             if !launch.include_status {
                 let skills = client
                     .request_raw("skills/list", Params::Present(json!({"cwds":[launch.cwd]})))
                     .await
-                    .map_err(|_| ServiceError::Response)?;
+                    .map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Response,
+                    ))?;
                 return Ok(Sensitive::new(
                     json!({"initialize":initialized,"skills":skills}),
                 ));
@@ -220,7 +247,10 @@ impl NativeProbe for ProcessProbes {
             let account = client
                 .request_raw("account/read", Params::Present(json!({})))
                 .await
-                .map_err(|_| ServiceError::Response)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
             let mut result = json!({"initialize":initialized,"account":account});
             if result["account"]["account"].is_null()
                 && result["account"]["requiresOpenaiAuth"].as_bool() == Some(true)
@@ -295,7 +325,10 @@ impl NativeProbe for ProcessProbes {
         };
         let result = tokio::time::timeout_at(deadline, work)
             .await
-            .map_err(|_| ServiceError::Response)
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))
             .and_then(|result| result);
         let _ = tokio::time::timeout(Duration::from_secs(2), client.shutdown()).await;
         finish(&mut process).await;
@@ -323,7 +356,10 @@ impl NativeProbe for ProcessProbes {
             strict_mcp_config: !launch.managed_mcp,
             ..Default::default()
         };
-        let description = describe_spawn(&options).map_err(|_| ServiceError::Response)?;
+        let description = describe_spawn(&options).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         let mut process_options =
             process_options(description.command, &description.args, &description.env);
         process_options.cwd = description.cwd;
@@ -345,8 +381,14 @@ impl NativeProbe for ProcessProbes {
             client.initialize(description.initialize),
         )
         .await
-        .map_err(|_| ServiceError::Response)?
-        .map_err(|_| ServiceError::Response)?;
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         let mut result = json!({"initialize":initialized.raw()});
         if launch.include_status {
             let (usage, settings) = tokio::join!(

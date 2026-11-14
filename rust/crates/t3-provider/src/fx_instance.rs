@@ -43,8 +43,9 @@ impl FxInstance {
         if spec.driver.0 != "fx" {
             return Err(ServiceError::Unsupported);
         }
-        let mut settings: FxSettings =
-            serde_json::from_value(spec.config.clone()).map_err(|_| ServiceError::Response)?;
+        let mut settings: FxSettings = serde_json::from_value(spec.config.clone()).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+        )?;
         settings.enabled = spec.enabled;
         settings.binary_path =
             crate::environment::expand_home_path(&settings.binary_path, &context.home);
@@ -91,7 +92,10 @@ impl FxInstance {
         self.core
             .initial(&self.checked()?)
             .map(|snapshot| self.stamp(snapshot))
-            .map_err(|_| ServiceError::Response)
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))
     }
     pub fn into_managed(
         self,
@@ -118,14 +122,12 @@ impl ProviderInstanceService for FxInstance {
         let mut machine = self.machine.lock().await;
         if let Some(cwd) = cwd {
             if machine.is_none() {
-                *machine = Some(
-                    self.stamp(
-                        self.core
-                            .check(&self.checked()?)
-                            .await
-                            .map_err(|_| ServiceError::Response)?,
+                *machine = Some(self.stamp(self.core.check(&self.checked()?).await.map_err(
+                    crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Response,
                     ),
-                );
+                )?));
             }
             let base = machine.as_mut().ok_or(ServiceError::Unavailable)?;
             if !base.enabled {
@@ -144,8 +146,11 @@ impl ProviderInstanceService for FxInstance {
             let skills =
                 tokio::task::spawn_blocking(move || fx_skills::discover(&directory, &environment))
                     .await
-                    .map_err(|_| ServiceError::Response)?;
-            let workspace=serde_json::from_value(json!({"cwd":cwd,"checkedAt":self.checked()?,"slashCommands":base.slash_commands,"skills":skills,"slashCommandsPending":false})).map_err(|_|ServiceError::Response)?;
+                    .map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Response,
+                    ))?;
+            let workspace=serde_json::from_value(json!({"cwd":cwd,"checkedAt":self.checked()?,"slashCommands":base.slash_commands,"skills":skills,"slashCommandsPending":false})).map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response))?;
             let snapshots = base.workspace_snapshots.get_or_insert_with(Vec::new);
             snapshots.retain(|snapshot| snapshot.cwd.0 != cwd);
             snapshots.push(workspace);
@@ -154,12 +159,9 @@ impl ProviderInstanceService for FxInstance {
             }
             return Ok(base.clone());
         }
-        let mut next = self.stamp(
-            self.core
-                .check(&self.checked()?)
-                .await
-                .map_err(|_| ServiceError::Response)?,
-        );
+        let mut next = self.stamp(self.core.check(&self.checked()?).await.map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+        )?);
         if let Some(previous) = machine.as_ref() {
             next.workspace_snapshots = previous.workspace_snapshots.clone();
         }

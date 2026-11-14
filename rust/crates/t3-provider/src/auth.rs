@@ -98,6 +98,7 @@ struct State {
 struct Inner {
     domain: tokio::sync::RwLock<BindingDomain>,
     state: Mutex<State>,
+    commit: Mutex<()>,
     changes: watch::Sender<u64>,
     cancel: CancellationToken,
 }
@@ -135,6 +136,7 @@ impl AuthContext {
         let inner = self.inner.upgrade().ok_or(ServiceError::Inactive)?;
         let flow = self.flow_id.clone();
         tokio::spawn(async move {
+            let _commit = inner.commit.lock().await;
             let mut state = inner.state.lock().await;
             if inner.cancel.is_cancelled()
                 || state
@@ -145,12 +147,22 @@ impl AuthContext {
                 return Err(ServiceError::Inactive);
             }
             state.published.state.phase = ProviderAuthPhase::Verifying;
+            state.published.state.message = Some("Checking provider sign-in.".into());
             state.published.state.authorization_url = None;
             state.published.state.interaction = Some(None);
             inner
                 .changes
                 .send_modify(|value| *value = value.wrapping_add(1));
+            if let Some(active) = state.active.as_mut() {
+                active.responds = false;
+                active.completes = false;
+            }
+            drop(state);
             let result = operation.await;
+            let mut state = inner.state.lock().await;
+            if state.active.as_ref().is_none_or(|active| active.id != flow) {
+                return result;
+            }
             state.active = None;
             state.published.state.phase = if result.is_ok() {
                 ProviderAuthPhase::Succeeded
@@ -169,7 +181,10 @@ impl AuthContext {
             result
         })
         .await
-        .map_err(|_| ServiceError::Storage)?
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?
     }
     pub async fn interaction(
         &self,
@@ -177,10 +192,13 @@ impl AuthContext {
         responds: bool,
         completes: bool,
     ) -> ServiceResult<()> {
-        let interaction = serde_json::from_value(
-            serde_json::to_value(interaction).map_err(|_| ServiceError::Response)?,
-        )
-        .map_err(|_| ServiceError::Response)?;
+        let interaction = serde_json::from_value(serde_json::to_value(interaction).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+        )?)
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         let Some(inner) = self.inner.upgrade() else {
             return Err(ServiceError::Inactive);
         };
@@ -296,6 +314,7 @@ impl AuthController {
             timeout,
             inner: Arc::new(Inner {
                 domain: tokio::sync::RwLock::new(Arc::new(Mutex::new(BindingState::default()))),
+                commit: Mutex::new(()),
                 state: Mutex::new(State {
                     published: Published { owner: None, state },
                     active: None,
@@ -456,6 +475,7 @@ impl AuthController {
             };
             let methods = backend.methods().await.ok();
             if let Some(inner) = inner.upgrade() {
+                let _commit = inner.commit.lock().await;
                 let mut state = inner.state.lock().await;
                 if state.active.as_ref().is_some_and(|a| a.id == id) {
                     state.active = None;
@@ -533,7 +553,10 @@ impl AuthController {
             active
                 .replies
                 .try_send((reply, tx))
-                .map_err(|_| ServiceError::ResponseBusy)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::ResponseBusy,
+                ))?;
             active.responding = true;
         }
         let inner = self.inner.clone();
@@ -548,7 +571,10 @@ impl AuthController {
             result
         })
         .await
-        .map_err(|_| ServiceError::Inactive)?;
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Inactive,
+        ))?;
         result?;
         Ok(self.snapshot(owner).await)
     }
@@ -580,6 +606,7 @@ impl AuthController {
         .await
     }
     pub async fn cancel(&self, owner: &str, flow: &str) -> ServiceResult<AuthState> {
+        let _commit = self.inner.commit.lock().await;
         let mut state = self.inner.state.lock().await;
         let active = state
             .active
@@ -602,9 +629,13 @@ impl AuthController {
         let controller = self.clone();
         tokio::spawn(async move { controller.logout_inner().await })
             .await
-            .map_err(|_| ServiceError::Storage)?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?
     }
     async fn logout_inner(&self) -> ServiceResult<AuthState> {
+        let _commit = self.inner.commit.lock().await;
         self.backend.check_logout()?;
         let mut domain = self.binding_guard().await?;
         {
@@ -656,6 +687,7 @@ impl AuthController {
         let controller = self.clone();
         let method = method.to_owned();
         tokio::spawn(async move {
+            let _commit = controller.inner.commit.lock().await;
             {
                 let mut domain = controller.binding_guard().await?;
                 let mut state = controller.inner.state.lock().await;
@@ -680,7 +712,10 @@ impl AuthController {
             Ok(Sensitive::new(state.published.state.clone()))
         })
         .await
-        .map_err(|_| ServiceError::Storage)?
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?
     }
     pub async fn invalidate(&self) {
         let mut state = self.inner.state.lock().await;
@@ -724,6 +759,7 @@ impl AuthController {
     ) -> ServiceResult<AuthState> {
         let controller = self.clone();
         tokio::spawn(async move {
+            let _commit = controller.inner.commit.lock().await;
             controller.backend.validate_profile(&profile).await?;
             let mut domain = controller.binding_guard().await?;
             {
@@ -772,7 +808,10 @@ impl AuthController {
             Ok(Sensitive::new(published.clone()))
         })
         .await
-        .map_err(|_| ServiceError::Storage)?
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?
     }
 }
 

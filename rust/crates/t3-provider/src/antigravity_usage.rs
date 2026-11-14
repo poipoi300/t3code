@@ -113,8 +113,9 @@ pub fn summary_windows(
     value: &Value,
     requested_at: i64,
 ) -> ServiceResult<Vec<ServerProviderUsageWindow>> {
-    let summary: Summary =
-        serde_json::from_value(value.clone()).map_err(|_| ServiceError::Response)?;
+    let summary: Summary = serde_json::from_value(value.clone()).map_err(
+        crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+    )?;
     let groups = summary
         .groups
         .filter(|groups| {
@@ -218,8 +219,9 @@ struct Models {
     models: BTreeMap<String, Model>,
 }
 pub fn model_windows(value: &Value) -> ServiceResult<Vec<ServerProviderUsageWindow>> {
-    let models: Models =
-        serde_json::from_value(value.clone()).map_err(|_| ServiceError::Response)?;
+    let models: Models = serde_json::from_value(value.clone()).map_err(
+        crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+    )?;
     let mut windows: Vec<ServerProviderUsageWindow> = vec![];
     for (id, model) in models.models {
         let family = if model.model_provider.as_deref() == Some("MODEL_PROVIDER_GOOGLE")
@@ -332,7 +334,10 @@ impl AntigravityUsage {
     async fn request(&self, request: HttpRequest) -> ServiceResult<Sensitive<Value>> {
         let response = tokio::time::timeout(Duration::from_secs(10), self.http.send(request))
             .await
-            .map_err(|_| ServiceError::Network)??;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Network,
+            ))??;
         if !(200..300).contains(&response.status) {
             return Err(ServiceError::Network);
         }
@@ -347,7 +352,10 @@ impl AntigravityUsage {
         if let Some(message) = message {
             value["unavailable"]["message"] = json!(message);
         }
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
     pub async fn probe(&self) -> ServiceResult<ServerProviderUsageLimits> {
         match tokio::time::timeout(Duration::from_secs(30), self.read()).await {
@@ -379,12 +387,17 @@ impl AntigravityUsage {
         if metadata.len() > 1024 * 1024 {
             return Err(ServiceError::Response);
         }
-        let token: Token = serde_json::from_slice(
-            &tokio::fs::read(&self.token_path)
-                .await
-                .map_err(|_| ServiceError::Storage)?,
-        )
-        .map_err(|_| ServiceError::Response)?;
+        let token: Token =
+            serde_json::from_slice(&tokio::fs::read(&self.token_path).await.map_err(
+                crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ),
+            )?)
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         if [&token.client_id, &token.client_secret, &token.refresh_token]
             .iter()
             .any(|value| value.is_empty())
@@ -475,7 +488,7 @@ impl AntigravityUsage {
         let fetch = async |operation: &str| {
             let request = async |endpoint: &str| {
                 let requested = self.clock.now_ms();
-                let response=self.request(HttpRequest{method:"POST",url:format!("{endpoint}/v1internal:{operation}"),headers:BTreeMap::from([("Authorization".into(),Sensitive::new(format!("Bearer {}",cached.access.expose()))),("User-Agent".into(),Sensitive::new(format!("antigravity/hub/2.24.0 (aidev_client; os_type={}; arch={}; cl=963137146)",self.platform,self.architecture)))]),body:Some(Sensitive::new(serde_json::to_string(&token.project_id.as_ref().filter(|project|!project.is_empty()).map(|project|json!({"project":project})).unwrap_or_else(||json!({}))).map_err(|_|ServiceError::Response)?))}).await?;
+                let response=self.request(HttpRequest{method:"POST",url:format!("{endpoint}/v1internal:{operation}"),headers:BTreeMap::from([("Authorization".into(),Sensitive::new(format!("Bearer {}",cached.access.expose()))),("User-Agent".into(),Sensitive::new(format!("antigravity/hub/2.24.0 (aidev_client; os_type={}; arch={}; cl=963137146)",self.platform,self.architecture)))]),body:Some(Sensitive::new(serde_json::to_string(&token.project_id.as_ref().filter(|project|!project.is_empty()).map(|project|json!({"project":project})).unwrap_or_else(||json!({}))).map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response))?))}).await?;
                 if operation == "retrieveUserQuotaSummary" {
                     summary_windows(response.expose(), requested)
                 } else {
@@ -509,8 +522,14 @@ impl AntigravityUsage {
             );
         }
         let limits = make_usage_limits(windows, WireDateTime(checked));
-        let mut limits = serde_json::to_value(limits).map_err(|_| ServiceError::Response)?;
+        let mut limits = serde_json::to_value(limits).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         limits["credentialFingerprint"] = json!(cached.account);
-        serde_json::from_value(limits).map_err(|_| ServiceError::Response)
+        serde_json::from_value(limits).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
 }

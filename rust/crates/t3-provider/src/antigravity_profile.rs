@@ -257,12 +257,16 @@ impl Profile {
     }
 }
 fn private_directory(path: &Path) -> ServiceResult<()> {
-    std::fs::create_dir_all(path).map_err(|_| ServiceError::Storage)?;
+    std::fs::create_dir_all(path).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-            .map_err(|_| ServiceError::Storage)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Storage),
+        )?;
     }
     Ok(())
 }
@@ -291,7 +295,10 @@ pub async fn prepare(input: PrepareProfile<'_>) -> ServiceResult<Profile> {
         return Err(ServiceError::Unavailable);
     }
     let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
-    let directory = std::path::absolute(input.directory).map_err(|_| ServiceError::Storage)?;
+    let directory = std::path::absolute(input.directory).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
     let acp = directory.join("antigravity-acp");
     let temp = input
         .temp_directory
@@ -334,7 +341,10 @@ pub async fn prepare(input: PrepareProfile<'_>) -> ServiceResult<Profile> {
     options.check_exit = false;
     let output = t3_process::run(options)
         .await
-        .map_err(|_| ServiceError::Unavailable)?;
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Unavailable,
+        ))?;
     if output.code != Some(0)
         || !output.stdout.is_empty()
         || output.stdout_truncated
@@ -357,12 +367,18 @@ pub async fn prepare(input: PrepareProfile<'_>) -> ServiceResult<Profile> {
     if gcp.as_object().is_some_and(|gcp| !gcp.is_empty()) {
         settings["gcp"] = gcp;
     }
-    let settings = serde_json::to_vec(&settings).map_err(|_| ServiceError::Storage)?;
+    let settings = serde_json::to_vec(&settings).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
     std::fs::write(
         acp.join("settings.json"),
         [settings.as_slice(), b"\n"].concat(),
     )
-    .map_err(|_| ServiceError::Storage)?;
+    .map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
     for relative in ["config/skills", "antigravity-cli/skills"] {
         let link = directory.join(relative);
         let target = input.user_home.join(".gemini").join(relative);

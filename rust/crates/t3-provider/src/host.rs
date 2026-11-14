@@ -256,7 +256,10 @@ impl ProviderHost {
         if let Some(color) = entry.source.accent_color.as_ref().and_then(Option::as_ref) {
             value["accentColor"] = json!(color);
         }
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
     async fn park(
         &self,
@@ -278,14 +281,15 @@ impl ProviderHost {
     }
     pub async fn reconcile(
         &self,
-        settings: &ServerSettings,
+        settings: &dyn crate::text_generators::SettingsSource,
         rebuild: &BTreeSet<ProviderInstanceId>,
         defer_secrets: bool,
         blocked: &BTreeMap<ProviderDriverKind, String>,
     ) -> ServiceResult<HostReconcile> {
         let mut state = self.state.lock().await;
+        let settings = settings.settings().await?;
         self.registry
-            .reconcile(settings, &self.secrets, rebuild, defer_secrets, blocked)
+            .reconcile(&settings, &self.secrets, rebuild, defer_secrets, blocked)
             .await;
         let changes = self.apply_desired(&mut state).await?;
         self.service
@@ -304,7 +308,10 @@ impl ProviderHost {
             self.sessions
                 .retire(&id)
                 .await
-                .map_err(|_| ServiceError::StopSessions)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::StopSessions,
+                ))?;
             self.service.unregister(&id).await;
             state.live.remove(&id);
             state.registered.remove(&id);
@@ -379,13 +386,14 @@ impl ProviderHost {
     }
     pub async fn reload_secrets(
         &self,
-        settings: &ServerSettings,
+        settings: &dyn crate::text_generators::SettingsSource,
         instance: Option<&ProviderInstanceId>,
         blocked: &BTreeMap<ProviderDriverKind, String>,
     ) -> ServiceResult<HostReconcile> {
         let mut state = self.state.lock().await;
+        let settings = settings.settings().await?;
         self.registry
-            .reload_secrets(settings, &self.secrets, instance, blocked)
+            .reload_secrets(&settings, &self.secrets, instance, blocked)
             .await;
         let changes = self.apply_desired(&mut state).await?;
         self.service
@@ -395,14 +403,15 @@ impl ProviderHost {
     }
     pub async fn apply_secret(
         &self,
-        settings: &ServerSettings,
+        settings: &dyn crate::text_generators::SettingsSource,
         reference: &t3_contracts::secret_reference::SecretReference,
         value: &str,
         blocked: &BTreeMap<ProviderDriverKind, String>,
     ) -> ServiceResult<HostReconcile> {
         let mut state = self.state.lock().await;
+        let settings = settings.settings().await?;
         self.registry
-            .apply_secret(settings, &self.secrets, reference, value, blocked)
+            .apply_secret(&settings, &self.secrets, reference, value, blocked)
             .await;
         let changes = self.apply_desired(&mut state).await?;
         self.service
@@ -417,12 +426,22 @@ impl ProviderHost {
                 self.sessions
                     .retire(&id)
                     .await
-                    .map_err(|_| ServiceError::StopSessions)?;
+                    .map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::StopSessions,
+                    ))?;
             }
             self.service.unregister(&id).await;
             state.registered.remove(&id);
             state.live.remove(&id);
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl crate::text_generators::SettingsSource for ServerSettings {
+    async fn settings(&self) -> ServiceResult<ServerSettings> {
+        Ok(self.clone())
     }
 }

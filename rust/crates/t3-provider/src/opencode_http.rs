@@ -64,7 +64,10 @@ impl OpenCodeHttp {
         base_url: &str,
         password: Option<SecretString>,
     ) -> Result<Self, OpenCodeError> {
-        let base = url::Url::parse(base_url.trim()).map_err(|_| OpenCodeError::Identity)?;
+        let base = url::Url::parse(base_url.trim()).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            OpenCodeError::Identity,
+        ))?;
         if !matches!(base.scheme(), "http" | "https") || base.host_str().is_none() {
             return Err(OpenCodeError::Identity);
         }
@@ -121,7 +124,10 @@ impl OpenCodeHttp {
             .transport
             .raw(self.request(path, Some(directory), 2))
             .await
-            .map_err(|_| OpenCodeError::Unavailable)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                OpenCodeError::Unavailable,
+            ))?;
         Self::decode(response)
     }
     fn decode(response: crate::transport::RawHttpResponse) -> Result<Value, OpenCodeError> {
@@ -148,7 +154,10 @@ impl OpenCodeHttp {
         if !json {
             return Err(OpenCodeError::Identity);
         }
-        serde_json::from_slice(response.body.expose()).map_err(|_| OpenCodeError::Identity)
+        serde_json::from_slice(response.body.expose()).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            OpenCodeError::Identity,
+        ))
     }
     pub async fn raw(
         &self,
@@ -163,8 +172,14 @@ impl OpenCodeHttp {
                 .raw(self.request(path, directory, generation)),
         )
         .await
-        .map_err(|_| OpenCodeError::Timeout)?
-        .map_err(|_| OpenCodeError::Unavailable)
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            OpenCodeError::Timeout,
+        ))?
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            OpenCodeError::Unavailable,
+        ))
     }
     pub async fn probe(&self, environment: &Environment) -> Result<OpenCodeVersion, OpenCodeError> {
         for path in ["/api/info", "/global/health"] {
@@ -177,8 +192,14 @@ impl OpenCodeHttp {
                 self.transport.raw(self.request(path, None, 0)),
             )
             .await
-            .map_err(|_| OpenCodeError::Timeout)?
-            .map_err(|_| OpenCodeError::Unavailable)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                OpenCodeError::Timeout,
+            ))?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                OpenCodeError::Unavailable,
+            ))?;
             if matches!(response.status, 401 | 403) {
                 return Err(OpenCodeError::Authentication);
             }
@@ -188,8 +209,10 @@ impl OpenCodeHttp {
                 response.content_type.as_deref(),
                 &String::from_utf8_lossy(response.body.expose()),
             )
-            .map_err(|_| OpenCodeError::Identity)?
-            {
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                OpenCodeError::Identity,
+            ))? {
                 return Ok(version);
             }
         }
@@ -282,7 +305,7 @@ impl OpenCodeModels for HttpModels {
             let mut normalized=json!({"providerID":model["providerID"],"id":model["id"],"name":model["name"],"variants":model["variants"],"released":model["time"]["released"],"deprecated":model["status"]=="deprecated"});
             if let Some(family)=model.get("family") { normalized["family"]=family.clone(); }
             if let Some(name)=model["providerID"].as_str().and_then(|id|names.get(id)).filter(|name|!name.is_empty()) { normalized["providerName"]=json!(name); }
-            serde_json::from_value(normalized).map_err(|_|ServiceError::Response)
+            serde_json::from_value(normalized).map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response))
         }).collect()
     }
 }

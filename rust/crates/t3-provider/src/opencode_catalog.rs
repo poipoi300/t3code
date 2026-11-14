@@ -306,13 +306,18 @@ pub fn skills(values: &[Value], v2: bool) -> ServiceResult<Vec<ServerProviderSki
             value["description"] = json!(description);
             value["shortDescription"] = json!(description);
         }
-        skills.push(serde_json::from_value(value).map_err(|_| ServiceError::Response)?);
+        skills.push(
+            serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?,
+        );
     }
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(skills)
 }
 pub fn commands(values: &[Value], v2: bool) -> ServiceResult<Vec<ServerProviderSlashCommand>> {
-    let mut commands = vec![serde_json::from_value(json!({"name":"compact","description":"Summarize the conversation and reduce context usage"})).map_err(|_|ServiceError::Response)?];
+    let mut commands = vec![serde_json::from_value(json!({"name":"compact","description":"Summarize the conversation and reduce context usage"})).map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response))?];
     let mut seen = BTreeSet::from(["compact"]);
     for command in values {
         let Some(name) = command["name"]
@@ -345,7 +350,12 @@ pub fn commands(values: &[Value], v2: bool) -> ServiceResult<Vec<ServerProviderS
                 value["input"] = json!({"hint":hint});
             }
         }
-        commands.push(serde_json::from_value(value).map_err(|_| ServiceError::Response)?);
+        commands.push(
+            serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?,
+        );
     }
     Ok(commands)
 }

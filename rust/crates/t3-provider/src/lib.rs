@@ -38,6 +38,7 @@ pub mod cursor_catalog;
 pub mod cursor_provider;
 pub mod cursor_skills;
 pub mod cursor_usage;
+mod diagnostics;
 pub mod discovery;
 pub mod domain;
 pub mod environment;

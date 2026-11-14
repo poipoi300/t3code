@@ -37,7 +37,10 @@ fn limits(
     if let Some(reason) = unavailable {
         value["unavailable"] = json!({"reason":reason});
     }
-    serde_json::from_value(value).map_err(|_| ServiceError::Response)
+    serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Response,
+    ))
 }
 pub fn unavailable(checked: &str, reason: &str) -> ServiceResult<ServerProviderUsageLimits> {
     limits(checked, vec![], Some(reason))
@@ -93,8 +96,9 @@ pub fn codex_limits(response: &Value, checked: &str) -> ServiceResult<ServerProv
         .filter(|v| !v.is_null())
         .or_else(|| response.get("rateLimits"))
         .unwrap_or(response);
-    let mut value = serde_json::to_value(limits(checked, codex_windows(snapshot), None)?)
-        .map_err(|_| ServiceError::Response)?;
+    let mut value = serde_json::to_value(limits(checked, codex_windows(snapshot), None)?).map_err(
+        crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+    )?;
     if let Some(credits) = response
         .get("rateLimitResetCredits")
         .filter(|v| v.is_object())
@@ -114,7 +118,10 @@ pub fn codex_limits(response: &Value, checked: &str) -> ServiceResult<ServerProv
         }
         value["resetCredits"] = summary;
     }
-    serde_json::from_value(value).map_err(|_| ServiceError::Response)
+    serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Response,
+    ))
 }
 pub fn codex_update(
     snapshot: &Value,
@@ -134,7 +141,10 @@ pub fn codex_update(
     } else {
         serde_json::from_value(json!({"windows":windows}))
             .map(Some)
-            .map_err(|_| ServiceError::Response)
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))
     }
 }
 pub fn merge_codex(previous: Option<&Value>, update: &Value) -> Option<Value> {
@@ -323,5 +333,8 @@ pub fn claude_update(
     };
     serde_json::from_value(json!({"windows":[window]}))
         .map(Some)
-        .map_err(|_| ServiceError::Response)
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
 }

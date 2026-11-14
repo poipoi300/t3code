@@ -38,7 +38,9 @@ fn iso(ms: f64) -> ServiceResult<String> {
         .ok_or(ServiceError::Response)
 }
 pub fn report(value: &Value) -> ServiceResult<RuntimeUsageUpdate> {
-    let usage: Usage = serde_json::from_value(value.clone()).map_err(|_| ServiceError::Response)?;
+    let usage: Usage = serde_json::from_value(value.clone()).map_err(
+        crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+    )?;
     if !usage.window.used_percent.is_finite()
         || usage.window.used_percent < 0.0
         || !usage.weekly.used_percent.is_finite()
@@ -50,7 +52,7 @@ pub fn report(value: &Value) -> ServiceResult<RuntimeUsageUpdate> {
     let windows=serde_json::from_value(json!([
         {"id":"session","kind":"session","label":"Session","usedPercent":usage.window.used_percent.clamp(0.0,100.0),"resetsAt":iso(usage.window.resets_at_ms)?,"windowDurationMins":usage.window.window_duration_mins},
         {"id":"weekly","kind":"weekly","label":"Weekly","usedPercent":usage.weekly.used_percent.clamp(0.0,100.0),"resetsAt":iso(usage.weekly.resets_at_ms)?,"windowDurationMins":10080}
-    ])).map_err(|_|ServiceError::Response)?;
+    ])).map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response))?;
     let tier = t3_contracts::wire::trim_js(&usage.tier);
     Ok(RuntimeUsageUpdate {
         windows,
@@ -73,7 +75,10 @@ impl MuseUsageIngestion {
     pub async fn apply(&self, value: &Value) -> ServiceResult<bool> {
         let update = report(value)?;
         let timestamp = chrono::DateTime::parse_from_rfc3339(&update.checked_at.0)
-            .map_err(|_| ServiceError::Response)?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?
             .timestamp_millis();
         let mut latest = self.latest.lock().await;
         if latest.is_some_and(|latest| timestamp < latest) {

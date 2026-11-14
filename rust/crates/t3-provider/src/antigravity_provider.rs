@@ -62,8 +62,9 @@ impl AntigravityProvider {
         if let Some(color) = &spec.accent_color {
             value["accentColor"] = json!(color);
         }
-        let snapshot: ServerProvider =
-            serde_json::from_value(value).map_err(|_| ServiceError::Response)?;
+        let snapshot: ServerProvider = serde_json::from_value(value).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+        )?;
         let (changes, _) = watch::channel(Some(snapshot.clone()));
         Ok(Arc::new_cyclic(|weak| Self {
             spec,
@@ -288,7 +289,10 @@ impl AntigravityProvider {
         state.snapshot.auth = serde_json::from_value(
             json!({"status":"authenticated","type":self.auth.method,"label":self.auth.label()}),
         )
-        .map_err(|_| ServiceError::Response)?;
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         state.snapshot.message = None;
         state.snapshot.checked_at = t3_contracts::wire::WireDateTime(stamp(self.clock.now_ms())?);
         state.snapshot.supports_text_generation = Some(Some(supports_text_generation));
@@ -335,7 +339,7 @@ impl AntigravityProvider {
         let skills = skills
             .or_else(|| previous.map(|workspace| workspace.skills.clone()))
             .unwrap_or_default();
-        let workspace=serde_json::from_value(json!({"cwd":cwd,"checkedAt":stamp(self.clock.now_ms())?,"slashCommands":commands,"skills":skills})).map_err(|_|ServiceError::Response)?;
+        let workspace=serde_json::from_value(json!({"cwd":cwd,"checkedAt":stamp(self.clock.now_ms())?,"slashCommands":commands,"skills":skills})).map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response))?;
         let workspaces = snapshot.workspace_snapshots.get_or_insert_default();
         workspaces.retain(|workspace| workspace.cwd.0 != cwd);
         workspaces.push(workspace);
@@ -377,7 +381,10 @@ impl AntigravityProvider {
         } else {
             json!({"status":"unauthenticated","type":self.auth.method,"label":self.auth.label()})
         })
-        .map_err(|_| ServiceError::Response)?;
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         state.snapshot.status = ServerProviderState::Warning;
         state.snapshot.message = Some(Some(self.sign_in_message().into()));
         state.snapshot.checked_at = t3_contracts::wire::WireDateTime(stamp(self.clock.now_ms())?);
@@ -489,7 +496,10 @@ impl ProviderInstanceService for AntigravityProvider {
                 crate::antigravity_skills::discover(&root, &home)
             })
             .await
-            .map_err(|_| ServiceError::Storage)??;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))??;
             let mut state = self.state.lock().await;
             self.workspace(&mut state.snapshot, cwd, None, Some(skills))?;
             self.publish(&state);
@@ -513,7 +523,10 @@ impl ProviderInstanceService for AntigravityProvider {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
         let runtime = tokio::time::timeout_at(deadline, self.factory.create(None))
             .await
-            .map_err(|_| ServiceError::Expired)??;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Expired,
+            ))??;
         let work = async {
             let started = runtime.start().await?;
             let catalog = runtime.catalog(&started).await?;
@@ -523,7 +536,7 @@ impl ProviderInstanceService for AntigravityProvider {
             if let Some(access) = &access {
                 tokio::select! {biased;_=access.cancellation.cancelled()=>Err(ServiceError::Cancelled),result=work=>result}
             } else { work.await }
-        }).await.map_err(|_| ServiceError::Expired);
+        }).await.map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Expired));
         runtime.close().await;
         let (started, catalog) = result??;
         self.catalog_started(started, catalog.expose(), None, Some(revision))

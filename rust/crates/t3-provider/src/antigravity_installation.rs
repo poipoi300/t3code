@@ -64,7 +64,10 @@ impl ReqwestAntigravityReleases {
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .map_err(|_| ServiceError::Network)?,
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Network,
+                ))?,
             platform,
             architecture,
             musl,
@@ -82,18 +85,31 @@ impl AntigravityReleases for ReqwestAntigravityReleases {
             ))
             .send()
             .await
-            .map_err(|_| ServiceError::Network)?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Network,
+            ))?
             .error_for_status()
-            .map_err(|_| ServiceError::Network)?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Network,
+            ))?
             .bytes()
             .await
-            .map_err(|_| ServiceError::Network)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Network,
+            ))?;
         if value.len() > 65536 {
             return Err(ServiceError::Response);
         }
         Ok(antigravity_release::parse(
-            &serde_json::from_slice::<serde_json::Value>(&value)
-                .map_err(|_| ServiceError::Response)?,
+            &serde_json::from_slice::<serde_json::Value>(&value).map_err(
+                crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ),
+            )?,
             self.platform,
             &self.architecture,
             self.musl,
@@ -111,17 +127,29 @@ impl AntigravityReleases for ReqwestAntigravityReleases {
             .get(&release.url)
             .send()
             .await
-            .map_err(|_| ServiceError::Network)?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Network,
+            ))?
             .error_for_status()
-            .map_err(|_| ServiceError::Network)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Network,
+            ))?;
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(path)
             .await
-            .map_err(|_| ServiceError::Storage)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
         let mut bytes = 0u64;
-        while let Some(chunk) = response.chunk().await.map_err(|_| ServiceError::Network)? {
+        while let Some(chunk) = response.chunk().await.map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Network,
+        ))? {
             bytes = bytes
                 .checked_add(chunk.len() as u64)
                 .ok_or(ServiceError::Response)?;
@@ -134,10 +162,16 @@ impl AntigravityReleases for ReqwestAntigravityReleases {
             }
             file.write_all(&chunk)
                 .await
-                .map_err(|_| ServiceError::Storage)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ))?;
             progress.send_replace(bytes);
         }
-        file.flush().await.map_err(|_| ServiceError::Storage)?;
+        file.flush().await.map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
         Ok(())
     }
 }
@@ -227,21 +261,42 @@ fn executable(path: &Path, size: Option<u64>) -> bool {
 fn record<T: serde::de::DeserializeOwned>(path: &Path) -> ServiceResult<T> {
     let mut bytes = vec![];
     fs::File::open(path)
-        .map_err(|_| ServiceError::Storage)?
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?
         .take(8193)
         .read_to_end(&mut bytes)
-        .map_err(|_| ServiceError::Storage)?;
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
     if bytes.len() > 8192 {
         return Err(ServiceError::Response);
     }
-    serde_json::from_slice(&bytes).map_err(|_| ServiceError::Response)
+    serde_json::from_slice(&bytes).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Response,
+    ))
 }
 fn atomic<T: Serialize>(path: &Path, value: &T) -> ServiceResult<()> {
     let parent = path.parent().ok_or(ServiceError::Storage)?;
-    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|_| ServiceError::Storage)?;
-    serde_json::to_writer(&mut file, value).map_err(|_| ServiceError::Storage)?;
-    file.write_all(b"\n").map_err(|_| ServiceError::Storage)?;
-    file.persist(path).map_err(|_| ServiceError::Storage)?;
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
+    serde_json::to_writer(&mut file, value).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
+    file.write_all(b"\n").map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
+    file.persist(path).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
     Ok(())
 }
 fn safe_member(name: &str) -> bool {
@@ -362,12 +417,21 @@ impl AntigravityInstallation {
         })
     }
     fn root(&self) -> ServiceResult<PathBuf> {
-        fs::create_dir_all(&self.options.base).map_err(|_| ServiceError::Storage)?;
-        let mut root = fs::canonicalize(&self.options.base).map_err(|_| ServiceError::Storage)?;
-        let relative = self
-            .directory
-            .strip_prefix(&self.options.base)
-            .map_err(|_| ServiceError::Storage)?;
+        fs::create_dir_all(&self.options.base).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
+        let mut root = fs::canonicalize(&self.options.base).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
+        let relative =
+            self.directory
+                .strip_prefix(&self.options.base)
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ))?;
         for component in relative.components() {
             let path = root.join(component);
             match fs::symlink_metadata(&path) {
@@ -375,12 +439,17 @@ impl AntigravityInstallation {
                     return Err(ServiceError::Storage);
                 }
                 Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    fs::create_dir(&path).map_err(|_| ServiceError::Storage)?
-                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(&path)
+                    .map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Storage,
+                    ))?,
                 Err(_) => return Err(ServiceError::Storage),
             }
-            let canonical = fs::canonicalize(&path).map_err(|_| ServiceError::Storage)?;
+            let canonical = fs::canonicalize(&path).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
             if canonical.parent() != Some(root.as_path()) {
                 return Err(ServiceError::Storage);
             }
@@ -395,7 +464,10 @@ impl AntigravityInstallation {
         let versions = root.join("versions");
         if fs::symlink_metadata(&versions).is_ok_and(|metadata| metadata.file_type().is_symlink())
             || fs::canonicalize(&versions)
-                .map_err(|_| ServiceError::Storage)?
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ))?
                 .parent()
                 != Some(root)
         {
@@ -452,7 +524,10 @@ impl AntigravityInstallation {
         if !executable(candidate, None) {
             return Ok(None);
         }
-        let real = fs::canonicalize(candidate).map_err(|_| ServiceError::Storage)?;
+        let real = fs::canonicalize(candidate).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
         if let Some(directory) = real.parent()
             && directory.parent() == Some(root.join("versions").as_path())
             && let Some(id) = directory
@@ -507,7 +582,10 @@ impl AntigravityInstallation {
         {
             let options = process_options(binary, &[], environment);
             let command = t3_process::resolve_command(&options.program, &[], &options.env, false)
-                .map_err(|_| ServiceError::Unavailable)?;
+                .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Unavailable,
+            ))?;
             return self
                 .external(
                     Path::new(&command.program),
@@ -759,9 +837,11 @@ impl AntigravityInstallation {
                 return Err(ServiceError::Storage);
             }
             Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&versions).map_err(|_| ServiceError::Storage)?
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(&versions)
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ))?,
             Err(_) => return Err(ServiceError::Storage),
         }
         let destination = versions.join(&id);
@@ -802,7 +882,10 @@ impl AntigravityInstallation {
                 tempfile::Builder::new()
                     .prefix(".install-")
                     .tempdir_in(&versions)
-                    .map_err(|_| ServiceError::Storage)?,
+                    .map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Storage,
+                    ))?,
             );
             let archive = stage.path().join("download");
             let (progress, mut receiver) = watch::channel(0);
@@ -812,7 +895,7 @@ impl AntigravityInstallation {
             );
             tokio::pin!(download);
             loop {
-                tokio::select! {result=&mut download=>{result.map_err(|_|ServiceError::Network)??;break;},changed=receiver.changed()=>{if changed.is_ok(){let bytes=*receiver.borrow_and_update();self.state.send_modify(|state|state.downloaded_bytes=bytes);}}}
+                tokio::select! {result=&mut download=>{result.map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Network))??;break;},changed=receiver.changed()=>{if changed.is_ok(){let bytes=*receiver.borrow_and_update();self.state.send_modify(|state|state.downloaded_bytes=bytes);}}}
             }
             let asset = release.clone();
             let retained = stage.clone();
@@ -820,7 +903,10 @@ impl AntigravityInstallation {
                 verify_download(&retained.path().join("download"), &asset)
             })
             .await
-            .map_err(|_| ServiceError::Maintenance)??;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Maintenance,
+            ))??;
             self.state
                 .send_modify(|state| state.phase = ProviderInstallPhase::Extracting);
             extract(
@@ -852,7 +938,10 @@ impl AntigravityInstallation {
                 options.timeout = Some(Duration::from_secs(30));
                 t3_process::run(options)
                     .await
-                    .map_err(|_| ServiceError::Maintenance)?;
+                    .map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Maintenance,
+                    ))?;
             }
             self.state
                 .send_modify(|state| state.phase = ProviderInstallPhase::Verifying);
@@ -872,12 +961,20 @@ impl AntigravityInstallation {
                 self.validator.validate(&staged, &release.version),
             )
             .await
-            .map_err(|_| ServiceError::Maintenance)??;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Maintenance,
+            ))??;
             if !self.eligible(&release.version) {
                 return Err(ServiceError::Maintenance);
             }
             let entry = |path: &Path, name: &str| -> ServiceResult<FileRecord> {
-                let bytes = fs::metadata(path).map_err(|_| ServiceError::Storage)?.len();
+                let bytes = fs::metadata(path)
+                    .map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Storage,
+                    ))?
+                    .len();
                 Ok(FileRecord {
                     name: name.into(),
                     bytes,
@@ -911,7 +1008,10 @@ impl AntigravityInstallation {
                 self.validator.validate(&previous, &release.version),
             )
             .await
-            .map_err(|_| ServiceError::Maintenance)??;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Maintenance,
+            ))??;
         }
         if !self.eligible(&release.version) {
             return Err(ServiceError::Maintenance);
@@ -950,11 +1050,18 @@ impl AntigravityInstallation {
             .values()
             .map(|lease| lease.try_write())
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| ServiceError::Busy)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Busy,
+            ))?;
         let root = self.root()?;
         for path in protected {
-            let real = crate::environment::canonicalize_existing_parent(path)
-                .map_err(|_| ServiceError::Storage)?;
+            let real = crate::environment::canonicalize_existing_parent(path).map_err(
+                crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ),
+            )?;
             if real == root || real.starts_with(&root) {
                 return Err(ServiceError::Busy);
             }
@@ -962,7 +1069,10 @@ impl AntigravityInstallation {
         if fs::symlink_metadata(&root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
             return Err(ServiceError::Storage);
         }
-        fs::remove_dir_all(&root).map_err(|_| ServiceError::Storage)?;
+        fs::remove_dir_all(&root).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
         drop(guards);
         self.state.send_modify(|state| {
             state.phase = ProviderInstallPhase::Idle;
@@ -978,7 +1088,10 @@ impl AntigravityInstallation {
     }
 }
 fn verify_download(path: &Path, release: &Release) -> ServiceResult<()> {
-    let metadata = fs::metadata(path).map_err(|_| ServiceError::Storage)?;
+    let metadata = fs::metadata(path).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
     if metadata.len() == 0
         || metadata.len() > MAX_BYTES
         || release
@@ -987,12 +1100,18 @@ fn verify_download(path: &Path, release: &Release) -> ServiceResult<()> {
     {
         return Err(ServiceError::Maintenance);
     }
-    let mut file = fs::File::open(path).map_err(|_| ServiceError::Storage)?;
+    let mut file = fs::File::open(path).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
     let mut sha256 = Sha256::new();
     let mut sha512 = Sha512::new();
     let mut buffer = [0; 65536];
     loop {
-        let count = file.read(&mut buffer).map_err(|_| ServiceError::Storage)?;
+        let count = file.read(&mut buffer).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
         if count == 0 {
             break;
         }
@@ -1019,7 +1138,10 @@ async fn extract(
     environment: &Environment,
 ) -> ServiceResult<()> {
     let root = stage.path().join("runtime");
-    fs::create_dir(&root).map_err(|_| ServiceError::Storage)?;
+    fs::create_dir(&root).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
     let archive = stage.path().join("download");
     match release.format {
         Format::Executable => {
@@ -1030,18 +1152,31 @@ async fn extract(
                     stage.path().join("download"),
                     stage.path().join("runtime").join(name),
                 )
-                .map_err(|_| ServiceError::Storage)
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ))
             })
             .await
-            .map_err(|_| ServiceError::Storage)??;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))??;
         }
         Format::Zip => {
             let retained = stage.clone();
             let release = release.clone();
             tokio::task::spawn_blocking(move || {
-                let file = fs::File::open(retained.path().join("download"))
-                    .map_err(|_| ServiceError::Storage)?;
-                let mut zip = zip::ZipArchive::new(file).map_err(|_| ServiceError::Response)?;
+                let file = fs::File::open(retained.path().join("download")).map_err(
+                    crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Storage,
+                    ),
+                )?;
+                let mut zip = zip::ZipArchive::new(file).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
                 let expected = std::iter::once(&release.executable)
                     .chain(release.harness.iter())
                     .collect::<Vec<_>>();
@@ -1050,7 +1185,10 @@ async fn extract(
                 }
                 let mut seen = std::collections::BTreeSet::new();
                 for index in 0..zip.len() {
-                    let entry = zip.by_index(index).map_err(|_| ServiceError::Response)?;
+                    let entry = zip.by_index(index).map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Response,
+                    ))?;
                     let member = expected
                         .iter()
                         .find(|member| member.name == entry.name())
@@ -1076,12 +1214,18 @@ async fn extract(
                         .write(true)
                         .create_new(true)
                         .open(retained.path().join("runtime").join(&member.name))
-                        .map_err(|_| ServiceError::Storage)?;
+                        .map_err(crate::diagnostics::mapped(
+                            concat!(module_path!(), "::error"),
+                            ServiceError::Storage,
+                        ))?;
                     let count = std::io::copy(
                         &mut entry.take(member.bytes.unwrap_or(MAX_BYTES).saturating_add(1)),
                         &mut output,
                     )
-                    .map_err(|_| ServiceError::Storage)?;
+                    .map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Storage,
+                    ))?;
                     if member.bytes != Some(count) {
                         return Err(ServiceError::Maintenance);
                     }
@@ -1089,7 +1233,10 @@ async fn extract(
                 Ok(())
             })
             .await
-            .map_err(|_| ServiceError::Maintenance)??;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Maintenance,
+            ))??;
         }
         Format::TarGz => {
             let tar = crate::environment::archive_tar(platform, environment);
@@ -1099,7 +1246,10 @@ async fn extract(
                 options.max_output_bytes = 65536;
                 t3_process::run(options)
                     .await
-                    .map_err(|_| ServiceError::Maintenance)
+                    .map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Maintenance,
+                    ))
             };
             let list = run(vec!["-tzf".into(), archive.to_string_lossy().into_owned()]).await?;
             let kinds = run(vec!["-tvzf".into(), archive.to_string_lossy().into_owned()]).await?;
@@ -1119,9 +1269,12 @@ async fn extract(
                 environment,
             );
             options.timeout = None;
-            let mut child = t3_process::spawn_non_blocking(&options)
-                .await
-                .map_err(|_| ServiceError::Maintenance)?;
+            let mut child = t3_process::spawn_non_blocking(&options).await.map_err(
+                crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Maintenance,
+                ),
+            )?;
             let stdout = child.stdout.take().ok_or(ServiceError::Maintenance)?;
             let stderr = child.stderr.take();
             let drain = stderr.map(|mut stderr| {
@@ -1134,11 +1287,17 @@ async fn extract(
                 .create_new(true)
                 .open(root.join(&release.executable.name))
                 .await
-                .map_err(|_| ServiceError::Storage)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ))?;
             use tokio::io::AsyncReadExt;
             let bytes = tokio::io::copy(&mut stdout.take(MAX_BYTES + 1), &mut output)
                 .await
-                .map_err(|_| ServiceError::Storage)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ))?;
             if let Some(drain) = drain {
                 drain.abort();
             }
@@ -1147,7 +1306,10 @@ async fn extract(
                 || !child
                     .wait()
                     .await
-                    .map_err(|_| ServiceError::Maintenance)?
+                    .map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Maintenance,
+                    ))?
                     .success()
             {
                 return Err(ServiceError::Maintenance);
@@ -1167,8 +1329,12 @@ async fn extract(
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-                .map_err(|_| ServiceError::Storage)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).map_err(
+                crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ),
+            )?;
         }
     }
     Ok(())

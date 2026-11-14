@@ -67,10 +67,10 @@ impl CodexInstallEffects {
         Ok(Self {
             transport: Arc::new(crate::codex_installation::ReqwestReleases::new()?),
             validator: Arc::new(crate::codex_installation::ProcessCodexValidator),
-            local: Arc::new(crate::codex_installation::ProcessLocalCodex {
-                environment: context.environment.clone(),
-                managed_directory: paths.base.join("tools/codex"),
-            }),
+            local: Arc::new(crate::codex_installation::ProcessLocalCodex::new(
+                context.environment.clone(),
+                paths.base.join("tools/codex"),
+            )),
         })
     }
 }
@@ -117,7 +117,10 @@ impl CatalogRefresh for RefreshCatalog {
             .settings
             .snapshot()
             .await
-            .map_err(|_| ServiceError::Storage)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
         self.manifest
             .refresh(
                 self.clock.now_ms(),
@@ -126,7 +129,10 @@ impl CatalogRefresh for RefreshCatalog {
                 settings.enable_provider_update_checks,
             )
             .await
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         Ok(())
     }
 }
@@ -141,13 +147,16 @@ impl crate::text_generators::SettingsSource for PolicySettings {
             .snapshot()
             .await
             .map(|settings| self.policy.apply_limits(&settings))
-            .map_err(|_| ServiceError::Storage)
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))
     }
 }
 pub struct ProviderDomain {
     pub providers: Arc<ProviderService>,
     pub policy: Arc<crate::policy::ManagedProviders>,
-    settings: Arc<t3_config::settings::SettingsService>,
+    settings: Arc<PolicySettings>,
     blocked: BTreeMap<ProviderDriverKind, String>,
     pub auth: Arc<AuthService>,
     pub installations: Arc<ProviderInstallations>,
@@ -179,7 +188,10 @@ impl ProviderDomain {
             .settings
             .snapshot()
             .await
-            .map_err(|_| ServiceError::Storage)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
         let settings = ports.policy.apply_limits(&settings);
         let policy = ports.policy.clone();
         let shared_settings = ports.settings.clone();
@@ -199,12 +211,19 @@ impl ProviderDomain {
             .collect::<BTreeMap<_, _>>();
         let client = reqwest::Client::builder()
             .build()
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         let manifest = match options.manifest {
             Some(manifest) => manifest,
             None => Arc::new(
-                ModelManifest::new(client.clone(), options.manifest_cache)
-                    .map_err(|_| ServiceError::Response)?,
+                ModelManifest::new(client.clone(), options.manifest_cache).map_err(
+                    crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Response,
+                    ),
+                )?,
             ),
         };
         let platform = match options.context.platform {
@@ -331,7 +350,7 @@ impl ProviderDomain {
         let installations = Arc::new(ProviderInstallations::new(
             instances.clone(),
             providers.clone(),
-            policy_settings,
+            policy_settings.clone(),
             InstallationContext {
                 environment: options.context.environment.clone(),
                 home: options.context.home.clone(),
@@ -363,9 +382,12 @@ impl ProviderDomain {
             }),
             match ports.registry_downloads {
                 Some(downloads) => downloads,
-                None => {
-                    Arc::new(ReqwestRegistryDownloads::new().map_err(|_| ServiceError::Response)?)
-                }
+                None => Arc::new(ReqwestRegistryDownloads::new().map_err(
+                    crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Response,
+                    ),
+                )?),
             },
             ports.clock.clone(),
         ));
@@ -377,14 +399,14 @@ impl ProviderDomain {
             auth.clone(),
             options.context.cwd,
         ));
-        host.reconcile(&settings, &BTreeSet::new(), true, &blocked)
+        host.reconcile(policy_settings.as_ref(), &BTreeSet::new(), true, &blocked)
             .await?;
         let cancel = CancellationToken::new();
         let stop = cancel.clone();
         let watched_host = host.clone();
         let (failed, settings_failures) = watch::channel(None);
         let mut readiness = ports.background.clone();
-        let watched_policy = policy.clone();
+        let watched_settings = policy_settings.clone();
         let watched_blocked = blocked.clone();
         let settings_task = tokio::spawn(async move {
             let mut reconcile_now = readiness.borrow().server_ready;
@@ -401,14 +423,13 @@ impl ProviderDomain {
                 reconcile_now = false;
                 let defer_secrets = !readiness.borrow_and_update().server_ready;
                 let result = async {
-                    let current = ports
-                        .settings
-                        .snapshot()
-                        .await
-                        .map_err(|_| ServiceError::Storage)?;
-                    let current = watched_policy.apply_limits(&current);
                     watched_host
-                        .reconcile(&current, &BTreeSet::new(), defer_secrets, &watched_blocked)
+                        .reconcile(
+                            watched_settings.as_ref(),
+                            &BTreeSet::new(),
+                            defer_secrets,
+                            &watched_blocked,
+                        )
                         .await?;
                     Ok(())
                 }
@@ -419,7 +440,7 @@ impl ProviderDomain {
         Ok(Arc::new(Self {
             providers,
             policy,
-            settings: shared_settings,
+            settings: policy_settings,
             blocked,
             auth,
             installations,
@@ -445,15 +466,9 @@ impl ProviderDomain {
         input: t3_contracts::rpc::WsServerRefreshProvidersPayload,
     ) -> ServiceResult<t3_contracts::server::ServerProviderUpdatedPayload> {
         if input.reload_secrets.flatten() == Some(true) {
-            let settings = self
-                .settings
-                .snapshot()
-                .await
-                .map_err(|_| ServiceError::Storage)?;
-            let settings = self.policy.apply_limits(&settings);
             self.host
                 .reload_secrets(
-                    &settings,
+                    self.settings.as_ref(),
                     input.instance_id.as_ref().and_then(Option::as_ref),
                     &self.blocked,
                 )
@@ -466,18 +481,8 @@ impl ProviderDomain {
         reference: &t3_contracts::secret_reference::SecretReference,
         value: &str,
     ) -> ServiceResult<crate::host::HostReconcile> {
-        let settings = self
-            .settings
-            .snapshot()
-            .await
-            .map_err(|_| ServiceError::Storage)?;
         self.host
-            .apply_secret(
-                &self.policy.apply_limits(&settings),
-                reference,
-                value,
-                &self.blocked,
-            )
+            .apply_secret(self.settings.as_ref(), reference, value, &self.blocked)
             .await
     }
     pub async fn config_providers(&self) -> ServerProviders {

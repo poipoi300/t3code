@@ -85,7 +85,10 @@ async fn auth_url(
     sender
         .send(Sensitive::new(url.into()))
         .await
-        .map_err(|_| ServiceError::Cancelled)
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Cancelled,
+        ))
 }
 async fn stdout(
     reader: impl AsyncRead + Unpin,
@@ -99,7 +102,10 @@ async fn stdout(
             .take(16 * 1024 * 1024 + 1)
             .read_until(b'\n', &mut line)
             .await
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         if count == 0 {
             break;
         }
@@ -108,14 +114,20 @@ async fn stdout(
         }
         if line.starts_with(AUTH_PREFIX.as_bytes()) {
             let message = std::str::from_utf8(&line)
-                .map_err(|_| ServiceError::Callback)?
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Callback,
+                ))?
                 .trim_end_matches(['\r', '\n']);
             auth_url(&message[AUTH_PREFIX.len()..], &authorization).await?;
         } else {
             writer
                 .write_all(&line)
                 .await
-                .map_err(|_| ServiceError::Response)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
         }
     }
     Ok(())
@@ -132,7 +144,10 @@ async fn stderr(
             .take(16600)
             .read_until(b'\n', &mut line)
             .await
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         if count == 0 {
             break;
         }
@@ -170,12 +185,18 @@ impl ProcessRuntime {
         let workspace = tempfile::Builder::new()
             .prefix("t3-antigravity-setup-")
             .tempdir()
-            .map_err(|_| ServiceError::Storage)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
         let cwd = workspace.path().to_path_buf();
         let runtime_temp = tempfile::Builder::new()
             .prefix("runtime-")
             .tempdir_in(&profile.temp_directory)
-            .map_err(|_| ServiceError::Storage)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
         let spawn = profile.spawn(
             &executable.executable,
             executable.harness.as_deref(),
@@ -188,9 +209,13 @@ impl ProcessRuntime {
             process_options(&spawn.executable, &spawn.args, spawn.environment.expose());
         options.cwd = Some(cwd.clone());
         options.timeout = None;
-        let mut child = t3_process::spawn_non_blocking(&options)
-            .await
-            .map_err(|_| ServiceError::Unavailable)?;
+        let mut child =
+            t3_process::spawn_non_blocking(&options)
+                .await
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Unavailable,
+                ))?;
         let input = child.stdin.take().ok_or(ServiceError::Response)?;
         let output = child.stdout.take().ok_or(ServiceError::Response)?;
         let errors = child.stderr.take();
@@ -259,7 +284,7 @@ impl ProcessRuntime {
         if let Some(error) = *failed.borrow_and_update() {
             return Err(error);
         }
-        tokio::select! {result=operation=>result.map_err(|_|ServiceError::Response),_=failed.changed()=>Err(failed.borrow().unwrap_or(ServiceError::Response))}
+        tokio::select! {result=operation=>result.map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response)),_=failed.changed()=>Err(failed.borrow().unwrap_or(ServiceError::Response))}
     }
 }
 #[async_trait]
@@ -423,7 +448,10 @@ impl DeferredAntigravityFactory {
             }
         })
         .await
-        .map_err(|_| ServiceError::Storage)?;
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
         let profile = Arc::new(
             crate::antigravity_profile::prepare(crate::antigravity_profile::PrepareProfile {
                 directory: &self.profile_directory,

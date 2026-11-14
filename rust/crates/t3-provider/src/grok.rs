@@ -238,7 +238,10 @@ impl GrokMetadata for ProcessGrokMetadata {
     async fn initialize(&self, spawn: ResolvedRegistryAgent) -> ServiceResult<Sensitive<Value>> {
         let connection = AcpConnection::spawn(&spawn, Arc::new(SetupHandler { consent: None }))
             .await
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         let result = connection
             .initialize_with_meta(
                 "t3-code-provider-probe",
@@ -246,7 +249,10 @@ impl GrokMetadata for ProcessGrokMetadata {
                 Some(json!({"clientType":"extension"})),
             )
             .await
-            .map_err(|_| ServiceError::Response);
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ));
         connection.close().await;
         result
     }
@@ -336,7 +342,10 @@ impl GrokProvider {
         if let Some(color) = &self.spec.accent_color {
             value["accentColor"] = json!(color);
         }
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
     pub fn into_managed(
         self,
@@ -371,7 +380,10 @@ impl GrokProvider {
         )));
         let output = t3_process::run(options)
             .await
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         Ok(
             (output.code == Some(0) && !output.stdout_truncated && !output.stderr_truncated).then(
                 || {
@@ -389,7 +401,10 @@ impl GrokProvider {
             .command(&["inspect".into(), "--json".into()], cwd, 4_000)
             .await?
             .ok_or(ServiceError::Response)?;
-        let value = serde_json::from_str(output.expose()).map_err(|_| ServiceError::Response)?;
+        let value = serde_json::from_str(output.expose()).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         inspect_skills(&value)
     }
     async fn cli_models(&self) -> CliModels {
@@ -408,7 +423,10 @@ impl GrokProvider {
         if !self.spec.enabled {
             return Ok(initial);
         }
-        let mut value = serde_json::to_value(initial).map_err(|_| ServiceError::Response)?;
+        let mut value = serde_json::to_value(initial).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         let environment = self.environment();
         let probe_environment = probe_environment_for_grok(&environment);
         let version = match self
@@ -425,7 +443,10 @@ impl GrokProvider {
             Err(_) => {
                 value["status"] = json!("error");
                 value["message"] = json!("Failed to execute Grok CLI health check.");
-                return serde_json::from_value(value).map_err(|_| ServiceError::Response);
+                return serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ));
             }
         };
         value["installed"] = json!(version.installed);
@@ -444,7 +465,10 @@ impl GrokProvider {
             } else {
                 "Grok CLI is installed but failed to run."
             });
-            return serde_json::from_value(value).map_err(|_| ServiceError::Response);
+            return serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ));
         }
         let api_key = environment
             .get("XAI_API_KEY")
@@ -556,7 +580,10 @@ impl GrokProvider {
         ) {
             value["compatibilityAdvisory"] = json!(advisory);
         }
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
 }
 #[async_trait]
@@ -613,7 +640,7 @@ impl ProviderInstanceService for GrokProvider {
             if cached && !fresh {
                 return Ok(base.clone());
             }
-            let workspace=serde_json::from_value(json!({"cwd":cwd,"checkedAt":self.checked()?,"slashCommands":base.slash_commands,"skills":self.skills(Path::new(cwd)).await?,"slashCommandsPending":false})).map_err(|_|ServiceError::Response)?;
+            let workspace=serde_json::from_value(json!({"cwd":cwd,"checkedAt":self.checked()?,"slashCommands":base.slash_commands,"skills":self.skills(Path::new(cwd)).await?,"slashCommandsPending":false})).map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response))?;
             let snapshots = base.workspace_snapshots.get_or_insert_with(Vec::new);
             snapshots.retain(|snapshot| snapshot.cwd.0 != cwd);
             snapshots.push(workspace);

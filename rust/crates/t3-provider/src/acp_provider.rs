@@ -288,7 +288,10 @@ impl AcpProvider {
             value["status"] = json!("error");
             value["message"] = json!("Could not inspect the ACP Registry agent.");
         }
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
     async fn readiness(&self) -> ServiceResult<ServerProvider> {
         if !self.spec.enabled {
@@ -368,7 +371,10 @@ impl AcpProvider {
         mut base: ServerProvider,
         result: Result<AcpProbeOutcome, AcpProbeFailure>,
     ) -> ServiceResult<ServerProvider> {
-        let mut value = serde_json::to_value(&base).map_err(|_| ServiceError::Response)?;
+        let mut value = serde_json::to_value(&base).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         value
             .as_object_mut()
             .ok_or(ServiceError::Response)?
@@ -426,7 +432,10 @@ impl AcpProvider {
                 }
             }
         }
-        base = serde_json::from_value(value).map_err(|_| ServiceError::Response)?;
+        base = serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         Ok(base)
     }
     fn start_probe(&self, state: &mut State, base: ServerProvider) {

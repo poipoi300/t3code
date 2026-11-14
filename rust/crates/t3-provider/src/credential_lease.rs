@@ -51,22 +51,34 @@ impl CredentialLease {
         if key.is_empty() || key.contains(['/', '\\', '\0']) {
             return Err(ServiceError::Storage);
         }
-        fs::create_dir_all(directory).map_err(|_| ServiceError::Storage)?;
+        fs::create_dir_all(directory).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
         let path = directory.join(format!("{key}.bin.lock"));
         for attempt in 0..=80 {
             match fs::create_dir(&path) {
                 Ok(()) => {
                     let identity =
-                        file_id::get_file_id(&path).map_err(|_| ServiceError::Storage)?;
+                        file_id::get_file_id(&path).map_err(crate::diagnostics::mapped(
+                            concat!(module_path!(), "::error"),
+                            ServiceError::Storage,
+                        ))?;
                     let mut lease = Self::memory();
                     lease.path = Some(path.clone());
                     lease.identity = Some(identity);
                     let file = directory_handle(&path)?;
                     file.set_modified(SystemTime::now())
-                        .map_err(|_| ServiceError::Storage)?;
-                    let mut modified = fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .map_err(|_| ServiceError::Storage)?;
+                        .map_err(crate::diagnostics::mapped(
+                            concat!(module_path!(), "::error"),
+                            ServiceError::Storage,
+                        ))?;
+                    let mut modified = fs::metadata(&path).and_then(|m| m.modified()).map_err(
+                        crate::diagnostics::mapped(
+                            concat!(module_path!(), "::error"),
+                            ServiceError::Storage,
+                        ),
+                    )?;
                     let cancel = lease.cancel.clone();
                     let compromised = lease.compromised.clone();
                     tokio::spawn(async move {
@@ -90,7 +102,10 @@ impl CredentialLease {
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     let metadata =
-                        fs::symlink_metadata(&path).map_err(|_| ServiceError::Storage)?;
+                        fs::symlink_metadata(&path).map_err(crate::diagnostics::mapped(
+                            concat!(module_path!(), "::error"),
+                            ServiceError::Storage,
+                        ))?;
                     if !metadata.is_dir() || metadata.file_type().is_symlink() {
                         return Err(ServiceError::Storage);
                     }
@@ -129,7 +144,10 @@ fn directory_handle(path: &Path) -> ServiceResult<fs::File> {
     {
         options.read(true);
     }
-    options.open(path).map_err(|_| ServiceError::Storage)
+    options.open(path).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))
 }
 impl Drop for CredentialLease {
     fn drop(&mut self) {

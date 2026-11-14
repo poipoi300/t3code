@@ -1216,6 +1216,7 @@ async fn save_catalog_with(
                     // A profile that cannot be read (it failed authentication, or has a shape this
                     // build does not know) keeps its route and its row as they are, so every
                     // other environment can still be saved.
+                    platform.get(StorageArea::Secure, key.clone()).await?; // N2-PROBE
                     let Ok(existing) = platform.get(StorageArea::Secure, key.clone()).await else {
                         targets.push(target);
                         continue;

@@ -92,8 +92,9 @@ pub fn limits(response: &Value, checked_at: &str) -> ServiceResult<ServerProvide
     if windows.is_empty() {
         return crate::account_usage::unavailable(checked_at, "unsupported");
     }
-    serde_json::from_value(json!({"checkedAt":checked_at,"windows":windows}))
-        .map_err(|_| ServiceError::Response)
+    serde_json::from_value(json!({"checkedAt":checked_at,"windows":windows})).map_err(
+        crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+    )
 }
 async fn post(
     http: &dyn HttpTransport,
@@ -199,9 +200,15 @@ pub async fn read(
                 checked_at,
                 "probeFailed",
             )?)
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
             unavailable["unavailable"]["message"] = json!("Cursor could not read usage limits.");
-            serde_json::from_value(unavailable).map_err(|_| ServiceError::Response)
+            serde_json::from_value(unavailable).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))
         }
     }
 }

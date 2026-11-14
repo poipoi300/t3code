@@ -174,8 +174,12 @@ impl ProviderInstallations {
             if entry.source.driver.0 == driver {
                 self.providers
                     .refresh_providers(
-                        serde_json::from_value(serde_json::json!({"instanceId":id}))
-                            .map_err(|_| ServiceError::Response)?,
+                        serde_json::from_value(serde_json::json!({"instanceId":id})).map_err(
+                            crate::diagnostics::mapped(
+                                concat!(module_path!(), "::error"),
+                                ServiceError::Response,
+                            ),
+                        )?,
                     )
                     .await?;
             }

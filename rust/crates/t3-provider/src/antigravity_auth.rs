@@ -43,7 +43,7 @@ impl AuthBackend for AntigravityAuth {
         !has_attachments && t3_contracts::wire::trim_js(text) == "/logout"
     }
     async fn methods(&self) -> ServiceResult<Vec<ProviderAuthMethod>> {
-        Ok(vec![serde_json::from_value(serde_json::json!({"id":self.config.method,"name":self.config.label(),"description":null,"type":"agent"})).map_err(|_|ServiceError::Response)?])
+        Ok(vec![serde_json::from_value(serde_json::json!({"id":self.config.method,"name":self.config.label(),"description":null,"type":"agent"})).map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response))?])
     }
     async fn authenticate(&self, _method: &str, mut context: AuthContext) -> ServiceResult<()> {
         let _permit = self.provider.setup_guard().await;
@@ -84,6 +84,9 @@ impl AuthBackend for AntigravityAuth {
             Ok(Some("Signed out of Google.".into()))
         })
         .await
-        .map_err(|_| ServiceError::Expired)?
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Expired,
+        ))?
     }
 }

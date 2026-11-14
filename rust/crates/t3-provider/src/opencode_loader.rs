@@ -27,7 +27,10 @@ fn fingerprint(models: &[OpenCodeModel]) -> ServiceResult<Vec<String>> {
                 &model.provider_name,
                 variants,
             ))
-            .map_err(|_| ServiceError::Response)
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))
         })
         .collect::<ServiceResult<Vec<_>>>()?;
     rows.sort();

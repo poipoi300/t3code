@@ -64,7 +64,10 @@ impl ManagedCodexRuntime {
             .effective_home
             .as_ref()
             .unwrap_or(&self.layout.shared_home);
-        std::fs::create_dir_all(home).map_err(|_| ServiceError::Storage)?;
+        std::fs::create_dir_all(home).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
         let mut environment = self.environment.clone();
         environment.retain(|key, _| {
             ![
@@ -100,9 +103,17 @@ impl ManagedCodexRuntime {
     }
 }
 pub fn managed_launch_args(command: &str, args: &[String]) -> ServiceResult<String> {
-    let encode = |value: &str| serde_json::to_string(value).map_err(|_| ServiceError::Response);
+    let encode = |value: &str| {
+        serde_json::to_string(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
+    };
     let command = encode(command)?;
-    let args = serde_json::to_string(args).map_err(|_| ServiceError::Response)?;
+    let args = serde_json::to_string(args).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Response,
+    ))?;
     let config = [
         "model_provider=\"openai_token_sharing\"".to_owned(),
         format!(
@@ -136,7 +147,10 @@ pub async fn chatgpt_models(
         }),
     )
     .await
-    .map_err(|_| ServiceError::Network)??;
+    .map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Network,
+    ))??;
     if response.status != 200 {
         return Err(ServiceError::Response);
     }
@@ -210,7 +224,10 @@ impl ManagedCodexProvider {
         } else {
             "Codex is disabled in T3 Code settings."
         });
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
     pub async fn into_managed(
         self,
@@ -236,8 +253,9 @@ impl ProviderInstanceService for ManagedCodexProvider {
         &self.spec.instance_id
     }
     async fn snapshot(&self, cwd: Option<&str>, _fresh: bool) -> ServiceResult<ServerProvider> {
-        let mut value =
-            serde_json::to_value(self.initial_snapshot()?).map_err(|_| ServiceError::Response)?;
+        let mut value = serde_json::to_value(self.initial_snapshot()?).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+        )?;
         let checked = value["checkedAt"]
             .as_str()
             .ok_or(ServiceError::Response)?
@@ -287,7 +305,7 @@ impl ProviderInstanceService for ManagedCodexProvider {
                                     _=cancellation.cancelled()=>return Err(ServiceError::Cancelled),
                                     models=chatgpt_models(&*self.http,credentials.access_token,&draft.models)=>models?,
                                 };
-                                let mut draft=serde_json::to_value(draft).map_err(|_|ServiceError::Response)?;
+                                let mut draft=serde_json::to_value(draft).map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response))?;
                                 for key in ["auth","usageLimits","setup","runtimePaths","continuation"]{draft[key]=value[key].clone();}
                                 if let Some(commands)=draft["slashCommands"].as_array_mut(){commands.retain(|command|command["name"]!="feedback");}
                                 draft["models"]=json!(models);Ok::<_,ServiceError>(draft)
@@ -332,6 +350,9 @@ impl ProviderInstanceService for ManagedCodexProvider {
                 }
             }
         }
-        serde_json::from_value::<ServerProvider>(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value::<ServerProvider>(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
 }

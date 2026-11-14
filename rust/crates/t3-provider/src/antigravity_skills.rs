@@ -14,7 +14,10 @@ fn read(path: &Path, budget: &mut Budget) -> ServiceResult<Option<String>> {
     };
     if !file
         .metadata()
-        .map_err(|_| ServiceError::Storage)?
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?
         .is_file()
     {
         return Ok(None);
@@ -28,7 +31,10 @@ fn read(path: &Path, budget: &mut Budget) -> ServiceResult<Option<String>> {
         if buffer.is_empty() {
             break;
         }
-        let count = file.read(&mut buffer).map_err(|_| ServiceError::Storage)?;
+        let count = file.read(&mut buffer).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
         if count == 0 {
             break;
         }
@@ -112,9 +118,13 @@ fn scan(
         }
         Err(_) => return Err(ServiceError::Storage),
     };
-    let mut entries = entries
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| ServiceError::Storage)?;
+    let mut entries =
+        entries
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
     if entries.len() > budget.entries {
         return Err(ServiceError::Response);
     }
@@ -141,7 +151,12 @@ fn scan(
         if let Some(description) = description {
             value["description"] = json!(description);
         }
-        skills.push(serde_json::from_value(value).map_err(|_| ServiceError::Response)?);
+        skills.push(
+            serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?,
+        );
         return Ok(());
     }
     if children {

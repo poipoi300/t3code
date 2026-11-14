@@ -1,3 +1,8 @@
+//! OpenCode probing uses the bounded transport in `opencode_http`.
+//!
+//! ```compile_fail
+//! use t3_provider::discovery::probe_opencode_server;
+//! ```
 use crate::{
     Error, Result,
     environment::{Environment, Platform, probe_environment, process_options},
@@ -341,56 +346,6 @@ pub fn classify_opencode_response(
         .get("version")
         .and_then(serde_json::Value::as_str)
         .and_then(classify_opencode_version))
-}
-
-pub async fn probe_opencode_server(
-    client: &reqwest::Client,
-    server_url: &str,
-    password: &str,
-    env: &Environment,
-) -> Result<OpenCodeVersion> {
-    let base = url::Url::parse(server_url.trim())
-        .map_err(|_| invalid("OpenCode server", "invalid HTTP URL"))?;
-    if !matches!(base.scheme(), "http" | "https") {
-        return Err(invalid("OpenCode server", "invalid HTTP URL"));
-    }
-    for path in ["/api/info", "/global/health"] {
-        let mut url = base.clone();
-        url.set_path(&format!("{}{path}", base.path().trim_end_matches('/')));
-        let mut request = client
-            .get(url)
-            .timeout(Duration::from_millis(probe_timeout_ms(
-                "opencode", 5_000, env,
-            )));
-        if !password.is_empty() {
-            request = request.basic_auth("opencode", Some(password));
-        }
-        let response = request
-            .send()
-            .await
-            .map_err(|_| invalid("OpenCode server", "Couldn't reach the OpenCode server."))?;
-        let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|h| h.to_str().ok())
-            .map(str::to_owned);
-        let body = response.text().await.map_err(|_| {
-            invalid(
-                "OpenCode server",
-                "Couldn't read the OpenCode server version.",
-            )
-        })?;
-        if let Some(probed) =
-            classify_opencode_response(path, status, content_type.as_deref(), &body)?
-        {
-            return Ok(probed);
-        }
-    }
-    Err(invalid(
-        "OpenCode server",
-        "The server did not identify itself as OpenCode.",
-    ))
 }
 
 pub fn managed_release<'a>(

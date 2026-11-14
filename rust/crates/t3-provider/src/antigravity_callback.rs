@@ -26,7 +26,10 @@ pub fn authorization(input: &str) -> ServiceResult<Authorization> {
     {
         return Err(ServiceError::Callback);
     }
-    let url = url::Url::parse(input).map_err(|_| ServiceError::Callback)?;
+    let url = url::Url::parse(input).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Callback,
+    ))?;
     let state = one(&url, "state")
         .filter(|state| {
             !state.is_empty()
@@ -49,7 +52,10 @@ pub fn authorization(input: &str) -> ServiceResult<Authorization> {
     {
         return Err(ServiceError::Callback);
     }
-    let parsed = url::Url::parse(&redirect).map_err(|_| ServiceError::Callback)?;
+    let parsed = url::Url::parse(&redirect).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Callback,
+    ))?;
     if parsed.port().is_none_or(|port| port < 1024) {
         return Err(ServiceError::Callback);
     }
@@ -63,9 +69,13 @@ pub fn validate(pending: &Authorization, input: &str) -> ServiceResult<Sensitive
     if input.encode_utf16().count() > 16384 {
         return Err(ServiceError::Callback);
     }
-    let callback = url::Url::parse(input).map_err(|_| ServiceError::Callback)?;
-    let expected =
-        url::Url::parse(pending.redirect.expose()).map_err(|_| ServiceError::Callback)?;
+    let callback = url::Url::parse(input).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Callback,
+    ))?;
+    let expected = url::Url::parse(pending.redirect.expose()).map_err(
+        crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Callback),
+    )?;
     if callback.scheme() != "http"
         || callback.host_str() != Some("127.0.0.1")
         || callback.origin() != expected.origin()
@@ -106,7 +116,10 @@ pub async fn forward(callback: &Sensitive<url::Url>) -> ServiceResult<()> {
         let port = callback.port().ok_or(ServiceError::Callback)?;
         let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
             .await
-            .map_err(|_| ServiceError::Callback)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Callback,
+            ))?;
         let path = format!(
             "{}{}",
             callback.path(),
@@ -120,7 +133,10 @@ pub async fn forward(callback: &Sensitive<url::Url>) -> ServiceResult<()> {
         socket
             .write_all(request.as_bytes())
             .await
-            .map_err(|_| ServiceError::Callback)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Callback,
+            ))?;
         let mut header = vec![];
         let mut buffer = [0; 1024];
         let mut status = None;
@@ -128,7 +144,10 @@ pub async fn forward(callback: &Sensitive<url::Url>) -> ServiceResult<()> {
             let count = socket
                 .read(&mut buffer)
                 .await
-                .map_err(|_| ServiceError::Callback)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Callback,
+                ))?;
             if count == 0 {
                 break;
             }
@@ -136,7 +155,10 @@ pub async fn forward(callback: &Sensitive<url::Url>) -> ServiceResult<()> {
                 header.extend_from_slice(&buffer[..count]);
                 if let Some(end) = header.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
                     let first = std::str::from_utf8(&header[..end])
-                        .map_err(|_| ServiceError::Callback)?
+                        .map_err(crate::diagnostics::mapped(
+                            concat!(module_path!(), "::error"),
+                            ServiceError::Callback,
+                        ))?
                         .split("\r\n")
                         .next()
                         .ok_or(ServiceError::Callback)?;
@@ -160,5 +182,8 @@ pub async fn forward(callback: &Sensitive<url::Url>) -> ServiceResult<()> {
         }
     })
     .await
-    .map_err(|_| ServiceError::Callback)?
+    .map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Callback,
+    ))?
 }

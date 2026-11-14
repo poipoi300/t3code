@@ -73,8 +73,14 @@ impl JwksVerifier {
             }),
         )
         .await
-        .map_err(|_| ServiceError::Identity)?
-        .map_err(|_| ServiceError::Identity)?;
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Identity,
+        ))?
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Identity,
+        ))?;
         if response.status != 200 {
             return Err(ServiceError::Identity);
         }
@@ -114,10 +120,14 @@ impl IdentityVerifier for JwksVerifier {
         let decode = |part: &str| {
             URL_SAFE_NO_PAD
                 .decode(part)
-                .map_err(|_| ServiceError::Identity)
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Identity,
+                ))
         };
-        let header: Value =
-            serde_json::from_slice(&decode(parts[0])?).map_err(|_| ServiceError::Identity)?;
+        let header: Value = serde_json::from_slice(&decode(parts[0])?).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Identity),
+        )?;
         let alg = header
             .get("alg")
             .and_then(Value::as_str)
@@ -152,7 +162,10 @@ impl IdentityVerifier for JwksVerifier {
                 signed.as_bytes(),
                 &bytes,
             )
-            .map_err(|_| ServiceError::Identity)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Identity,
+            ))?;
         } else {
             let x = member("x")?;
             let y = member("y")?;
@@ -162,10 +175,14 @@ impl IdentityVerifier for JwksVerifier {
             let public: Vec<_> = [vec![4], x, y].concat();
             signature::UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, public)
                 .verify(signed.as_bytes(), &bytes)
-                .map_err(|_| ServiceError::Identity)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Identity,
+                ))?;
         }
-        let claims: Value =
-            serde_json::from_slice(&decode(parts[1])?).map_err(|_| ServiceError::Identity)?;
+        let claims: Value = serde_json::from_slice(&decode(parts[1])?).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Identity),
+        )?;
         let now = now_ms as f64 / 1000.;
         let audience_ok = claims.get("aud").is_some_and(|v| {
             v.as_str() == Some(audience)

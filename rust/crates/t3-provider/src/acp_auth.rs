@@ -115,7 +115,10 @@ impl AcpAuth {
             .catalog
             .inspect(&self.settings, self.environment.expose())
             .await
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         if inspected.status != InspectionStatus::Ready {
             return Err(ServiceError::Method);
         }
@@ -131,15 +134,24 @@ impl AcpAuth {
             .catalog
             .resolve(&self.settings, &self.cwd, self.environment.expose())
             .await
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         let connection = AcpConnection::spawn(&resolved, Arc::new(SetupHandler { consent: None }))
             .await
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         let initialized = connection
             .initialize("t3-code-provider-auth", self.terminal.is_some())
             .await;
         connection.close().await;
-        let initialized = initialized.map_err(|_| ServiceError::Response)?;
+        let initialized = initialized.map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         let methods = acp_catalog::auth_methods(
             initialized.expose()["authMethods"]
                 .as_array()
@@ -158,100 +170,122 @@ impl AcpAuth {
             .catalog
             .resolve(&self.settings, &self.cwd, self.environment.expose())
             .await
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         let (send, mut receive) = mpsc::unbounded_channel();
         let handler = Arc::new(SetupHandler {
             consent: Some(Arc::new(FlowConsent(send))),
         });
         let connection = AcpConnection::spawn(&resolved, handler.clone())
             .await
-            .map_err(|_| ServiceError::Response)?;
-        let result: ServiceResult<()> = async {
-            let initialized = with_consent(
-                async {
-                    connection
-                        .initialize("t3-code-provider-auth", self.terminal.is_some())
-                        .await
-                        .map_err(|_| ServiceError::Response)
-                },
-                &mut context,
-                &mut receive,
-            )
-            .await?;
-            let method = initialized.expose()["authMethods"]
-                .as_array()
-                .and_then(|methods| methods.iter().find(|candidate| candidate["id"] == method))
-                .cloned()
-                .ok_or(ServiceError::Method)?;
-            if method["type"] == "terminal" {
-                connection.close().await;
-                let terminal = self.terminal.as_ref().ok_or(ServiceError::Unsupported)?;
-                terminal
-                    .login(&resolved, Sensitive::new(method), &mut context)
-                    .await?;
-                context.verifying().await;
-                let verified = AcpConnection::spawn(&resolved, handler)
-                    .await
-                    .map_err(|_| ServiceError::Response)?;
-                let result: ServiceResult<()> = async {
-                    with_consent(
-                        async {
-                            verified
-                                .initialize("t3-code-provider-auth", self.terminal.is_some())
-                                .await
-                                .map_err(|_| ServiceError::Response)
-                        },
-                        &mut context,
-                        &mut receive,
-                    )
-                    .await?;
-                    with_consent(
-                        async {
-                            verified
-                                .new_session(&self.cwd)
-                                .await
-                                .map_err(|_| ServiceError::Response)
-                        },
-                        &mut context,
-                        &mut receive,
-                    )
-                    .await?;
-                    Ok(())
-                }
-                .await;
-                verified.close().await;
-                result?;
-            } else {
-                if method["type"].is_null() || method["type"] == "agent" {
-                    let id = method["id"].as_str().ok_or(ServiceError::Method)?;
-                    with_consent(
-                        async {
-                            connection
-                                .authenticate(id)
-                                .await
-                                .map_err(|_| ServiceError::Response)
-                        },
-                        &mut context,
-                        &mut receive,
-                    )
-                    .await?;
-                }
-                context.verifying().await;
-                with_consent(
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
+        let result: ServiceResult<()> =
+            async {
+                let initialized = with_consent(
                     async {
                         connection
-                            .new_session(&self.cwd)
+                            .initialize("t3-code-provider-auth", self.terminal.is_some())
                             .await
-                            .map_err(|_| ServiceError::Response)
+                            .map_err(crate::diagnostics::mapped(
+                                concat!(module_path!(), "::error"),
+                                ServiceError::Response,
+                            ))
                     },
                     &mut context,
                     &mut receive,
                 )
                 .await?;
+                let method = initialized.expose()["authMethods"]
+                    .as_array()
+                    .and_then(|methods| methods.iter().find(|candidate| candidate["id"] == method))
+                    .cloned()
+                    .ok_or(ServiceError::Method)?;
+                if method["type"] == "terminal" {
+                    connection.close().await;
+                    let terminal = self.terminal.as_ref().ok_or(ServiceError::Unsupported)?;
+                    terminal
+                        .login(&resolved, Sensitive::new(method), &mut context)
+                        .await?;
+                    context.verifying().await;
+                    let verified = AcpConnection::spawn(&resolved, handler).await.map_err(
+                        crate::diagnostics::mapped(
+                            concat!(module_path!(), "::error"),
+                            ServiceError::Response,
+                        ),
+                    )?;
+                    let result: ServiceResult<()> = async {
+                        with_consent(
+                            async {
+                                verified
+                                    .initialize("t3-code-provider-auth", self.terminal.is_some())
+                                    .await
+                                    .map_err(crate::diagnostics::mapped(
+                                        concat!(module_path!(), "::error"),
+                                        ServiceError::Response,
+                                    ))
+                            },
+                            &mut context,
+                            &mut receive,
+                        )
+                        .await?;
+                        with_consent(
+                            async {
+                                verified.new_session(&self.cwd).await.map_err(
+                                    crate::diagnostics::mapped(
+                                        concat!(module_path!(), "::error"),
+                                        ServiceError::Response,
+                                    ),
+                                )
+                            },
+                            &mut context,
+                            &mut receive,
+                        )
+                        .await?;
+                        Ok(())
+                    }
+                    .await;
+                    verified.close().await;
+                    result?;
+                } else {
+                    if method["type"].is_null() || method["type"] == "agent" {
+                        let id = method["id"].as_str().ok_or(ServiceError::Method)?;
+                        with_consent(
+                            async {
+                                connection.authenticate(id).await.map_err(
+                                    crate::diagnostics::mapped(
+                                        concat!(module_path!(), "::error"),
+                                        ServiceError::Response,
+                                    ),
+                                )
+                            },
+                            &mut context,
+                            &mut receive,
+                        )
+                        .await?;
+                    }
+                    context.verifying().await;
+                    with_consent(
+                        async {
+                            connection.new_session(&self.cwd).await.map_err(
+                                crate::diagnostics::mapped(
+                                    concat!(module_path!(), "::error"),
+                                    ServiceError::Response,
+                                ),
+                            )
+                        },
+                        &mut context,
+                        &mut receive,
+                    )
+                    .await?;
+                }
+                Ok(())
             }
-            Ok(())
-        }
-        .await;
+            .await;
         connection.close().await;
         result?;
         self.confirmed.set(true).await
@@ -275,7 +309,10 @@ impl AuthBackend for AcpAuth {
         let work = tokio::time::timeout(Duration::from_secs(30), self.discover());
         self.coordinator
             .background_probe(&self.agent_key(), async {
-                work.await.map_err(|_| ServiceError::Response)?
+                work.await.map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?
             })
             .await?
             .ok_or(ServiceError::Busy)
@@ -291,16 +328,25 @@ impl AuthBackend for AcpAuth {
                 .catalog
                 .resolve(&self.settings, &self.cwd, self.environment.expose())
                 .await
-                .map_err(|_| ServiceError::Response)?;
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?;
             let connection =
                 AcpConnection::spawn(&resolved, Arc::new(SetupHandler { consent: None }))
                     .await
-                    .map_err(|_| ServiceError::Response)?;
+                    .map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Response,
+                    ))?;
             let result: ServiceResult<()> = async {
                 connection
                     .initialize("t3-code-provider-auth", false)
                     .await
-                    .map_err(|_| ServiceError::Response)?;
+                    .map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Response,
+                    ))?;
                 let method = if connection.generation() == t3_acp::Generation::V1 {
                     "logout"
                 } else {
@@ -313,7 +359,10 @@ impl AuthBackend for AcpAuth {
                         t3_contracts::acp_registry::AcpRegistryOperationErrorReason::LogoutFailed,
                     )
                     .await
-                    .map_err(|_| ServiceError::Response)?;
+                    .map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Response,
+                    ))?;
                 Ok(())
             }
             .await;
@@ -322,7 +371,10 @@ impl AuthBackend for AcpAuth {
         };
         tokio::time::timeout(Duration::from_secs(60), work)
             .await
-            .map_err(|_| ServiceError::Response)??;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))??;
         self.confirmed.set(false).await?;
         Ok(None)
     }

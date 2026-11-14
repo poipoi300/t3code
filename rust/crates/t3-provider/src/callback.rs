@@ -21,15 +21,25 @@ struct Listener {
 #[async_trait]
 impl CallbackFactory for LoopbackCallbacks {
     async fn listen(&self) -> ServiceResult<Box<dyn CallbackListener>> {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|_| ServiceError::Callback)?;
+        let listener =
+            TcpListener::bind("127.0.0.1:0")
+                .await
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Callback,
+                ))?;
         let port = listener
             .local_addr()
-            .map_err(|_| ServiceError::Callback)?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Callback,
+            ))?
             .port();
         let mut nonce = [0; 24];
-        getrandom::fill(&mut nonce).map_err(|_| ServiceError::Callback)?;
+        getrandom::fill(&mut nonce).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Callback,
+        ))?;
         Ok(Box::new(Listener {
             listener,
             redirect: format!("http://127.0.0.1:{port}/auth/callback"),
@@ -49,11 +59,14 @@ impl CallbackListener for Listener {
     }
     async fn receive(&mut self) -> ServiceResult<Sensitive<String>> {
         loop {
-            let (mut socket, _) = self
-                .listener
-                .accept()
-                .await
-                .map_err(|_| ServiceError::Callback)?;
+            let (mut socket, _) =
+                self.listener
+                    .accept()
+                    .await
+                    .map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Callback,
+                    ))?;
             let request = tokio::time::timeout(Duration::from_secs(5), async {
                 let mut bytes = Vec::new();
                 let mut chunk = [0; 1024];

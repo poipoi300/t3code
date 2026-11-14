@@ -73,7 +73,10 @@ impl ReqwestReleases {
         Ok(Self {
             client: reqwest::Client::builder()
                 .build()
-                .map_err(|_| ServiceError::Network)?,
+                .map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Network,
+                ))?,
         })
     }
 }
@@ -85,12 +88,21 @@ impl ReleaseTransport for ReqwestReleases {
             .get("https://registry.npmjs.org/@openai/codex/latest")
             .send()
             .await
-            .map_err(|_| ServiceError::Network)?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Network,
+            ))?
             .error_for_status()
-            .map_err(|_| ServiceError::Network)?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Network,
+            ))?
             .json()
             .await
-            .map_err(|_| ServiceError::Response)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Response,
+            ))?;
         let version = latest["version"]
             .as_str()
             .filter(|v| valid_version(v))
@@ -101,17 +113,29 @@ impl ReleaseTransport for ReqwestReleases {
             .get(format!("{root}/codex-package_SHA256SUMS"))
             .send()
             .await
-            .map_err(|_| ServiceError::Network)?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Network,
+            ))?
             .error_for_status()
-            .map_err(|_| ServiceError::Network)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Network,
+            ))?;
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| ServiceError::Network)? {
+        while let Some(chunk) = response.chunk().await.map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Network,
+        ))? {
             if bytes.len() + chunk.len() > 1024 * 1024 {
                 return Err(ServiceError::Response);
             }
             bytes.extend_from_slice(&chunk);
         }
-        let text = String::from_utf8(bytes).map_err(|_| ServiceError::Response)?;
+        let text = String::from_utf8(bytes).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))?;
         let file = format!("codex-package-{target}.tar.gz");
         let checksum = text.lines().find_map(|line| {
             let mut fields = line.split_whitespace();
@@ -138,23 +162,38 @@ impl ReleaseTransport for ReqwestReleases {
             .get(&asset.url)
             .send()
             .await
-            .map_err(|_| ServiceError::Network)?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Network,
+            ))?
             .error_for_status()
-            .map_err(|_| ServiceError::Network)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Network,
+            ))?;
         let mut file = fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(destination)
-            .map_err(|_| ServiceError::Storage)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
         let mut bytes = 0u64;
-        while let Some(chunk) = response.chunk().await.map_err(|_| ServiceError::Network)? {
+        while let Some(chunk) = response.chunk().await.map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Network,
+        ))? {
             bytes = bytes
                 .checked_add(chunk.len() as u64)
                 .ok_or(ServiceError::Response)?;
             if bytes > asset.archive_bytes.unwrap_or(1024 * 1024 * 1024) {
                 return Err(ServiceError::Response);
             }
-            file.write_all(&chunk).map_err(|_| ServiceError::Storage)?;
+            file.write_all(&chunk).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
             progress.send_replace(bytes);
         }
         Ok(())
@@ -184,7 +223,10 @@ impl CodexExecutableValidator for ProcessCodexValidator {
         options.max_output_bytes = 8192;
         let output = t3_process::run(options)
             .await
-            .map_err(|_| ServiceError::Maintenance)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Maintenance,
+            ))?;
         if output.stdout_text().trim() == format!("codex-cli {version}") {
             Ok(())
         } else {
@@ -206,6 +248,27 @@ impl LocalCodex for NoLocalCodex {
 pub struct ProcessLocalCodex {
     pub environment: Environment,
     pub managed_directory: PathBuf,
+    cache: Mutex<BTreeMap<PathBuf, LocalProbe>>,
+}
+#[derive(PartialEq)]
+struct LocalFingerprint {
+    real: PathBuf,
+    bytes: u64,
+    modified_ms: Option<u128>,
+    identity: Option<file_id::FileId>,
+}
+struct LocalProbe {
+    fingerprint: LocalFingerprint,
+    executable: Option<CodexExecutable>,
+}
+impl ProcessLocalCodex {
+    pub fn new(environment: Environment, managed_directory: PathBuf) -> Self {
+        Self {
+            environment,
+            managed_directory,
+            cache: Mutex::new(BTreeMap::new()),
+        }
+    }
 }
 #[async_trait]
 impl LocalCodex for ProcessLocalCodex {
@@ -264,32 +327,56 @@ impl LocalCodex for ProcessLocalCodex {
         {
             return Ok(None);
         }
-        options.program = resolved.program;
-        options.args = vec!["--version".into()];
-        options.timeout = Some(Duration::from_secs(5));
-        options.max_output_bytes = 8192;
-        let output = match t3_process::run(options.clone()).await {
-            Ok(output) => output,
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
             Err(_) => return Ok(None),
         };
-        let text = output.stdout_text();
-        let Some(version) = text
-            .trim()
-            .strip_prefix("codex-cli ")
-            .filter(|v| valid_version(v))
-        else {
-            return Ok(None);
+        let fingerprint = LocalFingerprint {
+            real,
+            bytes: metadata.len(),
+            modified_ms: metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis()),
+            identity: file_id::get_file_id(&path).ok(),
         };
-        options.args = vec!["app-server".into(), "--help".into()];
-        if t3_process::run(options).await.is_err() {
-            return Ok(None);
+        let mut cache = self.cache.lock().await;
+        if let Some(cached) = cache
+            .get(&path)
+            .filter(|entry| entry.fingerprint == fingerprint)
+        {
+            return Ok(cached.executable.clone());
         }
-        Ok(Some(CodexExecutable {
+        options.program = resolved.program;
+        options.args = vec!["--version".into()];
+        options.max_output_bytes = 8192;
+        let executable = tokio::time::timeout(Duration::from_secs(5), async {
+            let output = t3_process::run(options.clone()).await.ok()?;
+            let text = output.stdout_text();
+            let version = text
+                .trim()
+                .strip_prefix("codex-cli ")
+                .filter(|version| valid_version(version) && !version.contains('-'))?;
+            options.args = vec!["app-server".into(), "--help".into()];
+            t3_process::run(options).await.ok()?;
+            Some(CodexExecutable {
+                path: path.clone(),
+                version: version.into(),
+                source: ProviderInstallSource::Local,
+                managed_directory: None,
+            })
+        })
+        .await
+        .unwrap_or(None);
+        cache.insert(
             path,
-            version: version.into(),
-            source: ProviderInstallSource::Local,
-            managed_directory: None,
-        }))
+            LocalProbe {
+                fingerprint,
+                executable: executable.clone(),
+            },
+        );
+        Ok(executable)
     }
 }
 
@@ -385,8 +472,14 @@ impl CodexInstallation {
             .parent()
             .and_then(Path::parent)
             .ok_or(ServiceError::Storage)?;
-        fs::create_dir_all(base).map_err(|_| ServiceError::Storage)?;
-        let mut root = fs::canonicalize(base).map_err(|_| ServiceError::Storage)?;
+        fs::create_dir_all(base).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
+        let mut root = fs::canonicalize(base).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
         for component in ["tools", "codex"] {
             let path = root.join(component);
             match fs::symlink_metadata(&path) {
@@ -395,11 +488,17 @@ impl CodexInstallation {
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    fs::create_dir(&path).map_err(|_| ServiceError::Storage)?;
+                    fs::create_dir(&path).map_err(crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Storage,
+                    ))?;
                 }
                 Err(_) => return Err(ServiceError::Storage),
             }
-            let resolved = fs::canonicalize(&path).map_err(|_| ServiceError::Storage)?;
+            let resolved = fs::canonicalize(&path).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
             if resolved.parent() != Some(root.as_path()) {
                 return Err(ServiceError::Storage);
             }
@@ -462,7 +561,10 @@ impl CodexInstallation {
         }
         let root = self.root()?;
         let directory = root.join(version);
-        let real = fs::canonicalize(&directory).map_err(|_| ServiceError::Maintenance)?;
+        let real = fs::canonicalize(&directory).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Maintenance,
+        ))?;
         if real.parent() != Some(root.as_path())
             || fs::symlink_metadata(&directory).is_ok_and(|m| m.file_type().is_symlink())
         {
@@ -508,8 +610,14 @@ impl CodexInstallation {
     pub async fn initialize(self: &Arc<Self>) -> ServiceResult<()> {
         if self.directory.exists() {
             let root = self.root()?;
-            for entry in fs::read_dir(&root).map_err(|_| ServiceError::Storage)? {
-                let entry = entry.map_err(|_| ServiceError::Storage)?;
+            for entry in fs::read_dir(&root).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))? {
+                let entry = entry.map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Storage,
+                ))?;
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
                 if (name.starts_with(".install-") || name.starts_with(".active-"))
@@ -580,15 +688,13 @@ impl CodexInstallation {
         }
         let current = self.state();
         if !running(&current) {
-            let offer = self.offer(
-                current.installed_version.as_ref().map(|v| v.0.as_str()),
-                upstream.1.as_ref(),
-            );
+            let installed = managed_version(&current).filter(|version| self.supported(version));
+            let offer = self.offer(installed, upstream.1.as_ref());
             self.state.send_modify(|s| {
                 s.version = offer
                     .as_ref()
                     .map(|a| a.version.clone().into())
-                    .or_else(|| s.installed_version.clone());
+                    .or_else(|| installed.map(|version| version.to_owned().into()));
                 s.total_bytes = offer.and_then(|a| a.archive_bytes);
             });
         }
@@ -598,15 +704,23 @@ impl CodexInstallation {
         installed: Option<&str>,
         upstream: Option<&ReleaseAsset>,
     ) -> Option<ReleaseAsset> {
-        let installed = installed.filter(|v| self.supported(v));
+        let Some(installed) = installed.filter(|v| self.supported(v)) else {
+            return self.pin.clone();
+        };
         [
             self.pin.as_ref(),
             upstream.filter(|r| self.supported(&r.version)),
         ]
         .into_iter()
         .flatten()
-        .filter(|r| installed.is_none_or(|i| compare_versions(&r.version, i).is_gt()))
-        .max_by(|a, b| compare_versions(&a.version, &b.version))
+        .filter(|r| compare_versions(&r.version, installed).is_gt())
+        .reduce(|selected, candidate| {
+            if compare_versions(&candidate.version, &selected.version).is_gt() {
+                candidate
+            } else {
+                selected
+            }
+        })
         .cloned()
     }
     pub async fn start(self: &Arc<Self>) -> ServiceResult<ProviderInstallState> {
@@ -625,11 +739,9 @@ impl CodexInstallation {
         }
         let current = self.state();
         let upstream = self.upstream.lock().await.1.clone();
-        let release = self.offer(
-            current.installed_version.as_ref().map(|v| v.0.as_str()),
-            upstream.as_ref(),
-        );
-        if release.is_none() && current.installed_version.is_none() {
+        let installed = managed_version(&current).filter(|version| self.supported(version));
+        let release = self.offer(installed, upstream.as_ref());
+        if release.is_none() && installed.is_none() {
             return Err(ServiceError::Unsupported);
         }
         let id = uuid::Uuid::new_v4().to_string();
@@ -729,10 +841,16 @@ impl CodexInstallation {
         let staging = tempfile::Builder::new()
             .prefix(".install-")
             .tempdir_in(&root)
-            .map_err(|_| ServiceError::Storage)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
         let archive = staging.path().join("download.tar.gz");
         let runtime = staging.path().join("runtime");
-        fs::create_dir(&runtime).map_err(|_| ServiceError::Storage)?;
+        fs::create_dir(&runtime).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
         let (progress, mut receiver) = watch::channel(0);
         let download = self.transport.download(&release, &archive, progress);
         tokio::pin!(download);
@@ -743,9 +861,21 @@ impl CodexInstallation {
         };
         tokio::time::timeout(Duration::from_secs(45 * 60), bounded)
             .await
-            .map_err(|_| ServiceError::Network)??;
-        let mut file = fs::File::open(&archive).map_err(|_| ServiceError::Storage)?;
-        let size = file.metadata().map_err(|_| ServiceError::Storage)?.len();
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Network,
+            ))??;
+        let mut file = fs::File::open(&archive).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
+        let size = file
+            .metadata()
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?
+            .len();
         if size > release.archive_bytes.unwrap_or(1024 * 1024 * 1024)
             || release
                 .archive_bytes
@@ -756,7 +886,10 @@ impl CodexInstallation {
         let mut digest = Sha256::new();
         let mut buffer = [0; 64 * 1024];
         loop {
-            let read = file.read(&mut buffer).map_err(|_| ServiceError::Storage)?;
+            let read = file.read(&mut buffer).map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
             if read == 0 {
                 break;
             }
@@ -817,7 +950,10 @@ impl CodexInstallation {
             json!({"version":release.version,"target":release.target,"sha256":release.sha256})
                 .to_string(),
         )
-        .map_err(|_| ServiceError::Storage)?;
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
         for attempt in 0..=10 {
             match fs::rename(&runtime, &destination) {
                 Ok(()) => break,
@@ -844,13 +980,18 @@ impl CodexInstallation {
     fn activate(&self, root: &Path, release: &ReleaseAsset) -> ServiceResult<()> {
         self.eligible(release)?;
         let executable = self.completed(&release.version)?;
-        let mut pointer =
-            tempfile::NamedTempFile::new_in(root).map_err(|_| ServiceError::Storage)?;
-        write!(pointer, "{}", json!({"version":release.version}))
-            .map_err(|_| ServiceError::Storage)?;
+        let mut pointer = tempfile::NamedTempFile::new_in(root).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Storage),
+        )?;
+        write!(pointer, "{}", json!({"version":release.version})).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Storage),
+        )?;
         pointer
             .persist(root.join("active.json"))
-            .map_err(|_| ServiceError::Storage)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?;
         self.publish_executable(&executable);
         Ok(())
     }
@@ -864,7 +1005,10 @@ impl CodexInstallation {
         options.max_output_bytes = 8 * 1024 * 1024;
         let output = t3_process::run(options)
             .await
-            .map_err(|_| ServiceError::Maintenance)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Maintenance,
+            ))?;
         Ok(output.stdout_text())
     }
     pub async fn remove(&self, protected: &[PathBuf]) -> ServiceResult<()> {
@@ -872,12 +1016,19 @@ impl CodexInstallation {
         if running(&self.state()) {
             return Err(ServiceError::Busy);
         }
-        let _leases = self.leases.try_write().map_err(|_| ServiceError::Busy)?;
+        let _leases = self.leases.try_write().map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Busy,
+        ))?;
         if self.directory.exists() {
             let root = self.root()?;
             for path in protected {
-                let path = crate::environment::canonicalize_existing_parent(path)
-                    .map_err(|_| ServiceError::Storage)?;
+                let path = crate::environment::canonicalize_existing_parent(path).map_err(
+                    crate::diagnostics::mapped(
+                        concat!(module_path!(), "::error"),
+                        ServiceError::Storage,
+                    ),
+                )?;
                 if path.starts_with(&root) {
                     return Err(ServiceError::Busy);
                 }
@@ -909,22 +1060,32 @@ impl CodexInstallation {
     }
 }
 fn valid_version(value: &str) -> bool {
-    crate::versions::parse_version(value).is_some()
-        && !value.contains(['/', '\\', ':', '+'])
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    static VERSION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9.-]+)?$")
+            .expect("constant Codex version pattern")
+    });
+    VERSION.is_match(value)
 }
+
 fn valid_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 fn record(path: &Path) -> ServiceResult<Value> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| ServiceError::Storage)?;
+    let metadata = fs::symlink_metadata(path).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 8192 {
         return Err(ServiceError::Maintenance);
     }
-    serde_json::from_slice(&fs::read(path).map_err(|_| ServiceError::Storage)?)
-        .map_err(|_| ServiceError::Maintenance)
+    serde_json::from_slice(&fs::read(path).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?)
+    .map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Maintenance,
+    ))
 }
 fn executable_file(path: &Path) -> bool {
     let Ok(metadata) = fs::symlink_metadata(path) else {
@@ -964,6 +1125,16 @@ pub fn validate_archive(names: &str, kinds: &str) -> ServiceResult<()> {
         Ok(())
     }
 }
+fn managed_version(state: &ProviderInstallState) -> Option<&str> {
+    if state.source == Some(Some(ProviderInstallSource::Managed)) {
+        state
+            .installed_version
+            .as_ref()
+            .map(|version| version.0.as_str())
+    } else {
+        None
+    }
+}
 fn running(state: &ProviderInstallState) -> bool {
     matches!(
         state.phase,
@@ -973,13 +1144,98 @@ fn running(state: &ProviderInstallState) -> bool {
     )
 }
 fn remove_inside(root: &Path, path: &Path) -> ServiceResult<()> {
-    let target = fs::canonicalize(path).map_err(|_| ServiceError::Storage)?;
-    let root = fs::canonicalize(root).map_err(|_| ServiceError::Storage)?;
+    let target = fs::canonicalize(path).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
+    let root = fs::canonicalize(root).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))?;
     if target == root
         || !target.starts_with(&root)
         || fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
     {
         return Err(ServiceError::Storage);
     }
-    fs::remove_dir_all(path).map_err(|_| ServiceError::Storage)
+    fs::remove_dir_all(path).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Storage,
+    ))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod release_selection_tests {
+    use super::*;
+    struct NoDownload;
+    #[async_trait]
+    impl ReleaseTransport for NoDownload {
+        async fn latest(&self, _: &str) -> ServiceResult<Option<ReleaseAsset>> {
+            panic!("unexpected lookup")
+        }
+        async fn download(
+            &self,
+            _: &ReleaseAsset,
+            _: &Path,
+            _: watch::Sender<u64>,
+        ) -> ServiceResult<()> {
+            panic!("unexpected download")
+        }
+    }
+    #[test]
+    fn managed_versions_use_the_typescript_schema() {
+        for invalid in ["1", "1.2", "1..2", "v1.2.3", "1.2.3+build", "1.2.3-"] {
+            assert!(!valid_version(invalid), "accepted {invalid}");
+        }
+        for valid in ["1.2.3", "0.170.0-alpha.1"] {
+            assert!(valid_version(valid));
+        }
+    }
+    #[test]
+    fn update_offers_keep_the_build_asset_when_upstream_has_the_same_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let pin = ReleaseAsset {
+            version: "0.166.0".into(),
+            target: "fixture".into(),
+            url: "https://example.invalid/pin".into(),
+            sha256: "build-pinned-hash".into(),
+            archive_bytes: Some(123),
+        };
+        let installation = CodexInstallation::new(
+            InstallationOptions {
+                base_directory: directory.path().into(),
+                platform: Platform::current(),
+                environment: Environment::new(),
+                pin: Some(pin.clone()),
+                manifest: Arc::new(crate::catalog::Manifest::bundled().unwrap()).into(),
+                server_version: "0.1.0".into(),
+            },
+            Arc::new(NoDownload),
+            Arc::new(ProcessCodexValidator),
+            Arc::new(NoLocalCodex),
+            Arc::new(crate::transport::SystemClock),
+        );
+        let mut upstream = pin.clone();
+        upstream.sha256 = "upstream-hash".into();
+        upstream.archive_bytes = None;
+        let offered = installation
+            .offer(Some("0.165.0"), Some(&upstream))
+            .unwrap();
+        assert_eq!(offered.sha256, pin.sha256);
+        assert_eq!(offered.archive_bytes, pin.archive_bytes);
+        upstream.version = "0.169.0".into();
+        assert_eq!(
+            installation
+                .offer(Some("0.165.0"), Some(&upstream))
+                .unwrap()
+                .version,
+            "0.169.0"
+        );
+        assert!(
+            installation
+                .offer(Some("0.169.0"), Some(&upstream))
+                .is_none()
+        );
+    }
 }

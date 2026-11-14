@@ -65,12 +65,16 @@ impl ConfigCursorCredentials {
         {
             self.save(&credentials).await?;
         }
-        std::fs::remove_file(path).map_err(|_| ServiceError::Storage)
+        std::fs::remove_file(path).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))
     }
 }
 fn decode(bytes: &[u8]) -> ServiceResult<CursorCredentials> {
-    let credentials: CursorCredentials =
-        serde_json::from_slice(bytes).map_err(|_| ServiceError::Response)?;
+    let credentials: CursorCredentials = serde_json::from_slice(bytes).map_err(
+        crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+    )?;
     if credentials.version != 1 {
         return Err(ServiceError::Response);
     }
@@ -82,7 +86,10 @@ impl CursorCredentialStore for ConfigCursorCredentials {
         Ok(self
             .0
             .get()
-            .map_err(|_| ServiceError::Storage)?
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))?
             .and_then(|bytes| decode(&bytes).ok()))
     }
     async fn save(&self, credentials: &CursorCredentials) -> ServiceResult<()> {
@@ -90,12 +97,23 @@ impl CursorCredentialStore for ConfigCursorCredentials {
             return Err(ServiceError::Response);
         }
         self.0
-            .set(&serde_json::to_vec(credentials).map_err(|_| ServiceError::Response)?)
+            .set(
+                &serde_json::to_vec(credentials).map_err(crate::diagnostics::mapped(
+                    concat!(module_path!(), "::error"),
+                    ServiceError::Response,
+                ))?,
+            )
             .await
-            .map_err(|_| ServiceError::Storage)
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Storage,
+            ))
     }
     async fn clear(&self) -> ServiceResult<()> {
-        self.0.remove().map_err(|_| ServiceError::Storage)
+        self.0.remove().map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))
     }
 }
 #[async_trait]
@@ -165,7 +183,7 @@ impl AuthBackend for CursorAuth {
         !has_attachments && text.trim() == "/logout"
     }
     async fn methods(&self) -> ServiceResult<Vec<ProviderAuthMethod>> {
-        serde_json::from_value(serde_json::json!([{"id":"browser","name":"Sign in with Cursor","description":null,"type":"agent"}])).map_err(|_| ServiceError::Response)
+        serde_json::from_value(serde_json::json!([{"id":"browser","name":"Sign in with Cursor","description":null,"type":"agent"}])).map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response))
     }
     async fn authenticate(&self, _: &str, context: AuthContext) -> ServiceResult<()> {
         let (urls, mut received) = mpsc::unbounded_channel();

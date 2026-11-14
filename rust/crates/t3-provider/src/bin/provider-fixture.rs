@@ -58,6 +58,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Vec<_>>()
         .as_slice()
     {
+        ["app-server", "--help"] => {
+            print!("Start the Codex app server");
+        }
         ["--version"] => {
             print!("{}", config["version"].as_str().unwrap_or("fx 0.0.13"));
             eprint!("{}", config["versionStderr"].as_str().unwrap_or(""));
@@ -351,6 +354,9 @@ async fn opencode_server(
     .ok();
     if let Some(path) = config["environmentLog"].as_str() {
         fs::write(path,json!({"hasV2Password":std::env::var_os("OPENCODE_PASSWORD").is_some(),"hasV1Password":std::env::var_os("OPENCODE_SERVER_PASSWORD").is_some(),"emptyConfig":std::env::var("OPENCODE_CONFIG_CONTENT").is_ok_and(|value|value=="{}")}).to_string())?;
+    }
+    if let Some(size) = config["startupStdoutBytes"].as_u64() {
+        std::io::stdout().write_all(&vec![b'x'; size as usize])?;
     }
     println!("opencode server listening on http://127.0.0.1:{port}");
     std::io::stdout().flush()?;

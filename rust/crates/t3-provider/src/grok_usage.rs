@@ -26,13 +26,19 @@ async fn text(path: &Path) -> ServiceResult<Option<String>> {
     file.take(1_048_577)
         .read_to_end(&mut bytes)
         .await
-        .map_err(|_| ServiceError::Storage)?;
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Storage,
+        ))?;
     if bytes.len() > 1_048_576 {
         return Err(ServiceError::Response);
     }
     String::from_utf8(bytes)
         .map(Some)
-        .map_err(|_| ServiceError::Response)
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
 }
 fn nonempty<'a>(environment: &'a Environment, key: &str) -> Option<&'a str> {
     environment
@@ -100,7 +106,9 @@ async fn credential(
             .await?
             .unwrap_or_else(|| "{}".into()),
     };
-    let credentials: Value = serde_json::from_str(&contents).map_err(|_| ServiceError::Response)?;
+    let credentials: Value = serde_json::from_str(&contents).map_err(
+        crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response),
+    )?;
     let credentials = credentials.as_object().ok_or(ServiceError::Response)?;
     if credentials.values().any(|credential| {
         credential.as_object().is_none()
@@ -127,7 +135,10 @@ fn unavailable(
     if let Some(message) = message {
         value["unavailable"]["message"] = json!(message);
     }
-    serde_json::from_value(value).map_err(|_| ServiceError::Response)
+    serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Response,
+    ))
 }
 pub fn limits(response: &Value, checked: &str) -> ServiceResult<ServerProviderUsageLimits> {
     if !response.is_object()
@@ -194,7 +205,10 @@ pub fn limits(response: &Value, checked: &str) -> ServiceResult<ServerProviderUs
         }
         value["windows"] = json!([window]);
     }
-    serde_json::from_value(value).map_err(|_| ServiceError::Response)
+    serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+        concat!(module_path!(), "::error"),
+        ServiceError::Response,
+    ))
 }
 pub async fn read(
     http: &dyn HttpTransport,

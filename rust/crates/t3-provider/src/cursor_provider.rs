@@ -37,7 +37,10 @@ impl CursorProvider {
         if let Some(color) = &self.spec.accent_color {
             value["accentColor"] = json!(color);
         }
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
     pub async fn into_managed(
         self,
@@ -122,8 +125,12 @@ impl CursorProvider {
             };
             match catalog {
                 Ok(Ok(snapshot)) => {
-                    let discovered = crate::models::cursor_models(&snapshot.models)
-                        .map_err(|_| ServiceError::Response)?;
+                    let discovered = crate::models::cursor_models(&snapshot.models).map_err(
+                        crate::diagnostics::mapped(
+                            concat!(module_path!(), "::error"),
+                            ServiceError::Response,
+                        ),
+                    )?;
                     value["status"] = json!(if discovered.is_empty() {
                         "warning"
                     } else {
@@ -218,7 +225,10 @@ impl CursorProvider {
         ) {
             value["compatibilityAdvisory"] = json!(advisory);
         }
-        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+        serde_json::from_value(value).map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Response,
+        ))
     }
 }
 #[async_trait]
@@ -275,7 +285,7 @@ impl ProviderInstanceService for CursorProvider {
             let checked = chrono::DateTime::from_timestamp_millis(self.clock.now_ms())
                 .ok_or(ServiceError::Response)?
                 .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-            let snapshot=serde_json::from_value(json!({"cwd":cwd,"checkedAt":checked,"slashCommands":base.slash_commands,"skills":skills,"slashCommandsPending":false})).map_err(|_|ServiceError::Response)?;
+            let snapshot=serde_json::from_value(json!({"cwd":cwd,"checkedAt":checked,"slashCommands":base.slash_commands,"skills":skills,"slashCommandsPending":false})).map_err(crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Response))?;
             let snapshots = base.workspace_snapshots.get_or_insert_with(Vec::new);
             snapshots.retain(|snapshot| snapshot.cwd.0 != cwd);
             snapshots.push(snapshot);

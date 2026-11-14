@@ -148,7 +148,10 @@ impl CursorAccountReader {
             }),
         )
         .await
-        .map_err(|_| ServiceError::Network)?
+        .map_err(crate::diagnostics::mapped(
+            concat!(module_path!(), "::error"),
+            ServiceError::Network,
+        ))?
     }
     async fn cached(&self, key: &str) -> Option<Arc<Session>> {
         let mut sessions = self.sessions.lock().await;
@@ -192,9 +195,13 @@ impl CursorAccountReader {
             .ok_or(ServiceError::Identity)?;
         let payload = URL_SAFE_NO_PAD
             .decode(token.split('.').nth(1).unwrap_or_default())
-            .map_err(|_| ServiceError::Identity)?;
-        let payload: Value =
-            serde_json::from_slice(&payload).map_err(|_| ServiceError::Identity)?;
+            .map_err(crate::diagnostics::mapped(
+                concat!(module_path!(), "::error"),
+                ServiceError::Identity,
+            ))?;
+        let payload: Value = serde_json::from_slice(&payload).map_err(
+            crate::diagnostics::mapped(concat!(module_path!(), "::error"), ServiceError::Identity),
+        )?;
         let subject = payload["sub"]
             .as_str()
             .filter(|sub| !sub.is_empty())
