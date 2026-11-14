@@ -5128,6 +5128,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -5399,10 +5400,12 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2 0.10.9",
+ "t3-acp",
  "t3-claude-cli",
  "t3-codex-app-server",
  "t3-config",
  "t3-contracts",
+ "t3-persistence",
  "t3-process",
  "tempfile",
  "thiserror 2.0.21",
@@ -5508,9 +5511,11 @@ dependencies = [
  "t3-contracts",
  "t3-forge",
  "t3-git",
+ "t3-host",
  "t3-orchestration",
  "t3-persistence",
  "t3-process",
+ "t3-project",
  "t3-rpc",
  "t3-scheduler",
  "t3-telemetry",
