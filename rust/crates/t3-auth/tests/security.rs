@@ -539,7 +539,7 @@ async fn cross_process_revocation_wakes_live_waiter_before_expiry() {
 }
 
 #[tokio::test]
-async fn bootstrap_credentials_are_checked_before_recording_proof_replay_state() {
+async fn token_endpoint_checks_proofs_without_recording_replay_state() {
     let h = Harness::config(AuthConfig {
         desktop_bootstrap_token: Some("desktop".into()),
         ..Default::default()
@@ -566,18 +566,22 @@ async fn bootstrap_credentials_are_checked_before_recording_proof_replay_state()
             .is_err()
     );
     assert_eq!(markers(), 0);
+    let mut malformed = request.clone();
+    malformed.headers.insert("dpop".into(), "not-a-proof".into());
+    assert!(h.auth.exchange_bootstrap(&malformed, "desktop", None, metadata()).await.is_err());
+    assert_eq!(markers(), 0);
     let issued = h
         .auth
         .exchange_bootstrap(&request, "desktop", None, metadata())
         .await
         .unwrap();
     assert_eq!(issued.token_type, AuthTokenType::DPoP);
-    assert_eq!(markers(), 1);
+    assert_eq!(markers(), 0);
     assert!(
         h.auth
             .exchange_bootstrap(&request, "desktop", None, metadata())
             .await
-            .is_err()
+            .is_ok()
     );
     assert_eq!(h.auth.sessions.list_active().await.unwrap().len(), 1);
 }

@@ -28,6 +28,7 @@ use tokio::sync::{Mutex, mpsc, watch};
 pub const SESSION_TTL_MS: i64 = 30 * 86_400_000;
 pub const WEBSOCKET_TTL_MS: i64 = 300_000;
 pub const DEV_EXPIRY_MS: i64 = 253_402_300_799_999;
+pub const ACCEPT_LEGACY_MCP_AUDIENCE: bool = false;
 
 #[derive(Clone)]
 pub struct ReusableDevAuth {
@@ -93,6 +94,7 @@ pub struct SessionRecord {
     pub expires_at: WireDateTime,
     pub last_connected_at: Option<WireDateTime>,
     pub revoked_at: Option<WireDateTime>,
+    pub proof_key_thumbprint: Option<String>,
 }
 #[derive(Clone)]
 pub struct IssuedSession {
@@ -234,6 +236,7 @@ impl SessionStore {
                 expires_at: iso(DEV_EXPIRY_MS)?,
                 last_connected_at: None,
                 revoked_at: None,
+                proof_key_thumbprint: None,
             };
             store
                 .inner
@@ -322,6 +325,7 @@ impl SessionStore {
             expires_at: iso(expires)?,
             last_connected_at: None,
             revoked_at: None,
+            proof_key_thumbprint: claims.jkt.clone(),
         };
         let stored = record.clone();
         let replace = input.replace_session_id.map(|id| id.0);
@@ -465,7 +469,10 @@ impl SessionStore {
     ) -> Result<VerifiedSession> {
         let resource = crate::oauth::canonical_mcp_resource(resource)?;
         let session = self.verify(token).await?;
-        if session.oauth_audience.as_deref() != Some(resource.as_str()) {
+        if match session.oauth_audience.as_deref() {
+            Some(audience) => audience != resource,
+            None => !ACCEPT_LEGACY_MCP_AUDIENCE,
+        } {
             return Err(Error::invalid(
                 "MCP token audience does not match the resource.",
             ));
@@ -651,6 +658,30 @@ impl SessionStore {
         let store = self.clone();
         let id = id.clone();
         crate::finish_mutation(async move { store.revoke_all_except_inner(&id).await }).await
+    }
+    pub async fn proof_key_thumbprint_of(&self, id: &AuthSessionId) -> Result<Option<String>> {
+        let id = id.0.clone();
+        Ok(self.inner.db.reader(move |db| {
+            Ok(db.query_row("SELECT proof_key_thumbprint FROM auth_sessions WHERE session_id=?1", [id], |r| r.get::<_, Option<String>>(0)).optional()?.flatten())
+        }).await?)
+    }
+    pub async fn revoke_by_proof_key(&self, proof_key: &str) -> Result<usize> {
+        let store = self.clone();
+        let proof_key = proof_key.to_owned();
+        crate::finish_mutation(async move {
+            let mut state = store.inner.state.lock().await;
+            let now = iso(store.now_ms())?.0;
+            let removed = store.inner.db.writer(move |db| {
+                let mut stmt = db.prepare("UPDATE auth_sessions SET revoked_at=?1 WHERE proof_key_thumbprint=?2 AND revoked_at IS NULL RETURNING session_id")?;
+                Ok(stmt.query_map(params![now, proof_key], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
+            }).await?;
+            let count = removed.len();
+            for id in removed {
+                state.connected.remove(&id);
+                store.publish(&mut state, SessionChange::ClientRemoved(AuthSessionId(id)));
+            }
+            Ok(count)
+        }).await
     }
     async fn revoke_all_except_inner(&self, id: &AuthSessionId) -> Result<usize> {
         let mut state = self.inner.state.lock().await;
@@ -918,8 +949,8 @@ fn insert(db: &rusqlite::Connection, record: &SessionRecord, ignore: bool) -> ru
             "INSERT INTO auth_sessions(
             session_id, subject, scopes, method, client_label, client_ip_address,
             client_user_agent, client_device_type, client_os, client_browser,
-            issued_at, expires_at, revoked_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,NULL) {conflict}"
+            issued_at, expires_at, revoked_at, proof_key_thumbprint)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,NULL,?13) {conflict}"
         ),
         params![
             record.session_id.0,
@@ -933,13 +964,14 @@ fn insert(db: &rusqlite::Connection, record: &SessionRecord, ignore: bool) -> ru
             c.os.as_ref().map(|s| &s.0),
             c.browser.as_ref().map(|s| &s.0),
             record.issued_at.0,
-            record.expires_at.0
+            record.expires_at.0,
+            record.proof_key_thumbprint
         ],
     )?;
     Ok(())
 }
 const SELECT: &str = "SELECT session_id, subject, scopes, method, client_label, client_ip_address, client_user_agent,
-             client_device_type, client_os, client_browser, issued_at, expires_at, last_connected_at, revoked_at
+             client_device_type, client_os, client_browser, issued_at, expires_at, last_connected_at, revoked_at, proof_key_thumbprint
              FROM auth_sessions";
 fn decode_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
     let opt = |i| -> rusqlite::Result<Option<TrimmedNonEmptyString>> {
@@ -965,6 +997,7 @@ fn decode_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
         expires_at: db_date(row.get(11)?)?,
         last_connected_at: row.get::<_, Option<String>>(12)?.map(db_date).transpose()?,
         revoked_at: row.get::<_, Option<String>>(13)?.map(db_date).transpose()?,
+        proof_key_thumbprint: row.get(14)?,
     })
 }
 
