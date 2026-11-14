@@ -8,6 +8,7 @@ pub mod project_settings;
 pub mod search_policy;
 pub mod terminal_history;
 pub mod terminal_output;
+pub mod text_generators;
 pub mod thread_search;
 pub mod tool_output;
 

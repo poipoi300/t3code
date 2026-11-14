@@ -244,6 +244,8 @@ fn positions(
     }
     (!places.is_empty()).then_some((quality, places))
 }
+/// JavaScript's `\s+`; Rust's `\s` also matches U+0085 and misses U+FEFF.
+const JS_SPACES: &str = r"[\t\n\x0B\x0C\r \u{a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}]+";
 fn phrase_regex(words: &[String]) -> Option<Regex> {
     if words.len() < 2 {
         return None;
@@ -254,7 +256,7 @@ fn phrase_regex(words: &[String]) -> Option<Regex> {
             .iter()
             .map(|word| regex::escape(word))
             .collect::<Vec<_>>()
-            .join(r"\s+")
+            .join(JS_SPACES)
     );
     Regex::new(&pattern).ok()
 }

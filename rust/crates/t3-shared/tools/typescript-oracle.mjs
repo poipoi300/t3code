@@ -158,7 +158,7 @@ for(const input of ['discard\ufefftail','prefix\x1b[31mOK','prefix\x1b]0;HIDDEN\
 }
 let seed=0x9e3779b9;
 const random=n=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed%n};
-const atoms=['abc','😀','界','é','\ufeff','\n','\r','\b','\x1b[31m','\x1b[0m','\x1b[2K','\x1b[1A','\x1b[3G','\x1b7','\x1b8','\x1b]title\x07','\x1bPpayload\x1b\\','\u009b','\u009d','\x1b[38:2::12:34:56m','\x1b#8'];
+const atoms=['abc','😀','界','é','\ufeff','\n','\r','\b','\x1b[31m','\x1b[0m','\x1b[2K','\x1b[1A','\x1b[3G','\x1b7','\x1b8','\x1b]title\x07','\x1bPpayload\x1b\\','\u009b','\u009d','\x1b[38:2::12:34:56m','\x1b#8','\x1bc','\x1b[?25l','\x1b[99999999999999999999999C','\x1b[18446744073709551616m','\x1b]title\nnext','\x1b]title\x1b[32m'];
 for(let i=0;i<320;i++){
   const input=Array.from({length:3+random(20)},()=>atoms[random(atoms.length)]).join('');
   const max=[3,20,128,65536][random(4)];
@@ -174,6 +174,25 @@ for(let i=0;i<320;i++){
   history.terminalSequenceStateAfter(stateBefore,input,cut);
   history.terminalSequenceEnd(stateBefore,input.slice(cut));
 }
+title='generated mid-line rewrites, run limits and colour parameters';
+const feed=(chunks,max)=>{let state=terminal.EMPTY_TERMINAL_OUTPUT;for(const chunk of chunks)state=terminal.appendTerminalOutput(state,chunk,max);terminal.terminalOutputResumeText(state);};
+const alternating=(from,count)=>Array.from({length:count},(_,i)=>(from+i)%2?'\x1b[0mx':'\x1b[31mx').join('');
+feed(['L'.repeat(70000),'\rX'.repeat(300),'\x1b[31m'+'\rY'.repeat(40)+'\x1b[0m','\x1b[2500G\x1b[32mmid\x1b[0m\r\x1b[2499Gab\x1b[1K','\r\x1b[33m'+'Z'.repeat(5000)]);
+feed(['L'.repeat(3000),'\rX'.repeat(500),'\x1b[31m\r'+'Y'.repeat(10)+'\x1b[0m'+'\rY'.repeat(10),'\x1b[5G\x1b[32mlong-overlap\x1b[0m\x1b[3G\x1b[31m'+'q'.repeat(40)]);
+for(const max of [300,4096])feed([Array.from({length:3000},(_,i)=>`\x1b[3${i%7+1}mX`).join(''),'\x1b[0m\r\x1b[10Gmid','tail'],max);
+// After the run limit flattens old runs, a mid-line write merges the plain run with an unstyled neighbour.
+const coloured=count=>Array.from({length:count},(_,i)=>`\x1b[3${i%7+1}mx`).join('');
+for(const tail of [alternating(0,1900),alternating(1,1901),coloured(1900)])feed([alternating(0,2049),'\x1b[0m\r\x1b[1796GZ','\x1b[0m\x1b[3000G'+tail]);
+feed([alternating(0,2049),'\x1b[0m\x1b[1796G\x1b[2K',alternating(0,10),'\r\x1b[1790G\x1b[1K'+alternating(1,1900)]);
+const lineAtoms=['\r','\x1b[3G','\x1b[9G','\x1b[40G','\x1b[31m','\x1b[32m','\x1b[0m','X','abcdef','\x1b[1K','\x1b[K','\x1b[2K','L'.repeat(50),'\x1b[38;2;1;2;3m','\x1b[1A','\n','\b','\u{1F600}'];
+for(let i=0;i<200;i++){
+  const max=[16,64,300][random(3)];
+  feed(Array.from({length:1+random(4)},()=>Array.from({length:4+random(30)},()=>lineAtoms[random(lineAtoms.length)]).join('')),max);
+}
+for(const colour of ['38;2;18446744073709551616;0;0','48;2;4294967296;4294967551;2147483648','38;2;9007199254740993;9007199254740995;300','38:2::18446744073709551616:1:2','38;2;1'+'0'.repeat(400)+';7;8','38;5;256','38;5;18446744073709551616','48:5:255'])feed([`a\x1b[${colour}mX\x1b[0mb`]);
+for(const text of ['foo﻿bar','foo\u0085bar','see foo ﻿ bar now','foo bar','foo bar'])for(const q of ['foo bar','see foo'])palette.messageMatcher(q)(text);
+const review='sectionId="turn:2" sectionTitle="Turn 2" filePath="hidden.ts" startIndex="3" endIndex="14" rangeLabel="L4"';
+for(const text of [`Before\n<review_commenté ${review}>\nKeep comment.\n</review_comment>\nAfter`,`Before <review_commentx ${review}>note</review_comment> after`,'<review_commenté>',['<preview_annotation>','Preview annotation:','Id: ann_2','Page: Checkout','Comment: First','</review_commenté','Second','</preview_annotation>','after'].join('\n')])find.searchableMessageSegments({role:'user',text,streaming:false});
 const queries=['auth','café','ΟΣ',"don't",'搜索','🚀','ui','fix sidebar','railwya','t3code','İ','a\u0301','名'];
 for(const input of ['名😀 café\r\x1b[2K🚀 résumé\n','\ufeffdata\x1b[3','\x1b]title😀\x07ok']){
   const bytes=new TextEncoder().encode(input);

@@ -8,14 +8,38 @@ pub struct TerminalText {
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::VecDeque;
 
 const ESC: u16 = 27;
 const LIVE_LINES: usize = 64;
+/// A run's units. A deque, so a write trims or splits a long run by moving its ends instead of
+/// copying the line: TypeScript's sliced and concatenated strings cost O(runs) per write.
+type Units = VecDeque<u16>;
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Run {
     pen: String,
-    #[serde(with = "utf16_text")]
-    text: Vec<u16>,
+    #[serde(with = "utf16_units")]
+    text: Units,
+}
+mod utf16_units {
+    use super::Units;
+    use serde::{Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(
+        units: &Units,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match units.as_slices() {
+            (front, []) => super::utf16_text::serialize(front, serializer),
+            _ => {
+                super::utf16_text::serialize(&units.iter().copied().collect::<Vec<_>>(), serializer)
+            }
+        }
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Units, D::Error> {
+        super::utf16_text::deserialize(deserializer).map(Units::from)
+    }
 }
 mod utf16_text {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -165,81 +189,165 @@ fn sgr(pen: &str) -> String {
 fn line_len(line: &Line) -> usize {
     line.iter().map(|run| run.text.len()).sum()
 }
-fn slice_line(line: &Line, start: usize, end: usize) -> Line {
+/// `sliceLine(line, start, end)` in place, keeping the same runs.
+fn slice_in_place(line: &mut Line, start: usize, end: usize) {
     let mut offset = 0;
-    let mut out = vec![];
-    for run in line {
-        let next = offset + run.text.len();
-        if next > start && offset < end {
-            out.push(Run {
-                pen: run.pen.clone(),
-                text: run.text[start.saturating_sub(offset)..run.text.len().min(end - offset)]
-                    .to_vec(),
-            });
+    let mut done = false;
+    line.retain_mut(|run| {
+        if done {
+            return false;
         }
-        offset = next;
-        if offset >= end {
-            break;
+        let run_start = offset;
+        let run_end = run_start + run.text.len();
+        offset = run_end;
+        done = run_end >= end;
+        let kept = run_end > start && run_start < end;
+        if kept {
+            run.text.truncate(end - run_start);
+            run.text.drain(..start.saturating_sub(run_start));
+        }
+        kept
+    });
+}
+/// `trimLineStart`: drops `count` units from the front, and the runs that empties.
+fn trim_line_start(line: &mut Line, count: usize) {
+    let mut remaining = count;
+    let mut dropped = 0;
+    while remaining > 0 && dropped < line.len() {
+        let run = &mut line[dropped];
+        if run.text.len() <= remaining {
+            remaining -= run.text.len();
+            dropped += 1;
+        } else {
+            run.text.drain(..remaining);
+            remaining = 0;
         }
     }
-    out
+    line.drain(..dropped);
 }
-fn push_run(line: &mut Line, run: Run) {
-    if run.text.is_empty() {
+/// `pushRun`: appends to the last run when the pen matches.
+fn push_units(line: &mut Line, pen: &str, text: &[u16]) {
+    if text.is_empty() {
         return;
     }
-    if let Some(last) = line.last_mut()
-        && last.pen == run.pen
-    {
-        last.text.extend(run.text);
-    } else {
-        line.push(run);
-    }
-}
-fn write_line(line: &Line, col: usize, text: &[u16], pen: &str) -> Line {
-    let len = line_len(line);
-    let mut out = slice_line(line, 0, col.min(len));
-    if col > len {
-        push_run(
-            &mut out,
-            Run {
-                pen: String::new(),
-                text: vec![32; col - len],
-            },
-        );
-    }
-    push_run(
-        &mut out,
-        Run {
+    match line.last_mut() {
+        Some(last) if last.pen == pen => last.text.extend(text),
+        _ => line.push(Run {
             pen: pen.into(),
-            text: text.to_vec(),
-        },
-    );
-    for run in slice_line(line, col + text.len(), len) {
-        push_run(&mut out, run);
+            text: text.iter().copied().collect(),
+        }),
     }
-    out
 }
-fn erase_line(line: &Line, col: usize, mode: u64) -> Line {
-    let len = line_len(line);
-    match mode {
-        0 => slice_line(line, 0, col),
-        1 => {
-            let mut out = vec![];
-            push_run(
-                &mut out,
-                Run {
-                    pen: String::new(),
-                    text: vec![32; (col + 1).min(len)],
-                },
-            );
-            for run in slice_line(line, col + 1, len) {
-                push_run(&mut out, run);
-            }
-            out
+/// Appends `right` to `left`, copying whichever is shorter.
+fn join(left: &mut Units, mut right: Units) {
+    if left.len() >= right.len() {
+        left.extend(right);
+    } else {
+        for unit in left.drain(..).rev() {
+            right.push_front(unit);
         }
-        2 => vec![],
-        _ => line.clone(),
+        *left = right;
+    }
+}
+/// `writeLine` rebuilds the line through `pushRun`: no empty runs, no neighbours sharing a pen.
+fn canonicalize(line: &mut Line) {
+    line.retain(|run| !run.text.is_empty());
+    line.dedup_by(|next, kept| {
+        let same = next.pen == kept.pen;
+        if same {
+            join(&mut kept.text, std::mem::take(&mut next.text));
+        }
+        same
+    });
+}
+/// The run holding unit `position` of a canonical line, and where that run starts.
+fn run_at(line: &Line, position: usize) -> (usize, usize) {
+    let mut start = 0;
+    for (index, run) in line.iter().enumerate() {
+        if position < start + run.text.len() {
+            return (index, start);
+        }
+        start += run.text.len();
+    }
+    (line.len(), start)
+}
+/// Splits off `text[..head]` and `text[cut..]`, copying only the shorter of the two.
+fn split_units(text: &mut Units, head: usize, cut: usize) -> (Units, Units) {
+    let mut whole = std::mem::take(text);
+    if head <= whole.len() - cut {
+        let left = whole.drain(..head).collect();
+        whole.drain(..cut - head);
+        (left, whole)
+    } else {
+        let right = whole.split_off(cut);
+        whole.truncate(head);
+        (whole, right)
+    }
+}
+/// `writeLine` away from the line's end, in place: the canonical runs of the units before `col`,
+/// padding, `text` in `pen`, then the units after it. Work follows the runs touched.
+fn write_within(line: &mut Line, col: usize, text: &[u16], pen: &str) {
+    canonicalize(line);
+    let len = line_len(line);
+    if col >= len {
+        push_units(line, "", &vec![32; col - len]);
+        push_units(line, pen, text);
+        return;
+    }
+    let end = col + text.len();
+    let (first, first_start) = run_at(line, col);
+    let head = col - first_start;
+    let run = &mut line[first];
+    if run.pen == pen && end <= first_start + run.text.len() {
+        for (slot, unit) in run.text.range_mut(head..head + text.len()).zip(text) {
+            *slot = *unit;
+        }
+        return;
+    }
+    let (last, last_start) = if end < len {
+        run_at(line, end)
+    } else {
+        (line.len(), len)
+    };
+    let written = Run {
+        pen: pen.into(),
+        text: text.iter().copied().collect(),
+    };
+    let (replaced, middle) = if first == last {
+        let run = &mut line[first];
+        let (left, right) = split_units(&mut run.text, head, end - first_start);
+        let left = Run {
+            pen: run.pen.clone(),
+            text: left,
+        };
+        let right = Run {
+            pen: run.pen.clone(),
+            text: right,
+        };
+        (first + 1, vec![left, written, right])
+    } else {
+        let mut left = std::mem::take(&mut line[first]);
+        left.text.truncate(head);
+        let mut parts = vec![left, written];
+        if last < line.len() {
+            let mut right = std::mem::take(&mut line[last]);
+            right.text.drain(..end - last_start);
+            parts.push(right);
+        }
+        ((last + 1).min(line.len()), parts)
+    };
+    line.splice(first..replaced, middle);
+    canonicalize(line);
+}
+/// `eraseLine`: 0 cursor to end, 1 start through cursor, 2 whole line.
+fn erase_in_line(line: &mut Line, col: usize, mode: f64) {
+    if mode == 0.0 {
+        slice_in_place(line, 0, col);
+    } else if mode == 1.0 {
+        let spaces = vec![32; (col + 1).min(line_len(line))];
+        write_within(line, 0, &spaces, "");
+    } else if mode == 2.0 {
+        line.clear();
     }
 }
 fn serialize_line(line: &Line) -> Vec<u16> {
@@ -250,7 +358,7 @@ fn serialize_line(line: &Line) -> Vec<u16> {
             out.extend(sgr(&run.pen).encode_utf16());
             current = &run.pen;
         }
-        out.extend(&run.text);
+        out.extend(run.text.iter());
     }
     if !current.is_empty() {
         out.extend(sgr("").encode_utf16());
@@ -269,10 +377,11 @@ struct Attributes {
     bg: String,
 }
 impl Attributes {
+    /// `parsePen`: a pen is `;`-separated numbers.
     fn from_pen(pen: &str) -> Self {
         let mut value = Self::default();
         if !pen.is_empty() {
-            value.apply(&csi_params(pen));
+            value.apply(&pen.split(';').map(js_number).collect::<Vec<_>>());
         }
         value
     }
@@ -298,7 +407,8 @@ impl Attributes {
         }
         parts.join(";")
     }
-    fn apply(&mut self, params: &[u64]) {
+    /// `applySgr` over JavaScript numbers.
+    fn apply(&mut self, params: &[f64]) {
         if params.is_empty() {
             *self = Self::default();
             return;
@@ -306,60 +416,98 @@ impl Attributes {
         let mut i = 0;
         while i < params.len() {
             let code = params[i];
-            match code {
-                0 => *self = Self::default(),
-                1 => self.bold = true,
-                2 => self.dim = true,
-                3 => self.italic = true,
-                4 => self.underline = true,
-                7 => self.inverse = true,
-                9 => self.strike = true,
-                22 => {
-                    self.bold = false;
-                    self.dim = false;
-                }
-                23 => self.italic = false,
-                24 => self.underline = false,
-                27 => self.inverse = false,
-                29 => self.strike = false,
-                30..=37 | 90..=97 => self.fg = code.to_string(),
-                40..=47 | 100..=107 => self.bg = code.to_string(),
-                39 => self.fg.clear(),
-                49 => self.bg.clear(),
-                38 | 48 | 58 => {
-                    let (color, next) = extended_color(code, params, i);
-                    if let Some(color) = color
-                        && code != 58
-                    {
-                        if code == 38 {
-                            self.fg = color;
-                        } else {
-                            self.bg = color;
-                        }
+            let within = |low: f64, high: f64| (low..=high).contains(&code);
+            if code == 0.0 || code.is_nan() {
+                *self = Self::default();
+            } else if code == 1.0 {
+                self.bold = true;
+            } else if code == 2.0 {
+                self.dim = true;
+            } else if code == 3.0 {
+                self.italic = true;
+            } else if code == 4.0 {
+                self.underline = true;
+            } else if code == 7.0 {
+                self.inverse = true;
+            } else if code == 9.0 {
+                self.strike = true;
+            } else if code == 22.0 {
+                self.bold = false;
+                self.dim = false;
+            } else if code == 23.0 {
+                self.italic = false;
+            } else if code == 24.0 {
+                self.underline = false;
+            } else if code == 27.0 {
+                self.inverse = false;
+            } else if code == 29.0 {
+                self.strike = false;
+            } else if within(30.0, 37.0) || within(90.0, 97.0) {
+                self.fg = code.to_string();
+            } else if within(40.0, 47.0) || within(100.0, 107.0) {
+                self.bg = code.to_string();
+            } else if code == 39.0 {
+                self.fg.clear();
+            } else if code == 49.0 {
+                self.bg.clear();
+            } else if [38.0, 48.0, 58.0].contains(&code) {
+                let (color, next) = extended_color(code, params, i);
+                if let Some(color) = color
+                    && code != 58.0
+                {
+                    if code == 38.0 {
+                        self.fg = color;
+                    } else {
+                        self.bg = color;
                     }
-                    i = next;
-                    continue;
                 }
-                _ => {}
+                i = next;
+                continue;
             }
             i += 1;
         }
     }
 }
-fn extended_color(code: u64, params: &[u64], i: usize) -> (Option<String>, usize) {
+/// JavaScript's `Number` for the digit strings a pen or CSI holds: the empty string is 0, and
+/// anything else that is not plain digits is NaN (`Number` would also accept signs, spaces, hex
+/// and exponents, which a CSI cannot carry).
+fn js_number(text: &str) -> f64 {
+    if text.is_empty() {
+        0.0
+    } else if text.bytes().all(|byte| byte.is_ascii_digit()) {
+        text.parse().unwrap_or(f64::INFINITY)
+    } else {
+        f64::NAN
+    }
+}
+/// JavaScript's `value & 255`, which first applies ToInt32.
+fn low_byte(value: f64) -> u32 {
+    if value.is_finite() {
+        (value.trunc().rem_euclid(4_294_967_296.0) as u32) & 255
+    } else {
+        0
+    }
+}
+fn extended_color(code: f64, params: &[f64], i: usize) -> (Option<String>, usize) {
     match params.get(i + 1) {
-        Some(5) => (
+        Some(5.0) => (
             params
                 .get(i + 2)
-                .filter(|v| **v <= 255)
-                .map(|v| format!("{code};5;{v}")),
+                // `value > 255` is false for NaN, which TypeScript keeps.
+                .filter(|value| (**value).partial_cmp(&255.0) != Some(std::cmp::Ordering::Greater))
+                .map(|value| format!("{code};5;{value}")),
             i + 3,
         ),
-        Some(2) => {
+        Some(2.0) => {
             let color = if let (Some(r), Some(g), Some(b)) =
                 (params.get(i + 2), params.get(i + 3), params.get(i + 4))
             {
-                Some(format!("{code};2;{};{};{}", r & 255, g & 255, b & 255))
+                Some(format!(
+                    "{code};2;{};{};{}",
+                    low_byte(*r),
+                    low_byte(*g),
+                    low_byte(*b)
+                ))
             } else {
                 None
             };
@@ -368,18 +516,11 @@ fn extended_color(code: u64, params: &[u64], i: usize) -> (Option<String>, usize
         _ => (None, i + 2),
     }
 }
-fn csi_params(text: &str) -> Vec<u64> {
+fn csi_params(text: &str) -> Vec<f64> {
     let mut out = vec![];
     let mut pending = 0i32;
     for part in text.split(';') {
-        let mut sub: Vec<_> = part
-            .split(':')
-            .map(|value| {
-                value
-                    .parse::<u64>()
-                    .unwrap_or(if value.is_empty() { 0 } else { u64::MAX })
-            })
-            .collect();
+        let mut sub: Vec<_> = part.split(':').map(js_number).collect();
         let head = sub[0];
         if pending > 0 {
             out.push(head);
@@ -390,40 +531,45 @@ fn csi_params(text: &str) -> Vec<u64> {
             pending = 0;
             if sub.len() == 1 {
                 out.push(head);
-                if head == 5 || head == 2 {
-                    pending = if head == 5 { 1 } else { 3 };
+                if head == 5.0 || head == 2.0 {
+                    pending = if head == 5.0 { 1 } else { 3 };
                 }
                 continue;
             }
-            if head == 2 && sub.len() >= 5 {
+            if head == 2.0 && sub.len() >= 5 {
                 sub.remove(1);
             }
-            out.extend(sub.into_iter().take(if head == 5 {
+            out.extend(sub.into_iter().take(if head == 5.0 {
                 2
-            } else if head == 2 {
+            } else if head == 2.0 {
                 4
             } else {
                 1
             }));
             continue;
         }
+        let colour = [38.0, 48.0, 58.0].contains(&head);
         if sub.len() == 1 {
             out.push(head);
-            if matches!(head, 38 | 48 | 58) {
+            if colour {
                 pending = -1;
             }
             continue;
         }
-        if !matches!(head, 38 | 48 | 58) {
-            out.push(if head == 4 && sub[1] == 0 { 24 } else { head });
+        if !colour {
+            out.push(if head == 4.0 && sub[1] == 0.0 {
+                24.0
+            } else {
+                head
+            });
             continue;
         }
-        if sub[1] == 2 && sub.len() >= 6 {
+        if sub[1] == 2.0 && sub.len() >= 6 {
             sub.remove(2);
         }
-        let take = if sub[1] == 5 {
+        let take = if sub[1] == 5.0 {
             3
-        } else if sub[1] == 2 {
+        } else if sub[1] == 2.0 {
             5
         } else {
             2
@@ -478,51 +624,42 @@ struct Terminal {
     settled_units: usize,
 }
 impl Terminal {
+    /// TypeScript's `write`, in place: a line is never copied to change part of it.
     fn write(&mut self, text: &[u16]) {
         let row = self.screen.row;
-        let mut line = if self.screen.col == line_len(&self.screen.lines[row]) {
-            let mut line = std::mem::take(&mut self.screen.lines[row]);
-            push_run(
-                &mut line,
-                Run {
-                    pen: self.screen.pen.clone(),
-                    text: text.to_vec(),
-                },
-            );
-            line
+        let line = &mut self.screen.lines[row];
+        if self.screen.col == line_len(line) {
+            push_units(line, &self.screen.pen, text);
         } else {
-            write_line(
-                &self.screen.lines[row],
-                self.screen.col,
-                text,
-                &self.screen.pen,
-            )
-        };
+            write_within(line, self.screen.col, text, &self.screen.pen);
+        }
         self.screen.col += text.len();
         if line.len() > 2048 {
+            // Flatten old runs so later trimming stays cheap; the first run's buffer is reused.
             let keep = line.len() - 256;
-            let plain = line[..keep]
-                .iter()
-                .flat_map(|run| run.text.iter().copied())
-                .collect();
-            line.splice(
-                ..keep,
-                [Run {
+            let mut flattened = line.drain(..keep);
+            let mut plain = flattened.next().map(|run| run.text).unwrap_or_default();
+            for run in flattened {
+                plain.extend(run.text);
+            }
+            line.insert(
+                0,
+                Run {
                     pen: String::new(),
                     text: plain,
-                }],
+                },
             );
         }
-        let length = line_len(&line);
+        let length = line_len(line);
         if length > self.max {
             let mut removed = length - self.max;
-            line = slice_line(&line, removed, length);
+            trim_line_start(line, removed);
             if line
                 .first()
-                .and_then(|run| run.text.first())
+                .and_then(|run| run.text.front())
                 .is_some_and(|ch| (0xdc00..=0xdfff).contains(ch))
             {
-                line = slice_line(&line, 1, length);
+                trim_line_start(line, 1);
                 removed += 1;
             }
             self.dropped = true;
@@ -533,7 +670,6 @@ impl Terminal {
                 saved.col = saved.col.saturating_sub(removed);
             }
         }
-        self.screen.lines[row] = line;
     }
     fn scroll_out(&mut self) -> usize {
         let line = self.screen.lines.remove(0);
@@ -590,7 +726,13 @@ impl Terminal {
             self.screen.pen = attributes.pen();
             return;
         }
-        let count = numbers.first().copied().unwrap_or(1).max(1) as i128;
+        // `Math.max(1, n || 1)`; a count past any window clamps the same in both.
+        let count = |n: Option<f64>| {
+            let n = n.filter(|n| *n != 0.0 && !n.is_nan()).unwrap_or(1.0);
+            n.clamp(1.0, u64::MAX as f64) as i128
+        };
+        let count_at = |index: usize| count(numbers.get(index).copied());
+        let count = count_at(0);
         let row = self.screen.row as i128;
         let col = self.screen.col as i128;
         match final_byte {
@@ -601,44 +743,42 @@ impl Terminal {
             69 => self.move_to(row + count, 0),
             70 => self.move_to(row - count, 0),
             71 => self.move_to(row, count - 1),
-            72 | 102 => self.move_to(
-                count - 1,
-                numbers.get(1).copied().unwrap_or(1).max(1) as i128 - 1,
+            72 | 102 => self.move_to(count - 1, count_at(1) - 1),
+            75 => erase_in_line(
+                &mut self.screen.lines[self.screen.row],
+                self.screen.col,
+                numbers.first().copied().unwrap_or(0.0),
             ),
-            75 => {
-                self.screen.lines[self.screen.row] = erase_line(
-                    &self.screen.lines[self.screen.row],
-                    self.screen.col,
-                    numbers.first().copied().unwrap_or(0),
-                )
-            }
-            74 => match numbers.first().copied().unwrap_or(0) {
-                0 => {
-                    self.screen.lines[self.screen.row] =
-                        erase_line(&self.screen.lines[self.screen.row], self.screen.col, 0);
+            74 => {
+                let mode = numbers.first().copied().unwrap_or(0.0);
+                if mode == 0.0 {
+                    erase_in_line(
+                        &mut self.screen.lines[self.screen.row],
+                        self.screen.col,
+                        0.0,
+                    );
                     self.screen.lines.truncate(self.screen.row + 1);
-                }
-                1 => {
+                } else if mode == 1.0 {
                     for line in &mut self.screen.lines[..self.screen.row] {
                         line.clear();
                     }
-                    self.screen.lines[self.screen.row] =
-                        erase_line(&self.screen.lines[self.screen.row], self.screen.col, 1);
-                }
-                2 => {
-                    self.screen.lines = vec![vec![]];
-                    self.screen.row = 0;
-                    self.screen.col = 0;
-                }
-                3 => {
+                    erase_in_line(
+                        &mut self.screen.lines[self.screen.row],
+                        self.screen.col,
+                        1.0,
+                    );
+                } else if mode == 3.0 {
                     if self.screen.settled.iter().any(|part| !part.is_empty()) {
                         self.dropped = true;
                     }
                     self.screen.settled = Default::default();
                     self.settled_units = 0;
+                } else if mode == 2.0 {
+                    self.screen.lines = vec![vec![]];
+                    self.screen.row = 0;
+                    self.screen.col = 0;
                 }
-                _ => {}
-            },
+            }
             115 => {
                 self.screen.saved = Some(Cursor {
                     row: self.screen.row,
@@ -938,12 +1078,11 @@ fn bound_window(terminal: &mut Terminal, truncated: &mut bool, max: usize) {
             .sum();
         let mut budget = max.saturating_sub(used);
         for row in terminal.screen.row + 1..terminal.screen.lines.len() {
-            let line = &terminal.screen.lines[row];
-            let len = line_len(line);
+            let len = line_len(&terminal.screen.lines[row]);
             let keep = len.min(budget);
             if keep < len {
                 *truncated = true;
-                terminal.screen.lines[row] = slice_line(line, len - keep, len);
+                slice_in_place(&mut terminal.screen.lines[row], len - keep, len);
                 if let Some(saved) = &mut terminal.screen.saved
                     && saved.row == row
                 {

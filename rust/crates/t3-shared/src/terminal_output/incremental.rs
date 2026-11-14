@@ -203,7 +203,10 @@ mod reader_tests {
         let (mut cursor, mut settled) = (SettledCursor::default(), String::new());
         for line in 0..200 {
             output.push(&format!("line {line} \u{1b}[32mok\u{1b}[0m\n"));
-            assert_eq!(read(&output, &mut cursor, &mut settled), output.snapshot().text);
+            assert_eq!(
+                read(&output, &mut cursor, &mut settled),
+                output.snapshot().text
+            );
         }
         // A redraw changes only the window.
         output.push("50%\r100%");
@@ -211,7 +214,10 @@ mod reader_tests {
             output.settled_since(&mut cursor),
             SettledChange::Appended(String::new())
         );
-        assert_eq!(read(&output, &mut cursor, &mut settled), output.snapshot().text);
+        assert_eq!(
+            read(&output, &mut cursor, &mut settled),
+            output.snapshot().text
+        );
         // One more line settles exactly one line.
         let before = cursor;
         output.push("\n");
@@ -239,6 +245,8 @@ mod reader_tests {
         assert!(resets > 0, "the 400-unit cap trims settled text");
         assert!(output.truncated());
         output.push("\u{1b}[3J");
-        assert!(matches!(output.settled_since(&mut cursor), SettledChange::Reset(text) if text.is_empty()));
+        assert!(
+            matches!(output.settled_since(&mut cursor), SettledChange::Reset(text) if text.is_empty())
+        );
     }
 }

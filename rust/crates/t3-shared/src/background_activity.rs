@@ -211,7 +211,10 @@ mod tests {
             }
         })));
         assert_eq!(resolved.profile, Profile::Balanced);
-        assert_eq!(resolved.automatic_git_fetch_interval, Duration::from_secs(15));
+        assert_eq!(
+            resolved.automatic_git_fetch_interval,
+            Duration::from_secs(15)
+        );
     }
 
     #[test]
@@ -237,7 +240,10 @@ mod tests {
             "providerHealthRefreshInterval": 240000
         })));
         assert_eq!(resolved.profile, Profile::Performance);
-        assert_eq!(resolved.automatic_git_fetch_interval, Duration::from_secs(7));
+        assert_eq!(
+            resolved.automatic_git_fetch_interval,
+            Duration::from_secs(7)
+        );
         assert_eq!(
             resolved.provider_health_refresh_interval,
             Duration::from_secs(240)
@@ -256,14 +262,21 @@ mod tests {
             "backgroundActivity": {"schemaVersion": 1, "profile": "performance", "overrides": {}},
             "automaticGitFetchInterval": 7000
         })));
-        assert_eq!(written.automatic_git_fetch_interval, Duration::from_secs(15));
+        assert_eq!(
+            written.automatic_git_fetch_interval,
+            Duration::from_secs(15)
+        );
     }
 
     #[test]
     fn durations_follow_effect_millis() {
-        let finite = |n: f64| WireNumber::Finite(t3_contracts::wire::JsNumber::from_f64(n).unwrap());
+        let finite =
+            |n: f64| WireNumber::Finite(t3_contracts::wire::JsNumber::from_f64(n).unwrap());
         assert_eq!(duration_from_millis(&finite(-5.0)), Duration::ZERO);
-        assert_eq!(duration_from_millis(&finite(1500.0)), Duration::from_millis(1500));
+        assert_eq!(
+            duration_from_millis(&finite(1500.0)),
+            Duration::from_millis(1500)
+        );
         assert_eq!(
             duration_from_millis(&WireNumber::NonFinite(WireNonFiniteNumber::Infinity)),
             Duration::MAX

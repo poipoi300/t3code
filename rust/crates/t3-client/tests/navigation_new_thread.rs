@@ -980,3 +980,91 @@ fn pending_checkout_disables_reentry_and_cancellation_restores_the_source_choice
     assert!(matches!(view, NewThreadView::LinkChoice { choices, .. }
         if choices[0].label.key == "Check out" && choices[0].disabled_reason.is_none()));
 }
+
+#[test]
+fn add_project_reuses_a_project_and_creates_local_or_new_projects_from_real_projections() {
+    use t3_client::navigation::{new_thread::Destination,project_flow::Step};
+    for mode in ["existing","local","new"] {
+        let (mut h,c,_,_,effects)=link_setup();
+        let session=c.add_project();
+        let service=session.clone();
+        let view=h.run(async move { service.resolve().await });
+        assert_eq!(view.step,Step::Sources);
+        let service=session.clone();
+        let selection=if mode=="new" {"new"}else{"local"};
+        assert!(h.run(async move{ service.select_item(selection).await }).unwrap().is_none());
+        let path=match mode {"existing"=>"/workspace/project/", "local"=>"/workspace/fresh",_=>"Garden Example"};
+        session.set_query(path.into()).unwrap();
+        let service=session.clone();
+        let view=h.run(async move {service.resolve().await});
+        assert!(view.can_submit,"{view:?}");
+        assert!(!view.can_pick_folder);
+        let service=session.clone();
+        let result=h.run(async move{service.submit(view.revision).await}).unwrap().unwrap();
+        if mode=="existing" {
+            assert!(matches!(result,Destination::Thread(_)));
+            assert!(effects.borrow().is_empty());
+        } else {
+            let Destination::Draft(id)=result else {panic!("created project must open a client draft")};
+            let document=c.composer_drafts().document();
+            let document=document.borrow();
+            let project=document["draftThreadsByThreadKey"][&id]["projectId"].as_str().unwrap();
+            assert!(c.store().shared_shell(&environment("env")).projects.iter().any(|p|p.id.0==project));
+            assert_eq!(effects.borrow()[0].0,if mode=="new"{"projects.createNew"}else{"projects.mutate"});
+            if mode=="new" {
+                assert!(session.notices().iter().any(|n|n.warning&&n.description.contains("initial commit refused")));
+            }
+        }
+    }
+}
+
+#[test]
+fn add_project_rejects_stale_or_denied_submissions_and_retains_input() {
+    let (mut h,c,_,_,effects)=link_setup();
+    let session=c.add_project();
+    let service=session.clone();
+    h.run(async move {service.resolve().await});
+    let service=session.clone();
+    h.run(async move {service.select_item("new").await}).unwrap();
+    session.set_query("Garden Example".into()).unwrap();
+    let service=session.clone();
+    let view=h.run(async move {service.resolve().await});
+    session.set_query("Kept name".into()).unwrap();
+    let service=session.clone();
+    assert!(matches!(h.run(async move {service.submit(view.revision).await}),Err(ClientError::Cancelled)));
+    c.client(&environment("env")).unwrap().session().unwrap().update_grants(t3_client::permissions::SessionGrants {valid:true,scopes:["orchestration:read".into()].into()});
+    let service=session.clone();
+    let view=h.run(async move {service.resolve().await});
+    let service=session.clone();
+    let result=h.run(async move {service.submit(view.revision).await});
+    assert!(matches!(result,Err(ClientError::PermissionDenied{..})),"{result:?}");
+    assert!(effects.borrow().is_empty());
+    let service=session.clone();
+    let view=h.run(async move {service.resolve().await});
+    assert_eq!(view.query,"Kept name");
+    assert!(view.error.is_some());
+}
+
+#[test]
+fn clone_step_stays_open_then_accepted_start_completes_and_retains_background_work() {
+    use t3_client::navigation::project_flow::Step;
+    let (mut h,c,_,_,effects)=link_setup();
+    let session=c.add_project();
+    let service=session.clone();h.run(async move {service.resolve().await});
+    let service=session.clone();h.run(async move {service.select_item("source:url").await}).unwrap();
+    session.set_query("https://github.com/acme/other.git".into()).unwrap();
+    let service=session.clone();let view=h.run(async move{service.resolve().await});
+    let mut completion=session.completed();
+    let service=session.clone();assert!(h.run(async move{service.submit(view.revision).await}).unwrap().is_none());
+    assert!(completion.next().now_or_never().is_none());
+    let service=session.clone();let view=h.run(async move{service.resolve().await});
+    assert_eq!(view.step,Step::CloneDestination);
+    assert!(view.query.ends_with("other"));
+    let service=session.clone();assert!(h.run(async move{service.submit(view.revision).await}).unwrap().is_none());
+    assert_eq!(h.run(async move{completion.next().await}),Some(()));
+    drop(session);
+    h.settle();
+    assert_eq!(effects.borrow().iter().filter(|(tag,_)|tag=="projectClone.start").count(),1);
+    let id=effects.borrow().iter().find(|(tag,_)|tag=="projectClone.start").unwrap().1["projectId"].clone();
+    assert!(c.composer_drafts().document().borrow()["draftThreadsByThreadKey"].as_object().unwrap().values().any(|d|d["projectId"]==id));
+}

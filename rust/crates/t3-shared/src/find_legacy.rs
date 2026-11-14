@@ -135,7 +135,7 @@ fn preview(body: &str, index: usize) -> Option<Value> {
             let line=lines[*index];
             ["Preview annotation:","Id: ","Page: ","Comment: ","Targets: "].iter().any(|prefix|line.starts_with(prefix))
                 || line=="Requested visual changes:" || line=="The attached screenshot is the annotated preview crop."
-                || regex(r"^</?(?:terminal_context|element_context|preview_annotation|review_comment)\b").is_match(line)
+                || regex(r"^</?(?:terminal_context|element_context|preview_annotation|review_comment)(?-u:\b)").is_match(line)
         }).unwrap_or(lines.len());
         std::iter::once(lines[start].strip_prefix(prefix).unwrap_or_default())
             .chain(lines[start + 1..end].iter().copied())
@@ -304,9 +304,12 @@ fn review(attributes: &str, body: &str, index: usize) -> Option<Value> {
     valid(&record).then_some(record)
 }
 
+// The TypeScript patterns have no `u` flag, so their `\b` is an ASCII word boundary.
 pub(super) fn upgrade(source: &str) -> String {
-    if !regex(r"<(?:terminal_context|element_context|preview_annotation|review_comment)\b|\u{fffc}")
-        .is_match(source)
+    if !regex(
+        r"<(?:terminal_context|element_context|preview_annotation|review_comment)(?-u:\b)|\u{fffc}",
+    )
+    .is_match(source)
     {
         return source.into();
     }
@@ -328,7 +331,7 @@ pub(super) fn upgrade(source: &str) -> String {
     let mut reviews = vec![];
     let mut rest = String::new();
     let mut consumed = 0;
-    for opening in regex(r"<review_comment\b([^>]*)>").captures_iter(source) {
+    for opening in regex(r"<review_comment(?-u:\b)([^>]*)>").captures_iter(source) {
         let Some(matched) = opening.get(0) else {
             continue;
         };

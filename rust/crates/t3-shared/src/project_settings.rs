@@ -145,7 +145,11 @@ pub fn resolve_project_settings(
             let custom = custom_model_slugs(
                 &environment["providerInstances"][instance]["config"]["customModels"],
             );
-            if hidden && !model.as_str().is_some_and(|m| custom.iter().any(|s| s == m)) {
+            if hidden
+                && !model
+                    .as_str()
+                    .is_some_and(|m| custom.iter().any(|s| s == m))
+            {
                 continue;
             }
         }
@@ -216,8 +220,8 @@ pub fn project_provider_instance_enabled(
     instance_id: &str,
 ) -> bool {
     if let Some(project_id) = project_id
-        && let Some(enabled) = settings["projectSettingsOverrides"][project_id]
-            ["providerInstances"][instance_id]["enabled"]
+        && let Some(enabled) = settings["projectSettingsOverrides"][project_id]["providerInstances"]
+            [instance_id]["enabled"]
             .as_bool()
     {
         return enabled;
@@ -297,11 +301,13 @@ pub fn fallback_text_generation_model_selection(
             "model": default_text_generation_model(driver),
         });
         let custom_default = default_model_selection["instanceId"].as_str() == Some(instance)
-            && default_model_selection["model"].as_str().is_some_and(|model| {
-                custom_model_slugs(&provider_instances[instance]["config"]["customModels"])
-                    .iter()
-                    .any(|slug| slug == model)
-            });
+            && default_model_selection["model"]
+                .as_str()
+                .is_some_and(|model| {
+                    custom_model_slugs(&provider_instances[instance]["config"]["customModels"])
+                        .iter()
+                        .any(|slug| slug == model)
+                });
         let selections = if custom_default {
             vec![default_model_selection.clone(), driver_default]
         } else {
@@ -524,7 +530,9 @@ mod tests {
             "claudeAgent"
         );
         assert_eq!(
-            resolve(&settings, OTHER).settings.text_generation_model_selection,
+            resolve(&settings, OTHER)
+                .settings
+                .text_generation_model_selection,
             settings.text_generation_model_selection
         );
     }
