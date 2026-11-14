@@ -878,9 +878,10 @@ impl PullRequestService {
             let mut held = self.0.reports.lock().unwrap_or_else(|e| e.into_inner());
             let ReportedStates { entries, order } = &mut *held;
             entries.retain(|_, (at, ..)| now.saturating_sub(*at) < 300_000);
-            if entries.get(&key).is_some_and(|(_, state, previous, _)| {
-                *state == input.state && *previous == draft
-            }) {
+            if entries
+                .get(&key)
+                .is_some_and(|(_, state, previous, _)| *state == input.state && *previous == draft)
+            {
                 return Ok(());
             }
             // TypeScript's `REF_EPOCH_CAPACITY`: the oldest report makes room for a new one.

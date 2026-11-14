@@ -268,7 +268,8 @@ async fn unavailable_errors_keep_the_provider_and_its_actionable_requirement() {
 }
 
 #[tokio::test]
-async fn same_host_cross_repository_reads_use_that_hosts_binding_and_unbound_private_hosts_are_refused() {
+async fn same_host_cross_repository_reads_use_that_hosts_binding_and_unbound_private_hosts_are_refused()
+ {
     let (service, forge, _) = setup_forge();
     let mut reference = reference();
     reference.repository = "owner/another".into();
