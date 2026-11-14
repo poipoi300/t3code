@@ -10,6 +10,7 @@ use nsh_base::rich_editor::{
         EditorState, EditorStateConfig, KeyEvent, Plugin, PluginSpec, Selection, StateError,
         TextSelection, Transaction, TransactionOrigin,
     },
+    transform::{Mappable, ReplaceStep},
     view::{EditorSession, NodeViews, RichEditorClasses, RichEditorPastedFiles, rich_editor},
 };
 use nsh_core::prelude::*;
@@ -147,6 +148,17 @@ fn tree(schema: &Schema, value: &Value) -> Result<Node, StateError> {
     Ok(node)
 }
 
+#[cfg(test)]
+thread_local! {
+    static JSON_EXPORTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn export_document(node: &Node) -> Value {
+    #[cfg(test)]
+    JSON_EXPORTS.with(|count| count.set(count.get() + 1));
+    node.to_json()
+}
+
 fn selection(state: &EditorState) -> SourceSelection {
     SourceSelection {
         anchor: state.selection().anchor(),
@@ -188,13 +200,63 @@ fn replace_document(
     range: SourceSelection,
 ) -> Result<Transaction, StateError> {
     let doc = tree(state.schema(), value)?;
+    replace_native_document(state, &doc, range)
+}
+
+fn diff_end(left: &Fragment, right: &Fragment, mut a: usize, mut b: usize) -> (usize, usize) {
+    let mut old = left.iter().rev();
+    let mut new = right.iter().rev();
+    while let (Some(left), Some(right)) = (old.next(), new.next()) {
+        if left.eq(right) {
+            a -= left.node_size();
+            b -= right.node_size();
+            continue;
+        }
+        if !left.same_markup(right) {
+            return (a, b);
+        }
+        if let (Some(left), Some(right)) = (left.text(), right.text()) {
+            let shared = left
+                .chars()
+                .rev()
+                .zip(right.chars().rev())
+                .take_while(|(a, b)| a == b)
+                .map(|(ch, _)| ch.len_utf16())
+                .sum::<usize>();
+            return (a - shared, b - shared);
+        }
+        if left.content().size() > 0 || right.content().size() > 0 {
+            return diff_end(left.content(), right.content(), a - 1, b - 1);
+        }
+        return (a, b);
+    }
+    (a, b)
+}
+
+fn replace_native_document(
+    state: &EditorState,
+    doc: &Node,
+    range: SourceSelection,
+) -> Result<Transaction, StateError> {
     if range.anchor > doc.content().size() || range.head > doc.content().size() {
         return Err(invalid("Composer selection is outside the document."));
     }
     let mut tr = state.tr();
-    if !state.doc().eq(&doc) {
-        tr.replace_with(0, state.doc().content().size(), doc.content().clone())
-            .map_err(invalid)?;
+    if let Some(start) = state.doc().content().find_diff_start(doc.content(), 0) {
+        let (old_end, new_end) = diff_end(
+            state.doc().content(),
+            doc.content(),
+            state.doc().content().size(),
+            doc.content().size(),
+        );
+        let overlap = start.saturating_sub(old_end.min(new_end));
+        tr.replace(
+            start,
+            old_end + overlap,
+            doc.slice(start, new_end + overlap, false)
+                .map_err(invalid)?,
+        )
+        .map_err(invalid)?;
     }
     tr.set_selection(TextSelection::create(
         tr.doc(),
@@ -202,6 +264,35 @@ fn replace_document(
         Some(range.head),
     ));
     Ok(tr)
+}
+
+struct DocumentProjection {
+    native: Node,
+    json: Arc<Value>,
+    map: Option<Arc<RichDocMap>>,
+}
+
+fn projection<'a>(data: &'a mut EditorData, node: &Node) -> &'a mut DocumentProjection {
+    if data
+        .projection
+        .as_ref()
+        .is_some_and(|cached| !cached.native.ptr_eq(node))
+    {
+        data.projection = None;
+    }
+    data.projection.get_or_insert_with(|| DocumentProjection {
+        native: node.clone(),
+        json: Arc::new(export_document(node)),
+        map: None,
+    })
+}
+
+fn remember_document(data: &mut EditorData, node: &Node, json: Value) {
+    data.projection = Some(DocumentProjection {
+        native: node.clone(),
+        json: Arc::new(json),
+        map: None,
+    });
 }
 
 struct EditorData {
@@ -212,7 +303,7 @@ struct EditorData {
     path_query_active: bool,
     disabled: bool,
     error: Option<String>,
-    serialized: Option<(Node, Arc<RichDocMap>)>,
+    projection: Option<DocumentProjection>,
     draft_key: Option<String>,
     controlled_snapshot: Option<ComposerSnapshot>,
 }
@@ -265,7 +356,7 @@ impl ComposerEditor {
             path_query_active: false,
             disabled: false,
             error: None,
-            serialized: None,
+            projection: None,
             draft_key: None,
             controlled_snapshot: None,
         }));
@@ -332,14 +423,15 @@ impl ComposerEditor {
 
     fn map_for(&self, state: &EditorState) -> Arc<RichDocMap> {
         let mut data = lock(&self.data);
-        if let Some((doc, map)) = &data.serialized
-            && doc.ptr_eq(state.doc())
-        {
-            return map.clone();
-        }
-        let map = Arc::new(document::serialize_document(&state.doc().to_json()));
-        data.serialized = Some((state.doc().clone(), map.clone()));
-        map
+        let cached = projection(&mut data, state.doc());
+        cached
+            .map
+            .get_or_insert_with(|| Arc::new(document::serialize_document(&cached.json)))
+            .clone()
+    }
+
+    fn document_json(&self, state: &EditorState) -> Arc<Value> {
+        projection(&mut lock(&self.data), state.doc()).json.clone()
     }
 
     pub fn read_snapshot(&self) -> ComposerSnapshot {
@@ -566,13 +658,14 @@ impl ComposerEditor {
         let state = self.session.state();
         let map = self.read_map();
         let range = self.read_selection_range();
+        let current = self.document_json(&state);
         let mut data = lock(&self.data);
         if data.mode == EditorMode::Literal {
             data.resolvers = resolvers;
             return Ok(());
         }
         let doc = document::reconcile_chips(
-            &state.doc().to_json(),
+            &current,
             |name| (resolvers.skill)(name),
             |instance, model| (resolvers.model)(instance, model),
         );
@@ -586,7 +679,7 @@ impl ComposerEditor {
             .set_meta("composerMetadata", json!(true));
         data.resolvers = resolvers;
         drop(data);
-        if *map != next_map || state.doc().to_json() != doc {
+        if *map != next_map || tr.doc_changed() {
             self.dispatch(tr)?;
         }
         Ok(())
@@ -595,7 +688,7 @@ impl ComposerEditor {
     pub fn copy_selection(&self) -> Result<String, StateError> {
         let state = self.session.state();
         document::serialize_selection(
-            &state.doc().to_json(),
+            &self.document_json(&state),
             state.selection().from(),
             state.selection().to(),
         )
@@ -661,9 +754,13 @@ fn history_transaction(
 fn apply_transaction(
     session: &EditorSession,
     shared: &Mutex<EditorData>,
-    tr: Transaction,
+    mut tr: Transaction,
 ) -> Result<(), StateError> {
     let old = session.state();
+    let composing = session.composing() || tr.get_meta("composition").is_some();
+    if let Some(prepared) = prepare_text_input(&old, &mut lock(shared), &mut tr, composing)? {
+        tr = prepared;
+    }
     if let Some(error) = tr.get_meta("composerError").and_then(Value::as_str) {
         return Err(invalid(error));
     }
@@ -679,7 +776,6 @@ fn apply_transaction(
         Some(TransactionOrigin::Paste | TransactionOrigin::Drop)
     ) || tr.get_meta("paste").is_some()
         || tr.get_meta("cut").is_some();
-    let composing = tr.get_meta("composition").is_some();
     let now = tr.time;
     let changed = tr.doc_changed() && tr.add_to_history();
     let steps = if let Some(input) = tr.get_meta("composerInput") {
@@ -691,22 +787,10 @@ fn apply_transaction(
         tr.steps
             .iter()
             .map(|step| {
-                let value = step.to_json();
-                if value["stepType"] != "replace" {
-                    return None;
-                }
-                let from = value["from"].as_u64()? as usize;
-                let to = value["to"].as_u64()? as usize;
+                let step = step.as_any().downcast_ref::<ReplaceStep>()?;
                 Some(undo::Replace {
-                    deleted: to.saturating_sub(from),
-                    inserted: step
-                        .get_map()
-                        .ranges
-                        .as_chunks::<3>()
-                        .0
-                        .iter()
-                        .map(|range| range[2])
-                        .sum(),
+                    deleted: step.to - step.from,
+                    inserted: step.slice.size(),
                 })
             })
             .collect::<Vec<_>>()
@@ -716,7 +800,21 @@ fn apply_transaction(
         return Ok(());
     }
     let mut data = lock(shared);
-    let mut doc = state.doc().to_json();
+    if tr_pairs_need_mapping(&applied) {
+        lock(&data.pairs).map(|position, bias| {
+            let mut mapped = position;
+            for tr in &applied {
+                let next = tr.mapping.map_result(mapped, bias);
+                if next.deleted {
+                    return None;
+                }
+                mapped = next.pos;
+            }
+            Some(mapped)
+        });
+    }
+    let cached = projection(&mut data, state.doc()).json.clone();
+    let mut doc = (*cached).clone();
     if history && data.mode != EditorMode::Literal {
         doc = document::reconcile_chips(
             &doc,
@@ -761,36 +859,41 @@ fn apply_transaction(
     let mode = data.mode;
     data.error = None;
     drop(data);
-    let rewrite = if state.selection().json_id() != "text" && mode == EditorMode::Rich {
-        let kind = if state.selection().json_id() == "node" {
-            EditorSelection::Node(state.selection().from())
+    let (rewrite, normalized_json) =
+        if state.selection().json_id() != "text" && mode == EditorMode::Rich {
+            let kind = if state.selection().json_id() == "node" {
+                EditorSelection::Node(state.selection().from())
+            } else {
+                EditorSelection::All
+            };
+            let selected = markdown_source::normalize_selection(&doc, kind, changed, takes_before);
+            let mut tr = replace_document(
+                &state,
+                &selected.document,
+                selected.selection.range(&selected.document),
+            )?;
+            let json = match selected.selection {
+                EditorSelection::Node(anchor) => json!({"type":"node","anchor":anchor}),
+                EditorSelection::All => json!({"type":"all"}),
+                EditorSelection::Text(range) => {
+                    json!({"type":"text","anchor":range.anchor,"head":range.head})
+                }
+            };
+            tr.set_selection(Selection::from_json(tr.doc(), &json)?);
+            (Some(tr), selected.document)
         } else {
-            EditorSelection::All
+            let normalized = tree(state.schema(), &rewrite.document)?;
+            let tr = if state.doc().eq(&normalized) && selection(&state) == rewrite.selection {
+                None
+            } else {
+                Some(replace_native_document(
+                    &state,
+                    &normalized,
+                    rewrite.selection,
+                )?)
+            };
+            (tr, rewrite.document)
         };
-        let selected = markdown_source::normalize_selection(&doc, kind, changed, takes_before);
-        let mut tr = replace_document(
-            &state,
-            &selected.document,
-            selected.selection.range(&selected.document),
-        )?;
-        let json = match selected.selection {
-            EditorSelection::Node(anchor) => json!({"type":"node","anchor":anchor}),
-            EditorSelection::All => json!({"type":"all"}),
-            EditorSelection::Text(range) => {
-                json!({"type":"text","anchor":range.anchor,"head":range.head})
-            }
-        };
-        tr.set_selection(Selection::from_json(tr.doc(), &json)?);
-        Some(tr)
-    } else if state.doc().to_json() != rewrite.document || selection(&state) != rewrite.selection {
-        Some(replace_document(
-            &state,
-            &rewrite.document,
-            rewrite.selection,
-        )?)
-    } else {
-        None
-    };
     if let Some(mut tr) = rewrite {
         tr.set_add_to_history(false);
         if let Some(marks) = state.stored_marks() {
@@ -800,14 +903,129 @@ fn apply_transaction(
         state = next;
         applied.extend(transactions);
     }
+    let mut data = lock(shared);
+    if data
+        .projection
+        .as_ref()
+        .is_none_or(|cached| !cached.native.ptr_eq(state.doc()))
+    {
+        remember_document(&mut data, state.doc(), normalized_json);
+    }
+    drop(data);
     session.commit(state, &applied);
     Ok(())
+}
+
+fn tr_pairs_need_mapping(applied: &[Transaction]) -> bool {
+    applied.iter().any(Transaction::doc_changed)
+        && !applied
+            .iter()
+            .any(|tr| tr.get_meta("composerPairsMapped").is_some())
+}
+
+// NSH calls input hooks before attaching composition metadata; inspect the native transaction instead.
+fn prepare_text_input(
+    state: &EditorState,
+    data: &mut EditorData,
+    tr: &mut Transaction,
+    composing: bool,
+) -> Result<Option<Transaction>, StateError> {
+    if data.mode == EditorMode::Literal
+        || composing
+        || !matches!(tr.origin(), Some(TransactionOrigin::Input))
+        || tr.steps.len() != 1
+    {
+        return Ok(None);
+    }
+    let Some(step) = tr.steps[0].as_any().downcast_ref::<ReplaceStep>() else {
+        return Ok(None);
+    };
+    if step.slice.content.child_count() != 1 {
+        return Ok(None);
+    }
+    let Some(text) = step
+        .slice
+        .content
+        .first_child()
+        .and_then(Node::text)
+        .map(str::to_owned)
+    else {
+        return Ok(None);
+    };
+    if utf16_len(&text) != 1 {
+        return Ok(None);
+    }
+    let (from, to) = (step.from, step.to);
+    if from != to {
+        let doc = projection(data, state.doc()).json.clone();
+        if let Some(mut surrounded) = surround_selection(state, &doc, from, to, &text)? {
+            surrounded
+                .set_origin(TransactionOrigin::Input)
+                .set_time(tr.time)
+                .scroll_into_view();
+            return Ok(Some(surrounded));
+        }
+    }
+    if data.mode != EditorMode::Rich
+        || !matches!(text.as_str(), "*" | "_" | "~" | "`" | " ")
+        || state.selection().resolved_from().parent().ty().spec().code
+    {
+        return Ok(None);
+    }
+    let doc = projection(data, state.doc()).json.clone();
+    let marks = state
+        .stored_marks()
+        .map(<[_]>::to_vec)
+        .unwrap_or_else(|| state.selection().resolved_from().marks());
+    let marks = marks.iter().map(|mark| mark.to_json()).collect::<Vec<_>>();
+    let Some(rewrite) = input_rules::type_text(
+        &mut lock(&data.pairs),
+        &doc,
+        SourceSelection {
+            anchor: from,
+            head: to,
+        },
+        &text,
+        &marks,
+        false,
+    ) else {
+        return Ok(None);
+    };
+    let native = tree(state.schema(), &rewrite.document)?;
+    let marks = rewrite
+        .stored_marks
+        .iter()
+        .map(|mark| state.schema().mark_from_json(mark).map_err(invalid))
+        .collect::<Result<Vec<_>, _>>()?;
+    if native.eq(tr.doc())
+        && rewrite.selection.anchor == tr.selection().anchor()
+        && rewrite.selection.head == tr.selection().head()
+    {
+        tr.set_stored_marks(Some(marks))
+            .set_meta("composerPairsMapped", json!(true));
+        remember_document(data, tr.doc(), rewrite.document);
+        return Ok(None);
+    }
+    let mut prepared = replace_native_document(state, &native, rewrite.selection)?;
+    prepared
+        .set_stored_marks(Some(marks))
+        .set_origin(TransactionOrigin::Input)
+        .set_time(tr.time)
+        .scroll_into_view()
+        .set_meta("composerPairsMapped", json!(true))
+        .set_meta(
+            "composerInput",
+            json!({"deleted":to-from,"inserted":utf16_len(&text)}),
+        );
+    remember_document(data, prepared.doc(), rewrite.document);
+    Ok(Some(prepared))
 }
 
 struct ComposerDocumentPlugin(Arc<Mutex<EditorData>>);
 
 fn surround_selection(
     state: &EditorState,
+    doc: &Value,
     from: usize,
     to: usize,
     text: &str,
@@ -843,7 +1061,7 @@ fn surround_selection(
                     .any(|mark| mark.ty().name() != markdown_source::SOURCE_MARK);
         !special
     });
-    let map = document::serialize_document(&state.doc().to_json());
+    let map = document::serialize_document(doc);
     if special
         || source::selection_touches_mention_boundary(
             &map.value,
@@ -865,7 +1083,7 @@ fn surround_selection(
             .schema()
             .mark_type(if text == "`" { "code" } else { "italic" })
             .is_some()
-        && let Some(document) = document::surround_selection(&state.doc().to_json(), from, to, mark)
+        && let Some(document) = document::surround_selection(doc, from, to, mark)
     {
         return replace_document(
             state,
@@ -917,78 +1135,6 @@ impl PluginSpec for ComposerDocumentPlugin {
         true
     }
 
-    fn handle_text_input(
-        &self,
-        state: &EditorState,
-        from: usize,
-        to: usize,
-        text: &str,
-        dispatch: &mut dyn FnMut(Transaction),
-    ) -> bool {
-        let data = lock(&self.0);
-        if data.mode != EditorMode::Literal {
-            let surrounded = surround_selection(state, from, to, text);
-            match surrounded {
-                Ok(Some(mut tr)) => {
-                    tr.set_origin(TransactionOrigin::Input).scroll_into_view();
-                    drop(data);
-                    dispatch(tr);
-                    return true;
-                }
-                Err(error) => {
-                    drop(data);
-                    dispatch(error_transaction(state, error));
-                    return true;
-                }
-                Ok(None) => {}
-            }
-        }
-        if data.mode != EditorMode::Rich {
-            return false;
-        }
-        let marks = state
-            .stored_marks()
-            .map(|marks| marks.to_vec())
-            .unwrap_or_else(|| state.selection().resolved_from().marks());
-        let marks = marks.iter().map(|mark| mark.to_json()).collect::<Vec<_>>();
-        let Some(rewrite) = input_rules::type_text(
-            &mut lock(&data.pairs),
-            &state.doc().to_json(),
-            SourceSelection {
-                anchor: from,
-                head: to,
-            },
-            text,
-            &marks,
-            false,
-        ) else {
-            return false;
-        };
-        let result =
-            replace_document(state, &rewrite.document, rewrite.selection).and_then(|mut tr| {
-                let marks = rewrite
-                    .stored_marks
-                    .iter()
-                    .map(|mark| state.schema().mark_from_json(mark).map_err(invalid))
-                    .collect::<Result<Vec<_>, _>>()?;
-                tr.set_stored_marks(Some(marks))
-                    .set_origin(TransactionOrigin::Input)
-                    .scroll_into_view();
-                // Whole-tree view replacements must retain the original edit's grouping kind.
-                tr.set_meta(
-                    "composerInput",
-                    json!({"deleted":to-from,"inserted":utf16_len(text)}),
-                );
-                Ok(tr)
-            });
-        drop(data);
-        match result {
-            Ok(tr) => dispatch(tr),
-            Err(error) => dispatch(error_transaction(state, error)),
-        }
-        true
-    }
-
     fn transform_pasted_html(&self, _state: &EditorState, _html: String) -> String {
         // The web composer deliberately imports the plain-text payload, never foreign HTML styles.
         String::new()
@@ -1001,8 +1147,19 @@ impl PluginSpec for ComposerDocumentPlugin {
         context: &ResolvedPos,
         _plain: bool,
     ) -> Option<Slice> {
-        let data = lock(&self.0);
+        let mut data = lock(&self.0);
         let mut text = text.replace("\r\n", "\n").replace('\r', "\n");
+        if context.parent().ty().spec().code {
+            return Some(if text.is_empty() {
+                Slice::empty()
+            } else {
+                Slice::new(
+                    Fragment::from(vec![state.schema().text(&text, vec![])]),
+                    0,
+                    0,
+                )
+            });
+        }
         let tokens = if data.mode == EditorMode::Literal {
             vec![]
         } else {
@@ -1041,7 +1198,8 @@ impl PluginSpec for ComposerDocumentPlugin {
             .first()
             .is_some_and(|token| chip(token) && token.range.start == 0)
         {
-            let map = document::serialize_document(&state.doc().to_json());
+            let cached = projection(&mut data, state.doc()).json.clone();
+            let map = document::serialize_document(&cached);
             let offset = map.flat_to_markdown(map.pm_to_flat(state.selection().from()));
             if source::utf16_byte_offset(&map.value, offset)
                 .and_then(|byte| map.value[..byte].chars().next_back())
@@ -1094,6 +1252,21 @@ impl PluginSpec for ComposerDocumentPlugin {
             dispatch(error_transaction(state, error));
             return true;
         }
+        if state.selection().resolved_from().parent().ty().spec().code {
+            let text = slice
+                .content
+                .text_between(0, slice.content.size(), None, Some("\n"));
+            let mut tr = state.tr();
+            tr.insert_text(
+                &text,
+                Some(state.selection().from()),
+                Some(state.selection().to()),
+            )
+            .set_origin(TransactionOrigin::Paste)
+            .scroll_into_view();
+            dispatch(tr);
+            return true;
+        }
         let source_text = slice.content.iter().all(|node| {
             node.is_text()
                 && node
@@ -1109,7 +1282,8 @@ impl PluginSpec for ComposerDocumentPlugin {
             dispatch(tr);
             return true;
         }
-        let collapsed = markdown_source::collapse(&state.doc().to_json(), selection(state), false);
+        let cached = projection(&mut lock(&self.0), state.doc()).json.clone();
+        let collapsed = markdown_source::collapse(&cached, selection(state), false);
         let result =
             replace_document(state, &collapsed.document, collapsed.selection).map(|mut tr| {
                 tr.replace_selection(slice.clone())
@@ -1126,7 +1300,7 @@ impl PluginSpec for ComposerDocumentPlugin {
 
     fn clipboard_text_serializer(&self, state: &EditorState, _slice: &Slice) -> Option<String> {
         document::serialize_selection(
-            &state.doc().to_json(),
+            &projection(&mut lock(&self.0), state.doc()).json,
             state.selection().from(),
             state.selection().to(),
         )
@@ -1840,5 +2014,29 @@ mod tests {
         type_text(&editor, "!");
         assert!(editor.undo().expect("draft b has its own history"));
         assert_eq!(editor.read_snapshot().value, "hello");
+    }
+
+    #[test]
+    fn ordinary_keystrokes_export_the_native_document_once_and_reuse_it_for_snapshots() {
+        let mut measurements = Vec::new();
+        for length in [8_192, 65_536] {
+            let editor = editor(&"a".repeat(length));
+            editor.focus_at_end().expect("end");
+            JSON_EXPORTS.with(|count| count.set(0));
+            for _ in 0..100 {
+                type_text(&editor, "a");
+                editor.read_snapshot();
+                editor.read_snapshot();
+            }
+            let exports = JSON_EXPORTS.with(std::cell::Cell::get);
+            measurements.push((length, exports));
+        }
+        eprintln!(
+            "100 keys + two snapshot reads/key, (initial bytes, native JSON exports): {measurements:?}"
+        );
+        assert!(
+            measurements.iter().all(|(_, exports)| *exports <= 100),
+            "reuse the same immutable document projection"
+        );
     }
 }

@@ -1,9 +1,7 @@
 //! Port of `apps/web/src/components/chat/ChatComposer.tsx`'s frame (`ComposerSurface` shell,
-//! host, main surface, editor and footer) around a native multiline input: Enter sends,
-//! Shift+Enter adds a line. Footer controls (model, permissions, attach) are CMP-*'s.
-//!
-//! The rich composer (chips, suggestions, attachments, drafts, IME rules) is lane CMP-*; it
-//! replaces this module's body. Sending goes through the backend; the reply arrives in the store.
+//! host, main surface, editor and footer) around CMP-EDITOR-1's prompt editor. Footer controls
+//! (model, permissions, attach) are CMP-*'s; Enter-to-send waits for the editor's submit (CMP-SEND).
+//! Sending goes through the backend; the reply arrives in the store.
 
 use nsh_core::prelude::*;
 use t3_client::types::ThreadKey;
@@ -11,6 +9,10 @@ use t3_client::types::ThreadKey;
 use crate::i18n::t;
 use crate::runtime::backend::SendError;
 use crate::runtime::rt;
+use crate::screens::composer::editor::{
+    ComposerEditor, ComposerPromptEditorProps, ComposerResolvers, EditorMode,
+    composer_prompt_editor_tiptap,
+};
 use crate::theme::{palette, tw};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::text::{TextRole, Tone, label};
@@ -21,9 +23,14 @@ pub fn composer(key: ThreadKey) -> impl IntoElement {
     let error = signal(None::<String>);
     let sending = signal(false);
     let empty = move || draft.with(|d| d.trim().is_empty());
+    // CMP-EDITOR-1's editor; its `on_change` hands the composer the markdown source.
+    let prompt = ComposerEditor::new("", 0, EditorMode::Plain, ComposerResolvers::default())
+        .expect("an empty plain-text document always builds");
+    let clearing = prompt.clone();
     let send = {
         let key = key.clone();
         move || {
+            let clearing = clearing.clone();
             let text = draft.get_untracked();
             if text.trim().is_empty() || sending.get_untracked() {
                 return;
@@ -34,7 +41,12 @@ pub fn composer(key: ThreadKey) -> impl IntoElement {
             let key = key.clone();
             spawn(async move {
                 match backend.send_message(&key, text).await {
-                    Ok(()) => draft.set(String::new()),
+                    Ok(()) => {
+                        draft.set(String::new());
+                        if let Err(failure) = clearing.sync("", 0) {
+                            error.set(Some(failure.to_string()));
+                        }
+                    }
                     Err(SendError::Disconnected) => {
                         error.set(Some(t("Not connected. Your message was not sent.")))
                     }
@@ -45,21 +57,20 @@ pub fn composer(key: ThreadKey) -> impl IntoElement {
         }
     };
     let send_from_button = send.clone();
-    let editor = nsh_base::input()
-        .value(move || draft.get())
-        .on_change(move |text: &str| draft.set(text.to_owned()))
-        .on_submit(move |_: &str| send())
-        .multiline(true)
-        .submit_behavior(SubmitBehavior::Submit)
-        .return_key_type(ReturnKeyType::Send)
-        .placeholder(t("Ask anything. @ files, $ skills, / commands"))
-        .label(SharedString::from(t("Message")))
-        .test_id("composer")
-        // `ComposerPromptEditorTiptap`'s editor; `min-h-[calc(2lh+--spacing(2))]` hand-ported
-        // for 14 px text at `leading-relaxed` (two 22.75 px lines and 8 px).
-        .app_class(tw(
-            "-m-1 block max-h-52 min-h-[53.5px] p-1 bg-transparent text-sm leading-relaxed text-foreground placeholder:text-placeholder",
-        ));
+    // Enter does not send yet: the editor exposes no submit (CMP-EDITOR-1 / CMP-SEND).
+    let editor = composer_prompt_editor_tiptap(
+        prompt,
+        ComposerPromptEditorProps {
+            disabled: Prop::bind(move || sending.get()),
+            placeholder: Prop::new(SharedString::from(
+                "Ask anything. @ files, $ skills, / commands",
+            )),
+            aria_label: Prop::new(SharedString::from("Message")),
+            ..Default::default()
+        },
+        move |snapshot| draft.set(snapshot.value),
+        |_| {},
+    );
     let send_button = nsh_base::button()
         .accessibility_label(Some(SharedString::from(t("Send message"))))
         .disabled(move || empty() || sending.get())

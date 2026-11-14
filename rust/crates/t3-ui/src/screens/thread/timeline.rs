@@ -1,84 +1,138 @@
-//! The thread timeline: one virtual-list cell per timeline entry, each reading its entry through
-//! its own memo, so a streamed token re-renders only the streaming row.
+//! Port of apps/web/src/components/chat/MessagesTimeline.tsx MessagesTimeline (the list and its
+//! row frame). Rows are the client's port of `MessagesTimeline.logic.ts`
+//! (`t3_client::thread_views::messages_timeline`), derived from the timeline entries and the
+//! thread's run; each virtual-list cell reads its row through its own memo, so a streamed token
+//! re-renders only the streaming row. Assistant rows are TL-ROWS-ASSISTANT's; user and work rows
+//! keep interim renderers until TL-ROWS-USER and TL-ROWS-WORK-* can be mounted (see
+//! `one-change/integration-1/README.md`).
 //!
-//! Interim structure (row = entry). The block-flattened timeline (TL-BLOCKS-*) replaces the cell
-//! body with blocks so long code cannot dominate a frame; see ui-plan.md, NSH problem 2.
+//! The block-flattened timeline (TL-BLOCKS-*) replaces the cell body with blocks so long code
+//! cannot dominate a frame; see ui-plan.md, NSH problem 2.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
-use nsh_base::text_view;
-use nsh_base::text_view::{MarkdownOptions, TextViewClasses};
 use nsh_core::prelude::*;
+use t3_client::services::models::{present_thread_shell, thread_runtime_is_active};
 use t3_client::state::selectors::thread_shell;
-use t3_client::types::ThreadKey;
-use t3_client::view_logic::session::{TimelineContent, TimelineEntry};
-use t3_contracts::orchestration_v2::OrchestrationV2ShellThreadStatus as Status;
+use t3_client::thread_views::messages_timeline::{
+    MessagesTimelineRow, MessagesTimelineRowContent, MessagesTimelineRowsInput,
+    MessagesTimelineRowsProjection, TimelineLatestRun, derive_messages_timeline_rows_with_state,
+    work_entry_display_label,
+};
+use t3_client::types::{EnvironmentId, ThreadKey};
+use t3_contracts::orchestration_v2::OrchestrationV2ThreadShell;
 
 use crate::i18n::t;
 use crate::runtime::{Shared, rt};
-use crate::theme::{palette, tw};
+use crate::screens::thread::rows::assistant::{
+    AssistantRowContext, AssistantRowsState, assistant_row, assistant_timeline_row,
+};
+use crate::theme::tw;
 use crate::ui::surface::empty_state;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RowKind {
-    UserMessage,
-    AssistantMessage,
+enum RowKind {
+    User,
+    Assistant,
+    Working,
     Work,
     Other,
 }
 
-impl RowKind {
-    pub fn of(entry: &TimelineEntry) -> Self {
-        match &entry.content {
-            TimelineContent::Message { message, .. } if message.role == "user" => Self::UserMessage,
-            TimelineContent::Message { .. } => Self::AssistantMessage,
-            TimelineContent::Work { .. } => Self::Work,
-            _ => Self::Other,
+fn kind_of(row: &MessagesTimelineRow) -> RowKind {
+    use MessagesTimelineRowContent as C;
+    match &row.content {
+        C::Message { message, .. } if message.role == "user" => RowKind::User,
+        C::Message { .. } => RowKind::Assistant,
+        C::Working { .. } => RowKind::Working,
+        C::Work { .. } | C::WorkLive { .. } | C::Thinking { .. } | C::WorkToggle { .. } => {
+            RowKind::Work
         }
+        _ => RowKind::Other,
     }
 }
 
-fn message_text(entry: &TimelineEntry) -> String {
-    match &entry.content {
-        TimelineContent::Message { message, .. } => message.text.clone(),
-        TimelineContent::Work { entry } => match &entry.detail {
-            Some(detail) => format!("{} · {detail}", entry.label),
-            None => entry.label.clone(),
-        },
-        TimelineContent::ProposedPlan { .. } => t("Proposed plan"),
-        TimelineContent::HtmlRender { .. } => t("Rendered HTML"),
-        TimelineContent::McpApp { .. } => t("App"),
-        TimelineContent::Event { .. } => t("Event"),
-    }
+/// What ChatView passes MessagesTimeline about the run (`latestRun`, `runningRunId`, `isWorking`,
+/// `activeTurnStartedAt`), read from the client's presentation of the thread shell.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct RunState {
+    latest_run: Option<TimelineLatestRun>,
+    running_run_id: Option<String>,
+    is_working: bool,
+    active_turn_started_at: Option<String>,
 }
 
-fn is_streaming(entry: &TimelineEntry) -> bool {
-    matches!(&entry.content, TimelineContent::Message { message, .. } if message.streaming)
+fn run_state(environment: &EnvironmentId, thread: &OrchestrationV2ThreadShell) -> RunState {
+    let view = present_thread_shell(environment.clone(), Rc::new(thread.clone()), None);
+    let latest_run = view.latest_run.as_ref().map(|run| TimelineLatestRun {
+        run_id: run.run_id.0.clone(),
+        status: serde_json::to_value(&run.status)
+            .ok()
+            .and_then(|status| status.as_str().map(str::to_owned))
+            .unwrap_or_default(),
+        started_at: run.started_at.as_ref().map(|at| at.0.clone()),
+        completed_at: run.completed_at.as_ref().map(|at| at.0.clone()),
+        turn_ended: run.turn_ended,
+    });
+    let runtime = view.runtime.as_ref();
+    RunState {
+        latest_run,
+        running_run_id: runtime.and_then(|r| r.active_run_id.as_ref().map(|id| id.0.clone())),
+        is_working: thread_runtime_is_active(runtime),
+        active_turn_started_at: runtime
+            .and_then(|r| r.activity_started_at.clone().flatten())
+            .map(|at| at.0),
+    }
 }
 
 pub fn timeline(key: ThreadKey) -> impl IntoElement {
     let runtime = rt();
     let thread_id = key.thread.clone();
-    let working = runtime
+    let environment = key.environment.clone();
+    let run = runtime
         .store
         .shell_state(key.environment.clone(), move |shell| {
             shell
                 .and_then(|shell| thread_shell(shell, &thread_id))
-                .is_some_and(|thread| {
-                    matches!(
-                        thread.status,
-                        Status::Preparing | Status::Queued | Status::Starting | Status::Running
-                    )
-                })
+                .map(|thread| run_state(&environment, thread))
+                .unwrap_or_default()
         });
-    let timeline = runtime.store.timeline(key);
-    let count = computed(move || timeline.with(|t| t.entries.len()));
-    let keys = computed(move || Shared(timeline.with(|t| t.keys.clone())));
+    let entries = runtime.store.timeline(key);
+    // The previous projection: the client reuses unchanged rows and patches a streaming one.
+    let previous: Rc<RefCell<Option<MessagesTimelineRowsProjection>>> = Rc::default();
+    let rows = computed(move || {
+        let run = run.get();
+        let input = MessagesTimelineRowsInput {
+            timeline_entries: entries.with(|t| t.entries.as_ref().clone()),
+            latest_run: run.latest_run,
+            running_run_id: run.running_run_id,
+            is_working: run.is_working,
+            active_turn_started_at: run.active_turn_started_at,
+            tool_call_visibility: "showAll".into(),
+            ..Default::default()
+        };
+        let next = derive_messages_timeline_rows_with_state(&input, previous.borrow().as_ref());
+        let rows = next.rows.clone();
+        *previous.borrow_mut() = Some(next);
+        Shared(rows)
+    });
+    let count = computed(move || rows.with(|r| r.0.len()));
+    let keys = computed(move || {
+        rows.with(|r| {
+            Shared(Rc::new(
+                r.0.iter()
+                    .map(|row| SharedString::from(row.id.clone()))
+                    .collect::<Vec<_>>(),
+            ))
+        })
+    });
+    let state = AssistantRowsState::default();
     let list = virtual_list(count, move |at| {
-        let entry: Memo<Option<Shared<TimelineEntry>>> =
-            computed(move || timeline.with(|t| t.entries.get(at.index()).cloned().map(Shared)));
-        let kind = computed(move || entry.get().map(|e| RowKind::of(&e)));
-        row(entry, kind)
+        let row: Memo<Option<Shared<MessagesTimelineRow>>> =
+            computed(move || rows.with(|r| r.0.get(at.index()).cloned().map(Shared)));
+        let kind = computed(move || row.with(|r| r.as_ref().map(|r| kind_of(&r.0))));
+        cell(row, kind, state)
     })
     .keys(move || keys.get().0.as_ref().clone())
     .alignment(ListAlignment::Bottom)
@@ -95,85 +149,126 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
         .min_h(px(0.0))
         .selectable(true)
         .child(list)
-        .child(when(move || working.get(), working_row))
 }
 
 /// `MessagesTimeline.tsx`'s row frame: the lane inset (`[data-chat-canvas]
-/// .messages-timeline-scroll`, hand-ported from `index.css`), the centred content column, and
-/// the row's bottom padding (`pb-4`; `pb-2` for an assistant message without its meta row).
-fn row(
-    entry: Memo<Option<Shared<TimelineEntry>>>,
+/// .messages-timeline-scroll`, hand-ported from `index.css`), the centred content column, and the
+/// row's bottom padding as the web chooses it per row kind.
+fn cell(
+    row: Memo<Option<Shared<MessagesTimelineRow>>>,
     kind: Memo<Option<RowKind>>,
+    state: AssistantRowsState,
 ) -> impl IntoElement {
-    let content = move || entry.get().map(|e| message_text(&e)).unwrap_or_default();
     let body = dynamic(move || match kind.get() {
-        Some(RowKind::UserMessage) => Some(user_message(content).into_element()),
-        Some(RowKind::AssistantMessage) => Some(assistant_message(entry, content).into_element()),
-        Some(RowKind::Work) | Some(RowKind::Other) => Some(work_line(content).into_element()),
-        None => None,
+        Some(RowKind::User) => Some(user_message(move || user_text(row)).into_element()),
+        Some(RowKind::Assistant) => Some(
+            assistant_timeline_row(
+                assistant_row(row),
+                AssistantRowContext::new(state),
+            )
+            .into_element(),
+        ),
+        Some(RowKind::Working) => Some(working_row().into_element()),
+        Some(RowKind::Work) => Some(work_lines(row).into_element()),
+        Some(RowKind::Other) | None => None,
     });
-    let padding = move || {
-        Some(tw(match kind.get() {
-            Some(RowKind::AssistantMessage) => "pb-2",
-            _ => "pb-4",
-        }))
-    };
+    let padding = move || Some(tw(row.with(|r| r.as_ref().map_or("pb-4", |r| padding_of(&r.0)))));
     view().app_class(tw("w-full px-3 sm:px-12")).child(
         view()
-            .app_class(tw(
-                "mx-auto w-full min-w-0 max-w-(--chat-content-max-width)",
-            ))
+            .app_class(tw("mx-auto w-full min-w-0 max-w-(--chat-content-max-width)"))
             .child(view().app_class(padding).child(body)),
     )
 }
 
-/// `TimelineUserMessageRow.tsx` `UserTimelineRow`, a plain message: the bubble. Departures until
-/// TL-USER: the body is plain text (the web renders it as markdown with line breaks), and the
-/// actions row (timestamp, copy, revert) is not built.
+/// The web's per-row bottom padding (MessagesTimeline.tsx, the row's outer `div`).
+fn padding_of(row: &MessagesTimelineRow) -> &'static str {
+    use MessagesTimelineRowContent as C;
+    match &row.content {
+        C::Work { .. } | C::WorkLive { .. } | C::Thinking { .. } | C::WorkToggle { .. } => "",
+        C::TurnFold { .. } | C::Working { .. } => "pb-1.5",
+        C::Message {
+            grouped_with_next: Some(true),
+            ..
+        } => "pb-1",
+        C::Message {
+            message,
+            show_assistant_meta: false,
+            ..
+        } if message.role == "assistant" => "pb-2",
+        C::Event { .. } | C::AttemptFold { .. } | C::HtmlRender { .. } | C::McpApp { .. } => {
+            "pb-2"
+        }
+        C::ViewedImages { .. } | C::WorktreeSetup { .. } => "pb-2",
+        _ => "pb-4",
+    }
+}
+
+fn user_text(row: Memo<Option<Shared<MessagesTimelineRow>>>) -> String {
+    row.with(|r| match r.as_ref().map(|r| &r.0.content) {
+        Some(MessagesTimelineRowContent::Message { message, .. }) => message.text.clone(),
+        _ => String::new(),
+    })
+}
+
+/// `TimelineUserMessageRow.tsx` `UserTimelineRow`, a plain message: the bubble. Interim until
+/// TL-ROWS-USER's row can mount (it needs the client's `resolveUserMessagePresentation`): the
+/// body is plain text and the actions row is not built.
 fn user_message(content: impl Fn() -> String + 'static) -> impl IntoElement {
     view()
         .app_class(tw("group flex flex-col items-end gap-1"))
         .child(
-        view()
-            .app_class(tw(
-                "relative min-w-0 max-w-[80%] rounded-2xl text-message-foreground bg-message p-3",
-            ))
-            .child(
-                text(move || SharedString::from(content()))
-                    .select_text()
-                    .app_class(tw("text-sm leading-relaxed text-message-foreground")),
-            ),
-    )
+            view()
+                .app_class(tw(
+                    "relative min-w-0 max-w-[80%] rounded-2xl text-message-foreground bg-message p-3",
+                ))
+                .child(
+                    text(move || SharedString::from(content()))
+                        .select_text()
+                        .app_class(tw("text-sm leading-relaxed text-message-foreground")),
+                ),
+        )
 }
 
-/// `TimelineAssistantRows.tsx` `AssistantTimelineRow`: the markdown body. Meta row, changed
-/// files and status badges are TL-ASSIST's.
-fn assistant_message(
-    entry: Memo<Option<Shared<TimelineEntry>>>,
-    content: impl Fn() -> String + 'static,
-) -> impl IntoElement {
-    let markdown = Rc::new(content);
-    view().app_class(tw("relative min-w-0 px-1 py-0.5")).child(
-        text_view()
-            .markdown(move || Some(SharedString::from(markdown())))
-            .options(move || MarkdownOptions {
-                streaming: entry.get().is_some_and(|e| is_streaming(&e)),
-                ..Default::default()
-            })
-            .selectable(true)
-            .classes(TextViewClasses::default())
-            // `ChatMarkdown`'s root: `text-sm text-foreground/[calc(90%+contrast/10)]` at the
-            // default contrast, set on the TextView so every part inherits it.
-            .text_size(px(14.0))
-            .text_color(move || palette().foreground.opacity(0.9))
-            .w_full(),
-    )
+/// Interim work rows until TL-ROWS-WORK-1 and -2 mount: one muted line per entry, with the
+/// client's labels (`work_entry_display_label`, the work toggle's summary).
+fn work_lines(row: Memo<Option<Shared<MessagesTimelineRow>>>) -> impl IntoElement {
+    let labels = computed(move || row.with(|r| r.as_ref().map(|r| work_labels(&r.0)).unwrap_or_default()));
+    view().app_class(tw("flex flex-col gap-1 pb-2")).child(dynamic(move || {
+        let lines = labels.get();
+        Some(
+            lines
+                .into_iter()
+                .fold(view().app_class(tw("flex flex-col gap-1")), |column, label| {
+                    column.child(
+                        text(SharedString::from(label))
+                            .number_of_lines(2u32)
+                            .app_class(tw("text-xs text-muted-foreground")),
+                    )
+                })
+                .into_element(),
+        )
+    }))
 }
 
-/// `TimelineWorkGroupRows.tsx` `WorkingTimelineRow`, its label without a run start ("Working..."),
-/// in the row frame: the timeline's last row while the thread's run is active.
+fn work_labels(row: &MessagesTimelineRow) -> Vec<String> {
+    use MessagesTimelineRowContent as C;
+    match &row.content {
+        C::Work { grouped_entries, .. } => grouped_entries
+            .iter()
+            .map(|entry| work_entry_display_label(entry, None))
+            .collect(),
+        C::WorkLive { entry, .. } => vec![work_entry_display_label(entry, None)],
+        C::Thinking { label, .. } => vec![label.clone().unwrap_or_else(|| t("Thinking"))],
+        C::WorkToggle { summary, .. } => vec![summary.clone()],
+        _ => Vec::new(),
+    }
+}
+
+/// `TimelineWorkGroupRows.tsx` `WorkingTimelineRow`, its label without a run start
+/// ("Working..."): the client's `working` row while the run is active. Owned by the integrator
+/// until TL-ROWS-WORK-1 takes it with the work rows.
 fn working_row() -> impl IntoElement {
-    let row = view().app_class(tw("border-b border-border/60 pb-2 pt-1")).child(
+    view().app_class(tw("border-b border-border/60 pb-2 pt-1")).child(
         view()
             .app_class(tw(
                 "flex h-6 min-w-0 items-baseline gap-2 px-1 text-sm leading-relaxed text-muted-foreground tabular-nums",
@@ -182,19 +277,5 @@ fn working_row() -> impl IntoElement {
                 text(t("Working..."))
                     .app_class(tw("relative shrink-0 overflow-hidden whitespace-nowrap")),
             ),
-    );
-    view().app_class(tw("w-full px-3 sm:px-12")).child(
-        view()
-            .app_class(tw(
-                "mx-auto w-full min-w-0 max-w-(--chat-content-max-width) pb-1.5",
-            ))
-            .child(row),
     )
-}
-
-/// Work rows are TL-WORK's; until then one muted line.
-fn work_line(content: impl Fn() -> String + 'static) -> impl IntoElement {
-    text(move || SharedString::from(content()))
-        .number_of_lines(2u32)
-        .app_class(tw("text-xs text-muted-foreground"))
 }

@@ -6,6 +6,7 @@
 //! Section markers, the working shelf, folders, search and drag are the SB-* packages'.
 
 pub mod actions;
+pub mod chrome;
 pub mod drag;
 pub mod projects;
 pub mod row;

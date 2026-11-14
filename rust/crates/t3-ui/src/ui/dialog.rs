@@ -12,6 +12,8 @@
 //! Text slots retain their last open value while the native layer animates out.
 //! `state.on_open_change(callback)` gives the caller control of open requests; the callback
 //! updates `open` itself and can reject a dismissal while a form has unsaved data.
+//! `state.on_open_change_complete(callback)` reports the settled open transition or closed layer;
+//! a confirmation host advances its FIFO queue on the closed notification.
 //! A presenter replacing an unanswered alert uses `state.on_replaced(on_dismiss)` and
 //! `state.replace_with(|| present_next())`; the old callback runs once, after the new request.
 //!
@@ -147,6 +149,7 @@ pub struct DialogState {
     actions: Stored<Vec<FocusAction>>,
     controls: Stored<Vec<FocusAction>>,
     open_change: Stored<Option<OpenChange>>,
+    open_change_complete: Stored<Option<OpenChange>>,
     replaced: Stored<Option<Replaced>>,
 }
 
@@ -166,6 +169,7 @@ impl DialogState {
             actions: stored(Vec::new()),
             controls: stored(Vec::new()),
             open_change: stored(None),
+            open_change_complete: stored(None),
             replaced: stored(None),
         }
     }
@@ -182,6 +186,12 @@ impl DialogState {
     /// Controlled onOpenChange: the caller updates `open`, or keeps it unchanged to reject.
     pub fn on_open_change(self, callback: impl Fn(bool) + 'static) {
         self.open_change
+            .with(|current| *current = Some(Rc::new(callback)));
+    }
+
+    /// Base UI's onOpenChangeComplete; closing is complete after the retained tree is disposed.
+    pub fn on_open_change_complete(self, callback: impl Fn(bool) + 'static) {
+        self.open_change_complete
             .with(|current| *current = Some(Rc::new(callback)));
     }
 
@@ -460,8 +470,17 @@ fn retained_while_closed<M: 'static, E: IntoChild<M> + 'static>(
                 backdrop_motion.value(MotionChannel::Opacity).set(0.0);
                 mounted.set(true);
             }
-            drop(transition(popup_motion, true, offset, false).start());
+            let ended = transition(popup_motion, true, offset, false).start();
             drop(transition(backdrop_motion, true, offset, true).start());
+            spawn(async move {
+                let _ = ended.await;
+                if generation.get() == current
+                    && state.open.get_untracked()
+                    && let Some(callback) = state.open_change_complete.get()
+                {
+                    callback(true);
+                }
+            });
         } else if mounted.get_untracked() {
             let ended = transition(popup_motion, false, offset, false).start();
             drop(transition(backdrop_motion, false, offset, true).start());
@@ -475,6 +494,16 @@ fn retained_while_closed<M: 'static, E: IntoChild<M> + 'static>(
     });
     when(mounted, move || {
         untracked(|| {
+            cleanup(move || {
+                if state.open.try_get() == Some(false)
+                    && let Some(callback) = state
+                        .open_change_complete
+                        .try_with(|callback| callback.clone())
+                        .flatten()
+                {
+                    callback(false);
+                }
+            });
             state.has_header.set(false);
             state.has_panel.set(false);
             state.bare_footer.set(false);
@@ -676,13 +705,18 @@ pub fn dialog_viewport<M>(options: PopupOptions, children: impl IntoChild<M>) ->
         ])))
         // max-sm:pt-12 overrides media's titlebar + 1.5rem inset in the web cascade.
         .when(options.variant == Variant::Media, |v| {
-            v.pt(move || {
-                px(
-                    if options.bottom_stick_on_mobile && layout_class().is_compact() {
-                        48.0
-                    } else {
-                        title_bar().top.0 + 24.0
-                    },
+            v.inline_style(move || {
+                let inset = if options.bottom_stick_on_mobile && layout_class().is_compact() {
+                    48.0
+                } else {
+                    title_bar().top.0 + 24.0
+                };
+                // Declarations follow classes; a typed .pt() would lose to the base p-4.
+                nsh_core::element::Style::default().with(
+                    nsh_core::StyleKey::PaddingTop,
+                    nsh_core::PropertyValue::Lp(
+                        nsh_core::geometry::AbsoluteLength::from(px(inset)).into(),
+                    ),
                 )
             })
         })

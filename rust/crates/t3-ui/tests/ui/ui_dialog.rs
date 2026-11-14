@@ -261,6 +261,51 @@ fn ReplacedAlert() -> impl IntoElement {
 }
 
 #[component]
+fn NextAfterExit() -> impl IntoElement {
+    theme::install(&ThemeChoice::default());
+    let open = signal(false);
+    let next = signal(false);
+    let completed = signal(0);
+    alert_dialog(open, move |state| {
+        state.on_open_change_complete(move |opened| {
+            if !opened {
+                completed.update(|count| *count += 1);
+                if !next.get_untracked() {
+                    next.set(true);
+                    open.set(true);
+                }
+            }
+        });
+        view()
+            .w_full()
+            .h_full()
+            .child(dialog_trigger(state, "Open first request"))
+            .child(text(move || format!("completed {}", completed.get())))
+            .child(alert_dialog_popup(
+                state,
+                AlertPopupOptions::default(),
+                move || {
+                    view()
+                        .child(alert_dialog_title(state, move || {
+                            if next.get() {
+                                "Next request".into()
+                            } else {
+                                "First request".into()
+                            }
+                        }))
+                        .child(alert_dialog_close(
+                            state,
+                            ButtonContent::Label(t("Finish request")),
+                            ButtonVariant::Outline,
+                            ButtonSize::Default,
+                            || false,
+                        ))
+                },
+            ))
+    })
+}
+
+#[component]
 fn Nested() -> impl IntoElement {
     theme::install(&ThemeChoice::default());
     let open = signal(false);
@@ -735,6 +780,24 @@ fn replacing_an_unanswered_alert_notifies_its_owner_once_after_presenting_the_ne
         .expect("close replacement");
     gone(&mut app, "role:alertdialog");
     app.wait_for("dismissed 1").expect("no second notification");
+}
+
+#[test]
+fn a_presenter_can_advance_to_the_next_request_after_the_old_popup_finishes_closing() {
+    let mut app = start::<NextAfterExit>(DESKTOP);
+    app.press("role:button[Open first request]")
+        .expect("open first");
+    app.wait_for("First request").expect("first popup");
+    app.press("role:button[Finish request]")
+        .expect("close first");
+    app.wait_for("Next request")
+        .expect("next popup after exit callback");
+    app.wait_for("completed 1").expect("one completion");
+    assert_eq!(app.screen().count("role:alertdialog"), Ok(1));
+    app.press("role:button[Finish request]")
+        .expect("close next");
+    gone(&mut app, "role:alertdialog");
+    app.wait_for("completed 2").expect("next completed once");
 }
 
 #[test]

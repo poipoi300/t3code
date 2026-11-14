@@ -11,7 +11,7 @@ publish = false
 # The authoritative NSH pin. The installer reads nsh-core; keep all NSH crates identical.
 [dependencies]
 nsh-core = { git = "https://github.com/longbridge/nsh", rev = "d6f549d5a85b6b23714249ddd572f922db961254" }
-nsh-base = { git = "https://github.com/longbridge/nsh", rev = "d6f549d5a85b6b23714249ddd572f922db961254", default-features = false, features = ["highlight"] }
+nsh-base = { git = "https://github.com/longbridge/nsh", rev = "d6f549d5a85b6b23714249ddd572f922db961254", default-features = false, features = ["highlight", "rich-editor"] }
 t3-client = { path = "../t3-client" }
 t3-contracts = { path = "../t3-contracts" }
 t3-theme = { path = "../t3-theme" }

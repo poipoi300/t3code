@@ -1,16 +1,16 @@
 //! Port of apps/web/src/components/RightPanelSheet.tsx RightPanelSheet.
 //!
 //! [`panel`] takes controlled `open`, `animation_duration_ms`, `on_close`, and one `children`
-//! builder slot. It returns a pane on Wide, [`right_panel_sheet`] on Medium, and a native
-//! navigation page on Compact. Put the compact result directly in the shell's `nav_stack`,
+//! non-lazy `Prop<Children>` slot. It returns a pane on Wide, [`right_panel_sheet`] on Medium,
+//! and a native navigation page on Compact. Put the compact result directly in the shell's `nav_stack`,
 //! alongside its thread page; `on_close` must remove that page from the caller's route stack.
 //! The inline pane's width and resize handle belong to its host (PNL-HOST / UI-RESIZE).
 //! Neither TSX component declares variants or sizes, so there are no `Variant` / `Size` enums.
 //!
-//! Children are constructed once and passed through a non-lazy NSH child slot. The slot owns
-//! their state while a closed surface leaves them detached; changing presentation reparents
-//! the same nodes. Keep this panel instance mounted in the host across layout changes. A host
-//! that changes its own wrappers can forward the panel through its own non-lazy child slot.
+//! The host declares `children: Prop<Children>` without `#[prop(lazy)]` and passes that slot
+//! here. It owns the content even while the surface leaves it detached; changing presentation
+//! reparents the same nodes. Keep that host mounted across layout changes and use [`panel_layout`]
+//! to unplace old wrappers before placing new ones. A builder closure would recreate the content.
 
 use std::rc::Rc;
 
@@ -22,110 +22,65 @@ use crate::state::layout::{LayoutClass, layout_class};
 use crate::theme::tw;
 
 /// The adaptive container; the caller owns visibility, route changes and the content's state.
-pub fn panel<E: IntoElement + 'static>(
+pub fn panel(
     open: impl Fn() -> bool + 'static,
     animation_duration_ms: u32,
     on_close: impl Fn() + 'static,
-    children: impl Fn() -> E + 'static,
-) -> impl IntoElement {
-    panel_root()
-        .open(open)
-        .animation_duration_ms(animation_duration_ms)
-        .adaptive(true)
-        .on_close(on_close)
-        .child(untracked(children))
-}
-
-/// `RightPanelSheet`: a named, controlled right sheet with no generated close button.
-pub fn right_panel_sheet<E: IntoElement + 'static>(
-    open: impl Fn() -> bool + 'static,
-    animation_duration_ms: u32,
-    on_close: impl Fn() + 'static,
-    children: impl Fn() -> E + 'static,
-) -> impl IntoElement {
-    panel_root()
-        .open(open)
-        .animation_duration_ms(animation_duration_ms)
-        .adaptive(false)
-        .on_close(on_close)
-        .child(untracked(children))
-}
-
-#[derive(Clone, PartialEq, Props)]
-struct PanelRootProps {
-    open: Prop<bool>,
-    animation_duration_ms: u32,
-    adaptive: bool,
     children: Prop<Children>,
-}
-
-#[derive(Clone, Debug, PartialEq, Event)]
-enum PanelRootEvent {
-    Close,
-}
-
-// A non-lazy slot keeps the content owned here while surface wrappers come and go.
-#[component]
-fn PanelRoot(props: PanelRootProps, cx: Scope<PanelRootEvent>) -> impl IntoElement {
-    let presentation = computed(move || {
-        if props.adaptive {
-            layout_class()
-        } else {
-            LayoutClass::Medium
-        }
-    });
+) -> impl IntoElement {
+    let open = computed(open);
+    let presentation = panel_layout();
+    let on_close = Rc::new(on_close);
     dynamic(move || {
-        let presentation = presentation.get();
-        // Only the presentation changes this subtree; content bindings track their own data.
-        untracked(|| match presentation {
-            LayoutClass::Wide => when(
-                move || props.open.get(),
-                move || {
-                    view()
-                        .app_class(tw("flex min-h-0 min-w-0 h-full flex-col"))
-                        .child(props.children)
-                },
-            )
+        let presentation = presentation.get()?;
+        let on_close = on_close.clone();
+        // Only the presentation changes these wrappers; the host owns their child slot.
+        Some(untracked(|| match presentation {
+            LayoutClass::Wide => when(open, move || {
+                view()
+                    .app_class(tw("flex min-h-0 min-w-0 h-full flex-col"))
+                    .child(children)
+            })
             .into_element(),
-            LayoutClass::Medium => sheet_surface(
-                props.open,
-                props.animation_duration_ms,
-                move || cx.emit(PanelRootEvent::Close),
-                props.children,
+            LayoutClass::Medium => right_panel_sheet(
+                move || open.get(),
+                animation_duration_ms,
+                move || on_close(),
+                children,
             )
             .into_element(),
             // Adaptive departure: the outer navigation stack pushes this page over the thread.
-            LayoutClass::Compact => when(
-                move || props.open.get(),
-                move || {
-                    nsh_base::nav_page()
-                        .title(move || SharedString::from(t("Workspace panel")))
-                        .pop_on_back(false)
-                        .on_back_press(move || cx.emit(PanelRootEvent::Close))
-                        .on_dismiss(move || {
-                            if props.open.get_untracked() {
-                                cx.emit(PanelRootEvent::Close);
-                            }
-                        })
-                        .child(
-                            view()
-                                .app_class(tw("flex min-h-0 min-w-0 flex-1 flex-col"))
-                                .child(props.children),
-                        )
-                },
-            )
+            LayoutClass::Compact => when(open, move || {
+                let on_back = on_close.clone();
+                let on_dismiss = on_close.clone();
+                nsh_base::nav_page()
+                    .title(move || SharedString::from(t("Workspace panel")))
+                    .pop_on_back(false)
+                    .on_back_press(move || on_back())
+                    .on_dismiss(move || {
+                        if open.get_untracked() {
+                            on_dismiss();
+                        }
+                    })
+                    .child(
+                        view()
+                            .app_class(tw("flex min-h-0 min-w-0 flex-1 flex-col"))
+                            .child(children),
+                    )
+            })
             .into_element(),
-        })
+        }))
     })
 }
 
-fn sheet_surface(
-    open: Prop<bool>,
+/// `RightPanelSheet`: a named, controlled right sheet with no generated close button.
+pub fn right_panel_sheet(
+    open: impl Fn() -> bool + 'static,
     animation_duration_ms: u32,
     on_close: impl Fn() + 'static,
     children: Prop<Children>,
 ) -> impl IntoElement {
-    let open = computed(move || open.get());
+    let open = computed(open);
     let shown = signal(false);
     let progress = animated_value(0.0);
     let translate_x = progress.interpolate(&[0.0, 1.0], &[32.0, 0.0]);
@@ -217,6 +172,27 @@ fn sheet_surface(
                     ),
             )
     })
+}
+
+/// The host's layout placement. `None` unplaces the old wrappers for one commit on a change;
+/// the next answer places new wrappers without destroying their non-lazy child slots.
+pub fn panel_layout() -> Memo<Option<LayoutClass>> {
+    let desired = computed(layout_class);
+    let placed = signal(Some(desired.get_untracked()));
+    effect(move || {
+        let next = desired.get();
+        if placed.get_untracked() == Some(next) {
+            return;
+        }
+        placed.set(None);
+        // NSH checks the old nested children_at before releasing it (core/views.rs).
+        after_answer(move || {
+            if desired.get_untracked() == next {
+                placed.set(Some(next));
+            }
+        });
+    });
+    computed(move || placed.get())
 }
 
 #[derive(Clone, PartialEq, Props)]

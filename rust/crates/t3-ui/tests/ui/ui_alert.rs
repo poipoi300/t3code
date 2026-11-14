@@ -8,8 +8,7 @@ use t3_ui::i18n::t;
 use t3_ui::ui::alert::{self, ControlAlignment, Props, Slots, Variant, composer_banner as banner};
 use t3_ui::ui::icon::Icon;
 
-#[component]
-fn CustomIndicator() -> impl IntoElement {
+fn custom_indicator() -> impl IntoElement {
     let step = signal(0_u32);
     nsh_base::button()
         .accessibility_label(Some(SharedString::from(t("Advance indicator"))))
@@ -63,15 +62,15 @@ fn AlertFixture() -> impl IntoElement {
         .child(view().test_id("tested-alert").child(dynamic(move || {
             let has_actions = actions.get();
             // Rebuild only for slot membership; theme and layout bindings keep the custom child.
-            untracked(|| {
+            untracked(move || {
                 alert::alert(
                     Props {
                         variant: Variant::Warning,
                         control_alignment: ControlAlignment::FirstLine,
                         ..Props::default()
                     },
-                    |_context| Slots {
-                        icons: vec![CustomIndicator().into_element()],
+                    move |_context| Slots {
+                        icons: vec![custom_indicator().into_element()],
                         content: vec![
                             alert::alert_title(
                                 text(SharedString::from(t("Permission required")))
@@ -162,7 +161,6 @@ fn start(window: (f32, f32)) -> Headless {
     let mut sets = t3_ui::registries();
     let mut fixtures = Registry::new();
     fixtures.register::<AlertFixture>();
-    fixtures.register::<CustomIndicator>();
     sets.push(fixtures);
     Headless::start(EngineConfig {
         ui_sets: sets,

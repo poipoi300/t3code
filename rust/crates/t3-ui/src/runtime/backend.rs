@@ -96,6 +96,7 @@ impl Backend for Unavailable {
             via: None,
             cause: None,
             server_update_required: false,
+            verification_code: None,
         }))
         .boxed_local()
     }

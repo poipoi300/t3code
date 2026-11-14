@@ -1,9 +1,11 @@
 //! CMP-EDITOR-1: exercise the editor foundation before CMP-PLAIN mounts it in the thread frame.
 
 use crate::support::{DESKTOP, PHONE};
+use nsh_base::rich_editor::view::SessionEventKind;
 use nsh_core::prelude::*;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
+use std::sync::{Arc, Mutex};
 use t3_ui::screens::composer::editor::{
     ComposerEditor, ComposerPromptEditorProps, ComposerResolvers, EditorMode,
     composer_prompt_editor_tiptap,
@@ -24,6 +26,20 @@ fn Harness(props: HarnessProps) -> impl IntoElement {
         ComposerResolvers::default(),
     )
     .expect("composer session");
+    let capture = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let recorded = capture.clone();
+    let session = editor.session();
+    let listener = session.on(
+        SessionEventKind::Transaction,
+        Arc::new(move |event| {
+            recorded
+                .lock()
+                .expect("events")
+                .push(event.payload.clone());
+        }),
+    );
+    let listening = session.clone();
+    cleanup(move || listening.off(listener));
     let snapshot = signal(editor.read_snapshot());
     let disabled = signal(false);
     let plain = editor.clone();
@@ -33,6 +49,8 @@ fn Harness(props: HarnessProps) -> impl IntoElement {
     let redo = editor.clone();
     let files = signal(0usize);
     let changes = signal(0usize);
+    let focus_end = editor.clone();
+    let compositions = signal(0usize);
     view()
         .w_full()
         .p(px(16.0))
@@ -55,6 +73,19 @@ fn Harness(props: HarnessProps) -> impl IntoElement {
         .child(text(move || format!("Source {:?}", snapshot.get().value)))
         .child(text(move || format!("Files {}", files.get())))
         .child(text(move || format!("Changes {}", changes.get())))
+        .child(text(move || format!("Composition commits {}", compositions.get())))
+        .child(
+            nsh_base::button()
+                .on_press(move || compositions.set(capture.lock().expect("events").iter().filter(|event| event["meta"].as_array().is_some_and(|meta| meta.iter().any(|key| key == "composition"))).count()))
+                .child(text("Inspect composition")),
+        )
+        .child(
+            nsh_base::button()
+                .on_press(move || {
+                    focus_end.focus_at_end().expect("focus end");
+                })
+                .child(text("Focus end")),
+        )
         .child(
             nsh_base::button()
                 .on_press(move || disabled.update(|value| *value = !*value))
@@ -195,5 +226,91 @@ fn switching_to_literal_mode_preserves_unknown_dollar_text_and_markdown() {
         app.type_text("id:composer-editor", "X")
             .expect("edit literal source");
         source(&mut app, &format!("X{value}"));
+    }
+}
+
+fn ime_text(app: &mut Headless, value: &str) {
+    let id = app
+        .screen()
+        .layout_nodes()
+        .into_iter()
+        .find(|node| node.kind == nsh_core::ViewKind::Input)
+        .expect("native IME sink")
+        .id;
+    app.engine().control().dispatch_event(
+        id,
+        nsh_core::EventKind::ChangeText,
+        nsh_core::EventPayload::Text {
+            text: value.into(),
+            count: 0,
+        },
+    );
+    assert!(app.settle(), "platform input reaches the editor");
+}
+
+#[test]
+fn platform_ime_preedit_commit_and_cancel_preserve_text_and_history() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = start_editor(window, "");
+        app.compose("id:composer-editor", "に")
+            .expect("first preedit");
+        ime_text(&mut app, "に");
+        source(&mut app, "");
+        app.compose("id:composer-editor", "にほ")
+            .expect("updated preedit");
+        ime_text(&mut app, "日本");
+        source(&mut app, "");
+        app.compose("id:composer-editor", "").expect("commit");
+        source(&mut app, "日本");
+        app.press("text:Inspect composition").expect("inspect metadata");
+        app.wait_for("Composition commits 1").expect("IME metadata retained");
+        app.compose("id:composer-editor", "取消")
+            .expect("new preedit");
+        ime_text(&mut app, "");
+        app.compose("id:composer-editor", "").expect("cancel");
+        source(&mut app, "日本");
+        app.press("text:Undo").expect("undo one composition");
+        source(&mut app, "");
+        app.press("text:Redo").expect("redo one composition");
+        source(&mut app, "日本");
+    }
+}
+
+#[test]
+fn committing_an_ime_delimiter_replaces_selected_text_without_surrounding_it() {
+    for window in [DESKTOP, PHONE] {
+        for plain in [false, true] {
+            let mut app = start_editor(window, "word");
+            if plain {
+                app.press("text:Plain").expect("plain mode");
+            }
+            app.type_text("id:composer-editor", "").expect("focus");
+            app.press_key("home").expect("start");
+            app.press_key("shift+end").expect("select word");
+            app.compose("id:composer-editor", "·")
+                .expect("composition starts");
+            ime_text(&mut app, "\"");
+            app.compose("id:composer-editor", "").expect("commit quote");
+            source(&mut app, "\"");
+            app.press("text:Undo").expect("undo commit");
+            source(&mut app, "word");
+        }
+    }
+}
+
+#[test]
+fn pasting_into_a_fence_keeps_markdown_mentions_and_newlines_verbatim() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = start_editor(window, "```ts\na\n```");
+        app.press("text:Focus end").expect("inside fence end");
+        let mut paste = nsh_core::PasteEvent::default();
+        paste.text = "\n**bold** @README.md\n- item\n$browser".into();
+        app.paste("id:composer-editor", &paste).expect("paste code");
+        source(
+            &mut app,
+            "```ts\na\n**bold** @README.md\n- item\n$browser\n```",
+        );
+        app.press("text:Undo").expect("undo paste");
+        source(&mut app, "```ts\na\n```");
     }
 }

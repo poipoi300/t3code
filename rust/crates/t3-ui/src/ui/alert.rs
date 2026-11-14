@@ -230,6 +230,7 @@ pub fn alert_action(content: impl IntoElement) -> impl IntoElement {
 /// `column` takes a reactive empty predicate, replacing `:has`/`:empty`.
 /// `children` supplies a Context with 20px rows, replacing its descendant min-height selector.
 /// `dismiss` uses Button's ghost/icon-xs primitive; disabled stays reactive and inert.
+/// `icon` accepts any element; `lucide_icon` applies the RowContext's SVG size and tint.
 /// Flex span slots become views because NSH text cannot host their row/grid layout.
 pub mod composer_banner {
     use super::*;
@@ -389,6 +390,7 @@ pub mod composer_banner {
         let color = |name| tokens.color(name).unwrap_or(AdaptiveColor::TRANSPARENT);
         let face = |dark: bool| {
             let component = |c: AdaptiveColor| if dark { c.dark } else { c.light };
+            // CSS html[data-theme-id] selectors depend on per-appearance identity, not RGB equality.
             let catalogue = tokens.number(if dark {
                 "theme-catalogue-dark"
             } else {
@@ -399,13 +401,15 @@ pub mod composer_banner {
             } else {
                 "theme-t3-chat-light"
             }) == Some(1.0);
-            let background = component(color(if catalogue {
-                "app-theme-surface-raised"
-            } else if dark {
-                "surface-raised"
+            let background = if catalogue {
+                component(color("app-theme-surface-raised"))
             } else {
-                "card"
-            }));
+                component(
+                    tokens
+                        .color("chat-composer-glass-surface")
+                        .unwrap_or_else(|| color(if dark { "surface-raised" } else { "card" })),
+                )
+            };
             let outline = match props.variant {
                 Variant::Error => component(color("error")).opacity(0.32),
                 Variant::Warning => component(color("warning")).opacity(0.28),
@@ -794,6 +798,7 @@ pub mod composer_banner {
             u32::from(Rgba::from(color)).to_be_bytes()
         }
 
+        #[track_caller]
         fn close(actual: Hsla, expected: Color) {
             // NSH's token boundary quantizes each input to eight-bit sRGB before mixing.
             for (actual, expected) in rgba(actual).into_iter().zip(expected.to_rgba8()) {
@@ -908,6 +913,18 @@ pub mod composer_banner {
                 ..Default::default()
             });
             let explicit = AdaptiveColor::rgb(0x123456, 0x654321);
+            let mut stock = tokens_for(&ThemeChoice::default());
+            stock.set_color("chat-composer-glass-surface", explicit);
+            assert_eq!(
+                surface_colors(SurfaceProps::default(), &stock).background,
+                explicit
+            );
+            let catalogue_background = surface_colors(SurfaceProps::default(), &tokens).background;
+            tokens.set_color("chat-composer-glass-surface", explicit);
+            assert_eq!(
+                surface_colors(SurfaceProps::default(), &tokens).background,
+                catalogue_background
+            );
             tokens.set_color("chat-composer-outline", explicit);
             assert_eq!(
                 surface_colors(SurfaceProps::default(), &tokens).outline,

@@ -76,5 +76,7 @@ fn root(address: Option<&str>, store: ClientStore, started: Started) -> AnyEleme
                 shell::app_shell().into_element()
             }
         }))
+        // ConfirmDialogHost at the root, as the web mounts it: every confirm request needs one.
+        .child(crate::ui::confirm::confirm_dialog_host())
         .into_element()
 }

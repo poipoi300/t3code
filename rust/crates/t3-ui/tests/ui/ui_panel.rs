@@ -5,8 +5,54 @@ use nsh_core::prelude::*;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
 use t3_ui::i18n::t;
-use t3_ui::state::layout::{LayoutClass, layout_class};
-use t3_ui::ui::panel::{panel, right_panel_sheet};
+use t3_ui::state::layout::LayoutClass;
+use t3_ui::ui::panel::{panel, panel_layout, right_panel_sheet};
+
+#[derive(Clone, PartialEq, Props)]
+struct HostFrameProps {
+    open: Prop<bool>,
+    base: Option<Slot>,
+    children: Prop<Children>,
+}
+
+#[derive(Clone, Debug, PartialEq, Event)]
+enum HostFrameEvent {
+    Close,
+}
+
+#[component]
+fn HostFrame(props: HostFrameProps, cx: Scope<HostFrameEvent>) -> impl IntoElement {
+    let placement = panel_layout();
+    view().flex_1().min_h(px(0.0)).child(dynamic(move || {
+        let placement = placement.get()?;
+        Some(untracked(|| {
+            let surface = panel(
+                move || props.open.get(),
+                0,
+                move || cx.emit(HostFrameEvent::Close),
+                props.children,
+            );
+            if placement == LayoutClass::Compact {
+                nsh_base::nav_stack()
+                    .flex_1()
+                    .child(
+                        nsh_base::nav_page()
+                            .title(t("Thread"))
+                            .child(view().flex_1().slot(props.base, |slot| slot)),
+                    )
+                    .child(surface)
+                    .into_element()
+            } else {
+                view()
+                    .flex_1()
+                    .flex_row()
+                    .child(view().flex_1().slot(props.base, |slot| slot))
+                    .child(surface)
+                    .into_element()
+            }
+        }))
+    }))
+}
 
 #[component]
 fn Host() -> impl IntoElement {
@@ -59,23 +105,13 @@ fn Host() -> impl IntoElement {
                     .on_press(move || decline.set(true)),
             )
     };
-    let compact = computed(move || layout_class() == LayoutClass::Compact);
-    view().w_full().h_full().child(dynamic(move || {
-        if compact.get() {
-            nsh_base::nav_stack()
-                .flex_1()
-                .child(nsh_base::nav_page().title(t("Thread")).child(base()))
-                .child(panel(move || open.get(), 0, close, content))
-                .into_element()
-        } else {
-            view()
-                .flex_1()
-                .flex_row()
-                .child(base())
-                .child(panel(move || open.get(), 0, close, content))
-                .into_element()
-        }
-    }))
+    view().w_full().h_full().child(
+        host_frame()
+            .open(open)
+            .on_close(close)
+            .base(base())
+            .child(content()),
+    )
 }
 
 fn start_host(viewport: (f32, f32)) -> Headless {
@@ -221,16 +257,35 @@ fn changing_layout_preserves_parent_owned_edits_and_does_not_request_close() {
 fn AnimatedSheet() -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
     let open = signal(true);
-    right_panel_sheet(
-        move || open.get(),
-        200,
-        move || open.set(false),
-        move || {
+    animated_frame()
+        .open(open)
+        .on_close(move || open.set(false))
+        .child(
             nsh_base::button()
                 .accessibility_label(Some(SharedString::from(t("Close panel"))))
                 .on_press(move || open.set(false))
-                .child(text(t("Panel content")))
-        },
+                .child(text(t("Panel content"))),
+        )
+}
+
+#[derive(Clone, PartialEq, Props)]
+struct AnimatedFrameProps {
+    open: Prop<bool>,
+    children: Prop<Children>,
+}
+
+#[derive(Clone, Debug, PartialEq, Event)]
+enum AnimatedFrameEvent {
+    Close,
+}
+
+#[component]
+fn AnimatedFrame(props: AnimatedFrameProps, cx: Scope<AnimatedFrameEvent>) -> impl IntoElement {
+    right_panel_sheet(
+        move || props.open.get(),
+        200,
+        move || cx.emit(AnimatedFrameEvent::Close),
+        props.children,
     )
 }
 
@@ -254,32 +309,47 @@ struct RetentionOpen(Signal<bool>);
 
 #[derive(Clone, PartialEq, Props)]
 struct RetentionFrameProps {
+    open: Prop<bool>,
     children: Prop<Children>,
 }
 
+#[derive(Clone, Debug, PartialEq, Event)]
+enum RetentionFrameEvent {
+    Close,
+}
+
 #[component]
-fn RetentionFrame(props: RetentionFrameProps) -> impl IntoElement {
-    let compact = computed(move || layout_class() == LayoutClass::Compact);
-    dynamic(move || {
-        if compact.get() {
-            nsh_base::nav_stack()
-                .flex_1()
-                .child(
-                    nsh_base::nav_page()
-                        .title(t("Thread"))
-                        .child(text(t("Thread content"))),
-                )
-                .child(props.children)
-                .into_element()
-        } else {
-            view()
-                .flex_1()
-                .flex_row()
-                .child(view().flex_1().child(text(t("Thread content"))))
-                .child(props.children)
-                .into_element()
-        }
-    })
+fn RetentionFrame(props: RetentionFrameProps, cx: Scope<RetentionFrameEvent>) -> impl IntoElement {
+    let placement = panel_layout();
+    view().flex_1().min_h(px(0.0)).child(dynamic(move || {
+        let placement = placement.get()?;
+        Some(untracked(|| {
+            let surface = panel(
+                move || props.open.get(),
+                0,
+                move || cx.emit(RetentionFrameEvent::Close),
+                props.children,
+            );
+            if placement == LayoutClass::Compact {
+                nsh_base::nav_stack()
+                    .flex_1()
+                    .child(
+                        nsh_base::nav_page()
+                            .title(t("Thread"))
+                            .child(text(t("Thread content"))),
+                    )
+                    .child(surface)
+                    .into_element()
+            } else {
+                view()
+                    .flex_1()
+                    .flex_row()
+                    .child(view().flex_1().child(text(t("Thread content"))))
+                    .child(surface)
+                    .into_element()
+            }
+        }))
+    }))
 }
 
 #[component]
@@ -330,12 +400,12 @@ fn RetentionHost() -> impl IntoElement {
                 .on_press(move || open.set(true))
                 .child(text(t("Open retained panel"))),
         )
-        .child(retention_frame().child(panel(
-            move || open.get(),
-            0,
-            move || open.set(false),
-            retention_content,
-        )))
+        .child(
+            retention_frame()
+                .open(open)
+                .on_close(move || open.set(false))
+                .child(retention_content()),
+        )
 }
 
 fn retained_scroll(app: &Headless) -> (nsh_core::NodeId, Points) {
@@ -344,6 +414,10 @@ fn retained_scroll(app: &Headless) -> (nsh_core::NodeId, Points) {
         .iter()
         .find(|node| node.test_id.as_deref() == Some("retention-scroll"))
         .expect("retained scroll view");
+    assert!(
+        scroller.bounds.size.height > px(0.0),
+        "the scroll viewport is visible and sized"
+    );
     let first = nodes
         .iter()
         .find(|node| node.test_id.as_deref() == Some("retention-row-0"))

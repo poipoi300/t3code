@@ -122,10 +122,7 @@ fn start(window: (f32, f32)) -> Headless {
 }
 
 fn loaded(app: &mut Headless) {
-    let node = app
-        .screen()
-        .id("id:project-favicon-preloader")
-        .expect("pending image");
+    let node = pending(app).expect("pending image");
     app.engine().control().dispatch_event(
         node,
         EventKind::Load,
@@ -135,6 +132,16 @@ fn loaded(app: &mut Headless) {
         }),
     );
     app.first_render().expect("settle image load");
+    app.wait_for("id:project-favicon-image")
+        .expect("loaded image displayed");
+}
+
+fn pending(app: &Headless) -> Option<nsh_core::NodeId> {
+    app.screen()
+        .layout_nodes()
+        .into_iter()
+        .find(|node| node.test_id.as_deref() == Some("project-favicon-preloader"))
+        .map(|node| node.id)
 }
 
 #[test]
@@ -187,10 +194,7 @@ fn replacement_errors_keep_the_displayed_image_and_path_changes_reset_it() {
 fn a_superseded_load_cannot_replace_the_current_request_and_replacements_wait_for_load() {
     let mut app = start(DESKTOP);
     app.press("id:automatic").expect("automatic");
-    let old = app
-        .screen()
-        .id("id:project-favicon-preloader")
-        .expect("first request");
+    let old = pending(&app).expect("first request");
     app.press("id:next").expect("supersede first request");
     app.engine().control().dispatch_event(
         old,
@@ -218,11 +222,7 @@ fn a_superseded_load_cannot_replace_the_current_request_and_replacements_wait_fo
             .matches("id:project-favicon-image")
             .expect("replacement visible")
     );
-    assert!(
-        !app.screen()
-            .matches("id:project-favicon-preloader")
-            .expect("replacement finished")
-    );
+    assert!(pending(&app).is_none(), "replacement finished");
 }
 
 #[test]
@@ -250,9 +250,5 @@ fn cached_images_show_immediately_and_a_decode_error_or_missing_marker_uses_the_
     assert!(app.screen().shows("RU"));
     app.press("id:missing").expect("server missing sentinel");
     assert!(app.screen().shows("RU"));
-    assert!(
-        !app.screen()
-            .matches("id:project-favicon-preloader")
-            .expect("no sentinel image request")
-    );
+    assert!(pending(&app).is_none(), "no sentinel image request");
 }
