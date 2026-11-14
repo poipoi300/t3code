@@ -18,6 +18,8 @@ struct Http {
     calls: Mutex<Vec<(String, Value)>>,
     reject: AtomicUsize,
     teams: Value,
+    expires: AtomicI64,
+    failed_team: AtomicUsize,
 }
 fn event(model: &str) -> Value {
     json!({"timestamp":1,"model":model,"conversationId":"session","tokenUsage":{"inputTokens":4,"cacheReadTokens":5,"cacheWriteTokens":6,"outputTokens":7,"totalCents":12}})
@@ -27,21 +29,25 @@ impl HttpTransport for Http {
     async fn send(&self, request: HttpRequest) -> ServiceResult<HttpResponse> {
         assert!(!format!("{request:?}").contains("private-key"));
         let method = request.url.rsplit('/').next().unwrap().to_owned();
-        let body = serde_json::from_str(request.body.as_ref().unwrap().expose()).unwrap();
-        self.calls.lock().await.push((method.clone(), body));
+        let body: Value = serde_json::from_str(request.body.as_ref().unwrap().expose()).unwrap();
+        self.calls.lock().await.push((method.clone(), body.clone()));
         let response = match method.as_str() {
             "exchange_user_api_key" => {
-                json!({"accessToken":format!("header.{}.signature",URL_SAFE_NO_PAD.encode(json!({"sub":"auth|demo","exp":4102444800_u64}).to_string()))})
+                json!({"accessToken":format!("header.{}.signature",URL_SAFE_NO_PAD.encode(json!({"sub":"auth|demo","exp":self.expires.load(Ordering::SeqCst)}).to_string()))})
             }
             "GetTeams" => self.teams.clone(),
             "GetMe" => json!({"userId":7}),
             "GetFilteredUsageEvents" => {
-                let calls = self.calls.lock().await;
-                let body = &calls.last().unwrap().1;
                 if body.get("teamId").is_some() {
                     assert_eq!(body["userId"], 7);
                 } else {
                     assert!(body.get("userId").is_none());
+                }
+                if body["teamId"].as_u64() == Some(self.failed_team.load(Ordering::SeqCst) as u64) {
+                    return Ok(HttpResponse {
+                        status: 500,
+                        body: Sensitive::new(json!({"message":"private team failure"})),
+                    });
                 }
                 if self.reject.load(Ordering::SeqCst) > 0 {
                     return Ok(HttpResponse {
@@ -64,6 +70,8 @@ fn setup(teams: Value) -> (Arc<CursorAccountReader>, Arc<Http>, Arc<Clock>) {
         calls: Mutex::new(vec![]),
         reject: AtomicUsize::new(0),
         teams,
+        expires: AtomicI64::new(4_102_444_800),
+        failed_team: AtomicUsize::new(0),
     });
     let clock = Arc::new(Clock(AtomicI64::new(0)));
     (
@@ -115,7 +123,7 @@ async fn personal_and_own_user_team_history_share_membership_but_keep_distinct_b
     let rejected = reader.read(&key, 0., 10.).await;
     assert!(rejected.records.is_empty());
     assert_eq!(
-        rejected.error.as_deref(),
+        rejected.error,
         Some("Sign in to Cursor again to read account usage.")
     );
     http.reject.store(0, Ordering::SeqCst);
@@ -248,4 +256,66 @@ async fn scopes_start_together_and_six_page_slots_keep_order_and_start_deadlines
     assert_eq!(result.records[3000].model, "None/page4");
     assert_eq!(result.records[4000].model, "None/page5");
     assert_eq!(result.records[4001].model, "Some(10)/page1");
+}
+
+#[tokio::test]
+async fn token_expiry_and_bounded_session_eviction_refresh_membership_and_team_failure_discards_all_scopes()
+ {
+    let (reader, http, clock) = setup(json!({"teams":[{"id":10},{"id":20}]}));
+    http.expires.store(100, Ordering::SeqCst);
+    let key = Sensitive::new("short-lived-private-key".into());
+    assert!(reader.read(&key, 0., 10.).await.error.is_none());
+    clock.0.store(69_999, Ordering::SeqCst);
+    reader.read(&key, 0., 10.).await;
+    assert_eq!(
+        http.calls
+            .lock()
+            .await
+            .iter()
+            .filter(|call| call.0 == "GetMe")
+            .count(),
+        1
+    );
+    clock.0.store(70_000, Ordering::SeqCst);
+    reader.read(&key, 0., 10.).await;
+    assert_eq!(
+        http.calls
+            .lock()
+            .await
+            .iter()
+            .filter(|call| call.0 == "GetMe")
+            .count(),
+        2
+    );
+    http.expires.store(4_102_444_800, Ordering::SeqCst);
+    for index in 0..17 {
+        reader
+            .read(&Sensitive::new(format!("private-key-{index}")), 0., 10.)
+            .await;
+    }
+    let before = http
+        .calls
+        .lock()
+        .await
+        .iter()
+        .filter(|call| call.0 == "GetMe")
+        .count();
+    reader
+        .read(&Sensitive::new("private-key-0".into()), 0., 10.)
+        .await;
+    assert_eq!(
+        http.calls
+            .lock()
+            .await
+            .iter()
+            .filter(|call| call.0 == "GetMe")
+            .count(),
+        before + 1
+    );
+    http.failed_team.store(20, Ordering::SeqCst);
+    let result = reader
+        .read(&Sensitive::new("private-key-0".into()), 0., 10.)
+        .await;
+    assert!(result.error.is_some());
+    assert!(result.records.is_empty());
 }

@@ -23,10 +23,13 @@ pub enum OpenCodeError {
     Timeout,
     #[error("Could not start the OpenCode server.")]
     Process,
+    #[error("OpenCode plugins are still activating.")]
+    ActivatingPlugins,
 }
 impl From<OpenCodeError> for ServiceError {
     fn from(error: OpenCodeError) -> Self {
         match error {
+            OpenCodeError::ActivatingPlugins => ServiceError::ActivatingPlugins,
             OpenCodeError::Unavailable | OpenCodeError::Timeout => ServiceError::Network,
             _ => ServiceError::Response,
         }
@@ -111,11 +114,28 @@ impl OpenCodeHttp {
         generation: u8,
         timeout: Duration,
     ) -> Result<Value, OpenCodeError> {
-        let response = self.raw(path, directory, generation, timeout).await?;
+        Self::decode(self.raw(path, directory, generation, timeout).await?)
+    }
+    async fn get_unbounded(&self, path: &str, directory: &str) -> Result<Value, OpenCodeError> {
+        let response = self
+            .transport
+            .raw(self.request(path, Some(directory), 2))
+            .await
+            .map_err(|_| OpenCodeError::Unavailable)?;
+        Self::decode(response)
+    }
+    fn decode(response: crate::transport::RawHttpResponse) -> Result<Value, OpenCodeError> {
         if matches!(response.status, 401 | 403) {
             return Err(OpenCodeError::Authentication);
         }
         if !(200..300).contains(&response.status) {
+            if response.status == 503
+                && serde_json::from_slice::<Value>(response.body.expose()).is_ok_and(|body| {
+                    body["_tag"] == "ServiceUnavailableError" && body["service"] == "plugin"
+                })
+            {
+                return Err(OpenCodeError::ActivatingPlugins);
+            }
             return Err(OpenCodeError::Unavailable);
         }
         let json = response
@@ -229,12 +249,7 @@ pub struct HttpModels {
 impl OpenCodeModels for HttpModels {
     async fn list(&self) -> ServiceResult<Vec<OpenCodeModel>> {
         let (models, providers) = tokio::join!(
-            self.connection.get(
-                "/api/model",
-                Some(&self.directory),
-                2,
-                Duration::from_secs(5)
-            ),
+            self.connection.get_unbounded("/api/model", &self.directory),
             self.connection.get(
                 "/api/provider",
                 Some(&self.directory),
@@ -244,7 +259,6 @@ impl OpenCodeModels for HttpModels {
         );
         let models = match models {
             Ok(models) => models,
-            Err(OpenCodeError::Timeout) => return Ok(vec![]),
             Err(error) => return Err(error.into()),
         };
         let providers = match providers {

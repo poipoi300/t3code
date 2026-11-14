@@ -296,7 +296,15 @@ fn protocol(config: &Value) -> Result<(), Box<dyn std::error::Error>> {
             },
             "config/read"=>json!({"config":config.get("routing").cloned().unwrap_or(json!({}))}),
             "skills/list"=>json!({"data":[]}),
-            "account/rateLimits/read"=>config.get("nativeUsage").cloned().unwrap_or(json!({"rateLimits":{"planType":"pro","primary":{"usedPercent":42,"windowDurationMins":300,"resetsAt":1800000000}},"rateLimitsByLimitId":null,"rateLimitResetCredits":null,"accountId":"workspace"})),
+            "account/rateLimits/read"=> {
+                if let Some(port) = config["rateLimitGate"].as_u64() {
+                    use std::io::Read;
+                    let mut gate = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, u16::try_from(port)?))?;
+                    gate.write_all(&[1])?;
+                    gate.read_exact(&mut [0])?;
+                }
+                config.get("nativeUsage").cloned().unwrap_or(json!({"rateLimits":{"planType":"pro","primary":{"usedPercent":42,"windowDurationMins":300,"resetsAt":1800000000}},"rateLimitsByLimitId":null,"rateLimitResetCredits":null,"accountId":"workspace"}))
+            },
             "account/rateLimitResetCredit/consume" => {
                 if message["params"]["idempotencyKey"] != config["resetKey"] { return Err("unexpected reset key".into()); }
                 json!({"outcome":"reset"})

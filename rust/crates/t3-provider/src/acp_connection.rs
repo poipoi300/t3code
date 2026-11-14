@@ -164,9 +164,8 @@ impl AcpConnection {
         let mut options =
             process_options(&spawn.executable, &spawn.args, spawn.environment.expose());
         options.cwd = Some(spawn.cwd.clone());
-        let mut process = tokio::task::spawn_blocking(move || t3_process::spawn(&options))
+        let mut process = t3_process::spawn_non_blocking(&options)
             .await
-            .map_err(|_| AcpError::new(Reason::ProbeFailed, "Could not start the ACP agent."))?
             .map_err(|_| AcpError::new(Reason::ProbeFailed, "Could not start the ACP agent."))?;
         let stdin = process.stdin.take().ok_or_else(|| {
             AcpError::new(

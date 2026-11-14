@@ -8,6 +8,11 @@ This crate does not implement or redefine
 
 ## Public API
 
+- `domain::ProviderDomain::open`: one policy-aware environment composition root
+  for all 29 handler services, shared secrets, settings reconciliation, provider
+  snapshots, managed Codex runtime admission and deterministic shutdown. See the
+  external server recipe for required host inputs and startup barriers.
+
 - `auth::{AuthService, AuthController}`: client-owned flow state, method and
   interaction validation, expiry/cancellation, private subscriptions, shared
   credential-binding exclusion, session admission/revocation and profile import.
@@ -63,7 +68,7 @@ This crate does not implement or redefine
 | `provider.auth.subscribe` | `auth::AuthService::subscribe` | Implemented |
 | `provider.chatgpt.reconnect-profile` | `auth::AuthService::reconnect_profile` | Implemented |
 | `provider.chatgpt.import-profile` | `auth::AuthService::import_profile` | Implemented |
-| `server.refreshProviders` | `service::ProviderService::refresh_providers` | Focused refresh/response-shaping tests pass |
+| `server.refreshProviders` | `domain::ProviderDomain::refresh_providers` | Policy-aware secret reconciliation and focused refresh/response-shaping tests pass |
 | `server.updateProvider` | `service::ProviderService::update_provider` | Coordination, current-version precheck, ownership recheck and terminal verification implemented; native Codex/Claude maintenance injected with `with_maintenance` |
 | `server.listTextGeneratorModels` | `service::ProviderService::list_text_generator_models` / `text_generators::TextGenerators::list_models` | Implemented; attach with `set_text_generators` |
 | `provider.chatgpt.handoff.subscribe` | `handoff::HandoffService::subscribe` | Isolated in-memory stream; verified export and disconnect cancellation tested |
@@ -174,7 +179,7 @@ POSIX execution have not been verified on this Windows machine.
 | `claudeAgent` | PATH/custom CLI; Windows entry resolution; prompt-free native probe | Manifest compatibility; model min/max filtering | Bundled/reported/custom models; runtime suffix/context resolution | Effort cap sources, Ultracode migration | Permission/plan/sandbox precedence and bypass availability | CLI-owned login guidance; account/usage probes and five-minute cache with one-use fallback; isolated homes | `t3-server` package G wires settings/background streams and injects `NativeMaintenance`; `t3-orchestration` owns adapter lifecycle |
 | `cursor` | Shipped SDK HTTP catalog; no CLI invented | Manifest compatibility | Cached per-key HTTP models, strict SDK schema and custom models | Parameter ordering, defaults, booleans, effort/context/fast mapping | Windows auto-review/sandbox precedence and agent/plan mapping | T3 credential store, legacy migration, scoped browser login via narrow SDK trait, configured-key precedence, verified atomic commit and logout | `t3-server` package G supplies the narrow `CursorLogin` SDK bridge and host wiring |
 | `grok` | PATH/custom CLI; updater-disabled probes; initialize-only metadata and CLI skill inventory | Manifest compatibility | CLI fallback and ACP catalogs, defaults and custom models | Reasoning metadata/default/order conversion | Supervised/Auto/Full-access argv and credential selection | CLI login verdict/recheck, API-key precedence, CLI-owned login guidance, official-account billing with custom-deployment refusal | `t3-orchestration` supplies adapter/text-generation attachment; `t3-server` package G wires lifecycle |
-| `opencode` | PATH/custom CLI, external HTTP identity, owned server/cache/idle lifetime | Minimum 1.14.19; generation classification; manifest compatibility | v1 connected-provider and v2 settling catalogs; independent workspace models, skills and commands | Variant/agent/default/family legacy mapping | v1 approval/sandbox rules and v2 runtime/plan ordering | Read-only upstream readiness and private UTF-8 Basic transport; auth remains CLI-owned | `t3-server` package G supplies `OpenCodeServiceBackend`; `t3-process` lacks AgentScope/provider-process identity support for the POSIX orphan ledger; `t3-orchestration` attaches adapters |
+| `opencode` | PATH/custom CLI, external HTTP identity, owned server/cache/idle lifetime | Minimum 1.14.19; generation classification; manifest compatibility | v1 connected-provider and v2 settling catalogs; independent workspace models, skills and commands | Variant/agent/default/family legacy mapping | v1 approval/sandbox rules and v2 runtime/plan ordering | Read-only upstream readiness and private UTF-8 Basic transport; auth remains CLI-owned | `t3-server` package G supplies `OpenCodeServiceBackend`; `t3-process` supplies the still-missing native `LedgerProcesses` bridge for the persisted orphan ledger; `t3-orchestration` attaches adapters |
 | `antigravity` | Leased managed/external ACP runtimes; paired harness/PATH discovery | Official CLI target/digest validation and compatibility | Explicit catalog refresh and live config callbacks; learned thinking options and workspace skills | Per-model observations, default aliases and duplicate labels | Permission and CLI-mode mapping | Client-owned Google flow, callback binding, profile isolation, safe browser helper and token/quota probe | `t3-server` package G wires the supplied factory/browser helper/installer; `t3-orchestration` forwards adapter catalog events |
 | `kiro` | CLI version/whoami; auth-gated model/template probes | Manifest compatibility | Live list/default aliases and custom models | Static efforts and live agent template | Autopilot mapping; approval/full modes | First-line whoami verdict; no login inference from API-key settings | `t3-orchestration` adapter attachment; manual-only maintenance matches source |
 | `pi` | CLI version and owned offline ephemeral RPC inventory | Minimum 0.80.5; manifest compatibility | Reported provider/id pairs, defaults, custom models, text-generation exclusions | Thinking opt-ins/clamped defaults and service tiers | Launch validation, extension/tool restrictions and runtime MCP environment | Inventory-derived readiness; no-refresh auth-check refinement | `t3-orchestration` attaches the adapter and materializes its runtime MCP extension |
@@ -184,7 +189,7 @@ POSIX execution have not been verified on this Windows machine.
 
 ## Source coverage and remaining shared work
 
-Authority: TypeScript checkout `2d8a843e6be9ca170f3bce98cc92ad76617b00c4`.
+Authority: TypeScript checkout `dea07a1b12d954c2b7f4bfacb47354d9fbb64f5d`, merged as `817a9186f9`.
 `data/model-manifest.json` is a byte-for-byte bundled snapshot from
 `apps/server/src/provider/model-manifest.json` (SHA-256
 `9af1ba02f747c869ba5d624aece2a889cc8700c37c09123c354b3f68180a8dc8`).
@@ -232,11 +237,13 @@ they must not be mistaken for verified end-to-end provider support:
   runtime MCP extension materialization, text-generation execution and live
   callbacks/usage ingestion. This crate exposes mode/catalog transforms and
   callback methods; it does not replace the existing adapter trait.
-- **`t3-process`, process-service owner:** `agentScope.ts` and
-  `providerProcesses.ts` are explicitly absent in that crate's README. OpenCode's
-  POSIX orphan ledger cannot safely adopt/terminate recorded processes through
-  its current API. `OpenCodeServiceReplacement` has a tested host-backend seam;
-  this crate does not terminate an arbitrary recorded PID.
+- **`t3-process`, process-service owner:** provide the native `LedgerProcesses`
+  bridge for Linux/Darwin process identity/group observation and group signals.
+  `opencode_ledger::OpenCodeLedger` owns persistence, optional serve argv, owner
+  checks and validated orphan decisions; `OpenCodeRuntime::new_with_ledger`
+  tracks captured children and forgets on exit. The default runtime owns its
+  children but cannot reap an earlier server's groups without this bridge.
+  `OpenCodeServiceReplacement` retains its tested host-backend seam.
 - **MCP handler owner:** call `catalog::list_capability_models` with preferences,
   normalized search terms and favorite/inherited/custom pinning. Project scopes,
   permission grants and the final `orchestrator_capabilities` response remain
@@ -295,13 +302,12 @@ profiles, native launches, release URLs and errors have formatting assertions.
 
 ## Verification and integration hand-off
 
-The final full crate run passed **242 tests, zero failed, one opt-in ignored**
-across 61 test binaries/doc-test summaries. `cargo fmt -p t3-provider --check`
-and strict `cargo clippy --all-targets --no-deps -- -D warnings` pass.
-Dependency-inclusive Clippy remains blocked in `t3-codex-app-server` with 57
-`result_large_err` / `large_enum_variant` findings in its `Error`/event types.
-That owner's files are untouched. Logs are in
-`D:\t3code-rust-target\server-e\provider-{tests,clippy}.log`.
+The merged-contract full crate run passed **257 tests, zero failed, one opt-in
+ignored** across 64 test binaries/doc-test summaries. Scoped formatting and
+strict dependency-inclusive `cargo clippy --all-targets -- -D warnings` pass;
+the former 57-finding Codex dependency blocker has been repaired by its owner.
+The test transcript is
+`D:\t3code-rust-target\server-e\provider-tests-drift.log`.
 
 Focused regressions cover ACP's 16-read mapping bound/order and import actor,
 Antigravity catalog refresh/per-model thinking/retirement/no-spawn health,
@@ -313,8 +319,8 @@ above, then Cursor/OpenCode and the remaining drivers. The missing native/host
 bridges and the contract/process-service limitations have named owners above;
 there is no provider-service work hidden behind an unimplemented RPC method.
 No live credentials, provider servers, real turns, product servers or git
-mutations were used. Only `rust/crates/t3-provider` was edited intentionally;
-Cargo updates the shared lockfile when resolving this crate's dependencies.
+mutations were used. Only `rust/crates/t3-provider` and the explicitly requested external server seam
+note were edited intentionally; Cargo updates the shared lockfile when resolving this crate's dependencies.
 
 Already present at takeover: instance/environment/policy/catalog helpers,
 partial CLI discovery, secret and registry parsing, modes/usage helpers and
@@ -338,8 +344,43 @@ host and broker fixtures pass; the domain fixture uses temporary homes and fake
 provider effects and verifies startup metadata, deferred probes, current settings
 and retirement/broker revocation.
 
-Drift is in progress in the hand-out order. Readiness gating, Antigravity bounded
-frontmatter scanning, MacPorts ownership and zeroSpendCap retention were already
-implemented in the previous round; their existing focused regressions will be
-rerun against the merged contracts. Native turn adapters/instructions remain
-with the assigned orchestration owners; the drift report will name each seam.
+The domain requires the host's loaded `ManagedProviders` policy. It applies
+limits at startup, settings reconciliation and supplied-secret refresh, disables
+API text generators under an allowlist, and exposes unavailable rows for missing
+native bridges. Server settings writes still call `policy.vet_write` before
+persistence. `domain.apply_secret(reference, value)` and
+`domain.refresh_providers(input)` preserve this policy boundary.
+
+| Drift area | Implementation / remaining owner |
+| --- | --- |
+| Readiness/current settings | Managed-provider barrier plus domain watch; no probe on readiness-channel closure |
+| Context budgets | Current `AGENT_CONTEXT_BUDGET_JSON` embedded data; instruction/tool-list assembly belongs to orchestration 11 / MCP |
+| Claude/Codex custom endpoint | Strict routing decode and HTTP(S) origin metadata; workspace Claude settings override parent environment |
+| Codex slow quota read | Full discovery budget retained; gated offline fixture answers after four virtual seconds and reports 42% |
+| Antigravity frontmatter / MacPorts / zeroSpendCap | Existing bounded scanning, manual-only ownership and retained cap behavior |
+| Sign-in URLs | Auth publication reuses canonical trim/HTTP(S)/16,384 UTF-16 validation; invalid interactions fail without publishing a URL; compatible wire dropping remains contracts-owned |
+| Cursor account history | Shared stateful reader, personal + own-user team scopes, v2 cache helpers from t3-usage, 16-entry TTL/expiry cache, six slots/two scopes, no partial results |
+| Cursor SDK defaults | `models::cursor_sdk_model_selection` and `cursor_context_window_tokens`; pass live catalog for interactive runs and text generation |
+| Async process launch | Native/ACP/Pi/OpenCode/Antigravity use `spawn_non_blocking`; `muse::CatalogRequest::spawn` supplies the same launch path to the MSP bridge |
+| OpenCode activation | Caller-bound model read, plugin-only one-second retry for two minutes, configured settle deadline and warm-cache progress |
+| OpenCode metadata | Compact per-workspace variants/context cache, input limit precedence, uncached failures and preserved unconfirmed variants |
+| OpenCode ledger | Persisted optional argv; exact PID/start/group checks, wrapper exec, strict old entries; fake process backend tests; native process bridge remains t3-process-owned |
+
+Native adapter changes remain blocked on their assigned **t3-orchestration**
+owners, not implemented by metadata discovery: 06/11/integrator must apply
+Claude skill `mentionsFrom = inlineContextLength`; 12 must wire Cursor catalog
+defaults and checkpoint context separately from complete/partial billed totals,
+OpenCode step context/capacity and resumed child ordinals, v2 lost-report call
+settlement, and Pi UTF-8/truncated command-output deltas. Grok's no-interrupt
+steering flag is already present in `adapters/acp.rs`. Native title generation
+also needs the adapter execution bridge; `TextGenerators` lists models only.
+The server recipe explains construction and startup order for all three consumers.
+
+Verification after all changes: 257 passed, zero failed, one opt-in ignored;
+scoped formatting and dependency-inclusive Clippy with warnings denied passed.
+The sign-in URL, policy and OpenCode deadline/activation regressions were observed
+failing before their behavior fixes. Existing frontmatter, MacPorts and
+zeroSpendCap cases also pass in the full suite. The native ledger backend,
+adapter changes, MSP bridge and title runner bindings above remain the named
+cross-crate blockers; no additional owned service edits are in flight.
+No real provider home, credentials, provider network or provider turns were used.

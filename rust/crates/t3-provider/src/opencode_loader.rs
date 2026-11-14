@@ -79,7 +79,20 @@ impl OpenCodeModelLoader {
     }
     pub async fn load(&self) -> ServiceResult<Vec<OpenCodeModel>> {
         let mut cached = self.cached.lock().await;
-        let first = self.source.list().await?;
+        let initial = async {
+            loop {
+                match self.source.list().await {
+                    Err(ServiceError::ActivatingPlugins) => {
+                        tokio::time::sleep(Duration::from_secs(1)).await
+                    }
+                    result => return result,
+                }
+            }
+        };
+        let first = match tokio::time::timeout(Duration::from_secs(120), initial).await {
+            Ok(result) => result?,
+            Err(_) => return Ok(cached.clone()),
+        };
         let mut latest = first.clone();
         let settled = tokio::time::timeout(
             self.timeout,

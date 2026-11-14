@@ -151,6 +151,7 @@ struct Http {
     replies: Mutex<std::collections::BTreeMap<String, RawHttpResponse>>,
     calls: Mutex<Vec<HttpRequest>>,
     slow_names: bool,
+    slow_models: bool,
 }
 #[async_trait]
 impl HttpTransport for Http {
@@ -161,6 +162,9 @@ impl HttpTransport for Http {
         assert_eq!(request.method, "GET");
         let path = url::Url::parse(&request.url).unwrap().path().to_owned();
         self.calls.lock().await.push(request);
+        if self.slow_models && path.ends_with("/api/model") {
+            tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        }
         if self.slow_names && path.ends_with("/api/provider") {
             return std::future::pending().await;
         }
@@ -197,6 +201,7 @@ async fn opencode_http_requires_version_identity_and_preserves_basic_passwords_a
         ])),
         calls: Mutex::new(vec![]),
         slow_names: false,
+        slow_models: false,
     });
     let client = OpenCodeHttp::new(
         http.clone(),
@@ -258,6 +263,7 @@ async fn optional_v2_provider_labels_cannot_stall_models_but_directory_catalogs_
         )])),
         calls: Mutex::new(vec![]),
         slow_names: true,
+        slow_models: false,
     });
     let connection = Arc::new(
         OpenCodeHttp::new(
@@ -433,6 +439,7 @@ async fn opencode_status_distinguishes_connected_empty_and_rejected_catalogs_and
         ])),
         calls: Mutex::new(vec![]),
         slow_names: false,
+        slow_models: false,
     });
     let service = provider(http.clone(), true);
     let snapshot = serde_json::to_value(service.snapshot(None, true).await.unwrap()).unwrap();
@@ -660,4 +667,157 @@ fn opencode_permission_modes_keep_auto_supervised_and_sandbox_overrides_and_plan
         json!({"action":"edit","effect":"deny","resource":"*"})
     );
     assert_eq!(plan[5]["resource"], "/plan");
+}
+
+#[tokio::test(start_paused = true)]
+async fn model_reads_use_the_callers_budget_instead_of_an_inner_five_second_cap() {
+    let http = Arc::new(Http {
+        replies: Mutex::new(std::collections::BTreeMap::from([
+            (
+                "/api/model".into(),
+                raw(
+                    200,
+                    json!({"data":[{"providerID":"openai","id":"slow","name":"Slow","variants":[],"time":{"released":1000},"status":"active"}]}),
+                ),
+            ),
+            ("/api/provider".into(), raw(200, json!({"data":[]}))),
+        ])),
+        calls: Mutex::new(vec![]),
+        slow_names: false,
+        slow_models: true,
+    });
+    let source = HttpModels {
+        connection: Arc::new(OpenCodeHttp::new(http, "https://fixture.invalid", None).unwrap()),
+        directory: "fixture".into(),
+        strict_names: false,
+    };
+    assert_eq!(source.list().await.unwrap().len(), 1);
+}
+#[tokio::test(start_paused = true)]
+async fn cold_catalog_retries_only_plugin_activation_with_a_bounded_initial_read() {
+    let full = catalog(&["one", "two"]);
+    let source = Arc::new(Source(Mutex::new(
+        vec![
+            Err(ServiceError::ActivatingPlugins),
+            Err(ServiceError::ActivatingPlugins),
+            Ok(full.clone()),
+            Ok(full.clone()),
+        ]
+        .into(),
+    )));
+    let loader = OpenCodeModelLoader::new(source.clone(), &Environment::new());
+    assert_eq!(loader.load().await.unwrap(), full);
+    assert_eq!(loader.load().await.unwrap(), full); // an unanswered initial read retains the warm cache
+    source.0.lock().await.push_back(Err(ServiceError::Response));
+    assert_eq!(loader.load().await.unwrap_err(), ServiceError::Response);
+    source
+        .0
+        .lock()
+        .await
+        .push_back(Err(ServiceError::ActivatingPlugins));
+    assert!(loader.read_settled().await.is_none());
+}
+
+#[tokio::test]
+async fn workspace_model_metadata_caches_compact_entries_and_missing_models_but_not_failures() {
+    use t3_provider::opencode_metadata::OpenCodeModelMetadata;
+    let http = Arc::new(Http {
+        replies: Mutex::new(std::collections::BTreeMap::from([(
+            "/provider".into(),
+            raw(503, json!({"message":"never echo a private payload"})),
+        )])),
+        calls: Mutex::new(vec![]),
+        slow_names: false,
+        slow_models: false,
+    });
+    let cache = OpenCodeModelMetadata::new(
+        Arc::new(OpenCodeHttp::new(http.clone(), "https://fixture.invalid", None).unwrap()),
+        "workspace".into(),
+    );
+    assert_eq!(
+        cache
+            .resolve_variant("openai", "model", Some("high"))
+            .await
+            .as_deref(),
+        Some("high")
+    );
+    http.replies.lock().await.insert("/provider".into(), raw(200, json!({"all":[{"id":"openai","models":{
+        "model":{"variants":{"low":{},"high":{}},"limit":{"input":200000,"context":1000000}},
+        "fallback":{"limit":{"input":null,"context":128000}}
+    }}]})));
+    assert_eq!(
+        cache.read("openai", "model").await.unwrap().context_window,
+        Some(200000.0)
+    );
+    assert_eq!(
+        cache
+            .read("openai", "fallback")
+            .await
+            .unwrap()
+            .context_window,
+        Some(128000.0)
+    );
+    assert_eq!(
+        cache
+            .resolve_variant("openai", "model", Some("invalid"))
+            .await,
+        None
+    );
+    assert_eq!(
+        cache
+            .resolve_variant("openai", "missing", Some("persisted"))
+            .await
+            .as_deref(),
+        Some("persisted")
+    );
+    http.replies.lock().await.clear();
+    assert!(cache.read("openai", "missing").await.is_none());
+    assert_eq!(
+        cache
+            .resolve_variant("openai", "model", Some("high"))
+            .await
+            .as_deref(),
+        Some("high")
+    );
+    assert_eq!(http.calls.lock().await.len(), 4);
+}
+#[tokio::test]
+async fn only_structured_plugin_unavailable_errors_are_retryable_and_error_payloads_stay_private() {
+    let http = Arc::new(Http {
+        replies: Mutex::new(std::collections::BTreeMap::new()),
+        calls: Mutex::new(vec![]),
+        slow_names: false,
+        slow_models: false,
+    });
+    let client = OpenCodeHttp::new(http.clone(), "https://fixture.invalid", None).unwrap();
+    for (body, expected) in [
+        (
+            json!({"_tag":"ServiceUnavailableError","service":"plugin","message":"private payload"}),
+            OpenCodeError::ActivatingPlugins,
+        ),
+        (
+            json!({"_tag":"ServiceUnavailableError","service":"other","message":"private payload"}),
+            OpenCodeError::Unavailable,
+        ),
+        (
+            json!({"service":"plugin","message":"private payload"}),
+            OpenCodeError::Unavailable,
+        ),
+    ] {
+        http.replies
+            .lock()
+            .await
+            .insert("/api/model".into(), raw(503, body));
+        let error = client
+            .get(
+                "/api/model",
+                Some("fixture"),
+                2,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error, expected);
+        assert!(!format!("{error:?} {error}").contains("private payload"));
+    }
 }

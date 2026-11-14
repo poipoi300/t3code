@@ -1119,7 +1119,9 @@ async fn extract(
                 environment,
             );
             options.timeout = None;
-            let mut child = t3_process::spawn(&options).map_err(|_| ServiceError::Maintenance)?;
+            let mut child = t3_process::spawn_non_blocking(&options)
+                .await
+                .map_err(|_| ServiceError::Maintenance)?;
             let stdout = child.stdout.take().ok_or(ServiceError::Maintenance)?;
             let stderr = child.stderr.take();
             let drain = stderr.map(|mut stderr| {

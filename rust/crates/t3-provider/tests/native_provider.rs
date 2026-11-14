@@ -397,3 +397,22 @@ async fn claude_custom_auth_reports_the_configured_origin_and_settings_override_
         );
     }
 }
+
+#[tokio::test]
+async fn codex_usage_after_three_seconds_stays_inside_the_discovery_deadline() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fixture = Fixture::new(
+        json!({"protocol":"codex","version":"codex-cli 0.166.0","rateLimitGate":listener.local_addr().unwrap().port()}),
+    );
+    let provider = provider(&fixture, "codex");
+    let snapshot = tokio::spawn(async move { provider.snapshot(None, true).await });
+    let (mut gate, _) = listener.accept().await.unwrap();
+    gate.read_exact(&mut [0]).await.unwrap();
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(4)).await;
+    tokio::time::resume();
+    gate.write_all(&[1]).await.unwrap();
+    let snapshot = serde_json::to_value(snapshot.await.unwrap().unwrap()).unwrap();
+    assert_eq!(snapshot["usageLimits"]["windows"][0]["usedPercent"], 42);
+}

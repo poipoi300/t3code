@@ -188,7 +188,9 @@ impl ProcessRuntime {
             process_options(&spawn.executable, &spawn.args, spawn.environment.expose());
         options.cwd = Some(cwd.clone());
         options.timeout = None;
-        let mut child = t3_process::spawn(&options).map_err(|_| ServiceError::Unavailable)?;
+        let mut child = t3_process::spawn_non_blocking(&options)
+            .await
+            .map_err(|_| ServiceError::Unavailable)?;
         let input = child.stdin.take().ok_or(ServiceError::Response)?;
         let output = child.stdout.take().ok_or(ServiceError::Response)?;
         let errors = child.stderr.take();

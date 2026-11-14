@@ -85,6 +85,8 @@ pub enum ServiceError {
     Disabled,
     #[error("Provider maintenance could not be completed.")]
     Maintenance,
+    #[error("OpenCode plugins are still activating.")]
+    ActivatingPlugins,
 }
 
 pub type ServiceResult<T> = Result<T, ServiceError>;

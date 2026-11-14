@@ -47,7 +47,7 @@ async fn with_consent<T>(
             result=&mut operation=>return result,
             Some(consent)=consents.recv()=>{
                 if let Some(previous)=pending.replace(consent.answer){let _=previous.send(false);}
-                let action=consent.action.into_inner();context.interaction(ProviderAuthInteraction::Browser{id:action.elicitation_id,url:action.url.into(),requires_consent:true,accepts_callback:None},true,false).await;
+                let action=consent.action.into_inner();context.interaction(ProviderAuthInteraction::Browser{id:action.elicitation_id,url:action.url.into(),requires_consent:true,accepts_callback:None},true,false).await?;
             },
             delivery=context.receive(),if pending.is_some()=>{
                 let delivery=delivery?;let accepted=match &delivery.reply{AuthReply::Response(response)=>match response.expose(){ProviderAuthResponse::Browser{action}=>Some(*action==ProviderBrowserAuthAction::Accept),_=>None},_=>None};

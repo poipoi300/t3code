@@ -226,6 +226,9 @@ impl ManagedProviders {
         })
     }
 
+    pub fn is_allowlisted(&self) -> bool {
+        self.allowed.is_some()
+    }
     pub fn is_driver_allowed(&self, driver: &ProviderDriverKind) -> bool {
         self.allowed.as_ref().is_none_or(|a| a.contains(driver))
     }

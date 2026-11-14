@@ -979,7 +979,7 @@ impl AuthBackend for ChatGptAuth {
                 false,
                 true,
             )
-            .await;
+            .await?;
         loop {
             let next = async {
                 if let Some(listener) = listener.as_mut() {

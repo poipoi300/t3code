@@ -55,6 +55,7 @@ struct Inner {
     launch: OpenCodeLaunch,
     http: Arc<dyn HttpTransport>,
     cache: Mutex<Option<Cached>>,
+    ledger: Option<Arc<crate::opencode_ledger::OpenCodeLedger>>,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
@@ -114,10 +115,18 @@ impl OpenCodeRuntime {
         self.0.http.clone()
     }
     pub fn new(launch: OpenCodeLaunch, http: Arc<dyn HttpTransport>) -> Self {
+        Self::new_with_ledger(launch, http, None)
+    }
+    pub fn new_with_ledger(
+        launch: OpenCodeLaunch,
+        http: Arc<dyn HttpTransport>,
+        ledger: Option<Arc<crate::opencode_ledger::OpenCodeLedger>>,
+    ) -> Self {
         Self(Arc::new(Inner {
             launch,
             http,
             cache: Mutex::new(None),
+            ledger,
         }))
     }
     pub async fn installed_version(&self) -> ServiceResult<Option<OpenCodeVersion>> {
@@ -214,7 +223,13 @@ impl OpenCodeRuntime {
                 {
                     return Err(OpenCodeError::Process);
                 }
-                start_owned(launch, self.0.http.clone(), installed).await?
+                start_owned(
+                    launch,
+                    self.0.http.clone(),
+                    installed,
+                    self.0.ledger.as_deref(),
+                )
+                .await?
             };
             *cache = Some(Cached {
                 server,
@@ -278,6 +293,7 @@ async fn start_owned(
     launch: &OpenCodeLaunch,
     transport: Arc<dyn HttpTransport>,
     installed: OpenCodeVersion,
+    ledger: Option<&crate::opencode_ledger::OpenCodeLedger>,
 ) -> Result<Arc<Server>, OpenCodeError> {
     let socket = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -324,10 +340,26 @@ async fn start_owned(
         &environment,
     );
     options.cwd = Some(launch.directory.clone());
-    let mut process = tokio::task::spawn_blocking(move || t3_process::spawn(&options))
+    let mut process = t3_process::spawn_non_blocking(&options)
         .await
-        .map_err(|_| OpenCodeError::Process)?
         .map_err(|_| OpenCodeError::Process)?;
+    let lease = if let (Some(ledger), Some(pid)) = (ledger, process.id()) {
+        ledger
+            .track(
+                pid,
+                port,
+                vec![
+                    "serve".into(),
+                    "--hostname=127.0.0.1".into(),
+                    format!("--port={port}"),
+                ],
+            )
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
     let mut stdout = process.stdout.take().ok_or(OpenCodeError::Process)?;
     let stderr = process.stderr.take();
     let control = ProcessControl {
@@ -384,6 +416,9 @@ async fn start_owned(
             biased;
             _=cancel.cancelled()=>{let _=process.terminate(Duration::from_secs(1)).await;},
             _=process.wait()=>{},
+        }
+        if let Some(lease) = lease {
+            let _ = lease.forget().await;
         }
         exited.cancel();
     });

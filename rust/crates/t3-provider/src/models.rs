@@ -626,6 +626,9 @@ pub fn cursor_context_window_tokens(
         return None;
     };
     let value = t3_contracts::wire::trim_js(&value);
+    if !matches!(value.as_bytes().last(), Some(b'k' | b'K' | b'm' | b'M')) {
+        return None;
+    }
     let (number, suffix) = value.split_at(value.len().checked_sub(1)?);
     if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;

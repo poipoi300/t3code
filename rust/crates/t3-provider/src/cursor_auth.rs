@@ -182,7 +182,7 @@ impl AuthBackend for CursorAuth {
                     context.interaction(ProviderAuthInteraction::Browser {
                         id: context.flow_id.clone().into(), url: url.into_inner().into(), requires_consent: false,
                         accepts_callback: None,
-                    }, false, false).await;
+                    }, false, false).await?;
                 }
             }
         };

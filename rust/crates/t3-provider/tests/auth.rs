@@ -20,7 +20,7 @@ impl AuthBackend for Backend {
     }
     async fn authenticate(&self, _: &str, mut context: AuthContext) -> ServiceResult<()> {
         self.events.send("started").unwrap();
-        context.interaction(serde_json::from_value(json!({"type":"credentials","id":"key-input","fields":[{"name":"key","label":"API key","secret":true}]})).unwrap(), true, false).await;
+        context.interaction(serde_json::from_value(json!({"type":"credentials","id":"key-input","fields":[{"name":"key","label":"API key","secret":true}]})).unwrap(), true, false).await?;
         let reply = context.receive().await?;
         assert!(!format!("{:?}", reply.reply).contains("secret-test-key"));
         context.verifying().await;
@@ -207,7 +207,7 @@ impl AuthBackend for PendingBackend {
         .unwrap())
     }
     async fn authenticate(&self, _: &str, mut context: AuthContext) -> ServiceResult<()> {
-        context.interaction(serde_json::from_value(json!({"type":"credentials","id":"input","fields":[{"name":"key","label":"Key","secret":true}]})).unwrap(),true,false).await;
+        context.interaction(serde_json::from_value(json!({"type":"credentials","id":"input","fields":[{"name":"key","label":"Key","secret":true}]})).unwrap(),true,false).await?;
         loop {
             let delivery = context.receive().await?;
             self.0.send(delivery).map_err(|_| ServiceError::Cancelled)?;
@@ -415,4 +415,97 @@ async fn registering_an_auth_flow_waiting_for_session_stop_joins_the_current_bin
         .cancel("owner", &flow.expose().flow_id.as_ref().unwrap().0)
         .await
         .unwrap();
+}
+
+struct BrowserBackend(String);
+#[async_trait]
+impl AuthBackend for BrowserBackend {
+    async fn logout(&self) -> ServiceResult<Option<String>> {
+        Ok(None)
+    }
+    async fn methods(&self) -> ServiceResult<Vec<ProviderAuthMethod>> {
+        Ok(serde_json::from_value(
+            json!([{"id":"browser","name":"Browser","type":"agent","description":null}]),
+        )
+        .unwrap())
+    }
+    async fn authenticate(&self, _: &str, mut context: AuthContext) -> ServiceResult<()> {
+        context
+            .interaction(
+                ProviderAuthInteraction::Browser {
+                    id: "browser".into(),
+                    url: self.0.clone().into(),
+                    requires_consent: false,
+                    accepts_callback: None,
+                },
+                false,
+                true,
+            )
+            .await?;
+        context.receive().await?;
+        Ok(())
+    }
+}
+struct BrowserStopper;
+#[async_trait]
+impl SessionStopper for BrowserStopper {
+    async fn stop(&self, _: &ProviderInstanceId, _: &CredentialBinding) -> ServiceResult<()> {
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn browser_interactions_validate_and_trim_provider_urls_before_publication() {
+    for (url, valid) in [
+        (
+            "  https://login.example.test/authorize?state=private-state  ".into(),
+            true,
+        ),
+        ("javascript:alert('private-state')".into(), false),
+        ("file:///private-state".into(), false),
+        (
+            format!("https://login.example.test/{}", "x".repeat(16_384)),
+            false,
+        ),
+    ] {
+        let controller = AuthController::new(
+            "browser".into(),
+            CredentialBinding {
+                key: "browser".into(),
+                owner: ProviderCredentialOwner::T3,
+            },
+            Arc::new(BrowserBackend(url)),
+            Arc::new(BrowserStopper),
+            Duration::from_secs(300),
+        )
+        .await;
+        let mut events = controller.subscribe("owner".into());
+        controller
+            .start("owner", None, None, None, 0)
+            .await
+            .unwrap();
+        let state = loop {
+            let state = events.next().await.unwrap();
+            if matches!(
+                state.expose().phase,
+                ProviderAuthPhase::Waiting | ProviderAuthPhase::Failed
+            ) {
+                break state;
+            }
+        };
+        if valid {
+            assert_eq!(
+                state.expose().authorization_url.as_deref(),
+                Some("https://login.example.test/authorize?state=private-state")
+            );
+        } else {
+            assert_eq!(state.expose().phase, ProviderAuthPhase::Failed);
+            assert!(state.expose().authorization_url.is_none());
+            assert_eq!(
+                state.expose().message.as_deref(),
+                Some(ServiceError::Response.to_string().as_str())
+            );
+        }
+        assert!(!format!("{state:?}").contains("private-state"));
+        controller.close();
+    }
 }

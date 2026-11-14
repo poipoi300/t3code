@@ -56,7 +56,9 @@ impl PiProbe for ProcessPiProbe {
         );
         options.cwd = Some(launch.cwd);
         options.timeout = None;
-        let mut child = t3_process::spawn(&options).map_err(|_| PiProbeError::Exit)?;
+        let mut child = t3_process::spawn_non_blocking(&options)
+            .await
+            .map_err(|_| PiProbeError::Exit)?;
         let mut stdin = child.stdin.take().ok_or(PiProbeError::Response)?;
         let stdout = child.stdout.take().ok_or(PiProbeError::Response)?;
         let _stderr = child.stderr.take().map(|mut stderr| {

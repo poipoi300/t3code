@@ -59,6 +59,19 @@ pub struct CatalogRequest {
     pub initialize: Sensitive<Value>,
     pub startup_timeout: Duration,
 }
+impl CatalogRequest {
+    pub async fn spawn(&self) -> ServiceResult<t3_process::SpawnedProcess> {
+        let mut options = crate::environment::process_options(
+            &self.binary,
+            &self.args,
+            self.environment.expose(),
+        );
+        options.cwd = Some(self.cwd.clone());
+        t3_process::spawn_non_blocking(&options)
+            .await
+            .map_err(|_| ServiceError::Unavailable)
+    }
+}
 impl std::fmt::Debug for CatalogRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("MuseCatalogRequest([REDACTED])")

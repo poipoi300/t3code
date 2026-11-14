@@ -176,9 +176,13 @@ impl AuthContext {
         interaction: ProviderAuthInteraction,
         responds: bool,
         completes: bool,
-    ) {
+    ) -> ServiceResult<()> {
+        let interaction = serde_json::from_value(
+            serde_json::to_value(interaction).map_err(|_| ServiceError::Response)?,
+        )
+        .map_err(|_| ServiceError::Response)?;
         let Some(inner) = self.inner.upgrade() else {
-            return;
+            return Err(ServiceError::Inactive);
         };
         let mut state = inner.state.lock().await;
         if let Some(active) = state.active.as_mut().filter(|a| a.id == self.flow_id) {
@@ -195,6 +199,7 @@ impl AuthContext {
             state.published.state.message = Some("Complete sign-in to continue.".into());
             inner.changes.send_modify(|v| *v = v.wrapping_add(1));
         }
+        Ok(())
     }
     pub async fn verifying(&self) {
         let Some(inner) = self.inner.upgrade() else {
