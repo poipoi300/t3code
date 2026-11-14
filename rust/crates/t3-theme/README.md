@@ -1,5 +1,13 @@
 # t3-theme
 
+Custom CSS is retained through theme imports, exports, saved and environment themes.
+Imports enforce the TypeScript limit of 20,000 UTF-16 units; invalid stored CSS is ignored.
+`css::theme_css_loads_remote_files` provides publication feedback. Browser hosts must
+parse with CSSOM before applying `theme_css_value_fetches` or `strip_fetches`, then replace
+or clear their adopted sheet when selection changes. Native token resolution does not
+interpret browser selectors; mobile preserves the payload without applying CSS.
+`node tools/extract-theme-css.mjs --check` verifies the generated upstream guide and hooks.
+
 T3 Code's design system as plain data and pure functions, independent of any UI
 framework. It compiles to `wasm32-unknown-unknown` (no I/O, threads or clocks) and replaces
 the hand-copied subset in `t3-ui/src/tokens.rs` as the source of truth.
@@ -17,6 +25,7 @@ src/fonts        font stacks, how font settings resolve, availability / monospac
 src/motion       panel animation rules, sidebar list animation planner, "nothing repaints continuously"
 src/resolved     ResolvedTheme: every token for an appearance, plus a JSON export
 src/ui_data      project icon colours, theme preview tiles, file tree variables
+src/css          publication/value fetch guards, normalized rule filtering, upstream guide/hooks
 ```
 
 ## Where the data comes from

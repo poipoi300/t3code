@@ -307,7 +307,8 @@ fn keeps_optional_light_and_dark_palettes_under_one_theme_id() {
         "name": "Aurora",
         "appearance": "light",
         "colors": { "canvas": "#f8fbff", "text": "#10243d" },
-        "variants": { "dark": { "canvas": "#101827", "text": "#eef5ff" } }
+        "variants": { "dark": { "canvas": "#101827", "text": "#eef5ff" } },
+        "css": "[data-chat-header] { border-bottom: 1px solid red; }"
     }));
     assert_eq!(theme.modes(), vec![Appearance::Light, Appearance::Dark]);
     let dark = theme.colors_for(Appearance::Dark).expect("dark");
@@ -343,6 +344,10 @@ fn keeps_optional_light_and_dark_palettes_under_one_theme_id() {
     let serialised: Value =
         serde_json::from_str(&serialize_theme_file(&theme).expect("serialises")).expect("json");
     assert_eq!(
+        serialised["css"],
+        "[data-chat-header] { border-bottom: 1px solid red; }"
+    );
+    assert_eq!(
         serialised["variants"]["dark"]["canvas"],
         json!(canonical("#101827"))
     );
@@ -350,6 +355,47 @@ fn keeps_optional_light_and_dark_palettes_under_one_theme_id() {
         serialised["variants"]["dark"]["text"],
         json!(canonical("#eef5ff"))
     );
+}
+
+#[test]
+fn imported_css_uses_the_javascript_length_limit_and_stored_css_is_lenient() {
+    use t3_theme::palette::parse_stored_theme;
+    let base = json!({"version": 1, "id": "css", "name": "CSS", "appearance": "dark", "colors": {"canvas": "#000"}});
+    for css in [
+        json!(null),
+        json!(42),
+        json!("x".repeat(20_001)),
+        json!("😀".repeat(10_001)),
+    ] {
+        let mut value = base.clone();
+        value["css"] = css;
+        assert_eq!(
+            parse_theme_file(&value)
+                .expect_err("invalid css")
+                .to_string(),
+            "Theme CSS must be text of 20000 characters or fewer."
+        );
+        value["label"] = json!("CSS");
+        let stored = parse_stored_theme(&value).expect("stored theme survives invalid css");
+        assert!(
+            serde_json::to_value(stored)
+                .expect("json")
+                .get("css")
+                .is_none()
+        );
+    }
+    for css in ["".to_owned(), "x".repeat(20_000), "😀".repeat(10_000)] {
+        let mut value = base.clone();
+        value["css"] = json!(css);
+        let theme = parse_theme_file(&value).expect("valid css");
+        let exported: Value =
+            serde_json::from_str(&serialize_theme_file(&theme).expect("serialize")).expect("json");
+        if css.is_empty() {
+            assert!(exported.get("css").is_none());
+        } else {
+            assert_eq!(exported["css"], css);
+        }
+    }
 }
 
 /// In-memory storage with the failure modes the browser's local storage has.

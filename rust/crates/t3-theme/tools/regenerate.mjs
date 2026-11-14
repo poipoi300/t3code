@@ -16,6 +16,7 @@ run("extract-palettes.mjs", true);
 run("extract-tokens.mjs", true);
 run("extract-syntax.mjs", true);
 run("extract-misc.mjs", true);
+run("extract-theme-css.mjs", true);
 run("sources.mjs");
 if (!check) {
   // Oracles record what real implementations compute; they are not checked, only rewritten.

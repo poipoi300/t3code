@@ -1,0 +1,46 @@
+Themes restyle T3 Code on web and desktop. Mobile does not use them.
+
+Colors: `canvas` and `accent` (hex) derive a full palette. `colors` overrides single roles, and `variants.light` or `variants.dark` does that for the other appearance. Prefer colors over CSS.
+Roles: canvas, chrome, toolbar, toolbarForeground, toolbarBorder, toolbarControl, toolbarControlForeground, toolbarControlHover, surface, surfaceRaised, surfaceOverlay, text, textMuted, border, input, focus, accent, accentForeground, secondary, secondaryForeground, muted, mutedForeground, placeholder, secondaryLabel, iconMuted, error, errorForeground, errorSurface, warning, warningForeground, warningSurface, update, updateForeground, updateSurface, accentSurface, accentSurfaceForeground, messageSurface, messageForeground, messageAction, messageActionForeground, messageActionHover, codeBackground, codeForeground, searchMatchBackground, searchMatchForeground, searchMatchActiveBackground, searchMatchActiveForeground, sidebar, sidebarForeground, sidebarMutedForeground, sidebarControlSurface, sidebarRowHover, sidebarRowActive, sidebarRowSelected, sidebarBorder, terminalBackground, terminalForeground, terminalCursor, terminalSelection, terminalScrollbar, terminalScrollbarHover.
+
+CSS: `css` applies after the app's styles. Use `.dark` or `:root:not(.dark)` for one appearance.
+It cannot load files: no @import, no image-set(), and url() only with data: or #id.
+A background image must be embedded as a data: address. `css` holds 20,000 characters, so keep the image near 10 KB.
+The app's own rules can be more specific. If a rule has no effect, add !important.
+It cannot reach the terminal text, the file tree, or diff internals. Use color roles for those.
+Native scrollbars take `::-webkit-scrollbar` and `::-webkit-scrollbar-thumb`.
+Icons are `svg.lucide`. stroke-width, stroke-linecap, and stroke-linejoin restyle them.
+
+Stable selectors (other class names change between releases, so do not use them):
+- [data-slot="sidebar"]: app sidebar
+- [data-slot="sidebar-inner"]: sidebar surface
+- [data-thread-item]: sidebar thread row
+- [data-slot="project-monogram"]: project icon with letters; its svg holds the tile
+- [data-chat-header]: chat header
+- [data-workspace-area="conversation"]: chat area, behind the messages
+- .messages-timeline-scroll: chat scroller
+- [data-timeline-row-kind]: chat row, such as ="message" or ="work"
+- [data-message-role="user"]: user message row
+- [data-user-message-bubble]: user message bubble
+- [data-message-role="assistant"]: assistant message row
+- .chat-markdown: assistant text
+- .chat-markdown-codeblock: code block
+- [data-chat-composer-form]: composer
+- [data-slot="composer-host"]: composer card
+- .composer-tiptap: composer text
+- [data-thread-details-card]: thread details card
+- [data-thread-terminal-drawer]: terminal drawer
+- [data-settings-page-scroll]: settings page
+- [data-slot="button"]: button
+- [data-slot="input"]: text input
+- [data-slot="switch"]: switch
+- [data-slot="select-trigger"]: select
+- [data-slot="dialog-popup"]: dialog
+- [data-slot="popover-popup"]: popover
+- [data-slot="menu-popup"]: menu
+- [data-slot="tooltip-popup"]: tooltip
+- [data-slot="scroll-area-scrollbar"]: overlay scrollbar
+- [data-slot="scroll-area-thumb"]: overlay scrollbar thumb
+
+You cannot see the result. Make small changes, then ask the user how it looks.
+To undo, set a built-in theme: t3-chat, grove, ocean, ember, or iris.

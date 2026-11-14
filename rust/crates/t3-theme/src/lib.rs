@@ -3,6 +3,7 @@
 //! Must compile to `wasm32-unknown-unknown`: no I/O, threads or clocks.
 
 pub mod color;
+pub mod css;
 pub mod fonts;
 pub mod import;
 pub mod motion;

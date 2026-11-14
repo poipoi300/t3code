@@ -14,6 +14,7 @@ use super::math::to_canonical_theme_color;
 use super::roles::ThemeColorRole;
 
 pub const THEME_FILE_VERSION: u32 = 1;
+pub const THEME_CSS_MAX_LENGTH: usize = 20_000;
 /// The `data-theme-id` of an unsaved draft shown while editing a theme.
 pub const THEME_PREVIEW_ID: &str = "__preview";
 pub const CUSTOM_THEMES_STORAGE_KEY: &str = "t3code:themes:v1";
@@ -56,6 +57,18 @@ fn js_trim(value: &str) -> &str {
 pub fn is_theme_label(value: &str) -> bool {
     let trimmed = js_trim(value);
     !trimmed.is_empty() && trimmed.encode_utf16().count() <= 48
+}
+
+fn theme_css(value: Option<&Value>) -> Option<&str> {
+    value?
+        .as_str()
+        .filter(|css| css.encode_utf16().count() <= THEME_CSS_MAX_LENGTH)
+}
+
+fn nonempty_css(value: Option<&Value>) -> Option<String> {
+    theme_css(value)
+        .filter(|css| !css.is_empty())
+        .map(str::to_owned)
 }
 
 fn is_collection_id(value: &str) -> bool {
@@ -199,6 +212,7 @@ pub fn parse_stored_theme(value: &Value) -> Option<ThemeDefinition> {
         collection: parse_collection(object.get("collection")),
         sidebar_artwork: None,
         managed: (object.get("managed") == Some(&Value::Bool(true))).then_some(true),
+        css: nonempty_css(object.get("css")),
     })
 }
 
@@ -296,6 +310,11 @@ pub fn parse_theme_file(value: &Value) -> Result<ThemeDefinition, ThemeError> {
         ));
     }
 
+    if object.contains_key("css") && theme_css(object.get("css")).is_none() {
+        return Err(ThemeError::new(format!(
+            "Theme CSS must be text of {THEME_CSS_MAX_LENGTH} characters or fewer."
+        )));
+    }
     let mut variants = ThemeVariants::default();
     if let Some(raw_variants) = object.get("variants") {
         let Some(raw_variants) = raw_variants.as_object() else {
@@ -330,6 +349,7 @@ pub fn parse_theme_file(value: &Value) -> Result<ThemeDefinition, ThemeError> {
         collection,
         sidebar_artwork: None,
         managed: (object.get("managed") == Some(&Value::Bool(true))).then_some(true),
+        css: nonempty_css(object.get("css")),
     })
 }
 
@@ -347,6 +367,8 @@ struct ThemeFile<'a> {
     collection: Option<&'a ThemeCollection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     managed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    css: Option<&'a str>,
 }
 
 /// `canonicalizeThemeDefinition`: every colour as canonical OKLCH.
@@ -387,6 +409,7 @@ pub fn serialize_theme_file(theme: &ThemeDefinition) -> Result<String, ThemeErro
         variants: canonical.variants.as_ref(),
         collection: canonical.collection.as_ref(),
         managed: canonical.is_managed().then_some(true),
+        css: canonical.css.as_deref().filter(|css| !css.is_empty()),
     };
     serde_json::to_string_pretty(&file)
         .map(|json| format!("{json}\n"))
@@ -407,6 +430,8 @@ pub struct EnvironmentTheme {
     pub colors: Option<Map<String, Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variants: Option<EnvironmentThemeVariants>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub css: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -469,6 +494,7 @@ fn environment_definition(theme: &EnvironmentTheme) -> ThemeDefinition {
         collection: None,
         sidebar_artwork: None,
         managed: pure_seed.then_some(true),
+        css: theme.css.clone().filter(|css| !css.is_empty()),
     }
 }
 

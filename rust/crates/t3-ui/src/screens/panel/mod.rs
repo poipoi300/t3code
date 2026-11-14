@@ -1,4 +1,4 @@
-//! Port of apps/web/src/rightPanelStore.ts and apps/web/src/components/RightPanelTabs.tsx.
+//! Port of rightPanelStore.ts, RightPanelTabs.tsx, ChatRightPanel.tsx and ThreadDetailsCard.tsx.
 
 // Declared by the integrator (ui-packages.py); the owner edits below this block.
 pub mod branch;
@@ -13,7 +13,7 @@ pub mod git_actions;
 pub mod review_comments;
 // End of declarations.
 
-use std::rc::Rc;
+use std::{collections::BTreeMap, rc::Rc};
 
 use nsh_core::element::{
     AnyValue, PropError, PropKind, PropSpec, SignalEquals, TsTypes, signal_with,
@@ -24,7 +24,7 @@ pub use t3_client::view_logic::shell::panels::{
     Action, Panel, PanelStore, Surface, SurfaceContent,
 };
 
-use crate::i18n::{Value, t, tr};
+use crate::i18n::{Text as I18nText, Value, t, tr};
 use crate::state::layout::LayoutClass;
 use crate::theme::{cn, palette, tw};
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
@@ -32,6 +32,301 @@ use crate::ui::icon::{Icon, icon, icon_with_class};
 use crate::ui::menu::{self, ItemOptions, MenuOptions};
 use crate::ui::panel::{panel, panel_layout};
 use crate::ui::tabs::{panel_tab_close_button, tab, tabs};
+
+/// TERM-1 provides its controlled drawer and content under the workspace owner.
+#[derive(Clone)]
+pub struct TerminalRegistration {
+    pub control: crate::screens::thread::header::TerminalControl,
+    pub render: Rc<dyn Fn(ThreadKey) -> AnyElement>,
+}
+
+/// GIT-2 supplies the branch row with its client workspace/VCS eligibility checks.
+#[derive(Clone)]
+pub struct BranchRegistration(pub Rc<dyn Fn(ThreadKey) -> AnyElement>);
+
+/// GIT-1 supplies its scoped control; its client service owns scratch/VCS eligibility.
+#[derive(Clone)]
+pub struct GitActionsRegistration(pub Rc<dyn Fn(ThreadKey) -> AnyElement>);
+
+#[derive(Clone, Copy)]
+struct WorkspaceSession {
+    host: PanelHost,
+    widths: Signal<BTreeMap<ThreadKey, f32>>,
+    history: Signal<t3_client::view_logic::shell::closed_views::ClosedViews>,
+}
+
+impl Default for WorkspaceSession {
+    fn default() -> Self {
+        use t3_client::view_logic::shell::closed_views::{ClosedView, ClosedViews};
+        let history = signal_with(ClosedViews::default(), SignalEquals::Never);
+        let sequence = signal(0_u64);
+        let host = PanelHost::new(PanelStore::default(), move |change| {
+            for surface in change.closed.into_iter().filter(Surface::can_remember) {
+                sequence.update(|id| *id += 1);
+                history.update(|history| {
+                    history.remember(
+                        sequence.get_untracked().to_string(),
+                        ClosedView::PanelTab {
+                            thread_ref: t3_contracts::environment::ScopedThreadRef {
+                                environment_id: change.thread.environment.clone(),
+                                thread_id: change.thread.thread.clone(),
+                            },
+                            surface,
+                        },
+                    );
+                });
+            }
+        });
+        Self {
+            host,
+            widths: signal(BTreeMap::new()),
+            history,
+        }
+    }
+}
+
+/// Session history until C12 connects durable storage and the reopen command.
+pub fn workspace_panel_history() -> Signal<t3_client::view_logic::shell::closed_views::ClosedViews>
+{
+    global::<WorkspaceSession>().get_untracked().history
+}
+
+/// The thread screen mounts this entry point; it owns demand, header, canvas and panel targets.
+pub fn thread_workspace(key: ThreadKey) -> impl IntoElement {
+    mounted_thread_workspace()
+        .environment(SharedString::from(key.environment.0))
+        .thread(SharedString::from(key.thread.0))
+}
+
+/// Registrations and the mounted workspace share this host; a restored runtime context wins.
+pub fn workspace_panel_host() -> PanelHost {
+    use_context::<PanelHost>().unwrap_or_else(|| global::<WorkspaceSession>().get_untracked().host)
+}
+
+#[derive(Clone, PartialEq, Props)]
+struct MountedThreadWorkspaceProps {
+    environment: SharedString,
+    thread: SharedString,
+}
+
+#[component]
+fn MountedThreadWorkspace(props: MountedThreadWorkspaceProps) -> impl IntoElement {
+    use crate::screens::thread::{composer, header, timeline};
+    use t3_client::workspace::chat_canvas::{
+        resolve_chat_canvas_lane, resolve_thread_details_card_layout,
+    };
+
+    let key = ThreadKey {
+        environment: t3_client::types::EnvironmentId(props.environment.to_string()),
+        thread: t3_client::types::ThreadId(props.thread.to_string()),
+    };
+    let runtime = crate::runtime::rt();
+    let backend = runtime.backend();
+    backend.open_thread(&key);
+    let closing = key.clone();
+    cleanup(move || backend.close_thread(&closing));
+
+    // NSH globals create their signals under a detached owner, above the shell replacement.
+    let session = global::<WorkspaceSession>().get_untracked();
+    let host = workspace_panel_host();
+    provide_context(host);
+    let selected = stored(key.clone());
+    let row_width = signal(0.0);
+    let canvas_size = signal((0.0, 0.0));
+    let measured_card = signal(false);
+    let padding = computed(move || {
+        if crate::state::layout::layout_class().is_compact() {
+            12.0
+        } else {
+            48.0
+        }
+    });
+    let placement = computed(move || {
+        resolve_thread_details_card_layout(
+            canvas_size.get(),
+            (padding.get(), 640.0),
+            None,
+            false,
+            0.0,
+        )
+    });
+    let inline = computed(move || placement.with(Option::is_some));
+    let terminal = use_context::<TerminalRegistration>().map(stored);
+    provide_context(header::HeaderLayout {
+        details_inline: Prop::bind(move || inline.get()),
+        terminal: terminal.map(|terminal| terminal.with(|t| t.control.clone())),
+    });
+    let registry = use_context::<PanelRegistry>().unwrap_or_else(|| PanelRegistry::new(vec![]));
+    let thread_id = key.thread.clone();
+    let shell = runtime.store.shell(key.environment.clone());
+    let has_project = computed(move || {
+        shell.with(|shell| {
+            shell.as_ref().is_some_and(|shell| {
+                shell.threads.iter().any(|t| {
+                    t.id == thread_id && shell.projects.iter().any(|p| p.id == t.project_id)
+                })
+            })
+        })
+    });
+    let lane = computed(move || {
+        let card_left =
+            (inline.get() && measured_card.get() && host.thread_panel_open(&selected.get(), true))
+                .then(|| placement.get().map(|p| p.x))
+                .flatten();
+        resolve_chat_canvas_lane(
+            canvas_size.get().0,
+            padding.get(),
+            tokens().number("chat-content-max-width").unwrap_or(736.0),
+            card_left,
+        )
+    });
+    let details_height = Prop::bind(move || {
+        placement
+            .get()
+            .map_or((canvas_size.get().1 - 52.0).max(0.0), |p| p.height)
+    });
+    let make_slots = move || details_slots(selected.get());
+    let inline_details = details::thread_details_target(
+        host,
+        key.clone(),
+        Prop::bind(move || inline.get()),
+        details_height,
+        make_slots(),
+    );
+    effect(move || {
+        if inline.get() && host.thread_panel_open(&selected.get(), false) {
+            host.apply(
+                &selected.get(),
+                Action::SetThreadPanel {
+                    inline: false,
+                    open: false,
+                },
+            );
+        }
+    });
+    let header = nsh_base::popover()
+        .open(move || Some(!inline.get() && host.thread_panel_open(&selected.get(), false)))
+        .on_open_change(move |event: &nsh_base::PopoverEvent| {
+            // The header's details button owns the toggle; native trigger presses must not toggle twice.
+            if let nsh_base::PopoverEvent::OpenChange(open, reason) = event
+                && *reason != nsh_base::OpenChangeReason::TriggerPress
+            {
+                host.apply(
+                    &selected.get(),
+                    Action::SetThreadPanel {
+                        inline: false,
+                        open: *open,
+                    },
+                );
+            }
+        })
+        .placement(Placement::Bottom)
+        .align(Align::End)
+        .offset(px(4.0))
+        .trigger(header::thread_header(key.clone()))
+        .child(dynamic(move || {
+            (!inline.get()).then(|| {
+                untracked(|| {
+                    view()
+                        .w(px(280.0))
+                        .max_w(move || px((window().width.0 - 24.0).max(0.0)))
+                        .child(details::thread_details_panel(
+                            selected.get(),
+                            details_height,
+                            make_slots(),
+                        ))
+                        .into_element()
+                })
+            })
+        }));
+    let canvas = view()
+        .app_class(tw("relative flex min-h-0 min-w-0 flex-1"))
+        .test_id("thread-workspace-canvas")
+        .on_layout(move |bounds: &Bounds<Points>| {
+            canvas_size.set((bounds.size.width.0, bounds.size.height.0))
+        })
+        .child(
+            view()
+                .flex_1()
+                .min_h(px(0.0))
+                .min_w(px(0.0))
+                .pr(move || px(lane.get().inset_end))
+                .child(timeline::timeline(key.clone()))
+                .child(composer::composer(key.clone()))
+                .child(terminal.map(|terminal| {
+                    panel_target()
+                        .open(move || terminal.with(|t| t.control.open.get()))
+                        .child(terminal.with(|t| (t.render)(selected.get())))
+                        .into_element()
+                })),
+        )
+        .child(
+            view()
+                .app_class(move || {
+                    tw(if inline.get() {
+                        "absolute z-20"
+                    } else {
+                        "absolute z-20 hidden"
+                    })
+                })
+                .right(px(12.0))
+                .top(move || px(placement.get().map_or(12.0, |p| p.y)))
+                .w(px(280.0))
+                .max_h(move || px(details_height.get()))
+                .on_layout(move |bounds: &Bounds<Points>| {
+                    measured_card.set(bounds.size.height.0 > 0.0)
+                })
+                .child(inline_details),
+        );
+    let workspace = view()
+        .flex_1()
+        .min_h(px(0.0))
+        .min_w(px(0.0))
+        .bg(move || palette().background)
+        .child(header)
+        .child(canvas);
+    view()
+        .flex_1()
+        .min_h(px(0.0))
+        .min_w(px(0.0))
+        .on_layout(move |bounds: &Bounds<Points>| row_width.set(bounds.size.width.0))
+        .child(
+            chat_right_panel(
+                host,
+                key.clone(),
+                Prop::bind(move || row_width.get()),
+                Prop::bind(move || {
+                    session
+                        .widths
+                        .with(|widths| widths.get(&selected.get()).copied().unwrap_or(540.0))
+                }),
+                150,
+                move |width| {
+                    session.widths.update(|widths| {
+                        widths.insert(selected.get(), width);
+                    })
+                },
+            )
+            .fill("workspace", workspace)
+            .child(right_panel_tabs(
+                host,
+                key.clone(),
+                registry,
+                header::panel_layout_controls(key, has_project),
+            )),
+        )
+}
+
+fn details_slots(key: ThreadKey) -> details::VersionControlSlots {
+    let branch =
+        use_context::<BranchRegistration>().map(|registration| (registration.0)(key.clone()));
+    let git_actions =
+        use_context::<GitActionsRegistration>().map(|registration| (registration.0)(key));
+    details::VersionControlSlots {
+        branch,
+        git_actions,
+    }
+}
 
 /// Created above the shell's adaptive replacement boundary. The client owns every transition.
 #[derive(Clone, Copy)]
@@ -195,14 +490,14 @@ impl SurfaceKind {
 }
 
 /// Owners register once when composing the workspace. `None` means available; errors stay visible.
-type SurfaceTitle = Rc<dyn Fn(&Surface) -> String>;
+type SurfaceTitle = Rc<dyn Fn(&Surface) -> SharedString>;
 type SurfacePending = Rc<dyn Fn(&Surface) -> bool>;
 type SurfaceGlyph = Rc<dyn Fn(&Surface) -> AnyElement>;
 type SurfaceView = Rc<dyn Fn(SurfaceContext) -> AnyElement>;
 
 pub struct PanelRegistration {
     pub kind: SurfaceKind,
-    pub unavailable: Prop<Option<String>>,
+    pub unavailable: Prop<Option<I18nText>>,
     pub open: Rc<dyn Fn(ThreadKey)>,
     pub render: SurfaceView,
     /// Live service metadata: browser title, terminal label, device name, or side-chat status.
@@ -217,7 +512,7 @@ pub struct PanelRegistration {
 impl PanelRegistration {
     pub fn new(
         kind: SurfaceKind,
-        unavailable: Prop<Option<String>>,
+        unavailable: Prop<Option<I18nText>>,
         open: impl Fn(ThreadKey) + 'static,
         render: impl Fn(SurfaceContext) -> AnyElement + 'static,
     ) -> Self {
@@ -257,10 +552,11 @@ impl PanelRegistry {
     }
 
     fn reason(self, kind: SurfaceKind) -> Option<String> {
-        self.registration(kind).map_or_else(
-            || Some(t("This surface is not available on this host.")),
-            |row| row.unavailable.get().map(|reason| t(&reason)),
-        )
+        self.registration(kind).and_then(|row| {
+            row.unavailable
+                .get()
+                .map(|reason| reason.resolve().to_string())
+        })
     }
 
     pub fn open(self, kind: SurfaceKind, thread: &ThreadKey) {
@@ -274,7 +570,7 @@ impl PanelRegistry {
     fn kinds(self) -> Vec<SurfaceKind> {
         SurfaceKind::ALL
             .into_iter()
-            .filter(|kind| *kind != SurfaceKind::SideChat || self.registration(*kind).is_some())
+            .filter(|kind| self.registration(*kind).is_some())
             .collect()
     }
 }
@@ -495,6 +791,44 @@ pub fn right_panel_tabs(
     let thread = stored(thread);
     let state = host.panel(thread.get());
     let surfaces = computed(move || state.with(|p| p.surfaces.clone()));
+    let frames = signal(BTreeMap::<String, Bounds<Points>>::new());
+    effect(move || {
+        let ids = surfaces.with(|surfaces| {
+            surfaces
+                .iter()
+                .map(|surface| surface.id.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+        });
+        frames.update(|frames| frames.retain(|id, _| ids.contains(id)));
+    });
+    let strip_width = signal(0.0_f32);
+    let viewport_width = signal(0.0_f32);
+    let scroll_offset = signal(0.0_f32);
+    let strip_scroll = element_ref();
+    let overflow = computed(move || strip_width.get() - viewport_width.get() > 1.0);
+    effect(move || {
+        let active = state.with(|p| p.active_surface_id.clone());
+        let bounds = frames.with(|frames| active.as_ref().and_then(|id| frames.get(id).copied()));
+        if !overflow.get() {
+            return;
+        }
+        if let Some(bounds) = bounds {
+            let left = bounds.origin.x.0;
+            let right = bounds.right().0;
+            let offset = scroll_offset.get_untracked();
+            let width = viewport_width.get_untracked();
+            let next = if left < offset {
+                left
+            } else if right > offset + width {
+                right - width
+            } else {
+                offset
+            };
+            if next != offset {
+                strip_scroll.scroll_to_offset(px(next), false);
+            }
+        }
+    });
     let menu_open = signal(false);
     effect(move || {
         if !state.with(|p| p.is_open) {
@@ -537,18 +871,42 @@ pub fn right_panel_tabs(
         t("Workspace panel tabs"),
         view()
             .app_class(tw("flex h-full w-max min-w-full items-center gap-1"))
+            .on_layout(move |bounds: &Bounds<Points>| strip_width.set(bounds.size.width.0))
             .child(each(
                 move || surfaces.get(),
                 |surface: &Surface| surface.id.clone(),
                 move |surface, _| {
-                    untracked(|| right_panel_tab(host, thread.get(), registry, state, surface))
+                    untracked(|| {
+                        sortable_tab_list(
+                            host,
+                            thread.get(),
+                            state,
+                            surface,
+                            frames,
+                            viewport_width,
+                            scroll_offset,
+                            registry,
+                        )
+                    })
                 },
             ))
             .child(add),
     );
     let header = view().app_class(tw("flex h-[var(--workspace-topbar-height)] min-h-[var(--workspace-topbar-height)] shrink-0 items-center gap-1 pl-2 pr-3"))
         // Native scroll owns touch/wheel gestures; CSS ScrollArea's DOM observer is unnecessary.
-        .child(scroll().horizontal().flex_1().min_w(px(0.0)).test_id("panel-tabs-scroll").child(strip))
+        .child(scroll().horizontal().flex_1().min_w(px(0.0)).test_id("panel-tabs-scroll")
+            .element_ref(&strip_scroll)
+            .on_layout(move |bounds: &Bounds<Points>| viewport_width.set(bounds.size.width.0))
+            .on_scroll(move |event: &ScrollEvent| scroll_offset.set(event.offset.x.0))
+            .child(strip))
+        .child(when(move || overflow.get(), move || view().app_class(tw("flex shrink-0 items-center gap-0.5"))
+            .label(t("Scroll panel tabs"))
+            .child(button(ButtonContent::Icon { icon: Icon::ChevronLeft, label: t("Scroll tabs left") }, ButtonVariant::Ghost, ButtonSize::IconXs,
+                move || scroll_offset.get() <= 1.0,
+                move || strip_scroll.scroll_to_offset(px((scroll_offset.get_untracked() - (viewport_width.get_untracked() * 0.75).max(120.0)).max(0.0)), !reduce_motion())))
+            .child(button(ButtonContent::Icon { icon: Icon::ChevronRight, label: t("Scroll tabs right") }, ButtonVariant::Ghost, ButtonSize::IconXs,
+                move || scroll_offset.get() + viewport_width.get() >= strip_width.get() - 1.0,
+                move || strip_scroll.scroll_to_offset(px((scroll_offset.get_untracked() + (viewport_width.get_untracked() * 0.75).max(120.0)).min((strip_width.get_untracked() - viewport_width.get_untracked()).max(0.0))), !reduce_motion())))))
         .child(layout_controls);
     view()
         .app_class(tw(
@@ -585,12 +943,13 @@ pub fn right_panel_tabs(
                                 state
                                     .with(|p| p.surfaces.iter().find(|s| s.id == id.get()).cloned())
                             });
-                            let visible = computed(move || {
+                            let selected = computed(move || {
                                 state.with(|p| {
-                                    p.is_open
-                                        && p.active_surface_id.as_deref() == Some(id.get().as_str())
+                                    p.active_surface_id.as_deref() == Some(id.get().as_str())
                                 })
                             });
+                            let visible =
+                                computed(move || state.with(|p| p.is_open && selected.get()));
                             let context = SurfaceContext {
                                 host,
                                 thread: thread.get(),
@@ -598,7 +957,8 @@ pub fn right_panel_tabs(
                                 visible,
                             };
                             retained_surface()
-                                .visible(visible)
+                                // The sheet retains its selected content while its exit animation ends.
+                                .visible(selected)
                                 .child(right_panel_surface_content(registry, context))
                         })
                     },
@@ -637,11 +997,108 @@ pub fn right_panel_surface_content(registry: PanelRegistry, context: SurfaceCont
         .and_then(|kind| registry.registration(kind));
     match registration {
         Some(row) => (row.render)(context),
-        None => view()
-            .app_class(tw("flex min-h-0 flex-1 items-center justify-center px-6"))
-            .child(text(t("This surface is not available on this host.")))
-            .into_element(),
+        None => view().into_element(),
     }
+}
+
+/// Port of RightPanelTabs.tsx SortableTabList; native responder capture replaces dnd-kit.
+#[allow(clippy::too_many_arguments)]
+fn sortable_tab_list(
+    host: PanelHost,
+    thread: ThreadKey,
+    state: Memo<Panel>,
+    surface: ReadSignal<Surface>,
+    frames: Signal<BTreeMap<String, Bounds<Points>>>,
+    viewport: Signal<f32>,
+    scroll: Signal<f32>,
+    registry: PanelRegistry,
+) -> impl IntoElement {
+    let thread = stored(thread);
+    let id = stored(surface.get_untracked().id);
+    let offset = signal(0.0_f32);
+    let active = signal(false);
+    let clamp = move |delta: f32| {
+        frames.with_untracked(|frames| {
+            frames.get(&id.get()).map_or(0.0, |bounds| {
+                let min = scroll.get_untracked() - bounds.origin.x.0;
+                let max =
+                    (scroll.get_untracked() + viewport.get_untracked() - bounds.right().0).max(min);
+                delta.clamp(min, max)
+            })
+        })
+    };
+    view()
+        .test_id(&format!("panel-tab-{}", id.get()))
+        .on_layout(move |bounds: &Bounds<Points>| {
+            frames.update(|frames| {
+                frames.insert(id.get(), *bounds);
+            })
+        })
+        .translate_x(move || px(offset.get()))
+        .z_index(move || if active.get() { 10 } else { 0 })
+        .claim_touches(TouchClaim::on_move().ask(move |request: &ClaimRequest| {
+            if request
+                .event
+                .gesture
+                .delta
+                .x
+                .0
+                .hypot(request.event.gesture.delta.y.0)
+                > 6.0
+            {
+                request.claim();
+            }
+        }))
+        .keep_touches(true)
+        .on_responder_grant(move |_: &ResponderEvent| active.set(true))
+        .on_responder_move(move |event: &ResponderEvent| offset.set(clamp(event.gesture.delta.x.0)))
+        .on_responder_release(move |event: &ResponderEvent| {
+            let delta = clamp(event.gesture.delta.x.0);
+            let target = frames.with_untracked(|frames| {
+                let center = frames.get(&id.get())?.center().x.0 + delta;
+                state.with_untracked(|panel| {
+                    panel
+                        .surfaces
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, surface)| {
+                            let distance = (frames.get(&surface.id)?.center().x.0 - center).abs();
+                            Some((index, distance))
+                        })
+                        .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)))
+                        .map(|(index, _)| index)
+                })
+            });
+            offset.set(0.0);
+            active.set(false);
+            if let Some(to) = target
+                && state.with_untracked(|panel| {
+                    panel
+                        .surfaces
+                        .get(to)
+                        .is_some_and(|surface| surface.id != id.get())
+                })
+            {
+                host.apply(
+                    &thread.get(),
+                    Action::Move {
+                        surface: id.get(),
+                        to: to as isize,
+                    },
+                );
+            }
+        })
+        .on_responder_terminate(move |_: &ResponderEvent| {
+            offset.set(0.0);
+            active.set(false);
+        })
+        .child(right_panel_tab(
+            host,
+            thread.get(),
+            registry,
+            state,
+            surface,
+        ))
 }
 
 fn right_panel_tab(
@@ -685,7 +1142,7 @@ fn right_panel_tab(
                 .map(move |(label, action)| {
                     let action = stored(action);
                     menu::menu_item(
-                        t(label),
+                        I18nText::from(label).resolve().to_string(),
                         ItemOptions {
                             disabled: Prop::bind(move || {
                                 state.with(|p| match action.get() {
@@ -699,7 +1156,7 @@ fn right_panel_tab(
                             }),
                             ..Default::default()
                         },
-                        text(t(label)),
+                        text(I18nText::from(label).resolve().to_string()),
                         move || host.apply(&thread.get(), action.get()),
                     )
                 }),
@@ -719,19 +1176,19 @@ fn surface_menu_item(
 ) -> impl IntoElement {
     let thread = stored(thread);
     menu::menu_item(
-        t(kind.label()),
+        I18nText::from(kind.label()).resolve().to_string(),
         ItemOptions {
             disabled: Prop::bind(move || registry.reason(kind).is_some()),
             ..Default::default()
         },
         view()
             .app_class(tw("flex min-w-0 flex-1 items-center gap-2"))
-            .child(text(t(kind.label())))
+            .child(text(I18nText::from(kind.label()).resolve().to_string()))
             .child(
                 text(move || SharedString::from(registry.reason(kind).unwrap_or_default()))
                     .app_class(tw("text-muted-foreground text-xs")),
             )
-            .child(menu::menu_shortcut(t(kind.shortcut()))),
+            .child(menu::menu_shortcut(kind.shortcut().to_owned())),
         move || registry.open(kind, &thread.get()),
     )
 }
@@ -814,7 +1271,7 @@ fn right_panel_empty_state(
             .child(view().app_class(tw("w-full max-w-xs py-6"))
                 .child(text(t("Open a surface")).app_class(tw("mb-3 text-center font-medium text-foreground text-sm")))
                 .child(view().app_class(tw("flex flex-col gap-0.5")).child(targets.get().into_iter().map(move |(kind, target)| {
-                    nsh_base::button().accessibility_label(t(kind.label())).element_ref(&target)
+                    nsh_base::button().accessibility_label(I18nText::from(kind.label()).resolve().to_string()).element_ref(&target)
                         .disabled(move || registry.reason(kind).is_some())
                         .on_press(move || registry.open(kind, &thread.get()))
                         .child(view()
@@ -826,9 +1283,9 @@ fn right_panel_empty_state(
                                 (highlight.get() == Some(kind) && registry.reason(kind).is_none()).then_some("bg-accent/60"),
                             ]))))
                             .child(icon(kind.icon(), 16.0, move || palette().foreground))
-                            .child(text(t(kind.label())).app_class(tw("min-w-0 flex-1 truncate")))
+                            .child(text(I18nText::from(kind.label()).resolve().to_string()).app_class(tw("min-w-0 flex-1 truncate")))
                             .child(text(move || SharedString::from(registry.reason(kind).unwrap_or_default())).app_class(tw("text-xs text-muted-foreground")))
-                            .child(text(t(kind.shortcut()))))
+                            .child(text(kind.shortcut().to_owned())))
                 }))))
     )
 }
@@ -837,7 +1294,7 @@ fn surface_title(surface: &Surface, registry: PanelRegistry) -> String {
     if let Some(row) = SurfaceKind::of(surface).and_then(|kind| registry.registration(kind))
         && let Some(title) = &row.title
     {
-        return t(&title(surface));
+        return title(surface).to_string();
     }
     match &surface.content {
         SurfaceContent::File { relative_path, .. } => relative_path
@@ -846,14 +1303,16 @@ fn surface_title(surface: &Surface, registry: PanelRegistry) -> String {
             .unwrap_or(relative_path)
             .to_owned(),
         SurfaceContent::PullRequest { number, .. } => {
-            tr("#{number}", &[("number", Value::Int(*number as i64))])
+            tr("#{number}", &[("number", Value::Text(number.to_string()))])
         }
         SurfaceContent::PullRequests => t("Pull requests"),
         SurfaceContent::Device { target, title } => title
             .clone()
             .or_else(|| target.as_ref().map(|target| target.name.clone()))
             .unwrap_or_else(|| t("Device")),
-        _ => t(SurfaceKind::of(surface).map_or("Unknown surface", SurfaceKind::label)),
+        _ => SurfaceKind::of(surface)
+            .map(|kind| I18nText::from(kind.label()).resolve().to_string())
+            .unwrap_or_default(),
     }
 }
 
@@ -861,9 +1320,6 @@ fn surface_icon(surface: ReadSignal<Surface>, registry: PanelRegistry) -> impl I
     dynamic(move || {
         let surface = surface.get();
         let row = SurfaceKind::of(&surface).and_then(|kind| registry.registration(kind));
-        if let Some(glyph) = row.as_ref().and_then(|row| row.glyph.as_ref()) {
-            return glyph(&surface);
-        }
         let which = match surface.content {
             SurfaceContent::Files { .. } => Icon::Files,
             SurfaceContent::File { .. } => Icon::FileText,
@@ -880,7 +1336,10 @@ fn surface_icon(surface: ReadSignal<Surface>, registry: PanelRegistry) -> impl I
             .app_class(tw(
                 "relative flex size-3 shrink-0 items-center justify-center",
             ))
-            .child(icon_with_class(which, "size-3 shrink-0"))
+            .child(row.as_ref().and_then(|row| row.glyph.as_ref()).map_or_else(
+                || icon_with_class(which, "size-3 shrink-0").into_element(),
+                |glyph| glyph(&surface),
+            ))
             .child(
                 row.and_then(|row| row.pending.clone())
                     .filter(|pending| pending(&surface))

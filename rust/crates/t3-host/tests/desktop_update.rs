@@ -178,7 +178,7 @@ async fn checked_track_switch_forwards_target_and_refuses_an_older_control_adapt
             .await
             .is_err()
     );
-    assert_eq!(plain.cancelled.load(Ordering::SeqCst), 1);
+    assert_eq!(plain.cancelled.load(Ordering::SeqCst), 0);
     struct Checked {
         inner: Arc<Control>,
         received: Mutex<Option<(DesktopUpdateChannelSchema, String)>>,

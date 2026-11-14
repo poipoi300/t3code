@@ -672,11 +672,14 @@ impl DeviceHost for LocalDeviceHost {
     }
     async fn stop(&self) -> Result<()> {
         let running = self.running.lock().await.take();
-        if let Some(running) = running {
-            running.cancel.cancel();
-            let _ = running.task.await;
-        }
-        self.stop_daemon().await
+        let hub = async {
+            if let Some(running) = running {
+                running.cancel.cancel();
+                let _ = running.task.await;
+            }
+        };
+        let (_, daemon) = tokio::join!(hub, self.stop_daemon());
+        daemon
     }
 }
 impl Drop for LocalDeviceHost {

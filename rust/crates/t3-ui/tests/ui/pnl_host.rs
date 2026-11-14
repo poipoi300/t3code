@@ -5,7 +5,7 @@ use nsh_core::prelude::*;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
 use t3_client::types::ThreadKey;
-use t3_ui::i18n::t;
+use t3_ui::i18n::{Text as I18nText, t};
 use t3_ui::screens::panel::{
     Action, PanelHost, PanelRegistration, PanelRegistry, PanelStore, SurfaceKind, chat_right_panel,
     panel_target, right_panel_tabs,
@@ -20,9 +20,9 @@ fn key(environment: &str) -> ThreadKey {
 
 fn control(label: &str, action: impl Fn() + 'static) -> impl IntoElement {
     nsh_base::button()
-        .accessibility_label(t(label))
+        .accessibility_label(label.to_owned())
         .on_press(action)
-        .child(text(t(label)))
+        .child(text(SharedString::from(label.to_owned())))
 }
 
 #[derive(Clone, PartialEq, Props)]
@@ -74,7 +74,7 @@ fn Host() -> impl IntoElement {
     let other = stored(key("second"));
     let state = host.panel(thread.get());
     let other_state = host.panel(other.get());
-    let unavailable = signal(None::<String>);
+    let unavailable = signal(None::<I18nText>);
     let opens = signal(0);
     let mounts = signal(0);
     let registrations =
@@ -131,7 +131,7 @@ fn Host() -> impl IntoElement {
             host.apply(&other.get(), Action::Open("diff".into()))
         }))
         .child(control("Make unavailable", move || {
-            unavailable.set(Some(t("The environment is offline.")))
+            unavailable.set(Some(I18nText::from("The environment is offline.")))
         }))
         .child(control("Try disabled surface", move || {
             registry.open(SurfaceKind::Files, &thread.get())
@@ -147,6 +147,17 @@ fn Host() -> impl IntoElement {
         }))
         .child(control("Open new surface menu", move || {
             host.request_new_surface(&thread.get())
+        }))
+        .child(control("Open many files", move || {
+            for index in 0..12 {
+                host.apply(
+                    &thread.get(),
+                    Action::OpenFile {
+                        path: format!("long-file-{index:02}.rs"),
+                        line: None,
+                    },
+                );
+            }
         }))
         .child(text(move || format!("closed:{}", closed.get().join(","))))
         .child(text(move || {
@@ -248,7 +259,7 @@ fn tab_selection_close_neighbor_and_reorder_use_the_client_reducer() {
     app.wait_for("text:content:files").expect("files mounted");
     app.press("role:button[Diff]").expect("open diff");
     app.wait_for("text:content:diff").expect("diff active");
-    assert!(!app.screen().shows("text:content:files"));
+    assert!(!app.screen().shows("content:files"));
     app.press("role:tab[Files]").expect("select files");
     app.wait_for("text:content:files").expect("files active");
     app.press("role:button[Reorder files]").expect("move tab");
@@ -266,7 +277,7 @@ fn tab_selection_close_neighbor_and_reorder_use_the_client_reducer() {
         .expect("close last surface");
     app.wait_for("text:closed:files,diff")
         .expect("last close reaches history");
-    assert!(!app.screen().shows("text:content:diff"));
+    assert!(!app.screen().shows("content:diff"));
     app.press("role:button[Toggle workspace panel]")
         .expect("show empty host");
     app.wait_for("Open a surface").expect("empty launcher");
@@ -285,7 +296,7 @@ fn bulk_close_remembers_the_active_tab_last_for_the_client_reopen_history() {
     app.press("role:menuitem[Close all]").expect("close tabs");
     app.wait_for("text:closed:files,diff")
         .expect("active tab remembered last");
-    assert!(!app.screen().shows("text:content:diff"));
+    assert!(!app.screen().shows("content:diff"));
 }
 
 #[test]
@@ -301,10 +312,55 @@ fn pointer_drag_reorders_tabs_without_recreating_their_content() {
     .expect("drag to second tab");
     app.wait_for("text:state:diff,files;other:false;opens:2;mounts:2;width:540")
         .expect("client order changed; views retained");
+    assert!(
+        app.screen().shows("content:diff"),
+        "dragging does not select a different tab"
+    );
     app.press("role:tab[Files]")
         .expect("moved tab remains selectable");
     app.wait_for("text:content:files")
         .expect("same files content");
+}
+
+#[test]
+fn overflowing_tabs_reveal_the_active_file_and_scroll_controls_move_the_native_viewport() {
+    let mut app = start(DESKTOP);
+    app.press("role:button[Open many files]")
+        .expect("open overflowing tabs");
+    app.wait_for("text:content:file:long-file-11.rs")
+        .expect("last file active");
+    app.wait_for("role:button[Scroll tabs left]")
+        .expect("overflow controls");
+    assert!(
+        !app.screen()
+            .accessibility_state("role:button[Scroll tabs left]")
+            .expect("left control")
+            .disabled
+    );
+    let before = app
+        .screen()
+        .layout_nodes()
+        .into_iter()
+        .find(|node| node.test_id.as_deref() == Some("panel-tab-file:long-file-00.rs"))
+        .expect("first tab")
+        .bounds
+        .origin
+        .x;
+    app.press("role:button[Scroll tabs left]")
+        .expect("scroll back");
+    let after = app
+        .screen()
+        .layout_nodes()
+        .into_iter()
+        .find(|node| node.test_id.as_deref() == Some("panel-tab-file:long-file-00.rs"))
+        .expect("first tab")
+        .bounds
+        .origin
+        .x;
+    assert!(
+        after > before,
+        "the content moves right as the horizontal offset decreases"
+    );
 }
 
 #[test]
@@ -475,4 +531,72 @@ fn details_and_terminal_mounting_seams_retain_child_owned_state() {
     app.press("role:button[Toggle]").expect("reopen");
     app.wait_for("Target stays expanded")
         .expect("same child component");
+}
+
+#[component]
+fn ProjectedWorkspace() -> impl IntoElement {
+    use std::rc::Rc;
+    use t3_client::connection::PairingInput;
+    use t3_ui::runtime::{Rt, backend::Backend, demo, host::Choice};
+    use t3_ui::state::nav::{Navigator, Route};
+
+    t3_ui::theme::install(&Default::default());
+    provide_context(t3_ui::theme::text_view_parts());
+    let store = t3_client::ClientStore::default();
+    let backend: Rc<dyn Backend> = Rc::new(demo::DemoBackend::new(store.clone()));
+    provide_context(Rt::new(store, backend.clone(), Choice::Demo));
+    let key = demo::demo_thread(&t3_client::types::EnvironmentId(
+        "demo-demo.t3.codes".into(),
+    ));
+    provide_context(Navigator::new(Route::Thread(key.clone())));
+    let ready = signal(false);
+    spawn(async move {
+        backend
+            .pair(PairingInput {
+                pairing_url: Some(demo::DEMO_PAIRING_URL.into()),
+                ..Default::default()
+            })
+            .await
+            .expect("real demo projection");
+        ready.set(true);
+    });
+    view().w_full().h_full().child(when(ready, move || {
+        t3_ui::screens::panel::thread_workspace(key.clone())
+    }))
+}
+
+#[test]
+fn production_workspace_mounts_real_details_and_header_toggle_targets() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = Headless::start(EngineConfig {
+            ui_sets: t3_ui::registries(),
+            viewport: size(px(window.0), px(window.1)),
+            ..EngineConfig::new(Root::of::<ProjectedWorkspace>())
+        })
+        .expect("production thread workspace");
+        app.wait_for("I added clamp next to sum and the tests pass.")
+            .expect("real timeline");
+        if window == DESKTOP {
+            app.wait_for("demo.t3.codes")
+                .expect("default inline details from real environment");
+            app.press("role:button[Toggle thread details panel]")
+                .expect("close details");
+            assert!(!app.screen().shows("demo.t3.codes"));
+        }
+        app.press("role:button[Toggle thread details panel]")
+            .expect("open details");
+        app.wait_for("demo.t3.codes")
+            .expect("actual details target");
+        if window == PHONE {
+            app.press_key("Escape").expect("dismiss popup");
+        }
+        app.press("role:button[Toggle right panel]")
+            .expect("open workspace panel");
+        app.wait_for("role:button[Close workspace panel]")
+            .expect("actual workspace panel target");
+        app.press("role:button[Close workspace panel]")
+            .expect("close workspace panel");
+        app.wait_for("role:button[Toggle right panel]")
+            .expect("return to thread");
+    }
 }
