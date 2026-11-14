@@ -767,3 +767,77 @@ async fn tool_images_have_dimensions_and_native_icons_have_the_contract_name() {
     };
     assert_eq!(file.read_range(0, 3).expect("read"), b"png");
 }
+
+/// A stored attachment is the file its entry names. A link planted in the attachments directory,
+/// to a file outside it or to another attachment, is neither signed nor served, including through
+/// a grant signed before the swap. A client's type never decides how an image renders.
+#[tokio::test]
+async fn attachment_links_are_never_followed_and_client_types_never_render() {
+    let temp = tempfile::tempdir().expect("test fixture");
+    let root = temp.path();
+    let service = service(root);
+    fs::create_dir(&service.attachments_dir).expect("test fixture");
+    let link = |target: &Path, link: &Path| {
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(target, link).expect("symlink");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).expect("symlink");
+    };
+    let grant = |id: &str, mime: Option<&str>| AssetResource::Attachment {
+        attachment_id: Text(id.into()),
+        file_name: None,
+        mime_type: mime.map(|m| Text(m.into())),
+        disposition: Some(AssetDisposition::Inline),
+        render_intent: None,
+    };
+    put(root, "outside/secret.png", b"secret");
+    let real = attachments::create_id("thread", None).expect("id");
+    put(root, &format!("attachments/{real}.png"), b"real");
+    for target in [
+        root.join("outside/secret.png"),
+        service.attachments_dir.join(format!("{real}.png")),
+    ] {
+        let planted = attachments::create_id("thread", None).expect("id");
+        link(&target, &service.attachments_dir.join(format!("{planted}.png")));
+        assert!(
+            service
+                .issue_url(grant(&planted, None), AssetContext::default(), 100)
+                .await
+                .is_err(),
+            "{} was signed through a link",
+            target.display()
+        );
+    }
+    // Signed while it was a file, swapped for a link afterwards: nothing is served.
+    let swapped = attachments::create_id("thread", None).expect("id");
+    let swapped_path = service.attachments_dir.join(format!("{swapped}.png"));
+    fs::write(&swapped_path, b"before").expect("test fixture");
+    let issued = service
+        .issue_url(grant(&swapped, None), AssetContext::default(), 100)
+        .await
+        .expect("url");
+    fs::remove_file(&swapped_path).expect("test fixture");
+    link(&root.join("outside/secret.png"), &swapped_path);
+    let (token, name) = url_parts(&issued.relative_url.0);
+    assert!(
+        service
+            .resolve(token, name, 101)
+            .await
+            .expect("resolve")
+            .is_none()
+    );
+    // An image asked for as HTML is served by its stored extension, not as HTML.
+    let issued = service
+        .issue_url(grant(&real, Some("text/html")), AssetContext::default(), 100)
+        .await
+        .expect("url");
+    let (token, name) = url_parts(&issued.relative_url.0);
+    let Some(ResolvedAsset::File {
+        mime_type, path, ..
+    }) = service.resolve(token, name, 101).await.expect("resolve")
+    else {
+        panic!("missing")
+    };
+    assert_eq!(mime_type, None);
+    assert!(path.ends_with(format!("{real}.png")));
+}
