@@ -361,6 +361,7 @@ impl Git {
         let checkpoint_ref = checkpoint_ref.to_owned();
         let previous = previous.map(str::to_owned);
         self.owned_operation(move |git| async move {
+            let git = git.checkpoint_reader().await?;
             git.capture_checkpoint_owned(&checkpoint_ref, previous.as_deref())
                 .await
         })
@@ -947,6 +948,7 @@ impl Git {
         validate_revision(checkpoint_ref)?;
         let revision = format!("{checkpoint_ref}^{{commit}}");
         let output = self
+            .without_fsmonitor()
             .execute(
                 &["rev-parse", "--verify", "--quiet", &revision],
                 ExecuteOptions {
@@ -1001,7 +1003,8 @@ impl Git {
             }
         }
         if !commands.is_empty() {
-            let output = self
+            let reader = self.checkpoint_reader().await?;
+            let output = reader
                 .execute(
                     &["update-ref", "--no-deref", "--stdin"],
                     ExecuteOptions {
@@ -1015,15 +1018,16 @@ impl Git {
             if output.code != Some(0) {
                 // A locked ref must not defeat the original best-effort pruning policy.
                 for reference in seen {
-                    self.execute(
-                        &["update-ref", "--no-deref", "-d", reference],
-                        ExecuteOptions {
-                            capture: true,
-                            allow_nonzero: true,
-                            ..Default::default()
-                        },
-                    )
-                    .await?;
+                    reader
+                        .execute(
+                            &["update-ref", "--no-deref", "-d", reference],
+                            ExecuteOptions {
+                                capture: true,
+                                allow_nonzero: true,
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
                 }
             }
         }
@@ -1061,6 +1065,7 @@ impl Git {
     ) -> Result<bool, GitError> {
         let reference = reference.to_owned();
         self.owned_operation(move |git| async move {
+            let git = git.checkpoint_reader().await?;
             git.restore_checkpoint_owned(&reference, fallback_to_head)
                 .await
         })

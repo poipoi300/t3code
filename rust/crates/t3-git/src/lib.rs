@@ -3,6 +3,7 @@
 
 mod actions;
 mod application;
+mod binding;
 mod broadcaster;
 mod checkpoint;
 mod core;
@@ -22,6 +23,7 @@ mod worktree_progress;
 pub use actions::{CheckoutRefresh, parse_commit_message};
 pub use actions::{CommitOptions, PreparedCommit, PushTarget};
 pub use application::{GitActionEffects, GitActionSubscription, GitApplicationService};
+pub use binding::RepositoryBinding;
 pub use broadcaster::{
     DEFAULT_VCS_FETCH_INTERVAL, DisabledVcsPolling, VcsBranchChange, VcsBranchChangesSubscription,
     VcsBranchSubscription, VcsStatusBroadcaster, VcsStatusPolicy, VcsStatusSubscription,
@@ -81,6 +83,8 @@ pub enum GitError {
     Unsupported(String),
     #[error("unsafe restore: {0}")]
     UnsafeRestore(String),
+    #[error("repository identity changed at {path}: {detail}")]
+    RepositoryChanged { path: PathBuf, detail: &'static str },
     #[error("invalid Git argument: {0}")]
     InvalidArgument(String),
     #[error("checkpoint range is unavailable: {0}")]
@@ -177,6 +181,8 @@ pub struct Git {
     internal_paths: Option<(PathBuf, PathBuf)>,
     git_dir: Option<PathBuf>,
     fsmonitor_disabled: bool,
+    bound_repository: Option<Arc<binding::BoundRepository>>,
+    checkpoint_mode: bool,
 }
 
 impl Git {
@@ -194,6 +200,8 @@ impl Git {
             internal_paths: None,
             git_dir: None,
             fsmonitor_disabled: false,
+            bound_repository: None,
+            checkpoint_mode: false,
         }
     }
     pub fn cwd(&self) -> &Path {
@@ -222,8 +230,14 @@ impl Git {
         })
     }
     pub fn at(&self, cwd: impl Into<PathBuf>) -> Self {
+        let cwd = cwd.into();
         Self {
-            cwd: cwd.into(),
+            bound_repository: if cwd == self.cwd {
+                self.bound_repository.clone()
+            } else {
+                None
+            },
+            cwd,
             ..self.clone()
         }
     }
@@ -280,6 +294,21 @@ impl Git {
         args: &[impl AsRef<std::ffi::OsStr>],
         options: ExecuteOptions,
     ) -> Result<ProcessOutput, GitError> {
+        if self.bound_repository.is_none() && (self.fsmonitor_disabled || options.capture) {
+            return self
+                .repository_reader()
+                .await?
+                .execute_unbound(args, options)
+                .await;
+        }
+        self.execute_unbound(args, options).await
+    }
+
+    async fn execute_unbound(
+        &self,
+        args: &[impl AsRef<std::ffi::OsStr>],
+        options: ExecuteOptions,
+    ) -> Result<ProcessOutput, GitError> {
         let _permit = if options.unbounded_concurrency
             || options
                 .timeout
@@ -304,14 +333,24 @@ impl Git {
         #[cfg(target_os = "macos")]
         let mut fsync_fallback = false;
         loop {
+            if let Some(binding) = &self.bound_repository {
+                binding.validate(self.cwd()).await?;
+            }
             let mut process = ProcessOptions::new(self.program.clone());
             process.args = vec!["-C".into(), self.cwd.as_os_str().to_owned()];
-            if let Some(directory) = &self.git_dir {
+            if let Some(binding) = &self.bound_repository {
+                process.args.extend([
+                    "--git-dir".into(),
+                    core::git_path(&binding.identity.git_dir).into_os_string(),
+                    "--work-tree".into(),
+                    core::git_path(&binding.identity.top_level).into_os_string(),
+                ]);
+            } else if let Some(directory) = &self.git_dir {
                 process
                     .args
                     .extend(["--git-dir".into(), directory.as_os_str().to_owned()]);
             }
-            if self.fsmonitor_disabled {
+            if self.fsmonitor_disabled || options.capture {
                 process
                     .args
                     .extend(["-c".into(), "core.fsmonitor=false".into()]);
@@ -319,7 +358,8 @@ impl Git {
             process.args.extend(args.iter().cloned());
             // -C lets Git diagnose a deleted workspace without a spawn-cwd failure.
             process.env = git_environment(&self.environment, &options.env);
-            if options.capture
+            if self.checkpoint_mode
+                || options.capture
                 || options
                     .env
                     .get(std::ffi::OsStr::new("GIT_INDEX_FILE"))
@@ -406,7 +446,7 @@ impl Git {
     }
 
     pub async fn detect_repository(&self) -> Result<Option<Repository>, GitError> {
-        let reader = self.without_fsmonitor();
+        let reader = self.repository_reader().await?;
         let result = match reader
             .execute(
                 &[
@@ -479,7 +519,7 @@ impl Git {
     }
 
     pub async fn status(&self) -> Result<Status, GitError> {
-        let reader = self.without_fsmonitor();
+        let reader = self.repository_reader().await?;
         if !reader.is_repository().await? {
             return Ok(Status::default());
         }
@@ -505,7 +545,7 @@ impl Git {
         parse_status(&output.stdout_text())
     }
     pub async fn current_branch(&self) -> Result<Option<String>, GitError> {
-        let reader = self.without_fsmonitor();
+        let reader = self.repository_reader().await?;
         let result = reader
             .execute(
                 &["symbolic-ref", "--quiet", "HEAD"],
@@ -522,7 +562,7 @@ impl Git {
         }
     }
     pub async fn list_refs(&self, prefixes: &[&str]) -> Result<Vec<GitRef>, GitError> {
-        let reader = self.without_fsmonitor();
+        let reader = self.repository_reader().await?;
         let mut args = vec![
             "for-each-ref",
             "--format=%(refname)%00%(objectname)%00%(upstream)%00%(HEAD)",

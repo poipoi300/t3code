@@ -86,25 +86,78 @@ grace through `t3-process`; Windows job termination remains immediate.
 
 ### Checkpoint filesystem boundary
 
-Restore checks the paths Git selects and refuses unsafe junctions, mount points
-and other name-surrogate reparse points found at check time. It checks candidate
+Restore checks the paths Git selects and refuses unsafe junctions, Windows mount
+points and other name-surrogate reparse points found at check time. It checks candidate
 ancestors and directories Git will replace; true symlink and file ancestors are
 left for Git to replace without following. Submodules remain non-recursive leaves.
 Clean always checks selected paths' ancestors. Git for Windows 2.23.0 and newer
 [unlink junctions without traversing them](https://github.com/git-for-windows/git/releases/tag/v2.23.0.windows.1),
-so listed clean paths are leaves on recognized supported releases. Older or
-unrecognized Windows builds retain the stricter selected-directory walk.
+so listed clean paths are leaves on recognized supported releases. Only those
+listed paths and their ancestors are classified by Rust in fast clean mode;
+non-junction name surrogates nested inside a listed directory are not inspected.
+Older or unrecognized Windows builds retain the stricter selected-directory walk.
+POSIX mount points are not detected. In particular a FUSE mount could be cleaned
+through; callers must prohibit mounts in the scope or reject such restores.
+Device-number checks alone would miss same-device bind mounts, and this Windows
+implementation has no verified POSIX mount-table/namespace boundary.
 
 A fresh clean preflight runs before mutation. Each clean pass is checked again;
 a later safety refusal names the path and says when tracked files were restored.
 These checks do not prevent a process from swapping a directory for a junction
 after its check or while Git is running. Callers must stop or quiesce the thread's
 own watchers, dev servers and other writers before restore, and hold that state
-through restore, clean and index finalization.
+through restore, clean and index finalization. The orchestration seam must enforce
+this; t3-git does not stop those processes. A post-write scan could only report
+damage after it happened and could miss a link removed by the writer. Staging in
+a scratch tree would still race when publishing into the live tree and would not
+atomically preserve ignored files, submodules and the index. Neither is a substitute
+for quiescence or OS-enforced isolation of the Git child.
 
 Capture reads what `git add` reads. Git for Windows may read through a junction
 during `add -A`, as the TypeScript driver does. Capture has no link scan, ignore
 enumeration, explicit file list or link removal.
+
+### Repository identity and configured commands
+
+Checkpoint operations and automatic status/branch reads pin a `RepositoryBinding`
+(canonical top-level, per-worktree Git directory and common directory). Commands
+use explicit `--git-dir` and `--work-tree`; discovery uses only `rev-parse` with
+fsmonitor disabled. A changed discovery result, `.git` added or redirected between
+the scope and top-level, or a changed `commondir` pointer refuses the operation and
+names the changed path. Descendant submodules and nested worktrees remain leaves
+of their containing scope and may have their own bindings.
+
+Until integration supplies durable identities, the first protected use records
+each scope in a process-lifetime cache, shared even across newly constructed Git
+handles. This does not survive a server restart and trusts what exists at first
+use. Project binding and thread worktree creation must call `bind_repository`
+before starting agent processes, persist the result outside the checkout, and
+install it with `with_repository_binding` before status/checkpoint work after a
+restart. The external server/orchestration seam requests describe that requirement.
+
+Every checkpoint command disables fsmonitor and hooks; status/branch reads disable
+fsmonitor, and all produced diffs disable external diff and textconv helpers.
+Capture's `add` may run clean/process filters; restore may run smudge/process
+filters, and its worktree comparisons/index reset may run clean/process filters.
+Status and untracked totals may also run clean/process filters. These preserve
+Git/LFS behavior. Clean itself runs no configured filter. These helpers come from
+the pinned repository's configuration hierarchy, including user/system settings;
+workspace attributes can select an already configured filter. Missing objects in
+a partial clone may trigger Git's lazy fetch, including transport/credential
+helpers. Noninteractive reads use no pager/editor or aliases; checkpoint hooks
+remain disabled. User-initiated commit/network operations retain their documented
+hooks and transport configuration.
+
+Pinning does not make the real Git configuration trustworthy. An agent able to
+edit it, an included config or participating user config can configure filters
+that the server runs with the server's privileges:
+this remains a security finding. Codex workspace-write protects Git metadata by
+default, while full access or approved escalation can write it. Claude's protected
+paths require approval in default/acceptEdits, classifier approval in auto, and are
+denied in dontAsk; bypassPermissions allows them. Its optional shell sandbox denies
+Git config writes, but native Windows shell commands are unsandboxed. These are
+provider/version/policy dependent, not protections enforced by t3-git. Adapter and
+primary-documentation evidence is recorded in the Round 3 report.
 
 Restore ownership compares the canonical deepest existing ancestor plus missing
 suffix components, with Windows case folding; missing scopes/owners cannot evade

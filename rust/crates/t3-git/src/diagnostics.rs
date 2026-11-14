@@ -473,6 +473,7 @@ impl Git {
             .execute(args, options)
             .await
             .map_err(|error| match error {
+                GitError::RepositoryChanged { .. } => error,
                 GitError::Process(ProcessError::Cancelled) => error,
                 GitError::Process(ProcessError::Timeout { .. }) => {
                     self.command_error(operation, "Git command timed out.")

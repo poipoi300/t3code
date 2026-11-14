@@ -923,7 +923,7 @@ async fn internal_file_symlinks_keep_git_symlink_semantics() -> TestResult {
 }
 
 #[tokio::test]
-async fn ref_pruning_uses_one_process_and_sparse_help_is_cached_per_program() -> TestResult {
+async fn ref_pruning_batches_deletions_and_sparse_help_is_cached_per_program() -> TestResult {
     let repo = Repository::new().await?;
     repo.write("included/a", "base\n")?;
     repo.write("excluded/b", "keep\n")?;
@@ -971,10 +971,25 @@ async fn ref_pruning_uses_one_process_and_sparse_help_is_cached_per_program() ->
         .count();
     std::fs::write(&trace, "")?;
     git.delete_checkpoint_refs(&references).await?;
+    let deletion = starts(&std::fs::read_to_string(&trace)?);
     assert_eq!(
-        starts(&std::fs::read_to_string(&trace)?).len(),
-        1,
-        "ref deletion must use one Git process"
+        deletion.len(),
+        2,
+        "one identity validation plus one batched deletion"
+    );
+    assert_eq!(
+        deletion
+            .iter()
+            .filter(|args| args.iter().any(|arg| arg == "update-ref"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        deletion
+            .iter()
+            .filter(|args| args.iter().any(|arg| arg == "--absolute-git-dir"))
+            .count(),
+        1
     );
     assert_eq!(
         probes, 1,

@@ -143,6 +143,13 @@ pub struct TurnDiff {
 
 impl Git {
     pub async fn diff_checkpoints(&self, options: DiffOptions<'_>) -> Result<String, GitError> {
+        self.checkpoint_reader()
+            .await?
+            .diff_checkpoints_bound(options)
+            .await
+    }
+
+    async fn diff_checkpoints_bound(&self, options: DiffOptions<'_>) -> Result<String, GitError> {
         if options.file_paths.is_some_and(<[String]>::is_empty) {
             return Ok(String::new());
         }
@@ -280,8 +287,16 @@ impl Git {
     ) -> Result<Vec<String>, GitError> {
         let mut command = vec!["-c", "diff.relative=false", "-c", "log.showSignature=false"];
         command.extend_from_slice(args);
-        command.extend(["--name-only", "-z", "--no-renames", "--no-ext-diff"]);
+        command.extend([
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+        ]);
         let output = self
+            .checkpoint_reader()
+            .await?
             .execute(
                 &command,
                 ExecuteOptions {
