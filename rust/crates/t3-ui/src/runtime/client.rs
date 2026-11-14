@@ -121,10 +121,7 @@ mod host {
         let config = NativeConfig::desktop(dir);
         // No OS key store binding for mobile yet (P7): saved credentials last one run.
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-        let config = NativeConfig::new(
-            dir,
-            Box::new(t3_platform::EphemeralSecretStore::default()),
-        );
+        let config = NativeConfig::new(dir, Box::new(t3_platform::EphemeralSecretStore::default()));
         Entered {
             handle: runtime.handle().clone(),
             future: Box::pin(NativePlatform::open(config)),

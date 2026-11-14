@@ -683,7 +683,7 @@ mod tests {
                 }
             }
         }
-        view()
+        view().test_id("toggle-class-checks-passed")
     }
 
     #[test]
@@ -695,5 +695,6 @@ mod tests {
             .expect("class engine");
         app.first_render()
             .expect("all class assertions pass under the engine's token scope");
+        assert_eq!(app.screen().count("id:toggle-class-checks-passed"), Ok(1));
     }
 }

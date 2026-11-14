@@ -135,6 +135,8 @@ pub fn alert(props: Props, build: impl FnOnce(Context) -> Slots) -> impl IntoEle
         .role(AccessibilityRole::Alert)
         .app_class(tw_with(props.scope, &cn([
             Some("relative rounded-xl border px-3.5 py-3 text-card-foreground text-sm"),
+            // index.css's base `* { @apply border-border }`; NSH's bare border uses currentColor.
+            Some("border-border"),
             // Descendant SVG/description selectors are applied to those slots directly.
             Some(match props.variant {
                 Variant::Default => "bg-transparent dark:bg-input/32",
@@ -284,6 +286,16 @@ pub mod composer_banner {
         compact_rows: bool,
     }
 
+    impl Context {
+        /// An existing size-query container's measured content-box width, for Width::Content rows.
+        pub fn from_container_width(width: Signal<f32>) -> Self {
+            Self {
+                width,
+                compact_rows: false,
+            }
+        }
+    }
+
     #[derive(Clone, Copy)]
     pub struct RowContext {
         banner: Context,
@@ -355,13 +367,10 @@ pub mod composer_banner {
 
     fn attachment_classes(props: AttachmentProps) -> SharedString {
         tw(&cn([
-            Some("mx-auto -mb-[17px]"),
-            Some(if props.in_column {
-                "w-full"
-            } else {
-                // ComposerSurface.Shell defines the subtree's drawer inset as 1.375rem.
-                "w-[calc(100%-44px)]"
-            }),
+            Some("mx-auto -mb-[17px] w-full"),
+            // NSH cannot mix percentage and absolute widths. This unpainted wrapper's padding
+            // gives the same child box; ComposerSurface.Shell defines the inset as 1.375rem.
+            (!props.in_column).then_some("px-[1.375rem]"),
             (props.in_column && props.last).then_some("mb-0"),
         ]))
     }
@@ -405,10 +414,7 @@ pub mod composer_banner {
         build: impl FnOnce(Context) -> E,
     ) -> impl IntoElement {
         let width = signal(0.0);
-        let content = build(Context {
-            width,
-            compact_rows: false,
-        });
+        let content = build(Context::from_container_width(width));
         surface_frame(
             props.surface,
             &cn([
@@ -503,6 +509,12 @@ pub mod composer_banner {
             .accessibility_label(move || Some(SharedString::from(t(&label()))))
             .disabled(disabled)
             .on_press(on_press)
+            // The shared adaptive contract adds a 44pt coarse target without changing row layout.
+            .hit_slop(move || {
+                let minimum = if context.banner.compact_rows { 20.0 } else { icon_column() };
+                let slack = ((crate::theme::metrics().hit_target - minimum) / 2.0).max(0.0);
+                EdgeInsets::all(px(slack))
+            })
             .app_class(move || Some(tw(&cn([
                 Some(row_classes(context).as_ref()),
                 Some("cursor-pointer rounded-xl hover:bg-foreground/5 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"),
@@ -634,6 +646,7 @@ pub mod composer_banner {
         disabled: impl Fn() -> bool + 'static,
         on_press: impl Fn() + 'static,
     ) -> impl IntoElement {
+        // The frozen Button API cannot request the source's 14px icon or arbitrary children.
         button(
             ButtonContent::Icon {
                 icon: Icon::X,

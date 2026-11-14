@@ -11,7 +11,8 @@
 //! Set `filter=false` for results already ranked by the client. Query, selected and disabled
 //! are caller-controlled signals. Empty/loading/error/offline content belongs in the caller's
 //! panel/list slots; `loading` marks either list as busy. Disabled, hidden and unknown items
-//! never dispatch a selection. `command_group(state, name, follows_group, || children)` scopes
+//! never dispatch a selection. Disabled rows remain keyboard-navigable, as in Base UI.
+//! `command_group(state, name, follows_group, || children)` scopes
 //! its collection to that group and hides the entire group when it has no filtered results.
 //! There are no Command `Variant` or `Size` enums in the TSX. Input is always `lg`; footer
 //! actions are `ghost-muted` / `xs`. Elements are opaque and cannot be restyled.
@@ -20,10 +21,16 @@
 //! [`command_dialog_popup`] inside it. The modal traps/restores focus; input autofocus takes
 //! priority over a preceding Back addon. Input's cancel callback owns closing or going back.
 //! NSH has no decomposed autocomplete, so slots share UI state over native controls.
+//! Item values must be unique within the catalogue; labels may repeat.
 
 use std::rc::Rc;
 
-use nsh_core::{AccessibilityState, element::desktop::title_bar, keymap::When, prelude::*};
+use nsh_core::{
+    AccessibilityState,
+    element::{IntoElements, desktop::title_bar},
+    keymap::When,
+    prelude::*,
+};
 
 use crate::i18n::t;
 use crate::state::layout::{Pointer, layout_class, pointer};
@@ -84,8 +91,10 @@ impl Default for CommandOptions {
 #[derive(Clone, Debug, PartialEq)]
 struct Highlight {
     query: String,
-    value: Option<SharedString>,
+    index: Option<usize>,
 }
+
+type SelectHandler = Rc<dyn Fn(&str)>;
 
 /// UI-only state, constructed under the owner mounting the command.
 #[derive(Clone, Copy)]
@@ -98,7 +107,7 @@ pub struct CommandState {
     pub highlighted: Memo<Option<SharedString>>,
     options: CommandOptions,
     requested: Signal<Option<Highlight>>,
-    select: Stored<Rc<dyn Fn(&str)>>,
+    select: Stored<SelectHandler>,
     input: ElementRef,
     list: ElementRef,
     active_row: Signal<Option<(SharedString, ElementRef)>>,
@@ -112,13 +121,24 @@ impl CommandState {
     ) -> Self {
         let query = signal(String::new());
         let catalogue = computed(items);
-        let filtered = computed(move || {
-            let query = query.get();
+        let index = computed(move || {
             catalogue.with(|items| {
                 items
                     .iter()
-                    .filter(|item| !options.filter || matches_query(item, &query))
-                    .cloned()
+                    .map(|item| (item.clone(), search_text(item)))
+                    .collect::<Vec<_>>()
+            })
+        });
+        let filtered = computed(move || {
+            if !options.filter {
+                return catalogue.get();
+            }
+            let query = query.get().trim().to_lowercase();
+            index.with(|items| {
+                items
+                    .iter()
+                    .filter(|(_, text)| matches_query(text, &query))
+                    .map(|(item, _)| item.clone())
                     .collect::<Vec<_>>()
             })
         });
@@ -145,7 +165,8 @@ impl CommandState {
                     requested.get().as_ref(),
                     options.auto_highlight,
                 );
-                requested.set(Some(Highlight { query, value }));
+                let index = value.and_then(|value| items.iter().position(|i| i.value == value));
+                requested.set(Some(Highlight { query, index }));
             });
         });
         Self {
@@ -173,8 +194,8 @@ impl CommandState {
         {
             return;
         }
-        self.selected.set(Some(value.to_owned().into()));
-        self.select.with(|select| select(value));
+        // Autocomplete uses selectionMode=none: choosing does not set data-selected.
+        self.select.get()(value);
     }
 
     pub fn accept(self) {
@@ -188,18 +209,21 @@ impl CommandState {
             || value.as_ref().is_some_and(|value| {
                 !self
                     .items
-                    .with_untracked(|items| items.iter().any(|i| &i.value == value && !i.disabled))
+                    .with_untracked(|items| items.iter().any(|i| &i.value == value))
             })
         {
             return;
         }
         self.requested.set(Some(Highlight {
             query: self.query.get_untracked(),
-            value,
+            index: value.and_then(|value| {
+                self.items
+                    .with_untracked(|items| items.iter().position(|i| i.value == value))
+            }),
         }));
     }
 
-    /// With loopFocus, arrows include the input (no highlighted row) past either end.
+    /// Arrows wrap options; only autoHighlight=false permits a loop through the input.
     pub fn move_highlight(self, forward: bool) {
         let next = self.items.with_untracked(|items| {
             step(
@@ -207,6 +231,7 @@ impl CommandState {
                 self.highlighted.get_untracked().as_deref(),
                 forward,
                 self.options.loop_focus,
+                self.options.auto_highlight == AutoHighlight::Never,
             )
         });
         self.highlight(next);
@@ -217,13 +242,15 @@ impl CommandState {
     }
 }
 
-fn matches_query(item: &Item, query: &str) -> bool {
-    let query = query.to_lowercase();
-    t(&item.label).to_lowercase().contains(&query)
-        || item
-            .keywords
-            .iter()
-            .any(|k| k.to_lowercase().contains(&query))
+fn search_text(item: &Item) -> Vec<String> {
+    // Exact Intl collation needs a t3-i18n contains helper; client-ranked results use filter=false.
+    std::iter::once(t(&item.label).to_lowercase())
+        .chain(item.keywords.iter().map(|k| k.to_lowercase()))
+        .collect()
+}
+
+fn matches_query(text: &[String], query: &str) -> bool {
+    text.iter().any(|text| text.contains(query))
 }
 
 fn resolve_highlight(
@@ -233,16 +260,16 @@ fn resolve_highlight(
     auto: AutoHighlight,
 ) -> Option<SharedString> {
     if let Some(requested) = requested.filter(|h| h.query == query) {
-        match &requested.value {
-            None => return None,
-            Some(value) if items.iter().any(|i| &i.value == value && !i.disabled) => {
-                return Some(value.clone());
+        match requested.index {
+            None if auto != AutoHighlight::Always => return None,
+            Some(index) if index < items.len() => {
+                return Some(items[index].value.clone());
             }
             _ => {}
         }
     }
-    (auto == AutoHighlight::Always || (auto == AutoHighlight::OnInput && !query.is_empty()))
-        .then(|| items.iter().find(|i| !i.disabled).map(|i| i.value.clone()))
+    (auto == AutoHighlight::Always || (auto == AutoHighlight::OnInput && !query.trim().is_empty()))
+        .then(|| items.first().map(|i| i.value.clone()))
         .flatten()
 }
 
@@ -251,33 +278,58 @@ fn step(
     current: Option<&str>,
     forward: bool,
     looping: bool,
+    allow_escape: bool,
 ) -> Option<SharedString> {
-    let enabled: Vec<_> = items.iter().filter(|i| !i.disabled).collect();
-    let at = current.and_then(|v| enabled.iter().position(|i| i.value == v));
+    // Base UI keeps disabled options navigable, so their reason can be read, but not chosen.
+    let rows = items;
+    let at = current.and_then(|v| rows.iter().position(|i| i.value == v));
     let next = match (at, forward) {
-        (None, true) => enabled.first(),
-        (None, false) => enabled.last(),
-        (Some(at), true) => enabled
-            .get(at + 1)
-            .or_else(|| (!looping).then(|| enabled.last()).flatten()),
-        (Some(at), false) => at
-            .checked_sub(1)
-            .and_then(|at| enabled.get(at))
-            .or_else(|| (!looping).then(|| enabled.first()).flatten()),
+        (None, true) => rows.first(),
+        (None, false) => rows.last(),
+        (Some(at), true) => rows.get(at + 1).or_else(|| {
+            if !looping {
+                rows.last()
+            } else if allow_escape {
+                None
+            } else {
+                rows.first()
+            }
+        }),
+        (Some(at), false) => at.checked_sub(1).and_then(|at| rows.get(at)).or_else(|| {
+            if !looping {
+                rows.first()
+            } else if allow_escape {
+                None
+            } else {
+                rows.last()
+            }
+        }),
     };
     next.map(|i| i.value.clone())
 }
 
 /// Autocomplete.Root provides state with no element of its own.
-pub fn command<E: IntoElement>(
+pub fn command<E: IntoElements>(
     state: CommandState,
-    children: impl FnOnce(CommandState) -> E,
+    children: impl FnOnce(CommandState) -> E + 'static,
 ) -> impl IntoElement {
-    children(state)
+    let children = stored(Some(children));
+    // A transparent one-time region permits sibling slots without an extra layout element.
+    dynamic(move || {
+        untracked(|| {
+            children
+                .with(|children| children.take())
+                .map(|children| children(state).into_elements())
+                .unwrap_or_default()
+        })
+    })
 }
 
 #[derive(Clone, Copy)]
-struct DialogScope(Signal<bool>);
+struct DialogScope {
+    open: Signal<bool>,
+    initial_focus: Signal<Option<ElementRef>>,
+}
 
 /// NSH owns the portal and focus scope; closing unmounts all command-owned work.
 pub fn command_dialog<E: IntoElement>(
@@ -291,7 +343,11 @@ pub fn command_dialog<E: IntoElement>(
         move || {
             // Untracked: signals read while constructing slots must not remount the modal.
             untracked(|| {
-                provide_context(DialogScope(open));
+                let initial_focus = signal(None::<ElementRef>);
+                provide_context(DialogScope {
+                    open,
+                    initial_focus,
+                });
                 let label = label.clone();
                 nsh_base::dialog()
                     .label(move || SharedString::from(t(&label)))
@@ -303,6 +359,12 @@ pub fn command_dialog<E: IntoElement>(
                         }
                     })
                     .on_cancel(move || open.set(false))
+                    // Native modal presentation focuses its first control after Input's autofocus.
+                    .on_open(move || {
+                        if let Some(input) = initial_focus.get_untracked() {
+                            input.focus();
+                        }
+                    })
                     .w_full()
                     .h_full()
                     .child(children())
@@ -390,6 +452,8 @@ pub struct InputOptions {
     pub start_addon: Option<AnyElement>,
     /// None lets Escape close the enclosing CommandDialog; Some can navigate a submenu back.
     pub on_cancel: Option<Rc<dyn Fn()>>,
+    /// Override Enter when the palette owns its active row; choose through CommandState for guards.
+    pub on_submit: Option<Rc<dyn Fn()>>,
 }
 
 impl InputOptions {
@@ -400,6 +464,7 @@ impl InputOptions {
             auto_focus: true,
             start_addon: None,
             on_cancel: None,
+            on_submit: None,
         }
     }
 }
@@ -407,9 +472,14 @@ impl InputOptions {
 pub fn command_input(state: CommandState, options: InputOptions) -> impl IntoElement {
     let focused = signal(false);
     let dialog = use_context::<DialogScope>();
+    if let Some(dialog) = dialog
+        && dialog.initial_focus.get_untracked().is_none()
+    {
+        dialog.initial_focus.set(Some(state.input));
+    }
     let cancel = options
         .on_cancel
-        .or_else(|| dialog.map(|dialog| Rc::new(move || dialog.0.set(false)) as Rc<dyn Fn()>));
+        .or_else(|| dialog.map(|dialog| Rc::new(move || dialog.open.set(false)) as Rc<dyn Fn()>));
     // NSH keys follow the focused input; their registration is disposed with its owner.
     effect(move || {
         if !focused.get() || state.disabled.get() {
@@ -440,6 +510,7 @@ pub fn command_input(state: CommandState, options: InputOptions) -> impl IntoEle
     });
     let label = options.label;
     let placeholder = options.placeholder;
+    let submit = options.on_submit;
     let addon = options.start_addon.unwrap_or_else(|| {
         // SVG selectors are applied to their target, with palette tint and responsive size.
         view()
@@ -461,13 +532,19 @@ pub fn command_input(state: CommandState, options: InputOptions) -> impl IntoEle
                 Some("relative w-full text-foreground"),
                 state.disabled.get().then_some("opacity-64"),
             ])))
+                // The web hides the entire addon subtree, including custom Back controls.
                 // NSH cannot evaluate calc(var(...)); preserve logical start padding in points.
-                .child(view().app_class(move || {
+                .child(view().accessibility_elements_hidden(true).app_class(move || {
                     let padding = format!("ps-[{}px]", tokens().number("command-shell-inset").unwrap_or(8.0) + 1.0);
                     tw(&cn([Some("absolute inset-y-0 start-px z-10 flex items-center opacity-80"), Some(&padding)]))
                 }).child(addon))
                 .child(view().app_class(tw("relative inline-flex w-full rounded-lg border border-transparent bg-transparent text-base text-foreground sm:text-sm shadow-none"))
                     .child(nsh_base::input().element_ref(&state.input)
+                        .role(AccessibilityRole::Combobox)
+                        .accessibility_state(move || AccessibilityState {
+                            expanded: Some(true), has_popup: true,
+                            disabled: state.disabled.get(), ..Default::default()
+                        })
                         .accessibility_controls(Some(state.list))
                         .accessibility_active_descendant(move || state.active_row.get()
                             .filter(|(value, _)| state.highlighted.get().as_ref() == Some(value))
@@ -476,7 +553,10 @@ pub fn command_input(state: CommandState, options: InputOptions) -> impl IntoEle
                         .on_change(move |value: &str| { if !state.disabled.get_untracked() { state.query.set(value.to_owned()); } })
                         .disabled(move || state.disabled.get())
                         .on_focus(move || focused.set(true)).on_blur(move || focused.set(false))
-                        .auto_focus(options.auto_focus).on_submit(move |_: &str| state.accept())
+                        .auto_focus(options.auto_focus).on_submit(move |_: &str| {
+                            if state.disabled.get_untracked() { return; }
+                            if let Some(submit) = &submit { submit(); } else { state.accept(); }
+                        })
                         .submit_behavior(SubmitBehavior::Submit)
                         .label(move || SharedString::from(t(&label)))
                         .placeholder(move || t(&placeholder))
@@ -629,10 +709,11 @@ struct GroupScope(SharedString);
 pub fn command_group<E: IntoElement>(
     state: CommandState,
     label: impl Into<String>,
-    follows_group: bool,
+    follows_group: impl IntoReactive<bool>,
     children: impl Fn() -> E + 'static,
 ) -> impl IntoElement {
     let label = label.into();
+    let follows_group = follows_group.into_reactive();
     let value = SharedString::from(label.clone());
     // AutocompleteGroup's [[role=group]+&] becomes the caller's sibling condition.
     when(
@@ -645,10 +726,11 @@ pub fn command_group<E: IntoElement>(
             untracked(|| {
                 provide_context(GroupScope(SharedString::from(label.clone())));
                 let label = label.clone();
+                let follows_group = follows_group.clone();
                 view()
                     .role(AccessibilityRole::Group)
                     .label(move || SharedString::from(t(&label)))
-                    .app_class(tw(&cn([follows_group.then_some("mt-1.5")])))
+                    .app_class(move || tw(&cn([follows_group.get().then_some("mt-1.5")])))
                     .child(children())
             })
         },
@@ -667,7 +749,6 @@ pub fn command_item(
     active: impl Fn() -> Option<bool> + 'static,
     children: impl IntoElement,
 ) -> impl IntoElement {
-    let active = Rc::new(active);
     let row = element_ref();
     let disabled =
         move || state.disabled.get() || item.with(|i| i.as_ref().is_none_or(|i| i.disabled));
@@ -703,39 +784,38 @@ pub fn command_item(
     // Autocomplete.Item is a role=option div, outside the Tab order; input retains key focus.
     view()
         .on_mouse_move(move |_: &MouseEvent| {
-            if let Some(item) = item.get_untracked() {
+            if let Some(item) = item.get_untracked().filter(|i| !i.disabled) {
                 state.highlight(Some(item.value));
             }
         })
-        .child(
-            view()
-                .element_ref(&row)
-                .role(AccessibilityRole::Option)
-                .focusable(false)
-                .optional_label(move || item.get().map(|i| SharedString::from(t(&i.label))))
-                .disabled(disabled)
-                .accessibility_state(move || AccessibilityState {
-                    selected: selected(),
-                    disabled: disabled(),
-                    ..Default::default()
-                })
-                .on_press(move || {
-                    if let Some(item) = item.get_untracked() {
-                        state.choose(&item.value);
-                    }
-                })
-                .hit_slop(move || {
-                    EdgeInsets::all(px(if pointer() == Pointer::Coarse {
-                        4.0
-                    } else {
-                        0.0
-                    }))
-                })
-                .app_class(move || {
-                    item_classes(selected(), highlighted.get(), disabled(), active())
-                })
-                .child(children),
-        )
+        .element_ref(&row)
+        .role(AccessibilityRole::Option)
+        .focusable(false)
+        .optional_label(move || item.get().map(|i| SharedString::from(t(&i.label))))
+        .disabled(disabled)
+        .accessibility_state(move || AccessibilityState {
+            selected: selected(),
+            disabled: disabled(),
+            ..Default::default()
+        })
+        .on_press(move || {
+            if let Some(item) = item.get_untracked() {
+                state.choose(&item.value);
+            }
+        })
+        .hit_slop(move || {
+            EdgeInsets::all(px(if pointer() == Pointer::Coarse {
+                if layout_class().is_compact() {
+                    4.0
+                } else {
+                    6.0
+                }
+            } else {
+                0.0
+            }))
+        })
+        .app_class(move || item_classes(selected(), highlighted.get(), disabled(), active()))
+        .child(children)
 }
 
 fn item_classes(
@@ -807,37 +887,43 @@ mod tests {
     }
 
     #[test]
-    fn filtering_preserves_case_insensitive_contains_and_keyword_matches() {
+    fn filtering_trims_and_matches_labels_and_keywords_without_changing_values() {
         let mut item = Item::new("stable-key", "Open settings");
         item.keywords.push("Preferences".into());
-        for query in ["", "open", "SETTINGS", "sett", "preferences"] {
-            assert!(matches_query(&item, query), "{query}");
+        for query in ["", "open", "SETTINGS", "sett", "preferences", " settings "] {
+            assert!(
+                matches_query(&search_text(&item), &query.trim().to_lowercase()),
+                "{query}"
+            );
         }
-        for query in ["stable-key", "missing", " settings "] {
-            assert!(!matches_query(&item, query), "{query}");
+        for query in ["stable-key", "missing"] {
+            assert!(
+                !matches_query(&search_text(&item), &query.to_lowercase()),
+                "{query}"
+            );
         }
     }
 
     #[test]
-    fn auto_highlight_always_handles_empty_query_disabled_and_empty_results() {
+    fn auto_highlight_always_handles_disabled_and_empty_results() {
         assert_eq!(
             resolve_highlight(&items(), "", None, AutoHighlight::Always).as_deref(),
-            Some("a")
+            Some("disabled")
         );
         assert_eq!(
             resolve_highlight(&[], "", None, AutoHighlight::Always),
             None
         );
         assert_eq!(
-            resolve_highlight(&items()[..1], "", None, AutoHighlight::Always),
-            None
+            resolve_highlight(&items()[..1], "", None, AutoHighlight::Always).as_deref(),
+            Some("disabled")
         );
         assert_eq!(
             resolve_highlight(&items(), "", None, AutoHighlight::OnInput),
             None
         );
         assert_eq!(
-            resolve_highlight(&items(), "open", None, AutoHighlight::OnInput).as_deref(),
+            resolve_highlight(&items()[1..], "open", None, AutoHighlight::OnInput).as_deref(),
             Some("a")
         );
         assert_eq!(
@@ -847,21 +933,20 @@ mod tests {
     }
 
     #[test]
-    fn kept_highlight_follows_the_value_when_async_results_reorder() {
+    fn highlight_tracks_the_position_when_results_reorder_even_if_the_option_is_disabled() {
         let requested = Highlight {
             query: "open".into(),
-            value: Some("b".into()),
+            index: Some(2),
         };
         let mut rows = items();
-        rows.reverse();
         assert_eq!(
             resolve_highlight(&rows, "open", Some(&requested), AutoHighlight::Always).as_deref(),
             Some("b")
         );
-        rows[0].disabled = true;
+        rows.reverse();
         assert_eq!(
             resolve_highlight(&rows, "open", Some(&requested), AutoHighlight::Always).as_deref(),
-            Some("a")
+            Some("disabled")
         );
         assert_eq!(
             resolve_highlight(&rows[1..], "open", Some(&requested), AutoHighlight::Always)
@@ -871,43 +956,65 @@ mod tests {
     }
 
     #[test]
-    fn query_changes_reset_highlight_and_an_explicit_input_highlight_is_retained() {
+    fn query_changes_reset_highlight_and_auto_highlight_controls_clearing() {
         let requested = Highlight {
             query: "old".into(),
-            value: Some("b".into()),
+            index: Some(2),
         };
         assert_eq!(
             resolve_highlight(&items(), "new", Some(&requested), AutoHighlight::Always).as_deref(),
-            Some("a")
+            Some("disabled")
         );
         let input = Highlight {
             query: "new".into(),
-            value: None,
+            index: None,
         };
         assert_eq!(
-            resolve_highlight(&items(), "new", Some(&input), AutoHighlight::Always),
+            resolve_highlight(&items(), "new", Some(&input), AutoHighlight::Never),
             None
+        );
+        assert_eq!(
+            resolve_highlight(&items(), "new", Some(&input), AutoHighlight::Always).as_deref(),
+            Some("disabled")
         );
     }
 
     #[test]
-    fn arrows_skip_disabled_rows_and_loop_through_the_input() {
+    fn arrows_include_disabled_options_and_escape_only_without_auto_highlight() {
         let rows = items();
         for (from, forward, expected) in [
-            (None, true, Some("a")),
+            (None, true, Some("disabled")),
             (None, false, Some("b")),
+            (Some("disabled"), true, Some("a")),
             (Some("a"), true, Some("b")),
             (Some("b"), false, Some("a")),
-            (Some("a"), false, None),
+            (Some("disabled"), false, None),
             (Some("b"), true, None),
-            (Some("missing"), true, Some("a")),
+            (Some("missing"), true, Some("disabled")),
         ] {
-            assert_eq!(step(&rows, from, forward, true).as_deref(), expected);
+            assert_eq!(step(&rows, from, forward, true, true).as_deref(), expected);
         }
-        assert_eq!(step(&rows, Some("a"), false, false).as_deref(), Some("a"));
-        assert_eq!(step(&rows, Some("b"), true, false).as_deref(), Some("b"));
-        assert_eq!(step(&[], None, true, true), None);
-        assert_eq!(step(&rows[..1], None, false, true), None);
+        assert_eq!(
+            step(&rows, Some("disabled"), false, true, false).as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            step(&rows, Some("b"), true, true, false).as_deref(),
+            Some("disabled")
+        );
+        assert_eq!(
+            step(&rows, Some("disabled"), false, false, false).as_deref(),
+            Some("disabled")
+        );
+        assert_eq!(
+            step(&rows, Some("b"), true, false, false).as_deref(),
+            Some("b")
+        );
+        assert_eq!(step(&[], None, true, true, false), None);
+        assert_eq!(
+            step(&rows[..1], None, false, true, false).as_deref(),
+            Some("disabled")
+        );
     }
 
     #[test]

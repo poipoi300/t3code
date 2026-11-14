@@ -372,7 +372,7 @@ mod tests {
         );
     }
 
-    /// Every string literal inside a `tw(..)`, `tw_with(..)` or `cn(..)` call in `src`.
+    /// Every string literal inside a `tw(..)`, `tw_with(..)`, `cn(..)` or `class(..)` call in `src`.
     fn class_literals() -> Vec<(String, String)> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = vec![root];
@@ -390,7 +390,8 @@ mod tests {
                 continue;
             }
             let text = std::fs::read_to_string(&path).expect("read");
-            for call in ["tw(", "tw_with(", "cn("] {
+            // `class(` is the local helper rows use for `tw_with` with fixed arguments.
+            for call in ["tw(", "tw_with(", "cn(", "class("] {
                 let mut from = 0;
                 while let Some(at) = text[from..].find(call) {
                     let start = from + at + call.len();

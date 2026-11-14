@@ -24,7 +24,7 @@ use nsh_core::{platform::Lifecycle, prelude::*};
 use t3_client::types::{ThreadId, ThreadKey};
 
 use super::button::{ButtonContent, ButtonSize, ButtonVariant, button};
-use super::icon::{Icon, icon};
+use super::icon::Icon;
 use crate::i18n::t;
 use crate::state::nav::Navigator;
 use crate::theme::{cn, palette, tw};
@@ -263,22 +263,29 @@ impl ToastManager {
         id
     }
 
-    /// Updates without changing the toast's identity or order; explicit timeouts restart the budget.
+    /// Explicit timeouts restart the base timer; the visible-time budget survives updates.
     pub fn update(&self, id: ToastId, update: impl Into<ToastUpdate>) -> bool {
         let mut state = self.0.borrow_mut();
         let Some(current) = state.entries.iter_mut().find(|entry| entry.id == id) else {
             return false;
         };
         let update = update.into();
-        let restart_timeout = update.timeout.is_some()
-            || update.data.as_ref().is_some_and(|data| {
-                data.dismiss_after_visible != current.options.data.dismiss_after_visible
-            });
-        let mut next = entry(id, update.apply(&current.options));
-        if !restart_timeout {
-            next.remaining = current.remaining.clone();
+        let timeout = update.timeout;
+        let options = update.apply(&current.options);
+        {
+            let mut budget = current.remaining.borrow_mut();
+            budget.advance(nsh_core::time::now());
+            if let Some(timeout) = timeout {
+                budget.timeout_remaining = timeout.filter(|value| !value.is_zero());
+            }
+            budget.set_visible(options.data.dismiss_after_visible);
         }
-        *current = next;
+        *current = Entry {
+            id,
+            options: Rc::new(options),
+            remaining: current.remaining.clone(),
+            ending: false,
+        };
         state.notify();
         true
     }
@@ -446,7 +453,9 @@ pub fn build_visible_toast_layout(toasts: &[LayoutInput]) -> VisibleToastLayout 
 
 #[derive(Debug)]
 struct VisibleTimeout {
-    remaining: Option<Duration>,
+    timeout_remaining: Option<Duration>,
+    visible_remaining: Option<Duration>,
+    visible_enabled: bool,
     started: Option<nsh_core::time::Instant>,
 }
 
@@ -455,18 +464,51 @@ impl VisibleTimeout {
         let timeout = timeout.filter(|value| !value.is_zero());
         let visible = visible.filter(|value| !value.is_zero());
         Self {
-            remaining: match (timeout, visible) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            },
+            timeout_remaining: timeout,
+            visible_remaining: visible,
+            visible_enabled: visible.is_some(),
             started: None,
         }
     }
 
-    fn pause(&mut self, now: nsh_core::time::Instant) {
-        if let (Some(started), Some(remaining)) = (self.started.take(), &mut self.remaining) {
-            *remaining = remaining.saturating_sub(now.saturating_duration_since(started));
+    fn remaining(&self) -> Option<Duration> {
+        let visible = self
+            .visible_enabled
+            .then_some(self.visible_remaining)
+            .flatten();
+        match (self.timeout_remaining, visible) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         }
+    }
+
+    fn set_visible(&mut self, duration: Option<Duration>) {
+        let duration = duration.filter(|value| !value.is_zero());
+        self.visible_enabled = duration.is_some();
+        // The web's per-id map retains an existing budget when dismissAfterVisibleMs changes.
+        if self.visible_remaining.is_none() {
+            self.visible_remaining = duration;
+        }
+    }
+
+    fn advance(&mut self, now: nsh_core::time::Instant) {
+        if let Some(started) = self.started {
+            let elapsed = now.saturating_duration_since(started);
+            if let Some(remaining) = &mut self.timeout_remaining {
+                *remaining = remaining.saturating_sub(elapsed);
+            }
+            if self.visible_enabled
+                && let Some(remaining) = &mut self.visible_remaining
+            {
+                *remaining = remaining.saturating_sub(elapsed);
+            }
+            self.started = Some(now);
+        }
+    }
+
+    fn pause(&mut self, now: nsh_core::time::Instant) {
+        self.advance(now);
+        self.started = None;
     }
 }
 
@@ -516,9 +558,11 @@ fn subscribe(manager: &ToastManager) -> Signal<Vec<Entry>> {
                     } else {
                         Duration::from_millis(500)
                     };
-                    owner.run(|| set_timeout(delay, move || {
-                        entries.update(|shown| shown.retain(|entry| entry.id != old.id))
-                    }));
+                    owner.run(|| {
+                        set_timeout(delay, move || {
+                            entries.update(|shown| shown.retain(|entry| entry.id != old.id))
+                        })
+                    });
                 }
             }
             entries.set(next);
@@ -706,13 +750,21 @@ fn thread_toast_visible_auto_dismiss(
         if paused {
             return;
         }
-        let remaining = entry.remaining.borrow().remaining;
+        let remaining = entry.remaining.borrow().remaining();
         if let Some(remaining) = remaining {
             entry.remaining.borrow_mut().started = Some(now);
             let close = manager.clone();
             let id = entry.id;
+            let budget = entry.remaining.clone();
             let timer = set_timeout(remaining, move || {
-                close.close(id);
+                let expired = {
+                    let mut budget = budget.borrow_mut();
+                    budget.advance(nsh_core::time::now());
+                    budget.remaining() == Some(Duration::ZERO)
+                };
+                if expired {
+                    close.close(id);
+                }
             });
             cleanup(move || {
                 timer.cancel();
@@ -760,9 +812,10 @@ fn toast_root(
         .accessibility_label(move || Some(SharedString::from(announcement(&item.get().options))))
         .on_dismiss_request(move || { swiped.set(true); dismiss.close(item.get_untracked().id); })
         // index.css @utility dropdown-glass: color-mix with transparent reduces to alpha.
+        // NSH exposes transition groups, not arbitrary property lists; ToastStack owns height reflow.
         .app_class(move || tw(&cn([
             Some("relative overflow-visible text-popover-foreground shadow-xl shadow-black/25 border border-contrast-foreground/10"),
-            (!reduce_motion()).then_some(if position.is_some() { "transition-[transform,opacity,height] duration-500" } else { "transition-[scale,opacity] duration-150" }),
+            (!reduce_motion()).then_some(if position.is_some() { "transition duration-500" } else { "transition duration-150" }),
             Some(if tooltip() { "rounded-md text-xs" } else { "rounded-lg" }),
         ])))
         // The frozen theme seam omits numeric/percentage tokens; stock index.css values until it exports them.
@@ -788,15 +841,15 @@ fn toast_root(
                     let dismiss_control = view().app_class(tw("absolute z-20 -top-1.5 -right-1.5")).child(
                             nsh_base::button().accessibility_label(Some(SharedString::from(t("Dismiss notification"))))
                                 .test_id("toast-close")
-                                .app_class(tw("inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-full border border-border/60 bg-popover/92 text-muted-foreground shadow-sm outline-none backdrop-blur-sm transition-[color,background-color,box-shadow] hover:bg-popover hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"))
+                                .app_class(tw("inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-full border border-border/60 bg-popover/92 text-muted-foreground shadow-sm outline-none backdrop-blur-sm transition hover:bg-popover hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"))
                                 .on_press(move || close.dismiss(id))
                                 // The shared icon API has no stroke-width prop; the source's close glyph is 2.25.
                                 .child(svg(nsh_core::element::ImageSrc::svg_markup(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>"#))
-                                    .w(px(12.0)).h(px(12.0)).accessible(false).text_color(|| palette().muted_foreground))
+                                    .w(px(12.0)).h(px(12.0)).accessible(false))
                         );
                     let content = view().app_class(tw(&cn([
                         // [overflow-x:clip] has no NSH equivalent; preserve visible detail panels.
-                        Some("pointer-events-auto min-h-0 overflow-y-visible pl-3.5 text-sm"),
+                        Some("pointer-events-auto min-h-0 overflow-visible pl-3.5 text-sm"),
                         Some(if descriptor.stacked { "flex flex-col gap-2 py-2.5 pr-3.5" } else if descriptor.trailing { "py-3 flex items-center justify-between gap-1.5 pr-6" } else { "py-3 flex items-center justify-between gap-1.5 pr-3.5" }),
                     ])))
                         .opacity(move || if hidden() { 0.0_f32 } else { 1.0 })
@@ -1060,7 +1113,7 @@ fn copy_error_button(source: String) -> impl IntoElement {
         .on_press(move || {
             if !source.is_empty() { set_clipboard(source.clone()); }
         })
-        .child(icon(Icon::Copy, 12.0, || palette().muted_foreground));
+        .child(svg(Icon::Copy.asset()).w(px(12.0)).h(px(12.0)).accessible(false));
     toast_tooltip(control, || t("Copy error"))
 }
 
@@ -1164,7 +1217,8 @@ fn expand_chevron(open: Signal<bool>, full_line: bool) -> impl IntoElement {
             })
         })
         .child(svg(nsh_core::element::ImageSrc::svg_markup(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#))
-            .w(px(14.0)).h(px(if full_line { 20.0 } else { 14.0 })).accessible(false).text_color(|| palette().muted_foreground))
+            .w(px(14.0)).h(px(if full_line { 20.0 } else { 14.0 })).accessible(false)
+            .when(full_line, |glyph| glyph.text_color(|| palette().muted_foreground)))
 }
 
 fn toast_expandable_section(options: Rc<ToastOptions>, open: Signal<bool>) -> impl IntoElement {
@@ -1402,26 +1456,66 @@ mod tests {
     }
 
     #[test]
-    fn visible_timeout_retains_only_the_unspent_budget_across_pause_and_remount() {
+    fn visible_timeout_retains_unspent_budget_across_pause_updates_and_remount() {
         let clock = nsh_core::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH);
         let start = clock.now();
         let mut timeout = VisibleTimeout::new(None, Some(Duration::from_secs(5)));
         timeout.started = Some(start);
         timeout.pause(start + Duration::from_secs(2));
-        assert_eq!(timeout.remaining, Some(Duration::from_secs(3)));
+        assert_eq!(timeout.remaining(), Some(Duration::from_secs(3)));
         timeout.pause(start + Duration::from_secs(100));
-        assert_eq!(timeout.remaining, Some(Duration::from_secs(3)));
+        assert_eq!(timeout.remaining(), Some(Duration::from_secs(3)));
         timeout.started = Some(start + Duration::from_secs(100));
         timeout.pause(start + Duration::from_secs(104));
-        assert_eq!(timeout.remaining, Some(Duration::ZERO));
+        assert_eq!(timeout.remaining(), Some(Duration::ZERO));
         assert_eq!(
-            VisibleTimeout::new(Some(Duration::ZERO), None).remaining,
+            VisibleTimeout::new(Some(Duration::ZERO), None).remaining(),
             None
         );
         assert_eq!(
             VisibleTimeout::new(Some(Duration::from_secs(2)), Some(Duration::from_secs(5)))
-                .remaining,
+                .remaining(),
             Some(Duration::from_secs(2))
+        );
+        let manager = ToastManager::default();
+        let options = ToastOptions {
+            timeout: None,
+            data: ThreadToastData {
+                dismiss_after_visible: Some(Duration::from_secs(5)),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let id = manager.add(options.clone());
+        let budget = manager.subscribe().0[0].remaining.clone();
+        budget.borrow_mut().started = Some(start);
+        budget.borrow_mut().pause(start + Duration::from_secs(2));
+        manager.update(id, options);
+        assert_eq!(
+            manager.subscribe().0[0].remaining.borrow().remaining(),
+            Some(Duration::from_secs(3))
+        );
+        manager.update(
+            id,
+            ToastUpdate {
+                timeout: Some(Some(Duration::from_secs(1))),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            manager.subscribe().0[0].remaining.borrow().remaining(),
+            Some(Duration::from_secs(1))
+        );
+        manager.update(
+            id,
+            ToastUpdate {
+                timeout: Some(None),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            manager.subscribe().0[0].remaining.borrow().remaining(),
+            Some(Duration::from_secs(3))
         );
     }
 

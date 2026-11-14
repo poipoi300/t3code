@@ -194,7 +194,7 @@ pub fn select_popup(
         .default_open(default_open)
         .disabled(disabled)
         .accessibility_label(move || Some(SharedString::from(t(&label.get()))))
-        .placeholder(move || Some(SharedString::from(t(&placeholder.get()))))
+        .placeholder(move || Some(SharedString::from(t(&current.get().filter(|value| !value.is_empty()).unwrap_or_else(|| placeholder.get())))))
         .trigger(trigger)
         .placement(popup.side)
         .align(popup.align)
@@ -247,7 +247,7 @@ fn trigger_classes(
     // NSH has no `bg-clip-padding`; its border paints over the background on every appearance.
     let classes = cn([
         Some(
-            "group relative inline-flex cursor-pointer select-none items-center justify-between gap-2 border rounded-lg text-left text-base outline-none transition-[color,box-shadow,background-color] data-disabled:pointer-events-none data-disabled:opacity-64 sm:text-sm",
+            "group relative inline-flex cursor-pointer select-none items-center justify-between gap-2 border rounded-lg text-left text-base outline-none data-disabled:pointer-events-none data-disabled:opacity-64 sm:text-sm",
         ),
         Some(match variant {
             Variant::Default => {
@@ -264,7 +264,7 @@ fn trigger_classes(
             Size::Sm => "min-h-8 gap-1.5 px-[9px] sm:min-h-7",
             Size::Xs => "h-7 gap-1 rounded-md px-[7px] text-sm sm:h-6 sm:text-xs",
         }),
-        (variant == Variant::Default).then_some("focus-visible:shadow-none active:shadow-none"),
+        (variant == Variant::Default).then_some("focus-visible:shadow-none"),
         (variant == Variant::Default && (disabled || invalid || pressed)).then_some("shadow-none"),
     ]);
     let attrs: Vec<_> = [
@@ -276,6 +276,20 @@ fn trigger_classes(
     .flatten()
     .collect();
     tw_with(Scope::Root, &classes, &attrs)
+}
+
+fn trigger_transition() -> nsh_core::element::Style {
+    use nsh_core::{PropertyValue, StyleKey, TransitionProps};
+    // NSH rejects the TSX's `transition-[color,box-shadow,background-color]` class.
+    let properties = if reduce_motion() {
+        0
+    } else {
+        TransitionProps::COLORS | TransitionProps::SHADOW
+    };
+    nsh_core::element::Style::default().with(
+        StyleKey::TransitionProperty,
+        PropertyValue::TransitionProps(TransitionProps(properties)),
+    )
 }
 
 /// Select's trigger slot. NSH supplies its combobox role, name, expanded state and press handler.
@@ -291,6 +305,7 @@ pub fn select_trigger(
     // Select binds its combobox behavior onto this slot; NSH ButtonProps cannot carry `invalid`.
     view()
         .disabled(disabled)
+        .inline_style(trigger_transition)
         .accessibility_state(move || AccessibilityState {
             invalid: invalid.get(),
             ..Default::default()
@@ -331,7 +346,7 @@ fn trigger_relief(
 ) -> impl IntoElement {
     // `before:` relief is visible only in the idle state; focus is projected to children.
     view().accessible(false).pointer_events(PointerEvents::None)
-        .app_class(tw("absolute inset-0 group-focus-visible:opacity-0 group-active:opacity-0 shadow-[0_1px_rgb(0_0_0/4%)] dark:shadow-[0_-1px_rgb(255_255_255/6%)]"))
+        .app_class(tw("absolute inset-0 group-focus-visible:opacity-0 shadow-[0_1px_rgb(0_0_0/4%)] dark:shadow-[0_-1px_rgb(255_255_255/6%)]"))
         .rounded(move || {
             let small = matches!(size, Size::Compact | Size::Xs);
             px(theme::current_tokens().number(if small { "radius-md" } else { "radius-lg" }).unwrap_or(if small { 6.0 } else { 8.0 }) - 1.0)
@@ -368,6 +383,7 @@ pub fn select_button(
     nsh_base::button()
         .accessibility_label(move || Some(SharedString::from(t(&label))))
         .disabled(disabled)
+        .inline_style(trigger_transition)
         .app_class(move || {
             Some(trigger_classes(
                 Variant::Default,
@@ -404,12 +420,12 @@ pub fn select_value(
     placeholder: Prop<SharedString>,
 ) -> impl IntoElement {
     let title = computed(move || {
-        value.get().and_then(|value| {
+        value.get().filter(|value| !value.is_empty()).map(|value| {
             items.with(|items| {
                 items
                     .iter()
                     .find(|item| item.value == value)
-                    .map(|item| item.title.clone())
+                    .map_or(value, |item| item.title.clone())
             })
         })
     });

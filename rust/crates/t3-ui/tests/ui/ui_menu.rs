@@ -8,6 +8,7 @@ use nsh_core::{
 };
 use nsh_engine::EngineConfig;
 use nsh_testing::Headless;
+use std::time::{Duration, SystemTime};
 use t3_ui::{i18n::t, theme, ui::menu::*};
 
 use crate::support::{DESKTOP, PHONE};
@@ -16,6 +17,7 @@ fn fixture(window: (f32, f32), root: Root, touch: bool) -> Headless {
     let mut config = EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
+        clock: nsh_core::time::Clock::manual(SystemTime::UNIX_EPOCH),
         ..EngineConfig::new(root)
     };
     config.environment.os = if touch { Os::Android } else { Os::Web };
@@ -101,6 +103,7 @@ fn keyboard_selection_wraps_skips_disabled_rows_and_activates_with_enter_or_spac
         for (keys, activate, expected) in [
             (&["down"][..], "enter", "Rename"),
             (&["down", "down"][..], "space", "Pin"),
+            (&["down", "up", "up"][..], "space", "Pin"),
             (&["end", "down"][..], "enter", "Rename"),
             (&["end", "home"][..], "space", "Rename"),
         ] {
@@ -113,7 +116,7 @@ fn keyboard_selection_wraps_skips_disabled_rows_and_activates_with_enter_or_spac
             app.press_key(activate).expect("choose");
             app.wait_for(&format!("text:chosen:{expected}"))
                 .expect("enabled action selected");
-            assert!(!app.shows("role:menuitem[Rename]"));
+            assert_eq!(app.screen().matches("role:menuitem[Rename]"), Ok(false));
         }
     }
 }
@@ -146,7 +149,7 @@ fn on_a_coarse_pointer_submenus_offer_back_then_the_parent_actions_work() {
     app.press("role:button[Actions]").expect("open sheet");
     app.press("role:menuitem[Copy]").expect("submenu");
     app.wait_for("Path").expect("child items");
-    assert!(!app.shows("role:menuitem[Rename]"));
+    assert!(!app.shows("Rename"));
     app.press("role:button[Back]").expect("back one level");
     app.wait_for("role:menuitem[Rename]").expect("parent items");
     assert!(!app.shows("Path"));
@@ -165,7 +168,7 @@ fn disabled_trigger_and_disabled_row_do_not_run_and_outside_press_closes() {
         .expect("enable trigger");
     app.press("role:button[Actions]").expect("open");
     assert!(app.press("role:menuitem[Unavailable]").is_err());
-    assert!(app.shows("text:chosen:none"));
+    assert!(app.shows("chosen:none"));
     app.press("role:button[Close from outside]")
         .expect("outside dismiss");
     assert!(!app.shows("Rename"));
@@ -177,6 +180,14 @@ fn tab_dismisses_and_typeahead_matches_enabled_labels() {
     app.press("role:button[Actions]").expect("open");
     app.press_key("down").expect("first enabled");
     app.press_key("p").expect("typeahead");
+    app.fast_forward(Duration::from_millis(500))
+        .expect("typeahead buffer expires");
+    app.press_key("r").expect("new prefix after focus moved");
+    app.press_key("space").expect("choose new prefix");
+    app.wait_for("text:chosen:Rename")
+        .expect("buffer expires after typeahead moves focus");
+    app.press_key("enter").expect("reopen for another search");
+    app.press_key("p").expect("Pin");
     app.press_key("space").expect("choose focused result");
     app.wait_for("text:chosen:Pin")
         .expect("typeahead moved focus");
@@ -189,7 +200,8 @@ fn tab_dismisses_and_typeahead_matches_enabled_labels() {
 fn CheckMenu() -> impl IntoElement {
     theme::install(&theme::ThemeChoice::default());
     let checked = signal(false);
-    let selected = signal(false);
+    let selected = signal(String::from("name"));
+    let changes = signal(0);
     let options = ItemOptions {
         close_on_select: false,
         ..Default::default()
@@ -231,26 +243,36 @@ fn CheckMenu() -> impl IntoElement {
                     ))
                     .child(menu_radio_group(
                         t("Sort"),
+                        move || selected.get(),
                         view()
                             .child(menu_radio_item(
                                 t("Name"),
-                                move || !selected.get(),
+                                "name".to_owned(),
                                 options,
                                 menu_item_label(t("Name")),
-                                move || selected.set(false),
+                                || {},
                             ))
                             .child(menu_radio_item(
                                 t("Activity"),
-                                move || selected.get(),
+                                "activity".to_owned(),
                                 options,
                                 menu_item_label(t("Activity")),
-                                move || selected.set(true),
+                                || {},
                             )),
+                        move |value| {
+                            changes.update(|n| *n += 1);
+                            selected.set(value);
+                        },
                     )),
             ),
         ))
         .child(text(move || {
-            format!("checked:{} selected:{}", checked.get(), selected.get())
+            format!(
+                "checked:{} selected:{} changes:{}",
+                checked.get(),
+                selected.get() == "activity",
+                changes.get()
+            )
         }))
 }
 
@@ -269,7 +291,7 @@ fn checkbox_variants_follow_the_controlled_value_and_radio_selection_is_exclusiv
             );
         }
         app.press("role:menuitemcheckbox[Switch]").expect("toggle");
-        app.wait_for("text:checked:true selected:false")
+        app.wait_for("text:checked:true selected:false changes:0")
             .expect("value changed");
         for name in ["Pinned", "Icon check", "Switch"] {
             assert_eq!(
@@ -282,8 +304,11 @@ fn checkbox_variants_follow_the_controlled_value_and_radio_selection_is_exclusiv
         }
         app.press("role:menuitemradio[Activity]")
             .expect("change selection");
-        app.wait_for("text:checked:true selected:true")
+        app.wait_for("text:checked:true selected:true changes:1")
             .expect("selection changed");
+        app.press("role:menuitemradio[Activity]").expect("reselect");
+        app.wait_for("text:checked:true selected:true changes:1")
+            .expect("reselect does not report a changed group value");
         assert_eq!(
             app.screen()
                 .accessibility_state("role:menuitemradio[Name]")
@@ -300,10 +325,19 @@ fn checkbox_variants_follow_the_controlled_value_and_radio_selection_is_exclusiv
         );
         app.press("role:menuitemcheckbox[Pinned]")
             .expect("reverse toggle");
-        app.wait_for("text:checked:false selected:true")
+        app.wait_for("text:checked:false selected:true changes:1")
             .expect("reverse value");
+        for name in ["Pinned", "Icon check", "Switch"] {
+            assert_eq!(
+                app.screen()
+                    .accessibility_state(&format!("role:menuitemcheckbox[{name}]"))
+                    .expect("reversed checkbox state")
+                    .checked,
+                Some(Checked::False)
+            );
+        }
         app.press_key("escape").expect("close");
-        app.press_key("enter").expect("reopen");
+        app.press("role:button[Preferences]").expect("reopen");
         app.wait_for("Activity").expect("new opening");
         assert_eq!(
             app.screen()
@@ -329,7 +363,7 @@ fn SearchMenu() -> impl IntoElement {
             || false,
             text(t("Search actions")),
             MenuOptions::default(),
-            menu_popup(
+            menu_popup_with(move || {
                 view()
                     .child(menu_search_input(
                         query,
@@ -341,8 +375,8 @@ fn SearchMenu() -> impl IntoElement {
                     .child(when(
                         move || "beta".contains(&query.get().to_lowercase()),
                         move || choice("Beta", false, chosen),
-                    )),
-            ),
+                    ))
+            }),
         ))
         .child(text(move || {
             format!("query:{} chosen:{}", query.get(), chosen.get())
@@ -363,10 +397,20 @@ fn search_keeps_typed_letters_and_arrow_down_reaches_an_enabled_result() {
         app.wait_for("text:query:Be chosen:Beta")
             .expect("selected enabled result");
         app.press_key("enter").expect("open again");
+        app.clear("label:Filter actions").expect("clear search");
         app.type_text("label:Filter actions", "z")
             .expect("empty results");
+        assert!(!app.shows("Beta"));
+        app.press_key("down").expect("no enabled result");
+        app.wait_for("label:Filter actions")
+            .expect("empty search stays open");
+        app.clear("label:Filter actions")
+            .expect("clear no-match query");
+        app.type_text("label:Filter actions", "Be")
+            .expect("restore result");
+        app.wait_for("Beta").expect("conditional row remounted");
         app.press_key("escape").expect("dismiss from input");
-        assert!(!app.shows("label:Filter actions"));
+        assert_eq!(app.screen().matches("label:Filter actions"), Ok(false));
     }
 }
 
@@ -412,7 +456,7 @@ fn context_menu_supports_secondary_click_and_long_press_without_pressing_the_row
                 .expect("secondary click");
         }
         app.wait_for("Rename").expect("context menu opens");
-        assert!(app.shows("text:presses:0 chosen:none"));
+        assert!(app.shows("presses:0 chosen:none"));
         app.press("role:menuitem[Rename]").expect("choose");
         app.wait_for("text:presses:0 chosen:Rename")
             .expect("action without row press");
@@ -420,6 +464,6 @@ fn context_menu_supports_secondary_click_and_long_press_without_pressing_the_row
             .expect("normal tap still works");
         app.wait_for("text:presses:1 chosen:Rename")
             .expect("reverse to normal interaction");
-        assert!(!app.shows("role:menuitem[Rename]"));
+        assert_eq!(app.screen().matches("role:menuitem[Rename]"), Ok(false));
     }
 }

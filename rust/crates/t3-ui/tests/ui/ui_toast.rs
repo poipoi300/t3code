@@ -35,9 +35,34 @@ fn error_options(details: &'static str) -> ToastOptions {
     }
 }
 
-#[native_module("t3/tests/ui-toast")]
-fn fixture(registry: &mut Registry) {
-    registry.register::<ToastFixture>();
+fn timed_options(count: Signal<i64>, visible_only: bool) -> ToastOptions {
+    ToastOptions {
+        title: "Timed notification".into(),
+        timeout: (!visible_only).then_some(Duration::from_secs(2)),
+        action: Some(Action {
+            label: "Hold notification".into(),
+            disabled: true,
+            on_press: Rc::new(move || count.set(100)),
+        }),
+        data: ThreadToastData {
+            dismiss_after_visible: visible_only.then_some(Duration::from_secs(2)),
+            expandable_content: Some(Rc::new(|| {
+                nsh_base::input()
+                    .test_id("toast-focus-input")
+                    .label(SharedString::from(t("Notification details")))
+                    .w(px(140.0))
+                    .h(px(28.0))
+                    .into_element()
+            })),
+            secondary_action: Some(Action {
+                label: "Keep open".into(),
+                disabled: false,
+                on_press: Rc::new(move || count.update(|value| *value += 1)),
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 #[component]
@@ -57,6 +82,7 @@ fn ToastFixture() -> impl IntoElement {
     let raised_error = signal(None::<toast::ToastId>);
     let update_error = manager.clone();
     let timed = manager.clone();
+    let visible_timed = manager.clone();
     let scoped = manager.clone();
     let action = manager.clone();
     view()
@@ -64,7 +90,7 @@ fn ToastFixture() -> impl IntoElement {
         .h_full()
         .child(
             view()
-                .app_class(t3_ui::theme::tw("p-8 gap-4"))
+                .app_class(t3_ui::theme::tw("p-8 pt-64 gap-4"))
                 .child(
                     nsh_base::button()
                         .accessibility_label(Some(SharedString::from(t("Clear buffered toast"))))
@@ -96,28 +122,19 @@ fn ToastFixture() -> impl IntoElement {
                     nsh_base::button()
                         .accessibility_label(Some(SharedString::from(t("Raise timed toast"))))
                         .on_press(move || {
-                            timed.add(ToastOptions {
-                                title: "Timed notification".into(),
-                                timeout: Some(Duration::from_secs(2)),
-                                action: Some(Action {
-                                    label: "Hold notification".into(),
-                                    disabled: true,
-                                    on_press: Rc::new(move || count.set(100)),
-                                }),
-                                data: ThreadToastData {
-                                    secondary_action: Some(Action {
-                                        label: "Keep open".into(),
-                                        disabled: false,
-                                        on_press: Rc::new(move || {
-                                            count.update(|value| *value += 1)
-                                        }),
-                                    }),
-                                    ..Default::default()
-                                },
-                                ..Default::default()
-                            });
+                            timed.add(timed_options(count, false));
                         })
                         .child(text(t("Raise timed toast"))),
+                )
+                .child(
+                    nsh_base::button()
+                        .accessibility_label(Some(SharedString::from(t(
+                            "Raise visible-time toast",
+                        ))))
+                        .on_press(move || {
+                            visible_timed.add(timed_options(count, true));
+                        })
+                        .child(text(t("Raise visible-time toast"))),
                 )
                 .child(
                     nsh_base::button()
@@ -184,7 +201,14 @@ fn ToastFixture() -> impl IntoElement {
                         "Actions: {count}",
                         &[("count", t3_ui::i18n::Value::Int(count.get()))],
                     ))
-                })),
+                }))
+                .child(
+                    nsh_base::input()
+                        .test_id("outside-focus")
+                        .label(SharedString::from(t("Page input")))
+                        .w(px(140.0))
+                        .h(px(28.0)),
+                ),
         )
         .child(toast::toasts(manager, Position::TopRight, move || {
             active.get()
@@ -196,15 +220,17 @@ fn ToastFixture() -> impl IntoElement {
 }
 
 fn start(window: (f32, f32)) -> Headless {
-    let mut sets = t3_ui::registries();
-    sets.push(registry());
-    Headless::start(EngineConfig {
-        ui_sets: sets,
+    let mut config = EngineConfig {
+        ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
         clock: nsh_core::time::Clock::manual(SystemTime::UNIX_EPOCH),
         ..EngineConfig::new(Root::of::<ToastFixture>())
-    })
-    .expect("toast fixture")
+    };
+    if window == DESKTOP {
+        config.environment.os = nsh_core::platform::Os::Windows;
+        config.environment.idiom = nsh_core::platform::Idiom::Desktop;
+    }
+    Headless::start(config).expect("toast fixture")
 }
 
 fn clear(app: &mut Headless) {
@@ -244,6 +270,12 @@ fn error_details_expand_and_collapse_without_dismissing_the_notification() {
     clear(&mut app);
     app.press("role:button[Raise error]").expect("raise error");
     app.wait_for("Permission denied").expect("description");
+    app.press("role:button[Copy error]")
+        .expect("copy error text");
+    assert!(
+        app.screen()
+            .sent(&nsh_core::Command::SetClipboard("Permission denied".into()))
+    );
     assert!(!app.screen().shows("Server error details"));
     app.press("role:button[Show details]").expect("expand");
     app.wait_for("Server error details").expect("details");
@@ -274,40 +306,49 @@ fn same_thread_ids_in_other_environments_do_not_expose_scoped_notifications() {
 
 #[test]
 fn hovered_toasts_keep_their_remaining_timeout_and_disabled_actions_stay_inert() {
-    let mut app = start(DESKTOP);
-    clear(&mut app);
-    app.press("role:button[Raise timed toast]").expect("raise");
-    app.wait_for("Timed notification").expect("timed toast");
-    app.hover("id:toast-title").expect("hover");
-    app.run_for(Duration::from_secs(10))
-        .expect("manual clock while hovered");
-    assert!(app.screen().shows("Timed notification"));
-    let _ = app.press("role:button[Hold notification]");
-    assert!(app.screen().shows("Actions: 0"));
-    app.hover("role:button[Return to thread]")
-        .expect("leave toast");
-    app.run_for(Duration::from_secs(3))
-        .expect("remaining timeout");
-    assert!(!app.screen().shows("Timed notification"));
+    for trigger in ["Raise timed toast", "Raise visible-time toast"] {
+        let mut app = start(DESKTOP);
+        clear(&mut app);
+        app.press(&format!("role:button[{trigger}]"))
+            .expect("raise");
+        app.wait_for("Timed notification").expect("timed toast");
+        app.hover("id:toast-title").expect("hover");
+        app.run_for(Duration::from_secs(10))
+            .expect("manual clock while hovered");
+        assert!(app.screen().shows("Timed notification"));
+        assert!(app.screen().shows("Hold notification"));
+        let _ = app.press("role:button[Hold notification]");
+        assert!(app.screen().shows("Actions: 0"));
+        app.hover("role:button[Return to thread]")
+            .expect("leave toast");
+        app.run_for(Duration::from_secs(3))
+            .expect("remaining timeout");
+        assert!(!app.screen().shows("Timed notification"));
+    }
 }
 
 #[test]
 fn focused_toast_controls_pause_dismissal_until_focus_leaves_the_stack() {
     let mut app = start(DESKTOP);
     clear(&mut app);
-    app.press("role:button[Raise timed toast]").expect("raise");
+    app.press("role:button[Raise visible-time toast]")
+        .expect("raise");
     app.wait_for("Timed notification").expect("timed toast");
     app.press("role:button[Keep open]")
-        .expect("focus secondary action");
+        .expect("secondary action");
     app.wait_for("Actions: 1")
         .expect("secondary action does not close");
+    app.press("role:button[Show details]")
+        .expect("show focusable details");
+    app.type_text("id:toast-focus-input", "hold")
+        .expect("focus a control inside the toast");
     app.hover("role:button[Return to thread]")
         .expect("pointer outside toast");
     app.run_for(Duration::from_secs(10))
         .expect("manual clock while focused");
     assert!(app.screen().shows("Timed notification"));
-    app.press("role:button[Return to thread]")
-        .expect("focus outside");
+    app.type_text("id:outside-focus", "leave")
+        .expect("focus leaves the toast");
     app.run_for(Duration::from_secs(3))
         .expect("remaining timeout");
     assert!(!app.screen().shows("Timed notification"));
@@ -343,7 +384,7 @@ fn anchored_copy_feedback_is_tooltip_shaped_and_expires() {
         .expect("copy success helper");
     app.wait_for("Copied!").expect("anchored feedback");
     assert!(!app.screen().shows("Dismiss notification"));
-    app.hover("role:button[Return to thread]")
+    app.press("role:button[Return to thread]")
         .expect("outside feedback");
     app.run_for(Duration::from_secs(2))
         .expect("copy feedback lifetime");

@@ -45,6 +45,7 @@ fn PopoverFixture(props: PopoverFixtureProps) -> impl IntoElement {
     view()
         .w_full()
         .h_full()
+        .test_id("popover-fixture")
         .p(px(40.0))
         .child(p::popover(
             handle,
@@ -54,7 +55,12 @@ fn PopoverFixture(props: PopoverFixtureProps) -> impl IntoElement {
                 width: p::Size::Md,
                 ..Default::default()
             },
-            p::popover_trigger("Open details", move || props.disabled, text(t("Details"))),
+            p::popover_trigger(
+                handle,
+                "Open details",
+                move || props.disabled,
+                text(t("Details")),
+            ),
             move || {
                 let draft = signal(String::new());
                 view()
@@ -130,9 +136,38 @@ fn a_touch_backdrop_consumes_the_outside_tap_before_an_action_beneath_it_can_run
     for retained in [false, true] {
         let mut app = start(popover_root(retained, false), PHONE, true);
         app.press("role:button[Open details]").expect("open");
-        app.press("role:button[Outside action]")
-            .expect("tap outside");
-        assert!(!app.screen().matches("label:Draft").expect("dismissed"));
+        let outside = app
+            .screen()
+            .id("role:button[Outside action]")
+            .expect("outside id");
+        let root = app.screen().id("id:popover-fixture").expect("fixture root");
+        let nodes = app.screen().layout_nodes();
+        let point = nodes
+            .iter()
+            .find(|n| n.id == outside)
+            .expect("outside bounds")
+            .bounds
+            .center();
+        let backdrop = nodes
+            .iter()
+            .find(|n| {
+                n.parent == nsh_core::ROOT_ID
+                    && n.id != root
+                    && n.bounds.size == size(px(PHONE.0), px(PHONE.1))
+                    && n.bounds.contains(&point)
+            })
+            .expect("backdrop covers the outside control");
+        // The headless driver does not route a covered control selector to a pressable
+        // backdrop. Tap the rendered backdrop at that control's actual coordinates.
+        app.press_at(
+            &format!("view:{}", backdrop.id),
+            point - backdrop.bounds.origin,
+        )
+        .expect("tap outside");
+        assert!(
+            !app.screen().matches("label:Draft").expect("dismissed"),
+            "retained: {retained}"
+        );
         assert!(app.screen().shows("Outside presses: 0"));
         app.press("role:button[Outside action]")
             .expect("next tap runs action");
@@ -148,6 +183,7 @@ struct TooltipFixtureProps {
 #[component]
 fn TooltipFixture(props: TooltipFixtureProps) -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
+    let target = element_ref();
     view()
         .w_full()
         .h_full()
@@ -155,18 +191,20 @@ fn TooltipFixture(props: TooltipFixtureProps) -> impl IntoElement {
         .child(
             view()
                 .h(px(128.0))
-                .child(tt::tooltip_provider(props.delay, || {
-                    tt::tooltip_scroll_dismiss_area(|| {
+                .child(tt::tooltip_provider(props.delay, move || {
+                    tt::tooltip_scroll_dismiss_area(target, move || {
                         let handle = tt::tooltip_create_handle();
-                        view()
-                            .h(px(500.0))
-                            .child(tt::tooltip_trigger(
+                        scroll()
+                            .element_ref(&target)
+                            .test_id("tooltip-scroll-dismiss-area")
+                            .h(px(128.0))
+                            .child(view().h(px(500.0)).child(tt::tooltip_trigger(
                                 handle,
                                 "Timeline action",
                                 || false,
                                 tt::tooltip(handle, Default::default(), text(t("Description"))),
                                 text(t("Timeline action")),
-                            ))
+                            )))
                             .into_element()
                     })
                     .into_element()
@@ -201,15 +239,25 @@ fn scrolling_dismisses_a_mouse_focused_hovered_tooltip() {
 
 #[test]
 fn scrolling_keeps_a_keyboard_focused_hovered_tooltip_open() {
-    let mut app = start(Root::of::<TooltipFixture>(), DESKTOP, false);
-    app.press_key("tab").expect("keyboard focus");
-    app.wait_for("Description").expect("focus hint opens");
-    app.hover("role:button[Timeline action]")
-        .expect("hover focused trigger");
-    scroll_without_changing_focus(&mut app);
-    assert!(app.screen().shows("Description"));
-    app.press_key("escape").expect("dismiss hint");
-    assert!(!app.screen().shows("Description"));
+    for hover_first in [false, true] {
+        let mut app = start(Root::of::<TooltipFixture>(), DESKTOP, false);
+        if hover_first {
+            app.hover("role:button[Timeline action]")
+                .expect("hover before focus");
+            app.wait_for("Description").expect("hover hint opens");
+        }
+        app.press_key("tab").expect("keyboard focus");
+        app.wait_for("Description").expect("focus hint opens");
+        app.hover("role:button[Timeline action]")
+            .expect("hover focused trigger");
+        scroll_without_changing_focus(&mut app);
+        assert!(
+            app.screen().shows("Description"),
+            "hover first: {hover_first}"
+        );
+        app.press_key("escape").expect("dismiss hint");
+        assert!(!app.screen().shows("Description"));
+    }
 }
 
 #[test]
@@ -244,7 +292,13 @@ fn PreviewFixture() -> impl IntoElement {
             close_delay: 0.0,
             ..Default::default()
         },
-        p::preview_card_trigger("Preview thread", None, text(t("Thread"))),
+        p::preview_card_trigger(
+            "Preview thread",
+            None,
+            nsh_base::LinkOpenWith::App,
+            |_| {},
+            text(t("Thread")),
+        ),
         || text(t("Thread preview")).into_element(),
     ))
 }

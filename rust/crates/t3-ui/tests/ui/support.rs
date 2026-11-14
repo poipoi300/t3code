@@ -7,14 +7,15 @@ use nsh_testing::Headless;
 pub const PHONE: (f32, f32) = (390.0, 844.0);
 pub const DESKTOP: (f32, f32) = (1280.0, 800.0);
 
-/// Launched by a link carrying the demo switch, so the app runs `DemoBackend`.
-pub const DEMO_LINK: &str = "https://t3.example.test/?backend=demo";
+/// Launched by an app link carrying the demo switch, so the app runs `DemoBackend`. A native
+/// launch link reaches the app only in a scheme it claims (`Root::url_schemes`).
+pub const DEMO_LINK: &str = "t3code://pair?backend=demo";
 
 fn config(window: (f32, f32)) -> EngineConfig {
     EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
-        ..EngineConfig::new(Root::of::<t3_ui::App>())
+        ..EngineConfig::new(Root::of::<t3_ui::App>().url_schemes(["t3code"]))
     }
 }
 
@@ -30,8 +31,7 @@ pub fn start_without_switch(window: (f32, f32)) -> Headless {
 
 /// The app as the web runtime runs it, at an address.
 pub fn start_on_web(window: (f32, f32), address: &str) -> Headless {
-    Headless::start_at_page(config(window), address)
-    .expect("the engine starts on a page")
+    Headless::start_at_page(config(window), address).expect("the engine starts on a page")
 }
 
 /// Pairs with the demo server through the real pairing screen.

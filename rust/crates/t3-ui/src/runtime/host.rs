@@ -73,7 +73,10 @@ mod tests {
         assert_eq!(choose(None, None), Choice::Client);
         assert_eq!(choose(Some("https://app.t3.codes/"), None), Choice::Client);
         assert_eq!(
-            choose(Some("https://app.t3.codes/t/x?backend=client"), Some("real")),
+            choose(
+                Some("https://app.t3.codes/t/x?backend=client"),
+                Some("real")
+            ),
             Choice::Client
         );
         assert_eq!(

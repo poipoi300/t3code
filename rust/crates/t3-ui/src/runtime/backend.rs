@@ -148,7 +148,9 @@ mod tests {
             pairing_url: Some("https://example.test/pair".into()),
             ..PairingInput::default()
         };
-        let expected = resolve_pairing_target(&input).expect_err("no token");
+        let Err(expected) = resolve_pairing_target(&input) else {
+            panic!("a link without a token is invalid");
+        };
         let failure = block_on(backend.pair(input)).expect_err("the client's validation");
         assert_eq!(failure.detail, expected.detail);
         assert!(backend.environments().is_empty());

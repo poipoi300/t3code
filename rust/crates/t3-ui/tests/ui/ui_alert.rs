@@ -8,11 +8,6 @@ use t3_ui::i18n::t;
 use t3_ui::ui::alert::{self, ControlAlignment, Props, Slots, Variant, composer_banner as banner};
 use t3_ui::ui::icon::Icon;
 
-#[native_module("t3/ui-alert-test")]
-fn native(registry: &mut Registry) {
-    registry.register::<AlertFixture>();
-}
-
 #[component]
 fn AlertFixture() -> impl IntoElement {
     t3_ui::theme::install(&t3_ui::theme::ThemeChoice::default());
@@ -156,7 +151,9 @@ fn AlertFixture() -> impl IntoElement {
 // The application has no primitive gallery route; mount the owned primitive as a test root.
 fn start(window: (f32, f32)) -> Headless {
     let mut sets = t3_ui::registries();
-    sets.push(registry());
+    let mut fixtures = Registry::new();
+    fixtures.register::<AlertFixture>();
+    sets.push(fixtures);
     Headless::start(EngineConfig {
         ui_sets: sets,
         viewport: size(px(window.0), px(window.1)),
@@ -209,7 +206,7 @@ fn approval_actions_follow_the_measured_container_when_it_shrinks() {
     let content = node(&app, "approval-copy");
     let action = node(&app, "approval-action");
     assert!(action.bounds.origin.y >= content.bounds.origin.y + content.bounds.size.height);
-    assert!(action.bounds.origin.x + action.bounds.size.width <= 300.0);
+    assert!(action.bounds.origin.x + action.bounds.size.width <= px(300.0));
     app.set_viewport(size(px(PHONE.0), px(PHONE.1)))
         .expect("resize to phone");
     let content = node(&app, "approval-copy");

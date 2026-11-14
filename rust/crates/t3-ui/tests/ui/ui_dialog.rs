@@ -17,10 +17,12 @@ fn start<C: Component<Props = ()>>(window: (f32, f32)) -> Headless {
     let mut app = Headless::start(EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
-        environment: Environment {
-            os: nsh_core::platform::Os::Windows,
+        clock: nsh_core::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH),
+        environment: nsh_core::platform::Environment {
+            // The web driver supports both keyboard view focus and a phone pointer idiom.
+            os: nsh_core::platform::Os::Web,
             idiom: nsh_core::platform::Idiom::Desktop,
-            ..Environment::default()
+            ..nsh_core::platform::Environment::default()
         },
         ..EngineConfig::new(Root::of::<C>())
     })
@@ -146,6 +148,7 @@ fn FocusOverride() -> impl IntoElement {
     let target = element_ref();
     let popup_ref = element_ref();
     let value = signal(String::new());
+    let ref_info = signal(String::new());
     dialog(open, move |state| {
         view()
             .w_full()
@@ -169,6 +172,22 @@ fn FocusOverride() -> impl IntoElement {
                                 .value(move || value.get())
                                 .on_change(move |text: &str| value.set(text.into())),
                         )
+                        .child(
+                            nsh_base::button()
+                                .accessibility_label(Some(SharedString::from(t(
+                                    "Inspect popup ref",
+                                ))))
+                                .on_press(move || {
+                                    ref_info.set(
+                                        popup_ref
+                                            .node()
+                                            .map(|node| node.to_string())
+                                            .unwrap_or_default(),
+                                    )
+                                })
+                                .child(text(t("Inspect popup ref"))),
+                        )
+                        .child(text(move || format!("popup ref {}", ref_info.get())))
                 },
             ))
     })
@@ -238,7 +257,9 @@ fn ActionFocus() -> impl IntoElement {
             }))
             .child(dialog_popup(state, PopupOptions::default(), move || {
                 let action = element_ref();
+                let cancel = element_ref();
                 state.register_action(action, move || disabled.get());
+                state.register_control(cancel, || false);
                 vec![
                     dynamic(move || {
                         let replaced = replaced.get();
@@ -266,14 +287,12 @@ fn ActionFocus() -> impl IntoElement {
                         })
                     })
                     .into_element(),
-                    dialog_close(
-                        state,
-                        ButtonContent::Label(t("Cancel")),
-                        ButtonVariant::Outline,
-                        ButtonSize::Default,
-                        || false,
-                    )
-                    .into_element(),
+                    nsh_base::button()
+                        .element_ref(&cancel)
+                        .accessibility_label(Some(SharedString::from(t("Cancel"))))
+                        .on_press(move || state.close())
+                        .child(text(t("Cancel")))
+                        .into_element(),
                     // A caller's render override supplies the ref until the shared Button accepts one.
                     nsh_base::button()
                         .element_ref(&action)
@@ -293,6 +312,112 @@ fn ActionFocus() -> impl IntoElement {
     })
 }
 
+fn layout_flow(options: PopupOptions) -> impl IntoElement {
+    theme::install(&ThemeChoice::default());
+    let open = signal(false);
+    dialog(open, move |state| {
+        view()
+            .w_full()
+            .h_full()
+            .child(dialog_trigger(state, "Open layout"))
+            .child(dialog_popup(state, options, move || {
+                if options.variant == Variant::Media {
+                    view()
+                        .w(px(2000.0))
+                        .h(px(2000.0))
+                        .child(dialog_title(state, || "Layout example".into()))
+                        .into_element()
+                } else {
+                    dialog_header(state, dialog_title(state, || "Layout example".into()))
+                        .into_element()
+                }
+            }))
+    })
+}
+
+#[component]
+fn MediaFlow() -> impl IntoElement {
+    layout_flow(PopupOptions {
+        variant: Variant::Media,
+        bottom_stick_on_mobile: false,
+        show_close_button: false,
+        ..PopupOptions::default()
+    })
+}
+
+#[component]
+fn CenteredFlow() -> impl IntoElement {
+    layout_flow(PopupOptions {
+        bottom_stick_on_mobile: false,
+        show_close_button: false,
+        ..PopupOptions::default()
+    })
+}
+
+#[component]
+fn ControlledFlow() -> impl IntoElement {
+    theme::install(&ThemeChoice::default());
+    let open = signal(false);
+    let allow_close = signal(false);
+    dialog(open, move |state| {
+        state.on_open_change(move |requested| {
+            if requested || allow_close.get() {
+                open.set(requested);
+            }
+        });
+        view()
+            .w_full()
+            .h_full()
+            .child(dialog_trigger(state, "Open controlled"))
+            .child(dialog_popup(state, PopupOptions::default(), move || {
+                vec![
+                    dialog_title(state, || "Unsaved changes".into()).into_element(),
+                    nsh_base::button()
+                        .accessibility_label(Some(SharedString::from(t("Allow close"))))
+                        .on_press(move || allow_close.set(true))
+                        .child(text(t("Allow close")))
+                        .into_element(),
+                ]
+            }))
+    })
+}
+
+#[component]
+fn RetainedText() -> impl IntoElement {
+    theme::install(&ThemeChoice::default());
+    let open = signal(false);
+    let title = signal(String::from("Original title"));
+    let description = signal(String::from("Original explanation"));
+    dialog(open, move |state| {
+        state.on_open_change(move |requested| {
+            batch(|| {
+                open.set(requested);
+                if !requested {
+                    title.set(String::new());
+                    description.set(String::new());
+                }
+            })
+        });
+        view()
+            .w_full()
+            .h_full()
+            .child(dialog_trigger(state, "Open retained text"))
+            .child(text(move || {
+                if open.get() {
+                    t("text open")
+                } else {
+                    t("text closed")
+                }
+            }))
+            .child(dialog_popup(state, PopupOptions::default(), move || {
+                vec![
+                    dialog_title(state, move || title.get()).into_element(),
+                    dialog_description(state, move || description.get()).into_element(),
+                ]
+            }))
+    })
+}
+
 fn bounds(app: &Headless, id: &str) -> nsh_core::Bounds<nsh_core::Points> {
     let node = app.screen().id(id).expect("element exists");
     app.screen()
@@ -301,6 +426,11 @@ fn bounds(app: &Headless, id: &str) -> nsh_core::Bounds<nsh_core::Points> {
         .find(|item| item.id == node)
         .expect("element laid out")
         .bounds
+}
+
+fn gone(app: &mut Headless, selector: &str) {
+    app.wait_for_gone(selector, std::time::Duration::from_secs(5))
+        .expect("modal is removed after its transition");
 }
 
 #[test]
@@ -320,8 +450,24 @@ fn disabled_actions_are_inert_and_enabled_actions_do_not_implicitly_close() {
     app.wait_for("accepted 1").expect("action runs once");
     assert_eq!(app.screen().count("role:dialog[Import failed]"), Ok(1));
     app.press("role:button[Cancel]").expect("cancel");
+    gone(&mut app, "role:dialog");
     app.wait_for("dialog closed").expect("exit completes");
     assert_eq!(app.screen().count("role:dialog"), Ok(0));
+}
+
+#[test]
+fn a_controlled_caller_can_reject_dismissal_without_losing_the_form() {
+    let mut app = start::<ControlledFlow>(DESKTOP);
+    app.press("role:button[Open controlled]").expect("open");
+    app.press_key("escape").expect("request close");
+    assert_eq!(app.screen().count("role:dialog[Unsaved changes]"), Ok(1));
+    app.press("role:button[Close]")
+        .expect("request close with button");
+    assert_eq!(app.screen().count("role:dialog[Unsaved changes]"), Ok(1));
+    app.press("role:button[Allow close]")
+        .expect("allow dismissal");
+    app.press_key("escape").expect("close after acceptance");
+    gone(&mut app, "role:dialog");
 }
 
 #[test]
@@ -336,12 +482,14 @@ fn escape_and_backdrop_dismiss_a_dialog_and_it_can_reopen() {
             Ok(Some("Try importing the project again.".into()))
         );
         app.press_key("escape").expect("escape");
+        gone(&mut app, "role:dialog");
         app.wait_for("dialog closed")
             .expect("removed after transition");
         app.press("role:button[Open retry]").expect("reopen");
         app.wait_for("Import failed").expect("new popup");
         app.press_at("id:dialog-backdrop", point(px(2.0), px(2.0)))
             .expect("outside press");
+        gone(&mut app, "role:dialog");
         app.wait_for("dialog closed").expect("backdrop closes");
     }
 }
@@ -360,10 +508,12 @@ fn alerts_reject_backdrop_dismissal_but_allow_escape_and_explicit_cancel() {
         .expect("outside press");
     assert_eq!(app.screen().count("role:alertdialog"), Ok(1));
     app.press_key("escape").expect("escape");
+    gone(&mut app, "role:alertdialog");
     app.wait_for("alert closed").expect("escape closes");
     app.press("role:button[Open confirmation]").expect("reopen");
     app.press("role:button[Keep project]")
         .expect("explicit cancel");
+    gone(&mut app, "role:alertdialog");
     app.wait_for("alert closed").expect("cancel closes");
 }
 
@@ -395,6 +545,43 @@ fn popup_changes_between_centered_dialog_and_bottom_sheet_on_resize() {
 }
 
 #[test]
+fn media_bounds_follow_the_viewport_on_resize() {
+    let mut app = start::<MediaFlow>(DESKTOP);
+    app.press("role:button[Open layout]").expect("open media");
+    for window in [DESKTOP, PHONE] {
+        app.set_viewport(size(px(window.0), px(window.1)))
+            .expect("resize media");
+        let popup = bounds(&app, "id:dialog-popup");
+        let max_width = (window.0 * 0.92).min(window.0 - 32.0);
+        assert!(
+            (popup.size.width.0 - max_width).abs() < 1.0,
+            "media width: {popup:?}"
+        );
+        assert!(
+            (popup.size.height.0 - window.1 * 0.92).abs() < 1.0,
+            "media height: {popup:?}"
+        );
+    }
+    app.press_key("escape")
+        .expect("dismiss without a built-in close button");
+    gone(&mut app, "role:dialog");
+}
+
+#[test]
+fn opting_out_of_the_mobile_sheet_keeps_a_phone_dialog_centered() {
+    let mut app = start::<CenteredFlow>(PHONE);
+    app.press("role:button[Open layout]")
+        .expect("open centered dialog");
+    let popup = bounds(&app, "id:dialog-popup");
+    assert!(
+        (popup.origin.y.0 * 2.0 + popup.size.height.0 - PHONE.1).abs() < 1.0,
+        "phone centered: {popup:?}"
+    );
+    app.press_key("escape").expect("dismiss");
+    gone(&mut app, "role:dialog");
+}
+
+#[test]
 fn caller_initial_focus_receives_typing() {
     for coarse in [false, true] {
         let mut app = start::<FocusOverride>(DESKTOP);
@@ -409,6 +596,11 @@ fn caller_initial_focus_receives_typing() {
         app.press_key("a").expect("type into focused input");
         assert_eq!(app.screen().input_text("label:Name"), Ok(Some("a")));
         assert_eq!(app.screen().input_text("label:Other name"), Ok(Some("")));
+        let popup = app.screen().id("id:dialog-popup").expect("popup node");
+        app.press("role:button[Inspect popup ref]")
+            .expect("inspect caller ref");
+        app.wait_for(&format!("popup ref {popup}"))
+            .expect("caller ref names the popup");
     }
 }
 
@@ -419,10 +611,12 @@ fn initial_focus_prefers_an_enabled_action_and_skips_a_disabled_one() {
     app.press_key("enter").expect("activate focused action");
     app.wait_for("retries 1").expect("action received focus");
     app.press("role:button[Cancel]").expect("cancel");
+    gone(&mut app, "role:dialog");
     app.wait_for("action closed").expect("closed");
     app.press_key("ctrl+d").expect("disable action");
     app.press("role:button[Open action]").expect("reopen");
     app.press_key("enter").expect("activate fallback cancel");
+    gone(&mut app, "role:dialog");
     app.wait_for("action closed")
         .expect("disabled action was skipped");
 }
@@ -447,6 +641,7 @@ fn escape_restores_keyboard_focus_to_the_trigger() {
     app.press_key("enter").expect("open with keyboard");
     app.wait_for("Retry import?").expect("popup");
     app.press_key("escape").expect("close");
+    gone(&mut app, "role:dialog");
     app.wait_for("action closed").expect("exit");
     app.press_key("enter").expect("activate restored trigger");
     app.wait_for("Retry import?")
@@ -470,14 +665,32 @@ fn replacing_text_slots_updates_the_modal_accessible_name_and_description() {
 }
 
 #[test]
+fn text_remains_visible_during_exit_after_the_caller_clears_its_data() {
+    let mut app = start::<RetainedText>(DESKTOP);
+    app.press("role:button[Open retained text]").expect("open");
+    let close = app.screen().id("role:button[Close]").expect("close button");
+    app.engine()
+        .control()
+        .dispatch_event(close, EventKind::Press, EventPayload::None);
+    app.wait_for("text closed")
+        .expect("caller cleared its data");
+    assert!(app.screen().shows("Original title"));
+    assert!(app.screen().shows("Original explanation"));
+    assert_eq!(app.screen().count("role:dialog[Original title]"), Ok(1));
+    gone(&mut app, "role:dialog");
+}
+
+#[test]
 fn a_nested_dialog_closes_without_closing_its_parent() {
     let mut app = start::<Nested>(DESKTOP);
     app.press("role:button[Open parent]").expect("open parent");
     app.press("role:button[Open nested]").expect("open nested");
     app.wait_for("Nested dialog").expect("child");
     app.press("role:button[Close nested]").expect("close child");
+    gone(&mut app, "role:dialog[Nested dialog]");
     app.wait_for("Open nested").expect("parent restored");
     app.press_key("escape").expect("close parent");
+    gone(&mut app, "role:dialog");
     app.wait_for("parent closed").expect("both removed");
 }
 
@@ -485,7 +698,15 @@ fn a_nested_dialog_closes_without_closing_its_parent() {
 fn reopening_during_exit_does_not_unmount_the_reopened_popup() {
     let mut app = start::<Flow>(DESKTOP);
     app.press("role:button[Open retry]").expect("open");
-    app.press("role:button[Cancel]").expect("begin exit");
+    let cancel = app
+        .screen()
+        .id("role:button[Cancel]")
+        .expect("cancel button");
+    // Headless::press settles animations; dispatch this press before advancing the manual clock.
+    app.engine()
+        .control()
+        .dispatch_event(cancel, EventKind::Press, EventPayload::None);
+    app.wait_for("dialog closed").expect("exit has begun");
     assert_eq!(
         app.screen().count("role:dialog"),
         Ok(1),
@@ -504,5 +725,6 @@ fn reopening_during_exit_does_not_unmount_the_reopened_popup() {
     app.press("role:button[Try again]").expect("retry");
     app.wait_for("accepted 1").expect("still interactive");
     app.press("role:button[Close]").expect("close");
+    gone(&mut app, "role:dialog");
     app.wait_for("dialog closed").expect("eventual exit");
 }

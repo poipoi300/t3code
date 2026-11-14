@@ -6,11 +6,15 @@
 //! Labels passed to trigger/title/close are English translation keys; arbitrary content is
 //! translated by its caller. `Variant::{Default, Panel}`, `Size::{Auto, Sm, Md, Lg}` (the web's
 //! width prop), and `Padding::{Default, Compact, None}` keep the web names. There is no restyling API.
+//! `popover_trigger(handle, ..)` measures the panel anchor; a custom trigger can forward its
+//! layout event to `handle.measure_anchor(bounds)`.
 //!
 //! `preview_card(options, trigger, content)` uses NSH's hover-card lifecycle; its trigger and
 //! popup slots are `preview_card_trigger` and `preview_card_popup`. NSH owns portals, flipping,
 //! safe-area clamping, hover delays, Escape/back and outside dismissal. It exposes no separate
 //! anchor, align offset, configurable collision strategy, or positioner interpolation.
+//! Preview triggers take NSH's `LinkOpenWith` and `on_open`; `App` delegates relative routes
+//! to the caller, while `System` keeps native external URL opening.
 
 use nsh_core::prelude::*;
 
@@ -102,6 +106,10 @@ impl PopoverHandle {
     pub fn set_open(self, open: bool) {
         self.open.set(open);
     }
+
+    pub fn measure_anchor(self, bounds: Bounds<Points>) {
+        self.anchor_width.set(bounds.size.width.0);
+    }
 }
 
 pub fn popover(
@@ -122,27 +130,17 @@ pub fn popover(
         .into_element();
     }
     with_popup_context((handle, options), move || {
-        standard_popover()
-            .trigger(trigger)
-            .child(dynamic(move || {
-                untracked(|| popover_popup(handle, options, content()).into_element())
-            }))
-            .into_element()
+        standard_popover(handle, options, trigger, content).into_element()
     })
     .into_element()
 }
 
-#[derive(Clone, PartialEq, Props)]
-struct StandardPopoverProps {
-    trigger: Prop<Option<Slot>>,
-    #[prop(lazy)]
-    children: Prop<Children>,
-}
-
-#[component]
-fn StandardPopover(props: StandardPopoverProps) -> impl IntoElement {
-    let (handle, options) =
-        use_context::<(PopoverHandle, PopoverOptions)>().expect("popover provides state");
+fn standard_popover(
+    handle: PopoverHandle,
+    options: PopoverOptions,
+    trigger: impl IntoElement,
+    content: impl Fn() -> AnyElement + 'static,
+) -> impl IntoElement {
     // NSH combines Portal and Positioner into its anchored overlay. Its coarse-pointer
     // backdrop always consumes outside taps, preserving mobile's no-click-through behavior.
     nsh_base::popover()
@@ -160,10 +158,12 @@ fn StandardPopover(props: StandardPopoverProps) -> impl IntoElement {
         } else {
             5.0
         }))
+        // NSH has no width/height tween or arbitrary transition list. Only this
+        // overlay's transform and opacity change; its painted surface is the child.
         .popup_class(tw(if options.variant == Variant::Panel {
-            "z-[46] transition-[width,height,scale,opacity]"
+            "z-[46] transition"
         } else {
-            "z-[130] transition-[width,height,scale,opacity]"
+            "z-[130] transition"
         }))
         .popup_starting_class(tw("scale-98 opacity-0"))
         .popup_ending_class(tw("scale-98 opacity-0"))
@@ -172,15 +172,14 @@ fn StandardPopover(props: StandardPopoverProps) -> impl IntoElement {
                 handle.available.set(*available);
             }
         })
-        .trigger(props.trigger.place(move |trigger| {
-            trigger.on_layout(move |bounds: &Bounds<Points>| {
-                handle.anchor_width.set(bounds.size.width.0);
-            })
+        .trigger(trigger)
+        .child(dynamic(move || {
+            untracked(|| popover_popup(handle, options, content()).into_element())
         }))
-        .child(props.children)
 }
 
 pub fn popover_trigger(
+    handle: PopoverHandle,
     label: impl Into<String>,
     disabled: impl Fn() -> bool + 'static,
     children: impl IntoElement,
@@ -189,6 +188,7 @@ pub fn popover_trigger(
     nsh_base::button()
         .accessibility_label(move || Some(t(&label).into()))
         .disabled(disabled)
+        .on_layout(move |bounds: &Bounds<Points>| handle.measure_anchor(*bounds))
         .app_class(tw(
             "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
         ))
@@ -236,7 +236,7 @@ pub fn popover_popup(
         // Runtime positioner variables become measured limits; subtree padding variables
         // become the same literal lengths. NSH text already wraps and preserves newlines.
         .app_class(tw(&cn([
-            Some("relative overflow-clip"),
+            Some("relative w-full overflow-clip"),
             panel.then_some("overflow-visible"),
             options.calendar.then_some("p-2"),
             (!options.calendar).then_some(match (panel, options.tooltip_style, options.padding) {
@@ -244,15 +244,19 @@ pub fn popover_popup(
                 (false, true, Padding::Default) => "px-2 py-1",
                 (false, _, Padding::Default) => "px-4 py-4",
                 (false, _, Padding::Compact) => "px-3 py-2",
-                (false, _, Padding::None) => "rounded-[calc(var(--radius-lg)-1px)] px-0 py-0",
+                (false, _, Padding::None) => "px-0 py-0",
             }),
         ])))
+        .when(options.padding == Padding::None, |viewport| {
+            viewport.rounded(move || inset_radius(false, false))
+        })
         .child(children);
     // `overflow-y-auto` is a real scroll view; panel/tooltip viewports stay unscrolled.
     let viewport = if panel || options.tooltip_style {
         viewport.into_element()
     } else {
         scroll()
+            .w_full()
             .max_h(move || handle.available.get().height)
             .child(viewport)
             .into_element()
@@ -314,33 +318,83 @@ pub(crate) fn dropdown_glass_background() -> AdaptiveColor {
 pub(crate) fn inset_highlight(tooltip: bool, calendar: bool) -> impl IntoElement {
     view()
         .pointer_events(PointerEvents::None)
-        .app_class(tw(&cn([
-            Some("absolute inset-0 shadow-[0_1px_0_rgb(0_0_0/4%)] dark:shadow-[0_-1px_0_rgb(255_255_255/6%)]"),
-            Some(if tooltip {
-                "rounded-[calc(var(--radius-md)-1px)]"
-            } else if calendar {
-                "rounded-[calc(var(--radius-xl)-1px)]"
-            } else {
-                "rounded-[calc(var(--radius-lg)-1px)]"
-            }),
-        ])))
+        .app_class(tw("absolute inset-0 shadow-[0_1px_0_rgb(0_0_0/4%)] dark:shadow-[0_-1px_0_rgb(255_255_255/6%)]"))
+        .rounded(move || inset_radius(tooltip, calendar))
 }
 
-// Rust handles cannot be JS props. A one-time region gives these internal components
-// an isolated context without leaking it into sibling popovers or tracking construction.
+/// `calc(var(--radius-*) - 1px)`: NSH's arbitrary radius parser cannot evaluate calc.
+pub(crate) fn inset_radius(tooltip: bool, calendar: bool) -> Points {
+    let tokens = tokens();
+    let base = tokens.number("radius").unwrap_or(8.0);
+    let (token, fallback) = if tooltip {
+        ("radius-md", base - 2.0)
+    } else if calendar {
+        ("radius-xl", base + 4.0)
+    } else {
+        ("radius-lg", base)
+    };
+    px((tokens.number(token).unwrap_or(fallback) - 1.0).max(0.0))
+}
+
+// NSH captures context at a component boundary, not a dynamic region forwarding children.
+// These Rust-only props carry one builder without exposing signals as JS prop values.
 pub(crate) fn with_popup_context<T: Clone + 'static>(
     context: T,
     build: impl FnOnce() -> AnyElement + 'static,
 ) -> impl IntoElement {
-    let build = stored(Some(build));
-    dynamic(move || {
-        untracked(|| {
-            build.with(Option::take).map(|build| {
-                provide_context(context.clone());
-                build()
-            })
-        })
-    })
+    PopupScope::element(PopupScopeProps(std::rc::Rc::new(std::cell::RefCell::new(
+        Some(Box::new(move || {
+            provide_context(context);
+            build()
+        })),
+    ))))
+}
+
+type ScopeBuilder = Box<dyn FnOnce() -> AnyElement>;
+
+#[derive(Clone, Default)]
+struct PopupScopeProps(std::rc::Rc<std::cell::RefCell<Option<ScopeBuilder>>>);
+
+impl PartialEq for PopupScopeProps {
+    fn eq(&self, other: &Self) -> bool {
+        std::rc::Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Props for PopupScopeProps {
+    fn spec(_: &mut nsh_core::element::TsTypes) -> Vec<nsh_core::element::PropSpec> {
+        Vec::new()
+    }
+    fn initial() -> Self {
+        Self::default()
+    }
+    fn set(
+        &mut self,
+        name: &str,
+        _: Option<nsh_core::element::AnyValue>,
+    ) -> Result<bool, nsh_core::element::PropError> {
+        Err(nsh_core::element::PropError(format!(
+            "unknown prop `{name}`"
+        )))
+    }
+    fn set_slot(&mut self, _: &str, _: Option<Slot>) -> bool {
+        false
+    }
+    fn set_children(&mut self, _: Children) -> bool {
+        false
+    }
+}
+
+struct PopupScope;
+
+impl Component for PopupScope {
+    type Props = PopupScopeProps;
+    type Event = nsh_core::element::NoEvent;
+
+    fn view(props: Self::Props, _: Scope<Self::Event>) -> impl IntoElement {
+        let child = props.0.borrow_mut().take().map(|build| build());
+        view().child(child)
+    }
 }
 
 #[derive(Clone, PartialEq, Props)]
@@ -492,7 +546,8 @@ pub fn preview_card(
         .margin(px(5.0))
         .open_delay(options.open_delay)
         .close_delay(options.close_delay)
-        .popup_class(tw("z-[140] transition-[scale,opacity]"))
+        // NSH's standard transition covers the overlay's changing transform and opacity.
+        .popup_class(tw("z-[140] transition"))
         .popup_starting_class(tw("scale-98 opacity-0"))
         .popup_ending_class(tw("scale-98 opacity-0"))
         .trigger(trigger)
@@ -505,11 +560,16 @@ pub fn preview_card(
 pub fn preview_card_trigger(
     label: impl Into<String>,
     href: Option<SharedString>,
+    open_with: nsh_base::LinkOpenWith,
+    on_open: impl Fn(&SharedString) + 'static,
     children: impl IntoElement,
 ) -> impl IntoElement {
     let label = label.into();
+    // NSH Link supplies native navigation and its destination hint when href is present.
     nsh_base::link()
         .href(href)
+        .open_with(open_with)
+        .on_open(on_open)
         .accessibility_label(move || Some(t(&label).into()))
         .app_class(tw(
             "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",

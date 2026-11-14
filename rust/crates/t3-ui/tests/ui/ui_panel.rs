@@ -95,20 +95,16 @@ fn medium_sheet_has_the_web_accessible_name_and_escape_requests_close() {
     app.wait_for("role:dialog[Workspace panel]")
         .expect("RightPanelSheet.browser.test.tsx: names the open right-panel dialog");
     let nodes = app.screen().layout_nodes();
-    let content = nodes
-        .iter()
-        .find(|node| node.test_id.as_deref() == Some("panel-content"))
-        .expect("sheet content");
     let popup = nodes
         .iter()
-        .find(|node| node.id == content.parent)
+        .find(|node| node.test_id.as_deref() == Some("workspace-panel-popup"))
         .expect("sheet popup");
     assert_eq!(popup.bounds.size.width, px(336.0));
     assert_eq!(popup.bounds.right(), px(800.0));
     app.type_text("id:panel-draft", "Unsaved review")
         .expect("edit");
     app.press_key("Escape").expect("dismiss sheet");
-    app.wait_for("requests:1").expect("close callback");
+    app.wait_for("text:requests:1").expect("close callback");
     assert!(!app.screen().shows("Panel content"));
     app.press("role:button[Open panel]").expect("reopen");
     app.wait_for("Panel content").expect("sheet returns");
@@ -116,6 +112,19 @@ fn medium_sheet_has_the_web_accessible_name_and_escape_requests_close() {
         app.screen().input_text("id:panel-draft").expect("draft"),
         Some("Unsaved review")
     );
+    for (keyboard, bottom) in [(300.0, 500.0), (0.0, 800.0)] {
+        app.set_environment("keyboard", |environment| {
+            environment.keyboard_height = px(keyboard);
+        })
+        .expect("software keyboard changes");
+        let popup = app
+            .screen()
+            .layout_nodes()
+            .into_iter()
+            .find(|node| node.test_id.as_deref() == Some("workspace-panel-popup"))
+            .expect("sheet popup above keyboard");
+        assert_eq!(popup.bounds.bottom(), px(bottom));
+    }
 }
 
 #[test]
@@ -127,11 +136,20 @@ fn controlled_dismissal_can_be_declined() {
             .expect("decline");
         app.press("role:button[Open panel]").expect("open");
         app.wait_for("Panel content").expect("panel");
-        app.back().expect("request dismissal");
-        app.wait_for("panel requests:1").expect("back callback");
+        app.type_text("id:panel-draft", "Keep this draft")
+            .expect("edit");
+        if viewport == PHONE {
+            app.back().expect("request dismissal");
+        } else {
+            app.press_key("Escape")
+                .expect("request dismissal from editor");
+        }
+        app.wait_for("text:panel requests:1")
+            .expect("back callback");
         app.press("role:button[Close panel]")
             .expect("second request");
-        app.wait_for("panel requests:2").expect("button callback");
+        app.wait_for("text:panel requests:2")
+            .expect("button callback");
         assert!(app.screen().shows("Panel content"));
     }
 }
@@ -154,7 +172,7 @@ fn wide_panel_is_beside_the_thread_and_close_is_reversible() {
         .expect("pane");
     assert!(panel.bounds.origin.x.0 > 0.0, "pane sits beside the thread");
     app.press("role:button[Close panel]").expect("close");
-    app.wait_for("requests:1").expect("closed");
+    app.wait_for("text:requests:1").expect("closed");
     assert!(!app.screen().shows("Panel content"));
     app.press("role:button[Open panel]").expect("reopen");
     app.wait_for("Panel content").expect("pane returns");
@@ -172,7 +190,7 @@ fn compact_panel_is_a_pushed_page_and_native_back_closes_it() {
             .expect("dialog selector")
     );
     app.back().expect("native back");
-    app.wait_for("requests:1")
+    app.wait_for("text:requests:1")
         .expect("route owner hears dismissal");
     app.wait_for("Open panel").expect("thread restored");
     assert!(!app.screen().shows("Panel content"));
@@ -195,7 +213,8 @@ fn changing_layout_preserves_parent_owned_edits_and_does_not_request_close() {
             Some("Keep this comment")
         );
     }
-    app.wait_for("requests:0").expect("resize never dismisses");
+    app.wait_for("text:requests:0")
+        .expect("resize never dismisses");
 }
 
 #[component]

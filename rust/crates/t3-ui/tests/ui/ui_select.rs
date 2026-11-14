@@ -82,7 +82,7 @@ fn Harness(props: HarnessProps) -> impl IntoElement {
             format!("Button presses: {}", button_presses.get())
         }))
         .child(text(move || {
-            format!("Value: {}", value.get().as_deref().unwrap_or("none"))
+            format!("Value: [{}]", value.get().as_deref().unwrap_or("none"))
         }))
         .child(
             nsh_base::button()
@@ -139,7 +139,8 @@ fn start_case(window: (f32, f32), props: HarnessProps) -> Headless {
     config.environment.os = if window == PHONE {
         Os::Android
     } else {
-        Os::Windows
+        // NSH's headless Windows host does not simulate Tab navigation.
+        Os::Web
     };
     config.environment.idiom = if window == PHONE {
         Idiom::Phone
@@ -157,6 +158,13 @@ fn open(app: &mut Headless) {
     app.wait_for("role:option[One]").expect("options");
 }
 
+fn refuses_disabled_press(app: &mut Headless, selector: &str) {
+    let error = app
+        .press(selector)
+        .expect_err("disabled control refuses input");
+    assert!(error.contains("is disabled"), "{error}");
+}
+
 #[test]
 fn choosing_updates_the_value_closes_and_reopens_with_the_selection_on_both_layouts() {
     for window in [DESKTOP, PHONE] {
@@ -167,11 +175,10 @@ fn choosing_updates_the_value_closes_and_reopens_with_the_selection_on_both_layo
                 .enabled("role:option[Two]")
                 .expect("disabled option")
         );
-        app.press("role:option[Two]")
-            .expect("disabled press is inert");
+        refuses_disabled_press(&mut app, "role:option[Two]");
         assert!(app.screen().shows("Changes: 0"));
         app.press("role:option[Three]").expect("choose");
-        app.wait_for("Value: three").expect("callback value");
+        app.wait_for("Value: [three]").expect("callback value");
         app.wait_for("Changes: 1").expect("one callback");
         app.wait_for("text:Three").expect("trigger follows");
         app.wait_for_gone("role:listbox", std::time::Duration::from_secs(5))
@@ -192,7 +199,7 @@ fn choosing_updates_the_value_closes_and_reopens_with_the_selection_on_both_layo
         app.press("role:button[Clear value]")
             .expect("clear controlled value");
         app.wait_for("text:Choose").expect("placeholder restored");
-        assert!(app.screen().shows("Value: none"));
+        assert!(app.screen().shows("Value: [none]"));
         assert!(
             app.screen().shows("Changes: 1"),
             "a parent value change does not emit a user change"
@@ -202,12 +209,20 @@ fn choosing_updates_the_value_closes_and_reopens_with_the_selection_on_both_layo
 
 #[test]
 fn controlled_value_can_decline_a_change_and_unknown_values_are_preserved() {
-    for initial in ["one", "unknown"] {
+    for initial in ["one", "unknown", ""] {
         let mut app = start(DESKTOP, true, false, Some(initial));
+        if initial == "unknown" {
+            app.wait_for("text:unknown")
+                .expect("unknown value is shown verbatim");
+        }
+        if initial.is_empty() {
+            app.wait_for("text:Choose")
+                .expect("empty-string value uses the placeholder");
+        }
         open(&mut app);
         app.press("role:option[Three]").expect("choose");
         app.wait_for("Changes: 1").expect("change reported");
-        assert!(app.screen().shows(&format!("Value: {initial}")));
+        assert!(app.screen().shows(&format!("Value: [{initial}]")));
         open(&mut app);
         assert_eq!(
             app.screen().selected("role:option[One]"),
@@ -231,7 +246,7 @@ fn a_controlled_open_request_can_be_declined() {
     app.press("role:combobox[Choose a number]")
         .expect("request open");
     app.wait_for("Open requests: 1").expect("open requested");
-    assert!(!app.screen().shows("role:listbox"));
+    assert_eq!(app.screen().matches("role:listbox"), Ok(false));
     assert!(app.screen().shows("Changes: 0"));
 }
 
@@ -245,7 +260,7 @@ fn uncontrolled_default_value_follows_choices_without_parent_feedback() {
     open(&mut app);
     assert_eq!(app.screen().selected("role:option[Three]"), Ok(true));
     assert!(
-        app.screen().shows("Value: one"),
+        app.screen().shows("Value: [one]"),
         "the parent did not follow the callback"
     );
 }
@@ -263,29 +278,27 @@ fn disabled_trigger_is_inert_and_items_and_empty_state_update_reactively() {
         |screen| screen.enabled("role:combobox[Choose a number]") == Ok(false),
     )
     .expect("disabled");
-    app.press("role:combobox[Choose a number]")
-        .expect("disabled press");
-    assert!(!app.screen().shows("role:listbox"));
-    app.press("role:button[Standalone choice]")
-        .expect("disabled standalone button");
+    refuses_disabled_press(&mut app, "role:combobox[Choose a number]");
+    assert_eq!(app.screen().matches("role:listbox"), Ok(false));
+    refuses_disabled_press(&mut app, "role:button[Standalone choice]");
     assert!(app.screen().shows("Button presses: 1"));
     app.press("role:button[Toggle disabled]").expect("enable");
     app.press("role:button[Replace options]").expect("replace");
     app.press("role:combobox[Choose a number]")
         .expect("open new options");
     app.wait_for("role:option[Four]").expect("new item");
-    assert!(!app.screen().shows("role:option[One]"));
+    assert_eq!(app.screen().matches("role:option[One]"), Ok(false));
     app.press("role:option[Four]").expect("choose new item");
-    app.wait_for("Value: four").expect("new value");
+    app.wait_for("Value: [four]").expect("new value");
     app.press("role:button[Empty options]")
         .expect("clear items");
-    app.wait_for("text:Choose")
-        .expect("missing value uses placeholder");
+    app.wait_for("text:four")
+        .expect("missing item's value is shown like Base UI's fallback");
     app.press("role:combobox[Choose a number]")
         .expect("open empty");
     app.wait_for("No options").expect("empty slot");
     assert!(
-        app.screen().shows("Value: four"),
+        app.screen().shows("Value: [four]"),
         "removing an item never clears the stored value"
     );
 }
@@ -298,7 +311,7 @@ fn escape_cancels_and_keyboard_navigation_skips_disabled_options() {
     app.wait_for("role:option[One]").expect("options");
     app.press_key("down").expect("skip disabled Two");
     app.press_key("enter").expect("select Three");
-    app.wait_for("Value: three").expect("keyboard selection");
+    app.wait_for("Value: [three]").expect("keyboard selection");
     app.press_key("down").expect("reopen");
     app.wait_for("role:option[One]").expect("options");
     app.press_key("home").expect("highlight One");
@@ -306,7 +319,7 @@ fn escape_cancels_and_keyboard_navigation_skips_disabled_options() {
     app.wait_for_gone("role:listbox", std::time::Duration::from_secs(5))
         .expect("dismissed");
     assert!(app.screen().shows("Changes: 1"));
-    assert!(app.screen().shows("Value: three"));
+    assert!(app.screen().shows("Value: [three]"));
 }
 
 #[test]
@@ -324,7 +337,7 @@ fn disabling_an_open_select_does_not_change_its_value() {
     app.wait_for_gone("role:listbox", std::time::Duration::from_secs(5))
         .expect("closed");
     assert!(app.screen().shows("Changes: 0"));
-    assert!(app.screen().shows("Value: one"));
+    assert!(app.screen().shows("Value: [one]"));
     app.press("role:button[Toggle disabled]").expect("enable");
     open(&mut app);
     assert_eq!(app.screen().selected("role:option[One]"), Ok(true));

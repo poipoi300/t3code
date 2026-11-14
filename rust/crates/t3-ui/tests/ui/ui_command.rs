@@ -48,6 +48,7 @@ fn CommandFixture() -> impl IntoElement {
         .child(command_dialog(open, "Command palette", move || {
             generation.update(|n| *n += 1);
             let changed = signal(false);
+            let close_next = signal(false);
             let state = CommandState::new(
                 move || {
                     let mut disabled = Item::new("disabled", "Unavailable");
@@ -70,7 +71,12 @@ fn CommandFixture() -> impl IntoElement {
                     items
                 },
                 CommandOptions::default(),
-                move |value| chosen.set(value.to_owned()),
+                move |value| {
+                    chosen.set(value.to_owned());
+                    if close_next.get_untracked() {
+                        open.set(false);
+                    }
+                },
             );
             let back = nsh_base::button()
                 .accessibility_label(Some(SharedString::from(t("Back"))))
@@ -78,6 +84,7 @@ fn CommandFixture() -> impl IntoElement {
                 .child(text(t("Back")))
                 .into_element();
             let mut input = InputOptions::new("Search projects", "Search projects");
+            input.auto_focus = false;
             input.start_addon = Some(back);
             command_dialog_popup(
                 command(state, move |state| {
@@ -112,7 +119,13 @@ fn CommandFixture() -> impl IntoElement {
                                             .child(command_group(
                                                 state,
                                                 "Projects",
-                                                true,
+                                                move || {
+                                                    state.items.with(|items| {
+                                                        items.iter().any(|i| {
+                                                            i.group.as_deref() == Some("Actions")
+                                                        })
+                                                    })
+                                                },
                                                 move || {
                                                     view()
                                                         .child(command_group_label("Projects"))
@@ -140,6 +153,14 @@ fn CommandFixture() -> impl IntoElement {
                         }))
                         .child(command_footer(
                             view()
+                                .child(command_footer_action(
+                                    "Choose and close",
+                                    || false,
+                                    move || {
+                                        close_next.set(true);
+                                        state.choose("a");
+                                    },
+                                ))
                                 .child(command_footer_action(
                                     "Replace results",
                                     || false,
@@ -183,14 +204,16 @@ fn row(state: CommandState, item: Memo<Option<Item>>) -> impl IntoElement {
 
 fn fixture(size: (f32, f32)) -> Headless {
     // The application palette is a different work package; mount this primitive directly.
-    let mut commands = Registry::new("t3/ui-command-test");
+    let mut commands = Registry::new();
     commands.register::<CommandFixture>();
-    Headless::start(EngineConfig {
+    let mut app = Headless::start(EngineConfig {
         ui_sets: vec![nsh_base::registry(), commands],
         viewport: nsh_core::geometry::size(px(size.0), px(size.1)),
         ..EngineConfig::new(Root::of::<CommandFixture>())
     })
-    .expect("command fixture starts")
+    .expect("command fixture starts");
+    app.wait_for("Open palette").expect("fixture mounts");
+    app
 }
 
 #[test]
@@ -201,7 +224,6 @@ fn submenu_search_takes_focus_before_back_at_phone_and_desktop_sizes() {
         // Port of CommandPaletteContent.browser.test.tsx: typing immediately goes to search.
         app.press_key("b")
             .expect("type into initially focused input");
-        app.wait_for("highlight: b").expect("filtered result");
         assert_eq!(
             app.screen()
                 .input_text("label:Search projects")
@@ -209,9 +231,13 @@ fn submenu_search_takes_focus_before_back_at_phone_and_desktop_sizes() {
             Some("b")
         );
         assert!(!app.screen().shows("Project A"));
+        app.press_key("down")
+            .expect("move past matching disabled option");
+        app.wait_for("text:highlight: b").expect("filtered result");
         app.submit("label:Search projects")
             .expect("select using touch keyboard");
-        app.wait_for("chosen: b").expect("correct stable value");
+        app.wait_for("text:chosen: b")
+            .expect("correct stable value");
         app.press_key("escape").expect("close");
         assert!(!app.screen().shows("Search projects"));
         app.press("role:button[Open palette]").expect("reopen");
@@ -221,27 +247,43 @@ fn submenu_search_takes_focus_before_back_at_phone_and_desktop_sizes() {
                 .expect("input"),
             Some("")
         );
-        app.wait_for("mounts: 2")
+        app.wait_for("text:mounts: 2")
             .expect("typing did not remount the modal");
+        app.press("role:button[Choose and close]")
+            .expect("selection closes its owner");
+        app.wait_for("text:chosen: a")
+            .expect("selection callback completed while unmounting");
+        assert!(!app.screen().shows("Search projects"));
     }
 }
 
 #[test]
-fn keyboard_and_touch_skip_disabled_items_and_refuse_unknown_values() {
+fn disabled_items_are_navigable_but_activation_and_unknown_values_fail_closed() {
     let mut app = fixture(DESKTOP);
     app.press("role:button[Open palette]").expect("open");
-    app.wait_for("highlight: a")
-        .expect("always highlights first enabled result");
+    app.wait_for("text:highlight: disabled")
+        .expect("first disabled result remains readable");
+    app.submit("label:Search projects")
+        .expect("submit disabled option");
+    assert!(app.screen().shows("chosen: <none>"));
     assert!(
         !app.screen()
             .enabled("role:option[Unavailable]")
             .expect("disabled option")
     );
     app.press_key("down").expect("next");
-    app.wait_for("highlight: b")
+    app.wait_for("text:highlight: a").expect("next option");
+    app.press_key("down").expect("next");
+    app.wait_for("text:highlight: b")
         .expect("highlight follows keyboard");
+    app.press_key("down").expect("wrap");
+    app.wait_for("text:highlight: disabled")
+        .expect("auto-highlight wraps across list boundary");
+    app.press_key("up").expect("wrap back");
+    app.wait_for("text:highlight: b")
+        .expect("reverse wrap reaches last option");
     app.submit("label:Search projects").expect("choose");
-    app.wait_for("chosen: b").expect("correct selection");
+    app.wait_for("text:chosen: b").expect("correct selection");
     app.press("role:button[Attempt disabled]")
         .expect("stale callback");
     app.press("role:button[Attempt unknown]")
@@ -249,7 +291,7 @@ fn keyboard_and_touch_skip_disabled_items_and_refuse_unknown_values() {
     assert!(app.screen().shows("chosen: b"));
     app.press("role:option[Project A]")
         .expect("touch selection");
-    app.wait_for("chosen: a")
+    app.wait_for("text:chosen: a")
         .expect("pointer selected its own value");
     app.press("role:button[Disable commands]")
         .expect("deny permission");
@@ -259,14 +301,14 @@ fn keyboard_and_touch_skip_disabled_items_and_refuse_unknown_values() {
 }
 
 #[test]
-fn async_results_reconcile_selection_without_reviving_removed_items() {
+fn async_results_keep_the_highlight_position_and_empty_results_do_not_dispatch() {
     let mut app = fixture(DESKTOP);
     app.press("role:button[Open palette]").expect("open");
-    app.wait_for("highlight: a").expect("initial");
+    app.wait_for("text:highlight: disabled").expect("initial");
     app.press("role:button[Replace results]")
         .expect("async result replacement");
-    app.wait_for("highlight: b")
-        .expect("removed highlight falls back to enabled result");
+    app.wait_for("text:highlight: b")
+        .expect("new result occupies the same highlighted position");
     assert!(!app.screen().shows("Project A"));
     app.type_text("label:Search projects", "missing")
         .expect("query with no matches");
@@ -284,11 +326,11 @@ fn virtualized_results_use_the_same_query_and_selection_contract() {
         app.wait_for("Project A").expect("virtual rows");
         app.type_text("label:Search projects", "Project B")
             .expect("filter");
-        app.wait_for("highlight: b")
+        app.wait_for("text:highlight: b")
             .expect("new query resets highlight");
         app.press("role:option[Project B]")
             .expect("press recycled row");
-        app.wait_for("chosen: b")
+        app.wait_for("text:chosen: b")
             .expect("row dispatch uses its current memo");
         assert!(!app.screen().shows("Project A"));
     }
@@ -308,6 +350,6 @@ fn filtering_hides_empty_groups_and_keeps_collections_in_their_group() {
     assert!(app.screen().enabled("role:group[Projects]").is_ok());
     app.press("role:option[Project A]")
         .expect("exactly one matching option");
-    app.wait_for("chosen: a")
+    app.wait_for("text:chosen: a")
         .expect("group selection keeps stable value");
 }

@@ -118,6 +118,7 @@ pub fn right_panel_sheet<E: IntoElement + 'static>(
     when(shown, move || {
         let cancel = on_close.clone();
         let backdrop_press = on_close.clone();
+        let escape = on_close.clone();
         // NSH's styled modal supplies focus containment/restoration; its Sheet has no title slot.
         nsh_base::dialog()
             .label(move || SharedString::from(t("Workspace panel")))
@@ -147,9 +148,11 @@ pub fn right_panel_sheet<E: IntoElement + 'static>(
             .child(
                 overlay()
                     // wco's topbar margin/height becomes NSH's reactive title-bar inset.
+                    .test_id("workspace-panel-popup")
                     .top(move || title_bar().top)
                     .right_0()
-                    .bottom_0()
+                    // Match nsh-base's Sheet keyboard_lift for a panel docked at the right.
+                    .bottom(move || (keyboard_height() - safe_area().bottom).max(Points::ZERO))
                     // Viewport min()/vw lengths are resolved from the same window width in NSH.
                     .w(move || px(sheet_width(window().width.0)))
                     // will-change-transform is dropped: native animation bindings own scheduling.
@@ -161,9 +164,47 @@ pub fn right_panel_sheet<E: IntoElement + 'static>(
                     // SheetPopup's before shadow is an explicit first child; max-sm hides it.
                     .child(view().app_class(tw("pointer-events-none absolute inset-0 shadow-[0_1px_rgb(0_0_0/4%)] dark:shadow-[0_-1px_rgb(255_255_255/6%)] max-sm:hidden")))
                     // SheetHeader's sr-only SheetTitle becomes the dialog's accessible label.
-                    .child(untracked(&children)),
+                    // NSH consumes an editor's Escape; bind inside the modal's window context.
+                    .child(
+                        sheet_content()
+                            .open(move || open.get())
+                            .on_close(move || escape())
+                            .child(untracked(&children)),
+                    ),
             )
     })
+}
+
+#[derive(Clone, PartialEq, Props)]
+struct SheetContentProps {
+    open: Prop<bool>,
+    #[prop(lazy)]
+    children: Prop<Children>,
+}
+
+#[derive(Clone, Debug, PartialEq, Event)]
+enum SheetContentEvent {
+    Close,
+}
+
+// A component mounts under the modal's WindowRef; a function called while building cannot.
+#[component]
+fn SheetContent(props: SheetContentProps, cx: Scope<SheetContentEvent>) -> impl IntoElement {
+    on_key_with(
+        "escape",
+        KeyOptions {
+            when: nsh_core::keymap::When::Always,
+            ..Default::default()
+        },
+        move |_| {
+            if props.open.get_untracked() {
+                cx.emit(SheetContentEvent::Close);
+            }
+        },
+    );
+    view()
+        .app_class(tw("flex min-h-0 min-w-0 flex-1 flex-col"))
+        .child(props.children)
 }
 
 /// `RightPanelSheet`'s 760 px media query, 28rem cap and narrow 24rem cap (16 px root).

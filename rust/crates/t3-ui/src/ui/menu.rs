@@ -3,6 +3,8 @@
 //! Public composition: `menu(trigger, options, popup)` / `context_menu(trigger, options,
 //! disabled, popup)` own NSH's popup lifecycle; `menu_popup(children)` is its padded content.
 //! `menu_button` is the same shared menu with a button trigger, including on web and Android.
+//! Build filtered/dynamic popup trees with `menu_popup_with(|| ...)`: NSH binds regions at
+//! construction, before an eager child can inherit its mounted menu context.
 //! `MenuOptions` controls the open signal, placement and `Width::{Default, Content}`.
 //! Rows take `ItemOptions`: `Variant::{Default, Destructive, Ghost}`, `Density::{Default, Touch}`,
 //! inset, reactive disabled state and close-on-select. There is no web `Size` prop: density is
@@ -21,8 +23,9 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use nsh_core::{
-    element::{ImageSrc, OrderWatch, StyleRefinement, watch_order},
-    keymap::When,
+    PropertyValue, StyleKey, Transition, TransitionProps,
+    element::{ImageSrc, OrderWatch, Renderer, Style, StyleRefinement, watch_order},
+    keymap::{Key, Keystroke, Modifiers, When, shifted},
     prelude::*,
 };
 
@@ -255,7 +258,32 @@ fn popup_style(style: StyleRefinement, width: Width) -> StyleRefinement {
 
 pub fn menu_popup(children: impl IntoElement) -> impl IntoElement {
     // NSH supplies the max-available-height scroll view outside this padded content.
-    view().app_class(tw("w-full p-1")).child(children)
+    popup_content().child(children)
+}
+
+/// Construct filtered rows under the popup's context, including NSH's native menu context.
+/// Eager regions are bound under their caller before NSH reparents static child components.
+pub fn menu_popup_with<E: IntoElement>(children: impl Fn() -> E + 'static) -> impl IntoElement {
+    popup_content().build(move |_: &bool| children())
+}
+
+#[derive(Clone, PartialEq, Props)]
+struct PopupContentProps {
+    children: Prop<Children>,
+    build: Prop<Option<Renderer<bool>>>,
+}
+
+#[component]
+fn PopupContent(props: PopupContentProps) -> impl IntoElement {
+    view()
+        .app_class(tw("w-full p-1"))
+        .child(props.children)
+        .children(
+            props
+                .build
+                .get_untracked()
+                .map(|build| build.render("menu-popup", false)),
+        )
 }
 
 #[derive(Clone)]
@@ -266,6 +294,7 @@ struct SearchRows {
     editing: Signal<bool>,
     query: Rc<RefCell<String>>,
     reset: Signal<u64>,
+    owner: Owner,
 }
 
 #[derive(Clone)]
@@ -295,6 +324,7 @@ impl Default for SearchRows {
             editing: signal(false),
             query: Rc::default(),
             reset: signal(0),
+            owner: Owner::current(),
         }
     }
 }
@@ -332,16 +362,8 @@ impl SearchRows {
         }
     }
 
-    fn typeahead(&self, event: &KeyEvent) {
-        let key = event.key.as_ref();
-        if self.focused.get_untracked().is_none()
-            || self.editing.get_untracked()
-            || event.modifiers.ctrl
-            || event.modifiers.alt
-            || event.modifiers.cmd
-            || key.chars().count() != 1
-            || key == " "
-        {
+    fn typeahead(&self, key: &str) {
+        if self.focused.get_untracked().is_none() || self.editing.get_untracked() {
             return;
         }
         let query = {
@@ -352,10 +374,13 @@ impl SearchRows {
         let epoch = self.reset.get_untracked().wrapping_add(1);
         self.reset.set(epoch);
         let current = self.clone();
-        set_timeout(Duration::from_millis(500), move || {
-            if current.reset.get_untracked() == epoch {
-                current.query.borrow_mut().clear();
-            }
+        // Focus changes replace the key bindings' owner; the popup owns this expiry.
+        self.owner.run(move || {
+            set_timeout(Duration::from_millis(500), move || {
+                if current.reset.get_untracked() == epoch {
+                    current.query.borrow_mut().clear();
+                }
+            });
         });
         let rows = self.rows.borrow();
         let focused = self.focused.get_untracked();
@@ -431,8 +456,46 @@ fn MenuContent(props: MenuContentProps, cx: Scope<MenuContentEvent>) -> impl Int
             move |_| (close.0)(),
         );
     }
+    let keyed = rows.clone();
+    // Raw key notifications currently reach only NSH's Linux renderer; keymap bindings
+    // provide the same printable-key behaviour on the other desktop renderers and web.
+    effect(move || {
+        if keyed.focused.get().is_some() && !keyed.editing.get() {
+            for key in r"0123456789abcdefghijklmnopqrstuvwxyz`-=[]\;',./".chars() {
+                for shift in [false, true] {
+                    let stroke = Keystroke {
+                        key: Key::Char(key),
+                        modifiers: Modifiers {
+                            shift,
+                            ..Default::default()
+                        },
+                    };
+                    let typed = if shift { shifted(key) } else { key }.to_string();
+                    let rows = keyed.clone();
+                    on_key_with(
+                        &stroke.to_string(),
+                        KeyOptions {
+                            when: When::NotEditing,
+                            ..Default::default()
+                        },
+                        move |_| rows.typeahead(&typed),
+                    );
+                }
+            }
+        }
+    });
     view()
-        .on_key_down(move |event: &KeyEvent| rows.typeahead(event))
+        .on_key_down(move |event: &KeyEvent| {
+            let key = event.key.as_ref();
+            if !key.is_ascii()
+                && key.chars().count() == 1
+                && !event.modifiers.ctrl
+                && !event.modifiers.alt
+                && !event.modifiers.cmd
+            {
+                rows.typeahead(key);
+            }
+        })
         .child(props.children)
 }
 
@@ -592,6 +655,17 @@ fn ItemRow(props: ItemRowProps, cx: Scope<ItemRowEvent>) -> impl IntoElement {
             _ => None,
         })
         .close_on_select(props.close_on_select)
+        .inline_style(move || {
+            if props.variant.get() == Variant::Ghost {
+                transition_style(
+                    TransitionProps::SHADOW | TransitionProps::TRANSFORM,
+                    150.0,
+                    [0.4, 0.0, 0.2, 1.0],
+                )
+            } else {
+                Style::default()
+            }
+        })
         .on_select(move || {
             if !disabled.get_untracked() {
                 if is_radio && let Some(group) = &radio {
@@ -723,8 +797,8 @@ fn row_class(options: ItemOptions, kind: RowKind, checkbox: CheckboxVariant) -> 
         // button.tsx's buttonVariants(ghost, compact): selectors become child icon styles,
         // the coarse after hit area becomes row_hit_slop, and --spacing(2)-1px is 7px.
         // Drop its will-change hint; native press feedback owns repaint scheduling. NSH's
-        // arbitrary transition-property replaces the unsupported transition-[...] utility.
-        (options.variant == Variant::Ghost).then_some("relative inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-[var(--control-radius)] border font-medium text-base outline-none [transition-property:box-shadow,scale] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 sm:text-sm h-7 gap-1 rounded-md px-[7px] text-xs border-transparent text-foreground h-auto min-h-7 w-full sm:text-xs active:scale-[0.97] active:bg-accent"),
+        // Typed transition_style replaces NSH's unsupported transition-[...] utility.
+        (options.variant == Variant::Ghost).then_some("relative inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-[var(--control-radius)] border font-medium text-base outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 sm:text-sm h-7 gap-1 rounded-md px-[7px] text-xs border-transparent text-foreground h-auto min-h-7 w-full sm:text-xs active:scale-[0.97] active:bg-accent"),
         (options.density == Density::Touch).then_some("min-h-10 sm:min-h-10"),
     ]);
     tw_with(ThemeScope::Root, &classes, &attrs)
@@ -856,9 +930,11 @@ fn checkbox_switch(checked: Prop<Option<bool>>, disabled: Prop<bool>) -> impl In
     view().accessible(false)
         .app_class(move || Some(tw(&cn([
             Some("inset-shadow-[0_1px_rgb(0_0_0/4%)] inline-flex shrink-0 items-center rounded-full p-px outline-none"),
-            (!reduce_motion()).then_some("[transition-property:background-color,box-shadow] duration-200"),
+
             disabled.get().then_some("opacity-64"),
         ]))))
+        // NSH accepts property-group masks, not the CSS transition list utility.
+        .inline_style(move || transition_style(TransitionProps::COLORS | TransitionProps::SHADOW, 200.0, [0.4, 0.0, 0.2, 1.0]))
         .h(move || px(thumb() + 2.0)).w(move || px(thumb() * 2.0 - 2.0))
         .bg(move || if checked.get() == Some(true) { palette().primary } else { palette().input })
         // NSH groups transform/shape timings: use the TSX's 150ms translation timing for both,
@@ -866,10 +942,28 @@ fn checkbox_switch(checked: Prop<Option<bool>>, disabled: Prop<bool>) -> impl In
         .child(view().app_class(move || Some(tw(&cn([
             Some("pointer-events-none block aspect-square h-full origin-left bg-background shadow-sm/5 group-active:scale-x-110"),
             (checked.get() == Some(true)).then_some("origin-[16px_50%] sm:origin-[12px_50%]"),
-            (!reduce_motion()).then_some("[transition-property:translate,border-radius,scale] duration-150"),
+
         ]))))
+            .inline_style(move || transition_style(TransitionProps::TRANSFORM | TransitionProps::SHAPE, 150.0, Transition::EASE))
             .rounded(move || px(thumb()))
             .translate_x(move || px(if checked.get() == Some(true) { thumb() - 4.0 } else { 0.0 })))
+}
+
+fn transition_style(properties: u8, duration: f32, easing: [f32; 4]) -> Style {
+    let properties = if reduce_motion() { 0 } else { properties };
+    Style::default()
+        .with(
+            StyleKey::TransitionProperty,
+            PropertyValue::TransitionProps(TransitionProps(properties)),
+        )
+        .with(
+            StyleKey::TransitionDuration,
+            PropertyValue::Ms(duration.into()),
+        )
+        .with(
+            StyleKey::TransitionTimingFunction,
+            PropertyValue::Easing(easing.map(Into::into)),
+        )
 }
 
 pub fn menu_radio_group(

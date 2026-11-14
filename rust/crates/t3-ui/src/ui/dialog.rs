@@ -9,6 +9,9 @@
 //! Button slots take the existing `ButtonSize` and `ButtonVariant`; `ActionVariant` excludes
 //! destructive variants, just as `DialogActionProps` does. Text slots receive English keys
 //! (closures allow dynamic text); ButtonContent carries already translated labels.
+//! Text slots retain their last open value while the native layer animates out.
+//! `state.on_open_change(callback)` gives the caller control of open requests; the callback
+//! updates `open` itself and can reject a dismissal while a form has unsaved data.
 //!
 //! `PopupOptions::initial_focus` overrides initial focus, and `popup_ref` preserves a caller ref.
 //! Coarse-pointer opens focus the popup to avoid the software keyboard. Automatic action focus
@@ -112,6 +115,7 @@ impl Default for PopupOptions {
 }
 
 type TextSource = Rc<dyn Fn() -> String>;
+type OpenChange = Rc<dyn Fn(bool)>;
 
 struct FocusAction {
     target: ElementRef,
@@ -136,6 +140,7 @@ pub struct DialogState {
     ancestors: Stored<Ancestors>,
     actions: Stored<Vec<FocusAction>>,
     controls: Stored<Vec<FocusAction>>,
+    open_change: Stored<Option<OpenChange>>,
 }
 
 impl DialogState {
@@ -153,16 +158,34 @@ impl DialogState {
             ancestors: stored(use_context::<Ancestors>().unwrap_or_default()),
             actions: stored(Vec::new()),
             controls: stored(Vec::new()),
+            open_change: stored(None),
         }
     }
 
     pub fn show(self) {
         self.touch.set(pointer() == Pointer::Coarse);
-        self.open.set(true);
+        self.request_open(true);
     }
 
     pub fn close(self) {
-        self.open.set(false);
+        self.request_open(false);
+    }
+
+    /// Controlled onOpenChange: the caller updates `open`, or keeps it unchanged to reject.
+    pub fn on_open_change(self, callback: impl Fn(bool) + 'static) {
+        self.open_change
+            .with(|current| *current = Some(Rc::new(callback)));
+    }
+
+    fn request_open(self, open: bool) {
+        if self.open.get_untracked() == open {
+            return;
+        }
+        if let Some(callback) = self.open_change.get() {
+            callback(open);
+        } else {
+            self.open.set(open);
+        }
     }
 
     /// Registers a custom rendered DialogAction for the source's initial-focus priority.
@@ -503,7 +526,7 @@ fn backdrop_surface(state: DialogState, variant: Variant) -> nsh_core::element::
         })
         // index.css @utility dialog-backdrop, expanded at its use site.
         .app_class(tw(&cn([
-            Some("fixed inset-0 z-50 bg-background/60 dark:bg-background/64 backdrop-blur-[4px]"),
+            Some("fixed inset-0 z-50 transition-all duration-200 bg-background/60 dark:bg-background/64 backdrop-blur-[4px]"),
             (variant == Variant::Media).then_some("z-[60] bg-black/75 backdrop-blur-none"),
         ])))
 }
@@ -675,7 +698,7 @@ fn title_text(
     state: DialogState,
     source: impl Fn() -> String + 'static,
 ) -> nsh_core::element::Text {
-    let source: TextSource = Rc::new(source);
+    let source = retained_text(state, source);
     register_text(state.title, source.clone());
     // wrap-anywhere drops: NSH wraps text at words and preserves newlines.
     text(move || SharedString::from(t(&source())))
@@ -702,9 +725,23 @@ fn description_text(
     state: DialogState,
     source: impl Fn() -> String + 'static,
 ) -> nsh_core::element::Text {
-    let source: TextSource = Rc::new(source);
+    let source = retained_text(state, source);
     register_text(state.description, source.clone());
     text(move || SharedString::from(t(&source())))
+}
+
+fn retained_text(state: DialogState, source: impl Fn() -> String + 'static) -> TextSource {
+    let last = stored(String::new());
+    let value = computed(move || {
+        if state.open.get() {
+            let next = source();
+            last.with(|previous| *previous = next.clone());
+            next
+        } else {
+            last.get()
+        }
+    });
+    Rc::new(move || value.get())
 }
 
 fn register_text(slot: Signal<Option<TextSource>>, source: TextSource) {

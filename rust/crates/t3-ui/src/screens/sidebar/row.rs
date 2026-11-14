@@ -120,7 +120,8 @@ pub fn thread_row(item: Memo<Option<SidebarItem>>, nav: Navigator) -> impl IntoE
             )))
     };
 
-    view().app_class(class("list-none py-0.5")).child(
+    // `<li className="list-none py-0.5">`: `list-none` has no NSH meaning (no list markers).
+    view().app_class(class("py-0.5")).child(
         nsh_base::button()
             .accessibility_label(move || Some(title_text()))
             .selected(active)

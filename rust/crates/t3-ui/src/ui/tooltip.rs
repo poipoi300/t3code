@@ -7,17 +7,21 @@
 //! no size prop in the TSX. Labels are English translation keys; callers translate content.
 //!
 //! Construct tooltip handles inside the lazy children of `tooltip_provider(delay, children)`
-//! and `tooltip_scroll_dismiss_area(children)` to inherit them. The dismiss area is a scroll
-//! view: on scrolling it closes hovered hints (including pending opens), while preserving a
-//! keyboard-focused hint. NSH owns hint delays, focus-visible activation, Escape and grace time.
+//! and `tooltip_scroll_dismiss_area(target, children)` to inherit them. `target` names the
+//! caller's existing scroll view or virtual list, so the wrapper adds no scroll container.
+//! Scrolling closes hovered hints (including pending opens) while preserving a keyboard-focused
+//! hint. NSH owns hint delays, focus-visible activation, Escape and grace time.
+//! NSH exposes no focus-visible observer: unknown programmatic focus retains the hint on scroll.
 
 use nsh_core::element::IntoTooltip;
 use nsh_core::element::desktop::title_bar;
 use nsh_core::prelude::*;
 
-use super::popover::{dropdown_glass_background, inset_highlight, with_popup_context};
+use super::popover::{
+    dropdown_glass_background, inset_highlight, inset_radius, with_popup_context,
+};
 use crate::i18n::t;
-use crate::theme::{cn, tw};
+use crate::theme::{cn, palette, tw};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Variant {
@@ -52,12 +56,20 @@ impl Default for TooltipOptions {
 #[derive(Clone, Copy)]
 struct TooltipProviderDelay(f64);
 
+#[derive(Clone, Copy, PartialEq)]
+enum FocusOrigin {
+    Outside,
+    Pointer,
+    Keyboard,
+    Unknown,
+}
+
 #[derive(Clone, Copy)]
 pub struct TooltipHandle {
     open: Signal<bool>,
     disabled: Signal<bool>,
     dismissed: Signal<bool>,
-    keyboard_focus: Signal<bool>,
+    focus: Signal<FocusOrigin>,
     tracker: Option<TooltipHoverTracker>,
 }
 
@@ -72,7 +84,7 @@ pub fn tooltip_create_handle() -> TooltipHandle {
         open: signal(false),
         disabled: signal(false),
         dismissed: signal(false),
-        keyboard_focus: signal(false),
+        focus: signal(FocusOrigin::Outside),
         tracker: use_context::<TooltipHoverTracker>(),
     };
     if let Some(tracker) = handle.tracker {
@@ -126,7 +138,12 @@ impl TooltipHoverTracker {
 
     fn dismiss_unfocused(self) {
         let Some(handle) = self.0.get() else { return };
-        if handle.keyboard_focus.get_untracked() {
+        // NSH does not expose focus-visible for programmatic focus. Retain unknown
+        // focus rather than taking a keyboard user's description away on scroll.
+        if matches!(
+            handle.focus.get_untracked(),
+            FocusOrigin::Keyboard | FocusOrigin::Unknown
+        ) {
             return;
         }
         self.0.replace(None);
@@ -153,7 +170,11 @@ pub fn tooltip(
         .on_open_change(move |event: &nsh_base::TooltipEvent| {
             if let nsh_base::TooltipEvent::OpenChange(open, reason) = event {
                 if *reason == nsh_base::OpenChangeReason::Focus {
-                    handle.keyboard_focus.set(*open);
+                    handle.focus.set(if *open {
+                        FocusOrigin::Keyboard
+                    } else {
+                        FocusOrigin::Outside
+                    });
                 }
                 if !*open || (!handle.disabled.get_untracked() && !handle.dismissed.get_untracked())
                 {
@@ -179,7 +200,7 @@ fn tooltip_positioner(
         .align(options.align)
         .offset(px(options.side_offset))
         .margin(move || px(5.0 + title_bar().top.0))
-        .app_class(tw("pointer-events-none z-[140] transition-[scale,opacity]"))
+        .app_class(tw("pointer-events-none z-[140] transition"))
 }
 
 pub fn tooltip_trigger(
@@ -190,49 +211,35 @@ pub fn tooltip_trigger(
     children: impl IntoElement + 'static,
 ) -> impl IntoElement {
     let label = label.into();
-    with_popup_context(handle, move || {
-        tooltip_trigger_root()
-            .popup(popup)
-            .trigger(
-                nsh_base::button()
-                    .accessibility_label(move || Some(t(&label).into()))
-                    .disabled(disabled)
-                    .app_class(tw(
-                        "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-                    ))
-                    .child(children),
-            )
-            .into_element()
-    })
-}
-
-#[derive(Clone, PartialEq, Props)]
-struct TooltipTriggerRootProps {
-    trigger: Prop<Option<Slot>>,
-    popup: Prop<Option<Slot>>,
-}
-
-// The slot already contains a native hint overlay; wrapping it in another hint would
-// impose a second delay and lose its controlled focus and dismissal state.
-struct TooltipSlot(AnyElement);
-
-impl IntoTooltip for TooltipSlot {
-    fn apply_tooltip(self, node: &mut nsh_core::element::ElNode) {
-        nsh_core::element::__hint_tooltip(node, self.0);
-    }
-}
-
-#[component]
-fn TooltipTriggerRoot(props: TooltipTriggerRootProps) -> impl IntoElement {
-    let handle = use_context::<TooltipHandle>().expect("tooltip_trigger provides its handle");
-    props.trigger.place(move |trigger| {
-        trigger
-            .on_mouse_enter(move |_: &MouseEvent| handle.hover())
-            .on_press_down(move |_: &PressEvent| handle.keyboard_focus.set(false))
-            .on_focus(move || handle.dismissed.set(false))
-            .on_blur(move || handle.keyboard_focus.set(false))
-            .tooltip(TooltipSlot(props.popup.place(|popup| popup)))
-    })
+    let trigger = element_ref();
+    trigger.on_focus_in(move || {
+        handle.dismissed.set(false);
+        if handle.focus.get_untracked() == FocusOrigin::Outside {
+            handle.focus.set(FocusOrigin::Unknown);
+        }
+    });
+    trigger.on_focus_out(move || handle.focus.set(FocusOrigin::Outside));
+    // NSH Button cannot host `.tooltip`; its fitted wrapper anchors the hint and
+    // observes focus within the real button without introducing a second control.
+    view()
+        .element_ref(&trigger)
+        .app_class(tw("w-fit"))
+        .tooltip(popup)
+        .on_mouse_enter(move |_: &MouseEvent| handle.hover())
+        .on_press_down(move |_: &PressEvent| handle.focus.set(FocusOrigin::Pointer))
+        // An already-hovered hint emits no second OpenChange when Tab focuses it.
+        // Key-up observes Tab after focus moved onto this trigger.
+        .on_key_down(move |_: &nsh_core::KeyEvent| handle.focus.set(FocusOrigin::Keyboard))
+        .on_key_up(move |_: &nsh_core::KeyEvent| handle.focus.set(FocusOrigin::Keyboard))
+        .child(
+            nsh_base::button()
+                .accessibility_label(move || Some(t(&label).into()))
+                .disabled(disabled)
+                .app_class(tw(
+                    "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+                ))
+                .child(children),
+        )
 }
 
 pub fn tooltip_popup(variant: Variant, children: impl IntoElement) -> impl IntoElement {
@@ -244,7 +251,7 @@ pub fn tooltip_popup(variant: Variant, children: impl IntoElement) -> impl IntoE
             Some(if variant == Variant::Glass {
                 "shadow-xl shadow-black/25 border backdrop-blur-(--glass-blur) dark:backdrop-blur-[16px] backdrop-saturate-[1.14] dark:backdrop-saturate-[1.08]"
             } else {
-                "border bg-popover bg-clip-padding dark:bg-clip-border shadow-md/5"
+                "border shadow-md/5"
             }),
             Some(if variant == Variant::Code {
                 "max-w-120 text-left font-mono text-[11px] leading-relaxed"
@@ -273,6 +280,16 @@ pub fn tooltip_popup(variant: Variant, children: impl IntoElement) -> impl IntoE
                         .opacity(0.1)
                 })
         })
+        // NSH has no background-clip: light paints only the padding box; dark keeps
+        // the border-box fill, matching not-dark:bg-clip-padding in TooltipPopup.
+        .when(variant != Variant::Glass, |popup| popup.bg(move || AdaptiveColor::new(
+            AdaptiveColor::TRANSPARENT.light, palette().popover.dark,
+        )))
+        .child((variant != Variant::Glass).then(|| view()
+            .pointer_events(PointerEvents::None)
+            .app_class(tw("absolute inset-px"))
+            .rounded(move || inset_radius(true, false))
+            .bg(move || AdaptiveColor::new(palette().popover.light, AdaptiveColor::TRANSPARENT.dark))))
         .child((variant != Variant::Glass).then(|| inset_highlight(true, false)))
         .child(view().app_class(tw("min-w-0 px-2 py-1")).child(children))
 }
@@ -281,43 +298,30 @@ pub fn tooltip_provider(
     delay: f64,
     children: impl Fn() -> AnyElement + 'static,
 ) -> impl IntoElement {
-    tooltip_provider_root()
-        .delay(delay)
-        .child(dynamic(move || untracked(&children)))
-}
-
-#[derive(Clone, PartialEq, Props)]
-struct TooltipProviderRootProps {
-    delay: f64,
-    children: Prop<Children>,
-}
-
-#[component]
-fn TooltipProviderRoot(props: TooltipProviderRootProps) -> impl IntoElement {
-    provide_context(TooltipProviderDelay(props.delay));
-    props.children
+    with_popup_context(TooltipProviderDelay(delay), children)
 }
 
 pub fn tooltip_scroll_dismiss_area(
+    target: ElementRef,
     children: impl Fn() -> AnyElement + 'static,
 ) -> impl IntoElement {
-    tooltip_scroll_dismiss_root().child(dynamic(move || untracked(&children)))
-}
-
-#[derive(Clone, PartialEq, Props)]
-struct TooltipScrollDismissRootProps {
-    children: Prop<Children>,
-}
-
-#[component]
-fn TooltipScrollDismissRoot(props: TooltipScrollDismissRootProps) -> impl IntoElement {
-    let tracker = TooltipHoverTracker(stored(None));
-    provide_context(tracker);
-    // NSH scroll events do not have a capture phase: this area owns the scroll view.
-    scroll()
-        .h_full()
-        .min_h(px(0.0))
-        .test_id("tooltip-scroll-dismiss-area")
-        .on_scroll(move |_: &ScrollEvent| tracker.dismiss_unfocused())
-        .child(props.children)
+    with_popup_context((), move || {
+        let tracker = TooltipHoverTracker(stored(None));
+        provide_context(tracker);
+        let previous = stored(None);
+        // NSH has no scroll capture phase. Watch the existing scroller without replacing
+        // its on_scroll handler; initial layout and size-only changes are not scrolls.
+        watch_scroll(
+            move || target.node(),
+            move |event| {
+                if previous
+                    .replace(Some(event.offset))
+                    .is_some_and(|offset| offset != event.offset)
+                {
+                    tracker.dismiss_unfocused();
+                }
+            },
+        );
+        children()
+    })
 }
