@@ -97,7 +97,14 @@ struct LaunchArgFilter {
 const MCP_LIST_FILTER: LaunchArgFilter = LaunchArgFilter {
     switches: &[],
     value_flags: &["--config", "-c", "--enable", "--disable", "--profile", "-p"],
-    inline_prefixes: &["--config=", "-c=", "--enable=", "--disable=", "--profile=", "-p="],
+    inline_prefixes: &[
+        "--config=",
+        "-c=",
+        "--enable=",
+        "--disable=",
+        "--profile=",
+        "-p=",
+    ],
 };
 const EXEC_FILTER: LaunchArgFilter = LaunchArgFilter {
     switches: &["--strict-config", "--oss"],
@@ -204,7 +211,12 @@ async fn enabled_mcp_servers(
     };
     let decoded: Option<Vec<(String, bool)>> = servers
         .iter()
-        .map(|server| Some((server["name"].as_str()?.to_owned(), server["enabled"].as_bool()?)))
+        .map(|server| {
+            Some((
+                server["name"].as_str()?.to_owned(),
+                server["enabled"].as_bool()?,
+            ))
+        })
         .collect();
     decoded
         .unwrap_or_default()
@@ -235,8 +247,10 @@ pub async fn run_codex(
         .map_err(|_| GenerationError::Provider)?;
     let work = async {
         let enabled = enabled_mcp_servers(run, &request.cwd, &cancellation).await;
-        let mut args =
-            crate::codex::codex_exec_mcp_prefix(&codex_exec_launch_args(&run.launch_argv), &enabled);
+        let mut args = crate::codex::codex_exec_mcp_prefix(
+            &codex_exec_launch_args(&run.launch_argv),
+            &enabled,
+        );
         args.extend(
             [
                 "--ephemeral",
@@ -249,7 +263,10 @@ pub async fn run_codex(
         );
         args.push(run.model.clone());
         args.push("--config".into());
-        args.push(format!("model_reasoning_effort=\"{}\"", run.reasoning_effort));
+        args.push(format!(
+            "model_reasoning_effort=\"{}\"",
+            run.reasoning_effort
+        ));
         if let Some(tier) = &run.service_tier {
             args.push("--config".into());
             args.push(format!("service_tier=\"{tier}\""));
@@ -271,10 +288,12 @@ pub async fn run_codex(
             &cancellation,
         );
         options.stdin = Some(request.prompt.clone().into_bytes());
-        let output = t3_process::run(options).await.map_err(|error| match error {
-            t3_process::ProcessError::Cancelled => GenerationError::Cancelled,
-            _ => GenerationError::Provider,
-        })?;
+        let output = t3_process::run(options)
+            .await
+            .map_err(|error| match error {
+                t3_process::ProcessError::Cancelled => GenerationError::Cancelled,
+                _ => GenerationError::Provider,
+            })?;
         if output.code != Some(0) {
             return Err(GenerationError::Provider);
         }
@@ -376,14 +395,18 @@ pub fn claude_args(
 /// The structured output of a `--output-format json` reply: the envelope, or the last
 /// `result` message of a message list.
 pub fn claude_structured_output(stdout: &[u8]) -> Result<Value, GenerationError> {
-    let output: Value = serde_json::from_slice(stdout).map_err(|_| GenerationError::InvalidOutput)?;
+    let output: Value =
+        serde_json::from_slice(stdout).map_err(|_| GenerationError::InvalidOutput)?;
     let envelope = match &output {
         Value::Object(object) if object.contains_key("structured_output") => Some(&output),
         Value::Array(messages) => {
             if messages.iter().any(|message| !message["type"].is_string()) {
                 return Err(GenerationError::InvalidOutput);
             }
-            messages.iter().rev().find(|message| message["type"] == "result")
+            messages
+                .iter()
+                .rev()
+                .find(|message| message["type"] == "result")
         }
         _ => return Err(GenerationError::InvalidOutput),
     };
@@ -415,9 +438,10 @@ pub async fn run_claude(
         } else {
             None
         };
-        let cwd = title_directory
-            .as_ref()
-            .map_or_else(|| request.cwd.clone(), |directory| directory.path().to_path_buf());
+        let cwd = title_directory.as_ref().map_or_else(
+            || request.cwd.clone(),
+            |directory| directory.path().to_path_buf(),
+        );
         let attempt = |persistence: bool| {
             let mut options = process(
                 &run.program,
@@ -479,7 +503,16 @@ mod tests {
         ]);
         assert_eq!(
             codex_exec_launch_args(&argv),
-            strings(&["-c", "model=x", "--profile", "work", "--oss", "--enable=foo", "--local-provider", "ollama"])
+            strings(&[
+                "-c",
+                "model=x",
+                "--profile",
+                "work",
+                "--oss",
+                "--enable=foo",
+                "--local-provider",
+                "ollama"
+            ])
         );
         assert_eq!(
             codex_mcp_list_launch_args(&argv),
@@ -496,11 +529,26 @@ mod tests {
             is_legacy,
         };
         let models = vec![model("gpt-old", false, true), model("gpt-5", true, false)];
-        assert_eq!(resolve_codex_model("gpt-5", &models, &[]), ("gpt-5".into(), false));
-        assert_eq!(resolve_codex_model("openai.gpt-5", &models, &[]), ("gpt-5".into(), false));
-        assert_eq!(resolve_codex_model("mine", &models, &["mine".into()]), ("mine".into(), false));
-        assert_eq!(resolve_codex_model("gpt-6-luna", &models, &[]), ("gpt-5".into(), true));
-        assert_eq!(resolve_codex_model("gpt-6-luna", &[], &[]), ("gpt-6-luna".into(), false));
+        assert_eq!(
+            resolve_codex_model("gpt-5", &models, &[]),
+            ("gpt-5".into(), false)
+        );
+        assert_eq!(
+            resolve_codex_model("openai.gpt-5", &models, &[]),
+            ("gpt-5".into(), false)
+        );
+        assert_eq!(
+            resolve_codex_model("mine", &models, &["mine".into()]),
+            ("mine".into(), false)
+        );
+        assert_eq!(
+            resolve_codex_model("gpt-6-luna", &models, &[]),
+            ("gpt-5".into(), true)
+        );
+        assert_eq!(
+            resolve_codex_model("gpt-6-luna", &[], &[]),
+            ("gpt-6-luna".into(), false)
+        );
     }
 
     #[test]
@@ -528,7 +576,9 @@ mod tests {
         assert!(investigating.contains(&CLAUDE_INVESTIGATION_DENIED.to_owned()));
         assert!(!investigating.contains(&NO_SESSION_PERSISTENCE.to_owned()));
         assert_eq!(
-            claude_structured_output(br#"[{"type":"system"},{"type":"result","structured_output":{"title":"x"}}]"#),
+            claude_structured_output(
+                br#"[{"type":"system"},{"type":"result","structured_output":{"title":"x"}}]"#
+            ),
             Ok(serde_json::json!({"title":"x"}))
         );
         assert_eq!(

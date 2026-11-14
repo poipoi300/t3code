@@ -101,6 +101,12 @@ fn scope_label(label: &ScopeLabel) -> String {
     }
 }
 
+thread_local! {
+    /// Without the URL service the settings address (scope and anchor) lives here: the frozen
+    /// router rebuilds the shell per route, and the address must outlive that, as the URL does.
+    static LOCAL_ADDRESS: std::cell::RefCell<(SettingsScopeSearch, String)> = Default::default();
+}
+
 /// Where the settings route reads and writes its address: the URL service when the app has
 /// one, else the navigator with this route's own search and hash.
 #[derive(Clone, Copy)]
@@ -166,9 +172,13 @@ impl SettingsLocation {
                 )));
             }
             None => batch(|| {
-                if let Some(search) = search {
-                    self.local_search.set(search.clone());
-                }
+                let search = search
+                    .cloned()
+                    .unwrap_or_else(|| self.local_search.get_untracked());
+                LOCAL_ADDRESS.with(|address| {
+                    *address.borrow_mut() = (search.clone(), hash.to_owned());
+                });
+                self.local_search.set(search);
                 self.local_hash.set(hash.to_owned());
                 if self.nav.top() != Route::Settings(page) {
                     self.nav.open(Route::Settings(page));
@@ -449,8 +459,8 @@ fn settings_route_layout(page: SettingsPage) -> impl IntoElement {
     let location = SettingsLocation {
         urls: use_context::<UrlState>(),
         nav: navigator(),
-        local_search: signal(SettingsScopeSearch::default()),
-        local_hash: signal(String::new()),
+        local_search: signal(LOCAL_ADDRESS.with(|address| address.borrow().0.clone())),
+        local_hash: signal(LOCAL_ADDRESS.with(|address| address.borrow().1.clone())),
     };
     // beforeLoad: an old settings link's anchor finds the page its row moved to.
     effect(move || {
@@ -643,7 +653,7 @@ fn page_content(page: SettingsPage) -> AnyElement {
     }
 }
 
-/// `SettingsScopeBoundary` without its search-target notices (SET-SEARCH's remaining work).
+/// `SettingsScopeBoundary`.
 fn settings_scope_boundary(context: SettingsContext) -> impl IntoElement {
     let page = context.page;
     let blocked = computed(move || {
@@ -671,15 +681,80 @@ fn settings_scope_boundary(context: SettingsContext) -> impl IntoElement {
             }
         }
     });
-    dynamic(move || match blocked.get() {
-        Some(message) => settings_page_container_plain(
-            text(message)
-                .app_class(tw("text-sm text-muted-foreground"))
-                .into_element(),
-        )
-        .into_element(),
-        None => untracked(|| page_content(page)),
+    let notice = computed(move || {
+        let target = context.target_id();
+        context.view().and_then(|view| {
+            t3_client::services::settings::search::search_target_notice(&view, &target)
+        })
+    });
+    dynamic(move || {
+        if let Some(notice) = notice.get() {
+            return untracked(|| settings_scope_notice(context, notice).into_element());
+        }
+        match blocked.get() {
+            Some(message) => settings_page_container_plain(
+                text(message)
+                    .app_class(tw("text-sm text-muted-foreground"))
+                    .into_element(),
+            )
+            .into_element(),
+            None => untracked(|| page_content(page)),
+        }
     })
+}
+
+/// Port of SettingsScopeNotice.tsx: the scopes that own a search target, as a page.
+fn settings_scope_notice(
+    context: SettingsContext,
+    notice: t3_client::services::settings::search::ScopeNotice,
+) -> impl IntoElement {
+    let page = context.page;
+    let mut groups = view().app_class(tw("flex flex-col gap-4"));
+    for group in notice.groups.iter().cloned() {
+        let mut rows = view();
+        for (index, choice) in group.choices.into_iter().enumerate() {
+            let target_id = notice.target_id.clone();
+            let label = if choice.label_is_key {
+                Text::client_key(choice.label.clone()).resolve().to_string()
+            } else {
+                choice.label.clone()
+            };
+            let search = choice.search.clone();
+            rows = rows.child(
+                nsh_base::button()
+                    .accessibility_label(Some(SharedString::from(label.clone())))
+                    .on_press(move || context.location.navigate(page, Some(&search), &target_id))
+                    .app_class(tw(&cn([
+                        Some("flex w-full min-w-0 cursor-pointer flex-row items-center gap-3 px-3 py-3 text-left outline-none hover:bg-accent/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:px-4"),
+                        (index > 0).then_some("border-t border-border/50"),
+                    ])))
+                    .child(
+                        view()
+                            .app_class(tw("min-w-0 flex-1"))
+                            .child(text(label).number_of_lines(1u32).app_class(tw("block truncate text-sm font-medium")))
+                            .child((!choice.secondary.is_empty()).then(|| {
+                                text(choice.secondary.clone())
+                                    .number_of_lines(1u32)
+                                    .app_class(tw("block truncate text-xs text-muted-foreground"))
+                            })),
+                    )
+                    .child(icon(Icon::ChevronRight, 16.0, move || palette().muted_foreground)),
+            );
+        }
+        groups = groups.child(match group.title {
+            Some(title) => settings_section("", Text::content(title), rows).into_element(),
+            None => settings_group(rows).into_element(),
+        });
+    }
+    settings_page_container(
+        view()
+            .app_class(tw("flex flex-col gap-3"))
+            .child(
+                text(settings_text(&notice.message))
+                    .app_class(tw("px-3 text-sm text-muted-foreground sm:px-4")),
+            )
+            .child(groups),
+    )
 }
 
 /// `RestoreDeviceDefaultsButton` (`useSettingsRestore`, without the theme store's labels).
@@ -1014,15 +1089,58 @@ pub fn settings_page_container(children: impl IntoElement) -> impl IntoElement {
     )
 }
 
+/// `useSettingsSearchTarget`: when a search jump names this anchor, scroll it to the middle,
+/// focus it and mark it until it loses focus (the web's pulse ends on blur; this is static).
+fn search_target(context: SettingsContext, id: &'static str) -> (ElementRef, Signal<bool>) {
+    let target = element_ref();
+    let highlighted = signal(false);
+    if !id.is_empty() {
+        target.on_focus_out(move || highlighted.set(false));
+    }
+    let _ = context;
+    (target, highlighted)
+}
+
+fn reveal_if_target(
+    context: SettingsContext,
+    id: &'static str,
+    target: ElementRef,
+    highlighted: Signal<bool>,
+) {
+    if id.is_empty() || untracked(|| context.target_id()) != id {
+        return;
+    }
+    target.reveal(
+        nsh_core::RevealOptions::default()
+            .vertical(nsh_core::ScrollAlignment::Center)
+            .animated(!reduce_motion()),
+    );
+    target.focus();
+    if !reduce_motion() {
+        highlighted.set(true);
+    }
+    context.clear_target();
+}
+
 /// `SettingsSection` (grouped variant) with its `SettingsGroup`.
 pub fn settings_section(
     id: &'static str,
     title: Text,
     children: impl IntoElement,
 ) -> impl IntoElement {
+    let context = use_settings();
+    let (target, highlighted) = search_target(context, id);
     view()
         .test_id(id)
-        .app_class(tw("flex flex-col gap-2.5"))
+        .element_ref(&target)
+        .focusable(!id.is_empty())
+        .on_layout(move |_: &Bounds<Points>| reveal_if_target(context, id, target, highlighted))
+        .app_class(move || {
+            Some(tw(&cn([
+                Some("flex flex-col gap-2.5 rounded-xl outline-none"),
+                highlighted.get().then_some("ring-2 ring-primary/40"),
+            ])))
+        })
         .child(
             view()
                 .app_class(tw("flex min-h-7 flex-row items-start justify-between gap-4 px-3 sm:px-4"))
@@ -1211,12 +1329,17 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
     let locked = move || managed.with(|m| m.is_some()) || managed_by.with(Option::is_some);
     let reset = reset.map(Rc::new);
     let title_text = title.clone();
+    let (target, highlighted) = search_target(context, id);
     view()
         .test_id(id)
+        .element_ref(&target)
+        .focusable(!id.is_empty())
+        .on_layout(move |_: &Bounds<Points>| reveal_if_target(context, id, target, highlighted))
         .app_class(move || {
             Some(tw(&cn([
-                Some("rounded-xl px-3 sm:px-4 py-3"),
+                Some("rounded-xl px-3 sm:px-4 py-3 outline-none"),
                 divided.then_some("rounded-none border-t border-border/50"),
+                highlighted.get().then_some("ring-2 ring-inset ring-primary/40"),
             ])))
         })
         .child(
