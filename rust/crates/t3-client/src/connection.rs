@@ -29,7 +29,8 @@ pub mod saved_environment;
 pub mod socket;
 pub mod threads;
 pub use runtime::{
-    ConnectedClient, ConnectionTask, ServerCredential, connect, connect_into, supervise_saved,
+    ConnectedClient, ConnectionTask, LearnRoutes, ServerCredential, connect, connect_into,
+    supervise_saved,
 };
 pub use threads::ThreadLease;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -371,7 +371,8 @@ fn signed_upload_persists_reference_before_dispatch_and_verifies_it_after_restar
             assert!(requests.try_recv().is_err());
             let http = platform.http_requests();
             assert_eq!(http.len(), 1);
-            assert_eq!(http[0].method, "PUT");
+            // The upload route is POST only, on both servers.
+            assert_eq!(http[0].method, "POST");
             assert_eq!(http[0].url, "https://remote.example/api/upload/signed");
             assert_eq!(http[0].body, vec![0]);
             assert_eq!(http[0].credentials, t3_client::platform::Credentials::Omit);

@@ -56,6 +56,38 @@ The convenience entry point connects an explicit HTTP(S) origin using bearer or 
 authorization. SSH provisioning and managed-relay discovery use their existing lower-level
 services rather than this origin-based entry point.
 
+### Learned direct routes
+
+A saved environment's config can announce direct addresses (`directEndpoints`). The runtime
+saves them as `learned:` routes, under the registry lease, with the rules of TypeScript's
+`mergeLearnedRoutes` (`connection::merge_learned_routes`). The announcing server is not
+trusted, so:
+
+- An announced address is used only for the environment that announced it. Its id names that
+  environment and the credential it borrows, and it is removed with the environment, or with
+  the route it borrowed from. A learned route also does not revoke routing trust.
+- It never widens where that environment's credential goes:
+  - only `http(s)`;
+  - plain HTTP only off an HTTPS page;
+  - never a loopback address;
+  - a bearer paired over HTTPS, loopback or the tailnet is never sent over plain HTTP outside
+    the tailnet.
+  
+  Before any credential is sent, the address must serve the same environment id in
+  `/.well-known/t3/environment` (`authorize_bearer`, `authorize_dpop`).
+- Inherited from TypeScript (auth review, finding 6): a bearer that was itself paired over plain
+  HTTP on a LAN can be lent to a learned plain-HTTP LAN address. On another network, a host at
+  that address that echoes the public environment id receives it. There is no certificate or
+  key continuity check, in either client.
+
+`client_runtime::announced_direct_addresses_are_learned_for_that_environment_except_unsafe_ones`
+covers the refusals.
+
+Uploads go to the current session's own address, the one the connection was authorised at:
+the paired address, the endpoint the relay named, or the local end of the SSH tunnel. The
+server signs each upload path (attachment, size, expiry). The client holds no upload key and
+sends no credential with the upload.
+
 ## Building screens on this crate
 
 This section is for the UI engineers. A screen reads the store through shared views, derives

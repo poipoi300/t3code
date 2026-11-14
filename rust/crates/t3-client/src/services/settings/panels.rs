@@ -468,9 +468,196 @@ pub fn restore_defaults_patch() -> SettingsPatch {
         .collect()
 }
 
+/// `reconcileSnoozeDraft`: reads a server value against the editor's writes still in flight.
+/// Matching one acknowledges it and every earlier write (`Some(remaining)`); anything else came
+/// `MAX_SNOOZE_PRESETS` and `MAX_SNOOZE_PRESET_MINUTES`.
+pub const MAX_SNOOZE_PRESETS: usize = 8;
+pub const MAX_SNOOZE_PRESET_MINUTES: i64 = 30 * 24 * 60;
+
+/// `UNIT_MINUTES`.
+pub fn snooze_unit_minutes(unit: &str) -> i64 {
+    match unit {
+        "days" => 24 * 60,
+        "hours" => 60,
+        _ => 1,
+    }
+}
+
+/// `splitMinutes`: the largest whole unit.
+pub fn split_snooze_minutes(minutes: i64) -> (i64, &'static str) {
+    if minutes % (24 * 60) == 0 {
+        (minutes / (24 * 60), "days")
+    } else if minutes % 60 == 0 {
+        (minutes / 60, "hours")
+    } else {
+        (minutes, "minutes")
+    }
+}
+
+fn snooze_setting(value: Value) -> Option<t3_contracts::settings::SnoozePresetSetting> {
+    serde_json::from_value(value).ok()
+}
+
+/// `nextCandidate`: the first of `ADD_CANDIDATES` not already listed, else one hour.
+pub fn next_snooze_candidate(
+    presets: &[t3_contracts::settings::SnoozePresetSetting],
+) -> t3_contracts::settings::SnoozePresetSetting {
+    use crate::thread_views::shelves::snooze_preset_id;
+    let used: Vec<String> = presets.iter().map(snooze_preset_id).collect();
+    let mut candidates = ServerSettings::default().snooze_presets;
+    candidates.extend(
+        [
+            serde_json::json!({"kind": "after", "minutes": 30}),
+            serde_json::json!({"kind": "at", "day": "saturday", "time": "09:00"}),
+            serde_json::json!({"kind": "after", "minutes": 24 * 60}),
+        ]
+        .into_iter()
+        .filter_map(snooze_setting),
+    );
+    candidates
+        .into_iter()
+        .find(|candidate| !used.contains(&snooze_preset_id(candidate)))
+        .or_else(|| snooze_setting(serde_json::json!({"kind": "after", "minutes": 60})))
+        .expect("a valid snooze preset")
+}
+
+/// `sameSnoozePresets`: row order is display order only.
+pub fn same_snooze_presets(
+    left: &[t3_contracts::settings::SnoozePresetSetting],
+    right: &[t3_contracts::settings::SnoozePresetSetting],
+) -> bool {
+    use crate::thread_views::shelves::snooze_preset_id;
+    let ids = |presets: &[t3_contracts::settings::SnoozePresetSetting]| {
+        let mut ids: Vec<String> = presets.iter().map(snooze_preset_id).collect();
+        ids.sort();
+        ids
+    };
+    ids(left) == ids(right)
+}
+
+/// `withWhen`: a preset moved to another "When", keeping the other kind's last value.
+pub fn snooze_with_when(
+    preset: &t3_contracts::settings::SnoozePresetSetting,
+    when: &str,
+    memory_minutes: i64,
+    memory_time: &str,
+) -> Option<t3_contracts::settings::SnoozePresetSetting> {
+    let current = serde_json::to_value(preset).ok()?;
+    if when == "after" {
+        return if current["kind"] == "after" {
+            Some(preset.clone())
+        } else {
+            snooze_setting(serde_json::json!({"kind": "after", "minutes": memory_minutes}))
+        };
+    }
+    let time = if current["kind"] == "at" {
+        current["time"].as_str().unwrap_or(memory_time).to_owned()
+    } else {
+        memory_time.to_owned()
+    };
+    snooze_setting(serde_json::json!({"kind": "at", "day": when, "time": time}))
+}
+
+/// from elsewhere and replaces the draft (`None`).
+pub fn reconcile_snooze_draft<T: PartialEq + Clone>(pending: &[T], saved: &T) -> Option<Vec<T>> {
+    pending
+        .iter()
+        .position(|snapshot| snapshot == saved)
+        .map(|acknowledged| pending[acknowledged + 1..].to_vec())
+}
+
+/// `sortSnoozeRows`: soonest wake first, options with no wake right now (a passed "Today")
+/// last; ties keep their order.
+pub fn sort_snooze_rows<K: Clone>(
+    presets: &[t3_contracts::settings::SnoozePresetSetting],
+    keys: &[K],
+    calendar: &crate::thread_views::shelves::SnoozeCalendar<'_>,
+) -> (Vec<t3_contracts::settings::SnoozePresetSetting>, Vec<K>) {
+    use crate::thread_views::shelves::resolve_snooze_preset;
+    let mut order: Vec<(usize, Option<String>)> = presets
+        .iter()
+        .enumerate()
+        .map(|(index, preset)| (index, resolve_snooze_preset(preset, calendar).map(|p| p.snoozed_until)))
+        .collect();
+    order.sort_by(|a, b| match (&a.1, &b.1) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (Some(a), Some(b)) => a.cmp(b),
+    });
+    (
+        order.iter().map(|(index, _)| presets[*index].clone()).collect(),
+        order.iter().map(|(index, _)| keys[*index].clone()).collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snooze_editor_helpers_follow_the_web() {
+        assert_eq!(split_snooze_minutes(2 * 1440), (2, "days"));
+        assert_eq!(split_snooze_minutes(90), (90, "minutes"));
+        assert_eq!(split_snooze_minutes(120), (2, "hours"));
+        let defaults = ServerSettings::default().snooze_presets;
+        let next = next_snooze_candidate(&defaults);
+        assert!(!defaults.contains(&next), "the first unused candidate");
+        let mut reversed = defaults.clone();
+        reversed.reverse();
+        assert!(same_snooze_presets(&defaults, &reversed));
+        let at: t3_contracts::settings::SnoozePresetSetting =
+            serde_json::from_value(serde_json::json!({"kind": "at", "day": "today", "time": "18:00"})).expect("preset");
+        let after = snooze_with_when(&at, "after", 45, "09:00").expect("after");
+        assert_eq!(serde_json::to_value(&after).unwrap_or_default(), serde_json::json!({"kind": "after", "minutes": 45}));
+        let friday = snooze_with_when(&at, "friday", 45, "09:00").expect("friday");
+        assert_eq!(serde_json::to_value(&friday).unwrap_or_default()["time"], "18:00");
+        assert!(snooze_with_when(&at, "someday", 45, "09:00").is_none());
+    }
+
+    #[test]
+    fn snooze_drafts_keep_our_echoes_and_adopt_values_from_elsewhere() {
+        assert_eq!(reconcile_snooze_draft(&["a", "b"], &"a"), Some(vec!["b"]));
+        assert_eq!(reconcile_snooze_draft(&["b"], &"b"), Some(vec![]));
+        assert_eq!(reconcile_snooze_draft(&["b"], &"c"), None);
+        // "a" was written and acknowledged before; seeing it again means someone restored it.
+        assert_eq!(reconcile_snooze_draft::<&str>(&[], &"a"), None);
+        // Every earlier write is acknowledged when a later one echoes.
+        assert_eq!(reconcile_snooze_draft(&["a", "b", "a"], &"b"), Some(vec!["a"]));
+    }
+
+    #[test]
+    fn snooze_rows_sort_by_wake_and_put_a_passed_today_option_last() {
+        use crate::thread_views::shelves::SnoozeCalendar as Calendar;
+        use t3_contracts::settings::SnoozePresetSetting;
+        // 16:00 on a Thursday in a fixed UTC zone: 20 hours wakes tomorrow and 09:00 has passed.
+        let now = 1_793_232_000_000_i64 + 16 * 3_600_000;
+        let day = 86_400_000_i64;
+        let local_wake = |days: i64, hour: u32, minute: u32| {
+            Some(now.div_euclid(day) * day + days * day + i64::from(hour) * 3_600_000 + i64::from(minute) * 60_000)
+        };
+        let same_day = |a: i64, b: i64| a.div_euclid(day) == b.div_euclid(day);
+        let format = |ms: i64| ms.to_string();
+        let iso = |ms: i64| crate::time::iso_from_epoch_ms(ms as u64);
+        let calendar = Calendar {
+            now_ms: now,
+            weekday: 4,
+            local_wake: &local_wake,
+            same_day: &same_day,
+            format_time: &format,
+            short_weekday: &format,
+            to_iso: &iso,
+        };
+        let presets: Vec<SnoozePresetSetting> = serde_json::from_value(serde_json::json!([
+            {"kind": "after", "minutes": 1200},
+            {"kind": "at", "day": "today", "time": "09:00"},
+            {"kind": "at", "day": "today", "time": "18:00"},
+            {"kind": "after", "minutes": 60}
+        ]))
+        .expect("presets");
+        let (_, keys) = sort_snooze_rows(&presets, &["20h", "passed", "evening", "1h"], &calendar);
+        assert_eq!(keys, vec!["1h", "evening", "20h", "passed"]);
+    }
 
     #[test]
     fn grouping_toggle_restores_the_last_enabled_mode() {

@@ -157,6 +157,8 @@ pub struct ServerState {
     pub undecryptable: Option<String>,
     /// With `undecryptable`, only records whose id contains this.
     pub undecryptable_record: Option<String>,
+    /// `directEndpoints` the server announces in its config.
+    pub direct_endpoints: Option<Value>,
     /// The server ends each thread stream cleanly after its snapshot.
     pub thread_streams_end: bool,
     pub rpc_script: BTreeMap<String, std::collections::VecDeque<Result<Value, Value>>>,
@@ -642,8 +644,12 @@ impl Handler for FakeHandler {
         } else if tag == self::tag::<WsServerProbeRpc>() {
             HandlerOutput::Unary(async { Exit::success(json!({})) }.boxed_local())
         } else if tag == self::tag::<WsSubscribeServerConfigRpc>() {
+            let mut config = config(&environment);
+            if let Some(endpoints) = server.state.borrow().direct_endpoints.clone() {
+                config["directEndpoints"] = endpoints;
+            }
             live(
-                vec![json!({"version":1,"type":"snapshot","config":config(&environment)})],
+                vec![json!({"version":1,"type":"snapshot","config":config})],
                 (),
             )
         } else if tag == self::tag::<WsOrchestrationV2SubscribeShellRpc>() {

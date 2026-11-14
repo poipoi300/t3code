@@ -36,12 +36,21 @@ pub enum ServerCredential {
     PairingToken(Sensitive<String>),
 }
 pub type ConnectionTask = LocalBoxFuture<'static, Result<(), ClientError>>;
+/// Saves the direct addresses an environment announced over its active route and returns the
+/// environment's routes when they changed (TypeScript's `learnRoutes` registry option). Called
+/// with the environment, the active route's id and the announced endpoints.
+pub type LearnRoutes = Rc<
+    dyn Fn(EnvironmentId, String, Vec<ReportedEndpoint>) -> LocalBoxFuture<'static, Option<Vec<Route>>>,
+>;
 
 struct Owner {
     environment: EnvironmentId,
     store: ClientStore,
     events: mpsc::UnboundedSender<ConnectionEvent>,
     endpoint: RefCell<Option<SessionEndpoint>>,
+    /// The current session's HTTP address: the paired address, the endpoint the relay named,
+    /// or the local end of the SSH tunnel.
+    http_base: RefCell<Option<String>>,
     store_session: Cell<Option<Generation>>,
     threads: Rc<super::threads::ThreadDemand>,
     abort: AbortHandle,
@@ -77,6 +86,11 @@ impl ConnectedClient {
     }
     pub fn session(&self) -> Option<SessionEndpoint> {
         self.owner.endpoint.borrow().clone()
+    }
+    /// Where the current session's HTTP requests (signed uploads, assets) go, as TypeScript's
+    /// prepared connection `httpBaseUrl`; `None` while there is no session.
+    pub fn http_base_url(&self) -> Option<String> {
+        self.owner.http_base.borrow().clone()
     }
     pub fn state(&self) -> ConnectionState {
         self.store()
@@ -259,6 +273,7 @@ pub async fn connect_into<P: Platform + Clone + 'static>(
         shared,
         authorization,
         actions,
+        None,
     );
     let initialized = {
         match futures::future::select(client.wait_ready(false).boxed_local(), task.as_mut()).await {
@@ -278,11 +293,14 @@ pub async fn connect_into<P: Platform + Clone + 'static>(
 ///
 /// `authorization` is shared by every environment of one client, as TypeScript's
 /// `RemoteEnvironmentAuthorization`; a relay route needs one built with a signer and relay.
+///
+/// `learn`, when given, saves the direct addresses the environment announces in its config.
 pub async fn supervise_saved<P: Platform + Clone + 'static>(
     platform: P,
     store: ClientStore,
     authorization: RemoteAuthorization,
     environment: &EnvironmentId,
+    learn: Option<LearnRoutes>,
 ) -> Result<(ConnectedClient, ConnectionTask), ClientError> {
     let shared: Rc<dyn Platform> = Rc::new(platform.clone());
     let mut registry = EnvironmentRegistry::load(
@@ -321,6 +339,7 @@ pub async fn supervise_saved<P: Platform + Clone + 'static>(
         shared,
         authorization,
         actions,
+        learn,
     ))
 }
 
@@ -332,8 +351,10 @@ fn start<P: Platform + Clone + 'static>(
     shared: Rc<dyn Platform>,
     authorization: RemoteAuthorization,
     actions: VecDeque<ConnectionAction>,
+    learn: Option<LearnRoutes>,
 ) -> (ConnectedClient, ConnectionTask) {
     let (events, receiver) = mpsc::unbounded();
+    let (learned, learned_routes) = mpsc::unbounded();
     let (frames, frame_receiver) = mpsc::channel(1);
     let (abort, registration) = AbortHandle::new_pair();
     let (threads, thread_changes) = super::threads::ThreadDemand::new();
@@ -343,6 +364,7 @@ fn start<P: Platform + Clone + 'static>(
         store: store.clone(),
         events: events.clone(),
         endpoint: RefCell::new(None),
+        http_base: RefCell::new(None),
         store_session: Cell::new(None),
         threads: threads.clone(),
         abort,
@@ -369,6 +391,9 @@ fn start<P: Platform + Clone + 'static>(
         threads,
         thread_changes,
         follows: Default::default(),
+        learn,
+        learned,
+        learned_routes,
     };
     runtime.publish();
     let task: ConnectionTask = async move {
@@ -378,6 +403,23 @@ fn start<P: Platform + Clone + 'static>(
     }
     .boxed_local();
     (ConnectedClient { owner }, task)
+}
+
+/// The direct addresses a server announces in its config, as `ReportedEndpoint`s.
+fn reported_endpoints(config: &t3_contracts::server::ServerConfig) -> Option<Vec<ReportedEndpoint>> {
+    let endpoints = config.direct_endpoints.as_ref()?;
+    Some(
+        endpoints
+            .0
+            .iter()
+            .map(|endpoint| ReportedEndpoint {
+                http_base_url: endpoint.http_base_url.0.clone(),
+                kind: serde_json::to_value(&endpoint.kind)
+                    .ok()
+                    .and_then(|kind| kind.as_str().map(str::to_owned)),
+            })
+            .collect(),
+    )
 }
 
 fn auth_failure(error: crate::authorization::AuthorizationError) -> ClientError {
@@ -448,6 +490,10 @@ struct Runtime<P: Platform + Clone + 'static> {
     threads: Rc<super::threads::ThreadDemand>,
     thread_changes: mpsc::UnboundedReceiver<()>,
     follows: super::threads::ThreadFollows,
+    learn: Option<LearnRoutes>,
+    /// Routes the config job learned, by the session generation that announced them.
+    learned: mpsc::UnboundedSender<(u64, Vec<Route>)>,
+    learned_routes: mpsc::UnboundedReceiver<(u64, Vec<Route>)>,
 }
 impl<P: Platform + Clone + 'static> Drop for Runtime<P> {
     fn drop(&mut self) {
@@ -523,6 +569,7 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
         }
         if let Some(owner) = self.owner.upgrade() {
             owner.endpoint.borrow_mut().take();
+            owner.http_base.borrow_mut().take();
             owner.store_session.set(None);
         }
     }
@@ -679,6 +726,11 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
         let environment = self.environment.clone();
         let endpoint = lease.session.endpoint();
         let platform = self.platform.clone();
+        let learn = self.learn.clone().zip(
+            self.context
+                .as_ref()
+                .map(|context| (context.route_id.clone(), self.learned.clone())),
+        );
         self.schedule(
             Key::Config(generation.0),
             async move {
@@ -695,6 +747,7 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
                         Default::default(),
                     );
                 let mut current = None;
+                let mut announced = None;
                 while let Some(event) = stream.next().await {
                     let event = match event {
                         Ok(event) => event,
@@ -711,6 +764,18 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
                                 next.config.as_ref().clone(),
                             ) {
                                 return Outcome::Ended(Err(ClientError::Cancelled));
+                            }
+                            let reported = reported_endpoints(&next.config);
+                            if let Some((learn, (route_id, learned))) = &learn
+                                && let Some(reported) = reported
+                                && announced.as_ref() != Some(&reported)
+                            {
+                                announced = Some(reported.clone());
+                                if let Some(routes) =
+                                    learn(environment.clone(), route_id.clone(), reported).await
+                                {
+                                    let _ = learned.unbounded_send((generation.0, routes));
+                                }
                             }
                             current = Some(next);
                         }
@@ -739,6 +804,9 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
         }
         if let Some(owner) = self.owner.upgrade() {
             owner.endpoint.replace(Some(context.session.endpoint()));
+            owner
+                .http_base
+                .replace(Some(context.prepared.http_base_url.clone()));
         }
         self.feed(ConnectionEvent::ConfigReady { generation })?;
         self.follow_shell();
@@ -963,6 +1031,7 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
                 Job(Option<(Key, Option<Outcome>)>),
                 Threads,
                 Timer,
+                Learned(Option<(u64, Vec<Route>)>),
             }
             let deadline = self
                 .registry
@@ -992,13 +1061,31 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
                 let frame = self.frames.next().fuse();
                 // The client keeps the sender alive, so this ends only after the client dropped.
                 let threads = self.thread_changes.next().fuse();
-                futures::pin_mut!(timer, host, job, event, frame, threads);
-                futures::select_biased! { event = event => Input::Event(event), job = job => Input::Job(job), frame = frame => Input::Event(frame), _ = threads => Input::Threads, host = host => Input::Host(host), _ = timer => Input::Timer }
+                let learned = self.learned_routes.next().fuse();
+                futures::pin_mut!(timer, host, job, event, frame, threads, learned);
+                futures::select_biased! { event = event => Input::Event(event), job = job => Input::Job(job), frame = frame => Input::Event(frame), _ = threads => Input::Threads, learned = learned => Input::Learned(learned), host = host => Input::Host(host), _ = timer => Input::Timer }
             };
             match input {
                 Input::Event(Some(event)) => self.feed(event)?,
                 Input::Event(None) => self.feed(ConnectionEvent::Disconnect)?,
                 Input::Timer => self.feed(ConnectionEvent::Tick)?,
+                Input::Learned(None) => {}
+                Input::Learned(Some((generation, routes))) => {
+                    if self
+                        .context
+                        .as_ref()
+                        .is_some_and(|context| context.generation.0 == generation)
+                    {
+                        let change = self.registry.set_routes(
+                            &self.environment,
+                            routes,
+                            Time::from_platform(&self.platform),
+                        )?;
+                        self.pending
+                            .extend(change.actions.into_iter().map(|(_, action)| action));
+                        self.publish();
+                    }
+                }
                 Input::Host(None) => self.host_closed = true,
                 Input::Host(Some(event)) => {
                     let random = self.random()?;

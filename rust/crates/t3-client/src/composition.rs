@@ -15,8 +15,8 @@ use crate::{
         ConnectedClient, ConnectionDiagnosis, ConnectionFailure, ConnectionMode, ConnectionProfile,
         ConnectionState, ConnectionStores, ConnectionTask, ConnectionVia, DiagnosisInput,
         PairingInput, Phase, Route, ThreadLease, Time, prepare_pairing_registration,
-        prepare_ssh_registration, present_connection_diagnosis, runtime::session_failure,
-        supervise_saved,
+        prepare_ssh_registration, present_connection_diagnosis,
+        runtime::{LearnRoutes, session_failure, supervise_saved},
     },
     environment::{EnvironmentRegistration, EnvironmentRegistry},
     platform::{NetworkStatus, Platform},
@@ -1252,6 +1252,44 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         Ok(registry)
     }
 
+    /// Saves the direct addresses an environment announces, under the registry lease so it
+    /// cannot race a pairing or a removal. Weak, so a running driver does not keep the client
+    /// alive. A failure keeps the routes as they were, as TypeScript logs and goes on.
+    fn route_learner(&self) -> LearnRoutes {
+        let inner = Rc::downgrade(&self.inner);
+        Rc::new(move |environment, active_route, reported| {
+            let inner = inner.clone();
+            async move {
+                let this = Self {
+                    inner: inner.upgrade()?,
+                };
+                let _lease = this.inner.registry.lock().await;
+                // Plain HTTP is unusable from an HTTPS page (mixed content), as in TypeScript.
+                let https_page = this
+                    .inner
+                    .platform
+                    .app_url()
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|url| url.to_ascii_lowercase().starts_with("https:"));
+                let mut registry = this.load_registry().await.ok()?;
+                registry
+                    .learn_routes(
+                        &this.inner.platform,
+                        &environment,
+                        &active_route,
+                        &reported,
+                        !https_page,
+                    )
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            .boxed_local()
+        })
+    }
+
     /// Starts supervising a saved environment and lists it; the caller holds the registry lease.
     async fn start_saved(&self, id: &EnvironmentId) -> Result<(), ClientError> {
         let registry = self.load_registry().await?;
@@ -1275,6 +1313,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             self.inner.store.clone(),
             self.inner.authorization.clone(),
             id,
+            Some(self.route_learner()),
         )
         .await?;
         self.attach(

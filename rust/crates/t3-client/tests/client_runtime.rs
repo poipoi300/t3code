@@ -1265,3 +1265,85 @@ fn a_malformed_config_chunk_resubscribes_on_the_same_socket() {
     assert_eq!(harness.server().state.borrow().sockets_opened, 1);
     assert_eq!(client.environments()[0].state.phase, Phase::Connected);
 }
+
+#[test]
+fn announced_direct_addresses_are_learned_for_that_environment_except_unsafe_ones() {
+    // A learned route comes from the server's own config, so each announced address is checked
+    // as TypeScript's `mergeLearnedRoutes` does before it can carry this environment's token.
+    let mut harness = Harness::new(ENV);
+    harness.server().state.borrow_mut().direct_endpoints = Some(serde_json::json!([
+        // Loopback names whichever device opens it, never the server.
+        {"kind": "lan", "httpBaseUrl": "http://127.0.0.1:3773/"},
+        // Plain HTTP would carry a token that was paired over HTTPS.
+        {"kind": "lan", "httpBaseUrl": "http://192.168.1.20:3773/"},
+        {"kind": "lan", "httpBaseUrl": "ftp://192.168.1.20/"},
+        {"kind": "tailnet", "httpBaseUrl": "https://box.example.ts.net/"},
+    ]));
+    let client = paired(&mut harness);
+    harness.advance(1_000);
+    let platform = harness.platform.clone();
+    let routes = harness.run(async move {
+        let registry: EnvironmentRegistry<SessionEndpoint> = EnvironmentRegistry::load(
+            &platform,
+            NetworkStatus::Unknown,
+            Time::from_platform(&platform),
+        )
+        .await
+        .unwrap();
+        registry
+            .get(&environment(ENV))
+            .unwrap()
+            .registration()
+            .routes
+            .clone()
+    });
+    let paired_route = routes
+        .iter()
+        .find(|route| !route.id.starts_with("learned:"))
+        .unwrap()
+        .id
+        .clone();
+    let learned: Vec<_> = routes
+        .iter()
+        .filter(|route| route.id.starts_with("learned:"))
+        .collect();
+    assert_eq!(learned.len(), 1, "{routes:?}");
+    assert_eq!(learned[0].http_base, "https://box.example.ts.net/");
+    // It borrows the paired credential by id, for this environment only.
+    assert_eq!(
+        learned[0].id,
+        format!("learned:{ENV}:https://box.example.ts.net@{paired_route}")
+    );
+    let learned_id = learned[0].id.clone();
+    let platform = harness.platform.clone();
+    let id = learned_id.clone();
+    let profile = harness.run(async move {
+        t3_client::persistence::load_record::<serde_json::Value>(
+            &platform,
+            StorageArea::Secure,
+            &t3_client::platform::StorageKey::new("connection-profile", None, &id),
+            1,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .payload
+    });
+    assert_eq!(profile["learned"], true);
+    assert_eq!(profile["network"], "tailscale");
+    assert_eq!(profile["environmentId"], ENV);
+    // Removing the environment removes what it announced.
+    harness.run(client.remove(&environment(ENV))).unwrap();
+    harness.settle();
+    let platform = harness.platform.clone();
+    let left = harness.run(async move {
+        platform
+            .get(
+                StorageArea::Secure,
+                t3_client::platform::StorageKey::new("connection-profile", None, &learned_id),
+            )
+            .await
+            .unwrap()
+    });
+    assert_eq!(left, None);
+}

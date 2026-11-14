@@ -480,7 +480,7 @@ impl<P: Platform + Clone + 'static> EditorPicker<P> {
                     else {
                         return Ok(false);
                     };
-                    if picker.service.platform.open_url(url).await.is_err() {
+                    if picker.service.platform.open_editor_link(url).await.is_err() {
                         return Ok(false);
                     }
                     picker.select_editor(editor).await?;

@@ -37,6 +37,32 @@ pub fn safe_external_url(raw: &str, surface: ExternalUrlSurface) -> Option<Strin
     allowed.then(|| url.into())
 }
 
+/// A path an editor would read as UNC or a device (`//server`, `\\server`), checked after
+/// percent-decoding because the editor decodes it. On Windows it is opened over SMB and can
+/// send the user's NTLM credentials. Hardening beyond TypeScript, which accepts these.
+fn unc_or_device_path(url: &url::Url) -> bool {
+    let path = percent_encoding::percent_decode_str(url.path()).decode_utf8_lossy();
+    path.contains('\\') || path.get(1..).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The editor-link opener, apart from [`safe_external_url`] so that accepting editor links on
+/// the web never widens what an ordinary link may open. TypeScript's web client hands the remote
+/// editor links it builds (`buildRemoteOpenUrl`) to `location.assign`, outside `isWebUrl`; the
+/// desktop also opens local editor file links. A UNC or device path is refused first.
+pub fn safe_editor_link(raw: &str, surface: ExternalUrlSurface) -> Option<String> {
+    let url = url::Url::parse(raw).ok()?;
+    if !REMOTE_EDITOR_SCHEMES.contains(&url.scheme()) || unc_or_device_path(&url) {
+        return None;
+    }
+    let allowed = match surface {
+        ExternalUrlSurface::Desktop => remote_editor(&url) || local_editor_file(&url),
+        ExternalUrlSurface::Web => remote_editor(&url),
+        // The mobile app has no editor to hand a link to.
+        ExternalUrlSurface::Mobile => false,
+    };
+    allowed.then(|| url.into())
+}
+
 fn no_credentials(url: &url::Url) -> bool {
     url.username().is_empty() && url.password().is_none()
 }
@@ -102,9 +128,7 @@ fn local_editor_file(url: &url::Url) -> bool {
         && host_is(url, "file")
         && no_credentials(url)
         && url.path().len() > 1
-        // Beyond TypeScript: `//server/share` is a UNC path, which the editor reads over SMB on
-        // Windows and so can send the user's NTLM credentials to that server.
-        && !url.path()[1..].starts_with(['/', '\\'])
+        && !unc_or_device_path(url)
 }
 
 #[cfg(test)]
@@ -140,10 +164,39 @@ mod tests {
         ),
         ("jetbrains://gateway:1/ssh/environment?h=box", false, false),
         ("vscode://file//server/share/a.rs", false, false),
+        ("vscode://file/%5C%5Cserver/share/a.rs", false, false),
         ("vscode://file/\\\\server\\share\\a.rs", false, false),
         ("vscode://file/C:/Users/me/a.rs:3", true, false),
         ("not a url", false, false),
     ];
+
+    #[test]
+    fn editor_links_open_only_editor_links_and_never_a_unc_path() {
+        use super::safe_editor_link;
+        for (address, desktop, web) in [
+            ("vscode://vscode-remote/ssh-remote+box/home/me", true, true),
+            ("zed://ssh/me@box/home/me", true, true),
+            ("jetbrains://gateway/ssh/environment?h=box", true, true),
+            ("cursor://file/home/me/a.rs:3", true, false),
+            // Not editor links: the ordinary opener's business, never this one's.
+            ("https://example.com/", false, false),
+            ("javascript:alert(1)", false, false),
+            ("file:///etc/passwd", false, false),
+            ("grokbot://app/v1/prompt?text=hi", false, false),
+            // UNC and device paths, plain or percent-encoded, local or remote.
+            ("vscode://file//server/share/a.rs", false, false),
+            ("vscode://file/%5C%5Cserver/share", false, false),
+            ("vscode://file/%2F%2Fserver/share", false, false),
+            ("vscode://vscode-remote//server/share", false, false),
+            ("vscode://vscode-remote/ssh-remote+box/a\\b", false, false),
+            ("vscode://user:pw@vscode-remote/ssh-remote+box/home", false, false),
+            ("vscode://vscode-remote:22/ssh-remote+box/home", false, false),
+        ] {
+            assert_eq!(safe_editor_link(address, Desktop).is_some(), desktop, "{address}");
+            assert_eq!(safe_editor_link(address, Web).is_some(), web, "{address}");
+            assert!(safe_editor_link(address, Mobile).is_none(), "{address}");
+        }
+    }
 
     #[test]
     fn each_surface_opens_only_what_its_typescript_client_opens() {

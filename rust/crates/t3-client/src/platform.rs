@@ -233,6 +233,9 @@ pub enum HostAction {
     ClipboardWrite(Vec<MimeData>),
     Haptic(Haptic),
     OpenUrl(String),
+    /// A remote editor link (desktop: or a local editor file link), already checked by
+    /// `external_links::safe_editor_link`; the web host navigates to it as TypeScript does.
+    OpenEditorLink(String),
     PickResources {
         mime: Vec<String>,
         multiple: bool,
@@ -362,6 +365,7 @@ impl std::fmt::Debug for HostAction {
             Self::ClipboardWrite(_) => "ClipboardWrite",
             Self::Haptic(_) => "Haptic",
             Self::OpenUrl(_) => "OpenUrl",
+            Self::OpenEditorLink(_) => "OpenEditorLink",
             Self::PickResources { .. } => "PickResources",
             Self::ReadResource { .. } => "ReadResource",
             Self::WriteResource { .. } => "WriteResource",
@@ -505,6 +509,22 @@ pub trait Platform: Storage {
     /// Which links this host hands to the OS (`external_links::safe_external_url`).
     fn external_url_surface(&self) -> crate::persistence::external_links::ExternalUrlSurface {
         crate::persistence::external_links::ExternalUrlSurface::Web
+    }
+    /// Opens an editor link (TypeScript's `openRemoteEditorUrl`), through its own policy so that
+    /// [`Self::open_url`] stays limited to what an ordinary link may open.
+    fn open_editor_link(&self, url: String) -> HostFuture<'_, ()> {
+        async move {
+            let url = crate::persistence::external_links::safe_editor_link(
+                &url,
+                self.external_url_surface(),
+            )
+            .ok_or_else(|| PlatformError::InvalidData("Unable to open link.".into()))?;
+            match self.host(HostAction::OpenEditorLink(url)).await? {
+                HostReply::Unit => Ok(()),
+                _ => Err(PlatformError::InvalidData("open_editor_link reply".into())),
+            }
+        }
+        .boxed_local()
     }
     fn open_url(&self, url: String) -> HostFuture<'_, ()> {
         async move {

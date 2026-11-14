@@ -915,13 +915,22 @@ impl<S> EnvironmentRegistry<S> {
         }
     }
     pub async fn save(&mut self, platform: &dyn Platform) -> Result<(), ClientError> {
+        self.save_with(platform, Vec::new()).await
+    }
+    /// [`Self::save`], with whole secure rows (profiles) that replace what the save would write.
+    async fn save_with(
+        &mut self,
+        platform: &dyn Platform,
+        overrides: Vec<StorageWrite>,
+    ) -> Result<(), ClientError> {
         let entries: Vec<_> = self
             .entries()
             .filter(|r| self.entries.get(&r.id).is_some_and(|h| !h.platform_owned))
             .cloned()
             .collect();
-        self.catalog_bytes =
-            Some(save_catalog(platform, entries, self.catalog_bytes.clone()).await?);
+        self.catalog_bytes = Some(
+            save_catalog_with(platform, entries, self.catalog_bytes.clone(), overrides).await?,
+        );
         if let Some(authorization) = &self.authorization {
             authorization.flush_cleanup().await.map_err(|_| {
                 ClientError::InvalidPayload(
@@ -930,6 +939,153 @@ impl<S> EnvironmentRegistry<S> {
             })?;
         }
         Ok(())
+    }
+    /// Adopts the direct addresses an environment announced over the route it is connected
+    /// by (`directEndpoints` in its config), as TypeScript's `learnRoutes`: the rules are
+    /// `connection::merge_learned_routes`. Saves the routes and their `learned` profiles and
+    /// returns them; `None` when nothing changed or the environment is not a saved one.
+    pub async fn learn_routes(
+        &mut self,
+        platform: &dyn Platform,
+        id: &EnvironmentId,
+        active_route_id: &str,
+        reported: &[crate::connection::ReportedEndpoint],
+        allow_insecure: bool,
+    ) -> Result<Option<Vec<Route>>, ClientError> {
+        use crate::connection::{ConnectionProfile, ProfileAuthorization, ProfileNetwork};
+        let Some(handle) = self.entries.get(id).filter(|handle| !handle.platform_owned) else {
+            return Ok(None);
+        };
+        let label = handle.registration.label.clone();
+        let saved = handle.registration.routes.clone();
+        let Some(active) = saved
+            .iter()
+            .find(|route| route.id == active_route_id)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let mut profiles = BTreeMap::new();
+        for route in &saved {
+            if matches!(route.mode, ConnectionMode::Remote | ConnectionMode::Tunnel) {
+                let key = StorageKey::new("connection-profile", None, &route.id);
+                if let Ok(Some(record)) = crate::persistence::load_record::<ConnectionProfile>(
+                    platform,
+                    StorageArea::Secure,
+                    &key,
+                    1,
+                )
+                .await
+                {
+                    profiles.insert(route.id.clone(), record.payload);
+                }
+            }
+        }
+        let cloud = matches!(
+            profiles.get(&active.id),
+            Some(ConnectionProfile::Bearer {
+                authorization: Some(ProfileAuthorization::T3Connect),
+                ..
+            })
+        );
+        let tailscale: Vec<String> = profiles
+            .iter()
+            .filter(|(_, profile)| {
+                matches!(
+                    profile,
+                    ConnectionProfile::Bearer {
+                        network: Some(ProfileNetwork::Tailscale),
+                        ..
+                    }
+                )
+            })
+            .map(|(route, _)| route.clone())
+            .collect();
+        let Some(learned) = crate::connection::merge_learned_routes(
+            &saved,
+            &active,
+            reported,
+            allow_insecure,
+            cloud,
+            &tailscale,
+        ) else {
+            return Ok(None);
+        };
+        let cloud = cloud || active.mode == ConnectionMode::Relay;
+        let mut overrides = Vec::new();
+        for route in &learned.routes {
+            let network = learned
+                .tailscale_route_ids
+                .contains(&route.id)
+                .then_some(ProfileNetwork::Tailscale);
+            let profile = if route.id.starts_with("learned:") {
+                ConnectionProfile::Bearer {
+                    connection_id: route.id.clone(),
+                    environment_id: id.clone(),
+                    label: label.clone(),
+                    http_base_url: route.http_base.clone(),
+                    ws_base_url: route.ws_base.clone(),
+                    learned: Some(true),
+                    authorization: cloud.then_some(ProfileAuthorization::T3Connect),
+                    network,
+                }
+            } else {
+                // A saved address the environment also announced keeps its profile; only
+                // whether it is on the tailnet follows the announcement.
+                match profiles.get(&route.id) {
+                    Some(ConnectionProfile::Bearer {
+                        network: current, ..
+                    }) if *current == network => continue,
+                    Some(profile @ ConnectionProfile::Bearer { .. }) => {
+                        let mut profile = profile.clone();
+                        if let ConnectionProfile::Bearer { network: slot, .. } = &mut profile {
+                            *slot = network;
+                        }
+                        profile
+                    }
+                    _ => continue,
+                }
+            };
+            let record = crate::persistence::Record::new(
+                "connection-profile",
+                None,
+                &route.id,
+                1,
+                serde_json::to_value(&profile)?,
+            );
+            overrides.push(StorageWrite {
+                key: StorageKey::new("connection-profile", None, &route.id),
+                value: Some(record.encode().map_err(|_| {
+                    ClientError::InvalidPayload("could not encode connection profile".into())
+                })?),
+            });
+        }
+        if let Some(handle) = self.entries.get_mut(id) {
+            handle.registration.routes = learned.routes.clone();
+        }
+        self.save_with(platform, overrides).await?;
+        Ok(Some(learned.routes))
+    }
+    /// Replaces the routes of a running environment's registration and tells its supervisor,
+    /// which checks whether a better route is now available.
+    pub fn set_routes(
+        &mut self,
+        id: &EnvironmentId,
+        routes: Vec<Route>,
+        time: Time,
+    ) -> Result<RegistryChange, ClientError> {
+        let handle = self
+            .entries
+            .get_mut(id)
+            .ok_or(ClientError::EnvironmentMismatch)?;
+        if handle.registration.routes == routes {
+            return Ok(RegistryChange::default());
+        }
+        handle.registration.routes = routes.clone();
+        Ok(RegistryChange::actions(
+            id,
+            handle.handle(ConnectionEvent::SetRoutes(routes), time, 0.5),
+        ))
     }
     pub async fn set_enabled_persisted(
         &mut self,
@@ -1333,10 +1489,17 @@ async fn save_catalog_with(
                     value: None,
                 });
             }
+            // Learned routes borrow the active route's credential, so, as in TypeScript, they do
+            // not revoke the routing trust a newly paired address does.
             let route_ids = |values: &[serde_json::Value]| -> BTreeSet<(String, String)> {
                 values
                     .iter()
                     .filter(|value| value["environmentId"] == environment.0)
+                    .filter(|value| {
+                        !value["connectionId"]
+                            .as_str()
+                            .is_some_and(|id| id.starts_with("learned:"))
+                    })
                     .map(|value| {
                         (
                             value["_tag"].as_str().unwrap_or("").to_owned(),

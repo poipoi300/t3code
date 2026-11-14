@@ -498,7 +498,7 @@ pub async fn attachment_upload_cycle(
     };
     let result = platform
         .http(HttpRequest {
-            method: "PUT".into(),
+            method: "POST".into(),
             url,
             headers: BTreeMap::from([("content-type".into(), mime.into())]),
             body,
