@@ -161,3 +161,46 @@ fn kiro_agent_picker_requires_multiple_choices_and_preserves_descriptions() {
         matches!(descriptor,ProviderOptionDescriptor::Select(d) if d.current_value == Some(Some("work".into())) && d.options[1].description == Some(Some("Company agent".into())))
     );
 }
+
+#[test]
+fn cursor_sdk_selection_fills_catalog_defaults_but_only_sends_fast_when_selected() {
+    let models=cursor_models(&[json!({"id":"grok-4.5","displayName":"Grok 4.5","parameters":[{"id":"effort","values":[{"value":"low"},{"value":"high"}]},{"id":"context","values":[{"value":"1m"}]},{"id":"fast","values":[{"value":"false"},{"value":"true"}]}],"variants":[{"isDefault":true,"params":[{"id":"effort","value":"high"},{"id":"context","value":"1m"},{"id":"fast","value":"true"}]}]})]).unwrap();
+    for (options, expected) in [
+        (
+            json!([]),
+            json!([{"id":"effort","value":"high"},{"id":"context","value":"1m"},{"id":"fast","value":"false"}]),
+        ),
+        (
+            json!([{"id":"effort","value":"low"},{"id":"fastMode","value":true}]),
+            json!([{"id":"effort","value":"low"},{"id":"fast","value":"true"},{"id":"context","value":"1m"}]),
+        ),
+    ] {
+        let selection = serde_json::from_value(
+            json!({"instanceId":"cursor","model":"grok-4.5","options":options}),
+        )
+        .unwrap();
+        assert_eq!(
+            cursor_sdk_model_selection(&selection, &models),
+            json!({"id":"grok-4.5","params":expected})
+        );
+        assert_eq!(
+            cursor_context_window_tokens(&selection, &models),
+            Some(1_000_000)
+        );
+    }
+    let selection = serde_json::from_value(json!({"instanceId":"cursor","model":"auto"})).unwrap();
+    assert_eq!(
+        cursor_sdk_model_selection(&selection, &models),
+        json!({"id":"default"})
+    );
+    for (value, expected) in [
+        (json!(" 256K "), Some(256_000)),
+        (json!("2m"), Some(2_000_000)),
+        (json!(true), None),
+        (json!("0k"), None),
+        (json!("9007199254740991m"), None),
+    ] {
+        let selection=serde_json::from_value(json!({"instanceId":"cursor","model":"missing","options":[{"id":"contextWindow","value":value}]})).unwrap();
+        assert_eq!(cursor_context_window_tokens(&selection, &models), expected);
+    }
+}

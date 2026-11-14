@@ -888,3 +888,28 @@ pub fn list_capability_models<'a>(
         listed,
     }
 }
+
+pub fn option_current_value(
+    descriptor: &ProviderOptionDescriptor,
+) -> Option<ProviderOptionSelectionValue> {
+    match descriptor {
+        ProviderOptionDescriptor::Boolean(descriptor) => descriptor
+            .current_value
+            .flatten()
+            .map(ProviderOptionSelectionValue::Boolean),
+        ProviderOptionDescriptor::Select(descriptor) => descriptor
+            .current_value
+            .as_ref()
+            .and_then(Option::as_ref)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                descriptor
+                    .options
+                    .iter()
+                    .find(|option| option.is_default == Some(Some(true)))
+                    .map(|option| &option.id)
+            })
+            .cloned()
+            .map(ProviderOptionSelectionValue::String),
+    }
+}

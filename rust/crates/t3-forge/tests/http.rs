@@ -323,14 +323,22 @@ async fn review_host_resolves_a_pr_through_the_real_git_workflow_service() {
 }
 #[tokio::test]
 async fn app_sign_in_polls_saves_and_reads_its_own_viewer() {
-    use t3_forge::github::app::{AppSessionStore, AppSignIn, MemoryAppSessions};
+    use t3_forge::github::app::{AppSessionStore, AppSignIn};
     let (http,endpoint,task)=server_http(vec![
         answer(json!({"device_code":"device-1","user_code":"ABCD-1234","verification_uri":"https://github.com/login/device","expires_in":900,"interval":0})),
         answer(json!({"error":"authorization_pending"})),
+        answer(json!({"error":"slow_down", "interval":0})),
         answer(json!({"access_token":"ghu_new","expires_in":28800,"refresh_token":"ghr_new","refresh_token_expires_in":15897600})),
         answer(json!({"login":"octocat"})),
+        answer(json!({"login":"octocat"})),
     ]).await;
-    let store = Arc::new(MemoryAppSessions::default());
+    let root = tempfile::tempdir().unwrap();
+    let settings_path = root.path().join("settings.json");
+    let secrets = t3_config::secrets::SecretStore::new(root.path().join("secrets"));
+    let store = Arc::new(t3_forge::github::session_store::SettingsAppSessions::new(
+        t3_config::settings::SettingsService::new(&settings_path),
+        secrets.clone(),
+    ));
     let app = Arc::new(
         AppSignIn::new("Iv-test-client".into(), store.clone())
             .unwrap()
@@ -352,21 +360,56 @@ async fn app_sign_in_polls_saves_and_reads_its_own_viewer() {
         .await
         .unwrap();
     assert_eq!(result.account.0, "octocat");
+    sign_in
+        .cancel(serde_json::from_value(json!({"provider":"github","host":"github.com"})).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        sign_in
+            .wait(serde_json::from_value(json!({"provider":"github","host":"github.com"})).unwrap())
+            .await
+            .unwrap()
+            .account
+            .0,
+        "octocat"
+    );
     let saved = store.read("github.com").await.unwrap().unwrap();
     assert_eq!(saved.access_token, "ghu_new");
     assert_eq!(saved.refresh_token.as_deref(), Some("ghr_new"));
+    let persisted = std::fs::read_to_string(&settings_path).unwrap();
+    assert!(!persisted.contains(&saved.access_token));
+    assert!(!persisted.contains(saved.refresh_token.as_deref().unwrap()));
+    let reopened = t3_forge::github::session_store::SettingsAppSessions::new(
+        t3_config::settings::SettingsService::new(&settings_path),
+        secrets,
+    );
+    assert_eq!(
+        reopened
+            .read("github.com")
+            .await
+            .unwrap()
+            .unwrap()
+            .access_token,
+        saved.access_token
+    );
     let requests = task.await.unwrap();
     let form: std::collections::HashMap<_, _> =
         url::form_urlencoded::parse(requests[1].raw_body.as_bytes())
             .into_owned()
             .collect();
     assert_eq!(requests[0].path, "/login/device/code");
+    assert_eq!(requests.len(), 6);
+    assert!(
+        requests[1..4]
+            .iter()
+            .all(|r| r.path == "/login/oauth/access_token")
+    );
     assert_eq!(form["device_code"], "device-1");
     assert_eq!(
         form["grant_type"],
         "urn:ietf:params:oauth:grant-type:device_code"
     );
-    assert!(requests[3].headers.contains("Bearer ghu_new"));
+    assert!(requests[4].headers.contains("Bearer ghu_new"));
 }
 #[tokio::test]
 async fn app_sign_in_refuses_unsafe_links_denial_expiry_and_cancellation_without_saving() {
@@ -1632,4 +1675,38 @@ async fn checkout_fetches_and_tracks_the_head_using_real_isolated_git() {
         Some("origin")
     );
     assert_eq!(task.await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn concurrent_device_starts_replace_one_pending_flow_and_cancel_without_saving() {
+    use t3_forge::github::app::{AppSessionStore, AppSignIn, MemoryAppSessions};
+    let (http, endpoint, server) = server_http((1..=2).map(|id| answer(json!({"device_code":format!("device-{id}"), "user_code":format!("code-{id}"), "verification_uri":"https://github.com/login/device", "expires_in":900, "interval":3600}))).collect()).await;
+    let store = Arc::new(MemoryAppSessions::default());
+    let app = Arc::new(
+        AppSignIn::new("fixture-client".into(), store.clone())
+            .unwrap()
+            .with_loopback_endpoint(&endpoint)
+            .unwrap(),
+    );
+    let registry = Arc::new(t3_forge::registry::ForgeRegistry::new([Arc::new(
+        GitHub::new(http).unwrap().with_app_sign_in(app),
+    )
+        as Arc<dyn Forge>]));
+    let sign_in = t3_forge::services::SourceControlSignIn::new(registry.clone());
+    let input =
+        || serde_json::from_value(json!({"provider":"github", "host":"github.com"})).unwrap();
+    let (first, second) = tokio::join!(sign_in.start(input()), sign_in.start(input()));
+    let mut codes = [first.unwrap().user_code.0, second.unwrap().user_code.0];
+    codes.sort();
+    assert_eq!(codes, ["code-1", "code-2"]);
+    sign_in.cancel(input()).await.unwrap();
+    assert_eq!(
+        sign_in.wait(input()).await.unwrap_err().wire.reason,
+        t3_contracts::source_control::SourceControlSignInFailure::Cancelled
+    );
+    assert!(store.read("github.com").await.unwrap().is_none());
+    registry.shutdown().await;
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|r| r.path == "/login/device/code"));
 }

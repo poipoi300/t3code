@@ -70,14 +70,25 @@ fn protocol_url(
 }
 fn redacted_url(value: &str) -> String {
     if let Ok(mut url) = url::Url::parse(value) {
+        if url.username().is_empty()
+            && url.password().is_none_or(str::is_empty)
+            && url.query().is_none_or(str::is_empty)
+        {
+            return value.into();
+        }
         let _ = url.set_username("");
         let _ = url.set_password(None);
         url.set_query(None);
-        url.set_fragment(None);
         url.to_string()
     } else {
         value.into()
     }
+}
+fn clone_url(value: &str) -> String {
+    static PATHLESS_QUERY: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^([a-zA-Z][a-zA-Z0-9+.-]*://[^/?#]+)\?").unwrap()
+    });
+    PATHLESS_QUERY.replace(value, "$1/?").into_owned()
 }
 fn https_url(value: &str) -> Option<String> {
     let value = value.trim();
@@ -407,14 +418,7 @@ impl SourceControlRepositoryService {
         let parent = prepared.destination_path.parent().ok_or_else(|| {
             repository_error(provider, "cloneRepository", "Invalid clone destination.")
         })?;
-        let url = if let Ok(mut parsed) = url::Url::parse(url) {
-            if parsed.query().is_some() && parsed.path().is_empty() {
-                parsed.set_path("/");
-            }
-            parsed.to_string()
-        } else {
-            url.into()
-        };
+        let url = clone_url(url);
         let lines = Arc::new(std::sync::Mutex::new(
             crate::clone_progress::Lines::default(),
         ));
@@ -834,5 +838,41 @@ mod tests {
         ] {
             assert_eq!(https_url(input).as_deref(), expected, "{input}");
         }
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+    #[test]
+    fn clone_operands_are_preserved_except_pathless_queries() {
+        for value in [
+            r"C:\repo",
+            "local folder/repo",
+            "https://host/a/../repo",
+            "https://host/a/%2e%2e/repo",
+            "ssh://host/a b.git",
+            "https://host/repo#fragment",
+            "https://host/repo?",
+        ] {
+            assert_eq!(clone_url(value), value);
+            assert_eq!(redacted_url(value), value);
+        }
+        assert_eq!(
+            clone_url("ssh://git@host/a b.git"),
+            "ssh://git@host/a b.git"
+        );
+        assert_eq!(
+            clone_url("https://host?token=value"),
+            "https://host/?token=value"
+        );
+        assert_eq!(
+            clone_url("https://host/a?token=value"),
+            "https://host/a?token=value"
+        );
+        assert_eq!(
+            redacted_url("https://user:private@host/repo?token=private#branch"),
+            "https://host/repo#branch"
+        );
     }
 }

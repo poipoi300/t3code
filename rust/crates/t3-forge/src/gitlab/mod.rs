@@ -269,4 +269,3 @@ impl GitLab {
         json!({"fullPath":input.repo.repository,"iid":input.number.to_string()})
     }
 }
-

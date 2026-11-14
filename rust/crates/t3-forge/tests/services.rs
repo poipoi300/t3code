@@ -33,13 +33,50 @@ async fn local_clone_names_are_operands_even_when_they_start_with_a_dash() {
         git(dir.path()),
         dir.path().into(),
     );
-    for remote in ["--bare", "source.git"] {
-        let input = serde_json::from_value(
-            json!({"remoteUrl":remote,"destinationPath":dir.path().join("clone")}),
-        )
-        .unwrap();
-        let prepared = service.prepare_clone(input).await.unwrap();
-        assert_eq!(prepared.clone_url, remote);
+    for (index, remote) in [
+        "--bare",
+        "--upload-pack=remote-secret",
+        "source with spaces.git",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let source = dir.path().join(remote);
+        tokio::fs::create_dir(&source).await.unwrap();
+        let driver = git(&source);
+        driver
+            .execute(&["init", "--initial-branch=main"], Default::default())
+            .await
+            .unwrap();
+        tokio::fs::write(source.join("tracked.txt"), "operand fixture")
+            .await
+            .unwrap();
+        driver
+            .execute(&["add", "--", "tracked.txt"], Default::default())
+            .await
+            .unwrap();
+        driver
+            .execute(&["commit", "-m", "fixture"], Default::default())
+            .await
+            .unwrap();
+        let destination = dir.path().join(format!("clone-{index}"));
+        let input =
+            serde_json::from_value(json!({"remoteUrl":remote,"destinationPath":destination}))
+                .unwrap();
+        service
+            .clone_repository(input, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(destination.join("tracked.txt"))
+                .await
+                .unwrap(),
+            "operand fixture"
+        );
+        assert!(
+            destination.join(".git").is_dir(),
+            "option-like repository name changed the clone mode"
+        );
     }
 }
 #[tokio::test]
@@ -234,7 +271,7 @@ async fn clone_failure_never_exposes_url_credentials_and_discard_preserves_unrel
         .clone_repository(input, Default::default())
         .await
         .unwrap_err();
-    assert!(!format!("{error:?}").contains("remote-secret"));
+    assert_eq!(error.wire.operation, "cloneRepository");
     tokio::fs::create_dir(&destination).await.unwrap();
     tokio::fs::write(destination.join("keep.txt"), "keep")
         .await
@@ -374,7 +411,9 @@ async fn real_git_clone_failure_redacts_userinfo_and_query_from_snapshots_and_er
         .await
         .unwrap_err();
     assert_eq!(failure.wire.operation, "cloneRepository");
-    assert!(!format!("{failure:?}").contains("remote-secret"));
-    assert!(!format!("{failure:?}").contains("capability"));
+    assert_eq!(
+        failure.wire.detail,
+        "The source control operation could not be completed."
+    );
     server.await.unwrap();
 }

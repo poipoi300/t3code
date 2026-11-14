@@ -85,9 +85,9 @@ JSON holds its redaction marker, while the matching secret file holds UTF-8 JSON
 with `accessToken`, `accessTokenExpiresAt`, `refreshToken` and
 `refreshTokenExpiresAt`. The secret filename is the config store's existing
 `source-control-<base64url(github)>-<base64url(signIns)>-<base64url(host)>.bin`.
-The existing secret store supplies file protections (POSIX 0700/0600 and the
-environment's Windows directory ACL); this crate adds no encryption or new token
-database. `MemoryAppSessions` is ephemeral/test storage.
+The existing secret store applies POSIX 0700/0600. Its non-Unix permission helper
+is a no-op: Windows protection depends on the directory ACL provisioned by the
+host and was not verified here. This crate adds no encryption or new token database. `MemoryAppSessions` is ephemeral/test storage.
 
 Refresh compare-and-replace holds the same settings write lock as user updates
 and sign-out, compares the actual stored access token, then reloads/publishes the

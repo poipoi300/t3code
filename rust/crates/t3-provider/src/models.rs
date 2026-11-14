@@ -560,3 +560,84 @@ pub fn default_models_by_driver() -> BTreeMap<&'static str, &'static str> {
         .copied()
         .collect()
 }
+
+pub fn cursor_sdk_model_selection(
+    selection: &t3_contracts::model_selection::ModelSelection,
+    models: &[t3_contracts::server::ServerProviderModel],
+) -> Value {
+    let mut options = selection
+        .options
+        .as_ref()
+        .map(|options| options.0.clone())
+        .unwrap_or_default();
+    let descriptors = models
+        .iter()
+        .find(|model| model.slug.0 == selection.model)
+        .and_then(|model| model.capabilities.as_ref())
+        .map(crate::catalog::descriptors)
+        .unwrap_or_default();
+    for descriptor in descriptors {
+        let id = crate::catalog::option_id(descriptor);
+        if options.iter().any(|option| option.id == id) {
+            continue;
+        }
+        let value = if id == "fastMode" {
+            Some(ProviderOptionSelectionValue::Boolean(false))
+        } else {
+            crate::catalog::option_current_value(descriptor)
+        };
+        if let Some(value) = value {
+            options.push(ProviderOptionSelection {
+                id: id.into(),
+                value,
+            });
+        }
+    }
+    let mut value =
+        serde_json::json!({"id":if selection.model=="auto" {"default"}else{&selection.model}});
+    if !options.is_empty() {
+        value["params"]=serde_json::json!(options.into_iter().map(|option|serde_json::json!({"id":match option.id.as_str(){"contextWindow"=>"context","fastMode"=>"fast",other=>other},"value":match option.value{ProviderOptionSelectionValue::String(value)=>value,ProviderOptionSelectionValue::Boolean(value)=>value.to_string()}})).collect::<Vec<_>>());
+    }
+    value
+}
+pub fn cursor_context_window_tokens(
+    selection: &t3_contracts::model_selection::ModelSelection,
+    models: &[t3_contracts::server::ServerProviderModel],
+) -> Option<u64> {
+    let explicit = selection
+        .options
+        .as_ref()
+        .and_then(|options| options.0.iter().find(|option| option.id == "contextWindow"));
+    let value = if let Some(option) = explicit {
+        Some(option.value.clone())
+    } else {
+        models
+            .iter()
+            .find(|model| model.slug.0 == selection.model)
+            .and_then(|model| model.capabilities.as_ref())
+            .and_then(|capabilities| {
+                crate::catalog::descriptors(capabilities)
+                    .iter()
+                    .find(|descriptor| crate::catalog::option_id(descriptor) == "contextWindow")
+            })
+            .and_then(crate::catalog::option_current_value)
+    }?;
+    let ProviderOptionSelectionValue::String(value) = value else {
+        return None;
+    };
+    let value = t3_contracts::wire::trim_js(&value);
+    let (number, suffix) = value.split_at(value.len().checked_sub(1)?);
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let multiplier = match suffix.to_ascii_lowercase().as_str() {
+        "k" => 1000,
+        "m" => 1_000_000,
+        _ => return None,
+    };
+    number
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(multiplier)
+        .filter(|value| *value > 0 && *value <= 9_007_199_254_740_991)
+}

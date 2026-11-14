@@ -37,13 +37,11 @@ pub(super) fn record(raw: &Value) -> Result<ChangeRequest> {
     parse(value, "checkoutMergeRequest")
 }
 fn host(checkout: &CheckoutInput) -> Option<String> {
-    checkout.context.as_ref().and_then(|c| {
-        c.requested_host.clone().or_else(|| {
-            url::Url::parse(&c.provider.base_url)
-                .ok()
-                .map(|u| u.authority().to_string())
-        })
-    })
+    checkout
+        .context
+        .as_ref()
+        .and_then(|c| crate::remote::parse_remote(&c.remote_url))
+        .map(|r| r.host)
 }
 fn urls(raw: &Value) -> Result<SourceControlRepositoryCloneUrls> {
     parse(
@@ -52,17 +50,23 @@ fn urls(raw: &Value) -> Result<SourceControlRepositoryCloneUrls> {
     )
 }
 impl GitLab {
+    fn for_checkout(&self, checkout: &CheckoutInput) -> Self {
+        let mut scoped = self.clone();
+        if let Some(host) = host(checkout) {
+            scoped.configured_hosts.insert(host);
+        }
+        scoped
+    }
+    fn check_reference(&self, reference: &str, operation: &str) -> Result<()> {
+        if let Ok(url) = url::Url::parse(reference) {
+            self.check_host(url.authority(), operation)?;
+        }
+        Ok(())
+    }
     pub(super) fn checkout_ref(&self, input: &CheckoutInput) -> ProviderRepositoryRef {
         ProviderRepositoryRef {
             cwd: input.cwd.to_string_lossy().into(),
-            host: host(input)
-                .or_else(|| {
-                    self.environment
-                        .get(std::ffi::OsStr::new("GITLAB_HOST"))
-                        .and_then(|v| v.as_ref())
-                        .map(|v| v.to_string_lossy().into())
-                })
-                .unwrap_or_else(|| "gitlab.com".into()),
+            host: host(input).unwrap_or_else(|| self.configured_host()),
             repository: input
                 .context
                 .as_ref()
@@ -75,6 +79,7 @@ impl GitLab {
         &self,
         input: CheckoutListInput,
     ) -> Result<Vec<ChangeRequest>> {
+        let scoped = self.for_checkout(&input.checkout);
         let source = input
             .source
             .or_else(|| crate::remote::parse_owner_ref(&input.head_selector));
@@ -94,7 +99,7 @@ impl GitLab {
             None => args.push("--all".into()),
             _ => {}
         }
-        let output = self
+        let output = scoped
             .execute(
                 &input.checkout.cwd,
                 host(&input.checkout).as_deref(),
@@ -115,7 +120,9 @@ impl GitLab {
         Ok(rows(&value).filter_map(|v| record(v).ok()).collect())
     }
     pub(super) async fn checkout_get(&self, input: CheckoutGetInput) -> Result<ChangeRequest> {
-        let output = self
+        let scoped = self.for_checkout(&input.checkout);
+        scoped.check_reference(&input.reference, "getMergeRequest")?;
+        let output = scoped
             .execute(
                 &input.checkout.cwd,
                 host(&input.checkout).as_deref(),
@@ -136,18 +143,22 @@ impl GitLab {
         record(&value)
     }
     pub(super) async fn checkout_request(&self, input: CheckoutGetInput) -> Result<()> {
-        self.execute(
-            &input.checkout.cwd,
-            host(&input.checkout).as_deref(),
-            "checkoutMergeRequest",
-            vec!["mr".into(), "checkout".into(), "--".into(), input.reference],
-            None,
-            8 * 1024 * 1024,
-        )
-        .await?;
+        let scoped = self.for_checkout(&input.checkout);
+        scoped.check_reference(&input.reference, "checkoutMergeRequest")?;
+        scoped
+            .execute(
+                &input.checkout.cwd,
+                host(&input.checkout).as_deref(),
+                "checkoutMergeRequest",
+                vec!["mr".into(), "checkout".into(), "--".into(), input.reference],
+                None,
+                8 * 1024 * 1024,
+            )
+            .await?;
         Ok(())
     }
     pub(super) async fn create_request(&self, input: CreateChangeRequestInput) -> Result<()> {
+        let scoped = self.for_checkout(&input.checkout);
         let repo = self.checkout_ref(&input.checkout);
         let path = if repo.repository.is_empty() {
             "projects/:fullpath/merge_requests".into()
@@ -172,7 +183,8 @@ impl GitLab {
         {
             payload["source_project_id"] = json!(project);
         }
-        self.api(&repo, "createMergeRequest", "POST", &path, Some(payload))
+        scoped
+            .api(&repo, "createMergeRequest", "POST", &path, Some(payload))
             .await?;
         Ok(())
     }
@@ -180,12 +192,13 @@ impl GitLab {
         &self,
         input: CloneUrlsInput,
     ) -> Result<SourceControlRepositoryCloneUrls> {
+        let scoped = self.for_checkout(&input.checkout);
         let mut repo = self.checkout_ref(&input.checkout);
         if let Some(host) = input.host {
-            repo.host = host;
+            repo.host = scoped.check_host(&host, "getRepositoryCloneUrls")?;
         }
         let name = if let Ok(url) = url::Url::parse(&input.repository) {
-            repo.host = url.authority().into();
+            repo.host = scoped.check_host(url.authority(), "getRepositoryCloneUrls")?;
             url.path()
                 .trim_matches('/')
                 .trim_end_matches(".git")
@@ -193,7 +206,7 @@ impl GitLab {
         } else {
             input.repository
         };
-        let raw = self
+        let raw = scoped
             .api(
                 &repo,
                 "getRepositoryCloneUrls",
@@ -242,13 +255,14 @@ impl GitLab {
         )
     }
     pub(super) async fn default_branch(&self, input: CheckoutInput) -> Result<Option<String>> {
+        let scoped = self.for_checkout(&input);
         let repo = self.checkout_ref(&input);
         let path = if repo.repository.is_empty() {
             "projects/:fullpath".into()
         } else {
             project(&repo.repository)?
         };
-        let raw = self
+        let raw = scoped
             .api(&repo, "getDefaultBranch", "GET", &path, None)
             .await?;
         Ok(text(&raw, "default_branch").map(str::to_string))

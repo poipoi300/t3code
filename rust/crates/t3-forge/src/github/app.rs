@@ -85,6 +85,17 @@ struct Pending {
     result: watch::Sender<Option<Result<()>>>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
+impl Pending {
+    fn fail_if_pending(&self, host: &str, reason: SignInFailure, detail: &str) {
+        self.result.send_if_modified(|result| {
+            if result.is_some() {
+                return false;
+            }
+            *result = Some(Err(failure(host, reason, detail)));
+            true
+        });
+    }
+}
 impl Drop for Pending {
     fn drop(&mut self) {
         if let Some(task) = &self.task {
@@ -209,6 +220,14 @@ impl AppSignIn {
         let host = normalized(raw_host);
         if !self.allowed(&host) {
             return Ok(None);
+        }
+        if let Some(session) = self.store.read(&host).await?
+            && !self.refused.lock().await.contains(&session.access_token)
+            && session
+                .access_token_expires_at
+                .is_none_or(|at| now() < at.saturating_sub(300_000))
+        {
+            return Ok(Some(Credential::new(&host, session.access_token, "app")));
         }
         let _gate = self.refresh_gate.lock().await;
         let Some(session) = self.store.read(&host).await? else {
@@ -452,11 +471,11 @@ impl AppSignIn {
                 task: Some(task),
             },
         ) {
-            previous.result.send_replace(Some(Err(failure(
+            previous.fail_if_pending(
                 &host,
                 SignInFailure::Failed,
                 "A newer sign-in replaced this one.",
-            ))));
+            );
         }
         Ok(prompt)
     }
@@ -491,11 +510,11 @@ impl AppSignIn {
     pub async fn cancel(&self, raw_host: &str) {
         let host = normalized(raw_host);
         if let Some(pending) = self.pending.lock().await.get_mut(&host) {
-            pending.result.send_replace(Some(Err(failure(
+            pending.fail_if_pending(
                 &host,
                 SignInFailure::Cancelled,
                 "The sign-in was cancelled.",
-            ))));
+            );
             if let Some(task) = pending.task.take() {
                 task.abort();
                 let _ = task.await;
@@ -507,11 +526,11 @@ impl AppSignIn {
         let pending = std::mem::take(&mut *self.pending.lock().await);
         let mut tasks = vec![];
         for (host, mut pending) in pending {
-            pending.result.send_replace(Some(Err(failure(
+            pending.fail_if_pending(
                 &host,
                 SignInFailure::Cancelled,
                 "The sign-in was cancelled.",
-            ))));
+            );
             if let Some(task) = pending.task.take() {
                 task.abort();
                 tasks.push(task);
@@ -550,8 +569,20 @@ impl GitHub {
             Err(_) => return Ok(SourceControlAppAccessStatus::Covered),
         };
         let key = credential.fingerprint.clone();
-        let mut coverage = self.coverage.lock().await;
-        if coverage.get(&key).is_none_or(|entry| {
+        let gate = {
+            let mut gates = self.coverage_gates.lock().await;
+            gates.retain(|_, weak| weak.strong_count() > 0);
+            if let Some(gate) = gates.get(&key).and_then(std::sync::Weak::upgrade) {
+                gate
+            } else {
+                let gate = Arc::new(Mutex::new(()));
+                gates.insert(key.clone(), Arc::downgrade(&gate));
+                gate
+            }
+        };
+        let _gate = gate.lock().await;
+        let cached = self.coverage.lock().await.get(&key).cloned();
+        let entry = if cached.as_ref().is_none_or(|entry| {
             now().saturating_sub(entry.at) >= if entry.failed { 30_000 } else { 120_000 }
         }) {
             let read = async {
@@ -649,20 +680,21 @@ impl GitHub {
                 Ok::<_, ForgeError>((accounts, repositories))
             }
             .await;
+            let mut coverage = self.coverage.lock().await;
             if coverage.len() >= 8 {
                 coverage.clear();
             }
-            coverage.insert(
-                key.clone(),
-                Coverage {
-                    at: now(),
-                    failed: read.is_err(),
-                    result: read.ok(),
-                },
-            );
-        }
-        let Some((accounts, repositories)) = coverage.get(&key).and_then(|e| e.result.as_ref())
-        else {
+            let entry = Coverage {
+                at: now(),
+                failed: read.is_err(),
+                result: read.ok(),
+            };
+            coverage.insert(key, entry.clone());
+            Some(entry)
+        } else {
+            cached
+        };
+        let Some((accounts, repositories)) = entry.as_ref().and_then(|e| e.result.as_ref()) else {
             return Ok(SourceControlAppAccessStatus::Covered);
         };
         let repo = super::repository::parse_repository_selector(repository, &host)
@@ -676,5 +708,94 @@ impl GitHub {
                 SourceControlAppAccessStatus::NotCovered
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+    use futures_util::FutureExt;
+    fn session() -> AppSession {
+        AppSession {
+            access_token: "fixture-app-token".into(),
+            access_token_expires_at: None,
+            refresh_token: None,
+            refresh_token_expires_at: None,
+        }
+    }
+    #[tokio::test]
+    async fn fresh_token_read_does_not_wait_for_an_unrelated_refresh() {
+        let store = Arc::new(MemoryAppSessions::default());
+        store.write("github.com", session()).await.unwrap();
+        let app = AppSignIn::new("fixture-client".into(), store).unwrap();
+        let _refresh = app.refresh_gate.lock().await;
+        assert!(
+            app.token("github.com")
+                .now_or_never()
+                .expect("fresh read waited for refresh gate")
+                .unwrap()
+                .is_some()
+        );
+    }
+    #[tokio::test]
+    async fn installation_network_io_does_not_hold_the_coverage_cache_lock() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+            sync::oneshot,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (observed, request) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = vec![];
+            let mut chunk = [0; 2048];
+            while !bytes.windows(4).any(|v| v == b"\r\n\r\n") {
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&chunk[..count]);
+            }
+            observed.send(()).unwrap();
+            resume.await.unwrap();
+            let body = r#"{"installations":[]}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let store = Arc::new(MemoryAppSessions::default());
+        store.write("github.com", session()).await.unwrap();
+        let app = Arc::new(AppSignIn::new("fixture-client".into(), store).unwrap());
+        let http = GitHubHttp::new(
+            Arc::new(GitHubCredentials::new(Default::default())),
+            Arc::new(crate::rate_limit::RateLimits::default()),
+        )
+        .unwrap()
+        .with_loopback_endpoint(&endpoint)
+        .unwrap();
+        let github = Arc::new(GitHub::new(http).unwrap().with_app_sign_in(app));
+        let read = tokio::spawn({
+            let github = github.clone();
+            async move { github.app_reach("github.com", "a/b").await }
+        });
+        request.await.unwrap();
+        assert!(
+            github.coverage.try_lock().is_ok(),
+            "network request held the global cache lock"
+        );
+        release.send(()).unwrap();
+        assert_eq!(
+            read.await.unwrap().unwrap(),
+            SourceControlAppAccessStatus::NotCovered
+        );
+        server.await.unwrap();
     }
 }
