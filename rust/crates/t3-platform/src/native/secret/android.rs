@@ -9,7 +9,8 @@ use jni::{
     JNIEnv, JavaVM,
     objects::{JByteArray, JObject, JValue},
 };
-use std::{io::ErrorKind, path::PathBuf, sync::OnceLock};
+use super::keystore_failure::Site;
+use std::{cell::Cell, io::ErrorKind, path::PathBuf, sync::OnceLock};
 use zeroize::Zeroizing;
 
 static VM: OnceLock<JavaVM> = OnceLock::new();
@@ -58,19 +59,24 @@ impl AndroidKeystoreStore {
         self.dir.join(wrapped::file_name(id))
     }
 
+    /// Runs `call`, which records in `site` which Keystore call it is making, so a failure is
+    /// judged by where it happened as well as what was thrown.
     fn java<R>(
         &self,
-        call: impl for<'local> FnOnce(&mut JNIEnv<'local>) -> jni::errors::Result<R>,
+        call: impl for<'local> FnOnce(&mut JNIEnv<'local>, &Cell<Site>) -> jni::errors::Result<R>,
     ) -> Result<R, JavaFailure> {
         let mut env = self
             .vm
             .attach_current_thread()
             .map_err(|error| JavaFailure::Other(error.to_string()))?;
+        let site = Cell::new(Site::Other);
         // A frame frees the call's local references on a thread Java already attached.
-        let result = env.with_local_frame(32, |env| call(env));
+        let result = env.with_local_frame(32, |env| call(env, &site));
         match result {
             Ok(value) => Ok(value),
-            Err(jni::errors::Error::JavaException) => Err(classify_exception(&mut env)),
+            Err(jni::errors::Error::JavaException) => {
+                Err(classify_exception(&mut env, site.get()))
+            }
             Err(error) => Err(JavaFailure::Other(error.to_string())),
         }
     }
@@ -94,42 +100,57 @@ fn is_instance(env: &mut JNIEnv<'_>, object: &JObject<'_>, class: &str) -> bool 
     matched
 }
 
-fn classify_exception(env: &mut JNIEnv<'_>) -> JavaFailure {
-    use super::keystore_failure::{Facts, Failure, classify};
+/// The JNI half of the decision: the facts `keystore_failure::classify` judges. It needs a
+/// device to run; the judgement is tested on the host.
+fn classify_exception(env: &mut JNIEnv<'_>, site: Site) -> JavaFailure {
+    use super::keystore_failure::{Cause, Facts, Failure, Thrown, classify};
     let Ok(throwable) = env.exception_occurred() else {
         return JavaFailure::Other("an unreadable Java exception".into());
     };
     let _ = env.exception_describe();
     let _ = env.exception_clear();
-    let mut facts = Facts {
-        tag_mismatch: is_instance(env, &throwable, "javax/crypto/AEADBadTagException"),
-        permanently_invalidated: is_instance(
-            env,
-            &throwable,
-            "android/security/keystore/KeyPermanentlyInvalidatedException",
-        ),
-        unrecoverable: is_instance(env, &throwable, "java/security/UnrecoverableKeyException"),
-        ..Facts::default()
+    let thrown = if is_instance(env, &throwable, "javax/crypto/AEADBadTagException") {
+        Thrown::AeadBadTag
+    } else if is_instance(
+        env,
+        &throwable,
+        "android/security/keystore/KeyPermanentlyInvalidatedException",
+    ) {
+        Thrown::KeyPermanentlyInvalidated
+    } else if is_instance(env, &throwable, "java/security/UnrecoverableKeyException") {
+        Thrown::UnrecoverableKey
+    } else {
+        Thrown::Other
     };
-    if facts.unrecoverable
-        && let Ok(cause) = env
-            .call_method(&throwable, "getCause", "()Ljava/lang/Throwable;", &[])
-            .and_then(|cause| cause.l())
-        && !cause.is_null()
+    let cause = match env
+        .call_method(&throwable, "getCause", "()Ljava/lang/Throwable;", &[])
+        .and_then(|cause| cause.l())
     {
-        facts.keystore_cause = is_instance(env, &cause, "android/security/KeyStoreException");
-        if facts.keystore_cause {
+        Ok(cause) if cause.is_null() => Cause::None,
+        Ok(cause) if is_instance(env, &cause, "android/security/KeyStoreException") => {
             // API 33+; older devices raise NoSuchMethodError, cleared below.
-            facts.cause_transient = env
+            let transient = env
                 .call_method(&cause, "isTransientFailure", "()Z", &[])
                 .and_then(|value| value.z())
                 .ok();
             if env.exception_check().unwrap_or(false) {
                 let _ = env.exception_clear();
             }
+            Cause::KeyStore { transient }
         }
-    }
-    match classify(&facts) {
+        Ok(_) => Cause::Other,
+        Err(_) => {
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_clear();
+            }
+            Cause::Other
+        }
+    };
+    match classify(&Facts {
+        site,
+        thrown,
+        cause,
+    }) {
         Failure::Permanent { replace_key } => JavaFailure::KeyUnusable { replace_key },
         Failure::Transient => JavaFailure::Other("a Keystore call failed".into()),
     }
@@ -230,6 +251,7 @@ fn unavailable(error: impl std::fmt::Display) -> SecretStoreError {
 /// This app's Keystore key; generated when `create` and absent.
 fn keystore_key<'local>(
     env: &mut JNIEnv<'local>,
+    site: &Cell<Site>,
     create: bool,
 ) -> jni::errors::Result<Option<JObject<'local>>> {
     let provider = env.new_string("AndroidKeyStore")?;
@@ -248,6 +270,7 @@ fn keystore_key<'local>(
         &[JValue::Object(&JObject::null())],
     )?;
     let alias = env.new_string(ALIAS)?;
+    site.set(Site::GetKey);
     let key = env
         .call_method(
             &store,
@@ -256,6 +279,7 @@ fn keystore_key<'local>(
             &[JValue::Object(&alias), JValue::Object(&JObject::null())],
         )?
         .l()?;
+    site.set(Site::Other);
     if !key.is_null() {
         return Ok(Some(key));
     }
@@ -331,10 +355,12 @@ fn cipher<'local>(env: &mut JNIEnv<'local>) -> jni::errors::Result<JObject<'loca
 
 fn do_final(
     env: &mut JNIEnv<'_>,
+    site: &Cell<Site>,
     cipher: &JObject<'_>,
     input: &[u8],
 ) -> jni::errors::Result<Vec<u8>> {
     let input = env.byte_array_from_slice(input)?;
+    site.set(Site::DoFinal);
     let output = JByteArray::from(
         env.call_method(cipher, "doFinal", "([B)[B", &[JValue::Object(&input)])?
             .l()?,
@@ -343,16 +369,13 @@ fn do_final(
 }
 
 impl SecretKeyStore for AndroidKeystoreStore {
-    fn retire(&self, id: &str) -> Result<(), SecretStoreError> {
-        let path = self.path(id);
-        if !path.exists() {
-            return Ok(());
+    /// The wrapped key file; the Keystore key is shared by every id and stays.
+    fn delete(&self, id: &str) -> Result<(), SecretStoreError> {
+        match std::fs::remove_file(self.path(id)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(unavailable(error)),
         }
-        let seconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs());
-        std::fs::rename(&path, path.with_extension(format!("retired-{seconds}")))
-            .map_err(unavailable)
     }
     fn load(&self, id: &str) -> Result<Option<Zeroizing<Vec<u8>>>, SecretStoreError> {
         let blob = match std::fs::read(self.path(id)) {
@@ -361,8 +384,8 @@ impl SecretKeyStore for AndroidKeystoreStore {
             Err(error) => return Err(unavailable(error)),
         };
         let (nonce, ciphertext) = wrapped::decode(&blob)?;
-        self.java(|env| {
-            let Some(key) = keystore_key(env, false)? else {
+        self.java(|env, site| {
+            let Some(key) = keystore_key(env, site, false)? else {
                 return Ok(None);
             };
             let cipher = cipher(env)?;
@@ -372,6 +395,7 @@ impl SecretKeyStore for AndroidKeystoreStore {
                 "(I[B)V",
                 &[JValue::Int(TAG_BITS), JValue::Object(&iv)],
             )?;
+            site.set(Site::Init);
             env.call_method(
                 &cipher,
                 "init",
@@ -382,32 +406,34 @@ impl SecretKeyStore for AndroidKeystoreStore {
                     JValue::Object(&spec),
                 ],
             )?;
-            do_final(env, &cipher, ciphertext).map(|plain| Some(Zeroizing::new(plain)))
+            do_final(env, site, &cipher, ciphertext).map(|plain| Some(Zeroizing::new(plain)))
         })
         .map_err(failure_to_secret_error)
     }
 
     fn store(&self, id: &str, secret: &[u8]) -> Result<(), SecretStoreError> {
         let wrap = || {
-            self.java(|env| {
-                let key =
-                    keystore_key(env, true)?.ok_or(jni::errors::Error::NullPtr("keystore key"))?;
+            self.java(|env, site| {
+                let key = keystore_key(env, site, true)?
+                    .ok_or(jni::errors::Error::NullPtr("keystore key"))?;
                 let cipher = cipher(env)?;
+                site.set(Site::Init);
                 env.call_method(
                     &cipher,
                     "init",
                     "(ILjava/security/Key;)V",
                     &[JValue::Int(ENCRYPT_MODE), JValue::Object(&key)],
                 )?;
-                let ciphertext = do_final(env, &cipher, secret)?;
+                let ciphertext = do_final(env, site, &cipher, secret)?;
                 let iv = JByteArray::from(env.call_method(&cipher, "getIV", "()[B", &[])?.l()?);
                 Ok((env.convert_byte_array(&iv)?, ciphertext))
             })
         };
-        // A key invalidated for good cannot wrap a new secret either: replace it once.
+        // A key the Keystore says is gone for good (invalidated, or failing at getKey with no
+        // cause) cannot wrap a new secret either: delete it once and generate another.
         let (nonce, ciphertext) = match wrap() {
             Err(JavaFailure::KeyUnusable { replace_key: true }) => {
-                self.java(delete_keystore_key)
+                self.java(|env, _| delete_keystore_key(env))
                     .map_err(failure_to_secret_error)?;
                 wrap()
             }

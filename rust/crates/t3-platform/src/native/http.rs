@@ -135,6 +135,13 @@ mod tests {
             ("http://10.0.0.1/", false),
             ("https://example.com/", false),
             ("http://[::2]/", false),
+            // Second re-review C2: Chromium's implicit bypass also covers link-local and the
+            // IPv4-mapped spellings.
+            ("http://169.254.10.20/", true),
+            ("http://[fe80::1]/", true),
+            ("http://[::ffff:127.0.0.1]/", true),
+            ("http://[::ffff:169.254.1.1]/", true),
+            ("http://[::ffff:10.0.0.1]/", false),
         ] {
             let parsed = url::Url::parse(url).unwrap();
             assert_eq!(is_loopback(&parsed.host().unwrap()), loopback, "{url}");

@@ -23,53 +23,75 @@ pub enum SecretStoreError {
 pub trait SecretKeyStore: Send + Sync + 'static {
     fn load(&self, id: &str) -> Result<Option<Zeroizing<Vec<u8>>>, SecretStoreError>;
     fn store(&self, id: &str, secret: &[u8]) -> Result<(), SecretStoreError>;
-    /// Removes the key stored under `id`; an id with no key is success.
+    /// Removes the key stored under `id`; an id with no key is success. A store that cannot
+    /// delete leaves one orphaned entry, which opens nothing once its records are gone.
     fn delete(&self, _id: &str) -> Result<(), SecretStoreError> {
-        Ok(())
-    }
-    /// Sets aside a key that `load` reported `Corrupt`, before a new one is stored under the
-    /// same id, so a misread key is kept rather than overwritten.
-    fn retire(&self, _id: &str) -> Result<(), SecretStoreError> {
         Ok(())
     }
 }
 
-/// What a failed Android Keystore call means; `secret/android.rs` gathers the facts from the
-/// exception. Only an authentication-tag failure and a permanently invalidated key are certain:
-/// AOSP's `AndroidKeyStoreProvider` raises `UnrecoverableKeyException` for every keystore2
-/// error except not-found and invalidated, temporary ones included.
+/// What a failed Android Keystore call means. `secret/android.rs` gathers the facts from the
+/// exception and the call that raised it; the decision is here, tested on the cases AOSP
+/// delivers. Only a key the Keystore says is gone, or a blob that does not match the key, is
+/// certain; everything else, keystore2's system errors included, fails this launch only.
 #[cfg(any(target_os = "android", test))]
 pub(crate) mod keystore_failure {
-    #[derive(Debug, Default, Clone, Copy)]
+    /// The call that raised the exception.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Site {
+        /// `KeyStore.getKey`.
+        GetKey,
+        /// `Cipher.init`.
+        Init,
+        /// `Cipher.doFinal`.
+        DoFinal,
+        Other,
+    }
+
+    /// The exception's class, as far as the decision needs it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Thrown {
+        AeadBadTag,
+        KeyPermanentlyInvalidated,
+        UnrecoverableKey,
+        Other,
+    }
+
+    /// The exception's cause.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Cause {
+        None,
+        /// An `android.security.KeyStoreException`, with its `isTransientFailure()` (API 33+).
+        KeyStore { transient: Option<bool> },
+        Other,
+    }
+
+    #[derive(Debug, Clone, Copy)]
     pub(crate) struct Facts {
-        pub tag_mismatch: bool,
-        pub permanently_invalidated: bool,
-        pub unrecoverable: bool,
-        /// The cause is an `android.security.KeyStoreException`.
-        pub keystore_cause: bool,
-        /// Its `isTransientFailure()` (API 33+); `None` before 33.
-        pub cause_transient: Option<bool>,
+        pub site: Site,
+        pub thrown: Thrown,
+        pub cause: Cause,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) enum Failure {
         /// The key will never open this blob; `replace_key` when the Keystore entry itself is
-        /// gone for good and may be deleted.
+        /// gone for good and must be deleted before a new key can wrap anything.
         Permanent { replace_key: bool },
         /// Possibly temporary: fail this launch and touch nothing.
         Transient,
     }
 
     pub(crate) fn classify(facts: &Facts) -> Failure {
-        if facts.permanently_invalidated {
-            Failure::Permanent { replace_key: true }
-        } else if facts.tag_mismatch
-            || facts.unrecoverable
-                && (!facts.keystore_cause || facts.cause_transient == Some(false))
-        {
-            Failure::Permanent { replace_key: false }
-        } else {
-            Failure::Transient
+        match (facts.site, facts.thrown, facts.cause) {
+            (_, Thrown::KeyPermanentlyInvalidated, _)
+            // keystore2's getKey rethrows an invalidated key, or one of an unknown algorithm,
+            // as UnrecoverableKeyException with no cause.
+            | (Site::GetKey, Thrown::UnrecoverableKey, Cause::None) => {
+                Failure::Permanent { replace_key: true }
+            }
+            (Site::DoFinal, Thrown::AeadBadTag, _) => Failure::Permanent { replace_key: false },
+            _ => Failure::Transient,
         }
     }
 
@@ -77,54 +99,55 @@ pub(crate) mod keystore_failure {
     mod tests {
         use super::*;
 
+        /// The exceptions AOSP raises, from `sources/android-31` (second re-review A1, A2).
         #[test]
         fn only_certain_keystore_failures_discard_saved_credentials() {
-            let unrecoverable = Facts {
-                unrecoverable: true,
-                ..Facts::default()
-            };
+            let facts = |site, thrown, cause| Facts { site, thrown, cause };
+            let replace = Failure::Permanent { replace_key: true };
             for (facts, expected) in [
+                // keystore2 `AndroidKeyStoreSpi.engineGetKey` (:108-114): a permanently
+                // invalidated key, rethrown with no cause. Also "Key algorithm unknown"
+                // (`AndroidKeyStoreProvider.java:387, 401`).
+                (facts(Site::GetKey, Thrown::UnrecoverableKey, Cause::None), replace),
+                // A binder failure after one retry: `KeyStore2.handleRemoteExceptionWithRetry`
+                // (:103-127) raises SYSTEM_ERROR, wrapped by `loadAndroidKeyStoreKeyFromKeystore`
+                // (:350-365). API 31-32 have no `isTransientFailure`; API 33+ answers false.
                 (
-                    Facts {
-                        tag_mismatch: true,
-                        ..Facts::default()
-                    },
-                    Failure::Permanent { replace_key: false },
-                ),
-                (
-                    Facts {
-                        permanently_invalidated: true,
-                        ..Facts::default()
-                    },
-                    Failure::Permanent { replace_key: true },
-                ),
-                // A keystore2 error behind UnrecoverableKeyException may be temporary.
-                (
-                    Facts {
-                        keystore_cause: true,
-                        ..unrecoverable
-                    },
+                    facts(Site::GetKey, Thrown::UnrecoverableKey, Cause::KeyStore { transient: None }),
                     Failure::Transient,
                 ),
                 (
-                    Facts {
-                        keystore_cause: true,
-                        cause_transient: Some(true),
-                        ..unrecoverable
-                    },
+                    facts(
+                        Site::GetKey,
+                        Thrown::UnrecoverableKey,
+                        Cause::KeyStore { transient: Some(false) },
+                    ),
                     Failure::Transient,
                 ),
                 (
-                    Facts {
-                        keystore_cause: true,
-                        cause_transient: Some(false),
-                        ..unrecoverable
-                    },
+                    facts(
+                        Site::GetKey,
+                        Thrown::UnrecoverableKey,
+                        Cause::KeyStore { transient: Some(true) },
+                    ),
+                    Failure::Transient,
+                ),
+                (
+                    facts(Site::GetKey, Thrown::UnrecoverableKey, Cause::Other),
+                    Failure::Transient,
+                ),
+                // Older keystores raise the invalidation itself, at `Cipher.init`.
+                (facts(Site::Init, Thrown::KeyPermanentlyInvalidated, Cause::None), replace),
+                // The blob was not wrapped by this key.
+                (
+                    facts(Site::DoFinal, Thrown::AeadBadTag, Cause::None),
                     Failure::Permanent { replace_key: false },
                 ),
-                (unrecoverable, Failure::Permanent { replace_key: false }),
-                // Bad padding, a provider or keystore error: not certain, so temporary.
-                (Facts::default(), Failure::Transient),
+                // Bad padding, an invalid key at init, anything else: not certain.
+                (facts(Site::DoFinal, Thrown::Other, Cause::None), Failure::Transient),
+                (facts(Site::Init, Thrown::Other, Cause::None), Failure::Transient),
+                (facts(Site::GetKey, Thrown::AeadBadTag, Cause::None), Failure::Transient),
+                (facts(Site::Other, Thrown::UnrecoverableKey, Cause::None), Failure::Transient),
             ] {
                 assert_eq!(classify(&facts), expected, "{facts:?}");
             }
@@ -174,6 +197,9 @@ impl SecretKeyStore for KeychainStore {
     fn store(&self, id: &str, secret: &[u8]) -> Result<(), SecretStoreError> {
         self.0.store(id, secret)
     }
+    fn delete(&self, id: &str) -> Result<(), SecretStoreError> {
+        self.0.delete(id)
+    }
 }
 
 #[cfg(any(
@@ -206,6 +232,12 @@ impl SecretKeyStore for OsSecretStore {
             .and_then(|entry| entry.set_secret(secret))
             .map_err(|e| SecretStoreError::Unavailable(e.to_string()))
     }
+    fn delete(&self, id: &str) -> Result<(), SecretStoreError> {
+        match keyring::Entry::new(&self.service, id).and_then(|entry| entry.delete_credential()) {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(SecretStoreError::Unavailable(e.to_string())),
+        }
+    }
 }
 
 /// Keeps keys in process memory only: secure records become unreadable when the process exits
@@ -232,6 +264,13 @@ impl SecretKeyStore for EphemeralSecretStore {
             .map_err(|_| SecretStoreError::Unavailable("poisoned".into()))?;
         keys.retain(|(key, _)| key != id);
         keys.push((id.to_owned(), Zeroizing::new(secret.to_vec())));
+        Ok(())
+    }
+    fn delete(&self, id: &str) -> Result<(), SecretStoreError> {
+        self.keys
+            .lock()
+            .map_err(|_| SecretStoreError::Unavailable("poisoned".into()))?
+            .retain(|(key, _)| key != id);
         Ok(())
     }
 }

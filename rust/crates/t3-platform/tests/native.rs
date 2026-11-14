@@ -813,7 +813,8 @@ async fn an_unreadable_or_wrong_length_storage_key_is_replaced_instead_of_failin
             .await
             .expect("opens with a new key");
         let report = reopened.open_report();
-        assert_eq!(report.discarded_secure_records, 1);
+        assert_eq!(report.retained_secure_records, 1);
+        assert_eq!(report.discarded_secure_records, 0);
         assert!(report.replaced_unreadable_key);
         assert_eq!(
             reopened
@@ -939,7 +940,8 @@ async fn damage_past_the_file_header_is_moved_aside_too() {
 struct FlakySecrets {
     inner: Arc<EphemeralSecretStore>,
     unavailable_once: std::sync::atomic::AtomicBool,
-    corrupt_once: std::sync::atomic::AtomicBool,
+    /// Reads that report the key unreadable before it reads again.
+    corrupt_reads: std::sync::atomic::AtomicUsize,
 }
 impl t3_platform::SecretKeyStore for FlakySecrets {
     fn load(
@@ -950,7 +952,11 @@ impl t3_platform::SecretKeyStore for FlakySecrets {
         if self.unavailable_once.swap(false, SeqCst) {
             return Err(t3_platform::SecretStoreError::Unavailable("keystore busy".into()));
         }
-        if self.corrupt_once.swap(false, SeqCst) {
+        if self
+            .corrupt_reads
+            .try_update(SeqCst, SeqCst, |left| left.checked_sub(1))
+            .is_ok()
+        {
             return Err(t3_platform::SecretStoreError::Corrupt);
         }
         self.inner.load(id)
@@ -977,7 +983,7 @@ async fn a_key_store_that_is_unavailable_once_keeps_every_record_for_the_next_op
     flaky.secrets = Box::new(FlakySecrets {
         inner: secrets.clone(),
         unavailable_once: true.into(),
-        corrupt_once: false.into(),
+        corrupt_reads: 0.into(),
     });
     assert!(
         NativePlatform::open(flaky).await.is_err(),
@@ -1012,7 +1018,7 @@ async fn an_unreadable_key_keeps_its_records_until_it_reads_again() {
     damaged.secrets = Box::new(FlakySecrets {
         inner: secrets.clone(),
         unavailable_once: false.into(),
-        corrupt_once: true.into(),
+        corrupt_reads: 2.into(),
     });
     let rekeyed = NativePlatform::open(damaged).await.unwrap();
     let report = rekeyed.open_report();
