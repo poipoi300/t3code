@@ -150,6 +150,19 @@ pub fn latest_provider_turn_for_attempt<'a>(
         })
 }
 
+fn writers_running(running: &[String]) -> Result<()> {
+    if running.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Service {
+        operation: WRITERS_RUNNING_OPERATION,
+        detail: format!(
+            "Files can't be restored while this thread is still writing to its folder: {}. Stop them, then try again.",
+            running.join(", ")
+        ),
+    })
+}
+
 impl CheckpointRollbackService {
     /// Refuses a file restore while anything of this thread can write to its workspace, naming
     /// each writer, and otherwise holds the host's writers until the returned hold drops.
@@ -161,6 +174,23 @@ impl CheckpointRollbackService {
         session: &dyn SessionRuntime,
         provider: &OrchestrationV2ProviderThread,
     ) -> Result<WriterHold> {
+        let mut running = self.running_writers(thread_id, session, provider).await?;
+        let hold = self
+            .writers
+            .hold(thread_id.clone(), PathBuf::from(cwd))
+            .await?;
+        running.extend(hold.running.iter().cloned());
+        writers_running(&running)?;
+        Ok(hold)
+    }
+
+    /// The thread's own writers: a running turn, provider commands, provider background work.
+    async fn running_writers(
+        &self,
+        thread_id: &ThreadId,
+        session: &dyn SessionRuntime,
+        provider: &OrchestrationV2ProviderThread,
+    ) -> Result<Vec<String>> {
         // Narrow reads: history may hold payloads older runs no longer decode.
         let shells = self
             .projections
@@ -217,21 +247,7 @@ impl CheckpointRollbackService {
         {
             running.push("background work its provider started".to_owned());
         }
-        let hold = self
-            .writers
-            .hold(thread_id.clone(), PathBuf::from(cwd))
-            .await?;
-        running.extend(hold.running.iter().cloned());
-        if !running.is_empty() {
-            return Err(Error::Service {
-                operation: WRITERS_RUNNING_OPERATION,
-                detail: format!(
-                    "Files can't be restored while this thread is still writing to its folder: {}. Stop them, then try again.",
-                    running.join(", ")
-                ),
-            });
-        }
-        Ok(hold)
+        Ok(running)
     }
 
     pub async fn execute(
@@ -434,6 +450,17 @@ impl CheckpointRollbackService {
                 configured_policy.options,
             )
             .await?;
+        // Before the provider's rollback, so a refusal changes nothing. The host's writers stay
+        // held until Git returns; the thread lane is not held here because ingesting the
+        // provider's rollback events takes it.
+        let host_writers = if input.restore_files {
+            Some(
+                self.quiesce(&input.thread_id, &scope.cwd.0, session.as_ref(), &provider)
+                    .await?,
+            )
+        } else {
+            None
+        };
         let mut turns = Vec::new();
         for turn in &context.provider_turns {
             if turn.provider_thread_id != provider.id {
@@ -491,14 +518,18 @@ impl CheckpointRollbackService {
             {
                 return Err(reject(SHARED_WORKSPACE_RESTORE_MESSAGE));
             }
-            // Held until Git returns: nothing of this thread may write while restore runs.
-            let _writers = self
-                .quiesce(&input.thread_id, &scope.cwd.0, session.as_ref(), &provider)
-                .await?;
+            // A turn or command may have started during the provider's rollback; the lane now
+            // keeps new ones out until the commit.
+            writers_running(
+                &self
+                    .running_writers(&input.thread_id, session.as_ref(), &provider)
+                    .await?,
+            )?;
             self.checkpoints
                 .restore(scope.clone(), checkpoint, cancellation)
                 .await?;
         }
+        drop(host_writers);
         if !context.stale_checkpoints.is_empty() {
             self.checkpoints
                 .delete_stale_refs(scope.clone(), context.stale_checkpoints.clone())

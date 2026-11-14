@@ -5,6 +5,7 @@ pub mod composition;
 pub mod decision;
 pub mod effects;
 pub mod error;
+pub mod native_history;
 pub mod ports;
 pub mod projections;
 pub mod provider;

@@ -780,7 +780,34 @@ struct MappingState {
     execute_session: bool,
     execute_turn: Option<String>,
     failed: bool,
+    /// Thread setup in progress (`session/new` or `session/load`): sign-in consent is admitted.
+    setting_up: bool,
+    /// The native session being loaded and the app thread it belongs to; the agent replays its
+    /// history meanwhile.
+    loading: Option<(String, ThreadId)>,
+    history: BTreeMap<String, LoadedHistory>,
 }
+
+/// Bounds on a replayed history: it is agent content, kept in memory and imported as messages.
+const HISTORY_MAX_MESSAGES: usize = 2_000;
+const HISTORY_MAX_MESSAGE_BYTES: usize = 1 << 20;
+const HISTORY_MAX_BYTES: usize = 16 << 20;
+/// TypeScript `MAX_ACP_CONTENT_TEXT_LENGTH`, in UTF-16 units.
+const CONTENT_TEXT_LIMIT: usize = 65_536;
+
+/// TypeScript `appendLoadedHistory`'s snapshot state for one native session.
+#[derive(Default)]
+struct LoadedHistory {
+    order: Vec<String>,
+    messages: BTreeMap<String, OrchestrationV2ConversationMessage>,
+    reasoning: Vec<MessageId>,
+    role: Option<&'static str>,
+    message_id: Option<String>,
+    index: u64,
+    bytes: usize,
+    truncated: bool,
+}
+
 struct Shared {
     driver: ProviderDriverKind,
     instance: ProviderInstanceId,
@@ -793,8 +820,232 @@ struct Shared {
     state: Mutex<MappingState>,
     subscribers: Mutex<Subscribers>,
     cancellation: CancellationToken,
+    hooks: Option<Arc<dyn AcpRuntimeHooks>>,
+    reports_per_turn_prompt_usage: bool,
 }
+/// The first `limit` UTF-16 units of `text` (JavaScript `slice`), whole characters only.
+fn utf16_prefix(text: &str, limit: usize) -> &str {
+    let mut units = 0;
+    for (index, character) in text.char_indices() {
+        units += character.len_utf16();
+        if units > limit {
+            return &text[..index];
+        }
+    }
+    text
+}
+fn bounded_metadata(value: &Value, limit: usize) -> &str {
+    utf16_prefix(value.as_str().unwrap_or_default().trim(), limit)
+}
+fn bounded_uri(value: &Value) -> &str {
+    let uri = bounded_metadata(value, 4_096);
+    if uri.to_ascii_lowercase().starts_with("data:") {
+        ""
+    } else {
+        uri
+    }
+}
+/// TypeScript `acpContentBlockDisplayText`.
+pub fn acp_content_display_text(content: &Value) -> Option<String> {
+    let or = |text: &str, fallback: &str| {
+        if text.is_empty() {
+            fallback.to_owned()
+        } else {
+            text.to_owned()
+        }
+    };
+    Some(match content["type"].as_str()? {
+        "text" => utf16_prefix(content["text"].as_str()?, CONTENT_TEXT_LIMIT).to_owned(),
+        "resource_link" => {
+            let title = bounded_metadata(&content["title"], 512);
+            let label = if title.is_empty() {
+                or(bounded_metadata(&content["name"], 512), "resource")
+            } else {
+                title.to_owned()
+            };
+            let description = bounded_metadata(&content["description"], 2_048);
+            let uri = bounded_uri(&content["uri"]);
+            let head = if description.is_empty() {
+                label
+            } else {
+                format!("{label}: {description}")
+            };
+            if uri.is_empty() {
+                head
+            } else {
+                format!("{head}\n{uri}")
+            }
+        }
+        "resource" => {
+            let resource = &content["resource"];
+            if let Some(text) = resource["text"].as_str() {
+                return Some(utf16_prefix(text, CONTENT_TEXT_LIMIT).to_owned());
+            }
+            let mime = bounded_metadata(&resource["mimeType"], 256);
+            let uri = bounded_uri(&resource["uri"]);
+            format!(
+                "[ACP binary resource{}{}]",
+                if mime.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({mime})")
+                },
+                if uri.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {uri}")
+                }
+            )
+        }
+        "image" => {
+            let mime = or(bounded_metadata(&content["mimeType"], 256), "unknown type");
+            let uri = bounded_uri(&content["uri"]);
+            format!(
+                "[ACP image ({mime}){}]",
+                if uri.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {uri}")
+                }
+            )
+        }
+        "audio" => format!(
+            "[ACP audio ({})]",
+            or(bounded_metadata(&content["mimeType"], 256), "unknown type")
+        ),
+        other => format!(
+            "[Unsupported ACP content: {}]",
+            or(utf16_prefix(other.trim(), 128), "unknown")
+        ),
+    })
+}
+
 impl Shared {
+    /// TypeScript `appendLoadedHistory`: while a session loads, the agent replays its history as
+    /// message updates; they become the session's snapshot messages, not live turn items.
+    fn capture_history(&self, update: &t3_acp::SessionUpdate) {
+        let kind = update.kind();
+        let mut state = lock(&self.state);
+        let Some((native, thread)) = state.loading.clone() else {
+            return;
+        };
+        if update.session_id != native {
+            return;
+        }
+        let (role, text, replace) = match kind {
+            "user_message_chunk" | "agent_message_chunk" | "agent_thought_chunk" => {
+                let Some(text) = acp_content_display_text(&update.update["content"]) else {
+                    return;
+                };
+                if text.trim().is_empty() {
+                    return;
+                }
+                (kind, text, false)
+            }
+            "user_message" | "agent_message" | "agent_thought" => {
+                let Some(blocks) = update.update["content"].as_array() else {
+                    return;
+                };
+                let text = blocks
+                    .iter()
+                    .filter_map(acp_content_display_text)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (kind, text, true)
+            }
+            "tool_call" | "tool_call_update" | "plan" | "plan_update" | "plan_removed" => {
+                let history = state.history.entry(native).or_default();
+                history.role = None;
+                history.message_id = None;
+                return;
+            }
+            _ => return,
+        };
+        let role = if role.starts_with("user") {
+            "user"
+        } else if role.contains("thought") {
+            "thought"
+        } else {
+            "assistant"
+        };
+        if text.is_empty() && !replace {
+            return;
+        }
+        let source = update.update["messageId"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(|id| utf16_prefix(id, 256).to_owned());
+        let now = self.clock.now();
+        let history = state.history.entry(native.clone()).or_default();
+        if history.truncated {
+            return;
+        }
+        let starts_new = history.role != Some(role)
+            || source
+                .as_ref()
+                .is_some_and(|source| history.message_id.as_ref() != Some(source));
+        if starts_new {
+            history.index += 1;
+        }
+        let item = match &source {
+            Some(source) => format!("{native}:history:{role}:message:{source}"),
+            None => format!("{native}:history:{role}:{}", history.index),
+        };
+        let id = self.item_id("message", &item);
+        let (existed, previous_text, created) = match history.messages.get(&id) {
+            Some(message) => (true, message.text.clone(), json!(message.created_at)),
+            None => (false, String::new(), json!(now)),
+        };
+        if !existed && history.order.len() >= HISTORY_MAX_MESSAGES {
+            history.truncated = true;
+            return;
+        }
+        let mut next = if replace {
+            text
+        } else {
+            format!("{previous_text}{text}")
+        };
+        if next.len() > HISTORY_MAX_MESSAGE_BYTES {
+            let mut end = HISTORY_MAX_MESSAGE_BYTES;
+            while !next.is_char_boundary(end) {
+                end -= 1;
+            }
+            next.truncate(end);
+        }
+        let bytes = history.bytes - previous_text.len() + next.len();
+        if bytes > HISTORY_MAX_BYTES {
+            history.truncated = true;
+            return;
+        }
+        let Ok(message) = decode::<OrchestrationV2ConversationMessage>(json!({
+            "id": id, "threadId": thread, "runId": null, "nodeId": null,
+            "createdBy": if role == "user" { "user" } else { "agent" },
+            "creationSource": "provider",
+            "role": if role == "user" { "user" } else { "assistant" },
+            "text": next, "attachments": [], "streaming": false,
+            "createdAt": created, "updatedAt": now,
+        })) else {
+            return;
+        };
+        if role == "thought"
+            && let Ok(id) = expanded(&message.id)
+            && !history.reasoning.contains(id)
+        {
+            history.reasoning.push(id.clone());
+        }
+        if !existed {
+            history.order.push(id.clone());
+        }
+        history.bytes = bytes;
+        history.role = Some(role);
+        history.message_id = source.or(if starts_new {
+            None
+        } else {
+            history.message_id.take()
+        });
+        history.messages.insert(id, message);
+    }
+
     async fn emit(&self, kind: ProviderEventKind) -> ProviderResult<()> {
         let event = ProviderEvent {
             driver: self.driver.clone(),
@@ -1051,6 +1302,41 @@ impl ClientHandler for RequestHandler {
     }
 }
 impl RequestHandler {
+    /// TypeScript `onUrlElicitation`, admitted only for this runtime's own session: while it
+    /// sets up a thread (no session id yet, or the one being loaded) or for the session whose
+    /// turn is running. The host binds the answer to this instance's pending attempt.
+    async fn url_consent(&self, params: &Value) -> bool {
+        let Some(hooks) = self.shared.hooks.clone() else {
+            return false;
+        };
+        let (Some(id), Some(url)) = (params["elicitationId"].as_str(), params["url"].as_str())
+        else {
+            return false;
+        };
+        let session = params["sessionId"].as_str();
+        let (admitted, turn) = {
+            let state = lock(&self.shared.state);
+            let loading = state.loading.as_ref().map(|(native, _)| native.as_str());
+            let setup = state.setting_up && session.is_none_or(|s| loading.is_none_or(|l| l == s));
+            let active = state.active.as_deref();
+            let turn = active
+                .filter(|active| session.is_none_or(|s| s == *active))
+                .and_then(|active| state.contexts.get(active))
+                .map(|context| context.cancellation.clone());
+            (setup || turn.is_some(), turn)
+        };
+        if !admitted {
+            return false;
+        }
+        let message = params["message"].as_str().unwrap_or_default();
+        let turn = turn.unwrap_or_default();
+        tokio::select! {
+            _ = self.shared.cancellation.cancelled() => false,
+            _ = turn.cancelled() => false,
+            accepted = hooks.url_consent(id, url, message) => accepted,
+        }
+    }
+
     async fn permission(&self, mut params: Value, wire: RequestContext) -> Result<Value, RpcError> {
         let native = params["sessionId"]
             .as_str()
@@ -1163,6 +1449,11 @@ impl RequestHandler {
         mut params: Value,
         wire: RequestContext,
     ) -> Result<Value, RpcError> {
+        if params["mode"] == "url" {
+            return Ok(
+                json!({"action": if self.url_consent(&params).await { "accept" } else { "decline" }}),
+            );
+        }
         {
             let state = lock(&self.shared.state);
             let native = state
@@ -1376,6 +1667,41 @@ impl RequestHandler {
     }
 }
 
+/// Host bindings a flavour gives the adapter (TypeScript `AcpAdapterV2Flavor`'s
+/// `onUrlElicitation`, `onAvailableCommandsUpdate`, `onSessionConfigurationUpdate` and
+/// `withRuntimeStartup`). Everything passed in comes from the agent and is untrusted.
+#[async_trait]
+pub trait AcpRuntimeHooks: Send + Sync {
+    /// A sign-in URL the agent asks the user to open; `true` accepts. The adapter calls this only
+    /// for its own session while it sets up a thread or runs a turn.
+    async fn url_consent(&self, elicitation_id: &str, url: &str, message: &str) -> bool;
+    /// The agent's raw `availableCommands`.
+    fn available_commands(&self, commands: &[Value]);
+    /// The session's `{configOptions, modes, models}` after setup or a configuration update.
+    fn session_configuration(&self, configuration: &Value);
+    /// Held while the agent process starts and initializes.
+    fn startup(&self) -> Option<Box<dyn std::any::Any + Send>>;
+}
+
+/// Per-agent switches of the generic adapter (TypeScript `AcpAdapterV2Flavor` fields).
+#[derive(Clone, Debug)]
+pub struct AcpFlavor {
+    /// `capabilities.turns.supportsSteeringByInterruptRestart`.
+    pub steering_by_interrupt_restart: bool,
+    /// `reportsPerTurnPromptUsage`: the prompt response's usage is the turn's own.
+    pub reports_per_turn_prompt_usage: bool,
+}
+impl Default for AcpFlavor {
+    fn default() -> Self {
+        Self {
+            steering_by_interrupt_restart: true,
+            // The generic adapter has always read the prompt response's usage; a flavour that
+            // has not proven per-turn usage turns it off (TypeScript's default).
+            reports_per_turn_prompt_usage: true,
+        }
+    }
+}
+
 pub struct AcpAdapter {
     pub instance_id: ProviderInstanceId,
     pub driver: ProviderDriverKind,
@@ -1385,6 +1711,8 @@ pub struct AcpAdapter {
     pub ids: Arc<dyn IdGenerator>,
     pub initialize: Value,
     pub supported_runtime_modes: BTreeMap<ProviderDriverKind, Vec<RuntimeMode>>,
+    pub hooks: Option<Arc<dyn AcpRuntimeHooks>>,
+    pub flavor: AcpFlavor,
 }
 
 pub const DEV_REPLAY_INSTANCE_ID: &str = "devReplay";
@@ -1425,24 +1753,95 @@ impl AcpAdapter {
             clock,
             ids,
             initialize: json!({"protocolVersion":2,"clientInfo":{"name":"t3-code","version":"1"},"clientCapabilities":{}}),
-            supported_runtime_modes: {
-                use RuntimeMode::*;
-                [
-                    (
-                        "acpRegistry",
-                        vec![ApprovalRequired, AutoAcceptEdits, Auto, FullAccess],
-                    ),
-                    ("grok", vec![ApprovalRequired, Auto, FullAccess]),
-                    ("kiro", vec![ApprovalRequired, FullAccess]),
-                    ("muse", vec![ApprovalRequired, FullAccess]),
-                    ("pi", vec![ApprovalRequired, AutoAcceptEdits, FullAccess]),
-                    ("fx", vec![ApprovalRequired, Auto]),
-                ]
-                .into_iter()
-                .map(|(driver, modes)| (ProviderDriverKind(driver.into()), modes))
-                .collect()
-            },
+            supported_runtime_modes: acp_supported_runtime_modes(),
+            hooks: None,
+            flavor: AcpFlavor::default(),
         }
+    }
+}
+
+/// The runtime modes each built-in ACP flavour offers (TypeScript provider snapshots).
+fn acp_supported_runtime_modes() -> BTreeMap<ProviderDriverKind, Vec<RuntimeMode>> {
+    use RuntimeMode::*;
+    [
+        (
+            "acpRegistry",
+            vec![ApprovalRequired, AutoAcceptEdits, Auto, FullAccess],
+        ),
+        ("grok", vec![ApprovalRequired, Auto, FullAccess]),
+        ("kiro", vec![ApprovalRequired, FullAccess]),
+        ("muse", vec![ApprovalRequired, FullAccess]),
+        ("pi", vec![ApprovalRequired, AutoAcceptEdits, FullAccess]),
+        ("fx", vec![ApprovalRequired, Auto]),
+    ]
+    .into_iter()
+    .map(|(driver, modes)| (ProviderDriverKind(driver.into()), modes))
+    .collect()
+}
+
+/// Which registry agent an instance runs, as its settings name it (TypeScript reads
+/// `settings.source`, `settings.agentId` and the local `settings.commandPath`'s file name).
+#[derive(Clone, Debug, Default)]
+pub struct AcpRegistryAgent {
+    /// The registry id; empty for a local agent.
+    pub agent_id: String,
+    /// A local agent's command file name, lowercase, without its directory.
+    pub local_command: Option<String>,
+}
+impl AcpRegistryAgent {
+    fn local(&self, names: &[&str]) -> bool {
+        self.local_command.as_deref().is_some_and(|command| {
+            names.iter().any(|name| {
+                [*name, &format!("{name}.exe"), &format!("{name}.cmd")]
+                    .iter()
+                    .any(|candidate| command == *candidate)
+            })
+        })
+    }
+    /// GitHub Copilot CLI: cancelling its prompt also kills the background agents it started.
+    pub fn is_copilot(&self) -> bool {
+        self.agent_id == "github-copilot-cli" || self.local(&["copilot"])
+    }
+    /// Claude Agent over ACP.
+    pub fn is_claude(&self) -> bool {
+        self.agent_id == "claude-acp" || self.local(&["claude-agent-acp"])
+    }
+}
+
+/// The ACP Registry flavour (TypeScript `makeAcpRegistryAdapterV2` over `makeAcpAdapterV2`):
+/// the client capabilities a registry session advertises (no client file system or terminals,
+/// form and URL elicitation), the host's coordinator hooks, and the per-agent switches this
+/// adapter supports. `transport` launches the agent the instance's settings resolve to.
+pub fn acp_registry_adapter(
+    instance_id: ProviderInstanceId,
+    agent: &AcpRegistryAgent,
+    transport: Arc<dyn AcpTransportFactory>,
+    hooks: Option<Arc<dyn AcpRuntimeHooks>>,
+    clock: Arc<dyn Clock>,
+    ids: Arc<dyn IdGenerator>,
+) -> AcpAdapter {
+    AcpAdapter {
+        instance_id,
+        driver: ProviderDriverKind("acpRegistry".into()),
+        transport,
+        effects: Arc::new(RejectClientEffects),
+        clock,
+        ids,
+        initialize: json!({
+            "clientInfo": {"name": "t3-code", "version": "0.0.0"},
+            "clientCapabilities": {
+                "fs": {"readTextFile": false, "writeTextFile": false},
+                "terminal": false,
+                "elicitation": {"form": {}, "url": {}},
+            },
+        }),
+        supported_runtime_modes: acp_supported_runtime_modes(),
+        hooks,
+        flavor: AcpFlavor {
+            steering_by_interrupt_restart: !agent.is_copilot(),
+            // glm-acp-agent is the one agent whose per-turn usage a live probe has verified.
+            reports_per_turn_prompt_usage: agent.agent_id == "glm-acp-agent",
+        },
     }
 }
 
@@ -1688,8 +2087,8 @@ impl ProviderAdapter for AcpAdapter {
     }
     async fn capabilities(&self) -> ProviderResult<OrchestrationV2ProviderCapabilities> {
         let mut capabilities = acp_capabilities()?;
-        if self.driver.0 == "grok" {
-            // Cancelling a Grok prompt kills its running foreground tool.
+        if self.driver.0 == "grok" || !self.flavor.steering_by_interrupt_restart {
+            // Cancelling a Grok (or Copilot) prompt kills its running foreground work.
             capabilities.turns.supports_steering_by_interrupt_restart = false;
         }
         Ok(capabilities)
@@ -1727,6 +2126,7 @@ impl ProviderAdapter for AcpAdapter {
         {
             return Err(protocol("unsupported ACP item identity version"));
         }
+        let _startup = self.hooks.as_ref().and_then(|hooks| hooks.startup());
         let transport_stop = cancellation.child_token();
         let transport = self
             .transport
@@ -1761,9 +2161,14 @@ impl ProviderAdapter for AcpAdapter {
                 execute_session: false,
                 execute_turn: None,
                 failed: false,
+                setting_up: false,
+                loading: None,
+                history: BTreeMap::new(),
             }),
             subscribers: Mutex::new(Vec::new()),
             cancellation: cancellation.child_token(),
+            hooks: self.hooks.clone(),
+            reports_per_turn_prompt_usage: self.flavor.reports_per_turn_prompt_usage,
         });
         let handler = Arc::new(RequestHandler {
             shared: shared.clone(),
@@ -1776,7 +2181,12 @@ impl ProviderAdapter for AcpAdapter {
             ClientOptions::default(),
         );
         let (control, commands) = mpsc::channel(16);
-        let receiver = tokio::spawn(receive_events(shared.clone(), events, commands));
+        let receiver = tokio::spawn(receive_events(
+            shared.clone(),
+            client.clone(),
+            events,
+            commands,
+        ));
         let initialized = tokio::select! { _ = cancellation.cancelled() => Err(ProviderError::Cancelled), result = client.initialize(self.initialize.clone()) => result.map_err(native_error) };
         if let Err(error) = initialized {
             shared.cancellation.cancel();
@@ -1809,8 +2219,21 @@ impl ProviderAdapter for AcpAdapter {
     }
 }
 
+/// TypeScript `onSessionConfigurationUpdate(configOptions, modeState, models)`.
+fn publish_configuration(shared: &Shared, client: &Client, native: &str) {
+    if let Some(hooks) = &shared.hooks {
+        let state = client.session_state(native);
+        hooks.session_configuration(&json!({
+            "configOptions": state.config_options,
+            "modes": state.modes,
+            "models": state.models,
+        }));
+    }
+}
+
 async fn receive_events(
     shared: Arc<Shared>,
+    client: Client,
     mut events: t3_acp::Events,
     mut commands: mpsc::Receiver<Control>,
 ) -> ProviderResult<()> {
@@ -1843,6 +2266,14 @@ async fn receive_events(
                 let Some(event) = event else { break; };
                 match event {
                     Ok(t3_acp::Event::SessionUpdate(update)) => {
+                        match update.kind() {
+                            "available_commands_update" => if let Some(hooks) = &shared.hooks {
+                                hooks.available_commands(update.update["availableCommands"].as_array().map_or(&[], Vec::as_slice));
+                            },
+                            "config_option_update" | "current_mode_update" => publish_configuration(&shared, &client, &update.session_id),
+                            _ => {}
+                        }
+                        shared.capture_history(&update);
                         for snapshot in batcher.push(&update, tokio::time::Instant::now()) { shared.emit_many(shared.text_events(snapshot)?).await?; }
                         shared.emit_many(shared.update_events(&update)?).await?;
                     }
@@ -1899,6 +2330,7 @@ async fn finish_turn(
             result
                 .as_ref()
                 .ok()
+                .filter(|_| shared.reports_per_turn_prompt_usage)
                 .and_then(|response| response.get("usage")),
             false,
             turn["status"].as_str().unwrap_or("failed"),
@@ -2065,6 +2497,16 @@ impl AcpSessionRuntime {
         } else {
             *lock(&self.shared.item_identity_version)
         };
+        struct Setup<'a>(&'a Shared);
+        impl Drop for Setup<'_> {
+            fn drop(&mut self) {
+                let mut state = lock(&self.0.state);
+                state.setting_up = false;
+                state.loading = None;
+            }
+        }
+        let setup = Setup(&self.shared);
+        lock(&self.shared.state).setting_up = true;
         let native = if let Some(native) = resume_native {
             if !self
                 .client
@@ -2072,6 +2514,12 @@ impl AcpSessionRuntime {
                 .is_some_and(|n| n.response["agentCapabilities"]["loadSession"] == true)
             {
                 return Err(ProviderError::Unsupported("ACP session/load"));
+            }
+            {
+                // The replay that follows replaces any earlier copy of this session's history.
+                let mut state = lock(&self.shared.state);
+                state.history.remove(&native);
+                state.loading = Some((native.clone(), thread_id.clone()));
             }
             let mut params = params;
             params["sessionId"] = json!(native);
@@ -2091,6 +2539,8 @@ impl AcpSessionRuntime {
                 .ok_or_else(|| protocol("ACP session/new omitted sessionId"))?
                 .to_owned()
         };
+        drop(setup);
+        publish_configuration(&self.shared, &self.client, &native);
         lock(&self.initial_native).take();
         *lock(&self.shared.item_identity_version) = identity_version;
         let native_metadata = (identity_version == 2).then(|| json!({"itemIdentityVersion":2}));
@@ -2162,6 +2612,7 @@ impl AcpSessionRuntime {
         lock(&self.shared.state)
             .selected_models
             .insert(native.into(), model.into());
+        publish_configuration(&self.shared, &self.client, native);
         Ok(())
     }
 }
@@ -2388,7 +2839,35 @@ impl SessionRuntime for AcpSessionRuntime {
     ) -> ProviderResult<ThreadSnapshot> {
         self.available()?;
         let native = Self::native_id(&thread)?;
+        let loaded = lock(&self.shared.state)
+            .threads
+            .get(&native)
+            .is_some_and(|known| known.id == thread.id);
+        if !loaded {
+            // TypeScript `readThreadSnapshot` loads the session first; its replay is the history.
+            let app_thread = thread
+                .app_thread_id
+                .as_ref()
+                .map(expanded)
+                .transpose()?
+                .cloned()
+                .ok_or_else(|| protocol("ACP snapshot requires app thread ID"))?;
+            let policy = lock(&self.shared.policy).clone();
+            self.setup_thread(app_thread, Some(thread.clone()), false, policy)
+                .await?;
+        }
         let state = lock(&self.shared.state);
+        let history = state.history.get(&native);
+        let mut messages: Vec<_> = history
+            .map(|history| {
+                history
+                    .order
+                    .iter()
+                    .filter_map(|id| history.messages.get(id).cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let reasoning = history.map_or_else(Vec::new, |history| history.reasoning.clone());
         let thread = state
             .threads
             .get(&native)
@@ -2405,15 +2884,19 @@ impl SessionRuntime for AcpSessionRuntime {
                 .filter(|turn| turn.provider_thread_id == state.threads[&native].id)
                 .cloned()
                 .collect(),
-            messages: state
-                .messages
-                .iter()
-                .filter(|message| {
-                    Some(message.thread_id.clone()) == state.threads[&native].app_thread_id
-                })
-                .cloned()
-                .collect(),
-            reasoning_message_ids: Some(Vec::new()),
+            messages: {
+                messages.extend(
+                    state
+                        .messages
+                        .iter()
+                        .filter(|message| {
+                            Some(message.thread_id.clone()) == state.threads[&native].app_thread_id
+                        })
+                        .cloned(),
+                );
+                messages
+            },
+            reasoning_message_ids: Some(reasoning),
             runtime_requests: state
                 .requests
                 .values()

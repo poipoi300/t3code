@@ -447,6 +447,7 @@ pub struct WorkflowFiles {
 /// A started runtime. Reads go through `transport`; commands through [`Self::dispatch_command`],
 /// [`Self::launch_thread`] and [`Self::project_command`]; stop operations through `threads`.
 pub struct OrchestrationRuntime {
+    providers: Arc<dyn ProviderRegistry>,
     pub transport: Arc<TransportService>,
     pub intake: ThreadMessageIntake,
     /// Thread lifecycle: `stop_thread`, `interrupt_thread`, `send_to_thread`, `wait_for_thread`.
@@ -872,6 +873,7 @@ impl OrchestrationRuntime {
             watch.start().await?;
         }
         Ok(Self {
+            providers,
             transport,
             intake,
             threads,
@@ -932,6 +934,11 @@ impl OrchestrationRuntime {
     /// The clock and id generator the runtime was started with.
     pub fn clock(&self) -> Arc<dyn Clock> {
         self.clock.clone()
+    }
+    /// The provider registry turns use, for host services that open a provider session
+    /// themselves (native history import); opens are admitted like any other.
+    pub fn providers(&self) -> Arc<dyn ProviderRegistry> {
+        self.providers.clone()
     }
     pub fn ids(&self) -> Arc<dyn IdGenerator> {
         self.ids.clone()

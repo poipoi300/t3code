@@ -342,3 +342,19 @@ Redistribution and use in source and binary forms, with or without modification,
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 Original work copyright (c) 2012 Yves-Marie K. Rinquin, under MIT license.
 https://github.com/rubycon/isaac.js
+
+## Registry flavour, loaded history and native history import (2026-11-14)
+
+`adapters/acp.rs` now carries `AcpRuntimeHooks` (URL sign-in consent, published commands and
+configuration, the startup guard) and `AcpFlavor` switches; `acp_registry_adapter` builds the ACP
+Registry flavour (registry client capabilities, Copilot without interrupt-restart steering, per-turn
+usage only for `glm-acp-agent`). The server binds the hooks to the provider domain's runtime
+coordinator and launches through the registry catalogue (`t3-server/src/adapters/acp_registry.rs`).
+URL consent is admitted only for this runtime's own session while it sets up a thread or runs that
+session's turn. Messages an agent replays during `session/load` are kept per session (at most 2,000
+messages, 1 MiB each, 16 MiB in all) and returned by `snapshot`, which loads the session first as
+TypeScript's `readThreadSnapshot` does. `native_history.rs` ports `importNativeHistory`.
+Not ported: agent subagent routing (Claude, Copilot, Devin), Mistral/Copilot extension
+notifications, Copilot lost-session restart and HTTP MCP, Devin client terminals, vendor
+elicitation forms (factory-droid, omp, opencode), advertised-command compaction and
+`authMethodId` re-authentication inside a session. Those agents run on the generic mapping.

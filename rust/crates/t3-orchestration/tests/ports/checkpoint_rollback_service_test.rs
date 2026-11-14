@@ -1214,7 +1214,8 @@ async fn restorable(
 }
 
 /// Review t3-git H-2: a file restore never runs under a live writer of its thread. A host
-/// terminal, a provider command and a running turn each refuse it by name, before Git is called.
+/// terminal, a provider command and a running turn each refuse it by name, before Git or the
+/// provider's conversation rollback is called.
 #[tokio::test]
 async fn a_restore_refuses_while_the_thread_still_writes_to_its_folder() -> Result<()> {
     for writer in ["terminal", "command", "turn"] {
@@ -1240,7 +1241,7 @@ async fn a_restore_refuses_while_the_thread_still_writes_to_its_folder() -> Resu
             }
             _ => {}
         }
-        let (mut service, _, _calls) = service(&h, &backend, true);
+        let (mut service, _, mut calls) = service(&h, &backend, true);
         service.writers = writers.clone();
         let error = service
             .execute(
@@ -1259,6 +1260,12 @@ async fn a_restore_refuses_while_the_thread_still_writes_to_its_folder() -> Resu
             "{writer}: {error}"
         );
         assert_eq!(backend.restores.load(Ordering::SeqCst), 0, "{writer}");
+        while let Ok(call) = calls.try_recv() {
+            assert!(
+                !matches!(call, FakeCall::Rollback(_)),
+                "{writer}: a refused restore leaves the provider's conversation as it was"
+            );
+        }
         assert!(
             writers.try_write(),
             "{writer}: the refusal releases the hold"
