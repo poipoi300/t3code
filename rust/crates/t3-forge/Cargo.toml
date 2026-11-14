@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 t3-contracts = { path = "../t3-contracts" }
+t3-config = { path = "../t3-config" }
 t3-process = { path = "../t3-process" }
 t3-git = { path = "../t3-git" }
 async-trait = "0.1"

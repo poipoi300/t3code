@@ -369,6 +369,69 @@ async fn app_sign_in_polls_saves_and_reads_its_own_viewer() {
     assert!(requests[3].headers.contains("Bearer ghu_new"));
 }
 #[tokio::test]
+async fn app_sign_in_refuses_unsafe_links_denial_expiry_and_cancellation_without_saving() {
+    use t3_forge::github::app::{AppSessionStore, AppSignIn, MemoryAppSessions};
+    for uri in [
+        "javascript:private-token",
+        "file:///private-token",
+        "https://private-token@github.com/login/device",
+    ] {
+        let (_,endpoint,task)=server_http(vec![answer(json!({"device_code":"private-device","user_code":"code","verification_uri":uri,"expires_in":900,"interval":0}))]).await;
+        let store = Arc::new(MemoryAppSessions::default());
+        let app = Arc::new(
+            AppSignIn::new("public-client".into(), store.clone())
+                .unwrap()
+                .with_loopback_endpoint(&endpoint)
+                .unwrap(),
+        );
+        let error = app.start("github.com").await.unwrap_err();
+        assert!(!format!("{error:?}").contains("private-"));
+        assert!(store.read("github.com").await.unwrap().is_none());
+        task.await.unwrap();
+    }
+    for (expires, denial) in [(900, true), (0, false)] {
+        let mut replies = vec![answer(
+            json!({"device_code":"private-device","user_code":"code","verification_uri":"https://github.com/login/device","expires_in":expires,"interval":0}),
+        )];
+        if denial {
+            replies.push(answer(
+                json!({"error":"access_denied","error_description":"private-denial"}),
+            ));
+        }
+        let (_, endpoint, task) = server_http(replies).await;
+        let store = Arc::new(MemoryAppSessions::default());
+        let app = Arc::new(
+            AppSignIn::new("public-client".into(), store.clone())
+                .unwrap()
+                .with_loopback_endpoint(&endpoint)
+                .unwrap(),
+        );
+        app.start("github.com").await.unwrap();
+        let error = app.wait("github.com").await.unwrap_err();
+        assert!(!format!("{error:?}").contains("private-"));
+        assert!(store.read("github.com").await.unwrap().is_none());
+        task.await.unwrap();
+        app.shutdown().await;
+    }
+    let (_,endpoint,task)=server_http(vec![answer(json!({"device_code":"private-device","user_code":"code","verification_uri":"https://github.com/login/device","expires_in":900,"interval":3600}))]).await;
+    let store = Arc::new(MemoryAppSessions::default());
+    let app = Arc::new(
+        AppSignIn::new("public-client".into(), store.clone())
+            .unwrap()
+            .with_loopback_endpoint(&endpoint)
+            .unwrap(),
+    );
+    assert!(app.start("evil.example").await.is_err());
+    app.start("github.com").await.unwrap();
+    app.cancel("github.com").await;
+    app.cancel("github.com").await;
+    assert!(app.wait("github.com").await.is_err());
+    assert!(store.read("github.com").await.unwrap().is_none());
+    task.await.unwrap();
+    app.shutdown().await;
+    assert!(app.start("github.com").await.is_err());
+}
+#[tokio::test]
 async fn app_refresh_failure_retains_an_unexpired_token_but_never_a_rejected_one() {
     use t3_forge::github::app::{AppSession, AppSessionStore, AppSignIn, MemoryAppSessions};
     let (http, endpoint, task) = server_http(

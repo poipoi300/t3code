@@ -56,7 +56,7 @@ impl Transport {
         let result = self
             .cli
             .run(CliRequest {
-                program: "origin",
+                program: "origin".into(),
                 provider: "cursor-origin",
                 operation: op.into(),
                 cwd: cwd.into(),

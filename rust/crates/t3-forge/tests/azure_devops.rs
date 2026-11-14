@@ -26,7 +26,7 @@ struct Recorded {
 #[async_trait]
 impl ForgeCli for Recorded {
     async fn run(&self, request: CliRequest) -> Result<CliResponse> {
-        assert_eq!(request.program, "az");
+        assert!(request.program == "az" || request.program == "fixture-python.exe");
         let mut answers = self.answers.lock().unwrap();
         let at = answers
             .iter()
@@ -55,7 +55,13 @@ fn setup(answers: Vec<Answer>) -> (AzureDevOps, Arc<Recorded>) {
         answers: Mutex::new(answers),
         ..Default::default()
     });
-    (AzureDevOps::new().unwrap().with_cli(cli.clone()), cli)
+    (
+        AzureDevOps::new()
+            .unwrap()
+            .with_invocation(t3_forge::azure_devops::launcher::Invocation::direct())
+            .with_cli(cli.clone()),
+        cli,
+    )
 }
 fn drained(cli: &Recorded) {
     assert!(cli.answers.lock().unwrap().is_empty());
@@ -102,6 +108,41 @@ async fn checkout_without_state_includes_completed_requests() {
             .any(|s| s == "--status=all")
     );
     drained(&cli);
+}
+#[tokio::test]
+async fn unicode_calls_and_discovery_use_bundled_python_and_installer() {
+    let (forge, cli) = setup(vec![answer("checkoutList", json!([]))]);
+    let invocation = t3_forge::azure_devops::launcher::Invocation {
+        command: "fixture-python.exe".into(),
+        args: vec![
+            "-X".into(),
+            "utf8".into(),
+            "-IBm".into(),
+            "azure.cli".into(),
+        ],
+        installer: Some("MSI"),
+    };
+    let forge = forge.with_invocation(invocation);
+    forge
+        .checkout_list_change_requests(CheckoutListInput {
+            checkout: CheckoutInput {
+                cwd: "fixture".into(),
+                context: None,
+            },
+            source: None,
+            head_selector: "café/你好".into(),
+            state: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    let requests = cli.requests.lock().unwrap();
+    assert_eq!(requests[0].program, "fixture-python.exe");
+    assert_eq!(&requests[0].args[..4], ["-X", "utf8", "-IBm", "azure.cli"]);
+    assert_eq!(
+        requests[0].environment[std::ffi::OsStr::new("AZ_INSTALLER")],
+        Some("MSI".into())
+    );
 }
 #[tokio::test]
 async fn list_advances_by_raw_rows_and_preserves_review_involvement() {

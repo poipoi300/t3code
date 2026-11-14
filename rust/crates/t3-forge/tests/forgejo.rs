@@ -115,6 +115,125 @@ fn body(request: &CliRequest) -> Value {
 fn raw() -> Value {
     json!({"number":7,"title":"[WIP] Add page","body":"Body","html_url":"https://git.example/mount/acme/web/pulls/7","user":{"login":"author"},"state":"open","merged":false,"mergeable":false,"head":{"ref":"refs/pull/7/head","label":"original-branch","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","repo":{"full_name":"fork/web","owner":{"login":"fork"}}},"base":{"ref":"main","sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","repo":{"full_name":"acme/web","owner":{"login":"acme"}}},"merge_base":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","created_at":"2026-07-01T00:00:00+00:00","updated_at":"2026-07-02T00:00:00+00:00","closed_at":null,"merged_at":null,"labels":[],"requested_reviewers":[{"login":"requested"}]})
 }
+fn checkout_input(cwd: &Path, branch: &str) -> CheckoutListInput {
+    CheckoutListInput{checkout:CheckoutInput{cwd:cwd.into(),context:Some(CheckoutContext{provider:serde_json::from_value(json!({"kind":"forgejo","name":"Forgejo","baseUrl":"https://git.example/mount"})).unwrap(),remote_name:"origin".into(),remote_url:"https://git.example/mount/acme/web.git".into(),requested_host:None})},source:None,head_selector:branch.into(),state:None,limit:None}
+}
+#[tokio::test(start_paused = true)]
+async fn ignored_head_filter_scans_incrementally_and_rechecks_deleted_candidates() {
+    let pulls = Arc::new(Mutex::new(
+        (1..=120)
+            .rev()
+            .map(|number| {
+                let mut p = raw();
+                p["number"] = json!(number);
+                p["head"]["ref"] = json!(if number == 5 {
+                    "feature".into()
+                } else {
+                    format!("other-{number}")
+                });
+                p["head"]["label"] = p["head"]["ref"].clone();
+                p["updated_at"] = json!(
+                    chrono::DateTime::from_timestamp(number, 0)
+                        .unwrap()
+                        .to_rfc3339()
+                );
+                p
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let records = pulls.clone();
+    let pages = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = pages.clone();
+    let (dir, forge, _) = setup(move |r| {
+        let url = url::Url::parse(r.args.last().unwrap()).unwrap();
+        let pulls = records.lock().unwrap();
+        if let Some(number) = url
+            .path()
+            .strip_prefix("/mount/api/v1/repos/acme/web/pulls/")
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            return pulls
+                .iter()
+                .find(|p| p["number"] == number)
+                .cloned()
+                .map(reply)
+                .unwrap_or(Reply {
+                    status: 404,
+                    body: b"private body".to_vec(),
+                    link: None,
+                });
+        }
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let page = url
+            .query_pairs()
+            .find(|(k, _)| k == "page")
+            .unwrap()
+            .1
+            .parse::<usize>()
+            .unwrap();
+        reply(json!(
+            pulls
+                .iter()
+                .skip((page - 1) * 50)
+                .take(50)
+                .collect::<Vec<_>>()
+        ))
+    });
+    assert!(
+        forge
+            .checkout_list_change_requests(checkout_input(dir.path(), "missing-one"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(pages.load(std::sync::atomic::Ordering::SeqCst), 4);
+    assert!(
+        forge
+            .checkout_list_change_requests(checkout_input(dir.path(), "missing-two"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(pages.load(std::sync::atomic::Ordering::SeqCst), 5);
+    let result = forge
+        .checkout_list_change_requests(checkout_input(dir.path(), "feature"))
+        .await
+        .unwrap();
+    assert_eq!(result[0].number, 5);
+    {
+        let mut pulls = pulls.lock().unwrap();
+        let p = pulls.iter_mut().find(|p| p["number"] == 5).unwrap();
+        p["state"] = json!("closed");
+        p["updated_at"] = json!("2026-11-13T00:00:00Z");
+        pulls.sort_by(|a, b| b["updated_at"].as_str().cmp(&a["updated_at"].as_str()));
+    }
+    assert_eq!(
+        forge
+            .checkout_list_change_requests(checkout_input(dir.path(), "feature"))
+            .await
+            .unwrap()[0]
+            .state,
+        ChangeRequestState::Closed
+    );
+    pulls.lock().unwrap().retain(|p| p["number"] != 5);
+    assert!(
+        forge
+            .checkout_list_change_requests(checkout_input(dir.path(), "feature"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let before = pages.load(std::sync::atomic::Ordering::SeqCst);
+    tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+    assert!(
+        forge
+            .checkout_list_change_requests(checkout_input(dir.path(), "missing-three"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(pages.load(std::sync::atomic::Ordering::SeqCst) - before, 4);
+}
 #[tokio::test]
 async fn checkout_without_state_includes_merged_requests() {
     let (dir, forge, _) = setup(|r| {

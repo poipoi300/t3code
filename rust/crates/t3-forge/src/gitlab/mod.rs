@@ -116,7 +116,7 @@ impl GitLab {
         let response = self
             .cli
             .run(CliRequest {
-                program: "glab",
+                program: "glab".into(),
                 provider: "gitlab",
                 operation: operation.into(),
                 cwd: cwd.into(),

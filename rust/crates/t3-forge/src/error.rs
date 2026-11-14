@@ -43,6 +43,26 @@ pub enum ForgeError {
     },
 }
 impl ForgeError {
+    pub fn repository_hint(&self) -> Option<&'static str> {
+        let Self::Provider { detail, .. } = self else {
+            return None;
+        };
+        match detail.as_ref() {
+            "Repositories are named workspace/repository." => {
+                Some("Repositories are named workspace/repository.")
+            }
+            "A Bitbucket repository must be workspace/repository." => {
+                Some("A Bitbucket repository must be workspace/repository.")
+            }
+            "Cursor Origin repositories are private. Choose private visibility." => {
+                Some("Cursor Origin repositories are private. Choose private visibility.")
+            }
+            "Specify an Origin repository as owner/name or name." => {
+                Some("Specify an Origin repository as owner/name or name.")
+            }
+            _ => None,
+        }
+    }
     pub fn provider(
         provider: &str,
         operation: &str,

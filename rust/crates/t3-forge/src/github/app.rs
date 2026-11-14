@@ -32,6 +32,9 @@ impl std::fmt::Debug for AppSession {
 /// Compare-and-replace must be atomic with settings updates and sign-out.
 #[async_trait]
 pub trait AppSessionStore: Send + Sync {
+    fn revision(&self) -> u64 {
+        0
+    }
     async fn read(&self, host: &str) -> Result<Option<AppSession>>;
     async fn write(&self, host: &str, session: AppSession) -> Result<()>;
     async fn replace(
@@ -43,14 +46,21 @@ pub trait AppSessionStore: Send + Sync {
 }
 
 #[derive(Default)]
-pub struct MemoryAppSessions(Mutex<HashMap<String, AppSession>>);
+pub struct MemoryAppSessions(
+    Mutex<HashMap<String, AppSession>>,
+    std::sync::atomic::AtomicU64,
+);
 #[async_trait]
 impl AppSessionStore for MemoryAppSessions {
+    fn revision(&self) -> u64 {
+        self.1.load(std::sync::atomic::Ordering::Acquire)
+    }
     async fn read(&self, host: &str) -> Result<Option<AppSession>> {
         Ok(self.0.lock().await.get(host).cloned())
     }
     async fn write(&self, host: &str, session: AppSession) -> Result<()> {
         self.0.lock().await.insert(host.into(), session);
+        self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(())
     }
     async fn replace(&self, host: &str, previous: &str, next: Option<AppSession>) -> Result<bool> {
@@ -66,20 +76,24 @@ impl AppSessionStore for MemoryAppSessions {
         } else {
             sessions.remove(host);
         }
+        self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(true)
     }
 }
 
 struct Pending {
     result: watch::Sender<Option<Result<()>>>,
-    task: tokio::task::JoinHandle<()>,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 impl Drop for Pending {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 }
 pub struct AppSignIn {
+    stop: t3_process::CancellationToken,
     client_id: String,
     store: Arc<dyn AppSessionStore>,
     client: Client,
@@ -99,6 +113,9 @@ fn normalized(host: &str) -> String {
     host.trim().to_lowercase()
 }
 impl AppSignIn {
+    pub fn revision(&self) -> u64 {
+        self.store.revision()
+    }
     pub fn new(client_id: String, store: Arc<dyn AppSessionStore>) -> Result<Self> {
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -111,6 +128,7 @@ impl AppSignIn {
                 )
             })?;
         Ok(Self {
+            stop: Default::default(),
             client_id: client_id.trim().into(),
             store,
             client,
@@ -171,7 +189,10 @@ impl AppSignIn {
             })
     }
     fn session(value: &Value) -> Option<AppSession> {
-        let token = value["access_token"].as_str()?.to_string();
+        let token = value["access_token"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())?
+            .to_string();
         let expires = |key: &str| {
             value[key]
                 .as_u64()
@@ -284,6 +305,13 @@ impl AppSignIn {
     }
     pub async fn start(self: &Arc<Self>, raw_host: &str) -> Result<SourceControlSignInPrompt> {
         let host = normalized(raw_host);
+        if self.stop.is_cancelled() {
+            return Err(failure(
+                &host,
+                SignInFailure::Cancelled,
+                "The sign-in was cancelled.",
+            ));
+        }
         if !self.allowed(&host) {
             return Err(failure(
                 &host,
@@ -311,6 +339,16 @@ impl AppSignIn {
             .to_string();
         let code = value["user_code"].as_str().ok_or_else(invalid)?;
         let uri = value["verification_uri"].as_str().ok_or_else(invalid)?;
+        if uri.len() > 16_384
+            || url::Url::parse(uri.trim()).ok().is_none_or(|u| {
+                !matches!(u.scheme(), "http" | "https")
+                    || u.host_str().is_none()
+                    || !u.username().is_empty()
+                    || u.password().is_some()
+            })
+        {
+            return Err(invalid());
+        }
         let expiry = now().saturating_add(
             value["expires_in"]
                 .as_u64()
@@ -322,6 +360,14 @@ impl AppSignIn {
             json!({"userCode":code,"verificationUri":uri,"expiresAt":expiry}),
             "signIn",
         )?;
+        let mut pending = self.pending.lock().await;
+        if self.stop.is_cancelled() {
+            return Err(failure(
+                &host,
+                SignInFailure::Cancelled,
+                "The sign-in was cancelled.",
+            ));
+        }
         let (result, _) = watch::channel(None);
         let sender = result.clone();
         let this = Arc::downgrade(self);
@@ -399,12 +445,13 @@ impl AppSignIn {
             };
             sender.send_replace(Some(outcome));
         });
-        if let Some(previous) = self
-            .pending
-            .lock()
-            .await
-            .insert(host.clone(), Pending { result, task })
-        {
+        if let Some(previous) = pending.insert(
+            host.clone(),
+            Pending {
+                result,
+                task: Some(task),
+            },
+        ) {
             previous.result.send_replace(Some(Err(failure(
                 &host,
                 SignInFailure::Failed,
@@ -443,13 +490,35 @@ impl AppSignIn {
     }
     pub async fn cancel(&self, raw_host: &str) {
         let host = normalized(raw_host);
-        if let Some(pending) = self.pending.lock().await.get(&host) {
+        if let Some(pending) = self.pending.lock().await.get_mut(&host) {
             pending.result.send_replace(Some(Err(failure(
                 &host,
                 SignInFailure::Cancelled,
                 "The sign-in was cancelled.",
             ))));
-            pending.task.abort();
+            if let Some(task) = pending.task.take() {
+                task.abort();
+                let _ = task.await;
+            }
+        }
+    }
+    pub async fn shutdown(&self) {
+        self.stop.cancel();
+        let pending = std::mem::take(&mut *self.pending.lock().await);
+        let mut tasks = vec![];
+        for (host, mut pending) in pending {
+            pending.result.send_replace(Some(Err(failure(
+                &host,
+                SignInFailure::Cancelled,
+                "The sign-in was cancelled.",
+            ))));
+            if let Some(task) = pending.task.take() {
+                task.abort();
+                tasks.push(task);
+            }
+        }
+        for task in tasks {
+            let _ = task.await;
         }
     }
 }

@@ -365,6 +365,46 @@ async fn repository_is_made_private_after_creation_and_discovery_uses_namespace(
     assert_eq!(discovery["auth"]["account"]["value"], "fixture");
     task.await.unwrap();
 }
+#[tokio::test]
+async fn publication_refuses_public_and_reports_an_already_created_repository_on_privacy_failure() {
+    let (base, task) = server(2, |r| {
+        if r.method == "POST" {
+            answer(json!({"name":"web"}))
+        } else {
+            Answer {
+                status: 401,
+                body: "private-upstream-token".into(),
+                headers: vec![],
+            }
+        }
+    })
+    .await;
+    let (dir, forge, _) = setup(base);
+    let registry = Arc::new(t3_forge::registry::ForgeRegistry::new([
+        Arc::new(forge) as Arc<dyn Forge>
+    ]));
+    let service = t3_forge::services::SourceControlRepositoryService::new(
+        registry,
+        t3_git::Git::new(dir.path()).with_environment(environment()),
+        dir.path().into(),
+    );
+    let input = |visibility: &str| {
+        serde_json::from_value(json!({"provider":"cursor-origin","cwd":dir.path(),"repository":"fixture/web","visibility":visibility})).unwrap()
+    };
+    let refused = service
+        .publish_repository(input("public"))
+        .await
+        .unwrap_err();
+    assert!(refused.wire.detail.contains("Choose private visibility"));
+    let failed = service
+        .publish_repository(input("private"))
+        .await
+        .unwrap_err();
+    assert!(failed.wire.detail.contains("Created fixture/web"));
+    assert!(failed.wire.detail.contains("team can still see"));
+    assert!(!format!("{failed:?}").contains("private-upstream-token"));
+    task.await.unwrap();
+}
 
 #[tokio::test]
 async fn twice_refused_tokens_stop_without_exposing_remote_secrets() {

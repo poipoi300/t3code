@@ -405,7 +405,9 @@ impl GitHubHttp {
         self.pinned
     }
     pub(super) fn settings_revision(&self) -> u64 {
-        self.credentials.revision()
+        self.credentials
+            .revision()
+            .wrapping_add(self.app.as_ref().map_or(0, |app| app.revision()))
     }
     pub(super) async fn settings(&self) -> Option<CredentialSettings> {
         self.credentials.settings().await

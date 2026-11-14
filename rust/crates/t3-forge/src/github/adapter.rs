@@ -237,6 +237,9 @@ impl GitHub {
 #[async_trait]
 impl Forge for GitHub {
     async fn shutdown(&self) {
+        if let Some(app) = &self.app_sign_in {
+            app.shutdown().await;
+        }
         self.event_stop.cancel();
         self.event_tasks.wait().await;
     }

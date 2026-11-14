@@ -10,6 +10,7 @@ mod media;
 pub mod merge_message;
 mod queries;
 mod repository;
+pub mod session_store;
 pub mod stack;
 pub mod transport;
 mod workflows;

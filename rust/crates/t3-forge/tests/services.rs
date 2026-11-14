@@ -25,6 +25,80 @@ fn git(cwd: &Path) -> t3_git::Git {
         .into(),
     )
 }
+#[tokio::test]
+async fn local_clone_names_are_operands_even_when_they_start_with_a_dash() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = SourceControlRepositoryService::new(
+        Arc::new(ForgeRegistry::default()),
+        git(dir.path()),
+        dir.path().into(),
+    );
+    for remote in ["--bare", "source.git"] {
+        let input = serde_json::from_value(
+            json!({"remoteUrl":remote,"destinationPath":dir.path().join("clone")}),
+        )
+        .unwrap();
+        let prepared = service.prepare_clone(input).await.unwrap();
+        assert_eq!(prepared.clone_url, remote);
+    }
+}
+#[tokio::test]
+async fn lookup_exposes_only_fixed_repository_hints_and_never_raw_provider_text() {
+    struct Failure {
+        detail: &'static str,
+        caps: t3_forge::PullRequestCapabilities,
+    }
+    #[async_trait::async_trait]
+    impl t3_forge::Forge for Failure {
+        fn kind(&self) -> SourceControlProviderKind {
+            "bitbucket".into()
+        }
+        fn capabilities(&self) -> &t3_forge::PullRequestCapabilities {
+            &self.caps
+        }
+        fn supports(&self, _: &str) -> bool {
+            true
+        }
+        async fn get_repository_clone_urls(
+            &self,
+            _: t3_forge::forge::CloneUrlsInput,
+        ) -> t3_forge::Result<SourceControlRepositoryCloneUrls> {
+            Err(t3_forge::ForgeError::provider(
+                "bitbucket",
+                "repository",
+                t3_forge::FailureReason::Failed,
+                self.detail,
+            ))
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    for (detail, expected) in [
+        (
+            "<html>private-token</html>",
+            "The source control operation could not be completed.",
+        ),
+        (
+            "Repositories are named workspace/repository.",
+            "Repositories are named workspace/repository.",
+        ),
+    ] {
+        let caps=serde_json::from_value(json!({"diff":false,"comment":false,"actions":[],"mergeMethods":[],"search":false,"review":{"inlineComment":false,"reply":false,"resolve":false,"verdicts":[]},"reviewers":{"request":false,"listCandidates":false}})).unwrap();
+        let registry = Arc::new(ForgeRegistry::new([
+            Arc::new(Failure { detail, caps }) as Arc<dyn t3_forge::Forge>
+        ]));
+        let service =
+            SourceControlRepositoryService::new(registry, git(dir.path()), dir.path().into());
+        let error = service
+            .lookup_repository(
+                serde_json::from_value(json!({"provider":"bitbucket","repository":"invalid"}))
+                    .unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.wire.detail, expected);
+        assert!(!format!("{error:?}").contains("private-token"));
+    }
+}
 
 #[tokio::test]
 async fn clone_copies_a_real_repository_and_refuses_nonempty_destinations() {

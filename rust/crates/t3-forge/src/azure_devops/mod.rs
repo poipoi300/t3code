@@ -1,5 +1,6 @@
 mod adapter;
 mod decode;
+pub mod launcher;
 mod patch;
 mod read;
 use crate::{FailureReason, Forge, ForgeError, Result, cli::*, forge::*, model::*, support::*};
@@ -32,6 +33,7 @@ struct Change {
 type Locations = Arc<Mutex<VecDeque<(String, Location)>>>;
 #[derive(Clone)]
 pub struct AzureDevOps {
+    invocation: launcher::Invocation,
     cli: Arc<dyn ForgeCli>,
     environment: t3_process::Environment,
     capabilities: PullRequestCapabilities,
@@ -62,6 +64,7 @@ fn permissions() -> Value {
 impl AzureDevOps {
     pub fn new() -> Result<Self> {
         Ok(Self {
+            invocation: launcher::Invocation::detect(&Default::default()),
             cli: Arc::new(ProcessForgeCli),
             environment: Default::default(),
             stop: t3_process::CancellationToken::new(),
@@ -81,10 +84,25 @@ impl AzureDevOps {
         self
     }
     pub fn with_environment(mut self, environment: t3_process::Environment) -> Self {
+        self.invocation = launcher::Invocation::detect(&environment);
         self.environment = environment;
         self.locations = Default::default();
         self.revision = self.revision.wrapping_add(1);
         self
+    }
+    pub fn with_invocation(mut self, invocation: launcher::Invocation) -> Self {
+        self.invocation = invocation;
+        self
+    }
+    fn invocation_args(&self, args: Vec<String>) -> Vec<String> {
+        self.invocation.args.iter().cloned().chain(args).collect()
+    }
+    fn invocation_environment(&self) -> t3_process::Environment {
+        let mut environment = self.environment.clone();
+        if let Some(installer) = self.invocation.installer {
+            environment.insert("AZ_INSTALLER".into(), Some(installer.into()));
+        }
+        environment
     }
     async fn execute(
         &self,
@@ -96,13 +114,13 @@ impl AzureDevOps {
         let response = self
             .cli
             .run(CliRequest {
-                program: "az",
+                program: self.invocation.command.clone(),
                 provider: "azure-devops",
                 operation: op.into(),
                 cwd: cwd.into(),
-                args,
+                args: self.invocation_args(args),
                 stdin: None,
-                environment: self.environment.clone(),
+                environment: self.invocation_environment(),
                 max_bytes,
                 timeout: Duration::from_secs(30),
                 cancellation: self.stop.clone(),

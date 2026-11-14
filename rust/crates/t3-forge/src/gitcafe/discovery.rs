@@ -7,7 +7,7 @@ impl GitCafe {
     ) -> Result<t3_contracts::source_control::SourceControlProviderDiscoveryItem> {
         let probe = |args: Vec<String>| {
             self.cli.run(CliRequest {
-                program: "cafe",
+                program: "cafe".into(),
                 provider: "gitcafe",
                 operation: "discover".into(),
                 cwd: cwd.clone(),

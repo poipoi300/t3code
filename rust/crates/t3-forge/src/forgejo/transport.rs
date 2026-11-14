@@ -200,7 +200,7 @@ impl Transport {
         let output = self
             .cli
             .run(CliRequest {
-                program: command,
+                program: command.into(),
                 provider: "forgejo",
                 operation: op.into(),
                 cwd: cwd.into(),

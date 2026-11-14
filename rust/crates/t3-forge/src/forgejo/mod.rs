@@ -1,4 +1,5 @@
 mod adapter;
+mod branch_lookup;
 mod checkout;
 mod decode;
 mod read;
@@ -10,6 +11,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 use transport::{ResolveInput, Target, Transport};
 #[derive(Clone)]
 pub struct Forgejo {
+    branch_lists: branch_lookup::BranchLists,
     transport: Arc<Transport>,
     capabilities: PullRequestCapabilities,
     revision: u64,
@@ -43,6 +45,7 @@ fn issue_path(input: &PullRequestInput) -> String {
 impl Forgejo {
     pub fn new(git: t3_git::Git, config: transport::ForgejoConfig) -> Result<Self> {
         Ok(Self {
+            branch_lists: Default::default(),
             transport: Arc::new(Transport::new(git, config)),
             revision: 0,
             capabilities: parse(
@@ -56,6 +59,7 @@ impl Forgejo {
             Transport::new(self.transport.git.clone(), self.transport.config.clone());
         transport.cli = cli;
         self.transport = Arc::new(transport);
+        self.branch_lists = Default::default();
         self.revision = self.revision.wrapping_add(1);
         self
     }

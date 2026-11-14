@@ -313,7 +313,7 @@ impl CursorOrigin {
                 tokio::select! {_=self.transport_cancelled()=>return Err(error("createRepository","The operation was cancelled.")),_=tokio::time::sleep(Duration::from_secs(1))=>{}}
             }
         }
-        let value=result.map_err(|mut e|{if let ForgeError::Provider{detail,..}=&mut e{*detail=format!("Created {}, but could not make it private, so your Cursor team can still see it. Set it to private on cursor.com.",repo.repository).into_boxed_str();}e})?;
+        let value=result.map_err(|mut e|{if let ForgeError::Provider{detail,operation,..}=&mut e{*operation="makeRepositoryPrivate".into();*detail=format!("Created {}, but could not make it private, so your Cursor team can still see it. Set it to private on cursor.com.",repo.repository).into_boxed_str();}e})?;
         urls(&value, &repo.repository)
     }
     async fn transport_cancelled(&self) {

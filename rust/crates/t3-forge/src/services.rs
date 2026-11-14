@@ -153,7 +153,7 @@ fn known_provider(provider: &str, operation: &str) -> RepositoryResult<()> {
     }
 }
 fn validate_remote(remote: &str, provider: &str, operation: &str) -> RepositoryResult<()> {
-    if remote.trim().is_empty() || remote.starts_with('-') || remote.contains(['\0', '\r', '\n']) {
+    if remote.trim().is_empty() || remote.contains(['\0', '\r', '\n']) {
         return Err(repository_error(
             provider,
             operation,
@@ -286,11 +286,13 @@ impl SourceControlRepositoryService {
             }),
         )
         .await
-        .map_err(|_| {
+        .map_err(|error| {
             repository_error(
                 provider,
                 "lookupRepository",
-                "The repository could not be looked up. Check its name and your access.",
+                error
+                    .repository_hint()
+                    .unwrap_or("The source control operation could not be completed."),
             )
         })?;
         Ok(info(provider, &urls))
@@ -588,11 +590,14 @@ impl SourceControlRepositoryService {
                 visibility: input.visibility,
             })
             .await
-            .map_err(|_| {
+            .map_err(|error| {
+                if matches!(&error,ForgeError::Provider{provider,operation,..}if provider.0=="cursor-origin"&&operation=="makeRepositoryPrivate"){
+                    return repository_error(provider,"publishRepository",&format!("Created {}, but could not make it private, so your Cursor team can still see it. Set it to private on cursor.com.",crate::remote::transport_safe_error_value(&input.repository.0)));
+                }
                 repository_error(
                     provider,
                     "publishRepository",
-                    "The repository could not be created.",
+                    error.repository_hint().unwrap_or("The repository could not be created."),
                 )
             })?;
         let mut remote_url = protocol_url(&urls, input.protocol.as_ref().and_then(|p| p.as_ref()));

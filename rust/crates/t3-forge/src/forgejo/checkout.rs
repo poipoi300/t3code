@@ -4,7 +4,7 @@ use super::{
     *,
 };
 impl Forgejo {
-    async fn checkout_target(
+    pub(super) async fn checkout_target(
         &self,
         input: &CheckoutInput,
         repository: Option<&str>,
@@ -24,7 +24,7 @@ impl Forgejo {
             )
             .await
     }
-    async fn target_json(
+    pub(super) async fn target_json(
         &self,
         target: &Target,
         cwd: &Path,
@@ -77,75 +77,6 @@ impl Forgejo {
             .await?;
         d::checkout(&raw)?;
         Ok((target, raw))
-    }
-    pub(super) async fn checkout_list(
-        &self,
-        input: CheckoutListInput,
-    ) -> Result<Vec<ChangeRequest>> {
-        let target = self
-            .checkout_target(&input.checkout, None, None, None)
-            .await?;
-        let source = input
-            .source
-            .or_else(|| crate::remote::parse_owner_ref(&input.head_selector));
-        let branch = source
-            .as_ref()
-            .map(|s| s.ref_name.as_str())
-            .unwrap_or(&input.head_selector);
-        let state = match input.state {
-            Some(ChangeRequestState::Merged | ChangeRequestState::Closed) => "closed",
-            None => "all",
-            _ => "open",
-        };
-        let limit = input.limit.unwrap_or(20);
-        let mut result = vec![];
-        for page in 1..=10_000 {
-            let raw = self
-                .target_json(
-                    &target,
-                    &input.checkout.cwd,
-                    &format!(
-                        "{}/pulls?state={state}&head={}&sort=recentupdate&limit=50&page={page}",
-                        repo_path(&target.repository),
-                        encode(branch)
-                    ),
-                    Method::GET,
-                    None,
-                )
-                .await?;
-            let raw = raw
-                .as_array()
-                .ok_or_else(|| error("checkoutList", "Invalid pull request array."))?;
-            for raw in raw {
-                let item = d::checkout(raw)?;
-                if item.head_ref_name.0 != branch
-                    || source.as_ref().is_some_and(|s| {
-                        s.repository
-                            .as_ref()
-                            .is_some_and(|r| raw["head"]["repo"]["full_name"] != *r)
-                            || s.owner.as_ref().is_some_and(|owner| {
-                                raw["head"]["repo"]["owner"]["login"] != *owner
-                            })
-                    })
-                {
-                    continue;
-                }
-                let matches = match input.state {
-                    Some(ChangeRequestState::Merged) => d::state(raw) == "merged",
-                    Some(ChangeRequestState::Closed) => d::state(raw) == "closed",
-                    None => true,
-                    _ => d::state(raw) == "open",
-                };
-                if matches {
-                    result.push(item);
-                }
-            }
-            if result.len() >= limit || raw.is_empty() {
-                break;
-            }
-        }
-        result.truncate(limit);
-        Ok(result)
     }
     pub(super) async fn create_request(&self, input: CreateChangeRequestInput) -> Result<()> {
         let target = self

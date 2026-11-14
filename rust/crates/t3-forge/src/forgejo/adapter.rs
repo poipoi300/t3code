@@ -140,7 +140,7 @@ impl Forge for Forgejo {
         &self,
         input: CheckoutListInput,
     ) -> Result<Vec<ChangeRequest>> {
-        self.checkout_list(input).await
+        self.branch_list(input).await
     }
     async fn checkout_get_change_request(&self, input: CheckoutGetInput) -> Result<ChangeRequest> {
         d::checkout(&self.checkout_get_raw(&input).await?.1)

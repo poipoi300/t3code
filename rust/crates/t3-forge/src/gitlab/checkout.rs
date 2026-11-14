@@ -325,7 +325,7 @@ impl GitLab {
     async fn probe(&self, cwd: &Path, args: Vec<String>) -> Result<CliResponse> {
         self.cli
             .run(CliRequest {
-                program: "glab",
+                program: "glab".into(),
                 provider: "gitlab",
                 operation: "discover".into(),
                 cwd: cwd.into(),

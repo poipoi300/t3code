@@ -4,11 +4,18 @@ use async_trait::async_trait;
 use std::{path::Path, sync::LazyLock, time::Duration};
 use tokio::sync::Semaphore;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CliOutput {
     pub code: i32,
     pub stdout: String,
     pub stderr: String,
+}
+impl std::fmt::Debug for CliOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CliOutput")
+            .field("code", &self.code)
+            .finish_non_exhaustive()
+    }
 }
 #[async_trait]
 pub trait GitHubCli: Send + Sync {

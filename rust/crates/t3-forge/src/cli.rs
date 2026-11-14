@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::{path::PathBuf, time::Duration};
 
 pub struct CliRequest {
-    pub program: &'static str,
+    pub program: String,
     pub provider: &'static str,
     pub operation: String,
     pub cwd: PathBuf,

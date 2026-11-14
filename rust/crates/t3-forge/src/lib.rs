@@ -1,5 +1,6 @@
 //! Native source-control forge adapters; not a wasm32-unknown-unknown dependency.
 pub mod azure_devops;
+pub mod bindings;
 pub mod bitbucket;
 pub mod cli;
 pub mod clone_progress;
@@ -18,6 +19,7 @@ pub mod registry;
 pub mod remote;
 pub mod review_host;
 pub mod services;
+pub mod settings;
 pub use error::{FailureReason, ForgeError, Result};
 pub use forge::Forge;
 pub use model::*;

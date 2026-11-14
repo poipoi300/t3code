@@ -132,7 +132,7 @@ impl ApiCredentials for GitCafeCredentials {
             let output = self
                 .cli
                 .run(CliRequest {
-                    program: "cafe",
+                    program: "cafe".into(),
                     provider: "gitcafe",
                     operation: "credential".into(),
                     cwd: self.cwd.clone(),

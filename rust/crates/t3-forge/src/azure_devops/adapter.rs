@@ -106,13 +106,13 @@ impl Forge for AzureDevOps {
     ) -> Result<t3_contracts::source_control::SourceControlProviderDiscoveryItem> {
         let probe = |args: Vec<String>| {
             self.cli.run(CliRequest {
-                program: "az",
+                program: self.invocation.command.clone(),
                 provider: "azure-devops",
                 operation: "discover".into(),
                 cwd: cwd.clone(),
-                args,
+                args: self.invocation_args(args),
                 stdin: None,
-                environment: self.environment.clone(),
+                environment: self.invocation_environment(),
                 max_bytes: 16_000,
                 timeout: Duration::from_secs(20),
                 cancellation: self.stop.clone(),
