@@ -225,6 +225,50 @@ fn caller_refused(refusal: &t3_orchestration::error::CallerRefusal) -> McpError 
         refusal => McpError::failure(refusal.code(), refusal.to_string()),
     }
 }
+/// `t3_workflow_stop` (orchestrator handlers.ts): the stop error's reason picks the code and its
+/// TypeScript message is the text.
+fn workflow_stop_failure(error: t3_orchestration::error::Error) -> McpError {
+    let t3_orchestration::error::Error::StopWorkflow(stop) = error else {
+        return failure(error);
+    };
+    let reason = encoded(&stop.reason)
+        .ok()
+        .and_then(|reason| reason.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let message = match reason.as_str() {
+        "not-running" => "This workflow is no longer running.",
+        "unsupported" => "This provider cannot stop a workflow.",
+        "unavailable" => "This workflow has no live provider task.",
+        _ => "Failed to stop the workflow.",
+    };
+    McpError::failure(
+        if matches!(reason.as_str(), "unavailable" | "stop-failed") {
+            "orchestration_error"
+        } else {
+            "invalid_request"
+        },
+        message,
+    )
+}
+
+/// `t3_background_wait`: `unsupported` and `unmatched` are the caller's to fix.
+fn background_wait_failure(error: t3_orchestration::error::Error) -> McpError {
+    match error {
+        t3_orchestration::error::Error::Service { operation, detail }
+            if operation.starts_with("ThreadManagementBackgroundWaitError.") =>
+        {
+            McpError::failure(
+                if operation.ends_with(".unsupported") || operation.ends_with(".unmatched") {
+                    "invalid_request"
+                } else {
+                    "orchestration_error"
+                },
+                detail,
+            )
+        }
+        error => failure(error),
+    }
+}
 fn command_id() -> CommandId {
     CommandId(format!("mcp:{}", uuid::Uuid::new_v4()))
 }
@@ -646,7 +690,7 @@ impl OrchestratorService for OrchestrationAdapter {
         input["commandId"] = encoded(command_id())?;
         stop.stop_workflow(decoded(input)?, Some(modes(&context)))
             .await
-            .map_err(failure)?;
+            .map_err(workflow_stop_failure)?;
         Ok(json!({}))
     }
     async fn t3_background_wait(&self, context: CallContext, input: DecodedInput) -> Result<Value> {
@@ -665,7 +709,7 @@ impl OrchestratorService for OrchestrationAdapter {
                 input["waiting"] != false,
             )
             .await
-            .map_err(failure)?;
+            .map_err(background_wait_failure)?;
         Ok(json!({"matched":matched,"unmatched":unmatched}))
     }
 }
