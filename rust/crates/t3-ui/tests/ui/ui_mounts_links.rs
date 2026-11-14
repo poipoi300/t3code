@@ -12,6 +12,7 @@ use nsh_core::prelude::*;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
 use serde_json::json;
+use t3_client::ClientError;
 use t3_client::ClientStore;
 use t3_client::composition::ClientRuntime;
 use t3_client::persistence::external_links::ExternalUrlSurface;
@@ -23,7 +24,6 @@ use t3_client::platform::{
 use t3_client::services::resources::{Resource, ResourcePolicy};
 use t3_client::testing::FakePlatform;
 use t3_client::types::{EnvironmentId, Generation, ThreadId, ThreadKey};
-use t3_client::ClientError;
 use t3_contracts::git::*;
 use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
 use t3_contracts::source_control::*;
@@ -214,26 +214,43 @@ struct Publishing {
 }
 
 impl GitActionsBackend for Publishing {
-    fn watch(&self, _: &GitActionsScope, _: GitActionsWatch) -> LocalBoxStream<'static, GitActionsSnapshot> {
+    fn watch(
+        &self,
+        _: &GitActionsScope,
+        _: GitActionsWatch,
+    ) -> LocalBoxStream<'static, GitActionsSnapshot> {
         let resource = self.resource.clone();
         self.resource
             .observe(0)
-            .filter_map(move |_| futures::future::ready(resource.snapshot().value.as_deref().cloned()))
+            .filter_map(move |_| {
+                futures::future::ready(resource.snapshot().value.as_deref().cloned())
+            })
             .boxed_local()
     }
     fn refresh(&self, _: &GitActionsScope) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         async { Ok(()) }.boxed_local()
     }
-    fn run_action(&self, _: &GitActionsScope, _: GitActionRequest) -> LocalBoxFuture<'static, Result<GitRunStackedActionResult, ClientError>> {
+    fn run_action(
+        &self,
+        _: &GitActionsScope,
+        _: GitActionRequest,
+    ) -> LocalBoxFuture<'static, Result<GitRunStackedActionResult, ClientError>> {
         async { Err(ClientError::Unsupported("git.runStackedAction")) }.boxed_local()
     }
-    fn pull(&self, _: &GitActionsScope) -> LocalBoxFuture<'static, Result<VcsPullResult, ClientError>> {
+    fn pull(
+        &self,
+        _: &GitActionsScope,
+    ) -> LocalBoxFuture<'static, Result<VcsPullResult, ClientError>> {
         async { Err(ClientError::Unsupported("vcs.pull")) }.boxed_local()
     }
     fn initialize(&self, _: &GitActionsScope) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         async { Ok(()) }.boxed_local()
     }
-    fn publish(&self, _: &GitActionsScope, input: SourceControlPublishRepositoryInput) -> LocalBoxFuture<'static, Result<SourceControlPublishRepositoryResult, ClientError>> {
+    fn publish(
+        &self,
+        _: &GitActionsScope,
+        input: SourceControlPublishRepositoryInput,
+    ) -> LocalBoxFuture<'static, Result<SourceControlPublishRepositoryResult, ClientError>> {
         let url = self.url;
         async move {
             Ok(serde_json::from_value(json!({"repository":{"provider":"github","nameWithOwner":input.repository.0,"url":url,"sshUrl":"git@github.com:acme/web.git"},
@@ -241,10 +258,21 @@ impl GitActionsBackend for Publishing {
         }
         .boxed_local()
     }
-    fn sync_branch(&self, _: &GitActionsScope, _: Option<String>, _: Option<String>, _: bool) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    fn sync_branch(
+        &self,
+        _: &GitActionsScope,
+        _: Option<String>,
+        _: Option<String>,
+        _: bool,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         async { Ok(()) }.boxed_local()
     }
-    fn open_file(&self, _: &GitActionsScope, _: String, _: String) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    fn open_file(
+        &self,
+        _: &GitActionsScope,
+        _: String,
+        _: String,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         async { Ok(()) }.boxed_local()
     }
 }
@@ -285,7 +313,8 @@ fn the_publish_result_opens_only_a_link_the_policy_allows() {
         );
         app.wait_for("role:button[Publish repository]")
             .expect("the service's first snapshot");
-        app.press("role:button[Publish repository]").expect("publish");
+        app.press("role:button[Publish repository]")
+            .expect("publish");
         app.press("role:button[Next]").expect("provider ready");
         app.clear("id:publish-repository-path").expect("clear");
         app.type_text("id:publish-repository-path", "acme/web")
@@ -315,14 +344,9 @@ fn MarkdownFixture() -> impl IntoElement {
         .map(|(index, address)| format!("[link {index}]({address})"))
         .collect::<Vec<_>>()
         .join("\n\n");
-    view()
-        .w_full()
-        .h_full()
-        .child(line)
-        .child(t3_ui::screens::thread::markdown::base::chat_markdown(
-            move || message.clone(),
-            || false,
-        ))
+    view().w_full().h_full().child(line).child(
+        t3_ui::screens::thread::markdown::base::chat_markdown(move || message.clone(), || false),
+    )
 }
 
 #[test]
@@ -335,7 +359,10 @@ fn assistant_markdown_links_open_only_what_the_policy_allows() {
             let _ = app.press(&format!("text:link {index}"));
         }
     }
-    assert_eq!(opened_after_settling(&mut app), format!("opened: [{SAFE:?}]"));
+    assert_eq!(
+        opened_after_settling(&mut app),
+        format!("opened: [{SAFE:?}]")
+    );
 }
 
 #[component]
@@ -365,7 +392,10 @@ fn badge_links_open_only_what_the_policy_allows() {
     for index in 0..ADDRESSES.len() {
         app.press(&format!("label:badge {index}")).expect("badge");
     }
-    assert_eq!(opened_after_settling(&mut app), format!("opened: [{SAFE:?}]"));
+    assert_eq!(
+        opened_after_settling(&mut app),
+        format!("opened: [{SAFE:?}]")
+    );
 }
 
 // ---- Git actions started from a press finish (rule 7 audit: CANCELLED-ON-REBUILD) ----
@@ -394,17 +424,27 @@ struct Acting {
 }
 
 impl GitActionsBackend for Acting {
-    fn watch(&self, _: &GitActionsScope, _: GitActionsWatch) -> LocalBoxStream<'static, GitActionsSnapshot> {
+    fn watch(
+        &self,
+        _: &GitActionsScope,
+        _: GitActionsWatch,
+    ) -> LocalBoxStream<'static, GitActionsSnapshot> {
         let resource = self.resource.clone();
         self.resource
             .observe(0)
-            .filter_map(move |_| futures::future::ready(resource.snapshot().value.as_deref().cloned()))
+            .filter_map(move |_| {
+                futures::future::ready(resource.snapshot().value.as_deref().cloned())
+            })
             .boxed_local()
     }
     fn refresh(&self, _: &GitActionsScope) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         async { Ok(()) }.boxed_local()
     }
-    fn run_action(&self, _: &GitActionsScope, request: GitActionRequest) -> LocalBoxFuture<'static, Result<GitRunStackedActionResult, ClientError>> {
+    fn run_action(
+        &self,
+        _: &GitActionsScope,
+        request: GitActionRequest,
+    ) -> LocalBoxFuture<'static, Result<GitRunStackedActionResult, ClientError>> {
         let runs = self.runs.clone();
         let held = self.held.borrow_mut().as_mut().map(|held| {
             let (sender, answered) = futures::channel::oneshot::channel();
@@ -421,19 +461,37 @@ impl GitActionsBackend for Acting {
         }
         .boxed_local()
     }
-    fn pull(&self, _: &GitActionsScope) -> LocalBoxFuture<'static, Result<VcsPullResult, ClientError>> {
+    fn pull(
+        &self,
+        _: &GitActionsScope,
+    ) -> LocalBoxFuture<'static, Result<VcsPullResult, ClientError>> {
         async { Err(ClientError::Unsupported("vcs.pull")) }.boxed_local()
     }
     fn initialize(&self, _: &GitActionsScope) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         async { Ok(()) }.boxed_local()
     }
-    fn publish(&self, _: &GitActionsScope, _: SourceControlPublishRepositoryInput) -> LocalBoxFuture<'static, Result<SourceControlPublishRepositoryResult, ClientError>> {
+    fn publish(
+        &self,
+        _: &GitActionsScope,
+        _: SourceControlPublishRepositoryInput,
+    ) -> LocalBoxFuture<'static, Result<SourceControlPublishRepositoryResult, ClientError>> {
         async { Err(ClientError::Unsupported("sourceControl.publishRepository")) }.boxed_local()
     }
-    fn sync_branch(&self, _: &GitActionsScope, _: Option<String>, _: Option<String>, _: bool) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    fn sync_branch(
+        &self,
+        _: &GitActionsScope,
+        _: Option<String>,
+        _: Option<String>,
+        _: bool,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         async { Ok(()) }.boxed_local()
     }
-    fn open_file(&self, _: &GitActionsScope, _: String, _: String) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    fn open_file(
+        &self,
+        _: &GitActionsScope,
+        _: String,
+        _: String,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         async { Ok(()) }.boxed_local()
     }
 }
@@ -505,7 +563,11 @@ fn a_git_action_started_from_the_quick_button_or_the_menu_finishes() {
     app.wait_for("Pushed")
         .expect("the action finished and its success replaced the in-flight state");
     let runs = runs_after_settling(&mut app);
-    assert_eq!(runs.matches('"').count(), 2, "exactly one action reached the environment: {runs}");
+    assert_eq!(
+        runs.matches('"').count(),
+        2,
+        "exactly one action reached the environment: {runs}"
+    );
     // A menu item: the menu closes (its content is disposed) while the action runs.
     let mut app = start(DESKTOP, Root::of::<ActingFixture>());
     app.wait_for("role:button[Push & create PR]")
@@ -546,4 +608,41 @@ fn a_quick_git_action_answered_after_the_press_rendered_still_finishes() {
     app.press("role:button[Release replies]").expect("answer");
     app.wait_for("Pushed")
         .expect("the action's answer was handled");
+}
+
+// ---- Rule 7: an open asked for by a control that goes in its own handler (a toast action, a
+// menu item) still happens ----
+
+#[component]
+fn VanishingLink() -> impl IntoElement {
+    t3_ui::theme::install(&Default::default());
+    let (_, line) = provide_recording_client(true);
+    let shown = signal(true);
+    view().w_full().h_full().child(line).child(dynamic(move || {
+        shown.get().then(|| {
+            untracked(move || {
+                // Read where the toast or menu content is built, as the call sites do.
+                let opener = t3_ui::runtime::services::links::link_opener_here();
+                nsh_base::button()
+                    .accessibility_label(Some(SharedString::from("Open and close")))
+                    .on_press(move || {
+                        opener.open("https://github.com/acme/web");
+                        shown.set(false);
+                    })
+                    .child(text("Open and close"))
+            })
+        })
+    }))
+}
+
+#[test]
+fn a_link_opened_from_a_control_that_closes_in_its_handler_still_opens() {
+    let mut app = start(DESKTOP, Root::of::<VanishingLink>());
+    app.press("role:button[Open and close]").expect("open");
+    app.wait_for_gone("role:button[Open and close]", nsh_testing::WAIT)
+        .expect("the control went in its own handler");
+    assert_eq!(
+        opened_after_settling(&mut app),
+        "opened: [\"https://github.com/acme/web\"]"
+    );
 }

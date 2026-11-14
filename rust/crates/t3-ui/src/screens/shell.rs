@@ -55,6 +55,7 @@ fn split_shell() -> impl IntoElement {
         .child(when(
             move || panels.sidebar_open.get(),
             move || {
+                let tasks = crate::runtime::tasks::TaskOwner::here();
                 // AppSidebarLayout's `<Sidebar resizable>` with its SidebarRail inside.
                 view()
                     .flex_row()
@@ -70,7 +71,7 @@ fn split_shell() -> impl IntoElement {
                         resize: Some(thread_sidebar_rail(panels.sidebar_width, store.get())),
                         toggle: Rc::new(move || panels.sidebar_open.update(|open| *open = !*open)),
                         on_double_click: Some(Rc::new(move || {
-                            reset_thread_sidebar_width(panels.sidebar_width, store.get())
+                            reset_thread_sidebar_width(panels.sidebar_width, store.get(), tasks)
                         })),
                     }))
             },

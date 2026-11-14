@@ -17,6 +17,8 @@ use t3_client::composition::ClientRuntime;
 use t3_client::persistence::external_links::{ExternalUrlSurface, safe_external_url};
 use t3_client::platform::{Platform, PlatformError};
 
+use crate::runtime::tasks::TaskOwner;
+
 type Check = dyn Fn(&str) -> Option<String>;
 type Open = dyn Fn(String) -> LocalBoxFuture<'static, Result<(), PlatformError>>;
 
@@ -26,6 +28,8 @@ type Open = dyn Fn(String) -> LocalBoxFuture<'static, Result<(), PlatformError>>
 pub struct LinkOpener {
     check: Rc<Check>,
     open: Rc<Open>,
+    /// Where opens run: the opener's maker, so an open outlives the toast or menu that asked.
+    tasks: TaskOwner,
 }
 
 pub fn link_opener<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> LinkOpener {
@@ -34,6 +38,7 @@ pub fn link_opener<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> 
     LinkOpener {
         check: Rc::new(move |raw| checking.external_link(raw)),
         open: Rc::new(move |url| opening.open_external_url(url)),
+        tasks: TaskOwner::here(),
     }
 }
 
@@ -54,6 +59,7 @@ fn web_only() -> LinkOpener {
                 }
             })
         }),
+        tasks: TaskOwner::here(),
     }
 }
 
@@ -87,7 +93,7 @@ impl LinkOpener {
             return;
         };
         let open = (self.open)(url);
-        spawn(async move {
+        self.tasks.spawn(async move {
             if let Err(error) = open.await {
                 log::warn!("Could not open the link: {error}");
             }
@@ -152,9 +158,9 @@ mod tests {
                 for (number, line) in source.lines().enumerate() {
                     let code = line.split("//").next().unwrap_or_default();
                     // `.href(` with an argument (a getter such as `location.href()` is fine).
-                    let sets_href = code.match_indices(".href(").any(|(at, _)| {
-                        !code[at + ".href(".len()..].starts_with(')')
-                    });
+                    let sets_href = code
+                        .match_indices(".href(")
+                        .any(|(at, _)| !code[at + ".href(".len()..].starts_with(')'));
                     // NSH's opener, not a longer name ending in it (`open_external_url(`).
                     let opens = code.match_indices("open_url(").any(|(at, _)| {
                         code[..at]
@@ -167,7 +173,12 @@ mod tests {
                         || code.contains("LinkOpenWith::System")
                         || code.contains("TextViewLinks::Open");
                     if forbidden {
-                        offenders.push(format!("{}:{}: {}", relative.display(), number + 1, line.trim()));
+                        offenders.push(format!(
+                            "{}:{}: {}",
+                            relative.display(),
+                            number + 1,
+                            line.trim()
+                        ));
                     }
                 }
             }

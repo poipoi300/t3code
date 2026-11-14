@@ -284,12 +284,57 @@ use futures::{FutureExt, StreamExt};
 use t3_client::composition::{ClientRuntime, Spawner};
 use t3_client::testing::environment::{self, FakeEnvironment};
 use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
-use t3_ui::screens::sidebar::row::RowThreadActionsRuntime;
+use t3_ui::screens::sidebar::row::{RowThreadActions, RowThreadActionsRuntime};
 
 const DISPATCH: &str = "orchestration.dispatchCommand";
 
+/// The real client's menu and rename; its actions answer only when the test releases them, then
+/// refuse, as a server replying after the menu has gone.
+struct HeldActions {
+    client: ClientRuntime<environment::EnvironmentPlatform>,
+    held: Rc<std::cell::RefCell<Vec<futures::channel::oneshot::Sender<()>>>>,
+}
+
+impl RowThreadActions for HeldActions {
+    fn menu(&self, key: &ThreadKey) -> t3_ui::screens::sidebar::actions::ThreadActionMenu {
+        self.client.menu(key)
+    }
+    fn perform(
+        &self,
+        _: ThreadKey,
+        _: String,
+    ) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
+        let (sender, answered) = futures::channel::oneshot::channel();
+        self.held.borrow_mut().push(sender);
+        async move {
+            let _ = answered.await;
+            Err(t3_client::ClientError::Rejected {
+                message: "Held refusal".into(),
+                detail: None,
+            })
+        }
+        .boxed_local()
+    }
+    fn rename(
+        &self,
+        key: ThreadKey,
+        title: String,
+    ) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
+        self.client.rename(key, title)
+    }
+}
+
 #[component]
 fn ConnectedRowFixture() -> impl IntoElement {
+    row_fixture_body(false)
+}
+
+#[component]
+fn HeldRowFixture() -> impl IntoElement {
+    row_fixture_body(true)
+}
+
+fn row_fixture_body(held: bool) -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
     let store = t3_client::ClientStore::default();
     provide_context(Rt::new(
@@ -311,7 +356,15 @@ fn ConnectedRowFixture() -> impl IntoElement {
         OrchestrationV2CreationSource::Web,
         spawner.clone(),
     );
-    provide_context(RowThreadActionsRuntime(Rc::new(client.clone())));
+    let answers = Rc::new(std::cell::RefCell::new(Vec::new()));
+    provide_context(RowThreadActionsRuntime(if held {
+        Rc::new(HeldActions {
+            client: client.clone(),
+            held: answers.clone(),
+        })
+    } else {
+        Rc::new(client.clone())
+    }));
     let key = ThreadKey {
         environment: EnvironmentId("env".into()),
         thread: ThreadId("thread-a".into()),
@@ -340,9 +393,19 @@ fn ConnectedRowFixture() -> impl IntoElement {
     }
     let dispatches = signal(Vec::<serde_json::Value>::new());
     let nav = Navigator::new(Route::NewThread);
-    view()
+    let content = view()
         .w_full()
         .h_full()
+        .child(
+            nsh_base::button()
+                .accessibility_label(Some("Release replies".into()))
+                .on_press(move || {
+                    for sender in answers.borrow_mut().drain(..) {
+                        let _ = sender.send(());
+                    }
+                })
+                .child(text("Release replies")),
+        )
         .child(
             nsh_base::button()
                 .test_id("read-server")
@@ -383,14 +446,19 @@ fn ConnectedRowFixture() -> impl IntoElement {
                     )
                 })
             })
-        }))
+        }));
+    t3_ui::ui::toast::toast_provider(content, t3_ui::ui::toast::Position::TopRight)
 }
 
 fn connected_row() -> Headless {
+    connected_row_with(Root::of::<ConnectedRowFixture>())
+}
+
+fn connected_row_with(root: Root) -> Headless {
     let mut config = EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(DESKTOP.0), px(DESKTOP.1)),
-        ..EngineConfig::new(Root::of::<ConnectedRowFixture>())
+        ..EngineConfig::new(root)
     };
     config.environment.os = nsh_core::platform::Os::Linux;
     config.environment.idiom = nsh_core::platform::Idiom::Desktop;
@@ -432,10 +500,33 @@ fn a_row_menu_action_reaches_the_server_after_the_menu_closed() {
     let mut app = connected_row();
     app.right_click("id:sidebar-row-card")
         .expect("open the row menu");
-    app.press("role:menuitem[Mark unread]").expect("mark unread");
+    app.press("role:menuitem[Mark unread]")
+        .expect("mark unread");
     app.wait_for_gone("role:menuitem[Mark unread]", nsh_testing::WAIT)
         .expect("menu closed");
     app.press("id:read-server").expect("read the server");
     app.wait_for("Dispatches 1")
         .expect("the action reached the server");
+}
+
+// Rule 7: the menu closes on the press; the action's refusal arrives after that.
+#[test]
+fn a_row_menu_action_refused_after_the_menu_closed_still_reports_the_failure() {
+    let mut app = connected_row_with(Root::of::<HeldRowFixture>());
+    app.right_click("id:sidebar-row-card")
+        .expect("open the row menu");
+    app.press("role:menuitem[Mark unread]")
+        .expect("mark unread");
+    app.wait_for_gone("role:menuitem[Mark unread]", nsh_testing::WAIT)
+        .expect("menu closed");
+    app.press("role:button[Release replies]").expect("answer");
+    app.settle();
+    assert!(
+        app.screen()
+            .texts()
+            .iter()
+            .any(|text| text.contains("Held refusal")),
+        "the refusal never reached the failure toast: {:?}",
+        app.screen().texts()
+    );
 }

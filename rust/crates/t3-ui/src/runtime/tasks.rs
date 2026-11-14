@@ -81,9 +81,9 @@ mod tests {
             let gate = gate.clone();
             move || {
                 let screen = TaskOwner::here();
-                let watching = gate.clone();
-                let _ = watch(async move {
-                    if watching.wait().await {
+                let watching = gate.wait();
+                watch(async move {
+                    if watching.await {
                         finished.update(|n| *n += 1);
                     }
                 });
@@ -112,7 +112,7 @@ mod tests {
                         }))
                         .child(control("Start bare", move || {
                             let wait = bare_gate.wait();
-                            let _ = spawn(async move {
+                            spawn(async move {
                                 if wait.await {
                                     finished.update(|n| *n += 1);
                                 }
@@ -179,7 +179,8 @@ mod tests {
         started(&mut app, "Start under the screen");
         app.press("role:button[Close the screen]").expect("close");
         release(&mut app);
-        app.wait_for("text:released: refused").expect("task cancelled");
+        app.wait_for("text:released: refused")
+            .expect("task cancelled");
         assert!(app.screen().shows("finished: 0"));
     }
 
@@ -188,7 +189,8 @@ mod tests {
         let mut app = start();
         app.press("role:button[Close the screen]").expect("close");
         release(&mut app);
-        app.wait_for("text:released: refused").expect("watch cancelled");
+        app.wait_for("text:released: refused")
+            .expect("watch cancelled");
         assert!(app.screen().shows("finished: 0"));
     }
 

@@ -488,6 +488,21 @@ fn AppTree(props: TreeProps) -> impl IntoElement {
                 })
                 .child(text("Complete the turn")),
         )
+        .child({
+            let choosing = client.clone();
+            nsh_base::button()
+                .accessibility_label(Some(SharedString::from("Choose sound alerts")))
+                .on_press(move || {
+                    // What the Settings mode select writes.
+                    let mut patch = serde_json::Map::new();
+                    patch.insert("notificationMode".into(), json!("sound"));
+                    let write = choosing.settings().update_client(patch);
+                    spawn(async move {
+                        write.await.expect("device settings write");
+                    });
+                })
+                .child(text("Choose sound alerts"))
+        })
         .child(shell_button(
             "Snooze the thread",
             store.clone(),
@@ -853,6 +868,70 @@ fn a_subagent_asking_for_approval_notifies_its_parent_once() {
         .filter(|text| *text == "Approval needed")
         .count();
     assert_eq!(toasts, 1, "one notification, the parent's");
+}
+
+/// A speaker that decodes anything and records what it was asked (the headless one decodes WAV
+/// only; the web's alerts are MP3).
+#[derive(Clone, Default)]
+struct Speaker(std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>);
+
+impl nsh_core::audio::AudioBackend for Speaker {
+    fn command(&self, command: nsh_core::audio::AudioCommand, events: &nsh_core::audio::AudioSink) {
+        use nsh_core::audio::{AudioCommand, AudioEvent};
+        let name = match command {
+            AudioCommand::Load { .. } => {
+                events.send(AudioEvent::Loaded {
+                    duration: Duration::from_millis(500),
+                    bytes: 1,
+                    truncated: false,
+                });
+                "load"
+            }
+            AudioCommand::Play { .. } => "play",
+            _ => "other",
+        };
+        self.0.lock().expect("speaker").push(name);
+    }
+}
+
+fn start_app_tree_with_speaker(speaker: Speaker) -> Headless {
+    let root = Root::new::<AppTree>(|| TreeProps {
+        route: Route::Home.path(),
+        status: "running".into(),
+        settled: 0,
+    });
+    let mut config = config(DESKTOP, None, root);
+    config.audio = Some(std::sync::Arc::new(speaker));
+    let mut app = Headless::start(config).expect("app tree");
+    app.wait_for("Read stored width").expect("mounted");
+    app
+}
+
+/// `playNotificationSound`: in a sound mode a finished turn plays the completion alert, once.
+#[test]
+fn a_completed_turn_plays_the_alert_only_in_a_sound_mode() {
+    let plays = |speaker: &Speaker| {
+        speaker
+            .0
+            .lock()
+            .expect("speaker")
+            .iter()
+            .filter(|call| **call == "play")
+            .count()
+    };
+    let speaker = Speaker::default();
+    let mut app = start_app_tree_with_speaker(speaker.clone());
+    app.press("role:button[Complete the turn]").expect("complete");
+    app.settle();
+    assert_eq!(plays(&speaker), 0, "control: alerts off by default");
+    let speaker = Speaker::default();
+    let mut app = start_app_tree_with_speaker(speaker.clone());
+    app.press("role:button[Choose sound alerts]")
+        .expect("sound mode");
+    app.settle();
+    app.press("role:button[Complete the turn]").expect("complete");
+    app.settle();
+    assert_eq!(plays(&speaker), 1, "one alert: {:?}", speaker.0.lock().expect("speaker"));
 }
 
 /// BackgroundThreadAnnouncer's `effectiveSnoozed`: a snoozed thread finishing is not spoken.

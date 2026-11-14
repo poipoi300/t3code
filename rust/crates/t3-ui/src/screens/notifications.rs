@@ -8,8 +8,8 @@
 //! (`show_notification`, `set_badge`, `announce_for_accessibility`), which answer
 //! "unavailable" where a platform has none, so no platform branch is needed.
 //!
-//! Not built yet, each named in reports/ui-sh-notify.md: notification sounds (the web's two mp3
-//! assets), hidden-thread filtering (`hiddenThreadKeysAtom` has no client producer yet).
+//! Not built yet, named in reports/ui-mounts-app-root.md: hidden-thread filtering
+//! (`hiddenThreadKeysAtom` has no client producer yet).
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,10 +22,12 @@ use nsh_core::platform::Lifecycle;
 use nsh_core::prelude::*;
 use t3_client::services::models::PendingSubagentRequest;
 use t3_client::thread_views::threads::notification_center::{
-    NotificationCenter, NotificationTone, Presentation, ThreadNotification, presentation,
+    NotificationCenter, NotificationTone, Presentation, ThreadNotification, has_notification_sound,
+    presentation,
 };
 use t3_client::thread_views::threads::notifications::{
-    BackgroundMemory, BackgroundThread, next_background_announcement, resolve_background_request,
+    BackgroundMemory, BackgroundThread, NotificationKind, next_background_announcement,
+    resolve_background_request,
 };
 use t3_client::thread_views::threads::shell::{PendingChildRequest, ThreadShellViews};
 use t3_client::types::{EnvironmentId, SyncStatus, ThreadId, ThreadKey};
@@ -34,6 +36,7 @@ use t3_contracts::settings::{ClientSettingsSchema, NotificationMode};
 
 use crate::i18n::t;
 use crate::runtime::rt;
+use crate::runtime::tasks::TaskOwner;
 use crate::state::nav::{Route, navigator};
 use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::toast::{Action, ThreadToastData, ToastOptions, Variant, toast_manager};
@@ -104,11 +107,17 @@ pub fn thread_notifications() -> impl IntoElement {
         _ => None,
     };
 
+    let sounds = Rc::new(Sounds::new(TaskOwner::here()));
     let show: Rc<dyn Fn(Vec<ThreadNotification>)> = {
         let pending = pending.clone();
         Rc::new(move |shown: Vec<ThreadNotification>| {
             let current = settings.get_untracked();
             for notification in shown {
+                if has_notification_sound(&current.notification_mode) {
+                    sounds.play(notification.kind, move || {
+                        has_notification_sound(&settings.get_untracked().notification_mode)
+                    });
+                }
                 present(&notification, &current, open_key(), &pending, open_thread);
             }
         })
@@ -279,6 +288,64 @@ pub fn thread_notifications() -> impl IntoElement {
     });
 
     view().app_class(crate::theme::tw("hidden"))
+}
+
+/// The web's alert sounds, read from `apps/web/src/assets` so there is one copy of each.
+const COMPLETION_SOUND: &[u8] =
+    include_bytes!("../../../../../apps/web/src/assets/notification-completion.mp3");
+const INPUT_SOUND: &[u8] =
+    include_bytes!("../../../../../apps/web/src/assets/notification-input.mp3");
+
+/// `playNotificationSound`: each alert decoded once, then played. Another of the same alert while
+/// one still plays is coalesced; completion and input keep separate slots.
+struct Sounds {
+    tasks: TaskOwner,
+    slots: [RefCell<SoundSlot>; 2],
+}
+
+#[derive(Default)]
+struct SoundSlot {
+    sound: Option<Sound>,
+    playing_until: u64,
+}
+
+impl Sounds {
+    fn new(tasks: TaskOwner) -> Self {
+        Self {
+            tasks,
+            slots: Default::default(),
+        }
+    }
+
+    fn play(self: &Rc<Self>, kind: NotificationKind, should_play: impl Fn() -> bool + 'static) {
+        let (index, bytes) = match kind {
+            NotificationKind::Completion => (0, COMPLETION_SOUND),
+            NotificationKind::Input => (1, INPUT_SOUND),
+        };
+        let sounds = self.clone();
+        self.tasks.spawn(async move {
+            let cached = sounds.slots[index].borrow().sound.clone();
+            let sound = match cached {
+                Some(sound) => sound,
+                // A failed load (no audio here, a refused capability) is retried on the next alert.
+                None => match load_sound(bytes).await {
+                    Ok(sound) => {
+                        sounds.slots[index].borrow_mut().sound = Some(sound.clone());
+                        sound
+                    }
+                    Err(_) => return,
+                },
+            };
+            let now = nsh_core::time::unix_ms() as u64;
+            let mut slot = sounds.slots[index].borrow_mut();
+            if !should_play() || now < slot.playing_until {
+                return;
+            }
+            slot.playing_until = now + sound.duration().as_millis() as u64;
+            drop(slot);
+            sound.play(1.0, 1.0);
+        });
+    }
 }
 
 /// `present`: a toast in front of the app, else a system notification, as the client decides.

@@ -157,6 +157,8 @@ impl GitActionsControlProps {
 
 #[derive(Clone, Copy)]
 struct Control {
+    /// Press-started work runs here, not under the pressed button or the closing menu (rule 7).
+    tasks: crate::runtime::tasks::TaskOwner,
     scope: Stored<GitActionsScope>,
     backend: Stored<Option<GitActionsRuntime>>,
     snapshot: Signal<GitActionsSnapshot>,
@@ -281,6 +283,9 @@ fn live_branch_update(snapshot: &GitActionsSnapshot) -> Option<Option<String>> {
 }
 
 impl Control {
+    fn spawn_task(self, task: impl std::future::Future<Output = ()> + 'static) {
+        self.tasks.spawn(task);
+    }
     fn can_write(self) -> bool {
         self.backend.with(|b| b.is_some()) && self.snapshot.with(|s| s.can_write)
     }
@@ -338,7 +343,7 @@ impl Control {
         }
         if let Some(backend) = self.backend.get() {
             let scope = self.scope.get();
-            spawn(async move {
+            self.spawn_task(async move {
                 let _ = backend.0.refresh(&scope).await;
             });
         }
@@ -418,7 +423,7 @@ impl Control {
         let saved_message = request.commit_message.clone();
         self.success.set(None);
         self.initiating.set(true);
-        spawn(async move {
+        self.spawn_task(async move {
             let result = backend.0.run_action(&scope, request).await;
             self.initiating.set(false);
             match result {
@@ -491,7 +496,7 @@ impl Control {
                 let scope = self.scope.get();
                 self.success.set(None);
                 self.initiating.set(true);
-                spawn(async move {
+                self.spawn_task(async move {
                     let result = backend.0.pull(&scope).await;
                     self.initiating.set(false);
                     match result {
@@ -577,6 +582,7 @@ fn mounted_control(
     props: Stored<GitActionsControlProps>,
 ) -> AnyElement {
     let control = Control {
+        tasks: crate::runtime::tasks::TaskOwner::here(),
         scope: stored(scope),
         backend,
         snapshot: signal(GitActionsSnapshot::default()),
@@ -776,7 +782,7 @@ fn initialize_control(control: Control) -> impl IntoElement {
             };
             let scope = control.scope.get();
             control.initiating.set(true);
-            spawn(async move {
+            control.spawn_task(async move {
                 let result = backend.0.initialize(&scope).await;
                 control.initiating.set(false);
                 if let Err(error) = result {
@@ -1219,7 +1225,7 @@ fn commit_file(control: Control, file: VcsStatusResultWorkingTreeFiles) -> impl 
                 let root = control.snapshot.with(|s| s.status.as_ref().and_then(|s| s.working_tree.root_path.clone().flatten()));
                 if let (Some(backend), Some(root)) = (control.backend.get(), root) {
                     let scope = control.scope.get(); let path = path.get();
-                    spawn(async move { if let Err(error) = backend.0.open_file(&scope, root, path).await { control.show_error("Unable to open file", error); } });
+                    control.spawn_task(async move { if let Err(error) = backend.0.open_file(&scope, root, path).await { control.show_error("Unable to open file", error); } });
                 }
             })
             .app_class(tw("flex min-w-0 flex-1 items-center justify-between gap-3 text-left enabled:cursor-pointer"))
@@ -1533,7 +1539,7 @@ impl PublishState {
         let generation = self.generation.get_untracked();
         self.error.set(None);
         self.pending.set(true);
-        spawn(async move {
+        control.spawn_task(async move {
             let result = backend.0.publish(&scope, input).await;
             if self.generation.get_untracked() != generation {
                 return;

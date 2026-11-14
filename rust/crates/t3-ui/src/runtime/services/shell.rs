@@ -96,7 +96,11 @@ pub fn load_thread_sidebar_width(width: Signal<f32>, store: Option<SidebarWidthS
 }
 
 /// `resetSidebarWidth`: forgets the stored width and applies the default for the window.
-pub fn reset_thread_sidebar_width(width: Signal<f32>, store: Option<SidebarWidthStore>) {
+pub fn reset_thread_sidebar_width(
+    width: Signal<f32>,
+    store: Option<SidebarWidthStore>,
+    tasks: crate::runtime::tasks::TaskOwner,
+) {
     let viewport = f64::from(window().width.0);
     width.set(
         t3_client::view_logic::shell::sidebar_width::resolve_initial_thread_sidebar_width(
@@ -105,7 +109,7 @@ pub fn reset_thread_sidebar_width(width: Signal<f32>, store: Option<SidebarWidth
     );
     if let Some(store) = store {
         let clear = store.0.clear();
-        spawn(async move {
+        tasks.spawn(async move {
             if let Err(error) = clear.await {
                 log::error!("Could not clear persisted thread sidebar width. {error}");
             }
