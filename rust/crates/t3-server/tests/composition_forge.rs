@@ -1059,7 +1059,6 @@ async fn remote_status(s: &mut Server) -> Value {
 /// with no pull request and the stream open.
 #[tokio::test]
 async fn vcs_status_carries_the_pull_request_from_the_checkouts_forge() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (github, _) = github_stand_in().await;
     // Status fetches the upstream remote: `false` as ssh fails it locally, so gitlab.com is
     // never contacted.

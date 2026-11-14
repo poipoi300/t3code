@@ -385,10 +385,10 @@ async fn editor_links_open_only_local_targets_inside_server_workspaces() {
         let target = scratch.join("target");
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("notes.md"), "x").unwrap();
-        let dotted = scratch.join("dotted");
+        let stream_link = scratch.join("stream_link");
         std::os::windows::fs::symlink_dir(
             format!("{}::$INDEX_ALLOCATION", target.display()),
-            &dotted,
+            &stream_link,
         )
         .unwrap();
         for editor in ["vscode", "file-manager"] {
@@ -396,7 +396,7 @@ async fn editor_links_open_only_local_targets_inside_server_workspaces() {
                 &mut socket,
                 &mut client,
                 "shell.openInEditor",
-                json!({"cwd": dotted.join("notes.md").display().to_string(), "editor": editor, "reveal": true}),
+                json!({"cwd": stream_link.join("notes.md").display().to_string(), "editor": editor, "reveal": true}),
             )
             .await;
             assert_eq!(

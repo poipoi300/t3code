@@ -350,9 +350,26 @@ impl GitAdapter {
         session: &AuthSessionId,
         cwd: &str,
         operation: &str,
+        bindings: Option<&dyn SavedRepositoryBindings>,
     ) -> Result<&vcs::Vcs, Error> {
         let vcs = self.vcs.as_ref().ok_or_else(denied)?;
         self.checkout(session, cwd, operation).await?;
+        // Re-review 4 H-1 item 4: the folder's saved binding pins the reads. Applying it refuses
+        // a changed repository now, and records it as this scope's identity in t3-git's process
+        // cache, which every later status and branch read of the scope validates against.
+        if let Some(bindings) = bindings {
+            let saved = bindings
+                .saved_binding(Path::new(cwd))
+                .await
+                .map_err(|_| bindings_unreadable(cwd))?;
+            if let Some(saved) = saved {
+                self.git
+                    .at(cwd)
+                    .with_repository_binding(saved)
+                    .await
+                    .map_err(|e| error(e, operation))?;
+            }
+        }
         Ok(vcs)
     }
 
@@ -362,11 +379,12 @@ impl GitAdapter {
         self: &Arc<Self>,
         session: &AuthSessionId,
         socket: Option<u64>,
+        bindings: Option<&dyn SavedRepositoryBindings>,
         input: VcsStatusInput,
     ) -> Result<Revocable<t3_git::VcsBranchSubscription>, Error> {
         const OPERATION: &str = "subscribeVcsBranch";
         let vcs = self
-            .status_services(session, &input.cwd.0, OPERATION)
+            .status_services(session, &input.cwd.0, OPERATION, bindings)
             .await?;
         let permit = vcs.subscriptions.acquire(socket, OPERATION, &input.cwd.0)?;
         let subscription = vcs
@@ -401,10 +419,11 @@ impl GitAdapter {
     pub async fn refresh_branch(
         &self,
         session: &AuthSessionId,
+        bindings: Option<&dyn SavedRepositoryBindings>,
         input: VcsStatusInput,
     ) -> Result<(), Error> {
         const OPERATION: &str = "vcs.refreshBranch";
-        self.status_services(session, &input.cwd.0, OPERATION)
+        self.status_services(session, &input.cwd.0, OPERATION, bindings)
             .await?
             .application
             .refresh_branch(&input)
@@ -417,11 +436,12 @@ impl GitAdapter {
         self: &Arc<Self>,
         session: &AuthSessionId,
         socket: Option<u64>,
+        bindings: Option<&dyn SavedRepositoryBindings>,
         input: VcsStatusSubscriptionInput,
     ) -> Result<Revocable<t3_git::VcsStatusSubscription>, Error> {
         const OPERATION: &str = "subscribeVcsStatus";
         let vcs = self
-            .status_services(session, &input.cwd.0, OPERATION)
+            .status_services(session, &input.cwd.0, OPERATION, bindings)
             .await?;
         let permit = vcs.subscriptions.acquire(socket, OPERATION, &input.cwd.0)?;
         let subscription = vcs
@@ -436,10 +456,11 @@ impl GitAdapter {
     pub async fn refresh_status(
         &self,
         session: &AuthSessionId,
+        bindings: Option<&dyn SavedRepositoryBindings>,
         input: t3_contracts::rpc::WsVcsRefreshStatusPayload,
     ) -> Result<VcsStatusResult, Error> {
         const OPERATION: &str = "vcs.refreshStatus";
-        self.status_services(session, &input.cwd.0, OPERATION)
+        self.status_services(session, &input.cwd.0, OPERATION, bindings)
             .await?
             .application
             .refresh_status(&input)
@@ -471,11 +492,12 @@ impl GitAdapter {
     pub async fn create_worktree(
         &self,
         session: &AuthSessionId,
+        bindings: Option<&dyn SavedRepositoryBindings>,
         input: t3_contracts::rpc::WsVcsCreateWorktreePayload,
     ) -> Result<VcsCreateWorktreeResult, Error> {
         const OPERATION: &str = "vcs.createWorktree";
         let vcs = self
-            .status_services(session, &input.cwd.0, OPERATION)
+            .status_services(session, &input.cwd.0, OPERATION, bindings)
             .await?;
         if let Some(setting) = vcs.worktrees.directory_refusal().await {
             return Err(Error::Git(Box::new(GitCommandError {
@@ -781,8 +803,56 @@ fn denied() -> Error {
 }
 
 /// Raw GitError Display can contain stderr, argv, URLs and filesystem diagnostics.
+/// The typed status of a folder whose repository no longer matches its binding, named as
+/// orchestration names it (`checkpoint.git.repository-changed`); never "not a repository".
+pub const REPOSITORY_CHANGED_OPERATION: &str = "checkpoint.git.repository-changed";
+
+/// Saved repository bindings for folders, read at call time (the orchestration adapter's store,
+/// which starts after Git).
+pub trait SavedRepositoryBindings: Send + Sync {
+    fn saved_binding<'a>(
+        &'a self,
+        scope: &'a Path,
+    ) -> BoxFuture<'a, Result<Option<t3_git::RepositoryBinding>, String>>;
+}
+
+#[cfg(feature = "orchestration")]
+impl SavedRepositoryBindings for crate::adapters::orchestration::OrchestrationAdapter {
+    fn saved_binding<'a>(
+        &'a self,
+        scope: &'a Path,
+    ) -> BoxFuture<'a, Result<Option<t3_git::RepositoryBinding>, String>> {
+        Box::pin(async move {
+            self.repository_binding(scope)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+}
+
+/// An unreadable bindings store cannot prove the folder's repository, so reads fail closed.
+fn bindings_unreadable(cwd: &str) -> Error {
+    Error::Git(Box::new(GitCommandError {
+        operation: REPOSITORY_CHANGED_OPERATION.into(),
+        cwd: cwd.into(),
+        detail:
+            "T3 Code cannot read its saved repository bindings, so it will not read this folder."
+                .into(),
+        ..command_error(REPOSITORY_CHANGED_OPERATION)
+    }))
+}
+
 fn error(error: GitError, operation: &str) -> Error {
     match error {
+        GitError::RepositoryChanged { path, detail } => Error::Git(Box::new(GitCommandError {
+            operation: REPOSITORY_CHANGED_OPERATION.into(),
+            cwd: path.display().to_string(),
+            detail: format!(
+                "{} no longer belongs to the repository this folder was bound to: {detail} T3 Code will not read it until the folder is restored or the repository is trusted again.",
+                path.display()
+            ),
+            ..command_error(operation)
+        })),
         GitError::Vcs(failure) => Error::Vcs(Box::new(failure.error)),
         GitError::Command(failure) => Error::Git(Box::new(
             failure
@@ -914,7 +984,10 @@ pub mod vcs {
             &self,
             factory: impl FnOnce(GitWorkflowService) -> Arc<dyn GitWorkflowFactory>,
         ) {
-            let _ = self.workflows.forge.set(factory(self.workflows.root.clone()));
+            let _ = self
+                .workflows
+                .forge
+                .set(factory(self.workflows.root.clone()));
         }
 
         /// The environment's one setup tracker: thread launch must publish into this instance

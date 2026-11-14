@@ -1035,15 +1035,7 @@ async fn review_guides() {
     git(&seed, &["switch", "-q", "-c", "topic"]);
     std::fs::write(seed.join("hello.txt"), "hello there\n").unwrap();
     git(&seed, &["commit", "-q", "-am", "Rename the greeting"]);
-    git(
-        &seed,
-        &[
-            "push",
-            "-q",
-            &bare.to_string_lossy(),
-            "topic",
-        ],
-    );
+    git(&seed, &["push", "-q", &bare.to_string_lossy(), "topic"]);
     let head = git(&seed, &["rev-parse", "HEAD"]).trim().to_owned();
     // The checkout's post-checkout hook; proven live before the server runs.
     let marker = temp.path().join("hook-ran");
@@ -1120,21 +1112,16 @@ async fn review_guides() {
         &seed,
         &["commit", "-q", "--allow-empty", "-m", "Second head"],
     );
-    git(
-        &seed,
-        &[
-            "push",
-            "-q",
-            &bare.to_string_lossy(),
-            "topic",
-        ],
-    );
+    git(&seed, &["push", "-q", &bare.to_string_lossy(), "topic"]);
     *host.head.lock().unwrap() = git(&seed, &["rev-parse", "HEAD"]).trim().to_owned();
     ok(
         s.call("pullRequests.generateReviewGuide", reference.clone())
             .await,
     );
-    assert_eq!(agent_report(&mut s, &mut reports, &reference).await["mode"], "fail");
+    assert_eq!(
+        agent_report(&mut s, &mut reports, &reference).await["mode"],
+        "fail"
+    );
     s.cleanups.recv().await.expect("cleanup");
     let failed = ok(s.call("pullRequests.reviewGuide", reference.clone()).await);
     assert_eq!(failed["run"]["_tag"], "Failed", "{failed}");
@@ -1146,23 +1133,17 @@ async fn review_guides() {
         &seed,
         &["commit", "-q", "--allow-empty", "-m", "Third head"],
     );
-    git(
-        &seed,
-        &[
-            "push",
-            "-q",
-            &bare.to_string_lossy(),
-            "topic",
-        ],
-    );
+    git(&seed, &["push", "-q", &bare.to_string_lossy(), "topic"]);
     *host.head.lock().unwrap() = git(&seed, &["rev-parse", "HEAD"]).trim().to_owned();
     ok(
         s.call("pullRequests.generateReviewGuide", reference.clone())
             .await,
     );
-    assert_eq!(agent_report(&mut s, &mut reports, &reference).await["mode"], "hang");
+    assert_eq!(
+        agent_report(&mut s, &mut reports, &reference).await["mode"],
+        "hang"
+    );
     s.shutdown().await;
     nothing_left(&repo, &worktrees, &marker);
     drop(daemon);
 }
-
