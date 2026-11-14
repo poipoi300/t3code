@@ -264,3 +264,83 @@ async fn native_project_rows_are_mapped_to_public_project_contracts() {
         .unwrap();
     assert_eq!(page, json!({"projects":[project],"nextCursor":null}));
 }
+
+/// The composed runtime refuses under the command lock with a typed `CallerRefused` (review L1):
+/// the tool answers TypeScript's code and `escalationDenied` text, not `orchestration_error`.
+#[tokio::test]
+async fn a_typed_refusal_under_the_command_lock_keeps_its_code() {
+    use t3_mcp::adapters::orchestration::CallerCommandSource;
+    use t3_orchestration::{
+        api::CommandDispatcher, composition::CommandCaller, error::CallerRefusal,
+        ports::decisions::dispatch_mode_limit::ModeLimit,
+    };
+    struct Refusing(Arc<dyn CallerCommandSource>);
+    struct RefusingDispatcher;
+    #[async_trait]
+    impl CommandDispatcher for RefusingDispatcher {
+        async fn dispatch(
+            &self,
+            command: t3_contracts::orchestration_v2::OrchestrationV2ServerCommand,
+        ) -> error::Result<t3_orchestration::stores::receipts::CommandReceipt> {
+            let value = serde_json::to_value(&command).unwrap();
+            Err(error::Error::CallerRefused {
+                command_id: serde_json::from_value(value["commandId"].clone()).unwrap(),
+                refusal: CallerRefusal::AboveModeLimit {
+                    thread_id: ThreadId("target".into()),
+                    mode: ModeLimit::Runtime,
+                    runtime_mode: "full-access".into(),
+                    interaction_mode: "default".into(),
+                },
+            })
+        }
+    }
+    impl CallerCommandSource for Refusing {
+        fn threads(
+            &self,
+            caller: CommandCaller,
+        ) -> t3_orchestration::ports::thread_project::thread_management_service::ThreadManagementService
+        {
+            self.0.threads(caller)
+        }
+        fn dispatcher(&self, _: CommandCaller) -> Arc<dyn CommandDispatcher> {
+            Arc::new(RefusingDispatcher)
+        }
+        fn intake(
+            &self,
+            caller: CommandCaller,
+        ) -> Option<t3_orchestration::ports::runs_ingestion::thread_message_intake::ThreadMessageIntake>
+        {
+            self.0.intake(caller)
+        }
+        fn stop(
+            &self,
+        ) -> Option<&t3_orchestration::ports::thread_project::thread_management_service::ThreadStopService>
+        {
+            None
+        }
+    }
+    let base = adapter();
+    create(&base, "caller").await;
+    create(&base, "target").await;
+    let adapter = Arc::new(OrchestrationAdapter {
+        reader: base.reader.clone(),
+        database: base.database.clone(),
+        commands: Arc::new(Refusing(base.commands.clone())),
+    });
+    let input = json!({"threadId":"target","action":"pin"});
+    let admitted = context(adapter.clone(), "t3_thread_organize", &input).await;
+    let error = adapter
+        .t3_thread_organize(admitted, decode_input("t3_thread_organize", input).unwrap())
+        .await
+        .unwrap_err();
+    match error {
+        McpError::Failure { code, message } => {
+            assert_eq!(code, "runtime_mode_escalation_denied");
+            assert_eq!(
+                message,
+                "Thread target now runs in full-access/default mode, above this caller's. Its user changed it while this call ran."
+            );
+        }
+        other => panic!("{other}"),
+    }
+}
