@@ -420,7 +420,6 @@ InterfaceFontSize	n-zero	rust-accepts
 KeybindingShortcut	empty:key	rust-accepts
 KeybindingWhenNode	empty:left.name	rust-accepts
 KeybindingWhenNode	empty:right.name	rust-accepts
-ListTextGeneratorModelsInput	junk:config.baseUrl	rust-accepts
 ListTextGeneratorModelsInput	null:config.apiKey	rust-rejects
 ListTextGeneratorModelsInput	null:config.enabled	rust-rejects
 LoadBalancingWeights	neg:0	rust-accepts
@@ -2149,7 +2148,6 @@ TerminalSummary	empty:threadId	rust-accepts
 TerminalSummary	zero:pid	rust-accepts
 TerminalWriteInput	empty:data	rust-accepts
 TextGeneratorConfig	empty:apiKey.reference	rust-accepts
-TextGeneratorConfig	junk:baseUrl	rust-accepts
 TextGeneratorConfig	null:apiKey	rust-rejects
 TextGeneratorConfig	null:enabled	rust-rejects
 TextGeneratorConfig	pad:apiKey.reference	output-differs
