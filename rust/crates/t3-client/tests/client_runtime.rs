@@ -198,3 +198,40 @@ fn a_query_shares_one_driver_across_leases_and_stops_with_the_last() {
     drop(second);
     assert!(resource.is_closed(), "the last lease stops the driver");
 }
+
+#[test]
+fn a_refused_message_stays_visible_with_the_servers_reason_until_dismissed() {
+    use futures::{FutureExt, StreamExt};
+    use t3_client::thread_views::composer::send::SendState;
+    let mut harness = Harness::new(ENV);
+    let client = paired(&mut harness);
+    let mut changes = client.message_changes();
+    assert_eq!(
+        harness.run(client.send_message(&key("t1"), "hello".into())),
+        Ok(())
+    );
+    harness.settle();
+    assert!(
+        changes.next().now_or_never().flatten().is_some(),
+        "a change fired"
+    );
+    let pending = client.pending_messages(&key("t1"));
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    let reason = "Failed to dispatch orchestration V2 command: service ProviderAdapterRegistry.get: No orchestration provider adapter is registered for codex.";
+    assert!(
+        matches!(&pending[0].state, SendState::Restored { reason: r, .. } if r == reason),
+        "{:?}",
+        pending[0].state
+    );
+    assert_eq!(client.draft_text(&key("t1")).as_deref(), Some("hello"));
+    while changes.next().now_or_never().flatten().is_some() {}
+    client.dismiss_message(&key("t1"), &pending[0].message.message_id);
+    assert!(client.pending_messages(&key("t1")).is_empty());
+    harness.settle();
+    assert!(changes.next().now_or_never().flatten().is_some());
+    assert_eq!(
+        client.pending_messages(&key("t2")),
+        vec![],
+        "other threads see nothing"
+    );
+}

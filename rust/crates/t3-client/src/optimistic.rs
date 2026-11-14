@@ -3,7 +3,10 @@ use crate::{
     types::{CommandId, EnvironmentId, ThreadId},
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, rc::Rc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -225,7 +228,15 @@ impl<T> OptimisticState<T> {
             self.reject(&command);
         }
     }
-    pub fn reset(&mut self, projection: &ProjectionKey, generation: u64, sequence: u64) {
+    /// Starts a new lineage for `projection`. Its overlays wait for revalidation, except the
+    /// `unsent` commands: no request left for them, so there is nothing to be uncertain about.
+    pub fn reset(
+        &mut self,
+        projection: &ProjectionKey,
+        generation: u64,
+        sequence: u64,
+        unsent: &BTreeSet<CommandId>,
+    ) {
         self.progress.insert(
             projection.clone(),
             Progress {
@@ -234,7 +245,7 @@ impl<T> OptimisticState<T> {
             },
         );
         for (command, overlay) in &mut self.overlays {
-            if &overlay.projection == projection {
+            if &overlay.projection == projection && !unsent.contains(command) {
                 overlay.revalidating = true;
                 if let Some(intent) = self.pending.get_mut(command) {
                     intent.status = CommandStatus::UnknownDelivery;
@@ -489,7 +500,7 @@ mod tests {
         let mut state = OptimisticState::default();
         state.insert(id("c"), key("a"), 0, 1);
         state.accepted(&receipt("c", "a", 100));
-        state.reset(&key("a"), 1, 2);
+        state.reset(&key("a"), 1, 2, &BTreeSet::new());
         state.observe(&key("a"), 0, 1000);
         assert!(state.needs_revalidation(&id("c")));
         assert!(!state.accepted(&receipt("c", "a", 100)));
@@ -533,7 +544,7 @@ mod tests {
         assert!(state.matching_entity(&id("c"), &thread, 4));
         assert!(state.pending.is_empty());
         state.insert(id("reset"), thread.clone(), 4, 2);
-        state.reset(&thread, 5, 1);
+        state.reset(&thread, 5, 1, &BTreeSet::new());
         assert!(!state.matching_entity(&id("reset"), &thread, 5));
         assert!(!state.revalidated_entity(&id("reset"), &thread, 4));
         assert!(state.revalidated_entity(&id("reset"), &thread, 5));

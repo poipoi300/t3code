@@ -122,7 +122,21 @@ pub fn apply_event(
         ThreadVisited(e) => {
             p.thread = e.payload;
         }
-        ThreadVisitRecorded(_) => return Ok(false),
+        // `applyOrchestrationV2ThreadVisit`: only the read state; a visit is not activity, so
+        // `updated_at` stays, and absent `opens` keep the thread's.
+        ThreadVisitRecorded(e) => {
+            let visit = e.payload;
+            let opens = if visit.opens.is_some() {
+                visit.opens
+            } else {
+                p.thread.opens.clone()
+            };
+            if p.thread.last_visited_at == visit.last_visited_at && p.thread.opens == opens {
+                return Ok(false);
+            }
+            p.thread.last_visited_at = visit.last_visited_at;
+            p.thread.opens = opens;
+        }
         ThreadMarkedUnread(e) => {
             p.thread = e.payload;
         }

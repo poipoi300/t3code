@@ -19,7 +19,7 @@ use crate::{
         sessions::{QueryConnection, QueryConnectionPhase, ServiceSession, drive_query},
     },
     store::Scope,
-    thread_views::composer::send::SendService,
+    thread_views::composer::send::{PendingMessage, SendService},
     types::{EnvironmentId, Generation, ThreadKey},
 };
 use futures::{
@@ -74,6 +74,8 @@ struct Inner<P: Platform + Clone + 'static> {
     /// Open threads: how many opens each has, and its lease once its environment is connected.
     threads: RefCell<BTreeMap<ThreadKey, (usize, Option<ThreadLease>)>>,
     listeners: RefCell<Vec<mpsc::UnboundedSender<()>>>,
+    /// `message_changes` subscribers.
+    message_listeners: Rc<RefCell<Vec<mpsc::UnboundedSender<()>>>>,
     /// Mounted queries by identity, so every reader of one query shares one driver.
     queries: RefCell<BTreeMap<String, std::rc::Weak<dyn std::any::Any>>>,
 }
@@ -125,6 +127,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 environments: RefCell::new(Vec::new()),
                 threads: RefCell::new(BTreeMap::new()),
                 listeners: RefCell::new(Vec::new()),
+                message_listeners: Rc::default(),
                 queries: RefCell::new(BTreeMap::new()),
             }),
         }
@@ -239,6 +242,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             }
             this.inner.store.remove_environment(&environment);
             this.notify();
+            this.notify_messages();
             let platform = this.inner.platform.clone();
             let mut registry: EnvironmentRegistry<SessionEndpoint> = EnvironmentRegistry::load(
                 &platform,
@@ -531,6 +535,39 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             .boxed_local()
     }
 
+    /// The thread's messages this client has not seen projected yet: queued, sending, waiting
+    /// to retry (with the reason), and refused (`SendState::Restored`, with the server's reason)
+    /// until [`Self::dismiss_message`]. Empty when the environment has no delivery.
+    pub fn pending_messages(&self, key: &ThreadKey) -> Vec<PendingMessage> {
+        self.messages(&key.environment)
+            .map(|send| send.pending_messages(key))
+            .unwrap_or_default()
+    }
+
+    /// Fires when any environment's pending messages may have changed, and when an
+    /// environment's delivery starts or ends. Coalesce, then read `pending_messages`.
+    pub fn message_changes(&self) -> LocalBoxStream<'static, ()> {
+        let (sender, receiver) = mpsc::unbounded();
+        self.inner.message_listeners.borrow_mut().push(sender);
+        receiver.boxed_local()
+    }
+
+    /// Stops showing a refused message; its text stays in the thread's draft.
+    pub fn dismiss_message(&self, key: &ThreadKey, id: &t3_contracts::base_schemas::MessageId) {
+        if let Some(send) = self.messages(&key.environment) {
+            send.dismiss_message(id);
+        }
+    }
+
+    /// The draft a refused message of `key` was restored into, for the composer.
+    pub fn draft_text(&self, key: &ThreadKey) -> Option<String> {
+        self.messages(&key.environment)?.draft_text(key)
+    }
+
+    fn notify_messages(&self) {
+        notify_all(&self.inner.message_listeners);
+    }
+
     fn notify(&self) {
         self.inner
             .listeners
@@ -608,7 +645,17 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             self.inner.source.clone(),
         );
         let delivery = send.run();
+        let mut message_changes = send.changes();
+        let message_listeners = self.inner.message_listeners.clone();
         let tasks = vec![
+            self.spawn(
+                async move {
+                    while message_changes.next().await.is_some() {
+                        notify_all(&message_listeners);
+                    }
+                }
+                .boxed_local(),
+            ),
             self.spawn(
                 async move {
                     let _ = delivery.await;
@@ -650,7 +697,14 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             }
         }
         self.notify();
+        self.notify_messages();
     }
+}
+
+fn notify_all(listeners: &RefCell<Vec<mpsc::UnboundedSender<()>>>) {
+    listeners
+        .borrow_mut()
+        .retain(|listener| listener.unbounded_send(()).is_ok());
 }
 
 /// Binds message delivery to each new session of `client`, and unbinds it while there is none.

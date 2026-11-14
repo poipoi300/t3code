@@ -1391,3 +1391,39 @@ fn environment_subscriptions_wake_only_for_their_environment() {
             .contains(&t3_client::store::Scope::Environment(a))
     );
 }
+
+#[test]
+fn a_visit_record_changes_only_the_read_state() -> Result<(), ClientError> {
+    let mut p = projection()?;
+    let before = p.clone();
+    let visit = |payload: Value| event("thread.visit-recorded", payload);
+    assert!(apply_event(
+        &mut p,
+        visit(json!({"lastVisitedAt":"2026-06-21T00:00:00.000Z"}))?,
+        &HistoryMeta::default()
+    )?);
+    assert_eq!(
+        p.thread.last_visited_at.as_ref().map(|at| at.0.as_str()),
+        Some("2026-06-21T00:00:00.000Z")
+    );
+    assert_eq!(p.thread.opens, before.thread.opens, "absent opens are kept");
+    assert_eq!(p.thread.title, before.thread.title);
+    assert_eq!(p.updated_at, before.updated_at, "a visit is not activity");
+    let opens = json!({"openedAt":5,"score":1,"picks":[]});
+    apply_event(
+        &mut p,
+        visit(json!({"lastVisitedAt":null,"opens":opens}))?,
+        &HistoryMeta::default(),
+    )?;
+    assert_eq!(p.thread.last_visited_at, None);
+    assert_eq!(serde_json::to_value(&p.thread.opens)?, opens);
+    assert!(
+        !apply_event(
+            &mut p,
+            visit(json!({"lastVisitedAt":null}))?,
+            &HistoryMeta::default()
+        )?,
+        "the same read state changes nothing"
+    );
+    Ok(())
+}

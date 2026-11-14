@@ -1677,3 +1677,121 @@ fn mcp_address_prefers_relay_then_active_route_and_skips_missing_addresses() {
         "http://192.168.1.10:3773/mcp"
     );
 }
+
+fn approval_pending() -> ConnectionFailure {
+    let mut failure = ConnectionFailure::new(
+        FailureKind::ApprovalPending,
+        "Approve this device on Mac mini. It shows code K7QM-2XFD.",
+    );
+    failure.cause = Some(FailureCause::ApprovalPending);
+    failure
+}
+
+fn fail_with(h: &mut Harness, failure: ConnectionFailure) -> u64 {
+    let attempt = h.supervisor.active_attempt().unwrap();
+    h.event(ConnectionEvent::Failed { attempt, failure });
+    assert_eq!(h.supervisor.state().phase, Phase::Backoff);
+    h.supervisor.state().retry_at.unwrap() - h.platform.now_epoch_ms()
+}
+
+#[test]
+fn a_pending_approval_checks_back_every_four_seconds_without_climbing_the_ladder() {
+    let mut h = Harness::new(vec![relay()], false, NetworkStatus::Online);
+    h.connect();
+    for attempt in 1..=8 {
+        assert_eq!(h.supervisor.state().attempt, attempt);
+        assert_eq!(fail_with(&mut h, approval_pending()), 4_000);
+        h.advance(4_000);
+    }
+    // The waits do not count toward backoff, so an outage right after starts at the bottom.
+    assert!(fail_with(&mut h, failure(FailureKind::Transport)) <= 2_000);
+}
+
+#[test]
+fn a_device_nobody_approved_backs_off_once_its_request_expired() {
+    let mut h = Harness::new(vec![relay()], false, NetworkStatus::Online);
+    h.connect();
+    let mut delays = Vec::new();
+    for _ in 0..156 {
+        let delay = fail_with(&mut h, approval_pending());
+        delays.push(delay);
+        h.advance(delay);
+    }
+    // Ten minutes of 4 s checks, then backoff that never polls faster than that.
+    assert!(delays[..150].iter().all(|delay| *delay == 4_000));
+    assert!(delays[150..].iter().all(|delay| *delay >= 4_000));
+    assert!(*delays.last().unwrap() >= 32_000);
+}
+
+#[test]
+fn a_pending_approval_reconnects_as_a_wait_and_says_where_to_approve() {
+    let mut pending = approval_pending();
+    pending.trace_id = Some("trace-2".into());
+    let state = ConnectionState {
+        desired: true,
+        network: NetworkStatus::Online,
+        phase: Phase::Backoff,
+        attempt: 1,
+        retry_at: Some(1),
+        last_failure: Some(pending.clone()),
+        ..ConnectionState::default()
+    };
+    let presentation = present_connection_state(&state);
+    assert_eq!(
+        presentation,
+        ConnectionPresentation {
+            phase: PresentationPhase::Reconnecting,
+            error: Some("Approve this device on Mac mini. It shows code K7QM-2XFD.".into()),
+            trace_id: Some("trace-2".into()),
+            awaiting_approval: true,
+        }
+    );
+    assert_eq!(
+        connection_status_text(&presentation),
+        "Approve this device on Mac mini. It shows code K7QM-2XFD."
+    );
+    assert_eq!(
+        connection_status_title(&presentation),
+        "Waiting for approval"
+    );
+
+    pending.hop = Some(ConnectionHop::Server);
+    pending.via = Some(ConnectionVia::Relay);
+    pending.verification_code = Some("K7QM-2XFD".into());
+    let diagnosis = diagnosis(
+        &ConnectionState {
+            last_failure: Some(pending),
+            ..state
+        },
+        ConnectionVia::Relay,
+    );
+    assert_eq!(
+        diagnosis.headline,
+        "Mac mini is waiting for someone to approve this device"
+    );
+    assert!(
+        diagnosis
+            .steps
+            .join(" ")
+            .contains("t3 auth connect-device approve K7QM-2XFD")
+    );
+}
+
+#[test]
+fn the_hosts_pending_approval_answer_is_a_wait_not_a_permission_failure() {
+    let error: t3_contracts::environment_http::EnvironmentHttpCommonError = serde_json::from_value(
+        serde_json::json!({"_tag":"EnvironmentConnectApprovalPendingError","code":"connect_approval_pending","traceId":"trace-9"}),
+    )
+    .unwrap();
+    let failure = map_remote_environment_error(
+        &t3_client::authorization::AuthorizationError::Remote {
+            status: 403,
+            details: t3_client::authorization::Sensitive(Box::new(error)),
+        },
+        ConnectionVia::Relay,
+    );
+    assert_eq!(failure.kind, FailureKind::ApprovalPending);
+    assert_eq!(failure.cause, Some(FailureCause::ApprovalPending));
+    assert_eq!(failure.trace_id.as_deref(), Some("trace-9"));
+    assert!(!failure.is_blocked());
+}

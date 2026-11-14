@@ -280,6 +280,7 @@ impl Platform for TestPlatform {
                         (tag::<WsOrchestrationV2SubscribeShellRpc>(), Stream),
                         (tag::<WsOrchestrationV2SubscribeThreadRpc>(), Stream),
                         (tag::<WsOrchestrationV2GetTurnDiffRpc>(), Unary),
+                        (tag::<WsOrchestrationV2DispatchCommandRpc>(), Unary),
                     ] {
                         rpc.state.register(tag, kind);
                     }
@@ -404,6 +405,10 @@ impl Handler for FakeHandler {
                 ],
                 (),
             )
+        } else if tag == self::tag::<WsOrchestrationV2DispatchCommandRpc>() {
+            // The Rust server's refusal seen 2026-11-14 when no provider adapter is registered.
+            let refusal = json!({"_tag":"OrchestrationV2DispatchCommandError","commandId":request.payload["commandId"],"commandType":request.payload["type"],"message":"Failed to dispatch orchestration V2 command","detail":"service ProviderAdapterRegistry.get: No orchestration provider adapter is registered for codex."});
+            HandlerOutput::Unary(async move { Exit::fail(refusal) }.boxed_local())
         } else if tag == self::tag::<WsOrchestrationV2GetTurnDiffRpc>() {
             server.state.borrow_mut().turn_diffs += 1;
             let mut answer = request.payload.clone();

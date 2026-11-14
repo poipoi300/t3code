@@ -60,17 +60,43 @@ impl<E> std::fmt::Debug for RpcCallError<E> {
         Display::fmt(self, f)
     }
 }
-impl<E> RpcCallError<E> {
+impl<E: serde::Serialize> RpcCallError<E> {
     pub fn into_client_error(self) -> ClientError {
         match self {
             Self::NotSent(error) => error,
             Self::Unknown => ClientError::Disconnected,
             Self::Defect => ClientError::InvalidPayload("RPC handler defect".into()),
             Self::Interrupted => ClientError::Cancelled,
-            Self::Rejected(_) => ClientError::InvalidPayload("RPC request rejected".into()),
+            Self::Rejected(errors) => rejection(
+                &errors
+                    .iter()
+                    .filter_map(|error| serde_json::to_value(error).ok())
+                    .collect::<Vec<_>>(),
+            ),
             Self::InvalidResponse => ClientError::InvalidPayload("RPC response schema".into()),
             Self::Overflow => ClientError::InvalidPayload("RPC consumer overflow; resync".into()),
         }
+    }
+}
+
+/// The server's reason for refusing a request: the first typed error's `message` and `detail`
+/// (strings; `detail` may be absent or null).
+pub fn rejection(errors: &[Value]) -> ClientError {
+    let text =
+        |error: &Value, field: &str| error.get(field).and_then(Value::as_str).map(str::to_owned);
+    let reason = errors.iter().find_map(|error| {
+        let (message, detail) = (text(error, "message"), text(error, "detail"));
+        (message.is_some() || detail.is_some()).then_some((message, detail))
+    });
+    match reason {
+        Some((message, detail)) => ClientError::Rejected {
+            message: message.unwrap_or_else(|| "The server rejected the request.".into()),
+            detail,
+        },
+        None => ClientError::Rejected {
+            message: "The server rejected the request.".into(),
+            detail: None,
+        },
     }
 }
 
@@ -191,6 +217,11 @@ impl SessionEndpoint {
     ) -> Result<RawCall, RpcCallError> {
         let payload =
             serde_json::to_value(input).map_err(|error| RpcCallError::NotSent(error.into()))?;
+        // A replaced session refuses everything, as before, but as a disconnect: nothing was
+        // sent, so callers retry on the next session instead of treating it as a refusal.
+        if !self.inner.borrow().active {
+            return Err(RpcCallError::NotSent(ClientError::Disconnected));
+        }
         self.authorize(M::NAME, &payload)
             .map_err(RpcCallError::NotSent)?;
         let descriptor = WS_METHODS
@@ -686,6 +717,33 @@ pub async fn execute_environment_http_request<T: DeserializeOwned>(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    #[test]
+    fn a_refusal_keeps_the_servers_message_and_detail() {
+        let error = |value: Value| super::rejection(&[value]).to_string();
+        assert_eq!(
+            error(
+                json!({"_tag":"OrchestrationV2DispatchCommandError","message":"Failed to dispatch orchestration V2 command","detail":"service ProviderAdapterRegistry.get: No orchestration provider adapter is registered for codex."})
+            ),
+            "Failed to dispatch orchestration V2 command: service ProviderAdapterRegistry.get: No orchestration provider adapter is registered for codex."
+        );
+        assert_eq!(
+            error(json!({"message":"This thread is archived.","detail":null})),
+            "This thread is archived."
+        );
+        assert_eq!(
+            error(json!({"detail":"only detail"})),
+            "The server rejected the request.: only detail"
+        );
+        assert_eq!(
+            error(json!({"_tag":"Bare"})),
+            "The server rejected the request."
+        );
+        assert!(matches!(
+            RpcCallError::Rejected(vec![json!({"message":"m","detail":"d"})]).into_client_error(),
+            ClientError::Rejected { message, detail: Some(detail) } if message == "m" && detail == "d"
+        ));
+    }
+
     use super::*;
     use futures::{SinkExt, executor::block_on};
     use serde_json::json;

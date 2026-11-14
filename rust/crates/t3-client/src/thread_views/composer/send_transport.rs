@@ -106,11 +106,7 @@ impl<E: RpcEndpoint> RpcEndpoint for ObservedEndpoint<'_, E> {
                     } else {
                         FailureKind::Rejected
                     },
-                    reason: errors
-                        .iter()
-                        .find_map(|error| error.get("message").and_then(Value::as_str))
-                        .unwrap_or("The server rejected this message.")
-                        .into(),
+                    reason: crate::rpc::rejection(errors).to_string(),
                     command: None,
                 }),
                 Err(_) => Some(Failure {
@@ -755,6 +751,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         reason: &str,
     ) -> Result<bool, ClientError> {
         let drafts = self.inner.drafts.borrow().clone();
+        let mut restored_text = None;
         let draft_key = if let Some(drafts) = drafts {
             drafts.load().await?;
             let mut key = String::new();
@@ -782,6 +779,9 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                     |document| document.raw().clone(),
                 );
             let (draft_key, changed) = recover_document(&mut document, message)?;
+            restored_text = document["drafts"][&draft_key]["text"]
+                .as_str()
+                .map(str::to_owned);
             if changed {
                 let record = crate::persistence::Record::new(
                     "composer-drafts.mobile",
@@ -814,6 +814,15 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             }
             draft_key
         };
+        {
+            let mut refused = self.inner.refused.borrow_mut();
+            refused.retain(|entry| entry.message.message_id != message.message_id);
+            refused.push(super::send::Refused {
+                message: Rc::new(message.clone()),
+                draft_key: draft_key.clone(),
+                text: restored_text,
+            });
+        }
         self.set_state(
             &message.message_id,
             SendState::Restored {

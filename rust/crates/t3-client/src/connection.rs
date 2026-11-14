@@ -71,6 +71,8 @@ pub enum FailureKind {
     Configuration,
     Permission,
     Unsupported,
+    /// The host has not yet approved this T3 Connect device; a wait, not a failure.
+    ApprovalPending,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionFailure {
@@ -82,6 +84,8 @@ pub struct ConnectionFailure {
     pub via: Option<ConnectionVia>,
     pub cause: Option<FailureCause>,
     pub server_update_required: bool,
+    /// The code this device shows while the host decides whether to trust it.
+    pub verification_code: Option<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionHop {
@@ -103,6 +107,7 @@ pub enum FailureCause {
     RelayError,
     TunnelPending,
     TunnelNotEnabled,
+    ApprovalPending,
 }
 impl Eq for FailureCause {}
 
@@ -205,7 +210,7 @@ fn map_declared_remote_error(
     use t3_contracts::environment_http::EnvironmentHttpCommonError as E;
     let (kind, detail, trace) = match error {
         E::EnvironmentConnectApprovalPendingError(e) => (
-            FailureKind::Permission,
+            FailureKind::ApprovalPending,
             "This device is waiting for approval on the host.",
             &e.trace_id,
         ),
@@ -245,6 +250,9 @@ fn map_declared_remote_error(
     failure.trace_id = Some(trace.0.clone());
     failure.hop = Some(ConnectionHop::Server);
     failure.via = Some(via);
+    if failure.kind == FailureKind::ApprovalPending {
+        failure.cause = Some(FailureCause::ApprovalPending);
+    }
     failure
 }
 
@@ -534,6 +542,7 @@ impl LocatedCause {
             Self::Failure(FailureCause::RelayError) => "relay_error",
             Self::Failure(FailureCause::TunnelPending) => "tunnel_pending",
             Self::Failure(FailureCause::TunnelNotEnabled) => "tunnel_not_enabled",
+            Self::Failure(FailureCause::ApprovalPending) => "approval_pending",
             Self::Failure(FailureCause::Endpoint(cause)) => match cause {
                 E::TunnelDown => "tunnel_down",
                 E::OriginUnreachable => "origin_unreachable",
@@ -561,6 +570,7 @@ impl FailureKind {
             Self::Configuration => "configuration",
             Self::Permission => "permission",
             Self::Unsupported => "unsupported",
+            Self::ApprovalPending => "approval-pending",
         }
     }
 }
@@ -586,6 +596,7 @@ pub fn present_connection_diagnosis(input: DiagnosisInput<'_>) -> Option<Connect
     let headline = match cause {
         Some("offline") => "This device is offline".into(),
         Some("session_pending") => "This device is still loading its T3 Connect sign-in".into(),
+        Some("approval_pending") => format!("{host} is waiting for someone to approve this device"),
         Some("outdated") => format!("{host} runs an older T3 Code"),
         Some("clock_skew") => "This device's clock is off".into(),
         Some("not_linked") => format!("{host} is not linked to your T3 Connect account"),
@@ -619,6 +630,22 @@ pub fn present_connection_diagnosis(input: DiagnosisInput<'_>) -> Option<Connect
             "Wait a moment. T3 Code retries on its own.".into(),
             "If it keeps waiting, reload or restart T3 Code on this device.".into(),
         ],
+        Some("approval_pending") => {
+            let code = failure.and_then(|f| f.verification_code.as_deref());
+            let approve = code.map_or_else(
+                || "approve this device".to_owned(),
+                |code| format!("approve the device showing {code}"),
+            );
+            vec![
+                format!(
+                    "On a device already connected to {host}, open Settings > Sharing & access and {approve}."
+                ),
+                format!(
+                    "Or run `t3 auth connect-device approve {}` on {host}.",
+                    code.unwrap_or("<code>")
+                ),
+            ]
+        }
         Some("outdated") => vec![format!("Update T3 Code on {host}.")],
         Some("clock_skew") => vec![format!(
             "Turn on automatic date and time on this device and on {host}, then retry."
@@ -709,7 +736,7 @@ pub fn present_connection_diagnosis(input: DiagnosisInput<'_>) -> Option<Connect
         Some("offline") => "this-device-cant-reach-t3-connect",
         Some("outdated") => "the-host-runs-an-older-t3-code",
         Some("clock_skew") => "the-clock-is-off",
-        Some("session_pending" | "not_linked" | "tunnel_not_enabled") => {
+        Some("approval_pending" | "session_pending" | "not_linked" | "tunnel_not_enabled") => {
             "sign-in-account-or-link-problems"
         }
         Some("relay_error") => "t3-connect-returned-an-error",
@@ -1809,6 +1836,11 @@ pub const ROUTE_CHECK_TIMEOUT_MS: u64 = 2_500;
 pub const ROUTE_CHECK_HEAD_START_MS: u64 = 500;
 pub const LONG_BACKGROUND_AFTER_MS: u64 = 10_000;
 
+/// How often a device waiting for the host's approval checks back.
+pub const APPROVAL_PENDING_RETRY_DELAY_MS: u64 = 4_000;
+/// A pending request lives 10 minutes: 150 checks at 4 s.
+pub const APPROVAL_PENDING_FAST_RETRIES: u32 = 150;
+
 pub fn retry_delay_ms(failure_count: u32, random: f64) -> u64 {
     let ceiling = RETRY_BASE_DELAY_MS
         .saturating_mul(
@@ -1843,6 +1875,7 @@ impl ConnectionFailure {
             via: None,
             cause: None,
             server_update_required: false,
+            verification_code: None,
         }
     }
 
@@ -2052,6 +2085,8 @@ pub struct Supervisor {
     attempt: Option<AttemptId>,
     setup: Option<SetupBudget>,
     failures: u32,
+    /// Checks made while the host's approval was pending; they do not count in `failures`.
+    approval_waits: u32,
     retry_due: Option<u64>,
     active_route: Option<String>,
     connected_at: Option<u64>,
@@ -2112,6 +2147,7 @@ impl Supervisor {
             attempt: None,
             setup: None,
             failures: 0,
+            approval_waits: 0,
             retry_due: None,
             active_route: None,
             connected_at: None,
@@ -2256,6 +2292,7 @@ impl Supervisor {
                 }
                 self.state.desired = false;
                 self.failures = 0;
+                self.approval_waits = 0;
                 self.state.last_failure = None;
                 self.clear(&mut actions);
                 self.idle(Phase::Available);
@@ -2266,6 +2303,7 @@ impl Supervisor {
                     self.enabled = true;
                     self.state.desired = true;
                     self.failures = 0;
+                    self.approval_waits = 0;
                     self.state.last_failure = None;
                     self.start(time, &mut actions);
                 }
@@ -2275,6 +2313,7 @@ impl Supervisor {
                     self.start_probe(Wakeup::ForegroundProbe, true, time, &mut actions);
                 } else {
                     self.failures = 0;
+                    self.approval_waits = 0;
                     self.state.last_failure = None;
                     self.clear(&mut actions);
                     self.start(time, &mut actions);
@@ -2282,6 +2321,7 @@ impl Supervisor {
             }
             ConnectionEvent::Restart if self.state.desired => {
                 self.failures = 0;
+                self.approval_waits = 0;
                 self.state.last_failure = None;
                 self.clear(&mut actions);
                 self.start(time, &mut actions);
@@ -2424,7 +2464,10 @@ impl Supervisor {
         }
         if self.state.network == NetworkStatus::Offline && !self.replacing {
             self.idle(Phase::Offline);
-            self.state.attempt = self.failures.saturating_add(1);
+            self.state.attempt = self
+                .failures
+                .saturating_add(self.approval_waits)
+                .saturating_add(1);
             return;
         }
         if self.routes.is_empty() {
@@ -2439,7 +2482,10 @@ impl Supervisor {
         self.attempt = Some(attempt);
         self.state.phase = Phase::Connecting;
         self.state.stage = Some(AttemptStage::Preparing);
-        self.state.attempt = self.failures.saturating_add(1);
+        self.state.attempt = self
+            .failures
+            .saturating_add(self.approval_waits)
+            .saturating_add(1);
         self.state.generation = Generation(self.generation.0 + 1);
         self.attempt_routes = self.routes.clone();
         if let Some(index) = self
@@ -2495,6 +2541,7 @@ impl Supervisor {
     fn replace(&mut self, ignore_offline: bool, time: Time, actions: &mut Vec<ConnectionAction>) {
         self.clear(actions);
         self.failures = 0;
+        self.approval_waits = 0;
         self.replacing = ignore_offline;
         self.start(time, actions);
     }
@@ -2508,12 +2555,14 @@ impl Supervisor {
         actions: &mut Vec<ConnectionAction>,
     ) {
         let failed_probe = self.probe.is_some();
+        let failure_kind = failure.kind.clone();
         if established
             && self
                 .connected_at
                 .is_some_and(|at| time.monotonic_ms.saturating_sub(at) >= BACKOFF_RESET_AFTER_MS)
         {
             self.failures = 0;
+            self.approval_waits = 0;
         }
         self.clear(actions);
         self.replacing = false;
@@ -2527,15 +2576,30 @@ impl Supervisor {
         }
         if failed_probe {
             self.failures = 0;
+            self.approval_waits = 0;
             self.start(time, actions);
             return;
         }
-        let delay = if established && self.failures == 0 {
+        // Someone may be approving this device on the host: check back every 4 s for the
+        // request's 10 minutes. Those waits do not climb the ladder, so a later outage starts
+        // low; past them, a forgotten device backs off but never polls faster than 4 s.
+        let approval = failure_kind == FailureKind::ApprovalPending;
+        if approval {
+            self.approval_waits = self.approval_waits.saturating_add(1);
+        }
+        let awaiting_approval = approval && self.approval_waits <= APPROVAL_PENDING_FAST_RETRIES;
+        let delay = if awaiting_approval {
+            APPROVAL_PENDING_RETRY_DELAY_MS
+        } else if established && self.failures == 0 {
             session_loss_delay_ms(random)
+        } else if approval {
+            retry_delay_ms(self.failures, random).max(APPROVAL_PENDING_RETRY_DELAY_MS)
         } else {
             retry_delay_ms(self.failures, random)
         };
-        self.failures = self.failures.saturating_add(1);
+        if !awaiting_approval {
+            self.failures = self.failures.saturating_add(1);
+        }
         self.idle(Phase::Backoff);
         self.retry_due = Some(time.monotonic_ms.saturating_add(delay));
         self.state.retry_at = Some(time.epoch_ms.saturating_add(delay));
@@ -2579,6 +2643,7 @@ impl Supervisor {
             return;
         }
         self.failures = 0;
+        self.approval_waits = 0;
         self.start(time, actions);
     }
 
@@ -2600,6 +2665,7 @@ impl Supervisor {
         if self.state.phase != Phase::Connected {
             if reason.resets_backoff() {
                 self.failures = 0;
+                self.approval_waits = 0;
             }
             self.start(time, actions);
             return;
@@ -3604,8 +3670,24 @@ pub struct ConnectionPresentation {
     pub phase: PresentationPhase,
     pub error: Option<String>,
     pub trace_id: Option<String>,
+    /// Reconnecting because the host has not approved this device yet: `error` says where to
+    /// approve it and shows the code, and is not a failure.
+    pub awaiting_approval: bool,
 }
 pub fn present_connection_state(state: &ConnectionState) -> ConnectionPresentation {
+    if matches!(state.phase, Phase::Connecting | Phase::Backoff)
+        && let Some(failure) = state
+            .last_failure
+            .as_ref()
+            .filter(|f| f.kind == FailureKind::ApprovalPending)
+    {
+        return ConnectionPresentation {
+            phase: PresentationPhase::Reconnecting,
+            error: Some(failure.detail.clone()),
+            trace_id: failure.trace_id.clone(),
+            awaiting_approval: true,
+        };
+    }
     let phase = match state.phase {
         Phase::Available => PresentationPhase::Available,
         Phase::Offline => PresentationPhase::Offline,
@@ -3636,6 +3718,7 @@ pub fn present_connection_state(state: &ConnectionState) -> ConnectionPresentati
         phase,
         error: failure.map(|f| f.detail.clone()),
         trace_id: failure.and_then(|f| f.trace_id.clone()),
+        awaiting_approval: false,
     }
 }
 pub fn connection_status_text(presentation: &ConnectionPresentation) -> String {
@@ -3643,6 +3726,10 @@ pub fn connection_status_text(presentation: &ConnectionPresentation) -> String {
         PresentationPhase::Available => "Available".into(),
         PresentationPhase::Offline => "Offline".into(),
         PresentationPhase::Connecting => "Connecting...".into(),
+        PresentationPhase::Reconnecting if presentation.awaiting_approval => presentation
+            .error
+            .clone()
+            .unwrap_or_else(|| "Waiting for approval on the host".into()),
         PresentationPhase::Reconnecting => presentation.error.as_ref().map_or_else(
             || "Reconnecting...".into(),
             |error| format!("Failed to connect. Reconnecting... Reason: {error}"),
@@ -3656,6 +3743,9 @@ pub fn connection_status_text(presentation: &ConnectionPresentation) -> String {
     }
 }
 pub fn connection_status_title(presentation: &ConnectionPresentation) -> String {
+    if presentation.awaiting_approval {
+        return "Waiting for approval".into();
+    }
     if presentation.phase == PresentationPhase::Reconnecting && presentation.error.is_some() {
         "Failed to connect. Reconnecting...".into()
     } else {

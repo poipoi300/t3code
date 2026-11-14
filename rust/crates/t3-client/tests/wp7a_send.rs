@@ -1,4 +1,4 @@
-use futures::{SinkExt, StreamExt, channel::mpsc, executor::block_on};
+use futures::{FutureExt, SinkExt, StreamExt, channel::mpsc, executor::block_on};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, rc::Rc};
 use t3_client::{
@@ -195,7 +195,11 @@ fn unreadable_recovery_receipts_keep_the_outbox_and_retry_without_another_dispat
                     Some(DeliveryResult::Restored)
                 );
                 assert!(requests.try_recv().is_err());
-                assert!(service.pending_messages(&key()).is_empty());
+                // Restored, and listed as refused until the user dismisses it.
+                assert!(matches!(
+                    service.pending_messages(&key()).as_slice(),
+                    [pending] if matches!(pending.state, SendState::Restored { .. })
+                ));
                 let saved = SavedDraftDocument::decode_mobile(
                     &platform
                         .get(StorageArea::Ordinary, draft_key.clone())
@@ -927,14 +931,16 @@ fn actual_server_rejection_restores_content_durably_before_removing_the_outbox_r
                         Ok(next)
                     })
                     .expect("concurrent typing");
-                peer.send(Ok(codec::encode(&ServerMessage::<Value>::Exit {request_id:command.id,exit:Exit::fail(json!({"_tag":"OrchestrationV2DispatchCommandError","commandId":command.payload["commandId"],"commandType":"message.dispatch","message":"This thread is archived."}))}).expect("encode"))).await.expect("reply");
+                peer.send(Ok(codec::encode(&ServerMessage::<Value>::Exit {request_id:command.id,exit:Exit::fail(json!({"_tag":"OrchestrationV2DispatchCommandError","commandId":command.payload["commandId"],"commandType":"message.dispatch","message":"Failed to dispatch orchestration V2 command","detail":"service ProviderAdapterRegistry.get: No orchestration provider adapter is registered for codex."}))}).expect("encode"))).await.expect("reply");
             };
             let (result, ()) = futures::join!(service.step(), response);
             assert_eq!(result.expect("recover"), Some(DeliveryResult::Restored));
-            assert!(matches!(
-                service.state(&id),
-                Some(SendState::Restored { .. })
-            ));
+            let reason = "Failed to dispatch orchestration V2 command: service ProviderAdapterRegistry.get: No orchestration provider adapter is registered for codex.";
+            assert!(
+                matches!(service.state(&id), Some(SendState::Restored { reason: r, .. }) if r == reason),
+                "{:?}",
+                service.state(&id)
+            );
             let bytes = platform
                 .get(
                     StorageArea::Ordinary,
@@ -956,7 +962,18 @@ fn actual_server_rejection_restores_content_durably_before_removing_the_outbox_r
                 drafts.snapshot()["drafts"]["env:thread"]["text"],
                 document.raw()["drafts"]["env:thread"]["text"]
             );
-            assert!(service.pending_messages(&key()).is_empty());
+            // The refused message stays visible, with the server's reason, until dismissed; its
+            // text is in the draft the composer reads. The outbox row is gone either way.
+            let pending = service.pending_messages(&key());
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].message.message_id, id);
+            assert!(
+                matches!(&pending[0].state, SendState::Restored { reason: r, .. } if r == reason)
+            );
+            assert_eq!(
+                service.draft_text(&key()).as_deref(),
+                Some("newer unsaved typing\n\nkeep this rejected message")
+            );
             assert!(
                 platform
                     .list(StorageArea::Ordinary, "outbox".into())
@@ -964,6 +981,13 @@ fn actual_server_rejection_restores_content_durably_before_removing_the_outbox_r
                     .expect("rows")
                     .is_empty()
             );
+            assert!(
+                service.retry_message(&id).is_err(),
+                "resent from the composer, not here"
+            );
+            service.dismiss_message(&id);
+            assert!(service.pending_messages(&key()).is_empty());
+            assert_eq!(service.state(&id), None);
             endpoint.invalidate();
         };
         futures::join!(driver.run(futures::stream::pending(), || 0), scenario);
@@ -1111,5 +1135,91 @@ fn upload_transport_failure_retries_with_the_injected_clock_and_stable_message_i
             driver.run(futures::stream::pending(), || platform.monotonic_ms()),
             scenario
         );
+    });
+}
+
+#[test]
+fn an_endpoint_invalidated_mid_delivery_keeps_the_message_queued_for_retry() {
+    // Review H1: the runtime invalidates the endpoint on a reconnect before the send service
+    // hears of it. The message was never sent, so it must stay in the outbox, not be "refused".
+    block_on(async {
+        let platform = Rc::new(FakePlatform::default());
+        let (store, generation) = store();
+        let (wire, _requests) = mpsc::unbounded::<Frame>();
+        let (_peer, incoming) = mpsc::unbounded::<Result<Frame, mpsc::SendError>>();
+        let (endpoint, _driver) = rpc::session(wire, incoming, key().environment, grants(), 0);
+        let endpoint = Rc::new(endpoint);
+        let service = Service::new(
+            key().environment,
+            platform.clone(),
+            store.clone(),
+            OrchestrationV2CreationSource::Web,
+        );
+        service
+            .connect(generation, endpoint.clone(), config())
+            .expect("connect");
+        let id = service
+            .send_message(&key(), "never reached the server".into())
+            .await
+            .expect("submit");
+        endpoint.invalidate();
+        let result = service.step().await.expect("step");
+        assert_ne!(result, Some(DeliveryResult::Restored));
+        assert!(
+            !matches!(service.state(&id), Some(SendState::Restored { .. })),
+            "{:?}",
+            service.state(&id)
+        );
+        assert_eq!(
+            platform
+                .list(StorageArea::Ordinary, "outbox".into())
+                .await
+                .expect("rows")
+                .len(),
+            1,
+            "the unsent message stays in the outbox"
+        );
+        assert!(matches!(
+            service.pending_messages(&key()).as_slice(),
+            [pending] if !matches!(pending.state, SendState::Restored { .. })
+        ));
+        // The next session delivers it.
+        let (wire, mut requests) = mpsc::unbounded::<Frame>();
+        let (_peer, incoming) = mpsc::unbounded::<Result<Frame, mpsc::SendError>>();
+        let (next, driver) = rpc::session(wire, incoming, key().environment, grants(), 0);
+        let next = Rc::new(next);
+        let generation = store.begin_session(key().environment);
+        store.apply_shell(
+            &key().environment,
+            generation,
+            vec![serde_json::from_value(json!({"kind":"synchronized"})).expect("synchronized")],
+        );
+        service
+            .connect(generation, next.clone(), config())
+            .expect("reconnect");
+        service.retry_message(&id).expect("retry");
+        let delivered = async {
+            let step = service.step();
+            futures::pin_mut!(step);
+            match futures::future::select(step, requests.next()).await {
+                futures::future::Either::Right((Some(frame), _)) => request(frame),
+                futures::future::Either::Left((result, _)) => panic!(
+                    "the retried message was not dispatched: {result:?}, state {:?}",
+                    service.state(&id)
+                ),
+                _ => panic!("the retried message was not dispatched"),
+            }
+        };
+        let request = futures::future::select(
+            driver.run(futures::stream::pending(), || 0).boxed_local(),
+            delivered.boxed_local(),
+        )
+        .await;
+        match request {
+            futures::future::Either::Right((request, _)) => {
+                assert_eq!(request.tag, "orchestration.dispatchCommand")
+            }
+            futures::future::Either::Left(_) => panic!("the session ended first"),
+        }
     });
 }

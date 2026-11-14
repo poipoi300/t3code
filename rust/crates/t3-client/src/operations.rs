@@ -46,6 +46,8 @@ pub enum CommandOutcome<T> {
         reason: String,
     },
     UnknownAfterDisconnect,
+    /// The session ended before the request left; the command is pending again.
+    NotSent,
 }
 #[derive(Debug)]
 pub struct DeliveryReport<T> {
@@ -340,11 +342,17 @@ impl<I: Clone + Serialize + DeserializeOwned> OperationQueue<I> {
                     }
                 }
             },
-            Err(RpcCallError::Rejected(_)) => {
-                let reason = "RPC request rejected".to_owned();
+            Err(RpcCallError::Rejected(errors)) => {
+                let reason = crate::rpc::rejection(&errors).to_string();
                 record.status = CommandStatus::Rejected(reason.clone());
                 self.inner.borrow_mut().optimistic.reject(command);
                 CommandOutcome::Rejected { reason }
+            }
+            // The session ended before the request left: nothing ran, so the command is pending
+            // again, with its overlay, for the next session.
+            Err(RpcCallError::NotSent(ClientError::Disconnected)) => {
+                record.status = CommandStatus::Pending;
+                CommandOutcome::NotSent
             }
             Err(RpcCallError::NotSent(_)) => {
                 let reason = "RPC request was not sent".to_owned();
@@ -389,7 +397,16 @@ impl<I: Clone + Serialize + DeserializeOwned> OperationQueue<I> {
     }
     pub fn reset(&self, projection: &ProjectionKey, generation: u64, sequence: u64) {
         let mut inner = self.inner.borrow_mut();
-        inner.optimistic.reset(projection, generation, sequence);
+        // A pending record never left: delivery persists "unknown" before the request goes.
+        let unsent: BTreeSet<_> = inner
+            .records
+            .values()
+            .filter(|record| record.status == CommandStatus::Pending)
+            .map(|record| record.command.clone())
+            .collect();
+        inner
+            .optimistic
+            .reset(projection, generation, sequence, &unsent);
         let invalidated: BTreeSet<_> = inner
             .records
             .keys()
@@ -2174,13 +2191,18 @@ mod tests {
         reply: Reply,
         calls: Cell<usize>,
         on_call: Option<Box<dyn Fn()>>,
+        command: &'static str,
     }
     impl Endpoint {
         fn new(reply: Reply) -> Self {
+            Self::for_command(reply, "c")
+        }
+        fn for_command(reply: Reply, command: &'static str) -> Self {
             Self {
                 reply,
                 calls: Cell::new(0),
                 on_call: None,
+                command,
             }
         }
     }
@@ -2210,7 +2232,7 @@ mod tests {
             if let Some(callback) = &self.on_call {
                 callback();
             }
-            assert_eq!(serde_json::to_value(input).unwrap()["commandId"], "c");
+            assert_eq!(serde_json::to_value(input).unwrap()["commandId"], self.command);
             async move {
                 match self.reply {
                     Reply::Accepted(sequence) => {
@@ -2218,7 +2240,7 @@ mod tests {
                             .map_err(|_| RpcCallError::InvalidResponse)
                     }
                     Reply::Rejected => {
-                        Err(RpcCallError::Rejected(vec![json!({"_tag":"rejected"})]))
+                        Err(RpcCallError::Rejected(vec![json!({"_tag":"OrchestrationV2DispatchCommandError","message":"Failed to dispatch orchestration V2 command","detail":"service ProviderAdapterRegistry.get: No orchestration provider adapter is registered for codex."})]))
                     }
                     Reply::Unknown => Err(RpcCallError::Unknown),
                     Reply::Pending => futures::future::pending().await,
@@ -2369,15 +2391,41 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            queue
+                .dispatch(
+                    &storage,
+                    &Endpoint::for_command(Reply::Accepted(1000), "d"),
+                    &CommandId("d".into()),
+                )
+                .await
+                .unwrap();
+            queue
+                .enqueue::<WsOrchestrationV2DispatchCommandRpc>(
+                    &storage,
+                    &command("u"),
+                    key(),
+                    lineage,
+                    ViewChange {
+                        apply: 4,
+                        revert: 0,
+                    },
+                )
+                .await
+                .unwrap();
             queue.observe_store(&store, &mut progress);
             store.apply_shell(&env(), session, vec![shell(3)]);
             queue.observe_store(&store, &mut progress);
             assert_eq!(
                 queue.status(&CommandId("d".into())),
                 Some(CommandStatus::UnknownDelivery),
-                "an authoritative snapshot revalidates pending commands"
+                "an authoritative snapshot revalidates commands it has not confirmed"
             );
-            assert_eq!(view(&queue), 0);
+            assert_eq!(
+                queue.status(&CommandId("u".into())),
+                Some(CommandStatus::Pending),
+                "a command that never left has no outcome to revalidate; it is still deliverable"
+            );
+            assert_eq!(view(&queue), 4, "only the unsent command is still shown");
 
             // A command enqueued under a lineage the store has already left is revalidated on
             // the first observation.
@@ -2392,6 +2440,14 @@ mod tests {
                         apply: 3,
                         revert: 0,
                     },
+                )
+                .await
+                .unwrap();
+            queue
+                .dispatch(
+                    &storage,
+                    &Endpoint::for_command(Reply::Accepted(1000), "e"),
+                    &CommandId("e".into()),
                 )
                 .await
                 .unwrap();
@@ -2412,6 +2468,10 @@ mod tests {
             assert_eq!(
                 restarted.status(&CommandId("d".into())),
                 Some(CommandStatus::UnknownDelivery)
+            );
+            assert_eq!(
+                restarted.status(&CommandId("u".into())),
+                Some(CommandStatus::Pending)
             );
             assert!(restarted.inner.borrow().from_earlier_run.is_empty());
         });
@@ -2493,6 +2553,16 @@ mod tests {
                     ));
                 }
                 let base = Rc::new(0);
+                if matches!(reply, Reply::Rejected) {
+                    let reason = "Failed to dispatch orchestration V2 command: service ProviderAdapterRegistry.get: No orchestration provider adapter is registered for codex.";
+                    assert_eq!(
+                        restored.status(&CommandId("c".into())),
+                        Some(CommandStatus::Rejected(reason.into()))
+                    );
+                    assert!(
+                        matches!(&report.outcome, CommandOutcome::Rejected { reason: r } if r == reason)
+                    );
+                }
                 match report.outcome {
                     CommandOutcome::Rejected { .. } => assert!(Rc::ptr_eq(
                         &base,
@@ -2501,6 +2571,7 @@ mod tests {
                     CommandOutcome::Accepted { .. } | CommandOutcome::UnknownAfterDisconnect => {
                         assert_eq!(*restored.view(&base, &key(), |v, i, _| *v = i.apply), 1)
                     }
+                    CommandOutcome::NotSent => panic!("every reply here left the client"),
                 }
             }
         });

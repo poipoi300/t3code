@@ -174,6 +174,15 @@ pub(super) struct SendInner<P: Platform, E: RpcEndpoint> {
     pub fanout_prepared: RefCell<BTreeMap<String, PreparedAttachments>>,
     pub failure: RefCell<Option<super::send_transport::Failure>>,
     pub drafts: RefCell<Option<Rc<super::mobile_store::MobileDraftStore<P>>>>,
+    /// Messages the server refused, kept visible until dismissed. Their text was restored into
+    /// the thread's draft and their outbox row removed; this list lives in memory only.
+    pub refused: RefCell<Vec<Refused>>,
+}
+pub(super) struct Refused {
+    pub message: Rc<QueuedMessage>,
+    pub draft_key: String,
+    /// The draft text as recovery left it, for hosts without an attached draft store.
+    pub text: Option<String>,
 }
 pub struct SendService<P: Platform, E: RpcEndpoint> {
     pub(super) inner: Rc<SendInner<P, E>>,
@@ -218,6 +227,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                 fanout_prepared: RefCell::new(BTreeMap::new()),
                 failure: RefCell::new(None),
                 drafts: RefCell::new(None),
+                refused: RefCell::new(Vec::new()),
             }),
         }
     }
@@ -313,6 +323,12 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         self.inner.changes.notify();
     }
     pub fn retry_message(&self, id: &MessageId) -> Result<(), ClientError> {
+        if matches!(self.state(id), Some(SendState::Restored { .. })) {
+            return Err(ClientError::InvalidPayload(
+                "This message was refused and its text is back in the composer; send it again from there."
+                    .into(),
+            ));
+        }
         if matches!(self.state(id), Some(SendState::AwaitingConfirmation)) {
             return Err(ClientError::InvalidPayload(
                 "Wait for delivery confirmation before retrying this message.".into(),
@@ -653,6 +669,34 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             .and_then(|environment| environment.threads.get(&key.thread))
             .map_or(0, |thread| thread.generation)
     }
+    /// Stops showing a refused message (`SendState::Restored`); its text stays in the draft.
+    pub fn dismiss_message(&self, id: &MessageId) {
+        let removed = {
+            let mut refused = self.inner.refused.borrow_mut();
+            let before = refused.len();
+            refused.retain(|entry| &entry.message.message_id != id);
+            before != refused.len()
+        };
+        if removed {
+            self.inner.states.borrow_mut().remove(id);
+            self.inner.changes.notify();
+        }
+    }
+    /// The draft the latest refused message of `key` was restored into: the attached draft
+    /// store's current text, else the text recovery wrote.
+    pub fn draft_text(&self, key: &ThreadKey) -> Option<String> {
+        let refused = self.inner.refused.borrow();
+        let entry = refused
+            .iter()
+            .rev()
+            .find(|entry| entry.message.thread_key() == *key)?;
+        match self.inner.drafts.borrow().as_ref() {
+            Some(drafts) => drafts.snapshot()["drafts"][&entry.draft_key]["text"]
+                .as_str()
+                .map(str::to_owned),
+            None => entry.text.clone(),
+        }
+    }
     pub fn pending_messages(&self, key: &ThreadKey) -> Vec<PendingMessage> {
         self.pending(key, false)
     }
@@ -712,6 +756,21 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             {
                 let state = self.state(&message.message_id).unwrap_or(SendState::Queued);
                 result.push(PendingMessage { message, state });
+            }
+        }
+        if !edits {
+            for entry in self.inner.refused.borrow().iter() {
+                if entry.message.thread_key() == *key
+                    && !result
+                        .iter()
+                        .any(|item| item.message.message_id == entry.message.message_id)
+                    && let Some(state) = self.state(&entry.message.message_id)
+                {
+                    result.push(PendingMessage {
+                        message: entry.message.clone(),
+                        state,
+                    });
+                }
             }
         }
         result.retain(|item| {
