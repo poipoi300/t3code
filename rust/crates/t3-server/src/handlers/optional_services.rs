@@ -46,9 +46,29 @@ fn register_scheduler(
     adapter: std::sync::Arc<crate::adapters::scheduler::SchedulerAdapter>,
 ) -> crate::Result<()> {
     let service = adapter.clone();
-    registry.register_stream::<WsScheduledTasksSubscribeRpc, _, _, _>(move |_, _| {
+    registry.register_stream::<WsScheduledTasksSubscribeRpc, _, _, _>(move |ctx, _| {
         let service = service.clone();
-        async move { service.subscribe().await }
+        // TypeScript `withVisibleWebhookUrls`: webhook URLs start agents, so only
+        // operate-scoped sessions see them; the tasks stay readable.
+        let operate = ctx
+            .scopes
+            .contains(&t3_contracts::auth::AuthEnvironmentScope::OrchestrationOperate);
+        async move {
+            use futures::StreamExt;
+            let stream = service.subscribe().await?;
+            Ok(stream
+                .map(move |list| {
+                    list.map(|mut list| {
+                        if !operate {
+                            for task in &mut list.tasks {
+                                task.webhook = None;
+                            }
+                        }
+                        list
+                    })
+                })
+                .boxed())
+        }
     })?;
     let service = adapter.clone();
     if adapter.commands_available() {

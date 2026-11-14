@@ -82,6 +82,9 @@ impl ProviderAdapter for HoldingAdapter {
     fn driver(&self) -> ProviderDriverKind {
         ProviderDriverKind("replay".into())
     }
+    fn supported_runtime_modes(&self) -> Option<Vec<t3_contracts::provider_policy::RuntimeMode>> {
+        None
+    }
     async fn capabilities(&self) -> ProviderResult<OrchestrationV2ProviderCapabilities> {
         Ok(self.capabilities.clone())
     }

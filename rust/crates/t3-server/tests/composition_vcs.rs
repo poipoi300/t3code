@@ -394,7 +394,10 @@ async fn branch_and_status_streams_follow_a_real_repository() {
 
     // A branch switch reaches the branch stream (HEAD watcher or the explicit refresh).
     git(&repo, &["switch", "-q", "-c", "feature"]);
-    assert_eq!(ok(s.call("vcs.refreshBranch", cwd.clone()).await), Value::Null);
+    assert_eq!(
+        ok(s.call("vcs.refreshBranch", cwd.clone()).await),
+        Value::Null
+    );
     let switched = s.next(&branch).await.unwrap();
     assert_eq!(switched["refName"], "feature", "{switched}");
 
@@ -460,7 +463,8 @@ async fn worktrees_are_created_where_the_server_decides() {
     repository(&project);
     s.insert_project("project-1", &project);
     let create = |extra: Value| {
-        let mut payload = json!({"cwd": project.to_string_lossy(), "refName": "main", "path": null});
+        let mut payload =
+            json!({"cwd": project.to_string_lossy(), "refName": "main", "path": null});
         payload
             .as_object_mut()
             .unwrap()
@@ -470,7 +474,10 @@ async fn worktrees_are_created_where_the_server_decides() {
 
     // The default managed folder, keyed by repository name; Git registers the checkout.
     let created = ok(s
-        .call("vcs.createWorktree", create(json!({"newRefName": "feature/one"})))
+        .call(
+            "vcs.createWorktree",
+            create(json!({"newRefName": "feature/one"})),
+        )
         .await);
     assert_eq!(created["worktree"]["refName"], "feature/one");
     let path = PathBuf::from(created["worktree"]["path"].as_str().unwrap());
@@ -495,7 +502,10 @@ async fn worktrees_are_created_where_the_server_decides() {
     )
     .await);
     let created = ok(s
-        .call("vcs.createWorktree", create(json!({"newRefName": "feature/two"})))
+        .call(
+            "vcs.createWorktree",
+            create(json!({"newRefName": "feature/two"})),
+        )
         .await);
     let path = PathBuf::from(created["worktree"]["path"].as_str().unwrap());
     assert!(
@@ -528,8 +538,11 @@ async fn worktrees_are_created_where_the_server_decides() {
     )
     .await);
     let relative = failure(
-        s.call("vcs.createWorktree", create(json!({"newRefName": "feature/five"})))
-            .await,
+        s.call(
+            "vcs.createWorktree",
+            create(json!({"newRefName": "feature/five"})),
+        )
+        .await,
     );
     assert_eq!(relative["_tag"], "GitCommandError", "{relative}");
     assert!(
@@ -553,8 +566,11 @@ async fn worktrees_are_created_where_the_server_decides() {
     s.reconnect_with(&["orchestration:read", "orchestration:operate"])
         .await;
     missing_scope(
-        s.call("vcs.createWorktree", create(json!({"newRefName": "feature/six"})))
-            .await,
+        s.call(
+            "vcs.createWorktree",
+            create(json!({"newRefName": "feature/six"})),
+        )
+        .await,
         "source-control:write",
     );
     s.socket.close(None).await.unwrap();
@@ -646,7 +662,10 @@ async fn removing_a_project_ends_its_streams_with_the_refusal() {
     let project = s.home().join("project");
     repository(&project);
     s.insert_project("project-1", &project);
-    let branch = s.subscribe("subscribeVcsBranch", json!({"cwd": project.to_string_lossy()}));
+    let branch = s.subscribe(
+        "subscribeVcsBranch",
+        json!({"cwd": project.to_string_lossy()}),
+    );
     assert_eq!(s.next(&branch).await.unwrap()["refName"], "main");
     let status = s.subscribe(
         "subscribeVcsStatus",
@@ -678,12 +697,42 @@ async fn each_method_refuses_a_session_missing_exactly_its_scope() {
     let cwd = repo.to_string_lossy().into_owned();
     let thread = json!({"threadId": "thread-1"});
     let cases = [
-        ("subscribeVcsBranch", json!({"cwd": cwd}), "orchestration:read", true),
-        ("vcs.refreshBranch", json!({"cwd": cwd}), "orchestration:read", false),
-        ("subscribeVcsStatus", json!({"cwd": cwd}), "orchestration:read", true),
-        ("vcs.refreshStatus", json!({"cwd": cwd}), "orchestration:read", false),
-        ("subscribeWorktreeSetup", thread.clone(), "orchestration:read", true),
-        ("worktreeSetup.cancel", thread, "orchestration:operate", false),
+        (
+            "subscribeVcsBranch",
+            json!({"cwd": cwd}),
+            "orchestration:read",
+            true,
+        ),
+        (
+            "vcs.refreshBranch",
+            json!({"cwd": cwd}),
+            "orchestration:read",
+            false,
+        ),
+        (
+            "subscribeVcsStatus",
+            json!({"cwd": cwd}),
+            "orchestration:read",
+            true,
+        ),
+        (
+            "vcs.refreshStatus",
+            json!({"cwd": cwd}),
+            "orchestration:read",
+            false,
+        ),
+        (
+            "subscribeWorktreeSetup",
+            thread.clone(),
+            "orchestration:read",
+            true,
+        ),
+        (
+            "worktreeSetup.cancel",
+            thread,
+            "orchestration:operate",
+            false,
+        ),
         (
             "vcs.createWorktree",
             json!({"cwd": cwd, "refName": "main", "newRefName": "feature/x", "path": null}),

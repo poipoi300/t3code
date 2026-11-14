@@ -22,6 +22,10 @@ pub use t3_cloud::Error as CloudError;
 pub struct CloudAdapter {
     pub service: Arc<CloudService>,
     pub relay_client: Arc<RelayClient>,
+    /// The environment's one secret store, transport and clock, shared with peer links.
+    pub secrets: SecretStore,
+    pub http: Http,
+    pub clock: SharedClock,
     origin: String,
 }
 
@@ -84,8 +88,8 @@ impl CloudAdapter {
             clock.clone(),
         );
         let reachability = Arc::new(ConnectReachability::new(
-            Arc::new(NativeReachabilityProbe { http }),
-            clock,
+            Arc::new(NativeReachabilityProbe { http: http.clone() }),
+            clock.clone(),
         ));
         let host = config
             .host
@@ -99,7 +103,7 @@ impl CloudAdapter {
         };
         let service = CloudService::new(CloudServices {
             link,
-            secrets,
+            secrets: secrets.clone(),
             runtime,
             reachability,
             issuer: Arc::new(AuthCredentialIssuer::new(
@@ -113,6 +117,9 @@ impl CloudAdapter {
         Ok(Arc::new(Self {
             service,
             relay_client,
+            secrets,
+            http,
+            clock,
             origin: format!("http://{host}:{}", config.port),
         }))
     }

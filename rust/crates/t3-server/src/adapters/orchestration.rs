@@ -100,6 +100,12 @@ type ProviderSnapshots = tokio::sync::watch::Sender<Arc<Vec<t3_contracts::server
 
 pub use t3_orchestration::provider::ProviderAdapter;
 
+/// The launch host's workspace preparation and settings, folders, naming and setup scripts.
+pub type LaunchPorts = (
+    Arc<dyn t3_orchestration::api::WorkspaceBackend>,
+    Arc<dyn t3_orchestration::ports::checkpoints_forks::thread_launch_service::LaunchHost>,
+);
+
 /// Server settings as the runtime's settings port: reads the live snapshot and follows changes
 /// until shutdown.
 #[cfg(feature = "local-services")]
@@ -165,6 +171,7 @@ impl OrchestrationAdapter {
             Arc<dyn t3_orchestration::ports::sessions_recovery::provider_session_manager::SessionCredentials>,
         >,
         titles: Option<Arc<dyn t3_orchestration::api::TitleGenerator>>,
+        launch: Option<LaunchPorts>,
     ) -> crate::Result<Arc<Self>> {
         use t3_orchestration::{
             composition::{OrchestrationRuntime, RandomIds, RuntimePorts},
@@ -198,12 +205,20 @@ impl OrchestrationAdapter {
         }
         // Native instances join once the provider domain has started (`native_providers`).
         let provider_source = crate::adapters::native_providers::ProviderSource::new(registrations);
+        let checkpoints = Arc::new(GitCheckpointBackend::new(t3_git::Git::new));
         let mut ports = RuntimePorts::new(
             StoreDatabase(context.database.clone()),
             Arc::new(AdapterRegistry::from_instance_source(provider_source.clone())),
-            Arc::new(GitCheckpointBackend::new(t3_git::Git::new)),
+            checkpoints.clone(),
             clock,
         );
+        // `orchestration.launchThread` and launch workspace preparation (`adapters/launch.rs`).
+        if let Some((workspaces, host)) = launch {
+            ports.workspaces = workspaces;
+            ports.launch = Some(Arc::new(
+                t3_orchestration::runtime::checkpoints::GitLaunchEnvironment::new(checkpoints, host),
+            ));
+        }
         ports.settings = Arc::new(
             LiveSettings::start(context.local.settings.clone(), context.shutdown.clone()).await?,
         );

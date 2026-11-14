@@ -39,6 +39,8 @@ pub struct ProviderEffects {
 }
 pub struct ProvidersAdapter {
     pub domain: Arc<ProviderDomain>,
+    /// The environment's outbound HTTP transport, shared with the usage rate fetcher.
+    pub http: Arc<dyn HttpTransport>,
     settings: Arc<t3_config::settings::SettingsService>,
     clock: Arc<dyn ProviderClock>,
     authority: Arc<crate::workspaces::EnvironmentWorkspaces>,
@@ -224,6 +226,7 @@ impl ProvidersAdapter {
         });
         Ok(Arc::new(Self {
             domain,
+            http: effects.http.clone(),
             settings: context.local.settings.clone(),
             clock: effects.clock.clone(),
             authority,

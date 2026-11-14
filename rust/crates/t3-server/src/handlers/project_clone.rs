@@ -22,9 +22,12 @@ mod live {
         },
     };
 
+    /// Project errors are transparent over Git stderr, argv and URLs: the client gets fixed
+    /// text and the cause stays in the server log.
     fn internal<E>(error: ProjectError) -> Failure<E> {
+        tracing::warn!(%error, "project clone action failed");
         Failure::Defect(ServerDefect::Internal {
-            message: error.to_string(),
+            message: "The project clone could not be updated.".into(),
         })
     }
 

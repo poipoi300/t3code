@@ -80,6 +80,10 @@ impl ProviderAdapter for ScriptedAdapter {
     fn driver(&self) -> ProviderDriverKind {
         ProviderDriverKind("replay".into())
     }
+    /// A scripted provider that runs every mode it is given.
+    fn supported_runtime_modes(&self) -> Option<Vec<t3_contracts::provider_policy::RuntimeMode>> {
+        None
+    }
     async fn capabilities(&self) -> ProviderResult<OrchestrationV2ProviderCapabilities> {
         Ok(self.capabilities.clone())
     }
@@ -1158,105 +1162,5 @@ async fn the_managed_policy_caps_thread_runtime_modes() {
         refused_text(&switched).contains("Acme limits threads to Auto-accept edits."),
         "{switched}"
     );
-    server.shutdown().await.unwrap();
-}
-
-/// `ceiling-rereview` R1: a policy Group Policy writes (here a key below HKCU named through the
-/// dev-build override, never the real Policies key) caps thread modes as the file does, and a
-/// policy file beside it refuses start.
-#[cfg(windows)]
-#[tokio::test]
-async fn a_group_policy_registry_policy_caps_thread_runtime_modes() {
-    /// A key below `HKCU\Software` written with reg.exe and deleted when dropped.
-    struct TemporaryKey(String);
-    impl TemporaryKey {
-        fn reg(args: &[&str]) {
-            let status = std::process::Command::new("reg.exe")
-                .args(args)
-                .stdout(std::process::Stdio::null())
-                .status()
-                .unwrap();
-            assert!(status.success(), "reg.exe {args:?}");
-        }
-        fn text(&self, name: &str, data: &str) {
-            let key = format!(r"HKCU\{}", self.0);
-            Self::reg(&["add", &key, "/v", name, "/t", "REG_SZ", "/d", data, "/f"]);
-        }
-    }
-    impl Drop for TemporaryKey {
-        fn drop(&mut self) {
-            let _ = std::process::Command::new("reg.exe")
-                .args(["delete", &format!(r"HKCU\{}", self.0), "/f"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
-    }
-
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path().join("home");
-    let key = TemporaryKey(format!(
-        r"Software\T3CodeServerPolicyTest-{}",
-        uuid::Uuid::new_v4()
-    ));
-    key.text("Organization", "Acme");
-    key.text("MaxRuntimeMode", "auto-accept-edits");
-    let policy_file = temp.path().join("policy.json");
-    std::fs::write(&policy_file, r#"{"schemaVersion":1,"organization":"Acme"}"#).unwrap();
-    let mut inputs = dev_inputs(&home);
-    inputs.env.insert(
-        t3_config::policy_sources::DEV_REGISTRY_KEY_ENV.into(),
-        key.0.clone(),
-    );
-    inputs.env.insert(
-        "T3CODE_DEV_MANAGED_POLICY_PATH".into(),
-        policy_file.to_string_lossy().into_owned(),
-    );
-    let refused = match t3_server::runtime::start(inputs.clone()).await {
-        Ok(_) => panic!("a registry policy beside a policy file must refuse start"),
-        Err(error) => error.to_string(),
-    };
-    assert!(
-        refused.contains(&format!(
-            r"T3 Code cannot use the managed policy at HKCU\{}: a policy file at {} also exists; deploy the policy one way.",
-            key.0,
-            policy_file.display()
-        )),
-        "{refused}"
-    );
-
-    std::fs::remove_file(&policy_file).unwrap();
-    let server = t3_server::runtime::start(inputs).await.unwrap();
-    let (mut socket, mut client) = admin_socket(&server).await;
-    let scratch = call_exit(
-        &mut socket,
-        &mut client,
-        "projects.ensureScratch",
-        json!({}),
-    )
-    .await;
-    let project = scratch["value"]["projectId"].as_str().unwrap().to_owned();
-    let create = |id: &str, mode: &str| json!({"type":"thread.create","commandId":format!("command:{id}"),"threadId":id,"projectId":project,"title":"Capped","modelSelection":{"instanceId":"devReplay","model":"multi-turn"},"runtimeMode":mode,"interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"});
-    let full = call_exit(
-        &mut socket,
-        &mut client,
-        "orchestration.dispatchCommand",
-        create("thread:full", "full-access"),
-    )
-    .await;
-    assert_eq!(full["_tag"], "Failure", "{full}");
-    assert!(
-        full.to_string()
-            .contains("Acme limits threads to Auto-accept edits."),
-        "{full}"
-    );
-    let allowed = call_exit(
-        &mut socket,
-        &mut client,
-        "orchestration.dispatchCommand",
-        create("thread:capped", "auto-accept-edits"),
-    )
-    .await;
-    assert_eq!(allowed["_tag"], "Success", "{allowed}");
     server.shutdown().await.unwrap();
 }

@@ -126,8 +126,9 @@ impl GitAdapter {
         cwd: &str,
     ) -> Result<(PathBuf, Vec<PathBuf>), Error> {
         let authority = self.authority.as_ref().ok_or_else(denied)?;
-        if !Path::new(cwd).is_absolute() {
-            return Err(denied());
+        // Before any filesystem call: opening a UNC or WebDAV path authenticates to its host.
+        if !local_disk_path(Path::new(cwd)) {
+            return Err(not_local());
         }
         let cwd = tokio::fs::canonicalize(cwd).await.map_err(|_| denied())?;
         if !tokio::fs::metadata(&cwd).await.is_ok_and(|m| m.is_dir()) {
@@ -358,17 +359,34 @@ impl GitAdapter {
 
     #[cfg(feature = "local-services")]
     pub async fn subscribe_vcs_branch(
-        &self,
+        self: &Arc<Self>,
         session: &AuthSessionId,
         input: VcsStatusInput,
-    ) -> Result<t3_git::VcsBranchSubscription, Error> {
+    ) -> Result<Revocable<t3_git::VcsBranchSubscription>, Error> {
         const OPERATION: &str = "subscribeVcsBranch";
-        self.status_services(session, &input.cwd.0, OPERATION)
+        let subscription = self
+            .status_services(session, &input.cwd.0, OPERATION)
             .await?
             .application
             .subscribe_vcs_branch(&input)
             .await
-            .map_err(|e| error(e, OPERATION))
+            .map_err(|e| error(e, OPERATION))?;
+        Ok(self.revocable(subscription, session, input.cwd.0))
+    }
+
+    #[cfg(feature = "local-services")]
+    fn revocable<S>(
+        self: &Arc<Self>,
+        subscription: S,
+        session: &AuthSessionId,
+        cwd: String,
+    ) -> Revocable<S> {
+        Revocable {
+            subscription: Some(subscription),
+            adapter: self.clone(),
+            session: session.clone(),
+            cwd,
+        }
     }
 
     #[cfg(feature = "local-services")]
@@ -388,17 +406,19 @@ impl GitAdapter {
 
     #[cfg(feature = "local-services")]
     pub async fn subscribe_vcs_status(
-        &self,
+        self: &Arc<Self>,
         session: &AuthSessionId,
         input: VcsStatusSubscriptionInput,
-    ) -> Result<t3_git::VcsStatusSubscription, Error> {
+    ) -> Result<Revocable<t3_git::VcsStatusSubscription>, Error> {
         const OPERATION: &str = "subscribeVcsStatus";
-        self.status_services(session, &input.cwd.0, OPERATION)
+        let subscription = self
+            .status_services(session, &input.cwd.0, OPERATION)
             .await?
             .application
             .subscribe_vcs_status(&input)
             .await
-            .map_err(|e| error(e, OPERATION))
+            .map_err(|e| error(e, OPERATION))?;
+        Ok(self.revocable(subscription, session, input.cwd.0))
     }
 
     #[cfg(feature = "local-services")]
@@ -443,7 +463,9 @@ impl GitAdapter {
         input: t3_contracts::rpc::WsVcsCreateWorktreePayload,
     ) -> Result<VcsCreateWorktreeResult, Error> {
         const OPERATION: &str = "vcs.createWorktree";
-        let vcs = self.status_services(session, &input.cwd.0, OPERATION).await?;
+        let vcs = self
+            .status_services(session, &input.cwd.0, OPERATION)
+            .await?;
         if let Some(setting) = vcs.worktrees.directory_refusal().await {
             return Err(Error::Git(Box::new(GitCommandError {
                 operation: "GitVcsDriver.createWorktree".into(),
@@ -485,8 +507,72 @@ impl crate::services::DomainRuntime for GitAdapter {
     }
 }
 
+/// A status or branch subscription that asks the workspace authority again before each value,
+/// so revoked access (a removed project) ends it with the typed refusal. The authority has no
+/// change signal, so an idle subscription ends at its next value.
+#[cfg(feature = "local-services")]
+pub struct Revocable<S> {
+    subscription: Option<S>,
+    adapter: Arc<GitAdapter>,
+    session: AuthSessionId,
+    cwd: String,
+}
+
+#[cfg(feature = "local-services")]
+impl<S> Revocable<S> {
+    async fn still_granted<T>(&mut self, value: T) -> Option<Result<T, Error>> {
+        match self.adapter.directory(&self.session, &self.cwd).await {
+            Ok(_) => Some(Ok(value)),
+            Err(error) => {
+                self.subscription = None;
+                Some(Err(error))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "local-services")]
+impl Revocable<t3_git::VcsBranchSubscription> {
+    pub async fn recv(&mut self) -> Option<Result<VcsBranchStatus, Error>> {
+        let value = self.subscription.as_mut()?.recv().await?;
+        self.still_granted(value).await
+    }
+}
+
+#[cfg(feature = "local-services")]
+impl Revocable<t3_git::VcsStatusSubscription> {
+    pub async fn recv(&mut self) -> Option<Result<VcsStatusStreamEvent, Error>> {
+        let value = self.subscription.as_mut()?.recv().await?;
+        self.still_granted(value).await
+    }
+}
+
 fn text(path: &Path) -> Result<t3_contracts::base_schemas::TrimmedNonEmptyString, Error> {
     Ok(path.to_str().ok_or_else(denied)?.to_owned().into())
+}
+
+/// An absolute path on a local disk, decided from its text alone: on Windows a drive letter then
+/// the root (not UNC, device, verbatim or drive-relative forms), elsewhere the root.
+pub(crate) fn local_disk_path(path: &Path) -> bool {
+    use std::path::Component;
+    let mut components = path.components();
+    match components.next() {
+        Some(Component::Prefix(prefix)) => {
+            matches!(prefix.kind(), std::path::Prefix::Disk(_))
+                && matches!(components.next(), Some(Component::RootDir))
+        }
+        Some(Component::RootDir) => !cfg!(windows),
+        _ => false,
+    }
+}
+
+fn not_local() -> Error {
+    Error::Authorization(Box::new(EnvironmentAuthorizationError {
+        _tag: EnvironmentAuthorizationErrorTag::EnvironmentAuthorizationError,
+        message: "The requested directory must be a folder on this server's local disks.".into(),
+        required_scope: AuthEnvironmentScope::OrchestrationRead,
+        required_permission: None,
+    }))
 }
 
 fn denied() -> Error {
@@ -714,8 +800,10 @@ pub mod vcs {
                 t3_shared::background_activity::resolve_server_background_activity_settings(
                     settings,
                 );
-            self.interval
-                .store(millis(resolved.automatic_git_fetch_interval), Ordering::Relaxed);
+            self.interval.store(
+                millis(resolved.automatic_git_fetch_interval),
+                Ordering::Relaxed,
+            );
         }
     }
 
@@ -807,11 +895,14 @@ pub mod vcs {
                     &self.default,
                     &self.home,
                 ),
-                submodules: self.submodules(&settings, cwd).await.map(|choice| match choice {
-                    WorktreeSubmodules::Recursive => t3_git::WorktreeSubmodules::Recursive,
-                    WorktreeSubmodules::TopLevel => t3_git::WorktreeSubmodules::TopLevel,
-                    WorktreeSubmodules::None => t3_git::WorktreeSubmodules::None,
-                }),
+                submodules: self
+                    .submodules(&settings, cwd)
+                    .await
+                    .map(|choice| match choice {
+                        WorktreeSubmodules::Recursive => t3_git::WorktreeSubmodules::Recursive,
+                        WorktreeSubmodules::TopLevel => t3_git::WorktreeSubmodules::TopLevel,
+                        WorktreeSubmodules::None => t3_git::WorktreeSubmodules::None,
+                    }),
             }
         }
 

@@ -10,7 +10,6 @@ use t3_contracts::rpc::*;
 /// Methods no orchestration service serves yet, with the service method each waits for.
 fn register_pending(registry: &mut HandlerRegistry) -> crate::Result<()> {
     // ThreadMessageIntake::launch_thread (ThreadLaunchService::launch exists, its intake wrapper does not).
-    registry.unimplemented::<WsOrchestrationV2LaunchThreadRpc>()?;
     // workflow_script_query::read_workflow_script, native_child_work_query::get_native_child_work.
     registry.unimplemented::<WsOrchestrationV2GetWorkflowScriptRpc>()?;
     registry.unimplemented::<WsOrchestrationV2GetNativeChildWorkRpc>()?;

@@ -97,6 +97,12 @@ pub struct StartOptions {
     /// credential a provider session was opened with.
     #[cfg(feature = "mcp")]
     pub mcp_sessions: Option<Arc<crate::adapters::mcp::McpSessions>>,
+    /// The scheduled-task clock; `None` is the system clock. Tests drive due tasks with it.
+    #[cfg(feature = "scheduler")]
+    pub scheduler_clock: Option<Arc<dyn crate::adapters::scheduler::Clock>>,
+    /// The editor process edge and a slot for the started adapter (`adapters/host_leftovers.rs`).
+    #[cfg(feature = "host")]
+    pub host_leftovers: crate::adapters::host_leftovers::HostLeftoversOptions,
 }
 
 pub async fn start(inputs: crate::adapters::config::ConfigInputs) -> crate::Result<RunningServer> {
@@ -419,8 +425,6 @@ async fn start_domains(
         }
         domains.insert_runtime(preview)?;
     }
-    #[cfg(feature = "usage")]
-    domains.insert(crate::adapters::usage::UsageAdapter::start(&context).await?)?;
     // Before orchestration: provider sessions receive their MCP credential from it.
     #[cfg(feature = "mcp")]
     let mcp_sessions = {
@@ -440,6 +444,22 @@ async fn start_domains(
     };
     #[cfg(all(feature = "orchestration", not(feature = "textgen")))]
     let titles = None;
+    // Before orchestration, which composes it; projects and setup scripts are bound below.
+    #[cfg(all(feature = "git-actions", feature = "local-services"))]
+    let launch = match (
+        domains.get::<crate::adapters::git::GitAdapter>(),
+        domains.get::<crate::adapters::textgen::TextGenAdapter>(),
+        domains.get::<crate::adapters::terminal::TerminalAdapter>(),
+    ) {
+        (Some(git), Some(textgen), Some(terminal)) => {
+            crate::adapters::launch::LaunchAdapter::start(&context, git, textgen, terminal)
+        }
+        _ => None,
+    };
+    #[cfg(all(feature = "git-actions", feature = "local-services"))]
+    let launch_ports = launch.as_ref().map(|launch| launch.ports());
+    #[cfg(all(feature = "orchestration", not(all(feature = "git-actions", feature = "local-services"))))]
+    let launch_ports = None;
     #[cfg(feature = "orchestration")]
     domains.insert_runtime(
         crate::adapters::orchestration::OrchestrationAdapter::start(
@@ -448,6 +468,7 @@ async fn start_domains(
             options.dev_replay,
             mcp_sessions,
             titles,
+            launch_ports,
         )
         .await?,
     )?;
@@ -467,6 +488,9 @@ async fn start_domains(
         }
         domains.insert_runtime(providers)?;
     }
+    // After the providers: the price table is fetched over their shared HTTP transport.
+    #[cfg(feature = "usage")]
+    domains.insert(crate::adapters::usage::UsageAdapter::start_for(&context, domains).await?)?;
     // The orchestration runtime offers each thread the modes its provider instance lists.
     #[cfg(all(feature = "providers", feature = "orchestration"))]
     if let (Some(orchestration), Some(providers)) = (
@@ -510,7 +534,12 @@ async fn start_domains(
     }
     // Before projects: promoting a scratch thread moves its scheduled tasks.
     #[cfg(feature = "scheduler")]
-    let scheduler = crate::adapters::scheduler::SchedulerAdapter::start(&context).await?;
+    let scheduler = crate::adapters::scheduler::SchedulerAdapter::start_for(
+        &context,
+        domains,
+        options.scheduler_clock.clone(),
+    )
+    .await?;
     #[cfg(feature = "scheduler")]
     domains.insert_runtime(scheduler.clone())?;
     #[cfg(feature = "project")]
@@ -563,6 +592,27 @@ async fn start_domains(
             domains.insert(actions)?;
         }
     }
+    #[cfg(all(feature = "git-actions", feature = "local-services"))]
+    if let (Some(launch), Some(projects)) = (
+        launch,
+        domains.get::<crate::adapters::project::ProjectAdapter>(),
+    ) {
+        launch.bind(
+            projects,
+            domains.get::<crate::adapters::project_setup::ProjectSetupAdapter>(),
+        );
+        domains.insert(launch)?;
+    }
+    // After providers (secret resolver), cloud, orchestration and the workspace authority.
+    #[cfg(feature = "host")]
+    domains.insert_runtime(
+        crate::adapters::host_leftovers::HostLeftoversAdapter::start(
+            &context,
+            domains,
+            &options.host_leftovers,
+        )
+        .await?,
+    )?;
     // Last: it binds the tools of every domain above.
     #[cfg(feature = "mcp")]
     if let Some(mcp) = crate::adapters::mcp::McpAdapter::start(&context, domains).await? {

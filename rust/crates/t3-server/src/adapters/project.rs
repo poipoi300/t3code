@@ -262,6 +262,11 @@ impl ProjectAdapter {
     pub fn service(&self) -> &ProjectService {
         &self.service
     }
+
+    /// Scratch projects and per-thread folders, for thread launch (`adapters/launch.rs`).
+    pub fn managed(&self) -> &ManagedProjectFolders {
+        &self.managed
+    }
 }
 
 impl crate::services::DomainRuntime for ProjectAdapter {

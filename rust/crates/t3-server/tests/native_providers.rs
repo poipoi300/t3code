@@ -186,7 +186,7 @@ fn instance(provider: Provider, home: &Path, exit_after: Option<&str>, enabled: 
 mod harness {
     use super::*;
     use futures::{SinkExt, StreamExt};
-    use t3_rpc::{CallEvent, CallKind, Client, Exit, Frame};
+    use t3_rpc::{CallEvent, CallKind, Client, Exit, Frame, RequestId};
     use t3_server::{
         adapters::config::{ConfigInputs, ServerFlags},
         runtime::{RunningServer, StartOptions},
@@ -203,7 +203,7 @@ mod harness {
         pub cookie: String,
         socket: Socket,
         client: Client,
-        thread_stream: Option<u32>,
+        thread_stream: Option<RequestId>,
         /// Every frame the client received, for the "no secret reaches a client" check.
         pub received: String,
         /// The thread stream's values, in order.
@@ -381,14 +381,14 @@ mod harness {
         }
 
         /// Handles one event: thread stream values are recorded; returns a finished call.
-        async fn pump(&mut self) -> Option<(u32, Exit)> {
+        async fn pump(&mut self) -> Option<(RequestId, Exit)> {
             match self.event().await {
-                CallEvent::Chunk { id, values } if Some(id) == self.thread_stream => {
+                CallEvent::Chunk { id, values } if self.thread_stream.as_ref() == Some(&id) => {
                     self.client.acknowledge(id);
                     self.thread.extend(values);
                     None
                 }
-                CallEvent::Exit { id, exit } if Some(id) == self.thread_stream => panic!(
+                CallEvent::Exit { id, exit } if self.thread_stream.as_ref() == Some(&id) => panic!(
                     "thread stream ended: {}",
                     serde_json::to_value(exit).unwrap()
                 ),
@@ -444,7 +444,7 @@ mod harness {
                 }
                 if let Some((id, exit)) = self.pump().await {
                     panic!(
-                        "unexpected exit {id}: {}",
+                        "unexpected exit {id:?}: {}",
                         serde_json::to_value(exit).unwrap()
                     );
                 }

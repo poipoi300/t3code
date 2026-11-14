@@ -17,7 +17,9 @@ mod live {
     fn status_error(method: &str) -> impl Fn(Error) -> Failure<WsSubscribeVcsBranchError> + '_ {
         move |error| {
             Failure::Typed(match error {
-                Error::Authorization(e) => WsSubscribeVcsBranchError::EnvironmentAuthorizationError(e),
+                Error::Authorization(e) => {
+                    WsSubscribeVcsBranchError::EnvironmentAuthorizationError(e)
+                }
                 Error::Git(e) => WsSubscribeVcsBranchError::GitManagerServiceError(Box::new(
                     GitManagerServiceError::Command(*e),
                 )),
@@ -32,9 +34,9 @@ mod live {
         Failure::Typed(match error {
             Error::Authorization(e) => WsVcsPullError::EnvironmentAuthorizationError(e),
             Error::Git(e) => WsVcsPullError::GitCommandError(e),
-            Error::Vcs(_) => {
-                WsVcsPullError::GitCommandError(Box::new(command_error(WsVcsCreateWorktreeRpc::TAG)))
-            }
+            Error::Vcs(_) => WsVcsPullError::GitCommandError(Box::new(command_error(
+                WsVcsCreateWorktreeRpc::TAG,
+            ))),
         })
     }
 
@@ -60,7 +62,7 @@ mod live {
                     .map_err(status_error(WsSubscribeVcsBranchRpc::TAG))?;
                 Ok(async_stream::stream! {
                     while let Some(branch) = branches.recv().await {
-                        yield Ok(branch);
+                        yield branch.map_err(status_error(WsSubscribeVcsBranchRpc::TAG));
                     }
                 })
             }
@@ -84,7 +86,7 @@ mod live {
                     .map_err(status_error(WsSubscribeVcsStatusRpc::TAG))?;
                 Ok(async_stream::stream! {
                     while let Some(status) = statuses.recv().await {
-                        yield Ok(status);
+                        yield status.map_err(status_error(WsSubscribeVcsStatusRpc::TAG));
                     }
                 })
             }

@@ -22,8 +22,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use t3_contracts::{
-    auth::AuthSessionId,
-    base_schemas::{ProjectId, ThreadId},
+    base_schemas::{AuthSessionId, ProjectId, ThreadId},
     environment::RepositoryIdentity,
     git::*,
     model_selection::ModelSelection,

@@ -67,12 +67,17 @@ pub struct ForgeAdapter {
     repositories: SourceControlRepositoryService,
     sign_in: SourceControlSignIn,
     discovery: SourceControlDiscovery,
+    /// The last discovery and when it ran; its lock makes concurrent calls share one run.
+    discovered: Arc<tokio::sync::Mutex<Option<(std::time::Instant, SourceControlDiscoveryResult)>>>,
     /// The environment's shared Git handle; its caches are the ones a clone must invalidate.
     git: t3_git::Git,
+    /// The workflow every per-checkout workflow is a clone of, so they share Git and request
+    /// caches across calls.
+    workflows: t3_git::GitWorkflowService,
     workspaces: Arc<GitAdapter>,
     cwd: PathBuf,
     home: PathBuf,
-    internal: Vec<PathBuf>,
+    destinations: Destinations,
     github_hosts: RwLock<BTreeSet<String>>,
     credentials: Credentials,
     stop: tokio_util::sync::CancellationToken,
@@ -408,13 +413,28 @@ impl ForgeAdapter {
             sign_in: SourceControlSignIn::new(registry.clone()),
             discovery: SourceControlDiscovery::new(registry.clone(), cwd.clone())
                 .with_environment(patch),
+            discovered: Default::default(),
             registry,
+            workflows: t3_git::GitWorkflowService::new(git.clone()),
             git,
             workspaces,
-            internal: [paths.state_dir.clone(), paths.secrets()]
-                .into_iter()
-                .map(|path| resolved_or_lexical(&path))
+            destinations: Destinations {
+                base: resolved_or_lexical(&paths.base_dir),
+                managed: [
+                    paths.projects(),
+                    paths.source(),
+                    paths.worktrees(),
+                    paths.scratch(),
+                ]
+                .iter()
+                .map(|path| resolved_or_lexical(path))
                 .collect(),
+                home: resolved_or_lexical(&home),
+                internal: [paths.state_dir.clone(), paths.secrets()]
+                    .iter()
+                    .map(|path| resolved_or_lexical(path))
+                    .collect(),
+            },
             cwd,
             home,
             github_hosts: RwLock::new(github_hosts(hosts.get("github"), &environment)),
@@ -493,6 +513,37 @@ impl ForgeAdapter {
                 .contains(&host.trim().to_ascii_lowercase())
     }
 
+    /// GitHub takes the host from a repository URL and gh sends its environment token to any
+    /// `*.ghe.com`, so a URL may name only a configured host. Other text resolves to a host the
+    /// server knows (the cwd's remote or the default host).
+    fn repository_host(
+        &self,
+        provider: Option<&SourceControlProviderKind>,
+        repository: Option<&str>,
+        operation: &str,
+    ) -> Result<(), Refusal> {
+        let (Some(provider), Some(repository)) = (provider, repository) else {
+            return Ok(());
+        };
+        match url::Url::parse(repository.trim()) {
+            Ok(url)
+                if matches!(url.scheme(), "http" | "https")
+                    && !self.configured_host(provider, url.authority()) =>
+            {
+                Err(Refusal::Repository(Box::new(
+                    SourceControlRepositoryError {
+                        _tag: SourceControlRepositoryErrorTag::SourceControlRepositoryError,
+                        provider: provider.clone(),
+                        operation: operation.into(),
+                        detail: "This source control host is not configured on this server.".into(),
+                        cause: None,
+                    },
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// `sourceControl.lookupRepository`; a cwd, when given, must be an authorised workspace.
     pub async fn lookup_repository(
         &self,
@@ -507,6 +558,11 @@ impl ForgeAdapter {
                 .map_err(|_| denied("The requested directory is outside this session's authorized project workspaces."))?;
             input.cwd = Some(Some(text(&cwd)));
         }
+        self.repository_host(
+            Some(&input.provider),
+            Some(&input.repository.0),
+            "lookupRepository",
+        )?;
         self.repositories
             .lookup_repository(input)
             .await
@@ -518,8 +574,15 @@ impl ForgeAdapter {
         &self,
         mut input: SourceControlCloneRepositoryInput,
     ) -> Result<SourceControlCloneRepositoryResult, Refusal> {
+        let provider = input.provider.clone().flatten();
+        let repository = input.repository.clone().flatten();
+        self.repository_host(
+            provider.as_ref(),
+            repository.as_ref().map(|r| r.0.as_str()),
+            "cloneRepository",
+        )?;
         let destination = self
-            .authorize_destination(&input.destination_path.0)
+            .authorize_destination(provider.as_ref(), &input.destination_path.0)
             .await?;
         input.destination_path = text(&destination);
         let cloned = self
@@ -607,12 +670,27 @@ impl ForgeAdapter {
     /// `server.discoverSourceControl`; its only failure is an invalid probe result. The forge's
     /// discovery future is not provably `Send` (its buffered probe stream holds a higher-ranked
     /// closure), so it runs on a blocking thread through the runtime handle.
+    /// One run at a time, its result reused briefly: each run starts about nine `--version`
+    /// probes, and the run holds its lock until it finishes even if its caller has gone.
     pub async fn discover(self: Arc<Self>) -> Option<SourceControlDiscoveryResult> {
+        const REUSE: std::time::Duration = std::time::Duration::from_secs(10);
+        let mut last = self.discovered.clone().lock_owned().await;
+        if let Some((at, result)) = last.as_ref()
+            && at.elapsed() < REUSE
+        {
+            return Some(result.clone());
+        }
         let handle = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || handle.block_on(self.discovery.discover()).ok())
-            .await
-            .ok()
-            .flatten()
+        tokio::task::spawn_blocking(move || {
+            let found = handle.block_on(self.discovery.discover()).ok();
+            if let Some(found) = &found {
+                *last = Some((std::time::Instant::now(), found.clone()));
+            }
+            found
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     /// `git.resolvePullRequest` for an authorised checkout, through its own review host.
@@ -629,14 +707,10 @@ impl ForgeAdapter {
                 GitAdapterError::Authorization(error) => PullRequestRefusal::Authorization(error),
                 _ => PullRequestRefusal::Git(manager_error(&input.cwd.0)),
             })?;
-        let handle = self
-            .registry
-            .resolve(git.cwd(), None)
+        self.workflow_factory(self.workflows.clone())
+            .for_checkout(git.cwd())
             .await
-            .map_err(|_| PullRequestRefusal::Git(manager_error(&input.cwd.0)))?;
-        let host = Arc::new(ForgeReviewHost::new(handle, Arc::new(NoProjectSetup)));
-        t3_git::GitWorkflowService::new(git)
-            .with_review_host(host)
+            .map_err(|_| PullRequestRefusal::Git(manager_error(&input.cwd.0)))?
             .resolve_pull_request(&input.reference.0)
             .await
             .map_err(|error| {
@@ -650,15 +724,37 @@ impl ForgeAdapter {
             })
     }
 
+    /// A `GitWorkflowFactory` giving each checkout a clone of `template` with that checkout's own
+    /// forge review host, for the VCS status broadcaster and facade (`GitApplicationService`).
+    pub fn workflow_factory(
+        &self,
+        template: t3_git::GitWorkflowService,
+    ) -> Arc<dyn t3_git::GitWorkflowFactory> {
+        Arc::new(ForgeWorkflows {
+            registry: self.registry.clone(),
+            template,
+        })
+    }
+
     /// Clone destinations: `~` and relative paths as the repository service reads them, then the
-    /// nearest existing ancestor resolved through links. Network shares, device paths and T3's
-    /// own state are refused (a UNC destination would make a Windows server authenticate over
-    /// SMB); the forge clones into the resolved path.
-    pub async fn authorize_destination(&self, raw: &str) -> Result<PathBuf, Refusal> {
+    /// nearest existing ancestor resolved through links, then [`Destinations`]. Network shares
+    /// and device paths are refused (a UNC destination would make a Windows server authenticate
+    /// over SMB); the forge clones into the resolved path.
+    pub async fn authorize_destination(
+        &self,
+        provider: Option<&SourceControlProviderKind>,
+        raw: &str,
+    ) -> Result<PathBuf, Refusal> {
         let refused = || {
-            denied(
-                "The clone destination must be a folder on this server's local disks, outside T3 Code's own state.",
-            )
+            Refusal::Repository(Box::new(SourceControlRepositoryError {
+                _tag: SourceControlRepositoryErrorTag::SourceControlRepositoryError,
+                provider: provider
+                    .cloned()
+                    .unwrap_or_else(|| SourceControlProviderKind("unknown".into())),
+                operation: "cloneRepository".into(),
+                detail: "This folder cannot be a clone destination. Choose a folder on a local disk, outside hidden or application data folders and T3 Code's own folders.".into(),
+                cause: None,
+            }))
         };
         let raw = raw.trim();
         let expanded = if raw == "~" || raw.starts_with("~/") || raw.starts_with("~\\") {
@@ -700,10 +796,7 @@ impl ForgeAdapter {
         resolved.extend(missing.iter().rev());
         if !local_disk(&resolved)
             || resolved.file_name().is_none()
-            || self
-                .internal
-                .iter()
-                .any(|internal| resolved.starts_with(internal))
+            || self.destinations.refuses(&resolved)
         {
             return Err(refused());
         }
@@ -732,20 +825,96 @@ impl ForgeAdapter {
         projects: &t3_project::ProjectService,
         mut input: t3_contracts::project_clone::ProjectCloneStartInput,
     ) -> Result<t3_contracts::project_clone::ProjectCloneStartResult, ProjectCloneRefusal> {
+        let requested = input.provider.clone().flatten();
+        let repository = input.repository.clone().flatten();
+        self.repository_host(
+            requested.as_ref(),
+            repository.as_ref().map(|r| r.0.as_str()),
+            "cloneRepository",
+        )
+        .map_err(ProjectCloneRefusal::Refused)?;
         let destination = self
-            .authorize_destination(&input.destination_path.0)
+            .authorize_destination(requested.as_ref(), &input.destination_path.0)
             .await
             .map_err(ProjectCloneRefusal::Refused)?;
         input.destination_path = text(&destination);
-        let provider = input
-            .provider
-            .clone()
-            .flatten()
-            .unwrap_or_else(|| SourceControlProviderKind("unknown".into()));
+        let provider = requested.unwrap_or_else(|| SourceControlProviderKind("unknown".into()));
         projects
             .start_clone(input)
             .await
             .map_err(|error| ProjectCloneRefusal::Project(provider, Box::new(error)))
+    }
+}
+
+/// Folders a clone must never create (review M1). A repository there would be trusted as
+/// configuration or code: `~/.config/git/config` is Git's global configuration (its
+/// `core.fsmonitor` runs at the next status), `~/.ssh` is SSH's, and under the T3 base the
+/// service launcher trusts `runtime/versions/<v>` with its install marker and the ACP registry
+/// trusts an executable already under `tools`.
+struct Destinations {
+    /// The T3 base; only its managed project folders take clones.
+    base: PathBuf,
+    managed: Vec<PathBuf>,
+    /// The account home; its hidden folders and `AppData` (Windows) or `Library` (macOS) are
+    /// configuration, not projects.
+    home: PathBuf,
+    /// The state directory and secrets, which may live outside the base.
+    internal: Vec<PathBuf>,
+}
+impl Destinations {
+    /// `path` is resolved: its existing part canonical, the rest as the client wrote it.
+    fn refuses(&self, path: &Path) -> bool {
+        if self
+            .internal
+            .iter()
+            .any(|internal| path.starts_with(internal))
+        {
+            return true;
+        }
+        if path.starts_with(&self.base) {
+            return !self
+                .managed
+                .iter()
+                .any(|managed| path.starts_with(managed) && path != managed);
+        }
+        let Ok(rest) = path.strip_prefix(&self.home) else {
+            return false;
+        };
+        let Some(Component::Normal(first)) = rest.components().next() else {
+            return true;
+        };
+        let first = first.to_string_lossy();
+        first.starts_with('.')
+            || (cfg!(windows) && first.eq_ignore_ascii_case("AppData"))
+            || (cfg!(target_os = "macos") && first == "Library")
+    }
+}
+
+/// Per-checkout workflows: the review host is bound to the checkout's own forge and remote, never
+/// reused for another repository. Project setup in a new worktree is the template's worktree
+/// host's; the review host has none.
+struct ForgeWorkflows {
+    registry: Arc<ForgeRegistry>,
+    template: t3_git::GitWorkflowService,
+}
+#[async_trait::async_trait]
+impl t3_git::GitWorkflowFactory for ForgeWorkflows {
+    async fn for_checkout(
+        &self,
+        cwd: &Path,
+    ) -> Result<t3_git::GitWorkflowService, t3_git::GitError> {
+        let handle = self.registry.resolve(cwd, None).await.map_err(|_| {
+            t3_git::GitError::Unavailable(
+                "the source control provider could not be detected".into(),
+            )
+        })?;
+        Ok(self
+            .template
+            .at(cwd)
+            .with_review_host(Arc::new(ForgeReviewHost::new(
+                handle,
+                Arc::new(NoProjectSetup),
+            ))))
     }
 }
 
@@ -836,7 +1005,7 @@ fn denied(message: &str) -> Refusal {
     Refusal::Authorization(Box::new(EnvironmentAuthorizationError {
         _tag: EnvironmentAuthorizationErrorTag::EnvironmentAuthorizationError,
         message: message.into(),
-        required_scope: AuthEnvironmentScope::SourceControlWrite,
+        required_scope: AuthEnvironmentScope::OrchestrationRead,
         required_permission: None,
     }))
 }
@@ -847,11 +1016,7 @@ fn text(path: &Path) -> Text {
 
 /// A drive path on Windows (never UNC, device or verbatim); any absolute path elsewhere.
 fn local_disk(path: &Path) -> bool {
-    match path.components().next() {
-        Some(Component::Prefix(prefix)) => matches!(prefix.kind(), std::path::Prefix::Disk(_)),
-        Some(Component::RootDir) => !cfg!(windows),
-        _ => false,
-    }
+    crate::adapters::git::local_disk_path(path)
 }
 
 /// `canonicalize` answers `\\?\C:\...` on Windows; drive paths are compared in their plain form.

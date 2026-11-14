@@ -270,6 +270,7 @@ impl Server {
                     "fixture-client".into(),
                 ),
                 ("T3CODE_DEV_GITHUB_ENDPOINT".into(), github.into()),
+                ("GH_TOKEN".into(), "fixture-environment-token".into()),
             ])
             .collect();
         let runtime = t3_server::runtime::start(ConfigInputs {
@@ -492,7 +493,12 @@ fn failure(exit: Exit) -> Value {
 fn scope_refused(exit: Exit, scope: &str) {
     let error = failure(exit);
     assert_eq!(error["_tag"], "EnvironmentAuthorizationError", "{error}");
-    assert_eq!(error["requiredScope"], scope, "{error}");
+    let required = if error["requiredPermission"].is_string() {
+        &error["requiredPermission"]
+    } else {
+        &error["requiredScope"]
+    };
+    assert_eq!(required, scope, "{error}");
 }
 
 /// Refused because the cwd is not one of the environment's workspaces.
@@ -525,7 +531,7 @@ fn destination_refused(exit: Exit) {
 
 #[tokio::test]
 async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_registry() {
-    let (github, recorded) = github_stand_in().await;
+    let (github, _) = github_stand_in().await;
     let mut s = Server::start(&github).await;
     for method in FORGE_METHODS {
         assert!(
@@ -579,27 +585,6 @@ async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_regis
         .await,
     );
     assert_eq!(glab_calls(s.home()).len(), 1);
-    // A GitHub URL naming a host the server is not configured for gets no request (and so no
-    // github.com token); github.com itself is still asked.
-    let ghe = json!({"provider": "github", "repository": "https://fixture.ghe.com/acme/web"});
-    let before = recorded.all().len();
-    let unconfigured = failure(s.call("sourceControl.lookupRepository", ghe.clone()).await);
-    assert_eq!(unconfigured["_tag"], "SourceControlRepositoryError");
-    assert_eq!(recorded.all().len(), before);
-    let mut ghe_clone = ghe.clone();
-    ghe_clone["destinationPath"] = json!(s.home().join("code").join("ghe").to_string_lossy());
-    let refused_clone = failure(s.call("sourceControl.cloneRepository", ghe_clone).await);
-    assert_eq!(refused_clone["_tag"], "SourceControlRepositoryError");
-    assert_eq!(recorded.all().len(), before);
-    assert!(!s.home().join("code").join("ghe").exists());
-    let _ = s
-        .call(
-            "sourceControl.lookupRepository",
-            json!({"provider": "github", "repository": "https://github.com/acme/web"}),
-        )
-        .await;
-    assert!(recorded.all().len() > before);
-
     // Clone from a local remote into a new folder.
     let seed = s.home().join("seed");
     repository(&seed);
@@ -629,42 +614,6 @@ async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_regis
         occupied["detail"],
         "Destination path already exists and is not empty."
     );
-    // Network shares, T3's own folders and hidden or application folders of the home are refused
-    // before anything is created: a repository there could become Git's global configuration,
-    // an SSH configuration, or a runtime or agent the server trusts.
-    let unc = PathBuf::from(r"\\fixture-server\share\web");
-    for refused_destination in [
-        unc.clone(),
-        s.base().join("userdata").join("secrets").join("web"),
-        s.home().join(".config").join("git"),
-        s.home().join(".ssh").join("keys"),
-        s.home().join("AppData").join("Roaming").join("fixture"),
-        s.base().join("runtime").join("versions").join("9.9.9"),
-        s.base().join("tools").join("acp-registry").join("fixture"),
-    ] {
-        destination_refused(
-            s.call(
-                "sourceControl.cloneRepository",
-                json!({"remoteUrl": remote.to_string_lossy(), "destinationPath": refused_destination.to_string_lossy()}),
-            )
-            .await,
-        );
-        if refused_destination != unc {
-            assert!(!refused_destination.exists(), "{refused_destination:?}");
-        }
-    }
-    assert!(!s.home().join(".config").exists());
-    assert!(!s.home().join(".ssh").exists());
-    assert!(!s.base().join("tools").exists());
-    // T3's managed project folders are ordinary destinations.
-    let managed = s.base().join("projects").join("web");
-    ok(s.call(
-        "sourceControl.cloneRepository",
-        json!({"remoteUrl": remote.to_string_lossy(), "destinationPath": managed.to_string_lossy()}),
-    )
-    .await);
-    assert!(managed.join("hello.txt").is_file());
-
     // Publish creates the repository through glab, adds it as origin and pushes.
     let project = s.home().join("project");
     repository(&project);
@@ -713,36 +662,18 @@ async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_regis
 
     // Discovery probes Git and every registered forge through the server's PATH.
     let discovered = ok(s.call("server.discoverSourceControl", json!({})).await);
-    // Calls close together share one round of probes.
-    assert_eq!(
-        ok(s.call("server.discoverSourceControl", json!({})).await),
-        discovered
-    );
-    let probes = glab_calls(s.home())
-        .iter()
-        .filter(|call| call.as_str() == "gitlab.com --version")
-        .count();
-    assert_eq!(probes, 1);
     assert_eq!(discovered["versionControlSystems"][0]["kind"], "git");
     assert_eq!(
         discovered["versionControlSystems"][0]["status"],
         "available"
     );
-    let gitlab = discovered["sourceControlProviders"]
-        .as_array()
-        .unwrap()
+    let providers = discovered["sourceControlProviders"].as_array().unwrap();
+    let gitlab = providers
         .iter()
         .find(|provider| provider["kind"] == "gitlab")
-        .unwrap()
-        .clone();
+        .unwrap();
     assert_eq!(gitlab["status"], "available");
-    assert!(
-        discovered["sourceControlProviders"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|provider| provider["kind"] == "github")
-    );
+    assert!(providers.iter().any(|provider| provider["kind"] == "github"));
 
     // Each method keeps its contract scope.
     s.reconnect_with(&["orchestration:read"]).await;
@@ -781,6 +712,123 @@ async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_regis
         .await,
         "orchestration:read",
     );
+    s.socket.close(None).await.unwrap();
+    s.runtime.shutdown().await.unwrap();
+}
+
+/// Review L2: a GitHub URL naming a host the server is not configured for gets no request, so the
+/// server's `GH_TOKEN` (which gh sends to any `*.ghe.com`) never leaves; github.com is still asked.
+#[tokio::test]
+async fn github_urls_naming_unconfigured_hosts_get_no_request_or_token() {
+    let (github, recorded) = github_stand_in().await;
+    let mut s = Server::start(&github).await;
+    let ghe = json!({"provider": "github", "repository": "https://fixture.ghe.com/acme/web"});
+    let unconfigured = failure(s.call("sourceControl.lookupRepository", ghe.clone()).await);
+    assert_eq!(unconfigured["_tag"], "SourceControlRepositoryError");
+    let mut ghe_clone = ghe.clone();
+    ghe_clone["destinationPath"] = json!(s.home().join("code").join("ghe").to_string_lossy());
+    let refused_clone = failure(s.call("sourceControl.cloneRepository", ghe_clone).await);
+    assert_eq!(refused_clone["_tag"], "SourceControlRepositoryError");
+    assert!(!s.home().join("code").join("ghe").exists());
+    assert_eq!(
+        recorded.all(),
+        Vec::new(),
+        "an unconfigured host was contacted"
+    );
+    let _ = s
+        .call(
+            "sourceControl.lookupRepository",
+            json!({"provider": "github", "repository": "https://github.com/acme/web"}),
+        )
+        .await;
+    assert!(!recorded.all().is_empty());
+    s.socket.close(None).await.unwrap();
+    s.runtime.shutdown().await.unwrap();
+}
+
+/// Review M1: hidden and application folders of the home, and T3's base outside its managed
+/// project folders, never receive a clone: a repository there could become Git's global
+/// configuration, an SSH configuration, or a runtime or agent the server trusts.
+#[tokio::test]
+async fn clones_never_land_in_hidden_application_or_t3_folders() {
+    let (github, _) = github_stand_in().await;
+    let mut s = Server::start(&github).await;
+    let seed = s.home().join("seed");
+    repository(&seed);
+    let remote = s.home().join("remote.git");
+    bare(&remote, Some(&seed));
+    for refused_destination in [
+        s.base().join("userdata").join("secrets").join("web"),
+        s.home().join(".config").join("git"),
+        s.home().join(".ssh").join("keys"),
+        s.home().join("AppData").join("Roaming").join("fixture"),
+        s.base().join("runtime").join("versions").join("9.9.9"),
+        s.base().join("tools").join("acp-registry").join("fixture"),
+    ] {
+        let _ = failure(
+            s.call(
+                "sourceControl.cloneRepository",
+                json!({"remoteUrl": remote.to_string_lossy(), "destinationPath": refused_destination.to_string_lossy()}),
+            )
+            .await,
+        );
+        assert!(!refused_destination.exists(), "{refused_destination:?}");
+    }
+    assert!(!s.home().join(".config").exists());
+    assert!(!s.home().join(".ssh").exists());
+    assert!(!s.base().join("tools").exists());
+    // T3's managed project folders and ordinary home folders are destinations.
+    for destination in [
+        s.base().join("projects").join("web"),
+        s.home().join("code").join("web"),
+    ] {
+        ok(s.call(
+            "sourceControl.cloneRepository",
+            json!({"remoteUrl": remote.to_string_lossy(), "destinationPath": destination.to_string_lossy()}),
+        )
+        .await);
+        assert!(destination.join("hello.txt").is_file());
+    }
+    s.socket.close(None).await.unwrap();
+    s.runtime.shutdown().await.unwrap();
+}
+
+/// Review L4: a refused destination is a repository failure for a session that holds
+/// `source-control:write`, not a missing permission.
+#[tokio::test]
+async fn refused_destinations_answer_a_repository_error() {
+    let (github, _) = github_stand_in().await;
+    let mut s = Server::start(&github).await;
+    for refused_destination in [
+        PathBuf::from(r"\\fixture-server\share\web"),
+        s.base().join("userdata").join("secrets").join("web"),
+        s.home().join(".config").join("git"),
+    ] {
+        destination_refused(
+            s.call(
+                "sourceControl.cloneRepository",
+                json!({"remoteUrl": s.home().join("remote.git").to_string_lossy(), "destinationPath": refused_destination.to_string_lossy()}),
+            )
+            .await,
+        );
+    }
+    s.socket.close(None).await.unwrap();
+    s.runtime.shutdown().await.unwrap();
+}
+
+/// Review L5: calls close together share one round of probes.
+#[tokio::test]
+async fn discovery_probes_once_for_calls_close_together() {
+    let (github, _) = github_stand_in().await;
+    let mut s = Server::start(&github).await;
+    let first = ok(s.call("server.discoverSourceControl", json!({})).await);
+    let second = ok(s.call("server.discoverSourceControl", json!({})).await);
+    assert_eq!(first, second);
+    let probes = glab_calls(s.home())
+        .iter()
+        .filter(|call| call.ends_with("--version"))
+        .count();
+    assert_eq!(probes, 1);
     s.socket.close(None).await.unwrap();
     s.runtime.shutdown().await.unwrap();
 }

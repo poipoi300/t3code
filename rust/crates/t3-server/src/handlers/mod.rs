@@ -3,6 +3,8 @@ pub mod core;
 pub mod device;
 pub mod git_actions;
 pub mod host;
+pub mod host_leftovers;
+pub mod launch;
 pub mod mcp_apps;
 pub mod optional_services;
 pub mod orchestration;
@@ -40,6 +42,7 @@ pub fn registry_with(domains: &Domains) -> crate::Result<HandlerRegistry> {
     optional_services::register_with(&mut registry, domains)?;
     telemetry::register_with(&mut registry, domains)?;
     host::register_with(&mut registry, domains)?;
+    host_leftovers::register_with(&mut registry, domains)?;
     device::register_with(&mut registry, domains)?;
     preview::register_with(&mut registry, domains)?;
     cloud::register_with(&mut registry, domains)?;
@@ -50,6 +53,7 @@ pub fn registry_with(domains: &Domains) -> crate::Result<HandlerRegistry> {
     pull_requests::register_with(&mut registry, domains)?;
     mcp_apps::register_with(&mut registry, domains)?;
     git_actions::register_with(&mut registry, domains)?;
+    launch::register_with(&mut registry, domains)?;
     unsupported::register(&mut registry)?;
     registry.validate()?;
     Ok(registry)

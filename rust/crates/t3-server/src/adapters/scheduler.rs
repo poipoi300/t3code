@@ -190,10 +190,22 @@ fn failure(
     error: t3_scheduler::Error,
     task_id: Option<ScheduledTaskId>,
 ) -> Failure<WsScheduledTasksSubscribeError> {
+    use t3_scheduler::Error;
+    // TypeScript's texts; storage causes stay out of the client's message.
+    let message = match error {
+        Error::NotFound(_) => "Schedule task not found.".into(),
+        Error::Persistence(_) | Error::Sqlite(_) | Error::Json(_) => {
+            "Could not update schedule task.".into()
+        }
+        Error::CompletionAfterDispatch(_) => {
+            "The run started, but completion could not be recorded.".into()
+        }
+        error => error.to_string(),
+    };
     Failure::Typed(WsScheduledTasksSubscribeError::ScheduledTaskError(
         Box::new(ScheduledTaskError {
             _tag: ScheduledTaskErrorTag::ScheduledTaskError,
-            message: error.to_string(),
+            message,
             task_id: task_id.map(Some),
             cause: None,
         }),
@@ -432,10 +444,36 @@ impl SchedulerAdapter {
             Arc::new(UnassembledIntake),
             SchedulerOptions::default(),
             None,
+            None,
         )
         .await?;
         adapter.commands_available = false;
         Ok(Arc::new(adapter))
+    }
+    /// Over the shared orchestration runtime when it started: a task that fires is a queued
+    /// `message.dispatch` through the same intake, dispatch ceiling and turn policy as a client
+    /// message. Without the runtime, tasks stay readable and commands unserved.
+    pub async fn start_for(
+        context: &crate::services::DomainContext<'_>,
+        domains: &crate::services::Domains,
+        clock: Option<Arc<dyn Clock>>,
+    ) -> crate::Result<Arc<Self>> {
+        #[cfg(feature = "orchestration")]
+        if let Some(runtime) = domains
+            .get::<crate::adapters::orchestration::OrchestrationAdapter>()
+            .and_then(|adapter| adapter.composed().cloned())
+        {
+            let intake = Arc::new(runtime_intake::RuntimeIntake {
+                runtime,
+                shutdown: context.shutdown.clone(),
+            });
+            let backend = Arc::new(t3_scheduler::intake::IntakeDispatchBackend::new(intake));
+            return Self::build(context, backend, SchedulerOptions::default(), None, clock)
+                .await
+                .map(Arc::new);
+        }
+        let _ = (domains, clock);
+        Self::start(context).await
     }
     /// Supplies real destination validation/intake and the linked environment's relay verifier.
     pub async fn start_with(
@@ -444,7 +482,7 @@ impl SchedulerAdapter {
         options: SchedulerOptions,
         relay: Option<RelayDeliveryProof>,
     ) -> crate::Result<Arc<Self>> {
-        Self::build(context, backend, options, relay)
+        Self::build(context, backend, options, relay, None)
             .await
             .map(Arc::new)
     }
@@ -453,13 +491,314 @@ impl SchedulerAdapter {
         backend: Arc<dyn Orchestration>,
         options: SchedulerOptions,
         relay: Option<RelayDeliveryProof>,
+        clock: Option<Arc<dyn Clock>>,
     ) -> crate::Result<Self> {
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let clock: Arc<dyn Clock> = clock.unwrap_or_else(|| Arc::new(SystemClock));
         let service =
             ScheduledTaskService::new(context.database.clone(), clock.clone(), backend, options)
                 .await
                 .map_err(|error| crate::Error::Service(error.to_string()))?;
         Ok(Self::new(Arc::new(service), clock, relay))
+    }
+}
+
+/// `RuntimeTaskIntake` over the one orchestration runtime (recipe in `server-seam-requests.md`,
+/// "t3-scheduler runtime-intake server assembly"). TypeScript: `ScheduledTaskService.ts`
+/// `sendBound`, `hasQueuedOccurrence` and `recordRunFailure`.
+#[cfg(all(feature = "local-services", feature = "orchestration"))]
+mod runtime_intake {
+    use std::{sync::Arc, time::Duration};
+    use t3_contracts::{
+        base_schemas::{MessageId, ThreadId},
+        orchestration_v2::{OrchestrationV2RunStatus, OrchestrationV2ThreadProjection},
+        scheduled_task::ScheduledTask,
+    };
+    use t3_orchestration::{
+        api::{
+            MessageFilter, ProjectionReader, ProjectionRecordQuery, RecordFilter, RecordKind,
+        },
+        composition::OrchestrationRuntime,
+        error::Error as OrchestrationError,
+        ports::{
+            runs_ingestion::provider_event_ingestor::expanded_id,
+            thread_project::thread_management_service::{SendInput, SendMode, WaitInput},
+        },
+    };
+    use t3_scheduler::{
+        DispatchReceipt, Error, Result,
+        intake::{BoundTaskMessage, BoundTaskThread, IntakeError, RuntimeTaskIntake, TaskRunMode},
+    };
+    use tokio_util::sync::CancellationToken;
+
+    /// `RUN_OUTCOME_WAIT_MS` in TypeScript.
+    const RUN_OUTCOME_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
+
+    pub(super) struct RuntimeIntake {
+        pub runtime: Arc<OrchestrationRuntime>,
+        pub shutdown: CancellationToken,
+    }
+
+    fn read_failure(_: OrchestrationError) -> Error {
+        Error::Dispatch("Could not read the destination thread.".into())
+    }
+
+    impl RuntimeIntake {
+        async fn records(
+            &self,
+            thread_id: &ThreadId,
+            fields: Vec<RecordKind>,
+            messages: MessageFilter,
+            run_statuses: Option<Vec<OrchestrationV2RunStatus>>,
+        ) -> Result<OrchestrationV2ThreadProjection> {
+            self.runtime
+                .threads
+                .query_records(ProjectionRecordQuery {
+                    thread_id: thread_id.clone(),
+                    fields,
+                    filter: RecordFilter::default(),
+                    messages,
+                    run_statuses,
+                    include_latest_run: false,
+                })
+                .await
+                .map_err(read_failure)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeTaskIntake for RuntimeIntake {
+        async fn validate(&self, task: &ScheduledTask, _destination_changed: bool) -> Result<()> {
+            // The backend checked a changed destination; the project itself must still exist.
+            let snapshot = self
+                .runtime
+                .projections
+                .shell_snapshot(Some(vec![task.project_id.clone()]), None)
+                .await
+                .map_err(|_| Error::Invalid("Could not read the task's project.".into()))?;
+            if !snapshot
+                .projects
+                .iter()
+                .any(|project| project.id == task.project_id)
+            {
+                return Err(Error::Invalid("Project not found.".into()));
+            }
+            Ok(())
+        }
+
+        async fn thread(&self, id: &ThreadId) -> Result<Option<BoundTaskThread>> {
+            let shell = self
+                .runtime
+                .projections
+                .shell(id.clone())
+                .await
+                .map_err(read_failure)?;
+            Ok(shell.map(|shell| BoundTaskThread {
+                project_id: shell.project_id,
+                modes: TaskRunMode {
+                    runtime_mode: shell.runtime_mode,
+                    interaction_mode: shell.interaction_mode,
+                },
+                archived: shell.archived_at.is_some(),
+                deleted: shell.deleted_at.is_some(),
+            }))
+        }
+
+        async fn enqueue(
+            &self,
+            message: BoundTaskMessage,
+        ) -> std::result::Result<DispatchReceipt, IntakeError> {
+            let command = message.command;
+            let thread_id = command.thread_id.clone();
+            let sent = self
+                .runtime
+                .intake
+                .send_to_thread(SendInput {
+                    project_id: message.project_id,
+                    command_id: command.command_id,
+                    thread_id: command.thread_id,
+                    message_id: command.message_id,
+                    text: command.text,
+                    attachments: command.attachments,
+                    mode: SendMode::Queue,
+                    fresh_context: command.fresh_context.flatten().unwrap_or(false),
+                    // The bound thread's own provider and modes govern the run.
+                    model_selection: None,
+                    scheduled_task_id: command.scheduled_task_id.flatten(),
+                    sender_thread_id: None,
+                    linked_sender: None,
+                    created_by: command.created_by,
+                    creation_source: command.creation_source,
+                })
+                .await;
+            match sent {
+                Ok(_) => Ok(DispatchReceipt { thread_id }),
+                Err(OrchestrationError::ThreadNotFound(_)) => Err(IntakeError::ThreadNotFound),
+                // A refusal (such as the managed runtime-mode ceiling) carries TypeScript's text.
+                Err(OrchestrationError::Rejected { reason, .. }) => {
+                    Err(IntakeError::Other(Error::Dispatch(reason)))
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "scheduled message was not accepted");
+                    Err(IntakeError::Other(Error::Dispatch(
+                        "The scheduled message could not be dispatched.".into(),
+                    )))
+                }
+            }
+        }
+
+        async fn has_queued_occurrence(&self, task: &ScheduledTask) -> Result<bool> {
+            let Some(thread_id) = &task.thread_id else {
+                return Ok(false);
+            };
+            let queued = self
+                .records(
+                    thread_id,
+                    vec![RecordKind::Runs],
+                    MessageFilter::default(),
+                    Some(vec![OrchestrationV2RunStatus::Queued]),
+                )
+                .await?;
+            let ids: Vec<MessageId> = queued
+                .runs
+                .iter()
+                .filter(|run| run.status == OrchestrationV2RunStatus::Queued)
+                .filter_map(|run| expanded_id(&run.user_message_id).ok())
+                .collect();
+            if ids.is_empty() {
+                return Ok(false);
+            }
+            let messages = self
+                .records(
+                    thread_id,
+                    vec![RecordKind::Messages],
+                    MessageFilter {
+                        ids: Some(ids.clone()),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .await?;
+            Ok(messages.messages.iter().any(|message| {
+                expanded_id(&message.id).is_ok_and(|id| ids.contains(&id))
+                    && message
+                        .scheduled_task_id
+                        .clone()
+                        .flatten()
+                        .and_then(|id| expanded_id(&id).ok())
+                        .is_some_and(|id| id == task.id)
+            }))
+        }
+
+        async fn wait_for_failure(
+            &self,
+            receipt: DispatchReceipt,
+            message_id: String,
+        ) -> Result<Option<String>> {
+            let Some(shell) = self
+                .runtime
+                .projections
+                .shell(receipt.thread_id.clone())
+                .await
+                .map_err(read_failure)?
+            else {
+                return Ok(None);
+            };
+            let message_id = MessageId(message_id);
+            let runs = self
+                .records(
+                    &receipt.thread_id,
+                    vec![RecordKind::Runs],
+                    MessageFilter::default(),
+                    None,
+                )
+                .await?;
+            let Some(dispatched) = runs.runs.iter().find(|run| {
+                expanded_id(&run.user_message_id).is_ok_and(|id| id == message_id)
+            }) else {
+                return Ok(None);
+            };
+            let run_id = expanded_id(&dispatched.id).map_err(read_failure)?;
+            let waited = self
+                .runtime
+                .threads
+                .wait_for_thread(
+                    WaitInput {
+                        project_id: shell.project_id.clone(),
+                        thread_id: receipt.thread_id.clone(),
+                        run_id: Some(run_id.clone()),
+                        timeout: RUN_OUTCOME_WAIT,
+                        until_delegated_work_settled: false,
+                    },
+                    self.shutdown.child_token(),
+                )
+                .await
+                .map_err(read_failure)?;
+            let Some(run) = waited.run else {
+                return Ok(None);
+            };
+            let fallback = match run.status {
+                OrchestrationV2RunStatus::Failed => "The run failed.",
+                OrchestrationV2RunStatus::Interrupted => "The run was stopped.",
+                OrchestrationV2RunStatus::Cancelled => "The run was cancelled.",
+                OrchestrationV2RunStatus::RolledBack => "The run was rolled back.",
+                _ => return Ok(None),
+            };
+            let records = self
+                .records(
+                    &receipt.thread_id,
+                    vec![RecordKind::TurnItems, RecordKind::Messages],
+                    MessageFilter {
+                        ids: Some(vec![message_id.clone()]),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .await?;
+            // A queued message promoted to a steer cancels its run and joins the active one.
+            if run.status == OrchestrationV2RunStatus::Cancelled
+                && records
+                    .messages
+                    .iter()
+                    .find(|message| expanded_id(&message.id).is_ok_and(|id| id == message_id))
+                    .and_then(|message| message.run_id.as_ref())
+                    .and_then(|id| expanded_id(id).ok())
+                    .is_none_or(|id| id != run_id)
+            {
+                return Ok(None);
+            }
+            let failure = (run.status == OrchestrationV2RunStatus::Failed)
+                .then(|| latest_root_failure(&run, &records))
+                .flatten();
+            Ok(Some(failure.unwrap_or_else(|| fallback.into())))
+        }
+    }
+
+    /// `latestRootProviderFailure` (`packages/shared/src/orchestrationV2ThreadError.ts`): the
+    /// failed root error item with the greatest `updatedAt`, then ordinal, then id.
+    fn latest_root_failure(
+        run: &t3_contracts::orchestration_v2::OrchestrationV2Run,
+        records: &OrchestrationV2ThreadProjection,
+    ) -> Option<String> {
+        let run = serde_json::to_value(run).ok()?;
+        let millis =
+            |value: &serde_json::Value| value.as_str().and_then(t3_shared::search_policy::epoch_millis);
+        records
+            .turn_items
+            .iter()
+            .filter_map(|item| serde_json::to_value(item).ok())
+            .filter(|item| {
+                item["type"] == "error"
+                    && item["status"] == "failed"
+                    && item["runId"] == run["id"]
+                    && item["nodeId"] == run["rootNodeId"]
+            })
+            .max_by(|a, b| {
+                millis(&a["updatedAt"])
+                    .cmp(&millis(&b["updatedAt"]))
+                    .then(a["ordinal"].as_u64().cmp(&b["ordinal"].as_u64()))
+                    .then_with(|| a["id"].to_string().cmp(&b["id"].to_string()))
+            })
+            .and_then(|item| item["failure"]["message"].as_str().map(str::to_owned))
     }
 }
 
