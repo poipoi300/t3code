@@ -500,3 +500,19 @@ async fn setup_cancel_waits_for_finalization_and_uncancellable_keeps_running() {
     assert!(!tracker.cancel(&id).await);
     tracker.shutdown().await;
 }
+
+#[tokio::test]
+async fn setup_progress_and_failure_do_not_publish_remote_credentials() {
+    let tracker = WorktreeSetupTracker::new(Arc::new(ManualClock::new("2026-01-01T00:00:00.000Z")));
+    let id = ThreadId("private-setup".into());
+    tracker.begin(id.clone(), None, None, &[WorktreeSetupStageId::Fetch], None).unwrap();
+    let url = "https://fixture-user:fixture-secret@example.test/team/repo.git?token=fixture-query#fixture-fragment";
+    tracker.stage_status(&id, WorktreeSetupStageId::Fetch, WorktreeSetupStageStatus::Running, Some(Some(format!("Fetching {url}"))));
+    tracker.append_tail(&id, WorktreeSetupStageId::Fetch, &format!("remote: {url}"));
+    tracker.finish(&id, WorktreeSetupPhase::Failed, Some(&format!("could not fetch {url}")));
+    let snapshot = serde_json::to_string(&tracker.get(&id).unwrap()).unwrap();
+    for secret in ["fixture-user", "fixture-secret", "fixture-query", "fixture-fragment"] {
+        assert!(!snapshot.contains(secret), "setup snapshot exposed {secret}");
+    }
+    tracker.shutdown().await;
+}

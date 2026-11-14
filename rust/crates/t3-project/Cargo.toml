@@ -28,9 +28,11 @@ unicode-segmentation = "1"
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 
 [lints.rust]

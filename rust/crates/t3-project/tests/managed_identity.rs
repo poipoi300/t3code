@@ -213,6 +213,7 @@ async fn cleanup_refuses_a_real_junction_pointing_outside() {
         outside.clone().into_os_string(),
     ]);
     t3_process::run(options).await.unwrap();
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "server HostFolders must recognize junctions as links");
     folders.cleanup_unowned(&link).await;
     assert!(std::fs::symlink_metadata(&link).is_ok());
     assert_eq!(

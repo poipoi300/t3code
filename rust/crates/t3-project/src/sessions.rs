@@ -196,6 +196,11 @@ pub struct AgentSessionImporter {
     pub runtimes: Arc<dyn SessionImportStore>,
     pub lanes: Arc<KeyedLanes>,
 }
+struct ImportTarget<'a> {
+    project: &'a ProjectId,
+    root: &'a str,
+    worktree: Option<&'a SessionWorktree>,
+}
 pub fn same_transcript_identity(
     a: &AgentSessionImportSource,
     b: &AgentSessionImportSource,
@@ -258,7 +263,7 @@ impl AgentSessionImporter {
             skipped_count: 0,
         };
         for outcome in outcomes {
-            let (source, thread) = match outcome {
+            let (source, thread, worktree) = match outcome {
                 RecentSession::Skipped => {
                     result.skipped_count += 1;
                     continue;
@@ -287,8 +292,8 @@ impl AgentSessionImporter {
                 RecentSession::Importable {
                     thread,
                     source,
-                    worktree: _,
-                } => (source, thread),
+                    worktree,
+                } => (source, thread, worktree),
             };
             let id = ThreadId(format!(
                 "import:{}:{}",
@@ -298,8 +303,7 @@ impl AgentSessionImporter {
             match self
                 .import_one(
                     &id,
-                    &input.project_id,
-                    &project.workspace_root.0,
+                    ImportTarget { project: &input.project_id, root: &project.workspace_root.0, worktree: worktree.as_ref() },
                     &source,
                     &thread,
                     mode,
@@ -319,8 +323,7 @@ impl AgentSessionImporter {
     async fn import_one(
         &self,
         id: &ThreadId,
-        project: &ProjectId,
-        root: &str,
+        target: ImportTarget<'_>,
         source: &AgentSessionImportSource,
         thread: &SessionThread,
         mode: RuntimeMode,
@@ -335,7 +338,7 @@ impl AgentSessionImporter {
         }
         if let Some(existing) = self.projections.thread(id.clone()).await? {
             use t3_orchestration::ports::checkpoints_forks::checkpoint_restore_safety::expanded_id;
-            if expanded_id(&existing.project_id)? != *project
+            if expanded_id(&existing.project_id)? != *target.project
                 || existing.history_origin.as_ref().is_none_or(|h| {
                     serde_json::to_value(h).ok() != Some(serde_json::json!("v1_import"))
                 })
@@ -351,7 +354,7 @@ impl AgentSessionImporter {
                 return Ok(Some(false));
             }
         } else {
-            let (events, provider_thread) = import_events(id, project, source, thread, mode)?;
+            let (events, provider_thread) = import_events(id, target.project, source, thread, mode, target.worktree)?;
             let result = self
                 .sink
                 .commit_with_options(
@@ -374,7 +377,7 @@ impl AgentSessionImporter {
             }
         }
         self.runtimes
-            .persist_runtime(id, source, thread, root, mode)
+            .persist_runtime(id, source, thread, target.worktree.map_or(target.root, |worktree| worktree.path.as_str()), mode)
             .await?;
         self.runtimes.record_imported_transcript(id, source).await?;
         Ok(Some(true))
@@ -386,6 +389,7 @@ fn import_events(
     source: &AgentSessionImportSource,
     thread: &SessionThread,
     mode: RuntimeMode,
+    worktree: Option<&SessionWorktree>,
 ) -> Result<(
     Vec<t3_contracts::orchestration_v2::OrchestrationV2DomainEvent>,
     t3_contracts::orchestration_v2::OrchestrationV2ProviderThread,
@@ -419,7 +423,7 @@ fn import_events(
             .map(|(_, m)| *m)
             .unwrap_or(t3_contracts::model::DEFAULT_MODEL)
     });
-    let app = json!({"createdBy":"system","creationSource":"server","id":id,"projectId":project,"title":if thread.title.trim().is_empty(){"Untitled thread"}else{&thread.title},"providerInstanceId":source.provider_instance_id,"modelSelection":{"instanceId":source.provider_instance_id,"model":model},"runtimeMode":mode,"interactionMode":"default","branch":null,"worktreePath":null,"linkedPullRequest":null,"branchPullRequest":null,"activeProviderThreadId":provider_id,"historyOrigin":"v1_import","lineage":{"parentThreadId":null,"relationshipToParent":null,"rootThreadId":id},"forkedFrom":null,"createdAt":thread.created_at,"updatedAt":thread.updated_at,"archivedAt":null,"settledOverride":"settled","settledAt":thread.updated_at,"unsettledAt":null,"snoozedUntil":null,"snoozedAt":null,"pinnedAt":null,"pinOrderKey":null,"activeOrderKey":null,"lastVisitedAt":null,"deletedAt":null});
+    let app = json!({"createdBy":"system","creationSource":"server","id":id,"projectId":project,"title":if thread.title.trim().is_empty(){"Untitled thread"}else{&thread.title},"providerInstanceId":source.provider_instance_id,"modelSelection":{"instanceId":source.provider_instance_id,"model":model},"runtimeMode":mode,"interactionMode":"default","branch":worktree.and_then(|worktree|worktree.branch.as_deref()),"worktreePath":worktree.map(|worktree|worktree.path.as_str()),"linkedPullRequest":null,"branchPullRequest":null,"activeProviderThreadId":provider_id,"historyOrigin":"v1_import","lineage":{"parentThreadId":null,"relationshipToParent":null,"rootThreadId":id},"forkedFrom":null,"createdAt":thread.created_at,"updatedAt":thread.updated_at,"archivedAt":null,"settledOverride":"settled","settledAt":thread.updated_at,"unsettledAt":null,"snoozedUntil":null,"snoozedAt":null,"pinnedAt":null,"pinOrderKey":null,"activeOrderKey":null,"lastVisitedAt":null,"deletedAt":null});
     let provider = json!({"id":provider_id,"driver":driver,"providerInstanceId":source.provider_instance_id,"providerSessionId":null,"appThreadId":id,"ownerNodeId":null,"nativeThreadRef":{"driver":driver,"nativeId":native,"strength":"strong"},"nativeConversationHeadRef":null,"status":"idle","firstRunOrdinal":null,"lastRunOrdinal":null,"handoffIds":[],"forkedFrom":null,"pendingBackgroundTasks":[],"createdAt":thread.created_at,"updatedAt":thread.updated_at});
     let mut events = vec![
         json!({"id":format!("agent-session-import:v2:thread:{}:created",id.0),"type":"thread.created","threadId":id,"providerInstanceId":source.provider_instance_id,"occurredAt":thread.created_at,"payload":app}),
@@ -454,3 +458,4 @@ fn import_events(
         serde_json::from_value(provider)?,
     ))
 }
+
