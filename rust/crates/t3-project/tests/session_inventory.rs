@@ -784,15 +784,18 @@ async fn a_hostile_codex_state_database_cannot_stall_the_scan() {
     assert!(same(&found[0].0, &workspace));
 }
 
-/// A link in a session's cwd is resolved by the hardened resolver before anything follows it:
-/// here a link to `real.`, which Windows would silently open as `real`.
+/// A link in a session's cwd is judged by the hardened resolver before anything follows it.
+/// The link names `real::$INDEX_ALLOCATION`, which Windows opens as the directory `real` itself
+/// (link creation keeps the stream suffix; it would strip a trailing dot). Following the link
+/// first offers `real`; the resolver refuses the `:` in the link's target.
 #[cfg(windows)]
 #[tokio::test]
 async fn links_in_a_session_cwd_are_resolved_before_they_are_followed() {
     let f = Fixture::new();
     let real = f.workspace("real");
     let alias = f.root.join("work").join("alias");
-    std::os::windows::fs::symlink_dir(format!("{}.", real.display()), &alias).unwrap();
+    std::os::windows::fs::symlink_dir(format!("{}::$INDEX_ALLOCATION", real.display()), &alias)
+        .unwrap();
     write(
         &f.claude.join("projects/l/a.jsonl"),
         claude_line(&alias),
