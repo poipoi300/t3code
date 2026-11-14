@@ -810,6 +810,8 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink("//nonexistent.invalid/share", &link).expect("symlink");
         let target = link.join("notes.md");
+        let direct = t3_workspace::paths::canonicalize(&target);
+        eprintln!("canonicalize: {direct:?}");
         let result = checked_path(&target.to_string_lossy(), &[root]);
         assert!(
             matches!(result, Err(Error::Refused(_))),
