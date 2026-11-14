@@ -244,9 +244,13 @@ impl ProfileReporter {
             state.to_save = state.catalog.clone();
         }
         let profiles = self.profiles.clone();
-        tokio::spawn(async move { profiles.save().await })
+        let saved = tokio::spawn(async move { profiles.save().await })
             .await
-            .map_err(|e| Error::Io(e.to_string()))?
+            .map_err(|e| Error::Io(e.to_string()))?;
+        if saved.is_err() {
+            tracing::warn!("failed to save reported browser profiles");
+        }
+        Ok(())
     }
 }
 impl Drop for ProfileReporter {

@@ -120,5 +120,9 @@ async fn exercise_worker(module: &str) {
         .await
         .unwrap();
     assert!(!driver.is_connected());
+    assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+        matches!(event, t3_preview::driver::BrowserEvent::Worker {generation,message}
+            if generation == driver.generation() && matches!(*message,t3_preview::driver::BrowserEvent::Disconnected))
+    }), "shutdown returned before the worker's output pipe closed");
     assert!(!root.path().join("profiles").exists());
 }

@@ -560,13 +560,18 @@ async fn profile_union_is_uncapped_on_disk_and_disconnect_does_not_shrink_saved_
     let rows = |prefix: &str| {
         (0..13).map(|i|serde_json::from_value(json!({"id":format!("{prefix}-{i}"),"name":format!("{prefix}{i}"),"kind":"persistent"})).unwrap()).collect::<Vec<_>>()
     };
-    a.report(PreviewReportProfilesInput {
+    let saved = root.path().join("server-browser/reported-profiles.json");
+    std::fs::create_dir_all(&saved).unwrap();
+    let report = PreviewReportProfilesInput {
         profiles: rows("a"),
         default_profile_id: "a-0".into(),
         recording_frame_rate: Some(Some(60)),
-    })
-    .await
-    .unwrap();
+    };
+    a.report(report.clone()).await.unwrap();
+    assert_eq!(profiles.catalog().default_profile_id, "a-0");
+    assert!(saved.is_dir());
+    std::fs::remove_dir(&saved).unwrap();
+    a.report(report).await.unwrap();
     b.report(PreviewReportProfilesInput {
         profiles: rows("b"),
         default_profile_id: "b-0".into(),

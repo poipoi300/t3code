@@ -658,9 +658,16 @@ mod tests {
             client: None,
             linked_environments: Some(false),
         };
-        authorize(store, scope, tool_rule(tool, input), tool, input, false)
-            .await
-            .unwrap()
+        authorize(
+            store,
+            scope,
+            tool_rule(tool, input).unwrap(),
+            tool,
+            input,
+            false,
+        )
+        .await
+        .unwrap()
     }
     #[tokio::test]
     async fn path_sources_require_the_calling_threads_live_full_access_for_both_html_tools() {

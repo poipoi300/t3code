@@ -43,6 +43,10 @@ Configured probes accept only bounded loopback HTTP(S) URLs and never follow
 redirects. A stop rechecks the current PID/port ownership and environment,
 rejects shared process groups, then signals that exact group. Windows stopping
 is unsupported, matching TypeScript. It never kills by name or path pattern.
+Hosts sharing a machine with other environments use
+`stop_server_with_thread_check` to recheck the discovered agent's thread against
+their live environment database before signalling. `shutdown().await` closes
+subscriptions and joins the poller; browser shutdown joins its owned Node worker.
 
 ## Browser and HTML services
 
@@ -54,6 +58,10 @@ queued mutations, handoff barriers, coalesced input, pending launch reservations
 live in Rust. `execute_admitted` rechecks admission inside queued mutations.
 `execute` is for trusted internal callers. `cleanup_thread` and `shutdown` release
 resources; hold `activity().begin(thread)` for each active provider turn.
+The server's discovery subscriptions keep agent scans active while observed.
+This preserves discovery of newly launched native agents before the provider
+lifecycle feed is bound, at the cost of scanning while an idle observer remains
+connected. Provider turn activity and thread cleanup are separate MCP host seams.
 
 `BrowserDriver` is the browser boundary. Fakes implement only its command/reply
 and event methods. `prepare` binds a tab to a worker generation before opening;
@@ -93,7 +101,7 @@ Use this adapter in `t3-mcp::Services`; there is no second browser service there
 | Seam | Required host implementation |
 | --- | --- |
 | Electron browser | The desktop shell supplies `DesktopIpc`: bootstrap descriptor IO and a secret, loopback, single-client WebSocket relay for CDP. Forward shell contract events to `DesktopBrowserChannel::receive` and CDP writes through `DesktopBrowserCommand::Cdp`. The shell owns webviews, their sizing and native pickers; it does not launch the server's headless browser. |
-| Stream HTTP routes | The HTTP owner authenticates `/api/preview-stream/ws` with orchestration-read, derives `ViewerOptions::can_operate` from preview-operate and `interactive`, disables WebSocket compression and pumps `PreviewViewer::output/input/acknowledge`. `stream::FrameFlow` and `check_socket_buffer` provide one-frame pacing and the 8 MiB socket bound. Use 4404 for gone, 1012 for reconnect and the contract host-setup close code with `stream::host_setup`. |
+| Stream HTTP routes | `t3-server::handlers::preview` mounts `/api/preview-stream/ws`, authenticates media requests with orchestration-read, checks the live environment thread and exact tab owner, derives operation permission, and pumps `PreviewViewer` with one-frame pacing and the 8 MiB socket bound. It returns HTTP 503 for launch failure, 4404 for gone, 1012 for reconnect and the contract host-setup close code. |
 | Downloads/uploads | The HTTP owner authenticates read/download and operate/upload, parses multipart limits (20 files, 100 MiB total), then calls `open_download` or `answer_file_chooser`. Returned download paths are resolved from saved tab artifacts, never caller paths. |
 | Provider lifecycle | Orchestration calls browser cleanup and holds activity guards. The provider credential owner implements `HtmlRenderRecovery`, or connects `MemoryHtmlRecovery::{take, clear}` to credential reuse/replacement/clear. Attachment retention remains the attachment owner's job. |
 | Remote/browser hosts | MCP composition must choose the destination environment and automation host before this local service. The TypeScript `mcp/PreviewAutomationBroker.ts` host registry/focus/routing is outside this crate; it is not duplicated here. |
@@ -144,8 +152,8 @@ Known differences and limits:
   Node in its SEA. Desktop can supply Electron with RUN_AS_NODE and its ASAR
   Playwright tree, or external Node with unpacked package files. Startup probes
   accept virtual ASAR directories through Electron's filesystem implementation.
-- The standalone `PreviewAutomationBroker` host routing, actual HTTP registration,
-  Electron bootstrap/relay and privileged setup CLI await their owners above.
+- The standalone `PreviewAutomationBroker` host routing, download/upload HTTP
+  registration, Electron bootstrap/relay and privileged setup CLI await their owners above.
   The service methods and explicit integration seams are implemented here.
 - Tab IDs use the same sequence/server-epoch scheme as TypeScript. OS error
   details and some browser diagnostic prose are not identical.

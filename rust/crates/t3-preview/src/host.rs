@@ -119,6 +119,13 @@ console.log(JSON.stringify({node:process.execPath,module}));}catch(error){consol
 impl PreviewHost {
     /// Validates JavaScript dependencies now; Chrome installation remains lazy and managed.
     pub async fn new(input: HostInputs) -> Result<Self> {
+        Self::new_with_discovery(
+            input,
+            std::env::var("T3CODE_PORT_DISCOVERY").as_deref() != Ok("0"),
+        )
+        .await
+    }
+    pub async fn new_with_discovery(input: HostInputs, discovery_enabled: bool) -> Result<Self> {
         let runtime = input.runtime.validate().await?;
         for (name, path) in [
             ("base_dir", &input.base_dir),
@@ -178,7 +185,7 @@ impl PreviewHost {
             runtime,
             preview,
             html,
-            discovery: PortDiscovery::new()?,
+            discovery: PortDiscovery::with_options(discovery_enabled, "/proc".into())?,
         })
     }
 }

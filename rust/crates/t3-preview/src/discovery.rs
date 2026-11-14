@@ -15,6 +15,8 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 pub const AGENT_THREAD_ENV: &str = "T3CODE_THREAD_ID";
+pub type ThreadCheck =
+    Arc<dyn Fn(String) -> futures_util::future::BoxFuture<'static, bool> + Send + Sync>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Listener {
     pub port: u16,
@@ -818,7 +820,15 @@ impl PortDiscovery {
         }
     }
     pub async fn stop_server(&self, input: PreviewStopLocalServerInput) -> Result<()> {
-        self.stop_owned_server(input).await?;
+        self.stop_owned_server(input, None).await?;
+        self.refresh_after_stop().await
+    }
+    pub async fn stop_server_with_thread_check(
+        &self,
+        input: PreviewStopLocalServerInput,
+        check: ThreadCheck,
+    ) -> Result<()> {
+        self.stop_owned_server(input, Some(check)).await?;
         self.refresh_after_stop().await
     }
     async fn refresh_after_stop(&self) -> Result<()> {
@@ -831,7 +841,11 @@ impl PortDiscovery {
         }
         Ok(())
     }
-    async fn stop_owned_server(&self, input: PreviewStopLocalServerInput) -> Result<()> {
+    async fn stop_owned_server(
+        &self,
+        input: PreviewStopLocalServerInput,
+        check: Option<ThreadCheck>,
+    ) -> Result<()> {
         if cfg!(windows) {
             return Err(Error::Stop(PreviewStopLocalServerReason::Unsupported));
         }
@@ -843,6 +857,9 @@ impl PortDiscovery {
         lock(&self.inner.state).agent_pending = true;
         let listed = self.scan(&[]).await?;
         authorize_stop(&listed, &input)?;
+        if let Some(check) = check {
+            authorize_thread(&listed, &input, &check).await?;
+        }
         let table = read_process_table().await?;
         if !table.contains_key(&input.pid) {
             return Ok(());
@@ -874,6 +891,21 @@ impl PortDiscovery {
         signal_group(group, true)?;
         Ok(())
     }
+}
+async fn authorize_thread(
+    listed: &[DiscoveredLocalServer],
+    input: &PreviewStopLocalServerInput,
+    check: &ThreadCheck,
+) -> Result<()> {
+    if let Some(agent) = listed
+        .iter()
+        .find(|server| server.pid == Some(input.pid) && server.port == input.port)
+        .and_then(|server| server.agent.as_ref().and_then(Option::as_ref))
+        && !check(agent.thread_id.0.clone()).await
+    {
+        return Err(Error::Stop(PreviewStopLocalServerReason::NotFound));
+    }
+    Ok(())
 }
 pub fn authorize_stop(
     listed: &[DiscoveredLocalServer],
@@ -1034,6 +1066,21 @@ fn list_event(servers: Vec<DiscoveredLocalServer>) -> DiscoveredLocalServerList 
 #[cfg(test)]
 mod probe_tests {
     use super::*;
+    #[tokio::test]
+    async fn agent_stop_authority_refuses_foreign_and_deleted_threads() {
+        let input = PreviewStopLocalServerInput {
+            pid: 42,
+            port: 3000,
+        };
+        let check: ThreadCheck = Arc::new(|thread| async move { thread == "local" }.boxed());
+        for thread in ["local", "foreign", "deleted"] {
+            let listed:Vec<DiscoveredLocalServer>=serde_json::from_value(serde_json::json!([{"host":"localhost","port":3000,"url":"http://localhost:3000","pid":42,"processName":"node","terminal":null,"agent":{"threadId":thread}}])).expect("server row");
+            assert_eq!(
+                authorize_thread(&listed, &input, &check).await.is_ok(),
+                thread == "local"
+            );
+        }
+    }
     #[tokio::test]
     async fn nonzero_probe_exit_preserves_stdout_but_output_limits_still_fail_closed() {
         let source = "process.stdout.write('p42\\ncnode\\nn127.0.0.1:3000\\n');process.exitCode=1";

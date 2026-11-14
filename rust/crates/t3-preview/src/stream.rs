@@ -185,7 +185,29 @@ pub fn control_message(
 
 pub fn int_param(value: Option<&str>, fallback: u32, max: u32) -> u32 {
     value
-        .and_then(|value| value.parse::<f64>().ok())
+        .and_then(|value| {
+            let value = value.trim_matches(|c| {
+                matches!(c,
+                    '\u{9}'..='\u{d}' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' |
+                    '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'
+                )
+            });
+            let radix = match value.get(..2) {
+                Some("0x" | "0X") => 16,
+                Some("0b" | "0B") => 2,
+                Some("0o" | "0O") => 8,
+                _ => return value.parse::<f64>().ok(),
+            };
+            let digits = &value[2..];
+            if digits.is_empty() {
+                return None;
+            }
+            digits.chars().try_fold(0.0, |total, digit| {
+                digit
+                    .to_digit(radix)
+                    .map(|digit| total * f64::from(radix) + f64::from(digit))
+            })
+        })
         .filter(|n| n.is_finite() && *n > 0.0)
         .map(|n| n.round().min(max as f64) as u32)
         .unwrap_or(fallback)
@@ -210,4 +232,28 @@ pub fn host_setup(error: &Error) -> Option<t3_contracts::preview::PreviewStreamH
         need,
         command: detail["setupCommand"].as_str()?.into(),
     })
+}
+
+#[cfg(test)]
+mod query_tests {
+    #[test]
+    fn query_numbers_match_javascript_number_and_rounding() {
+        for (input, expected) in [
+            (None, 70),
+            (Some(""), 70),
+            (Some("0"), 70),
+            (Some("-1"), 70),
+            (Some("NaN"), 70),
+            (Some("Infinity"), 70),
+            (Some("1_0"), 70),
+            (Some("0x20"), 32),
+            (Some("0B100000"), 32),
+            (Some("0o40"), 32),
+            (Some("\u{feff} 32.5 \u{a0}"), 33),
+            (Some("0.1"), 0),
+            (Some("99999"), 100),
+        ] {
+            assert_eq!(super::int_param(input, 70, 100), expected, "{input:?}");
+        }
+    }
 }
