@@ -373,7 +373,12 @@ impl ExternalLauncher {
                 );
                 args = vec![target.clone()];
             }
-            let explorer = cfg!(windows) && distro.is_none();
+            let explorer = cfg!(windows)
+                && distro.is_none()
+                && editor
+                    .command
+                    .file_name()
+                    .is_some_and(|n| n.eq_ignore_ascii_case("explorer.exe"));
             if explorer && target.chars().any(|c| c == '"' || c.is_control()) {
                 return Err(unsupported());
             }
@@ -805,13 +810,11 @@ mod tests {
         std::fs::create_dir(&root).expect("root");
         let link = root.join("share");
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(r"\nonexistent.invalid\share", &link)
+        std::os::windows::fs::symlink_dir(r"\\nonexistent.invalid\share", &link)
             .expect("directory symlinks need Developer Mode or the symlink privilege");
         #[cfg(unix)]
         std::os::unix::fs::symlink("//nonexistent.invalid/share", &link).expect("symlink");
         let target = link.join("notes.md");
-        let direct = t3_workspace::paths::canonicalize(&target);
-        eprintln!("canonicalize: {direct:?}");
         let result = checked_path(&target.to_string_lossy(), &[root]);
         assert!(
             matches!(result, Err(Error::Refused(_))),
