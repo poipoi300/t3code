@@ -1,7 +1,6 @@
 //! ACP Registry agent management (`ws.ts` `server.*AcpRegistry*`): sign-in consent, native
 //! sessions, configurable model providers and logout, each one call into the provider domain's
 //! `AcpRegistryService`. The RPC guard has already applied each method's scope.
-//! `server.importAcpRegistrySession` stays unserved (registered in `handlers/providers.rs`).
 use crate::{registry::HandlerRegistry, services::Domains};
 use t3_contracts::rpc::*;
 
@@ -14,6 +13,7 @@ pub fn register_with(registry: &mut HandlerRegistry, domains: &Domains) -> crate
     registry.unimplemented::<WsServerAcceptAcpRegistryUrlAuthRpc>()?;
     registry.unimplemented::<WsServerListAcpRegistrySessionsRpc>()?;
     registry.unimplemented::<WsServerDeleteAcpRegistrySessionRpc>()?;
+    registry.unimplemented::<WsServerImportAcpRegistrySessionRpc>()?;
     registry.unimplemented::<WsServerListAcpRegistryProvidersRpc>()?;
     registry.unimplemented::<WsServerSetAcpRegistryProviderRpc>()?;
     registry.unimplemented::<WsServerDisableAcpRegistryProviderRpc>()?;
@@ -60,6 +60,8 @@ mod live {
         })?;
         unary!(WsServerListAcpRegistrySessionsRpc, |acp, input| acp
             .list_sessions(input));
+        unary!(WsServerImportAcpRegistrySessionRpc, |acp, input| acp
+            .import_session(input));
         unary!(WsServerDeleteAcpRegistrySessionRpc, |acp, input| acp
             .delete_session(input));
         unary!(WsServerListAcpRegistryProvidersRpc, |acp, input| acp

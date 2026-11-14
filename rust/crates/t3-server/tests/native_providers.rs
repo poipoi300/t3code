@@ -114,13 +114,20 @@ fn main() -> ExitCode {
     println!("\nrunning {} tests", selected.len());
     let mut failed = Vec::new();
     for (name, case) in &selected {
-        let result = std::panic::catch_unwind(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(case());
-        });
+        // A whole server start lives in the case's future; libtest's threads have a larger stack
+        // than Windows' 1 MiB main thread, so give the case one.
+        let case = *case;
+        let result = std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(case());
+            })
+            .unwrap()
+            .join();
         println!(
             "test {name} ... {}",
             if result.is_ok() { "ok" } else { "FAILED" }

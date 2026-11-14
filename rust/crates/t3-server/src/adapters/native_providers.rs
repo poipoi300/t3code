@@ -192,6 +192,18 @@ mod native {
             let built = match spec.driver.0.as_str() {
                 "codex" => codex(&self.host, &self.domain, spec),
                 "claudeAgent" => claude(&self.host, spec),
+                "acpRegistry" => crate::adapters::acp_registry::turn_registration(
+                    &self.domain,
+                    spec,
+                    crate::adapters::acp_registry::TurnHost {
+                        environment: &self.host.environment,
+                        home: &self.host.home,
+                        cwd: &self.host.cwd,
+                        platform: self.host.platform,
+                        clock: self.host.clock.clone(),
+                        ids: self.host.ids.clone(),
+                    },
+                ),
                 _ => return None,
             };
             match built {

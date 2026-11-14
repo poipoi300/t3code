@@ -1120,7 +1120,9 @@ fn same_dir(a: &str, b: &Path) -> bool {
 async fn agent_sessions_are_scanned_and_imported_once_from_the_server_home() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
-    let workspace = home.join("work").join("agent-project");
+    // Outside the T3 base directory (this harness uses the home as base), which scan never offers.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let workspace = elsewhere.path().join("agent-project");
     std::fs::create_dir_all(&workspace).unwrap();
     let claude_id = "33333333-3333-4333-8333-333333333333";
     let codex_id = "019a0000-0000-7000-8000-0000000000aa";

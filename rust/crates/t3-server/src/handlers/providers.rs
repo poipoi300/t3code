@@ -66,8 +66,7 @@ fn register_blocked(registry: &mut HandlerRegistry) -> crate::Result<()> {
     registry.unimplemented::<WsServerRefreshProvidersRpc>()?;
     registry.unimplemented::<WsProviderConsumeResetCreditRpc>()?;
     registry.unimplemented::<WsChatGptHandoffSubscribeRpc>()?;
-    // The other ACP Registry methods are registered by `handlers/acp_registry.rs`.
-    registry.unimplemented::<WsServerImportAcpRegistrySessionRpc>()?;
+    // The ACP Registry methods are registered by `handlers/acp_registry.rs`.
     Ok(())
 }
 

@@ -829,8 +829,8 @@ pub mod vcs {
         base_schemas::ProjectId, environment::WorktreeSubmodules, settings::ServerSettings,
     };
     use t3_git::{
-        GitApplicationService, GitWorkflowService, VcsStatusBroadcaster, VcsStatusPolicy,
-        WorktreeCreationSettings, WorktreeHost, WorktreeSetupTracker,
+        GitApplicationService, GitWorkflowFactory, GitWorkflowService, VcsStatusBroadcaster,
+        VcsStatusPolicy, WorktreeCreationSettings, WorktreeHost, WorktreeSetupTracker,
     };
     use t3_shared::project_settings::{has_project_settings_overrides, resolve_project_settings};
     use tokio_util::sync::CancellationToken;
@@ -841,6 +841,7 @@ pub mod vcs {
         setup: WorktreeSetupTracker,
         pub(super) worktrees: Arc<Worktrees>,
         pub(super) subscriptions: Arc<SubscriptionLimits>,
+        workflows: Arc<CheckoutWorkflows>,
         stop: CancellationToken,
         follower: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     }
@@ -883,19 +884,37 @@ pub mod vcs {
             let workflow = GitWorkflowService::new(git)
                 .with_worktrees_directory(default_worktrees)
                 .with_worktree_host(worktrees.clone());
-            let broadcaster = VcsStatusBroadcaster::new(workflow.clone()).with_policy(policy);
+            let workflows = Arc::new(CheckoutWorkflows {
+                root: workflow.clone(),
+                forge: std::sync::OnceLock::new(),
+            });
+            let broadcaster = VcsStatusBroadcaster::new(workflow.clone())
+                .with_workflow_factory(workflows.clone())
+                .with_policy(policy);
             let setup = WorktreeSetupTracker::new();
             let application =
-                GitApplicationService::new(workflow, broadcaster.clone(), setup.clone());
+                GitApplicationService::new(workflow, broadcaster.clone(), setup.clone())
+                    .with_workflow_factory(workflows.clone());
             Self {
                 application,
                 broadcaster,
                 setup,
                 worktrees,
                 subscriptions: Arc::default(),
+                workflows,
                 stop,
                 follower: std::sync::Mutex::new(Some(follower)),
             }
+        }
+
+        /// Binds the forge registry's per-checkout workflows (`adapters/forge.rs`), so status
+        /// carries each checkout's pull request; `factory` receives the root workflow to clone.
+        /// The forge starts after Git; until it binds, checkouts use the root workflow alone.
+        pub fn bind_workflow_factory(
+            &self,
+            factory: impl FnOnce(GitWorkflowService) -> Arc<dyn GitWorkflowFactory>,
+        ) {
+            let _ = self.workflows.forge.set(factory(self.workflows.root.clone()));
         }
 
         /// The environment's one setup tracker: thread launch must publish into this instance
@@ -930,6 +949,22 @@ pub mod vcs {
                 let _ = follower.await;
             }
             self.broadcaster.shutdown().await;
+        }
+    }
+
+    /// Each checkout's workflow for the status broadcaster and the facade: the forge's factory once
+    /// bound, else the root workflow at that checkout.
+    struct CheckoutWorkflows {
+        root: GitWorkflowService,
+        forge: std::sync::OnceLock<Arc<dyn GitWorkflowFactory>>,
+    }
+    #[async_trait::async_trait]
+    impl GitWorkflowFactory for CheckoutWorkflows {
+        async fn for_checkout(&self, cwd: &Path) -> Result<GitWorkflowService, GitError> {
+            match self.forge.get() {
+                Some(forge) => forge.for_checkout(cwd).await,
+                None => Ok(self.root.at(cwd)),
+            }
         }
     }
 

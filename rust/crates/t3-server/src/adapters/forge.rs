@@ -53,6 +53,7 @@ use t3_forge::{
     services::{CloneOptions, SourceControlRepositoryService, SourceControlSignIn},
 };
 
+use t3_git::ReviewHost as _;
 use t3_workspace::paths::{validate_host_path, within};
 
 pub use t3_forge::registry::ForgeRegistry;
@@ -440,6 +441,17 @@ impl ForgeAdapter {
             stop: context.shutdown.child_token(),
             follower: Default::default(),
         });
+        // Status pull-request enrichment for the VCS group (`git.rs`, `vcs`).
+        if let Some(vcs) = adapter.workspaces.vcs() {
+            let registry = adapter.registry.clone();
+            vcs.bind_workflow_factory(|template| {
+                Arc::new(ForgeWorkflows {
+                    registry,
+                    template,
+                    lenient_lookups: true,
+                })
+            });
+        }
         let follower = adapter.clone().follow_settings(changes);
         *adapter
             .follower
@@ -696,6 +708,7 @@ impl ForgeAdapter {
         Arc::new(ForgeWorkflows {
             registry: self.registry.clone(),
             template,
+            lenient_lookups: false,
         })
     }
 
@@ -1050,10 +1063,12 @@ impl t3_forge::github::transport::Credentials for ConfiguredHostCredentials {
 
 /// Per-checkout workflows: the review host is bound to the checkout's own forge and remote, never
 /// reused for another repository. Project setup in a new worktree is the template's worktree
-/// host's; the review host has none.
+/// host's; the review host has none. For status (`lenient_lookups`) a checkout whose forge cannot
+/// be resolved gets no review host, and a failed pull-request lookup does not fail the read.
 struct ForgeWorkflows {
     registry: Arc<ForgeRegistry>,
     template: t3_git::GitWorkflowService,
+    lenient_lookups: bool,
 }
 #[async_trait::async_trait]
 impl t3_git::GitWorkflowFactory for ForgeWorkflows {
@@ -1061,18 +1076,127 @@ impl t3_git::GitWorkflowFactory for ForgeWorkflows {
         &self,
         cwd: &Path,
     ) -> Result<t3_git::GitWorkflowService, t3_git::GitError> {
-        let handle = self.registry.resolve(cwd, None).await.map_err(|_| {
-            t3_git::GitError::Unavailable(
-                "the source control provider could not be detected".into(),
-            )
-        })?;
+        let handle = match self.registry.resolve(cwd, None).await {
+            Ok(handle) => handle,
+            Err(_) if self.lenient_lookups => return Ok(self.template.at(cwd)),
+            Err(_) => {
+                return Err(t3_git::GitError::Unavailable(
+                    "the source control provider could not be detected".into(),
+                ));
+            }
+        };
+        let host = ForgeReviewHost::new(handle, Arc::new(NoProjectSetup));
         Ok(self
             .template
             .at(cwd)
-            .with_review_host(Arc::new(ForgeReviewHost::new(
-                handle,
-                Arc::new(NoProjectSetup),
-            ))))
+            .with_review_host(if self.lenient_lookups {
+                Arc::new(StatusReviewHost {
+                    inner: host,
+                    last: Default::default(),
+                })
+            } else {
+                Arc::new(host)
+            }))
+    }
+}
+
+/// Status looks the branch's pull request up through `list`. A failed lookup (the forge CLI
+/// missing or signed out, the forge unreachable) answers that branch's last listing, else none,
+/// with a warning: TypeScript's `lookupStatusPr` does the same, so status never fails on it.
+struct StatusReviewHost {
+    inner: ForgeReviewHost,
+    last: std::sync::Mutex<BTreeMap<String, Vec<t3_contracts::source_control::ChangeRequest>>>,
+}
+#[async_trait::async_trait]
+impl t3_git::ReviewHost for StatusReviewHost {
+    async fn list(
+        &self,
+        cwd: &Path,
+        head: &str,
+        state: Option<t3_contracts::source_control::ChangeRequestState>,
+        limit: usize,
+    ) -> Result<Vec<t3_contracts::source_control::ChangeRequest>, t3_git::GitError> {
+        let key = format!("{}\0{head}\0{state:?}\0{limit}", cwd.display());
+        let listed = self.inner.list(cwd, head, state, limit).await;
+        let mut last = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match listed {
+            Ok(requests) => {
+                if last.len() >= 512 && !last.contains_key(&key) {
+                    last.pop_first();
+                }
+                last.insert(key, requests.clone());
+                Ok(requests)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "PR lookup failed.");
+                Ok(last.get(&key).cloned().unwrap_or_default())
+            }
+        }
+    }
+    async fn get(
+        &self,
+        cwd: &Path,
+        reference: &str,
+    ) -> Result<t3_contracts::source_control::ChangeRequest, t3_git::GitError> {
+        self.inner.get(cwd, reference).await
+    }
+    async fn checkout(&self, cwd: &Path, reference: &str) -> Result<(), t3_git::GitError> {
+        self.inner.checkout(cwd, reference).await
+    }
+    async fn create(
+        &self,
+        cwd: &Path,
+        base: &str,
+        head: &str,
+        title: &str,
+        body_file: &Path,
+    ) -> Result<(), t3_git::GitError> {
+        self.inner.create(cwd, base, head, title, body_file).await
+    }
+    async fn clone_urls(
+        &self,
+        cwd: &Path,
+        repository: &str,
+        request_url: &str,
+    ) -> Result<SourceControlRepositoryCloneUrls, t3_git::GitError> {
+        self.inner.clone_urls(cwd, repository, request_url).await
+    }
+    async fn default_branch(&self, cwd: &Path) -> Result<Option<String>, t3_git::GitError> {
+        self.inner.default_branch(cwd).await
+    }
+    fn head_ref(&self, number: u64) -> Option<String> {
+        self.inner.head_ref(number)
+    }
+    fn short_label(&self) -> &str {
+        self.inner.short_label()
+    }
+    fn head_branch_probe(
+        &self,
+        selectors: &[String],
+        state: Option<t3_contracts::source_control::ChangeRequestState>,
+        default_branch_selector: Option<&str>,
+    ) -> (Vec<String>, usize) {
+        self.inner
+            .head_branch_probe(selectors, state, default_branch_selector)
+    }
+    async fn targets_remote(
+        &self,
+        cwd: &Path,
+        remote: &str,
+        repository: Option<&str>,
+    ) -> Result<bool, t3_git::GitError> {
+        self.inner.targets_remote(cwd, remote, repository).await
+    }
+    async fn setup(
+        &self,
+        cwd: &Path,
+        thread_id: &str,
+        worktree: &Path,
+    ) -> Result<(), t3_git::GitError> {
+        self.inner.setup(cwd, thread_id, worktree).await
     }
 }
 

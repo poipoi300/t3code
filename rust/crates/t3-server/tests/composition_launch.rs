@@ -737,12 +737,17 @@ async fn setup_scripts_publish_output_and_their_end_on_the_setup_stream() {
     s.insert_project("project-pass", &passing, &script("echo t3-setup-output"));
     let failing = s.home().join("failing");
     repository(&failing);
+    // The terminal's shell is PowerShell on Windows and the test server passes no PATH, so the
+    // native child that exits 3 is named by its full path.
     let exit_three = if cfg!(windows) {
-        "cmd /c exit 3"
+        format!(
+            r"& '{}\System32\cmd.exe' /c exit 3",
+            std::env::var("SystemRoot").unwrap()
+        )
     } else {
-        "sh -c 'exit 3'"
+        "sh -c 'exit 3'".to_owned()
     };
-    s.insert_project("project-fail", &failing, &script(exit_three));
+    s.insert_project("project-fail", &failing, &script(&exit_three));
 
     let setup = s.subscribe("subscribeWorktreeSetup", json!({"threadId": "thread:pass"}));
     assert_eq!(s.next(&setup).await.unwrap(), Value::Null);

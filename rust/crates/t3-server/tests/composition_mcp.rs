@@ -1026,7 +1026,9 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
         )
         .await;
     assert!(
-        is_error(&stop) && !stop.to_string().contains("The operation could not be completed."),
+        is_error(&stop)
+            && stop.to_string().contains("invalid_request")
+            && stop.to_string().contains("This workflow is no longer running."),
         "{stop}"
     );
     let missing_project = mcp
