@@ -82,6 +82,7 @@ async fn the_web_client_start_up_sequence_reports_each_step() {
         server.rpc_methods_served,
         t3_contracts::rpc::WS_METHODS.len()
     );
+    println!("unserved: {}", server.unserved_methods.join(" "));
 
     assert!(
         report["fatal"].is_null(),

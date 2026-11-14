@@ -13,6 +13,8 @@ pub struct RunningServer {
     pub pairing_credential: String,
     /// RPC methods this server serves (registered, not `NotImplemented`), of the contract's 220.
     pub rpc_methods_served: usize,
+    /// The contract methods this server answers with Effect's unknown-request-tag defect.
+    pub unserved_methods: Vec<&'static str>,
     shutdown: CancellationToken,
     phase: watch::Receiver<Phase>,
     task: Option<tokio::task::JoinHandle<crate::Result<()>>>,
@@ -177,10 +179,12 @@ async fn start_configured(
             )));
         }
     };
-    let rpc_methods_served = t3_contracts::rpc::WS_METHODS
+    let unserved_methods: Vec<&'static str> = t3_contracts::rpc::WS_METHODS
         .iter()
-        .filter(|method| handlers.disposition(method.tag) == Some(true))
-        .count();
+        .filter(|method| handlers.disposition(method.tag) != Some(true))
+        .map(|method| method.tag)
+        .collect();
+    let rpc_methods_served = t3_contracts::rpc::WS_METHODS.len() - unserved_methods.len();
     tracing::info!(
         served = rpc_methods_served,
         total = t3_contracts::rpc::WS_METHODS.len(),
@@ -217,6 +221,7 @@ async fn start_configured(
         address,
         pairing_credential,
         rpc_methods_served,
+        unserved_methods,
         shutdown,
         phase,
         task: Some(task),

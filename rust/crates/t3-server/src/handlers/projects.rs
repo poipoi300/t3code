@@ -20,6 +20,19 @@ pub fn register_with(registry: &mut HandlerRegistry, domains: &Domains) -> crate
                 })
             }
         })?;
+        let p = projects.clone();
+        // Same mapping as ensureScratch in TypeScript (`managedFolders.createNamedProject`).
+        registry.register::<WsProjectsCreateNewRpc, _, _>(move |_, input| {
+            let p = p.clone();
+            async move {
+                p.create_new(input).await.map_err(|error| {
+                    typed(serde_json::json!({
+                        "_tag": "OrchestrationDispatchCommandError",
+                        "message": error.to_string(),
+                    }))
+                })
+            }
+        })?;
         let p = projects;
         // Mutations pass the command gate, as TypeScript's `startup.enqueueCommand` does.
         registry.register::<WsProjectsMutateRpc, _, _>(move |ctx, mutation| {
@@ -51,6 +64,7 @@ pub fn register_with(registry: &mut HandlerRegistry, domains: &Domains) -> crate
     }
     let _ = domains;
     registry.unimplemented::<WsProjectsEnsureScratchRpc>()?;
+    registry.unimplemented::<WsProjectsCreateNewRpc>()?;
     registry.unimplemented::<WsProjectsMutateRpc>()
 }
 

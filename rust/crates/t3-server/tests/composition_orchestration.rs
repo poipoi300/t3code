@@ -622,6 +622,22 @@ async fn dev_mode_scratch_project_thread_and_replay_turn_over_the_socket() {
     )
     .await);
     assert_eq!(again["projectId"], project.as_str());
+    // A named project gets its own folder under the managed projects root.
+    let named = ok(unary(
+        &mut client,
+        &mut socket,
+        "projects.createNew",
+        json!({"name": "Named project"}),
+    )
+    .await);
+    let root = named["workspaceRoot"].as_str().unwrap();
+    let projects_root = std::fs::canonicalize(home.join("projects")).unwrap();
+    assert!(
+        std::fs::canonicalize(root)
+            .unwrap()
+            .starts_with(&projects_root),
+        "{named}"
+    );
 
     // An unserved method: Effect's answer for an unknown request tag, never a structured defect.
     let unserved = unary(
@@ -645,6 +661,28 @@ async fn dev_mode_scratch_project_thread_and_replay_turn_over_the_socket() {
         json!({"type":"thread.create","commandId":"command:dev-thread","threadId":thread,"projectId":project,"title":"Dev milestone","modelSelection":{"instanceId":"devReplay","model":"multi-turn"},"runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"}),
     )
     .await);
+    // No suggestion before the first turn: the stream opens with `null`.
+    let suggestion = client
+        .start(
+            "orchestration.subscribePromptSuggestion",
+            json!({"threadId": thread}),
+            CallKind::Stream,
+        )
+        .unwrap();
+    loop {
+        match event(&mut socket, &mut client).await {
+            CallEvent::Chunk { id, values } if id == suggestion => {
+                client.acknowledge(id);
+                assert_eq!(values, vec![Value::Null]);
+                break;
+            }
+            CallEvent::Exit { id, exit } if id == suggestion => {
+                panic!("suggestions ended: {}", serde_json::to_value(exit).unwrap())
+            }
+            CallEvent::Chunk { id, .. } => client.acknowledge(id),
+            _ => {}
+        }
+    }
     let subscription = client
         .start(
             "orchestration.subscribeThread",

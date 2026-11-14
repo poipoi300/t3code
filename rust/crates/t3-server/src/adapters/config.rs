@@ -111,6 +111,8 @@ impl LocalServices {
             "cwd": self.config.cwd.to_string_lossy(), "keybindingsConfigPath": self.config.paths.keybindings().to_string_lossy(),
             "keybindings": keys.keybindings, "issues": keys.issues, "settings": settings,
             "providers": [], "availableEditors": [],
+            // Upstream 2d80cb6bc7: clients count live timers on the host clock.
+            "serverTime": super::auth::now_iso()?,
             "observability":observability
         })).map_err(service_error)
     }

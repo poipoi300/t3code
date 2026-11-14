@@ -215,6 +215,15 @@ pub async fn serve(
         }),
     );
     output.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    if html {
+        // The app can approve agents and start threads in one click, so no other site may
+        // frame it (`SPA_FRAME_HEADERS` in apps/server/src/http.ts, upstream 94aa3d7736).
+        output.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("frame-ancestors 'none'"),
+        );
+        output.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    }
     if !unchanged {
         let content_type = if html {
             "text/html; charset=utf-8"

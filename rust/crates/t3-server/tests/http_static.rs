@@ -33,6 +33,9 @@ async fn html_headers_validators_and_fallbacks() {
     assert_eq!(headers["content-type"], "text/html; charset=utf-8");
     assert_eq!(headers["cache-control"], "no-cache");
     assert_eq!(headers["vary"], "Accept-Encoding");
+    // Upstream 94aa3d7736: no other site may frame the app.
+    assert_eq!(headers["content-security-policy"], "frame-ancestors 'none'");
+    assert_eq!(headers["x-frame-options"], "DENY");
     assert!(
         headers.get("etag").is_none() && headers.get("last-modified").is_none(),
         "HTML is always revalidated"

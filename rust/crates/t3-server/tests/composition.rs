@@ -260,6 +260,13 @@ async fn binary_serves_health_bootstrap_and_core_rpc_then_stops_and_releases_its
             .to_string_lossy()
             .as_ref()
     );
+    // The host clock (upstream 2d80cb6bc7), as an ISO timestamp.
+    assert!(
+        config["serverTime"]
+            .as_str()
+            .is_some_and(|t| t.ends_with('Z') && t.contains('T')),
+        "{config}"
+    );
     match call(
         &mut socket,
         &mut client,
@@ -375,7 +382,9 @@ async fn peer_link_registration_follows_the_linked_environments_setting_at_start
 #[tokio::test]
 async fn the_real_clients_preflight_passes_on_every_route_group() {
     let temp = tempfile::tempdir().unwrap();
-    let server = t3_server::runtime::start(inputs(temp.path())).await.unwrap();
+    let server = t3_server::runtime::start(inputs(temp.path()))
+        .await
+        .unwrap();
     let http = reqwest::Client::new();
     let client_headers = [
         "authorization",
@@ -407,19 +416,33 @@ async fn the_real_clients_preflight_passes_on_every_route_group() {
         let headers = preflight.headers();
         assert_eq!(headers["access-control-allow-origin"], "*", "{path}");
         assert_eq!(headers["access-control-max-age"], "600", "{path}");
-        assert!(!headers.contains_key("access-control-allow-credentials"), "{path}");
+        assert!(
+            !headers.contains_key("access-control-allow-credentials"),
+            "{path}"
+        );
         let allowed = headers["access-control-allow-headers"].to_str().unwrap();
         for header in client_headers {
-            assert!(allowed.split(',').any(|h| h.trim() == header), "{path}: {header}");
+            assert!(
+                allowed.split(',').any(|h| h.trim() == header),
+                "{path}: {header}"
+            );
         }
         // TypeScript does not allow it either, so no client may send it cross-origin.
         assert!(!allowed.contains("cache-control"), "{path}");
         let methods = headers["access-control-allow-methods"].to_str().unwrap();
-        assert!(["GET", "POST", "OPTIONS"].iter().all(|m| methods.contains(m)), "{path}");
+        assert!(
+            ["GET", "POST", "OPTIONS"]
+                .iter()
+                .all(|m| methods.contains(m)),
+            "{path}"
+        );
     }
     // The simple cross-origin read the descriptor needs carries the wildcard origin too.
     let descriptor = http
-        .get(format!("http://{}/.well-known/t3/environment", server.address))
+        .get(format!(
+            "http://{}/.well-known/t3/environment",
+            server.address
+        ))
         .header("origin", "https://app.t3.codes")
         .send()
         .await

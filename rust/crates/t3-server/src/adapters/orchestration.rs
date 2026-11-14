@@ -435,6 +435,27 @@ impl OrchestrationAdapter {
     }
 }
 
+impl OrchestrationAdapter {
+    /// `orchestration.subscribePromptSuggestion`: the thread's latest suggestion, then each
+    /// replacement; the session manager clears it for a deleted thread.
+    pub fn subscribe_prompt_suggestion(
+        &self,
+        thread: ThreadId,
+    ) -> BoxStream<'static, OrchestrationResult<OrchestrationV2PromptSuggestion>> {
+        let sessions = self.runtime().map(|runtime| runtime.sessions.clone());
+        boxed(async_stream::try_stream! {
+            let mut suggestions = sessions?.subscribe_prompt_suggestion(thread).await?;
+            loop {
+                let current = suggestions.borrow_and_update().clone();
+                yield current;
+                if suggestions.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+    }
+}
+
 fn boxed<T: Send + 'static>(
     stream: impl Stream<Item = OrchestrationResult<T>> + Send + 'static,
 ) -> BoxStream<'static, OrchestrationResult<T>> {

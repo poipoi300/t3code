@@ -139,6 +139,14 @@ impl ProjectAdapter {
         self.managed.ensure_scratch().await
     }
 
+    /// `projects.createNew`: a named project folder under the managed projects root.
+    pub async fn create_new(
+        &self,
+        input: t3_contracts::project::ProjectCreateNewInput,
+    ) -> t3_project::Result<t3_contracts::project::ProjectCreateNewResult> {
+        self.managed.create_new(input).await
+    }
+
     /// `projects.mutate`.
     pub async fn mutate(&self, mutation: ProjectMutation) -> t3_project::Result<Project> {
         self.service.mutate(mutation).await

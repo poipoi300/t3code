@@ -13,8 +13,6 @@ fn register_pending(registry: &mut HandlerRegistry) -> crate::Result<()> {
     registry.unimplemented::<WsOrchestrationV2LaunchThreadRpc>()?;
     // CommandOutputHub::subscribe (ports::transport::command_output_hub is empty).
     registry.unimplemented::<WsOrchestrationV2SubscribeCommandOutputRpc>()?;
-    // ProviderSessionManager::subscribe_prompt_suggestion.
-    registry.unimplemented::<WsOrchestrationV2SubscribePromptSuggestionRpc>()?;
     // ThreadSearch::search_threads (ports::transport::thread_search is empty).
     registry.unimplemented::<WsOrchestrationV2SearchThreadsRpc>()?;
     // ThreadFind::search_thread_stream (ports::transport::thread_find is empty).
@@ -35,7 +33,6 @@ fn register_pending(registry: &mut HandlerRegistry) -> crate::Result<()> {
     registry.unimplemented::<WsProjectCloneRetryRpc>()?;
     registry.unimplemented::<WsSubscribeProjectClonesRpc>()?;
     // ProjectService::{mutate, ensure_scratch, create_new, create_from_thread}.
-    registry.unimplemented::<WsProjectsCreateNewRpc>()?;
     registry.unimplemented::<WsProjectsCreateFromThreadRpc>()?;
     // AgentSessionScanner::scan, AgentSessionImporter::import_recent_agent_threads.
     registry.unimplemented::<WsAgentSessionsScanRpc>()?;
@@ -45,6 +42,7 @@ fn register_pending(registry: &mut HandlerRegistry) -> crate::Result<()> {
 
 /// Methods served once an orchestration adapter is present.
 fn register_adapter_backed_unavailable(registry: &mut HandlerRegistry) -> crate::Result<()> {
+    registry.unimplemented::<WsOrchestrationV2SubscribePromptSuggestionRpc>()?;
     registry.unimplemented::<WsOrchestrationV2SubscribeShellRpc>()?;
     registry.unimplemented::<WsOrchestrationV2SubscribeThreadRpc>()?;
     registry.unimplemented::<WsOrchestrationV2GetThreadProjectionRpc>()?;
@@ -205,6 +203,23 @@ mod live {
                     Ok(a.subscribe_shell(input).map(|item| {
                         item.map_err(|e| {
                             shell_error("Failed while streaming the orchestration V2 shell", &e)
+                        })
+                    }))
+                }
+            },
+        )?;
+        // TypeScript's stream cannot fail (its error type is authorization only), so a session
+        // manager failure is a defect here.
+        let a = adapter.clone();
+        registry.register_stream::<WsOrchestrationV2SubscribePromptSuggestionRpc, _, _, _>(
+            move |_, input| {
+                let a = a.clone();
+                async move {
+                    Ok(a.subscribe_prompt_suggestion(input.thread_id).map(|item| {
+                        item.map_err(|error| {
+                            Failure::Defect(crate::registry::ServerDefect::Internal {
+                                message: error.to_string(),
+                            })
                         })
                     }))
                 }
