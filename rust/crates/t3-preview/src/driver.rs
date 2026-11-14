@@ -200,6 +200,7 @@ pub struct PlaywrightOptions {
 
 type Pending = Arc<Mutex<BTreeMap<u64, oneshot::Sender<Result<Value>>>>>;
 pub struct PlaywrightDriver {
+    tasks: AsyncMutex<Vec<tokio::task::JoinHandle<()>>>,
     generation: u64,
     stdin: AsyncMutex<tokio::process::ChildStdin>,
     pending: Pending,
@@ -276,7 +277,7 @@ impl PlaywrightDriver {
         let reader_pending = pending.clone();
         let reader_events = events.clone();
         let reader_stop = stop.clone();
-        tokio::spawn(async move {
+        let reader = tokio::spawn(async move {
             let mut stdout = BufReader::new(stdout);
             while let Ok(Some(line)) = read_bounded_line(&mut stdout, 150 * 1024 * 1024).await {
                 let Ok(message) = serde_json::from_slice::<Value>(&line) else {
@@ -322,12 +323,12 @@ impl PlaywrightDriver {
             });
         });
         let monitor_stop = stop.clone();
-        tokio::spawn(async move {
+        let monitor = tokio::spawn(async move {
             let _runtime = runtime;
             tokio::select! { _ = monitor_stop.cancelled() => { let _ = child.terminate(Duration::from_secs(2)).await; }, _ = child.wait() => {} }
             monitor_stop.cancel();
         });
-        tokio::spawn(async move {
+        let errors = tokio::spawn(async move {
             let mut stderr = stderr;
             let mut bytes = [0u8; 2048];
             while let Ok(count) = stderr.read(&mut bytes).await {
@@ -338,6 +339,7 @@ impl PlaywrightDriver {
             }
         });
         Ok(Self {
+            tasks: AsyncMutex::new(vec![monitor, reader, errors]),
             generation,
             stdin: AsyncMutex::new(stdin),
             pending,
@@ -376,6 +378,23 @@ impl BrowserDriver for PlaywrightDriver {
         self.generation
     }
     async fn call(&self, command: BrowserCommand, timeout: Duration) -> Result<Value> {
+        let shutdown = matches!(command, BrowserCommand::Shutdown);
+        let result = self.request(command, timeout).await;
+        if shutdown {
+            self.stop.cancel();
+            let tasks = std::mem::take(&mut *self.tasks.lock().await);
+            for task in tasks {
+                let _ = task.await;
+            }
+        }
+        result
+    }
+    fn subscribe(&self) -> mpsc::UnboundedReceiver<BrowserEvent> {
+        self.events.subscribe()
+    }
+}
+impl PlaywrightDriver {
+    async fn request(&self, command: BrowserCommand, timeout: Duration) -> Result<Value> {
         let opening = matches!(command, BrowserCommand::Open { .. });
         if self.stop.is_cancelled() {
             return Err(Error::Disconnected);
@@ -413,9 +432,6 @@ impl BrowserDriver for PlaywrightDriver {
                 .insert("_workerGeneration".into(), self.generation.into());
         }
         Ok(value)
-    }
-    fn subscribe(&self) -> mpsc::UnboundedReceiver<BrowserEvent> {
-        self.events.subscribe()
     }
 }
 impl Drop for PlaywrightDriver {

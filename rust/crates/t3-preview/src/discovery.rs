@@ -206,6 +206,7 @@ struct Inner {
     enabled: bool,
     proc_root: PathBuf,
     stop: CancellationToken,
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
@@ -282,17 +283,28 @@ impl PortDiscovery {
             enabled,
             proc_root,
             stop: CancellationToken::new(),
+            task: Mutex::new(None),
         });
         let weak = Arc::downgrade(&inner);
         let stop = inner.stop.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(3));
             tick.tick().await;
             loop {
                 tokio::select! {_=stop.cancelled()=>break,_=tick.tick()=>{let Some(inner)=weak.upgrade()else{break;};let retained={let state=lock(&inner.state);state.retained>0||!state.subscriptions.is_empty()};if retained {let _=Self {inner}.poll().await;}}}
             }
         });
+        *lock(&inner.task) = Some(task);
         Ok(Self { inner })
+    }
+    pub async fn shutdown(&self) {
+        self.inner.stop.cancel();
+        lock(&self.inner.state).subscriptions.clear();
+        let task = lock(&self.inner.task).take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
     }
     pub fn register_terminal_processes(&self, thread: &str, terminal: &str, pids: &[u64]) {
         let mut state = lock(&self.inner.state);
@@ -316,6 +328,9 @@ impl PortDiscovery {
         }
     }
     pub async fn retain(&self) -> Result<DiscoveryRetention> {
+        if self.inner.stop.is_cancelled() {
+            return Err(Error::Disconnected);
+        }
         let was_idle = {
             let mut state = lock(&self.inner.state);
             let idle = state.retained == 0;
@@ -336,6 +351,9 @@ impl PortDiscovery {
         Ok(retention)
     }
     pub async fn subscribe(&self, urls: Vec<String>) -> Result<DiscoverySubscription> {
+        if self.inner.stop.is_cancelled() {
+            return Err(Error::Disconnected);
+        }
         let urls = configured_urls(&urls);
         let initial = self.scan(&urls).await?;
         let (tx, events) = mpsc::unbounded_channel();

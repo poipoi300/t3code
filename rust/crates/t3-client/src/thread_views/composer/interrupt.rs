@@ -2,7 +2,7 @@
 use crate::{ClientError, ClientStore, operations::{self, CommandOutcome, InterruptInput, InterruptPlan, OperationQueue}, optimistic::{ProjectionKey, ViewChange}, platform::Platform, rpc::{RpcCallError, RpcEndpoint, RpcMethod, SessionEndpoint}, types::ThreadKey};
 use futures::{FutureExt, future::LocalBoxFuture, stream::LocalBoxStream};
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
-use t3_contracts::{orchestration_v2::*, rpc::{WsOrchestrationV2DispatchCommandRpc, WsOrchestrationV2GetThreadProjectionRpc}};
+use t3_contracts::rpc::{WsOrchestrationV2DispatchCommandRpc, WsOrchestrationV2GetThreadProjectionRpc};
 
 struct Observed<'a> { endpoint: &'a SessionEndpoint, error: Rc<RefCell<Option<ClientError>>> }
 impl RpcEndpoint for Observed<'_> {

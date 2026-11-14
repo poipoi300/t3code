@@ -162,6 +162,11 @@ async fn discovery_filters_real_non_document_responses_and_keeps_subscribers_sep
     scanner.poll().await.unwrap();
     assert!(docs.events.try_recv().is_err());
     assert!(admin.events.try_recv().is_err());
+    scanner.shutdown().await;
+    assert!(docs.events.recv().await.is_none());
+    assert!(admin.events.recv().await.is_none());
+    assert!(scanner.subscribe(vec![]).await.is_err());
+    assert!(scanner.retain().await.is_err());
 }
 
 #[cfg(windows)]

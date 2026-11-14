@@ -55,6 +55,9 @@ impl Default for PreviewManager {
 }
 
 impl PreviewManager {
+    pub fn tab_thread(&self, tab_id: &str) -> Option<String> {
+        lock(&self.state).sessions.iter().find(|session| session.tab_id.as_str() == tab_id).map(|session| session.thread_id.0.clone())
+    }
     pub fn subscribe_events(&self) -> mpsc::UnboundedReceiver<PreviewEvent> {
         self.events.subscribe()
     }

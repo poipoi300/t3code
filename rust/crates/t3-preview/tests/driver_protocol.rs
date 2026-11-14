@@ -119,5 +119,6 @@ async fn exercise_worker(module: &str) {
         .call(BrowserCommand::Shutdown, Duration::from_secs(5))
         .await
         .unwrap();
+    assert!(!driver.is_connected());
     assert!(!root.path().join("profiles").exists());
 }
