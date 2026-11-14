@@ -122,8 +122,9 @@ fn git_directories() -> Vec<PathBuf> {
     directories
 }
 
-/// A fake `glab`: it logs `GITLAB_HOST` and its arguments, answers `mr view` with `mr.json` and
-/// every API call with `project.json`.
+/// A fake `glab`: it logs `GITLAB_HOST` and its arguments, answers `mr list` with `mr-list.json`
+/// (signed out, as `glab auth login` asks, in a checkout named `signed-out`), `mr view` with
+/// `mr.json` and every API call with `project.json`.
 fn fake_glab(bin: &Path, published: &Path) {
     std::fs::create_dir_all(bin).unwrap();
     // Also the `namespaces/acme` answer when publishing: it needs the namespace id.
@@ -158,8 +159,7 @@ fn fake_glab(bin: &Path, published: &Path) {
              type \"%~dp0project.json\"\r\n\
              exit /b 0\r\n\
              :list\r\n\
-             set \"ARGS=%*\"\r\n\
-             if not \"%ARGS:logged-out=%\"==\"%ARGS%\" (echo glab auth login 1>&2& exit /b 1)\r\n\
+             if not \"%CD:signed-out=%\"==\"%CD%\" (echo glab auth login 1>&2& exit /b 1)\r\n\
              type \"%~dp0mr-list.json\"\r\n",
         )
         .unwrap();
@@ -168,7 +168,7 @@ fn fake_glab(bin: &Path, published: &Path) {
         std::fs::write(
             &script,
             "#!/bin/sh\nd=$(dirname \"$0\")\necho \"$GITLAB_HOST $1 $2\" >> \"$d/glab-calls.txt\"\n\
-             case \"$1 $2 $3\" in *logged-out*) echo 'glab auth login' >&2; exit 1;; esac\n\
+             case \"$PWD\" in *signed-out*) echo 'glab auth login' >&2; exit 1;; esac\n\
              case \"$1 $2\" in \"mr list\") cat \"$d/mr-list.json\"; exit 0;; esac\n\
              case \"$1\" in --version) echo 'glab version 1.0.0';; auth) exit 1;; \
              mr) cat \"$d/mr.json\";; *) cat \"$d/project.json\";; esac\n",
@@ -1059,6 +1059,7 @@ async fn remote_status(s: &mut Server) -> Value {
 /// with no pull request and the stream open.
 #[tokio::test]
 async fn vcs_status_carries_the_pull_request_from_the_checkouts_forge() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (github, _) = github_stand_in().await;
     // Status fetches the upstream remote: `false` as ssh fails it locally, so gitlab.com is
     // never contacted.

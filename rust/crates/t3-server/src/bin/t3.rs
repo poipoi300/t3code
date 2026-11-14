@@ -1,5 +1,16 @@
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
+/// The CLI and the server's start-up run on `entry`'s sized thread, never on the OS main thread
+/// (1 MiB on Windows).
+fn main() -> std::process::ExitCode {
+    match t3_server::entry::run(cli) {
+        Ok(exit) => exit,
+        Err(error) => {
+            eprintln!("cannot start the runtime: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn cli() -> std::process::ExitCode {
     #[cfg(feature = "providers")]
     if let Some(exit) = t3_server::adapters::providers::managed_token_helper(
         &std::env::args_os().skip(1).collect::<Vec<_>>(),

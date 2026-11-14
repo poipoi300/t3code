@@ -9,7 +9,7 @@ publish.workspace = true
 workspace = true
 [features]
 # The assembled domain services the `t3` binary serves.
-default = ["local-services", "workspace", "terminal", "git", "scheduler", "usage", "orchestration", "host", "project", "device", "providers", "preview", "cloud", "forge", "pull-requests", "textgen", "git-actions", "mcp"]
+default = ["local-services", "workspace", "terminal", "git", "scheduler", "usage", "orchestration", "host", "project", "device", "providers", "preview", "cloud", "forge", "pull-requests", "textgen", "git-actions", "mcp", "textgen-native"]
 local-services = [
     "dep:t3-auth",
     "dep:t3-config",
@@ -40,7 +40,7 @@ git-actions = ["textgen", "forge", "project", "pull-requests", "terminal", "dep:
 # never in a shipped binary: it lets a user point the policy reader away from the machine's
 # policy. Tests get it through the `t3-config` dev-dependency below.
 dev-policy-overrides = ["t3-config?/dev-policy-overrides"]
-# Round-2 text generation (native runners, review guides, title links); not default until it compiles and its tests pass.
+# Provider-native text generation (Codex, Claude), review guides and title link context.
 textgen-native = ["git-actions", "providers"]
 project = ["dep:t3-project", "orchestration", "workspace", "dep:t3-process", "dep:async-trait"]
 # The `/mcp` endpoint and per-thread provider credentials (`adapters/mcp.rs`).

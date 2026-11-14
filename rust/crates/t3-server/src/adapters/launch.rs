@@ -168,7 +168,11 @@ impl LaunchAdapter {
 #[cfg(feature = "scheduler")]
 #[async_trait::async_trait]
 impl crate::adapters::scheduled_launch::StrategyCheck for LaunchAdapter {
-    async fn check(&self, project: &ProjectId, strategy: &Strategy) -> std::result::Result<(), String> {
+    async fn check(
+        &self,
+        project: &ProjectId,
+        strategy: &Strategy,
+    ) -> std::result::Result<(), String> {
         self.check_client_strategy(project, strategy).await
     }
 }
@@ -257,14 +261,20 @@ impl Inner {
             return Err(REFUSED.into());
         };
         if let Ok(late) = self.late()
-            && late.projects.managed().is_scratch_project(&project.project_id).await
+            && late
+                .projects
+                .managed()
+                .is_scratch_project(&project.project_id)
+                .await
         {
             let scratch = match late.projects.managed().scratch_root().await {
                 Some(root) => local_real_path(root).await,
                 None => None,
             };
             return match scratch {
-                Some(root) if t3_workspace::paths::within(&target, &root) && target != root => Ok(()),
+                Some(root) if t3_workspace::paths::within(&target, &root) && target != root => {
+                    Ok(())
+                }
                 _ => Err(REFUSED.into()),
             };
         }

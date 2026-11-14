@@ -375,17 +375,22 @@ async fn editor_links_open_only_local_targets_inside_server_workspaces() {
         );
         assert!(launches.try_recv().is_err());
     }
-    // The UNC case above is refused by either resolver (the old one fails reaching the share).
-    // This one tells them apart: a link to `target.`, which Windows opens as `target`, inside the
-    // workspace. A plain `canonicalize` follows it and the editor would start; the hardened
-    // resolver refuses the trailing dot before following the link.
+    // The UNC case above answers the same with either resolver: the contract carries no reason,
+    // and following the link would only show on the network. This case tells them apart without
+    // one: a link inside the workspace to `target::$INDEX_ALLOCATION`, which Windows opens as the
+    // directory `target`. Following it first starts the editor on `target\notes.md`; the
+    // hardened resolver refuses the `:` in the link's target before following it.
     #[cfg(windows)]
     {
         let target = scratch.join("target");
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("notes.md"), "x").unwrap();
         let dotted = scratch.join("dotted");
-        std::os::windows::fs::symlink_dir(format!("{}.", target.display()), &dotted).unwrap();
+        std::os::windows::fs::symlink_dir(
+            format!("{}::$INDEX_ALLOCATION", target.display()),
+            &dotted,
+        )
+        .unwrap();
         for editor in ["vscode", "file-manager"] {
             let exit = unary(
                 &mut socket,

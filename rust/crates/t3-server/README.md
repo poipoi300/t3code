@@ -29,6 +29,13 @@ closes the command gate, stops accepting, ends HTTP connections at once (TypeScr
 open, closes the database and releases the home last. HTTP requests must send their headers
 within 60 s and keep their body moving within 300 s (Node's defaults).
 
+Stack budget: start-up is call depth, not one large future (the futures are about 29 KB). In a
+debug build, start plus shutdown passes on an 832 KB stack and overflows at 768 KB (measured
+2026-11-14). The OS main thread has 1 MiB on Windows, so the `t3` binary never polls the server
+there: `entry::run` drives its CLI future from an 8 MiB thread (the Linux and macOS default),
+and Tokio's workers keep their 2 MiB, so request paths are unchanged. A host that embeds the
+server and calls `runtime::start` must give the polling thread the same stack; none does today.
+
 ## Adding a domain group
 
 1. **Adapter** (`src/adapters/<group>.rs`): builds the crate's services once from a

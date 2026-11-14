@@ -350,26 +350,9 @@ impl GitAdapter {
         session: &AuthSessionId,
         cwd: &str,
         operation: &str,
-        bindings: Option<&dyn SavedRepositoryBindings>,
     ) -> Result<&vcs::Vcs, Error> {
         let vcs = self.vcs.as_ref().ok_or_else(denied)?;
         self.checkout(session, cwd, operation).await?;
-        // Re-review 4 H-1 item 4: the folder's saved binding pins the reads. Applying it refuses
-        // a changed repository now, and records it as this scope's identity in t3-git's process
-        // cache, which every later status and branch read of the scope validates against.
-        if let Some(bindings) = bindings {
-            let saved = bindings
-                .saved_binding(Path::new(cwd))
-                .await
-                .map_err(|_| bindings_unreadable(cwd))?;
-            if let Some(saved) = saved {
-                self.git
-                    .at(cwd)
-                    .with_repository_binding(saved)
-                    .await
-                    .map_err(|e| error(e, operation))?;
-            }
-        }
         Ok(vcs)
     }
 

@@ -142,7 +142,10 @@ fn canonical(path: &Path) -> PathBuf {
 
 impl Server {
     async fn start() -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        Self::start_in(tempfile::tempdir().unwrap()).await
+    }
+    /// Starts on a home prepared beforehand (state a restart finds).
+    async fn start_in(temp: tempfile::TempDir) -> Self {
         let home = temp.path();
         let env = ["SystemRoot", "ComSpec", "WINDIR"]
             .into_iter()
@@ -872,6 +875,65 @@ async fn status_subscriptions_are_bounded_per_connection_and_per_server() {
     for mut socket in kept {
         socket.close(None).await.unwrap();
     }
+    s.socket.close(None).await.unwrap();
+    s.runtime.take().unwrap().shutdown().await.unwrap();
+}
+
+fn repository_changed(exit: Exit) {
+    let error = failure(exit);
+    assert_eq!(error["_tag"], "GitCommandError", "{error}");
+    assert_eq!(
+        error["operation"], "checkpoint.git.repository-changed",
+        "{error}"
+    );
+}
+
+/// Re-review 4 H-1 item 4: status and branch reads run against the folder's saved binding. A
+/// folder whose repository changed since it was bound (saved before the server starts, as a
+/// restart finds it) is refused with its own typed status, never "not a repository".
+#[tokio::test]
+async fn status_reads_refuse_a_folder_whose_saved_repository_changed() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().to_owned();
+    let isolated = |path: &Path| {
+        t3_git::Git::new(path).with_environment(std::collections::BTreeMap::from([
+            (
+                "GIT_CONFIG_GLOBAL".into(),
+                Some(home.join("no-global-config").into_os_string()),
+            ),
+            ("GIT_CONFIG_NOSYSTEM".into(), Some("1".into())),
+        ]))
+    };
+    // `changed` was bound to `earlier`, a repository it no longer holds; `kept` still holds its own.
+    let earlier = home.join("earlier");
+    repository(&earlier);
+    let changed = home.join("worktrees").join("changed");
+    repository(&changed);
+    let kept = home.join("worktrees").join("kept");
+    repository(&kept);
+    let earlier_binding = isolated(&earlier).bind_repository().await.unwrap().unwrap();
+    let kept_binding = isolated(&kept).bind_repository().await.unwrap().unwrap();
+    let changed_key = changed.to_string_lossy().into_owned();
+    let kept_key = kept.to_string_lossy().into_owned();
+    std::fs::create_dir_all(home.join("userdata")).unwrap();
+    std::fs::write(
+        home.join("userdata").join("repository-bindings.json"),
+        serde_json::to_vec(&json!({ &changed_key: earlier_binding, &kept_key: kept_binding }))
+            .unwrap(),
+    )
+    .unwrap();
+
+    let mut s = Server::start_in(temp).await;
+    let cwd = json!({"cwd": changed_key});
+    let status = s.subscribe("subscribeVcsStatus", cwd.clone());
+    repository_changed(s.next(&status).await.unwrap_err());
+    let branch = s.subscribe("subscribeVcsBranch", cwd.clone());
+    repository_changed(s.next(&branch).await.unwrap_err());
+    repository_changed(s.call("vcs.refreshStatus", cwd.clone()).await);
+    repository_changed(s.call("vcs.refreshBranch", cwd).await);
+    // The folder that still holds its bound repository is served.
+    let refreshed = ok(s.call("vcs.refreshStatus", json!({"cwd": kept_key})).await);
+    assert_eq!(refreshed["isRepo"], true, "{refreshed}");
     s.socket.close(None).await.unwrap();
     s.runtime.take().unwrap().shutdown().await.unwrap();
 }
