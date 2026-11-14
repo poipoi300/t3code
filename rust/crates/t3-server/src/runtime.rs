@@ -11,6 +11,8 @@ pub struct RunningServer {
     /// The bound address; with `--port 0` this carries the port the OS chose.
     pub address: SocketAddr,
     pub pairing_credential: String,
+    /// RPC methods this server serves (registered, not `NotImplemented`), of the contract's 220.
+    pub rpc_methods_served: usize,
     shutdown: CancellationToken,
     phase: watch::Receiver<Phase>,
     task: Option<tokio::task::JoinHandle<crate::Result<()>>>,
@@ -165,6 +167,15 @@ async fn start_configured(
             )));
         }
     };
+    let rpc_methods_served = t3_contracts::rpc::WS_METHODS
+        .iter()
+        .filter(|method| handlers.disposition(method.tag) == Some(true))
+        .count();
+    tracing::info!(
+        served = rpc_methods_served,
+        total = t3_contracts::rpc::WS_METHODS.len(),
+        "RPC methods served"
+    );
     let services = Arc::new(ServiceRegistry {
         handlers,
         local,
@@ -195,6 +206,7 @@ async fn start_configured(
     Ok(RunningServer {
         address,
         pairing_credential,
+        rpc_methods_served,
         shutdown,
         phase,
         task: Some(task),

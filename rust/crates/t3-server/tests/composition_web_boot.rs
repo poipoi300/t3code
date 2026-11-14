@@ -77,6 +77,11 @@ async fn the_web_client_start_up_sequence_reports_each_step() {
     }
     let todo: Vec<_> = steps.iter().filter(|s| s["status"] != "served").collect();
     println!("to do: {} of {} steps", todo.len(), steps.len());
+    println!(
+        "RPC methods served: {} of {}",
+        server.rpc_methods_served,
+        t3_contracts::rpc::WS_METHODS.len()
+    );
 
     assert!(
         report["fatal"].is_null(),

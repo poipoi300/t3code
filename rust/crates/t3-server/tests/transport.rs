@@ -398,7 +398,6 @@ async fn real_http_pairing_effect_rpc_scopes_revocation_static_and_shutdown() {
         ),
         ("subscribeAuthAccess", json!({}), CallKind::Stream),
         ("server.getProcessDiagnostics", json!({}), CallKind::Unary),
-        ("server.getHostResources", json!({}), CallKind::Unary),
         ("subscribeResourceTelemetry", json!({}), CallKind::Stream),
         (
             "server.signalProcess",
@@ -416,12 +415,26 @@ async fn real_http_pairing_effect_rpc_scopes_revocation_static_and_shutdown() {
         scoped_client.start_request(request, kind).unwrap();
         match event(&mut scoped_socket, &mut scoped_client).await {
             CallEvent::Exit { exit, .. } => assert_eq!(
-                serde_json::to_value(exit).unwrap()["cause"][0]["error"]["_tag"],
-                "EnvironmentAuthorizationError"
+                serde_json::to_value(&exit).unwrap()["cause"][0]["error"]["_tag"],
+                "EnvironmentAuthorizationError","{tag}: {exit:?}"
             ),
             other => panic!("unexpected discard result {other:?}"),
         }
     }
+    // TypeScript's RpcAuthorization.ts gives host resources `orchestration:read` (thread load
+    // balancing reads host load), so this session is served, not refused.
+    let resources = unary(
+        &mut scoped_socket,
+        &mut scoped_client,
+        "server.getHostResources",
+        json!({}),
+    )
+    .await;
+    assert!(
+        matches!(resources, Exit::Success { .. }),
+        "{}",
+        serde_json::to_value(&resources).unwrap()
+    );
     let unsupported = unary(
         &mut scoped_socket,
         &mut scoped_client,

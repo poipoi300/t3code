@@ -268,13 +268,15 @@ fn failed(exit: Exit, tag: &str) -> Value {
 }
 
 #[tokio::test]
-async fn startup_without_a_workspace_authority_reports_explicitly_unsupported_methods() {
+async fn stock_startup_refuses_directories_outside_the_environment_workspaces() {
+    // The composition root supplies the environment authority (package A); a temp directory
+    // that is no project, managed worktree or thread worktree is refused for every method.
     let fx = support::Fixture::start().await;
     let (mut socket, mut client) = fx.connect(&fx.cookie, "").await;
     for (method, payload) in calls(fx.temp.path()) {
         failed(
             support::unary(&mut socket, &mut client, method, payload).await,
-            "NotImplemented",
+            "EnvironmentAuthorizationError",
         );
     }
     drop(socket);

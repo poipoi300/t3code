@@ -28,6 +28,7 @@ pub struct SocketScope {
     id: u64,
     acks: std::sync::Mutex<std::collections::HashMap<String, AckHook>>,
 }
+#[cfg_attr(not(feature = "local-services"), allow(dead_code))]
 impl SocketScope {
     pub(crate) fn new() -> Arc<Self> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -63,6 +64,7 @@ pub struct CallScope {
     socket: Option<Arc<SocketScope>>,
     request: Option<t3_rpc::RequestId>,
 }
+#[cfg_attr(not(feature = "local-services"), allow(dead_code))]
 impl CallScope {
     pub(crate) fn socket(socket: Arc<SocketScope>) -> Self {
         Self {

@@ -220,8 +220,8 @@ impl Fixture {
             connections: Default::default(),
             lifecycle: Default::default(),
         });
-        let app = t3_server::http::router(services.clone())
-            .merge(workspace_terminal::http_routes().with_state(services.clone()));
+        // The production router mounts the asset and upload routes for the workspace domain.
+        let app = t3_server::http::router(services.clone());
         let stop = services.shutdown.clone();
         let task = tokio::spawn(async move {
             axum::serve(
