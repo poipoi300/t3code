@@ -243,3 +243,64 @@ async fn local_spans_are_batched_off_the_ending_thread_and_keep_usage_counters()
     );
     handle.shutdown().await.expect("shutdown");
 }
+
+#[test]
+fn prefixed_keys_the_last_user_info_at_and_other_auth_schemes_are_redacted() {
+    for (text, secret) in [
+        ("https://host.test/token?client_secret=abc", "abc"),
+        ("https://host.test/token?private_token=abc", "abc"),
+        ("https://host.test/token?auth_token=abc", "abc"),
+        ("https://user:p@ss@collector.example/", "ss@"),
+        ("https://user:p@ss@collector.example/", "p@"),
+        ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+        ("x-api-key: sk-ant-abc", "sk-ant-abc"),
+    ] {
+        let redacted = t3_telemetry::privacy::redact_text(text);
+        assert!(!redacted.contains(secret), "{text} -> {redacted}");
+    }
+    assert!(
+        t3_telemetry::privacy::redact_text("https://user:p@ss@collector.example/")
+            .contains("collector.example/")
+    );
+    assert_eq!(
+        t3_telemetry::privacy::redact_text("https://host.test/a?page=2&sort=name"),
+        "https://host.test/a?page=2&sort=name"
+    );
+}
+
+fn quiet_spans(dispatch: &tracing::Dispatch, count: usize) {
+    tracing::dispatcher::with_default(dispatch, || {
+        for index in 0..count {
+            let _span = tracing::info_span!("burst.span", index).entered();
+        }
+    });
+}
+
+#[tokio::test]
+async fn a_burst_of_local_spans_within_one_window_is_kept() {
+    let dir = tempfile::tempdir().expect("temp");
+    let mut options = local_logging(dir.path());
+    // Large enough that the sink's own byte bound is not what drops records.
+    options.trace.max_bytes = 16 * 1024 * 1024;
+    let (dispatch, handle) = t3_telemetry::logging::build(options)
+        .await
+        .expect("logging");
+    quiet_spans(&dispatch, 20_000);
+    handle.force_flush().await.expect("flush");
+    let trace = std::fs::read_to_string(dir.path().join("server.trace.ndjson")).expect("trace");
+    assert_eq!(trace.matches("\"burst.span\"").count(), 20_000);
+    assert_eq!(handle.sink.dropped(), 0);
+    handle.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn dropping_the_handle_without_shutdown_keeps_the_last_window() {
+    let dir = tempfile::tempdir().expect("temp");
+    let (dispatch, handle) = t3_telemetry::logging::build(local_logging(dir.path()))
+        .await
+        .expect("logging");
+    quiet_spans(&dispatch, 3);
+    drop(handle);
+    let trace = std::fs::read_to_string(dir.path().join("server.trace.ndjson")).unwrap_or_default();
+    assert_eq!(trace.matches("\"burst.span\"").count(), 3, "{trace}");
+}
