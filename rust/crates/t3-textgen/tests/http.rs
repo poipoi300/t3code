@@ -318,53 +318,97 @@ async fn reply_shapes_map_to_the_typescript_messages() {
 
 #[test]
 fn a_redacted_key_is_substituted_only_for_the_saved_kind_and_origin() {
-    use t3_contracts::settings::TextGeneratorConfig;
-    use t3_contracts::settings_secret_value::SettingsSecretValue;
+    use t3_contracts::{
+        base_schemas::TrimmedNonEmptyString, settings::TextGeneratorConfig,
+        settings_secret_value::SettingsSecretValue,
+    };
     use t3_textgen::api::listing_config;
     const SENTINEL: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
-    let config = |kind: &str, url: &str, key: &str| -> TextGeneratorConfig {
-        serde_json::from_value(
-            serde_json::json!({"kind":kind,"baseUrl":url,"apiKey":key,"enabled":true}),
-        )
-        .expect("config")
+    // Built directly: decoding would already refuse some of these addresses.
+    let config = |kind: &str, url: &str, key: serde_json::Value| TextGeneratorConfig {
+        kind: serde_json::from_value(kind.into()).expect("kind"),
+        label: None,
+        base_url: TrimmedNonEmptyString(url.into()),
+        api_key: serde_json::from_value(key).expect("key"),
+        enabled: true,
     };
+    let reference = |path: &str| serde_json::json!({"provider": "1password", "reference": path});
     let saved = config(
         "openaiCompatible",
         "https://api.example.com/v1",
-        "saved-key",
+        "saved-key".into(),
     );
     let key = |supplied: &TextGeneratorConfig| {
         listing_config(Some(supplied), Some(&saved), SENTINEL).map(|c| c.api_key)
     };
     let saved_key = Ok(SettingsSecretValue::Literal("saved-key".into()));
-    // A supplied secret reference also reuses a stored secret: only the saved one, at the saved
-    // address, for the saved kind.
-    let referring = |kind: &str, url: &str, reference: &str| -> TextGeneratorConfig {
-        serde_json::from_value(serde_json::json!({
-            "kind": kind,
-            "baseUrl": url,
-            "apiKey": {"provider": "1password", "reference": reference},
-            "enabled": true,
-        }))
-        .expect("config")
-    };
-    let saved_reference = referring(
+    // The saved address, spelled differently.
+    for same in [
+        "https://API.example.com:443/v1/",
+        "https://api.example.com/v1",
+    ] {
+        assert_eq!(
+            key(&config("openaiCompatible", same, SENTINEL.into())),
+            saved_key,
+            "{same}"
+        );
+    }
+    // A stored secret never goes elsewhere: not for the placeholder, nor for a reference.
+    let saved_reference = config(
         "openaiCompatible",
         "https://api.example.com/v1",
-        "op://Private/api/key",
+        reference("op://Private/api/key"),
     );
     for stolen in [
-        referring("openaiCompatible", "https://attacker.example/v1", "op://Private/other/password"),
-        referring("openaiCompatible", "https://attacker.example/v1", "op://Private/api/key"),
-        referring("openaiCompatible", "https://api.example.com/v1", "op://Private/other/password"),
-        referring("anthropic", "https://api.example.com/v1", "op://Private/api/key"),
+        config(
+            "openaiCompatible",
+            "https://attacker.example/v1",
+            SENTINEL.into(),
+        ),
+        config(
+            "openaiCompatible",
+            "https://api.example.com/v2",
+            SENTINEL.into(),
+        ),
+        config(
+            "openaiCompatible",
+            "http://api.example.com/v1",
+            SENTINEL.into(),
+        ),
+        config(
+            "openaiCompatible",
+            "https://api.example.com:8443/v1",
+            SENTINEL.into(),
+        ),
+        config("anthropic", "https://api.example.com/v1", SENTINEL.into()),
+        config(
+            "openaiCompatible",
+            "https://attacker.example/v1",
+            reference("op://Private/other/password"),
+        ),
+        config(
+            "openaiCompatible",
+            "https://attacker.example/v1",
+            reference("op://Private/api/key"),
+        ),
+        config(
+            "openaiCompatible",
+            "https://api.example.com/v1",
+            reference("op://Private/other/password"),
+        ),
+        config(
+            "anthropic",
+            "https://api.example.com/v1",
+            reference("op://Private/api/key"),
+        ),
     ] {
-        for saved in [&saved_reference, &saved] {
+        for saved in [&saved, &saved_reference] {
             assert_eq!(
                 listing_config(Some(&stolen), Some(saved), SENTINEL).map(|c| c.api_key),
                 Err(GenerationError::KeyRequired),
-                "{} {:?}",
+                "{} {:?} against {:?}",
                 stolen.base_url.0,
+                stolen.api_key,
                 saved.api_key
             );
         }
@@ -377,41 +421,26 @@ fn a_redacted_key_is_substituted_only_for_the_saved_kind_and_origin() {
         listing_config(Some(&saved_reference), Some(&saved_reference), SENTINEL),
         Ok(saved_reference.clone())
     );
-    assert_eq!(
-        key(&config(
-            "openaiCompatible",
-            "https://API.example.com:443/v2",
-            SENTINEL
-        )),
-        saved_key
-    );
-    for elsewhere in [
-        config("openaiCompatible", "https://attacker.example/v1", SENTINEL),
-        config("openaiCompatible", "http://api.example.com/v1", SENTINEL),
-        config(
-            "openaiCompatible",
-            "https://api.example.com:8443/v1",
-            SENTINEL,
-        ),
-        config("anthropic", "https://api.example.com/v1", SENTINEL),
-        config("openaiCompatible", "not a url", SENTINEL),
+    // A freshly typed key goes to the saved address or an official endpoint only.
+    for (url, allowed) in [
+        ("https://api.example.com/v1/", true),
+        ("https://api.openai.com/v1", true),
+        ("https://attacker.example/v1", false),
+        ("https://user:pass@api.example.com/v1", false),
+        ("https://api.example.com/v1#fragment", false),
+        ("not a url", false),
     ] {
+        let fresh = config("openaiCompatible", url, "typed-key".into());
         assert_eq!(
-            key(&elsewhere),
-            Err(GenerationError::KeyRequired),
-            "{}",
-            elsewhere.base_url.0
+            listing_config(Some(&fresh), Some(&saved), SENTINEL),
+            if allowed {
+                Ok(fresh.clone())
+            } else {
+                Err(GenerationError::EndpointRefused)
+            },
+            "{url}"
         );
     }
-    let fresh = config(
-        "openaiCompatible",
-        "https://attacker.example/v1",
-        "typed-key",
-    );
-    assert_eq!(
-        key(&fresh),
-        Ok(SettingsSecretValue::Literal("typed-key".into()))
-    );
     assert_eq!(
         listing_config(None, Some(&saved), SENTINEL),
         Ok(saved.clone())
@@ -420,10 +449,9 @@ fn a_redacted_key_is_substituted_only_for_the_saved_kind_and_origin() {
         listing_config(None, None, SENTINEL),
         Err(GenerationError::Unavailable)
     );
-    let unsaved = config("openaiCompatible", "https://api.example.com/v1", SENTINEL);
     assert_eq!(
-        listing_config(Some(&unsaved), None, SENTINEL),
-        Err(GenerationError::KeyRequired)
+        GenerationError::EndpointRefused.to_string(),
+        "The text generator endpoint is not configured on this server."
     );
 }
 

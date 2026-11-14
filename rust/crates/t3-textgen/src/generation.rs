@@ -52,6 +52,8 @@ pub enum GenerationError {
     UnreadableReply,
     #[error("Enter the API key again: a saved key is only sent to its saved API and address.")]
     KeyRequired,
+    #[error("The text generator endpoint is not configured on this server.")]
+    EndpointRefused,
 }
 
 #[derive(Clone)]

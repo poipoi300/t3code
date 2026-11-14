@@ -15,6 +15,7 @@ pub mod native_worker;
 pub mod orchestration;
 pub mod post_processing;
 pub mod prompts;
+pub mod provider_runners;
 pub mod speech;
 pub mod text;
 pub mod title_context;

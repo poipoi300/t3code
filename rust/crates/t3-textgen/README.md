@@ -31,12 +31,19 @@ in `packages/provider-core/src/server/textGeneration*.ts` and
   by the complete configuration, bypasses on refresh/unsaved/test requests, and
   sends the tiny explicit connection-test prompt. Before constructing the runner
   for a listing or test, hosts call `api::listing_config(supplied, saved,
-  t3_config::secrets::REDACTED)`: with no supplied config it is the saved one; a
-  supplied key equal to the redaction sentinel becomes the saved key **only** when
-  `t3_shared::text_generators::saved_api_key_applies` holds (same `kind`, same
-  scheme, host and port), and otherwise fails with `GenerationError::KeyRequired`,
-  so a settings writer cannot send a saved key to an address of its choosing.
-  `t3-provider` applies the same function.
+  t3_config::secrets::REDACTED)`. With no supplied config it is the saved one; otherwise it
+  applies `t3_shared::text_generators::check_supplied_generator`, the one rule the server
+  adapter also follows:
+  - A placeholder key or a secret reference reuses a stored secret. It is allowed only for the
+    saved kind at the saved address, and a reference only when it is the saved one; otherwise
+    `KeyRequired`.
+  - Any other key goes only to the saved address or an official endpoint (OpenAI's `/v1`, or
+    Anthropic's for that kind); otherwise `EndpointRefused`.
+  - Addresses compare by scheme, host, port and path, trailing `/` ignored. User info, queries,
+    fragments, escapes and dot segments fail closed.
+
+  A settings writer therefore cannot send a saved key, or any secret a reference can name, to an
+  address of its choosing.
 - API replies are checked as TypeScript's schemas check them: a reply that fails
   (missing `finish_reason`, `message.content` or `stop_reason`, wrong field types,
   non-JSON, over 8 MiB) is `UnreadableReply` ("couldn't read"); a well-formed reply
@@ -258,8 +265,9 @@ cache for ten minutes, failures do not. API keys remain the host vault's concern
   discovery and worker error IPC are exercised with no model. GPU SDK packaging
   and acoustic parity remain unverified, not replaced with a fake production
   implementation. Paid model evals were not run; prompt bytes were preserved.
-- A redacted unsaved key is substituted only for its saved kind and origin
-  (`listing_config`); TypeScript substitutes it for any base URL. Custom branch
+- `listing_config` substitutes a redacted key, or accepts a secret reference, only for the
+  saved kind at the saved address, and contacts an unsaved address only when it is an
+  official endpoint. TypeScript passes any supplied address and reference through. Custom branch
   names over 255 bytes are refused rather than handed to git.
 - Verification markers use a Rust file-identity fingerprint, not Node's textual
   stat tuple. Each implementation safely rehashes the other's marker once.

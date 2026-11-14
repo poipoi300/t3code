@@ -304,25 +304,30 @@ fn model_page<'a>(
 }
 
 /// The configuration a model listing or connection test uses: the saved one, or the supplied
-/// unsaved one. A supplied key equal to the host's redaction `sentinel` stands for the saved key,
-/// which is used only when [`t3_shared::text_generators::saved_api_key_applies`] holds (same kind
-/// and origin); otherwise the key must be entered again, so it never reaches another address.
+/// one as far as [`t3_shared::text_generators::check_supplied_generator`] allows. `sentinel` is
+/// the host's redaction placeholder (`t3_config::secrets::REDACTED`). A placeholder or secret
+/// reference is refused unless it is the saved secret for the saved kind and address, and any
+/// other key may go only to the saved address or an official endpoint.
 pub fn listing_config(
     supplied: Option<&TextGeneratorConfig>,
     saved: Option<&TextGeneratorConfig>,
     sentinel: &str,
 ) -> Result<TextGeneratorConfig, GenerationError> {
+    use t3_shared::text_generators::{SuppliedGenerator, check_supplied_generator};
     let Some(supplied) = supplied else {
         return saved.cloned().ok_or(GenerationError::Unavailable);
     };
-    let mut config = supplied.clone();
-    if matches!(&supplied.api_key, SettingsSecretValue::Literal(key) if key == sentinel) {
-        config.api_key = saved
-            .filter(|saved| t3_shared::text_generators::saved_api_key_applies(supplied, saved))
-            .map(|saved| saved.api_key.clone())
-            .ok_or(GenerationError::KeyRequired)?;
+    match check_supplied_generator(supplied, saved, sentinel) {
+        SuppliedGenerator::UseSupplied => Ok(supplied.clone()),
+        SuppliedGenerator::UseSavedKey => saved
+            .map(|saved| TextGeneratorConfig {
+                api_key: saved.api_key.clone(),
+                ..supplied.clone()
+            })
+            .ok_or(GenerationError::KeyRequired),
+        SuppliedGenerator::KeyRequired => Err(GenerationError::KeyRequired),
+        SuppliedGenerator::AddressRefused => Err(GenerationError::EndpointRefused),
     }
-    Ok(config)
 }
 
 #[async_trait]
