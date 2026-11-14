@@ -39,6 +39,28 @@ pub struct LaunchingBackend {
     bound: Arc<dyn Orchestration>,
     runtime: Arc<OrchestrationRuntime>,
     ceiling: Option<RuntimeModeCeiling>,
+    check: Option<Arc<dyn StrategyCheck>>,
+}
+
+/// The launch host's client check: refs, branch names and an existing worktree that must be one
+/// of the project's (`LaunchAdapter::check_client_strategy`). `Err` is the refusal's text.
+#[async_trait::async_trait]
+pub trait StrategyCheck: Send + Sync {
+    async fn check(
+        &self,
+        project: &t3_contracts::base_schemas::ProjectId,
+        strategy: &t3_contracts::orchestration_v2::OrchestrationV2ThreadLaunchWorkspaceStrategy,
+    ) -> std::result::Result<(), String>;
+}
+
+/// The launch host's check, when the launch host is composed.
+pub fn strategy_check(domains: &crate::services::Domains) -> Option<Arc<dyn StrategyCheck>> {
+    #[cfg(feature = "git-actions")]
+    if let Some(launch) = domains.get::<crate::adapters::launch::LaunchAdapter>() {
+        return Some(launch);
+    }
+    let _ = domains;
+    None
 }
 
 impl LaunchingBackend {
@@ -46,11 +68,13 @@ impl LaunchingBackend {
         bound: Arc<dyn Orchestration>,
         runtime: Arc<OrchestrationRuntime>,
         managed_policy: Option<&t3_contracts::managed_policy::ManagedPolicyDocument>,
+        check: Option<Arc<dyn StrategyCheck>>,
     ) -> Arc<dyn Orchestration> {
         Arc::new(Self {
             bound,
             runtime,
             ceiling: managed_policy.and_then(RuntimeModeCeiling::from_managed),
+            check,
         })
     }
 }
@@ -108,6 +132,14 @@ impl Orchestration for LaunchingBackend {
             return self.bound.dispatch(request).await;
         }
         let task = request.task;
+        // Checked before the thread is created, as `orchestration.launchThread` checks a
+        // client's strategy (TypeScript's scheduler passes it unchecked).
+        if let Some(check) = &self.check {
+            check
+                .check(&task.project_id, &task.workspace_strategy)
+                .await
+                .map_err(Error::Dispatch)?;
+        }
         let launched = self
             .runtime
             .launch_thread(LaunchInput {

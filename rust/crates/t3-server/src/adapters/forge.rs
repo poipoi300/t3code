@@ -1075,7 +1075,6 @@ impl t3_git::GitWorkflowFactory for ForgeWorkflows {
         &self,
         cwd: &Path,
     ) -> Result<t3_git::GitWorkflowService, t3_git::GitError> {
-        eprintln!("DEBUG for_checkout start {cwd:?}");
         let handle = match self.registry.resolve(cwd, None).await {
             Ok(handle) => handle,
             Err(_) if self.lenient_lookups => return Ok(self.template.at(cwd)),
@@ -1085,7 +1084,6 @@ impl t3_git::GitWorkflowFactory for ForgeWorkflows {
                 ));
             }
         };
-        eprintln!("DEBUG resolved kind {}", handle.forge.kind().0);
         let host = ForgeReviewHost::new(handle, Arc::new(NoProjectSetup));
         Ok(self
             .template
@@ -1118,9 +1116,7 @@ impl t3_git::ReviewHost for StatusReviewHost {
         limit: usize,
     ) -> Result<Vec<t3_contracts::source_control::ChangeRequest>, t3_git::GitError> {
         let key = format!("{}\0{head}\0{state:?}\0{limit}", cwd.display());
-        eprintln!("DEBUG list start {head}");
         let listed = self.inner.list(cwd, head, state, limit).await;
-        eprintln!("DEBUG list end {}", listed.is_ok());
         let mut last = self
             .last
             .lock()
@@ -1191,7 +1187,13 @@ impl t3_git::ReviewHost for StatusReviewHost {
         remote: &str,
         repository: Option<&str>,
     ) -> Result<bool, t3_git::GitError> {
-        self.inner.targets_remote(cwd, remote, repository).await
+        // A forge that cannot tell (GitLab has no `creates_change_requests_in`) creates them in
+        // the remote, as TypeScript's `targetsRemote` assumes; an error must not fail status.
+        Ok(self
+            .inner
+            .targets_remote(cwd, remote, repository)
+            .await
+            .unwrap_or(true))
     }
     async fn setup(
         &self,

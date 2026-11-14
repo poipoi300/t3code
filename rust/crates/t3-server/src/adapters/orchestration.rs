@@ -908,7 +908,10 @@ fn bind_project_folders(
                     ApplicationStoredEvent::Orchestration(_) => None,
                 },
                 Err(RecvError::Lagged(missed)) => {
-                    tracing::warn!(missed, "project binder missed events; their folders bind at first checkpoint");
+                    tracing::warn!(
+                        missed,
+                        "project binder missed events; their folders bind at first checkpoint"
+                    );
                     None
                 }
                 Err(RecvError::Closed) => return,
@@ -923,4 +926,3 @@ fn bind_project_folders(
     });
     Ok(())
 }
-

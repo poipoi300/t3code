@@ -471,6 +471,10 @@ async fn start_domains(
     };
     #[cfg(all(feature = "git-actions", feature = "local-services"))]
     let launch_ports = launch.as_ref().map(|launch| launch.ports());
+    #[cfg(all(feature = "git-actions", feature = "local-services"))]
+    if let Some(launch) = &launch {
+        domains.insert(launch.clone())?;
+    }
     #[cfg(all(
         feature = "orchestration",
         not(all(feature = "git-actions", feature = "local-services"))
@@ -698,7 +702,6 @@ async fn start_domains(
             projects,
             domains.get::<crate::adapters::project_setup::ProjectSetupAdapter>(),
         );
-        domains.insert(launch)?;
     }
     // After providers (secret resolver), cloud, orchestration and the workspace authority.
     #[cfg(feature = "host")]

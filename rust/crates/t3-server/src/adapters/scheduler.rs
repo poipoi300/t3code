@@ -474,6 +474,7 @@ impl SchedulerAdapter {
                 backend,
                 runtime,
                 context.local.managed_policy.as_ref(),
+                crate::adapters::scheduled_launch::strategy_check(domains),
             );
             return Self::build(context, backend, SchedulerOptions::default(), None, clock)
                 .await

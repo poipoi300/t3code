@@ -163,6 +163,16 @@ impl LaunchAdapter {
     }
 }
 
+/// The scheduler's pre-launch check (`adapters/scheduled_launch.rs`): an unbound task's stored
+/// strategy is checked as a client's is, before its thread is created.
+#[cfg(feature = "scheduler")]
+#[async_trait::async_trait]
+impl crate::adapters::scheduled_launch::StrategyCheck for LaunchAdapter {
+    async fn check(&self, project: &ProjectId, strategy: &Strategy) -> std::result::Result<(), String> {
+        self.check_client_strategy(project, strategy).await
+    }
+}
+
 /// A revision a client names reaches Git after `--end-of-options` or as a ref argument; it may
 /// never start with `-` (Git's previous-branch `-` excepted) or carry control characters.
 fn check_revision(reference: &str) -> std::result::Result<(), String> {
@@ -226,10 +236,11 @@ impl Inner {
             .map_err(|e| failure("read-settings", e))
     }
 
-    /// A client's existing worktree: a local-disk path (decided from its text before any
-    /// filesystem call) that resolves without a link to a network target, a remote drive or a
-    /// device name (the workspace rule, `t3_workspace::paths::canonicalize`), and that Git
-    /// lists as a worktree of the project's repository. Git runs only after the path passed.
+    /// An existing worktree: a local-disk path (decided from its text before any filesystem
+    /// call) that resolves without a link to a network target, a remote drive or a device name
+    /// (the workspace rule, `t3_workspace::paths::canonicalize`), and that Git lists as a
+    /// worktree of the project's repository, or, for the scratch project, a folder under the
+    /// scratch root (the host's per-thread folders). Git runs only after the path passed.
     async fn registered_worktree(
         &self,
         project: &ProjectId,
@@ -245,6 +256,18 @@ impl Inner {
         let Some(target) = local_real_path(PathBuf::from(path)).await else {
             return Err(REFUSED.into());
         };
+        if let Ok(late) = self.late()
+            && late.projects.managed().is_scratch_project(&project.project_id).await
+        {
+            let scratch = match late.projects.managed().scratch_root().await {
+                Some(root) => local_real_path(root).await,
+                None => None,
+            };
+            return match scratch {
+                Some(root) if t3_workspace::paths::within(&target, &root) && target != root => Ok(()),
+                _ => Err(REFUSED.into()),
+            };
+        }
         let Ok(trees) = self.git.at(&project.workspace_root).list_worktrees().await else {
             return Err(REFUSED.into());
         };
@@ -852,7 +875,11 @@ impl WorkspaceBackend for Inner {
         let root = PathBuf::from(&project.workspace_root);
         match strategy {
             // TS `launchBranch`: a project-folder launch naming no branch records the checkout.
+            // Every launch path reaches here (client, scheduler, MCP, a retried preparation): the
+            // branch and an existing worktree are checked again, whatever checked them before.
             Strategy::Root(root_strategy) => {
+                check_branch(root_strategy.branch.as_ref().and_then(Option::as_ref))
+                    .map_err(|reason| failure("provision-worktree", reason))?;
                 let branch = match root_strategy.branch.flatten() {
                     Some(branch) => Some(branch.0),
                     None => self.current_branch(root.clone()).await.ok().flatten(),
@@ -864,6 +891,11 @@ impl WorkspaceBackend for Inner {
                 })
             }
             Strategy::ExistingWorktree(existing) => {
+                check_branch(existing.branch.as_ref().and_then(Option::as_ref))
+                    .map_err(|reason| failure("provision-worktree", reason))?;
+                self.registered_worktree(&project_id, &existing.worktree_path.0)
+                    .await
+                    .map_err(|reason| failure("provision-worktree", reason))?;
                 let path = PathBuf::from(&existing.worktree_path.0);
                 Ok(Workspace {
                     cwd: path.clone(),

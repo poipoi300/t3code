@@ -158,7 +158,8 @@ fn fake_glab(bin: &Path, published: &Path) {
              type \"%~dp0project.json\"\r\n\
              exit /b 0\r\n\
              :list\r\n\
-             echo %*| findstr /c:\"logged-out\" >nul && (echo glab auth login 1>&2& exit /b 1)\r\n\
+             set \"ARGS=%*\"\r\n\
+             if not \"%ARGS:logged-out=%\"==\"%ARGS%\" (echo glab auth login 1>&2& exit /b 1)\r\n\
              type \"%~dp0mr-list.json\"\r\n",
         )
         .unwrap();
@@ -1094,7 +1095,12 @@ async fn vcs_status_carries_the_pull_request_from_the_checkouts_forge() {
         .start("subscribeVcsStatus", cwd.clone(), CallKind::Stream)
         .unwrap();
     let remote = remote_status(&mut s).await;
-    assert_eq!(remote["pr"]["number"], 7, "{remote}");
+    assert_eq!(
+        remote["pr"]["number"],
+        7,
+        "{remote} {:?}",
+        glab_calls(s.home())
+    );
     assert_eq!(remote["pr"]["state"], "open", "{remote}");
     assert_eq!(remote["pr"]["headRef"], "feature", "{remote}");
     let refreshed = ok(s.call("vcs.refreshStatus", cwd).await);

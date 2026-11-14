@@ -33,22 +33,26 @@ fn register_vcs(registry: &mut HandlerRegistry) -> crate::Result<()> {
                 .map_err(vcs_error)
         })?;
         registry.register::<WsVcsCreateRefRpc, _, _>(|ctx, input| async move {
-            let _admitted = crate::writers::admit(&ctx.services, "Git branch creation", &input.cwd.0).await;
+            let _admitted =
+                crate::writers::admit(&ctx.services, "Git branch creation", &input.cwd.0).await;
             adapter(&ctx, WsVcsCreateRefRpc::TAG)?
                 .create_ref(&ctx.session_id, input)
                 .await
                 .map_err(vcs_error)
         })?;
         registry.register::<WsVcsSwitchRefRpc, _, _>(|ctx, input| async move {
-            let _admitted = crate::writers::admit(&ctx.services, "Git checkout", &input.cwd.0).await;
+            let _admitted =
+                crate::writers::admit(&ctx.services, "Git checkout", &input.cwd.0).await;
             adapter(&ctx, WsVcsSwitchRefRpc::TAG)?
                 .switch_ref(&ctx.session_id, input)
                 .await
                 .map_err(vcs_error)
         })?;
         registry.register::<WsVcsRemoveWorktreeRpc, _, _>(|ctx, input| async move {
-            let _admitted = crate::writers::admit(&ctx.services, "Git worktree removal", &input.cwd.0).await;
-            let _removed = crate::writers::admit(&ctx.services, "Git worktree removal", &input.path.0).await;
+            let _admitted =
+                crate::writers::admit(&ctx.services, "Git worktree removal", &input.cwd.0).await;
+            let _removed =
+                crate::writers::admit(&ctx.services, "Git worktree removal", &input.path.0).await;
             adapter(&ctx, WsVcsRemoveWorktreeRpc::TAG)?
                 .remove_worktree(&ctx.session_id, input)
                 .await
