@@ -1178,3 +1178,277 @@ fn the_thread_timeline_mounts_a_long_reply_as_block_cells() {
         "a 500-line fence is split into chunk cells, saw {chunks}"
     );
 }
+
+/// A subagent's timeline opens with MessagesTimeline's parent divider.
+#[component]
+fn SubagentTimelineFixture() -> impl IntoElement {
+    use t3_client::ClientStore;
+    use t3_client::testing::environment;
+    use t3_client::types::{EnvironmentId, ThreadId, ThreadKey};
+    use t3_contracts::orchestration_v2::{
+        OrchestrationV2ShellStreamItem, OrchestrationV2ThreadStreamItem,
+    };
+    use t3_ui::runtime::{Rt, backend::Unavailable, host::Choice};
+    use t3_ui::state::nav::{Navigator, Route};
+    t3_ui::theme::install(&Default::default());
+    let key = ThreadKey {
+        environment: EnvironmentId("env".into()),
+        thread: ThreadId("child".into()),
+    };
+    let store = ClientStore::default();
+    let session = store.begin_session(key.environment.clone());
+    let mut snapshot = environment::shell(&[("parent", "Parser rewrite"), ("child", "Reviewer")]);
+    for thread in snapshot["threads"].as_array_mut().expect("threads") {
+        if thread["id"] == "child" {
+            thread["lineage"] = json!({"rootThreadId":"parent","parentThreadId":"parent","relationshipToParent":"subagent"});
+        }
+    }
+    let shell = [
+        json!({"kind":"snapshot","snapshot":snapshot}),
+        json!({"kind":"synchronized"}),
+    ]
+    .into_iter()
+    .map(|item| serde_json::from_value::<OrchestrationV2ShellStreamItem>(item).expect("shell"))
+    .collect();
+    store.apply_shell(&key.environment, session, shell);
+    let thread = [
+        json!({"kind":"snapshot","snapshotSequence":1,
+            "projection":environment::projection("child", "Reviewer", json!([]), json!([]))}),
+        json!({"kind":"synchronized"}),
+    ]
+    .into_iter()
+    .map(|item| serde_json::from_value::<OrchestrationV2ThreadStreamItem>(item).expect("thread"))
+    .collect();
+    store
+        .apply_thread(key.clone(), session, thread)
+        .expect("thread");
+    provide_context(Rt::new(
+        store,
+        Rc::new(Unavailable("fixture".into())),
+        Choice::Demo,
+    ));
+    let nav = Navigator::new(Route::Thread(key.clone()));
+    provide_context(nav);
+    view()
+        .w_full()
+        .h_full()
+        .child(text(move || {
+            SharedString::from(format!("Route: {}", nav.top().path()))
+        }))
+        .child(t3_ui::screens::thread::timeline::timeline(key))
+}
+
+#[test]
+fn a_subagent_timeline_names_its_parent_and_opens_it() {
+    for window in [PHONE, DESKTOP] {
+        let mut sets = t3_ui::registries();
+        let mut fixtures = Registry::new();
+        fixtures.register::<SubagentTimelineFixture>();
+        sets.push(fixtures);
+        let mut app = Headless::start(EngineConfig {
+            ui_sets: sets,
+            viewport: size(px(window.0), px(window.1)),
+            ..EngineConfig::new(Root::of::<SubagentTimelineFixture>())
+        })
+        .expect("fixture");
+        app.wait_for("Subagent of").expect("the parent divider");
+        assert!(app.screen().shows("Parser rewrite"), "the parent's title");
+        app.press("role:button[Open parent thread]").expect("open");
+        app.wait_for("Route: /env/parent")
+            .expect("the parent thread");
+    }
+}
+
+/// The timeline's activity announcer: silent on mount, then the thread's status as it changes.
+#[component]
+fn AnnouncerFixture() -> impl IntoElement {
+    use t3_client::ClientStore;
+    use t3_client::testing::environment;
+    use t3_client::types::{EnvironmentId, ThreadId, ThreadKey};
+    use t3_contracts::orchestration_v2::{
+        OrchestrationV2ShellStreamItem, OrchestrationV2ThreadStreamItem,
+    };
+    use t3_ui::runtime::{Rt, backend::Unavailable, host::Choice};
+    use t3_ui::screens::thread::timeline::AnnouncementSink;
+    use t3_ui::state::nav::{Navigator, Route};
+    t3_ui::theme::install(&Default::default());
+    let key = ThreadKey {
+        environment: EnvironmentId("env".into()),
+        thread: ThreadId("talk".into()),
+    };
+    let store = ClientStore::default();
+    let session = store.begin_session(key.environment.clone());
+    let snapshot = environment::shell(&[("talk", "Talk")]);
+    let row = snapshot["threads"][0].clone();
+    let shell = [
+        json!({"kind":"snapshot","snapshot":snapshot}),
+        json!({"kind":"synchronized"}),
+    ]
+    .into_iter()
+    .map(|item| serde_json::from_value::<OrchestrationV2ShellStreamItem>(item).expect("shell"))
+    .collect();
+    store.apply_shell(&key.environment, session, shell);
+    let thread = [
+        json!({"kind":"snapshot","snapshotSequence":1,
+            "projection":environment::projection("talk", "Talk", json!([]), json!([]))}),
+        json!({"kind":"synchronized"}),
+    ]
+    .into_iter()
+    .map(|item| serde_json::from_value::<OrchestrationV2ThreadStreamItem>(item).expect("thread"))
+    .collect();
+    store
+        .apply_thread(key.clone(), session, thread)
+        .expect("thread");
+    provide_context(Rt::new(
+        store.clone(),
+        Rc::new(Unavailable("fixture".into())),
+        Choice::Demo,
+    ));
+    provide_context(Navigator::new(Route::Thread(key.clone())));
+    let spoken = signal(Vec::<String>::new());
+    provide_context(AnnouncementSink(Rc::new(move |text| {
+        spoken.update(|spoken| spoken.push(text))
+    })));
+    let sequence = stored(1u64);
+    let environment_id = key.environment.clone();
+    let request = move |id: &str, kind: &str| {
+        let mut thread = row.clone();
+        thread["pendingRuntimeRequest"] = json!({"id":id,"kind":kind,"createdAt":environment::NOW});
+        let next = sequence.with(|sequence| {
+            *sequence += 1;
+            *sequence
+        });
+        let delta = serde_json::from_value::<OrchestrationV2ShellStreamItem>(
+            json!({"kind":"thread.updated","sequence":next,"location":"active","thread":thread}),
+        )
+        .expect("shell delta");
+        store.apply_shell(&environment_id, session, vec![delta]);
+    };
+    let ask = request.clone();
+    view()
+        .w_full()
+        .h_full()
+        .child(control("Ask a question", move || {
+            ask("question", "user_input")
+        }))
+        .child(control("Ask approval", move || {
+            request("approval", "command")
+        }))
+        .child(text(move || {
+            SharedString::from(format!("Spoken: {}", spoken.get().join(" | ")))
+        }))
+        .child(t3_ui::screens::thread::timeline::timeline(key))
+}
+
+#[test]
+fn the_announcer_is_silent_on_mount_then_speaks_questions_and_approvals() {
+    let mut sets = t3_ui::registries();
+    let mut fixtures = Registry::new();
+    fixtures.register::<AnnouncerFixture>();
+    sets.push(fixtures);
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: sets,
+        viewport: size(px(DESKTOP.0), px(DESKTOP.1)),
+        ..EngineConfig::new(Root::of::<AnnouncerFixture>())
+    })
+    .expect("fixture");
+    app.wait_for("Spoken: ").expect("baseline, nothing spoken");
+    app.press("role:button[Ask a question]").expect("question");
+    app.wait_for("Spoken: Needs your input")
+        .expect("ThreadActivityAnnouncer's input status");
+    app.press("role:button[Ask approval]").expect("approval");
+    app.wait_for("Spoken: Needs your input | Needs approval")
+        .expect("then the approval");
+}
+
+/// The thread's find: Mod+F through the key service opens the bar over the production timeline,
+/// and it counts matches in the flattened reply.
+#[component]
+fn FindTimelineFixture() -> impl IntoElement {
+    use t3_client::ClientStore;
+    use t3_client::testing::environment;
+    use t3_client::types::{EnvironmentId, ThreadId, ThreadKey};
+    use t3_contracts::orchestration_v2::{
+        OrchestrationV2ShellStreamItem, OrchestrationV2ThreadStreamItem,
+    };
+    use t3_ui::keys::bindings::{Keybindings, keyboard_events};
+    use t3_ui::runtime::{Rt, backend::Unavailable, host::Choice};
+    use t3_ui::state::nav::{Navigator, Route};
+    t3_ui::theme::install(&Default::default());
+    let key = ThreadKey {
+        environment: EnvironmentId("env".into()),
+        thread: ThreadId("find".into()),
+    };
+    let store = ClientStore::default();
+    let session = store.begin_session(key.environment.clone());
+    let shell = [
+        json!({"kind":"snapshot","snapshot":environment::shell(&[("find", "Find")])}),
+        json!({"kind":"synchronized"}),
+    ]
+    .into_iter()
+    .map(|item| serde_json::from_value::<OrchestrationV2ShellStreamItem>(item).expect("shell"))
+    .collect();
+    store.apply_shell(&key.environment, session, shell);
+    let item = json!({"id":"answer","threadId":"find","type":"assistant_message","messageId":"answer",
+        "text":"First a needle here.\n\nThen another needle there.","streaming":false,"runId":"run",
+        "nodeId":null,"providerThreadId":null,"providerTurnId":null,"nativeItemRef":null,
+        "parentItemId":null,"ordinal":1,"status":"completed","title":null,"startedAt":AT,
+        "completedAt":AT,"updatedAt":AT});
+    let mut projection = environment::projection("find", "Find", json!([]), json!([item]));
+    projection["visibleTurnItems"] = json!([{"position":0,"visibility":"local",
+        "sourceThreadId":"find","sourceItemId":"answer","item":item}]);
+    let thread = [
+        json!({"kind":"snapshot","snapshotSequence":1,"projection":projection}),
+        json!({"kind":"synchronized"}),
+    ]
+    .into_iter()
+    .map(|item| serde_json::from_value::<OrchestrationV2ThreadStreamItem>(item).expect("thread"))
+    .collect();
+    store
+        .apply_thread(key.clone(), session, thread)
+        .expect("thread");
+    provide_context(Rt::new(
+        store.clone(),
+        Rc::new(Unavailable("fixture".into())),
+        Choice::Demo,
+    ));
+    provide_context(Navigator::new(Route::Thread(key.clone())));
+    let keys = Keybindings::attach(store, signal(vec![]), signal(None));
+    provide_context(keys);
+    keyboard_events(
+        keys,
+        view()
+            .w_full()
+            .h_full()
+            .child(t3_ui::screens::thread::timeline::timeline(key)),
+    )
+}
+
+#[test]
+fn mod_f_opens_find_over_the_timeline_and_counts_the_replys_matches() {
+    let mut sets = t3_ui::registries();
+    let mut fixtures = Registry::new();
+    fixtures.register::<FindTimelineFixture>();
+    sets.push(fixtures);
+    let mut config = EngineConfig {
+        ui_sets: sets,
+        viewport: size(px(DESKTOP.0), px(DESKTOP.1)),
+        ..EngineConfig::new(Root::of::<FindTimelineFixture>())
+    };
+    config.environment.os = nsh_core::platform::Os::Linux;
+    config.environment.idiom = nsh_core::platform::Idiom::Desktop;
+    let mut app = Headless::start(config).expect("fixture");
+    app.wait_for("text:/First a needle here/").expect("reply");
+    assert_eq!(app.screen().count("id:thread-find-bar"), Ok(0));
+    app.press_key("ctrl+f").expect("chat.find");
+    app.wait_for("id:thread-find-input").expect("the find bar");
+    app.type_text("id:thread-find-input", "needle")
+        .expect("query");
+    app.wait_for("1/2")
+        .expect("both matches in the flattened reply");
+    app.press("role:button[Close find]").expect("close");
+    app.wait_until("find closes", std::time::Duration::from_secs(2), |screen| {
+        screen.count("id:thread-find-bar") == Ok(0)
+    })
+    .expect("closed");
+}

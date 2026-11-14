@@ -115,3 +115,17 @@ fn picking_an_option_in_a_select_sends_one_settings_write_after_it_closes() {
     app.wait_for("text:/\"defaultThreadEnvMode\":\"worktree\"/")
         .expect("the patch the environment received");
 }
+
+#[test]
+fn tmp_permissions_select() {
+    let mut app = start_connected(TALL, SettingsPage::Threads, Remote::default());
+    app.press("role:combobox[Default permissions]")
+        .expect("open the select");
+    app.wait_for("role:option[Auto-accept edits]")
+        .expect("its options");
+    app.press("role:option[Auto-accept edits]").expect("pick");
+    app.wait_for_gone("role:option", std::time::Duration::from_secs(5))
+        .expect("the select closed");
+    app.press("id:read-server").expect("read the server");
+    app.wait_for("Updates 1").expect("one settings write");
+}

@@ -64,6 +64,8 @@ impl ViewedImagesContext {
             let thread = thread_shell(shell, &thread_id)?;
             thread.worktree_path.as_ref().map(|path| path.0.clone()).or_else(|| {
                 shell
+                    .snapshot
+                    .as_ref()?
                     .projects
                     .iter()
                     .find(|project| project.id == thread.project_id)
@@ -204,13 +206,13 @@ mod tests {
         }
         AssetUrlState::Success {
             url: "https://server.test/a".into(),
-            asset: Rc::new(serde_json::from_value::<AssetCreateUrlResult>(asset).unwrap()),
+            asset: Rc::new(serde_json::from_value::<AssetCreateUrlResult>(asset).expect("fixture")),
         }
     }
 
     #[test]
     fn known_dimensions_size_the_image_within_ten_rem() {
-        let size = asset_image_size(&success(Some((800, 400))), 10.0).unwrap();
+        let size = asset_image_size(&success(Some((800, 400))), 10.0).expect("fixture");
         assert_eq!(size.width, Some(800.0));
         assert_eq!(size.aspect_ratio, Some(2.0));
         // min(30rem, 10rem * 800 / 400) = 320px.
@@ -220,7 +222,7 @@ mod tests {
     #[test]
     fn unknown_dimensions_cap_only_the_height() {
         for state in [AssetUrlState::Loading, success(None)] {
-            let size = asset_image_size(&state, 10.0).unwrap();
+            let size = asset_image_size(&state, 10.0).expect("fixture");
             assert_eq!(size.max_height, Some(160.0));
             assert_eq!(size.width, None);
         }
@@ -232,9 +234,9 @@ mod tests {
         let row: MessagesTimelineRow = serde_json::from_value(json!({
             "id":"viewed","createdAt":null,"kind":"viewed-images","paths":["/repo/a.png","/repo/b.png"]
         }))
-        .unwrap();
+        .expect("fixture");
         assert_eq!(
-            ViewedImagesRow::from_row(&row).unwrap().paths.as_slice(),
+            ViewedImagesRow::from_row(&row).expect("fixture").paths.as_slice(),
             ["/repo/a.png", "/repo/b.png"]
         );
     }

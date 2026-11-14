@@ -725,9 +725,13 @@ impl AssistantRowsState {
     }
 }
 
+/// ChatView's `onReplyToResponse` (the composer's `replyToResponse`); overrides the host client's
+/// in tests. Production reads `screens::thread::composer::reply_to_response_handler`.
+#[derive(Clone)]
+pub struct ReplyService(pub ReplyHandler);
+
 /// MessagesTimeline's row context for assistant rows, from the thread's [`TimelineServices`].
-/// Reply is hidden until the composer exposes `replyToResponse` (ui-mounts-notes.md); the
-/// changed-files card (`AssistantChangedFilesSection`) is not ported by the diff lane yet.
+/// The changed-files card (`AssistantChangedFilesSection`) is not ported by the diff lane yet.
 #[derive(Clone)]
 pub struct AssistantRowContext {
     pub thread_ref: Option<ThreadKey>,
@@ -749,7 +753,7 @@ impl AssistantRowContext {
             timestamp_format: services.timestamp_format,
             provider_capabilities: None,
             on_fork_from_run: services.rewind.fork_action(),
-            on_reply_to_response: None,
+            on_reply_to_response: services.reply.clone(),
             state,
         }
     }

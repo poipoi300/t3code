@@ -326,3 +326,71 @@ fn mermaid_source_fallback_copies_exact_code_without_a_dead_diagram_action() {
         assert!(app.press("role:button[Expand diagram]").is_err());
     }
 }
+
+#[derive(Clone, PartialEq, Props)]
+struct RootProps {
+    math: bool,
+    source: String,
+}
+
+/// The shared Markdown root every caller uses (`markdown::base::chat_markdown`), with the client's
+/// math setting as the timeline provides it.
+#[component]
+fn MarkdownRootFixture(props: RootProps) -> impl IntoElement {
+    use t3_ui::screens::thread::markdown::base::{ChatMarkdownSettings, chat_markdown};
+    t3_ui::theme::install(&Default::default());
+    provide_context(t3_ui::theme::text_view_parts());
+    let math = props.math;
+    provide_context(ChatMarkdownSettings {
+        math_enabled: computed(move || math),
+    });
+    let source = props.source.clone();
+    view()
+        .w_full()
+        .h_full()
+        .child(chat_markdown(move || source.clone(), || false))
+}
+
+fn root(math: bool, source: &'static str) -> Headless {
+    let mut sets = t3_ui::registries();
+    let mut fixtures = Registry::new();
+    fixtures.register::<MarkdownRootFixture>();
+    sets.push(fixtures);
+    Headless::start(EngineConfig {
+        ui_sets: sets,
+        viewport: size(px(DESKTOP.0), px(DESKTOP.1)),
+        ..EngineConfig::new(Root::new::<MarkdownRootFixture>(move || RootProps {
+            math,
+            source: source.to_owned(),
+        }))
+    })
+    .expect("markdown root")
+}
+
+/// Math renders through MarkdownMath only with `mathRenderingEnabled`; off (the default), `$x^2$`
+/// stays the text it is, as the web without remark-math.
+#[test]
+fn math_renders_only_when_the_setting_is_on() {
+    let mut off = root(false, "Area $x^2$ here");
+    off.wait_for(r"text:/\$x\^2\$/").expect("literal dollars");
+    assert_eq!(off.screen().count("label:Inline equation"), Ok(0));
+    let mut on = root(true, "Area $x^2$ here");
+    on.wait_for("label:Inline equation").expect("MarkdownMath");
+    assert!(!on.screen().shows(r"text:/\$x\^2\$/"));
+}
+
+/// A remote image is ChatMarkdownImage (labelled with its alt); a source the client cannot
+/// resolve shows ChatMarkdownImage's unavailable fallback, not a broken image.
+#[test]
+fn images_render_through_the_chat_markdown_image() {
+    let mut local = root(false, "Shot: ![logo](./docs/logo.png)");
+    local
+        .wait_for(r"text:/^Image unavailable/")
+        .expect("the unavailable fallback, not a broken image");
+    let mut remote = root(false, "Shot: ![logo](https://example.com/logo.png)");
+    remote.wait_for("text:/^Shot:/").expect("rendered");
+    assert!(
+        !remote.screen().shows(r"text:/^Image unavailable/"),
+        "a direct source is drawn, not refused"
+    );
+}

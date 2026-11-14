@@ -8,7 +8,7 @@ use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
 use serde_json::{Value, json};
 use t3_client::ClientStore;
-use t3_client::thread_views::link_request::LinkAnswerError;
+use t3_client::thread_views::link_request::{LinkAnswerError, LinkableMachine};
 use t3_client::thread_views::messages_timeline::{
     MessagesTimelineRowContent, MessagesTimelineRowsInput, derive_messages_timeline_rows,
 };
@@ -143,6 +143,28 @@ impl LinkRequestClient for Links {
         });
         futures::future::ready(Ok(())).boxed_local()
     }
+    fn machines(
+        &self,
+        environment: EnvironmentId,
+    ) -> LocalBoxFuture<'static, Vec<LinkableMachine>> {
+        assert_eq!(
+            environment.0, "environment",
+            "the thread environment's links"
+        );
+        let machine = |id: &str, label: &str, urls: &[&str], linked: bool| LinkableMachine {
+            environment_id: EnvironmentId(id.into()),
+            label: label.into(),
+            connected: true,
+            connect_only: false,
+            linked,
+            urls: urls.iter().map(|url| (*url).to_owned()).collect(),
+        };
+        futures::future::ready(vec![
+            machine("laptop", "Laptop", &["http://192.168.1.9:3773"], true),
+            machine("ws", "Workstation", &["https://work.tail.ts.net"], false),
+        ])
+        .boxed_local()
+    }
 }
 
 #[component]
@@ -210,6 +232,14 @@ fn EventFixture() -> impl IntoElement {
             "secret-inherited" => vec![secret("pending", "inherited")],
             "secret-saved" => vec![secret("saved", "local")],
             "link" => vec![link("pending", json!({}))],
+            "link-pick" => vec![link(
+                "pending",
+                json!({"url":null,"hint":"my workstation","requestedAccess":null}),
+            )],
+            "link-existing" => vec![link(
+                "pending",
+                json!({"url":null,"environmentId":"laptop"}),
+            )],
             "link-linked" => vec![link(
                 "linked",
                 json!({"linkedLabel":"Workstation","linkedAccess":"read-only"}),
@@ -275,7 +305,9 @@ fn EventFixture() -> impl IntoElement {
                 ("Secret", "secret"),
                 ("Inherited secret", "secret-inherited"),
                 ("Saved secret", "secret-saved"),
-                ("Link", "link"),
+                ("Link request", "link"),
+                ("Pick a machine", "link-pick"),
+                ("Existing link", "link-existing"),
                 ("Linked", "link-linked"),
             ]
             .into_iter()
@@ -462,4 +494,63 @@ fn a_pending_link_request_can_be_declined_through_the_client() {
     app.press("id:link-linked").expect("linked");
     app.wait_for("Linked Workstation · Read only")
         .expect("answered row");
+}
+
+/// The review dialog sends exactly the machine, access and code the user chose. It opens on the
+/// hint's machine, at the web's default access (supervised), and cannot link without a code.
+#[test]
+fn the_link_dialog_sends_exactly_the_chosen_machine_access_and_code() {
+    for window in [PHONE, DESKTOP] {
+        let mut app = fixture(window);
+        app.press("id:link-pick")
+            .expect("a request that leaves the machine open");
+        app.wait_for("Link a machine to this environment")
+            .expect("card");
+        app.press("role:button[Choose machine…]")
+            .expect("open the dialog");
+        app.wait_for("Link a machine").expect("dialog");
+        app.wait_for("Workstation").expect("the machine list");
+        app.press("role:button[Continue]")
+            .expect("the hint's machine is chosen");
+        app.wait_for("Pairing code").expect("the access step");
+        assert!(
+            !app.screen()
+                .enabled("role:button[Link]")
+                .expect("link button"),
+            "nothing is linked without a pairing code"
+        );
+        assert!(app.screen().shows("Supervised"), "the web's default access");
+        app.type_text("label:Pairing code", " CODE-1 ")
+            .expect("code");
+        app.press("role:button[Link]").expect("link");
+        app.wait_for(
+            r#"Link answers: environment link {"type":"link","environmentId":"ws","label":"Workstation","urls":["https://work.tail.ts.net"],"access":"approval-required","pairingCode":"CODE-1"}"#,
+        )
+        .expect("exactly what was chosen, once");
+        app.wait_until(
+            "dialog closes",
+            std::time::Duration::from_secs(2),
+            |screen| !screen.shows("Pairing code"),
+        )
+        .expect("closed after the answer");
+    }
+}
+
+/// A machine already linked is offered as is: no new pairing, the existing link.
+#[test]
+fn an_existing_link_is_used_without_a_new_pairing() {
+    let mut app = fixture(DESKTOP);
+    app.press("id:link-existing").expect("named machine");
+    // The agent named an environment, not an address: the card names no machine, as the web.
+    app.wait_for("Link a machine to this environment")
+        .expect("card");
+    app.press("role:button[Review link…]").expect("open");
+    app.wait_for("role:button[Use this link]")
+        .expect("existing link offered");
+    assert!(!app.screen().shows("Pairing code"));
+    app.press("role:button[Use this link]").expect("use it");
+    app.wait_for(
+        r#"Link answers: environment link {"type":"use-existing","environmentId":"laptop"}"#,
+    )
+    .expect("the existing link, nothing else");
 }

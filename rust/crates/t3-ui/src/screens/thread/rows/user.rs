@@ -412,8 +412,9 @@ pub fn user_message_row(
     })
 }
 
-/// UserTimelineRow's `useAssetUrls` over `selectMessageImageResources`: a committed image's signed
-/// URL, by attachment id, while it resolves; a failed or loading one keeps its own preview.
+/// UserTimelineRow's `useAssetUrls` over `selectMessageImageResources`, and each
+/// UserVideoAttachment's `useAssetUrlState`: a committed image's or video's signed URL, by
+/// attachment id, while it resolves; a failed or loading one keeps its own preview.
 fn committed_image_urls(
     row: Memo<Option<UserRow>>,
     context: &UserRowContext,
@@ -424,7 +425,11 @@ fn committed_image_urls(
         let resources = computed(move || {
             row.with(|row| {
                 row.as_ref()
-                    .map(|row| select_message_image_resources(&row.images))
+                    .map(|row| {
+                        let mut resources = select_message_image_resources(&row.images);
+                        resources.extend(video_resources(&row.videos));
+                        resources
+                    })
                     .unwrap_or_default()
             })
         });
@@ -456,14 +461,52 @@ fn committed_image_urls(
     computed(move || urls.get())
 }
 
-/// `createMessageAttachmentPreviewProjector`: the signed URL replaces an attachment's preview.
+/// UserVideoAttachment's `buildAttachmentVideoAsset` for each committed video: a local upload's
+/// `blob:`/`data:` preview stays as it is, as an uploading file is not downloadable yet.
+fn video_resources(videos: &[MessageAttachment]) -> Vec<AssetResource> {
+    videos
+        .iter()
+        .filter(|video| {
+            !video
+                .preview_url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("blob:") || url.starts_with("data:"))
+        })
+        .filter_map(|video| match &video.attachment {
+            ChatAttachment::File(file) => Some(AssetResource::Attachment {
+                attachment_id: t3_contracts::base_schemas::TrimmedNonEmptyString(file.id.clone()),
+                file_name: Some(t3_contracts::base_schemas::TrimmedNonEmptyString(
+                    file.name.clone(),
+                )),
+                mime_type: Some(t3_contracts::base_schemas::TrimmedNonEmptyString(
+                    t3_client::view_logic::chat_view::video_mime_type(&file.name, &file.mime_type)
+                        .unwrap_or_else(|| file.mime_type.clone()),
+                )),
+                disposition: None,
+                render_intent: None,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `createMessageAttachmentPreviewProjector` for images, and UserVideoAttachment's
+/// `assetUrl.url ?? file.previewUrl` for videos: a signed URL replaces the preview.
 fn with_asset_previews(row: &UserRow, urls: &BTreeMap<String, String>) -> UserRow {
     let mut row = row.clone();
-    for image in row.images.iter_mut().chain(row.preview_images.iter_mut()) {
-        if let ChatAttachment::Image(file) = &image.attachment
-            && let Some(url) = urls.get(&file.id).filter(|url| !url.is_empty())
-        {
-            image.preview_url = Some(url.clone());
+    let media = row
+        .images
+        .iter_mut()
+        .chain(row.preview_images.iter_mut())
+        .chain(row.videos.iter_mut());
+    for attachment in media {
+        let id = match &attachment.attachment {
+            ChatAttachment::Image(file) => &file.id,
+            ChatAttachment::File(file) => &file.id,
+            ChatAttachment::Unknown(_) => continue,
+        };
+        if let Some(url) = urls.get(id).filter(|url| !url.is_empty()) {
+            attachment.preview_url = Some(url.clone());
         }
     }
     row

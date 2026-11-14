@@ -57,7 +57,7 @@ impl AssetUrlClient for Assets {
                     serde_json::from_value::<AssetCreateUrlResult>(
                         json!({"relativeUrl":"/api/assets/x","expiresAt":1}),
                     )
-                    .unwrap(),
+                    .expect("fixture"),
                 ),
             }
         };
@@ -90,7 +90,7 @@ fn ImagesFixture() -> impl IntoElement {
             "id":"viewed","createdAt":"2026-11-13T12:00:00Z","kind":"viewed-images",
             "paths":["/repo/first.png","/repo/notes.txt","/repo/denied.png","https://example.com/remote.png"]
         }))
-        .unwrap();
+        .expect("fixture");
         Some(Shared(Rc::new(row)))
     });
     let with = ViewedImagesContext::with_assets(key(), Some(AssetUrlBinding(Rc::new(Assets(calls)))));
@@ -148,6 +148,7 @@ fn only_host_images_are_requested_each_as_a_media_file_of_the_thread() {
 #[test]
 fn without_an_asset_service_images_are_unavailable_not_loading() {
     let mut app = fixture(DESKTOP);
+    app.wait_for("No client").expect("mounted");
     app.press("id:no-client").expect("no client");
     app.wait_for("Image unavailable · first.png")
         .expect("no asset service: the fallback, never a frame that keeps loading");

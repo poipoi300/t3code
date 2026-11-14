@@ -181,6 +181,15 @@ fn send_shortcut(
     }
 }
 
+/// Starts `task` under the composer's owner. A press handler runs under its control's owner, and
+/// CMP-SEND rebuilds its action group when the state the press changes (busy), which would dispose
+/// that owner and cancel the task before it sends.
+fn spawn_in(owner: Owner, task: impl std::future::Future<Output = ()> + 'static) {
+    owner.run(move || {
+        spawn(task);
+    });
+}
+
 /// A client session's view as a signal, subscribed before the first read. The client keeps
 /// unchanged views' `Rc`s, so readers compare by identity.
 fn watch<T: 'static>(
@@ -204,6 +213,7 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
     sender: Rc<dyn ComposerSendClient>,
     key: ThreadKey,
 ) -> AnyElement {
+    let owner = Owner::current();
     let keys = use_context::<Keybindings>();
     let target = ComposerTarget::Thread(key.clone());
     let drafts = ComposerDrafts::attach(bindings::composer_drafts(&client), key.clone());
@@ -442,7 +452,7 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
         let session = banner_session.clone();
         Rc::new(move |notice: String, action: String| {
             let operation = session.invoke(&notice, &action);
-            spawn(async move {
+            spawn_in(owner, async move {
                 match operation.await {
                     Ok(BannerOutcome::NavigateHome) => nav.open(Route::Home),
                     Ok(BannerOutcome::Unchanged) => {}
@@ -580,7 +590,7 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
                 busy.set(true);
                 let delivery = sender.submit(&key, snapshot.value, dispatch, options);
                 let editor = editor.clone();
-                spawn(async move {
+                spawn_in(owner, async move {
                     let result = delivery.await;
                     busy.set(false);
                     match result {
@@ -776,7 +786,7 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
         let key = key.clone();
         Rc::new(move || {
             let operation = client.interrupt_thread(&key);
-            spawn(async move {
+            spawn_in(owner, async move {
                 if let Err(error) = operation.await {
                     validation.set(Some(Text::content(error.to_string())));
                 }
@@ -820,7 +830,7 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
                         shortcut: Prop::new(None),
                         on_start: Rc::new(move || {
                             let operation = start.start();
-                            spawn(async move {
+                            spawn_in(owner, async move {
                                 let _ = operation.await;
                             });
                         }),
@@ -1006,6 +1016,7 @@ fn composer_frame(form: impl IntoElement, banner_attached: Memo<bool>) -> AnyEle
 
 /// The demo backend has no client services: the editor and send, through `Backend::send_message`.
 fn backend_composer(key: ThreadKey) -> AnyElement {
+    let owner = Owner::current();
     let backend = rt().backend();
     let sending = signal(false);
     let failure = signal(None::<Text>);
@@ -1026,7 +1037,7 @@ fn backend_composer(key: ThreadKey) -> AnyElement {
             failure.set(None);
             let delivery = backend.send_message(&key, value);
             let editor = editor.clone();
-            spawn(async move {
+            spawn_in(owner, async move {
                 match delivery.await {
                     Ok(()) => {
                         draft.set(String::new());

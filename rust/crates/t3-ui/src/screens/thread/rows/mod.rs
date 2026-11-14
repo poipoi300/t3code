@@ -7,6 +7,7 @@ pub mod embed;
 pub mod events;
 pub mod groups;
 pub mod plan;
+pub mod viewed_images;
 pub mod link_request;
 pub mod secret_request;
 pub mod user;

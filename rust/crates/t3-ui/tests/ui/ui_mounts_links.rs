@@ -367,3 +367,126 @@ fn badge_links_open_only_what_the_policy_allows() {
     }
     assert_eq!(opened_after_settling(&mut app), format!("opened: [{SAFE:?}]"));
 }
+
+// ---- Git actions started from a press finish (rule 7 audit: CANCELLED-ON-REBUILD) ----
+
+/// A branch one commit ahead of its upstream, not the default branch: the quick button and the
+/// menu's "Push" both run a git action directly.
+fn ahead_snapshot() -> GitActionsSnapshot {
+    let status: VcsStatusResult = serde_json::from_value(json!({"isRepo":true,"hasPrimaryRemote":true,"isDefaultRef":false,"refName":"feature","hasWorkingTreeChanges":false,
+        "workingTree":{"rootPath":"/project","files":[],"insertions":0,"deletions":0},"hasUpstream":true,"aheadCount":1,"behindCount":0,"pr":null}))
+        .expect("status");
+    GitActionsSnapshot {
+        status: Some(Rc::new(status)),
+        can_write: true,
+        can_operate: true,
+        has_server_thread: true,
+        ..Default::default()
+    }
+}
+
+/// The environment's git service: counts the actions that reached it.
+#[derive(Clone)]
+struct Acting {
+    resource: Resource<GitActionsSnapshot>,
+    runs: Rc<RefCell<Vec<String>>>,
+}
+
+impl GitActionsBackend for Acting {
+    fn watch(&self, _: &GitActionsScope, _: GitActionsWatch) -> LocalBoxStream<'static, GitActionsSnapshot> {
+        let resource = self.resource.clone();
+        self.resource
+            .observe(0)
+            .filter_map(move |_| futures::future::ready(resource.snapshot().value.as_deref().cloned()))
+            .boxed_local()
+    }
+    fn refresh(&self, _: &GitActionsScope) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        async { Ok(()) }.boxed_local()
+    }
+    fn run_action(&self, _: &GitActionsScope, request: GitActionRequest) -> LocalBoxFuture<'static, Result<GitRunStackedActionResult, ClientError>> {
+        let runs = self.runs.clone();
+        async move {
+            runs.borrow_mut().push(format!("{:?}", request.action));
+            Ok(serde_json::from_value(json!({"action":request.action,"branch":{"status":"skipped_not_requested"},"commit":{"status":"skipped_not_requested"},"push":{"status":"pushed"},
+                "pr":{"status":"skipped_not_requested"},"toast":{"title":"Pushed","cta":{"kind":"none"}}})).expect("result"))
+        }
+        .boxed_local()
+    }
+    fn pull(&self, _: &GitActionsScope) -> LocalBoxFuture<'static, Result<VcsPullResult, ClientError>> {
+        async { Err(ClientError::Unsupported("vcs.pull")) }.boxed_local()
+    }
+    fn initialize(&self, _: &GitActionsScope) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        async { Ok(()) }.boxed_local()
+    }
+    fn publish(&self, _: &GitActionsScope, _: SourceControlPublishRepositoryInput) -> LocalBoxFuture<'static, Result<SourceControlPublishRepositoryResult, ClientError>> {
+        async { Err(ClientError::Unsupported("sourceControl.publishRepository")) }.boxed_local()
+    }
+    fn sync_branch(&self, _: &GitActionsScope, _: Option<String>, _: Option<String>, _: bool) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        async { Ok(()) }.boxed_local()
+    }
+    fn open_file(&self, _: &GitActionsScope, _: String, _: String) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        async { Ok(()) }.boxed_local()
+    }
+}
+
+#[component]
+fn ActingFixture() -> impl IntoElement {
+    t3_ui::theme::install(&Default::default());
+    // As the app mounts it: the runtime present.
+    let (_, line) = provide_recording_client(true);
+    let resource = Resource::new(ResourcePolicy::default(), Generation(0));
+    let token = resource.begin();
+    resource.finish(token, ahead_snapshot(), 0, false);
+    let runs = Rc::new(RefCell::new(Vec::new()));
+    provide_context(GitActionsRuntime(Rc::new(Acting {
+        resource,
+        runs: runs.clone(),
+    })));
+    let shown = signal(String::from("runs: unread"));
+    let probe = nsh_base::button()
+        .accessibility_label(Some(SharedString::from("Read runs")))
+        .on_press(move || shown.set(format!("runs: {:?}", runs.borrow())))
+        .child(text("Read runs"));
+    let props = GitActionsControlProps::new(Prop::new(Some(scope())));
+    view()
+        .w_full()
+        .h_full()
+        .child(line)
+        .child(probe)
+        .child(text(move || shown.get()))
+        .child(view().w(px(280.0)).child(git_actions_control(props)))
+}
+
+fn runs_after_settling(app: &mut Headless) -> String {
+    app.settle();
+    app.press("role:button[Read runs]").expect("probe");
+    app.screen()
+        .texts()
+        .into_iter()
+        .find(|text| text.starts_with("runs: ") && *text != "runs: unread")
+        .map(str::to_owned)
+        .expect("runs line")
+}
+
+#[test]
+fn a_git_action_started_from_the_quick_button_or_the_menu_finishes() {
+    // The quick button ("Push & create PR" for a branch ahead of its upstream).
+    let mut app = start(DESKTOP, Root::of::<ActingFixture>());
+    app.wait_for("role:button[Push & create PR]")
+        .expect("the service's first snapshot");
+    app.press("role:button[Push & create PR]")
+        .expect("quick action");
+    app.wait_for("Pushed")
+        .expect("the action finished and its success replaced the in-flight state");
+    let runs = runs_after_settling(&mut app);
+    assert_eq!(runs.matches('"').count(), 2, "exactly one action reached the environment: {runs}");
+    // A menu item: the menu closes (its content is disposed) while the action runs.
+    let mut app = start(DESKTOP, Root::of::<ActingFixture>());
+    app.wait_for("role:button[Push & create PR]")
+        .expect("the service's first snapshot");
+    app.press("role:button[Git action options]").expect("menu");
+    app.press("role:menuitem[Push]").expect("menu item");
+    app.wait_for("Pushed")
+        .expect("the action finished although the menu that started it closed");
+    assert_eq!(runs_after_settling(&mut app), "runs: [\"Push\"]");
+}

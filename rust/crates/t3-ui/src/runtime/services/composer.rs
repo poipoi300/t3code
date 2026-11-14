@@ -684,13 +684,17 @@ pub fn thread_model_picker<P: Platform + Clone + 'static>(
             current.set(watching.snapshot());
         }
     });
+    // Picks come from rows the popover rebuilds; their tasks run under the picker's owner.
+    let owner = Owner::current();
     let report =
         move |operation: futures::future::LocalBoxFuture<'static, Result<(), ClientError>>| {
             failure.set(None);
-            spawn(async move {
-                if let Err(error) = operation.await {
-                    failure.set(Some(error.to_string()));
-                }
+            owner.run(move || {
+                spawn(async move {
+                    if let Err(error) = operation.await {
+                        failure.set(Some(error.to_string()));
+                    }
+                });
             });
         };
     let picking = session.clone();
@@ -751,10 +755,11 @@ mod tests {
             error: None,
         };
         assert!(!question_view(&client).response_disabled);
-        let responding = t3_client::thread_views::composer::questions_service::PendingUserInputView {
-            is_responding: true,
-            ..client.clone()
-        };
+        let responding =
+            t3_client::thread_views::composer::questions_service::PendingUserInputView {
+                is_responding: true,
+                ..client.clone()
+            };
         assert!(question_view(&responding).response_disabled);
         let disabled = t3_client::thread_views::composer::questions_service::PendingUserInputView {
             disabled: true,

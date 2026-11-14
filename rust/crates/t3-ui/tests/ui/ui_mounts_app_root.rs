@@ -480,8 +480,12 @@ fn dragging_the_sidebar_rail_persists_the_width_through_the_clients_rule() {
     let mut app = start_app_tree(DESKTOP, None, Route::Home, "idle");
     app.wait_for("role:button[Resize Sidebar]").expect("rail");
     assert_eq!(
-        app.screen().count("id:connection-notices"),
-        Ok(1),
+        app.screen()
+            .layout_nodes()
+            .iter()
+            .filter(|node| node.test_id.as_deref() == Some("connection-notices"))
+            .count(),
+        1,
         "the connection notices host is mounted once in the root"
     );
     app.drag("role:button[Resize Sidebar]", point(px(900.0), px(0.0)))

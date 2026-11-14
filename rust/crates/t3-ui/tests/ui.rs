@@ -326,3 +326,5 @@ mod dsk_backend;
 mod ui_mounts_app_root;
 #[path = "ui/ui_mounts_links.rs"]
 mod ui_mounts_links;
+#[path = "ui/tl_rows_viewed_images.rs"]
+mod tl_rows_viewed_images;

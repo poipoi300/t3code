@@ -388,8 +388,17 @@ impl ThreadFind {
         viewport: TimelineViewport,
         row_index: impl Fn(&BlockId) -> Option<usize> + 'static,
     ) -> Self {
+        Self::with_state(signal(FindState::default()), viewport, row_index)
+    }
+
+    /// Over a state the caller created first, so rows built before the list can read it.
+    pub fn with_state(
+        state: Signal<FindState>,
+        viewport: TimelineViewport,
+        row_index: impl Fn(&BlockId) -> Option<usize> + 'static,
+    ) -> Self {
         let this = Self {
-            state: signal(FindState::default()),
+            state,
             index: stored(ThreadFindIndex::default()),
             viewport,
             row_index: stored(Rc::new(row_index)),

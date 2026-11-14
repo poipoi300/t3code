@@ -431,4 +431,10 @@ impl<P: Platform + Clone + 'static> crate::screens::thread::rows::link_request::
     {
         self.0.answer(environment, input)
     }
+    fn machines(
+        &self,
+        environment: t3_client::types::EnvironmentId,
+    ) -> LocalBoxFuture<'static, Vec<t3_client::thread_views::link_request::LinkableMachine>> {
+        self.0.machines(environment)
+    }
 }

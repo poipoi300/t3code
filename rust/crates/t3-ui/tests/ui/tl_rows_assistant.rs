@@ -366,12 +366,6 @@ fn the_production_context_forks_through_the_rewind_service_and_keeps_busy_state_
     app.press("role:button[Fork from this response]")
         .expect("fork");
     app.wait_for("Forks: 1").expect("source operation");
-    // The composer has no reply service yet (ui-mounts-notes.md): hidden, as without onReplyToResponse.
-    assert!(
-        app.screen()
-            .enabled("role:button[Reply to this response]")
-            .is_err()
-    );
     assert!(
         !app.screen()
             .enabled("role:button[Fork from this response]")
@@ -466,5 +460,118 @@ fn the_demo_timeline_mounts_meta_and_copies_the_terminal_response_without_an_inj
             },
         )
         .expect("the timeline uses the component's real copy path");
+    }
+}
+
+/// The thread page's timeline and composer over one client: Reply from an assistant row puts the
+/// composer's "Replying to" banner up for that response.
+#[component]
+fn ReplyFixture() -> impl IntoElement {
+    use t3_client::ClientStore;
+    use t3_client::composition::{ClientRuntime, Spawner};
+    use t3_client::testing::{FakePlatform, environment};
+    use t3_contracts::orchestration_v2::{
+        OrchestrationV2CreationSource, OrchestrationV2ShellStreamItem,
+        OrchestrationV2ThreadStreamItem,
+    };
+    use t3_ui::runtime::{Rt, backend::Unavailable, host::Choice};
+    use t3_ui::screens::thread::composer::{reply_to_response, thread_composer};
+    use t3_ui::screens::thread::rows::assistant::ReplyService;
+    use t3_ui::state::nav::{Navigator, Route};
+    t3_ui::theme::install(&Default::default());
+    let key = ThreadKey {
+        environment: EnvironmentId("env".into()),
+        thread: ThreadId("thread-a".into()),
+    };
+    let store = ClientStore::default();
+    let session = store.begin_session(key.environment.clone());
+    let shell = [
+        json!({"kind":"snapshot","snapshot":environment::shell(&[("thread-a", "Reply thread")])}),
+        json!({"kind":"synchronized"}),
+    ]
+    .into_iter()
+    .map(|item| serde_json::from_value::<OrchestrationV2ShellStreamItem>(item).expect("shell"))
+    .collect();
+    store.apply_shell(&key.environment, session, shell);
+    let item = json!({"id":"answer-item","threadId":"thread-a","type":"assistant_message",
+        "messageId":"answer","text":"Here is the plan for the parser.","streaming":false,
+        "runId":"run","nodeId":null,"providerThreadId":null,"providerTurnId":null,
+        "nativeItemRef":null,"parentItemId":null,"ordinal":1,"status":"completed","title":null,
+        "startedAt":AT,"completedAt":AT,"updatedAt":AT});
+    let mut projection =
+        environment::projection("thread-a", "Reply thread", json!([]), json!([item]));
+    projection["visibleTurnItems"] = json!([{"position":0,"visibility":"local",
+        "sourceThreadId":"thread-a","sourceItemId":"answer-item","item":item}]);
+    let thread = [
+        json!({"kind":"snapshot","snapshotSequence":1,"projection":projection}),
+        json!({"kind":"synchronized"}),
+    ]
+    .into_iter()
+    .map(|item| serde_json::from_value::<OrchestrationV2ThreadStreamItem>(item).expect("thread"))
+    .collect();
+    store
+        .apply_thread(key.clone(), session, thread)
+        .expect("thread applies");
+    provide_context(Rt::new(
+        store.clone(),
+        Rc::new(Unavailable("fixture".into())),
+        Choice::Demo,
+    ));
+    provide_context(Navigator::new(Route::Thread(key.clone())));
+    let owner = Owner::current();
+    let spawner: Spawner = Rc::new(move |future| {
+        owner.run(|| {
+            spawn(future);
+        });
+    });
+    let client = ClientRuntime::new(
+        FakePlatform::default(),
+        store,
+        OrchestrationV2CreationSource::Web,
+        spawner,
+    );
+    let reply_client = client.clone();
+    let reply_key = key.clone();
+    provide_context(ReplyService(Rc::new(move |request| {
+        reply_to_response(&reply_client, &reply_key, request)
+    })));
+    toast::anchored_toast_provider(
+        view()
+            .w_full()
+            .h_full()
+            .child(
+                // The thread page gives the timeline the space above the composer.
+                view()
+                    .h(px(420.0))
+                    .child(t3_ui::screens::thread::timeline::timeline(key.clone())),
+            )
+            .child(thread_composer(client, key)),
+    )
+}
+
+#[test]
+fn reply_puts_the_response_in_the_composers_replying_to_banner() {
+    for window in [PHONE, DESKTOP] {
+        let mut sets = t3_ui::registries();
+        let mut fixtures = Registry::new();
+        fixtures.register::<ReplyFixture>();
+        sets.push(fixtures);
+        let mut config = EngineConfig {
+            ui_sets: sets,
+            viewport: size(px(window.0), px(window.1)),
+            ..EngineConfig::new(Root::of::<ReplyFixture>())
+        };
+        if window == DESKTOP {
+            config.environment.os = nsh_core::platform::Os::Linux;
+            config.environment.idiom = nsh_core::platform::Idiom::Desktop;
+        }
+        let mut app = Headless::start(config).expect("fixture");
+        app.wait_for("Here is the plan for the parser.")
+            .expect("assistant row");
+        assert!(!app.screen().shows("Replying to"));
+        app.press("role:button[Reply to this response]")
+            .expect("Reply is bound by the row's constructor");
+        app.wait_for("Replying to")
+            .expect("the composer's reply banner");
     }
 }

@@ -5,10 +5,13 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
 use super::code::{CodeHighlightState, HighlightQueueWork, code_chunk_row, highlighted_chunk};
-use super::flatten::{Block, BlockId, BlockKind, FlattenWork, MessageFlattener, StreamBlocks};
+use super::flatten::{
+    Block, BlockDelta, BlockId, BlockKind, FlattenWork, MessageFlattener, StreamBlocks,
+};
 use crate::i18n::t;
 use crate::runtime::{Shared, rt};
 use crate::screens::composer::send::{ComposerSendClient, PendingMessages, pending_messages};
+use crate::screens::thread::find::{FindKind, FindState, ThreadFind, thread_find_bar};
 use crate::screens::thread::markdown::base::{
     chat_markdown, chat_markdown_blocks, chat_markdown_leaf, starts_with_heading,
 };
@@ -28,6 +31,9 @@ use crate::screens::thread::rows::events::{EventRowContext, v2_event_timeline_ro
 use crate::screens::thread::rows::groups::{WorkGroupsContext, work_group_timeline_row};
 use crate::screens::thread::rows::plan::{PlanContext, proposed_plan_timeline_row};
 use crate::screens::thread::rows::user::{UserRowContext, UserRowState, user_message_row};
+use crate::screens::thread::rows::viewed_images::{
+    ViewedImagesContext, viewed_images_timeline_row,
+};
 use crate::screens::thread::rows::work::working_row;
 use crate::screens::thread::timeline::TimelineServices;
 use crate::screens::thread::viewport::{TimelineViewport, timeline_row_keys};
@@ -72,6 +78,8 @@ struct MessageDocument {
     work: ListWork,
     highlight_updates: Vec<Rc<BlockLeaf>>,
     highlight_reset: bool,
+    /// The last update's delta, for find (taken by the list after each pass).
+    find_delta: Option<BlockDelta>,
 }
 
 impl MessageDocument {
@@ -85,6 +93,7 @@ impl MessageDocument {
             work: ListWork::default(),
             highlight_updates: Vec::new(),
             highlight_reset: false,
+            find_delta: None,
         }
     }
 
@@ -103,6 +112,7 @@ impl MessageDocument {
             delta.document = finished.document;
             delta.context_version = finished.context_version;
         }
+        self.find_delta = Some(delta.clone());
         self.document = delta.document;
         let count = self.document.block_count();
         let old_last = self.leaves.last_key_value().map(|(&index, _)| index);
@@ -268,6 +278,10 @@ pub struct BlockListModel {
     work: ListWork,
     highlight_updates: Vec<Rc<BlockLeaf>>,
     highlight_resets: Vec<String>,
+    /// This pass's document changes for find: (order, row id, delta, finished).
+    find_updates: Vec<(usize, String, BlockDelta, bool)>,
+    /// The documents' row ids changed order or membership in this pass.
+    find_reordered: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -301,6 +315,13 @@ impl BlockListModel {
     pub fn update(&mut self, rows: &[Rc<MessagesTimelineRow>]) -> Vec<BlockId> {
         self.highlight_updates.clear();
         self.highlight_resets.clear();
+        self.find_updates.clear();
+        let documents_before: Vec<String> = self
+            .order
+            .iter()
+            .filter(|(_, id)| self.entries.get(id).is_some_and(|e| e.message.is_some()))
+            .map(|(_, id)| id.clone())
+            .collect();
         let mut removed = std::mem::take(&mut self.entries);
         let mut retired = Vec::new();
         self.order.clear();
@@ -343,6 +364,14 @@ impl BlockListModel {
                                 .update(&row.id, text, streaming, replace),
                         );
                         let document = entry.message.as_mut().expect("updated message");
+                        if let Some(delta) = document.find_delta.take() {
+                            self.find_updates.push((
+                                self.order.len(),
+                                row.id.clone(),
+                                delta,
+                                !streaming,
+                            ));
+                        }
                         self.highlight_updates
                             .append(&mut document.highlight_updates);
                         if document.highlight_reset {
@@ -369,6 +398,17 @@ impl BlockListModel {
                 .map_or(1, |m| m.document.block_count() + 1);
             self.entries.insert(row.id.clone(), entry);
         }
+        let documents_after: Vec<&String> = self
+            .order
+            .iter()
+            .filter(|(_, id)| self.entries.get(id).is_some_and(|e| e.message.is_some()))
+            .map(|(_, id)| id)
+            .collect();
+        self.find_reordered = documents_after.len() != documents_before.len()
+            || documents_after
+                .iter()
+                .zip(&documents_before)
+                .any(|(a, b)| *a != b);
         for entry in removed.into_values() {
             if let Some(message) = entry.message {
                 retired.extend(
@@ -458,6 +498,13 @@ impl BlockListModel {
         })
     }
 
+    /// The list index of a block, for find's scroll target.
+    pub fn index_of_block(&self, id: &BlockId) -> Option<usize> {
+        let entry = self.entries.get(&id.message_id)?;
+        let message = entry.message.as_ref()?;
+        (id.index < message.document.block_count()).then_some(entry.start + id.index)
+    }
+
     /// Selection/find/copy can read unmounted source; rendering never calls this for a document.
     pub fn document(&self, row_id: &str) -> Option<StreamBlocks> {
         Some(self.entries.get(row_id)?.message.as_ref()?.document.clone())
@@ -470,6 +517,15 @@ impl BlockListModel {
             .message
             .as_ref()?
             .code_text(fence.index)
+    }
+
+    /// The rows that hold a document, in timeline order (find's `retain_order`).
+    pub fn document_ids(&self) -> Vec<String> {
+        self.order
+            .iter()
+            .filter(|(_, id)| self.entries.get(id).is_some_and(|e| e.message.is_some()))
+            .map(|(_, id)| id.clone())
+            .collect()
     }
 
     pub fn work(&self) -> ListWork {
@@ -563,6 +619,10 @@ pub struct BlockListThreadContext {
     pub approvals: ApprovalContext,
     pub plans: PlanContext,
     pub pending: Option<(PendingMessages, Rc<dyn ComposerSendClient>)>,
+    /// MessagesTimeline's `listHeader` (the parent-thread divider), built by the timeline.
+    pub header: Option<Rc<dyn Fn() -> AnyElement>>,
+    pub viewed_images: ViewedImagesContext,
+    pub find_state: Signal<FindState>,
 }
 
 impl BlockListOptions {
@@ -596,6 +656,9 @@ impl BlockListOptions {
             approvals,
             plans,
             pending,
+            header: None,
+            viewed_images: ViewedImagesContext::new(services.key.clone()),
+            find_state: services.find_state,
         });
         options
     }
@@ -604,8 +667,37 @@ impl BlockListOptions {
 pub fn messages_timeline(rows: TimelineRows, options: BlockListOptions) -> impl IntoElement {
     let state = options.state;
     let thread = options.thread.clone();
+    let viewport = thread
+        .as_ref()
+        .map(|context| TimelineViewport::new(context.key.clone(), timeline_row_keys(rows)));
+    // MessagesTimeline's find: fed by the flattener's deltas, so it searches unmounted blocks.
+    let find = thread.as_ref().zip(viewport).map(|(context, viewport)| {
+        ThreadFind::with_state(context.find_state, viewport, move |block| {
+            state.model.with(|model| model.index_of_block(block))
+        })
+    });
     let revision = computed(move || {
         let retired = rows.with(|rows| untracked(|| state.model.with(|model| model.update(rows))));
+        if let Some(find) = find {
+            let (updates, reordered, order) = state.model.with(|model| {
+                (
+                    std::mem::take(&mut model.find_updates),
+                    std::mem::take(&mut model.find_reordered),
+                    model.document_ids(),
+                )
+            });
+            untracked(|| {
+                if reordered {
+                    find.retain_order(&order);
+                }
+                for (position, id, delta, finished) in updates {
+                    find.apply(position, &id, FindKind::Assistant, &delta);
+                    if finished {
+                        find.finish(position, &id);
+                    }
+                }
+            });
+        }
         state.highlights.with(|documents| {
             for id in &retired {
                 documents.remove(id);
@@ -644,16 +736,27 @@ pub fn messages_timeline(rows: TimelineRows, options: BlockListOptions) -> impl 
         revision.with(|_| ());
         state.len()
     });
-    let viewport = thread.as_ref().map(|context| {
-        TimelineViewport::new(context.key.clone(), timeline_row_keys(rows)).with_indexed_rows(
+    let viewport = viewport.map(|viewport| {
+        viewport.with_indexed_rows(
             count,
             move |index| state.model.with(|model| model.key_at(index)),
             move |key| state.model.with(|model| model.index_for_key(key)),
         )
     });
+    // ChatView's `chat.find` (Mod+F by default) opens or refocuses the bar.
+    if let (Some(find), Some(keys)) = (find, use_context::<crate::keys::bindings::Keybindings>()) {
+        keys.register(
+            crate::keys::bindings::Scope::default().command("chat.find", move |event| {
+                event.claim();
+                find.open();
+                true
+            }),
+        );
+    }
     let pending = thread
         .as_ref()
         .and_then(|context| context.pending.as_ref().map(|(messages, _)| *messages));
+    let header = thread.as_ref().and_then(|context| context.header.clone());
     let footer = thread.map(|context| {
         view().app_class(tw("w-full px-3 sm:px-12")).child(
             view()
@@ -684,6 +787,7 @@ pub fn messages_timeline(rows: TimelineRows, options: BlockListOptions) -> impl 
     .follow_end(px(1.0))
     .estimated_item_size(px(120.0))
     .content_padding_y(px(16.0))
+    .header(view().child(header.map(|header| header())))
     .footer(view().child(footer))
     .empty(dynamic(move || {
         pending
@@ -701,7 +805,13 @@ pub fn messages_timeline(rows: TimelineRows, options: BlockListOptions) -> impl 
         Some(viewport) => viewport.attach(list),
         None => list.initial_scroll_at_end(),
     };
-    view().flex_1().min_h(px(0.0)).selectable(true).child(list)
+    view()
+        .flex_1()
+        .min_h(px(0.0))
+        .selectable(true)
+        .app_class(tw("relative"))
+        .child(list)
+        .child(find.map(thread_find_bar))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -748,11 +858,7 @@ fn kind_of(row: &MessagesTimelineRow) -> RowKind {
 fn unrendered(kind: RowKind) -> bool {
     matches!(
         kind,
-        RowKind::WorktreeSetup
-            | RowKind::ViewedImages
-            | RowKind::ContextCompaction
-            | RowKind::HtmlRender
-            | RowKind::McpApp
+        RowKind::WorktreeSetup | RowKind::ContextCompaction | RowKind::HtmlRender | RowKind::McpApp
     )
 }
 
@@ -988,7 +1094,10 @@ fn standalone_row(
             .into_element(),
         RowKind::Working => working_row().into_element(),
         RowKind::WorktreeSetup => view().into_element(),
-        RowKind::ViewedImages => view().into_element(),
+        RowKind::ViewedImages => options.thread.map_or_else(
+            || view().into_element(),
+            |context| viewed_images_timeline_row(row, context.viewed_images).into_element(),
+        ),
         RowKind::ContextCompaction => view().into_element(),
         RowKind::HtmlRender => view().into_element(),
         RowKind::McpApp => view().into_element(),

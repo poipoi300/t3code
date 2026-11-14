@@ -283,6 +283,22 @@ fn read_server(app: &mut Headless) {
         .expect("read what the server received");
 }
 
+/// Re-reads the server until a dispatch matching `pattern` (a regex over the last one) arrives.
+fn wait_for_dispatch(app: &mut Headless, pattern: &str) {
+    let selector = format!("text:/Last dispatch .*{pattern}/");
+    for _ in 0..50 {
+        read_server(app);
+        if app.screen().matches(&selector).expect("selector") {
+            return;
+        }
+        app.settle();
+    }
+    panic!(
+        "no dispatch matched {pattern}; on screen: {:?}",
+        app.screen().texts()
+    );
+}
+
 #[test]
 fn a_draft_survives_leaving_and_returning_to_the_thread() {
     for window in [DESKTOP, PHONE] {
@@ -446,4 +462,31 @@ fn keystrokes_neither_recompute_the_timeline_nor_repeat_unchanged_queries() {
         app.screen().shows(&timeline),
         "typing never recomputed the timeline selector"
     );
+}
+
+/// The send button's press rebuilds the action group (busy); its send must still run.
+#[test]
+fn the_send_button_sends_once_and_the_composer_settles() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = start(window, true, false);
+        app.type_text("id:composer-editor", "button send")
+            .expect("type");
+        app.wait_for("Client draft \"button send\"").expect("saved");
+        app.press("role:button[Submit message]")
+            .expect("press send");
+        wait_for_dispatch(&mut app, "button send");
+        app.wait_for("Client draft \"\"").expect("the draft clears");
+        app.wait_until(
+            "the send button settles",
+            Duration::from_secs(5),
+            |screen| {
+                screen
+                    .matches("role:button[Submit message]")
+                    .expect("selector")
+            },
+        )
+        .expect("not busy");
+        read_server(&mut app);
+        assert!(app.screen().shows("Dispatches 1"), "sent once");
+    }
 }

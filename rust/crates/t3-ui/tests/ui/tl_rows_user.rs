@@ -56,6 +56,10 @@ fn projection(kind: &str) -> Option<Rc<MessagesTimelineRow>> {
             "text":"Please fix [a.ts](t3-context://v1/mention/mention-a)",
             "context":{"records":[{"version":1,"contextId":"mention-a","kind":"mention","label":"a.ts","path":"src/a.ts"}]}
         }),
+        "video" => json!({
+            "text":"Watch this",
+            "attachments":[{"type":"file","id":"clip","name":"clip.mov","mimeType":"application/octet-stream","sizeBytes":12}]
+        }),
         "image" => json!({
             "text":"Look at this",
             "attachments":[{"type":"image","id":"photo","name":"photo.png","mimeType":"image/png","sizeBytes":12}]
@@ -129,11 +133,20 @@ impl AssetUrlClient for Assets {
         _: EnvironmentId,
         resource: AssetResource,
     ) -> LocalBoxStream<'static, AssetUrlState> {
-        let AssetResource::Attachment { attachment_id, .. } = &resource else {
-            panic!("user images are attachments, got {resource:?}");
+        let AssetResource::Attachment {
+            attachment_id,
+            mime_type,
+            ..
+        } = &resource
+        else {
+            panic!("user media are attachments, got {resource:?}");
         };
         let id = attachment_id.0.clone();
-        self.0.update(|ids| ids.push(id.clone()));
+        let recorded = match mime_type {
+            Some(mime) if mime.0.starts_with("video/") => format!("{id} {}", mime.0),
+            _ => id.clone(),
+        };
+        self.0.update(|ids| ids.push(recorded));
         let state = AssetUrlState::Success {
             url: format!("https://server.test/api/assets/{id}"),
             asset: Rc::new(
@@ -184,6 +197,7 @@ fn UserRowFixture() -> impl IntoElement {
         ("Server example", "server"),
         ("Chip example", "chip"),
         ("Image example", "image"),
+        ("Video example", "video"),
     ] {
         root = root.child(
             nsh_base::button()
@@ -391,4 +405,18 @@ fn long_messages_measure_the_rem_threshold_and_find_reveals_them() {
         app.wait_for("Show less").expect("revealed");
         assert!(body_node(&app).bounds.size.height >= px(352.0));
     }
+}
+
+/// A committed video plays from the thread's signed URL, asked for with the video's MIME type.
+#[test]
+fn committed_videos_resolve_through_the_signed_asset_url() {
+    let mut app = fixture(DESKTOP);
+    app.wait_for("Daily audit").expect("row");
+    app.press("role:button[Video example]").expect("video");
+    app.wait_for("Signed: clip video/quicktime")
+        .expect("one signed URL, typed as the web's buildAttachmentVideoAsset types it");
+    assert!(
+        !app.screen().shows("clip.mov"),
+        "the player, not the file-name fallback"
+    );
 }
