@@ -58,7 +58,11 @@ fn a_local_path_longer_than_max_path_canonicalizes_inside_its_root() {
     let file = deep.join("workflow.js");
     std::fs::write(&file, "x").unwrap();
     let real = paths::canonicalize(&file).expect("a long local path is not a network path");
-    assert!(!real.to_string_lossy().starts_with(r"\\"), "{}", real.display());
+    assert!(
+        !real.to_string_lossy().starts_with(r"\\"),
+        "{}",
+        real.display()
+    );
     let root = paths::canonicalize(&root).unwrap();
     assert!(paths::within(&real, &root), "{}", real.display());
 }

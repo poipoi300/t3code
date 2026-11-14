@@ -23,7 +23,13 @@ struct Run {
 }
 
 impl Run {
-    async fn start(shell: &str, root: &Path, thread: &str, command: &str, env: Option<&[&str]>) -> Self {
+    async fn start(
+        shell: &str,
+        root: &Path,
+        thread: &str,
+        command: &str,
+        env: Option<&[&str]>,
+    ) -> Self {
         let mut options = ManagerOptions::new(root.join(format!("logs-{thread}")));
         options.preferred_shell = Some(shell.into());
         if let Some(keys) = env {
@@ -37,11 +43,13 @@ impl Run {
         let worktree = root.join(thread);
         std::fs::create_dir_all(&worktree).unwrap();
         let worktree = worktree.to_string_lossy().into_owned();
-        let scripts: Vec<ProjectScript> = vec![serde_json::from_value(serde_json::json!({
-            "id": "setup", "name": "Setup", "command": command, "icon": "configure",
-            "runOnWorktreeCreate": true, "async": false,
-        }))
-        .unwrap()];
+        let scripts: Vec<ProjectScript> = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "setup", "name": "Setup", "command": command, "icon": "configure",
+                "runOnWorktreeCreate": true, "async": false,
+            }))
+            .unwrap(),
+        ];
         let (sender, lines) = mpsc::unbounded_channel();
         let started = runner
             .run_for_thread(ScriptInput {

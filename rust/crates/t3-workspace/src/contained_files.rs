@@ -273,7 +273,10 @@ mod tests {
         let hard = f.root.join("session/hard.js");
         std::fs::hard_link(f.outside.join("flow.js"), &hard).unwrap();
         let path = f.files.realpath(&hard).unwrap();
-        assert!(f.files.open(&path).is_err(), "a hard link to an outside file opened");
+        assert!(
+            f.files.open(&path).is_err(),
+            "a hard link to an outside file opened"
+        );
     }
 
     /// Resolution itself is confined: a path not lexically inside the root is refused before any
@@ -287,9 +290,17 @@ mod tests {
             f.outside.join("flow.js"),
             f.outside.join("absent.js"),
             f.outside.join("dir.js"),
-            f.root.join("session").join("..").join("..").join("outside").join("flow.js"),
+            f.root
+                .join("session")
+                .join("..")
+                .join("..")
+                .join("outside")
+                .join("flow.js"),
         ] {
-            let error = f.files.realpath(&path).expect_err("outside the root resolved");
+            let error = f
+                .files
+                .realpath(&path)
+                .expect_err("outside the root resolved");
             kinds.push((error.kind(), error.to_string()));
         }
         assert!(kinds.windows(2).all(|pair| pair[0] == pair[1]), "{kinds:?}");
