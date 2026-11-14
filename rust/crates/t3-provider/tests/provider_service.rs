@@ -254,6 +254,11 @@ async fn an_update_survives_rpc_disconnect_rejects_duplicates_and_publishes_its_
         started,
         release: Mutex::new(Some(wait)),
     }));
+    let cache_root = tempfile::tempdir().unwrap();
+    let cache = Arc::new(t3_provider::status_cache::ProviderStatusCache::new(
+        cache_root.path().into(),
+    ));
+    service.set_status_cache(cache.clone()).await;
     let (instance, _events) = instance(true);
     instance.value.lock().await.version = Some("0.165.0".into());
     service.register(instance.clone()).await;
@@ -283,6 +288,9 @@ async fn an_update_survives_rpc_disconnect_rejects_duplicates_and_publishes_its_
     peer.value.lock().await.version = Some("0.166.0".into());
     release.send(()).unwrap();
     service.await_updates().await;
+    let persisted = cache.read(&"work".into()).await.unwrap();
+    assert_eq!(persisted.version.as_ref().unwrap().0, "0.166.0");
+    assert!(persisted.update_state.is_none());
     let peer_snapshots: Vec<_> = std::iter::from_fn(|| peer_events.try_recv().ok()).collect();
     assert_eq!(
         peer_snapshots,

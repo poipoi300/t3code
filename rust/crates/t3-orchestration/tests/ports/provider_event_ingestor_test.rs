@@ -1231,10 +1231,7 @@ impl InterceptCommitter {
     pub(crate) fn fail_next(&self, error: Error) {
         self.errors.lock().unwrap().push_back(error);
     }
-}
-#[async_trait]
-impl EventCommitter for InterceptCommitter {
-    async fn commit(&self, input: CommitRequest) -> Result<CommitResult> {
+    async fn before_commit(&self) -> Result<()> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let gate = self.gate.lock().unwrap().take();
         if let Some((entered, release)) = gate {
@@ -1245,7 +1242,31 @@ impl EventCommitter for InterceptCommitter {
         if let Some(error) = error {
             return Err(error);
         }
+        Ok(())
+    }
+}
+#[async_trait]
+impl EventCommitter for InterceptCommitter {
+    async fn commit(&self, input: CommitRequest) -> Result<CommitResult> {
+        self.before_commit().await?;
         self.inner.commit(input).await
+    }
+    async fn commit_with_options(
+        &self,
+        input: CommitRequest,
+        options: CommitOptions,
+    ) -> Result<CommitResult> {
+        self.before_commit().await?;
+        self.inner.commit_with_options(input, options).await
+    }
+    async fn commit_prepared(
+        &self,
+        input: CommitRequest,
+        options: CommitOptions,
+        prepare: CommitPreparation,
+    ) -> Result<CommitResult> {
+        self.before_commit().await?;
+        self.inner.commit_prepared(input, options, prepare).await
     }
     async fn commit_project(
         &self,
