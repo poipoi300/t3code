@@ -45,7 +45,14 @@ impl SessionInventory for Inventory {
         &self,
         _: &str,
         completed: &[AgentSessionImportSource],
-    ) -> Result<Vec<RecentSession>> {
+    ) -> Result<RecentThreads> {
+        Ok(Box::pin(futures_util::stream::iter(
+            self.recent(completed)?.into_iter().map(Ok),
+        )))
+    }
+}
+impl Inventory {
+    fn recent(&self, completed: &[AgentSessionImportSource]) -> Result<Vec<RecentSession>> {
         if completed
             .iter()
             .any(|s| same_transcript_identity(s, &self.source))

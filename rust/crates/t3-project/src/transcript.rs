@@ -383,7 +383,7 @@ pub fn parse_session_records(
         messages,
     })
 }
-fn valid_record(v: &Value) -> bool {
+pub(crate) fn valid_record(v: &Value) -> bool {
     let Some(object) = v.as_object() else {
         return false;
     };

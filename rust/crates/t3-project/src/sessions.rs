@@ -46,6 +46,10 @@ pub struct SessionWorktree {
 }
 /// Native discovery/streaming adapters must come from workspace/provider composition.
 /// Implementations enforce scanner byte/operation budgets, regular-file reads and identity checks.
+/// Recent threads one at a time, as TypeScript's stream: a transcript's selected history is
+/// held only while the importer handles it.
+pub type RecentThreads =
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<RecentSession>> + Send>>;
 #[async_trait]
 pub trait SessionInventory: Send + Sync {
     async fn candidates(&self) -> Result<SessionCandidates>;
@@ -53,7 +57,7 @@ pub trait SessionInventory: Send + Sync {
         &self,
         root: &str,
         completed: &[AgentSessionImportSource],
-    ) -> Result<Vec<RecentSession>>;
+    ) -> Result<RecentThreads>;
 }
 #[derive(Clone)]
 pub struct AgentSessionScanner {
@@ -252,7 +256,7 @@ impl AgentSessionImporter {
             .runtimes
             .completed_sources(&project.workspace_root.0)
             .await?;
-        let outcomes = self
+        let mut outcomes = self
             .scanner
             .inventory
             .recent_threads(&project.workspace_root.0, &completed)
@@ -262,7 +266,8 @@ impl AgentSessionImporter {
             imported_count: 0,
             skipped_count: 0,
         };
-        for outcome in outcomes {
+        while let Some(outcome) = futures_util::StreamExt::next(&mut outcomes).await {
+            let outcome = outcome?;
             let (source, thread, worktree) = match outcome {
                 RecentSession::Skipped => {
                     result.skipped_count += 1;
