@@ -635,6 +635,9 @@ fn link_setup() -> LinkHarness {
         ("pullRequests.linkedThreads", t3_rpc::CallKind::Unary),
         ("projects.createNew", t3_rpc::CallKind::Unary),
         ("projects.listIgnoredFiles", t3_rpc::CallKind::Unary),
+        ("projects.searchEntries", t3_rpc::CallKind::Unary),
+        ("projects.searchContents", t3_rpc::CallKind::Unary),
+        ("orchestration.searchThreads", t3_rpc::CallKind::Unary),
     ]);
     server.state.borrow_mut().extra_rpc = Some(Rc::new(move |request| {
         let reply = |value| {
@@ -1326,4 +1329,248 @@ fn prompt_link_replays_follow_platform_entry_keys_when_back_then_push_reuses_an_
             .as_ref(),
         NewThreadView::LinkOpened
     ));
+}
+
+#[test]
+fn clone_repository_identity_matches_git_remote_and_azure_source_cases() {
+    use t3_client::navigation::project_flow::repository_key;
+    for (raw, expected) in [
+        (" git@GitHub.com:Acme/Web.git ", "github.com/acme/web"),
+        ("https://github.com/acme/web.git/", "github.com/acme/web"),
+        (
+            "ssh://git@github.com:2222/acme/web.git",
+            "github.com/acme/web",
+        ),
+        (
+            "https://gitlab.com/team/nested/web.git",
+            "gitlab.com/team/nested/web",
+        ),
+        (
+            "git@ssh.dev.azure.com:v3/Acme/Tools/Web",
+            "dev.azure.com/acme/tools/_git/web",
+        ),
+        (
+            "git@vs-ssh.visualstudio.com:v3/Acme/Tools/Web",
+            "acme.visualstudio.com/tools/_git/web",
+        ),
+        ("C:/work/web", "c:/work/web"),
+    ] {
+        assert_eq!(repository_key(raw), expected, "{raw}");
+    }
+}
+
+#[test]
+fn palette_catalogue_uses_scoped_projects_and_rechecks_action_availability() {
+    use t3_client::navigation::{
+        Route,
+        palette_service::{Action, HostCommand},
+    };
+    use t3_client::view_logic::shell::palette_files::PaletteSearchClient;
+    let (mut h, c, _, _, _) = link_setup();
+    let palette = c.palette();
+    palette.set_route(Route::Thread(t3_client::types::ThreadKey {
+        environment: environment("env"),
+        thread: t3_client::types::ThreadId("t1".into()),
+    }));
+    assert_eq!(palette.catalogue().projects.len(), 1);
+    let mut targets = palette.watch_target();
+    assert!(
+        h.run(async move { targets.next().await.unwrap() })
+            .is_some()
+    );
+    palette.set_host_commands([HostCommand::FindThread].into());
+    let item = palette
+        .catalogue()
+        .groups
+        .iter()
+        .flat_map(|g| g.items.clone())
+        .find(|i| i.value == "find-current-thread")
+        .unwrap();
+    let service = palette.clone();
+    let chosen = item.clone();
+    assert!(matches!(
+        h.run(async move { service.activate(&chosen).await }),
+        Ok(Action::Host {
+            command: HostCommand::FindThread,
+            ..
+        })
+    ));
+    palette.set_host_commands(Default::default());
+    let service = palette.clone();
+    assert!(matches!(
+        h.run(async move { service.activate(&item).await }),
+        Err(ClientError::Cancelled)
+    ));
+    let service = palette.clone();
+    let project = palette.catalogue().projects[0].clone();
+    assert!(matches!(
+        h.run(async move { service.activate(&project).await }),
+        Ok(Action::Navigate(Route::Draft(_)))
+    ));
+    let usage = palette.filter(">usage", None, &[]);
+    assert!(
+        usage
+            .iter()
+            .flat_map(|g| &g.items)
+            .any(|i| i.value == "action:usage")
+    );
+}
+
+#[test]
+fn palette_search_debounces_queries_and_revocation_clears_results() {
+    use t3_client::navigation::Route;
+    use t3_client::view_logic::shell::palette_files::{PaletteSearchClient, SearchOptions};
+    let (mut h, c, _, _, effects) = link_setup();
+    let palette = c.palette();
+    palette.set_route(Route::Thread(t3_client::types::ThreadKey {
+        environment: environment("env"),
+        thread: t3_client::types::ThreadId("t1".into()),
+    }));
+    let target = palette.search_target().unwrap();
+    let previous = h.server().state.borrow().extra_rpc.clone().unwrap();
+    let calls = effects.clone();
+    h.server().state.borrow_mut().extra_rpc = Some(Rc::new(move |request| {
+        let answer = match request.tag.as_str() {
+            "projects.searchEntries" => {
+                json!({"entries":[{"path":"src/main.rs","kind":"file"}],"truncated":false})
+            }
+            "projects.searchContents" => {
+                json!({"matches":[{"path":"src/main.rs","lineNumber":3,"lineContent":"x[","matchRanges":[{"start":1,"end":2}]}],"truncated":true,"regexFallbackError":"invalid expression"})
+            }
+            _ => return previous(request),
+        };
+        calls
+            .borrow_mut()
+            .push((request.tag.clone(), request.payload.clone()));
+        Some(t3_rpc::HandlerOutput::Unary(
+            async move { t3_rpc::Exit::success(answer) }.boxed_local(),
+        ))
+    }));
+    let mut files = palette.files(target.clone(), "  src  ".into());
+    let (initial, mut files) = h.run(async move { (files.next().await.unwrap(), files) });
+    assert!(initial.pending);
+    let (done, ready) = futures::channel::oneshot::channel();
+    h.spawn(async move {
+        while let Some(view) = files.next().await {
+            if !view.pending {
+                assert!(done.send((view, files)).is_ok());
+                break;
+            }
+        }
+    });
+    h.settle();
+    assert!(
+        !effects
+            .borrow()
+            .iter()
+            .any(|(tag, _)| tag == "projects.searchEntries")
+    );
+    h.advance(250);
+    let (view, mut files) = h.run(async move { ready.await.unwrap() });
+    assert!(view.error.is_none(), "{:?}", view.error);
+    assert_eq!(view.entries.len(), 1);
+    assert_eq!(view.matched_query, "src");
+    assert!(palette.can_open(&target));
+    let mut content = palette.contents(
+        target.clone(),
+        " [ ".into(),
+        SearchOptions {
+            use_regex: true,
+            ..Default::default()
+        },
+    );
+    let (initial, mut content) = h.run(async move { (content.next().await.unwrap(), content) });
+    assert!(initial.pending);
+    let (done, ready) = futures::channel::oneshot::channel();
+    h.spawn(async move {
+        while let Some(view) = content.next().await {
+            if !view.pending {
+                done.send(view).unwrap();
+                break;
+            }
+        }
+    });
+    h.settle();
+    h.advance(250);
+    let content = h.run(async move { ready.await.unwrap() });
+    assert!(content.error.is_none(), "{:?}", content.error);
+    assert!(content.invalid_regex && content.truncated);
+    assert_eq!(content.matches.len(), 1);
+    let input = effects
+        .borrow()
+        .iter()
+        .find(|(tag, _)| tag == "projects.searchContents")
+        .unwrap()
+        .1
+        .clone();
+    assert_eq!(input["query"], " [ ");
+    assert_eq!(input["limit"], 500);
+    c.client(&environment("env"))
+        .unwrap()
+        .session()
+        .unwrap()
+        .update_grants(t3_client::permissions::SessionGrants {
+            valid: true,
+            scopes: ["orchestration:read".into()].into(),
+        });
+    assert!(!palette.can_open(&target));
+    palette.set_host_commands(Default::default());
+    let denied = h.run(async move {
+        loop {
+            let view = files.next().await.unwrap();
+            if view.error.is_some() {
+                break view;
+            }
+        }
+    });
+    assert!(denied.entries.is_empty());
+}
+
+#[test]
+fn palette_message_search_uses_cjk_token_policy_and_server_snippets() {
+    let (mut h, c, _, _, effects) = link_setup();
+    let previous = h.server().state.borrow().extra_rpc.clone().unwrap();
+    let calls = effects.clone();
+    h.server().state.borrow_mut().extra_rpc = Some(Rc::new(move |request| {
+        if request.tag != "orchestration.searchThreads" {
+            return previous(request);
+        }
+        calls
+            .borrow_mut()
+            .push((request.tag.clone(), request.payload.clone()));
+        let value = json!({"matches":[{"threadId":"t2","projectId":"project","source":"assistant","snippet":"漢字 explanation","messageCreatedAt":"2026-06-20T00:00:00.000Z","quality":0.9,"hits":2}]});
+        Some(t3_rpc::HandlerOutput::Unary(
+            async move { t3_rpc::Exit::success(value) }.boxed_local(),
+        ))
+    }));
+    let palette = c.palette();
+    let request = palette.clone();
+    let (done, ready) = futures::channel::oneshot::channel();
+    h.spawn(async move {
+        done.send(request.message_matches("漢字").await).unwrap();
+    });
+    h.settle();
+    assert!(
+        !effects
+            .borrow()
+            .iter()
+            .any(|(tag, _)| tag == "orchestration.searchThreads")
+    );
+    h.advance(250);
+    let results = h.run(async move { ready.await.unwrap() }).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].description.as_deref(), Some("漢字 explanation"));
+    assert_eq!(
+        results[0].thread.as_ref().unwrap().environment,
+        environment("env")
+    );
+    assert_eq!(
+        effects
+            .borrow()
+            .iter()
+            .find(|(tag, _)| tag == "orchestration.searchThreads")
+            .unwrap()
+            .1["query"],
+        "漢字"
+    );
 }

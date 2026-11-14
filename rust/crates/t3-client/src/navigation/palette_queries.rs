@@ -1,4 +1,5 @@
 use super::*;
+use crate::rpc::RpcEndpoint;
 use crate::{
     services::filesystem::ReadAccess,
     services::views::ComposerPathSearchTarget,
@@ -16,7 +17,7 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
         view: impl Fn(Option<&QueryState<Rc<M::Output>>>) -> V + 'static,
     ) -> LocalBoxStream<'static, V>
     where
-        M: RpcMethod + 'static,
+        M: crate::rpc::RpcMethod + 'static,
         M::Input: Clone + serde::Serialize + 'static,
         M::Output: PartialEq + serde::Serialize + 'static,
         V: 'static,
@@ -29,17 +30,19 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
         futures::stream::unfold(
             (this, target, input, view, changes, lease, updates, 0u8),
             |(this, target, input, view, mut changes, mut lease, mut updates, phase)| async move {
-                if phase==2{return None;}
-                let mut ended=false;
-                if phase==1 {
+                if phase == 2 {
+                    return None;
+                }
+                let mut ended = false;
+                if phase == 1 {
                     if let Some(events) = updates.as_mut() {
                         match futures::future::select(events.next(), changes.next()).await {
                             futures::future::Either::Left((None, _))
-                            | futures::future::Either::Right((None, _)) => ended=true,
+                            | futures::future::Either::Right((None, _)) => ended = true,
                             _ => {}
                         }
                     } else {
-                        ended=changes.next().await.is_none();
+                        ended = changes.next().await.is_none();
                     }
                 }
                 if !ended && this.access(&target).allowed {
@@ -64,14 +67,30 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                 }
                 let mut snapshot = lease.as_ref().map(|lease| lease.resource().snapshot());
                 if ended {
-                    let state=snapshot.get_or_insert_with(||QueryState {value:None,loading:false,error:None,revision:0});
-                    state.loading=false;
-                    if state.error.is_none(){state.error=Some(ClientError::Disconnected.to_string());}
+                    let state = snapshot.get_or_insert_with(|| QueryState {
+                        value: None,
+                        loading: false,
+                        error: None,
+                        revision: 0,
+                    });
+                    state.loading = false;
+                    if state.error.is_none() {
+                        state.error = Some(ClientError::Disconnected.to_string());
+                    }
                 }
                 let value = view(snapshot.as_ref());
                 Some((
                     value,
-                    (this, target, input, view, changes, lease, updates, if ended {2}else{1}),
+                    (
+                        this,
+                        target,
+                        input,
+                        view,
+                        changes,
+                        lease,
+                        updates,
+                        if ended { 2 } else { 1 },
+                    ),
                 ))
             },
         )
@@ -177,9 +196,12 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                     && state.is_none_or(|s| s.loading || (s.value.is_none() && s.error.is_none()))),
             error,
             invalid_regex: options.use_regex
-                && value
-                    .as_ref()
-                    .is_some_and(|v| v.regex_fallback_error.is_some()),
+                && value.as_ref().is_some_and(|v| {
+                    v.regex_fallback_error
+                        .as_ref()
+                        .and_then(Option::as_ref)
+                        .is_some_and(|error| !error.is_empty())
+                }),
             truncated: value.as_ref().is_some_and(|v| v.truncated),
         }
     }
@@ -208,7 +230,15 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                 query,
                 &Default::default(),
                 &environment.id,
-                self.runtime.store().shared_shell(&environment.id).and_then(|shell|shell.older_settled.as_ref().map(|older|older.before.clone())),
+                self.runtime
+                    .store()
+                    .shared_shell(&environment.id)
+                    .and_then(|shell| {
+                        shell
+                            .older_settled
+                            .as_ref()
+                            .map(|older| older.before.clone())
+                    }),
             ) else {
                 continue;
             };
@@ -221,12 +251,59 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
         }
         let mut items = vec![];
         let mut candidates = vec![];
+        let mut older_titles = vec![];
         while let Some((environment, result)) = jobs.next().await {
             let reply = match result {
                 Ok(value) => value,
                 Err(ClientError::Unsupported(_)) => continue,
                 Err(error) => return Err(error),
             };
+            for thread in reply.threads.as_deref().unwrap_or_default() {
+                if sidebar::is_hidden_thread(&thread.lineage) {
+                    continue;
+                }
+                let key = ThreadKey {
+                    environment: environment.clone(),
+                    thread: thread.id.clone(),
+                };
+                let project = ProjectKey {
+                    environment: environment.clone(),
+                    project: thread.project_id.clone(),
+                };
+                let shell = self.runtime.store().shared_shell(&environment);
+                let project_title = shell
+                    .as_ref()
+                    .and_then(|s| s.projects.iter().find(|p| p.id == thread.project_id))
+                    .map(|p| p.title.0.as_str());
+                let subject = self.subject(
+                    &sidebar::SidebarThread {
+                        key: key.clone(),
+                        project,
+                        shell: thread,
+                    },
+                    project_title,
+                );
+                if search::score_thread(
+                    query,
+                    &subject,
+                    self.platform.now_epoch_ms() as f64,
+                    false,
+                    false,
+                )
+                .is_none()
+                {
+                    continue;
+                }
+                let mut item = Item::action(
+                    format!("thread:{}:{}", environment.0, key.thread.0),
+                    &thread.title,
+                );
+                item.thread = Some(key.clone());
+                item.thread_search = Some(subject);
+                item.description = project_title.map(str::to_owned);
+                self.message_targets.borrow_mut().insert(key);
+                older_titles.push(item);
+            }
             for found in reply.matches {
                 let key = ThreadKey {
                     environment: environment.clone(),
@@ -235,7 +312,12 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                 let shell = self.runtime.store().shared_shell(&environment);
                 let thread = shell
                     .as_ref()
-                    .and_then(|s| s.threads.iter().find(|t| t.id == found.thread_id).map(Rc::as_ref))
+                    .and_then(|s| {
+                        s.threads
+                            .iter()
+                            .find(|t| t.id == found.thread_id)
+                            .map(Rc::as_ref)
+                    })
                     .or_else(|| {
                         reply
                             .threads
@@ -263,7 +345,7 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                     },
                     title,
                 );
-                let subject_view=subject.clone();
+                let subject_view = subject.clone();
                 let canonical = t3_shared::palette_search::ThreadSubject {
                     id: subject.id,
                     title: subject.title,
@@ -283,7 +365,14 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                         .collect(),
                 };
                 let value = serde_json::to_value(&found)?;
-                let title_match=value["source"]=="title"||t3_shared::palette_search::score_thread(query,&canonical,self.platform.now_epoch_ms() as f64,false,false).is_some();
+                let title_match = t3_shared::palette_search::score_thread(
+                    query,
+                    &canonical,
+                    self.platform.now_epoch_ms() as f64,
+                    false,
+                    false,
+                )
+                .is_some();
                 candidates.push(t3_shared::palette_search::MessageMatchCandidate {
                     subject: Some(canonical),
                     quality: value["quality"].as_f64(),
@@ -294,23 +383,46 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                     format!("thread:{}:{}", environment.0, key.thread.0),
                     &thread.title,
                 );
-                item.thread_search=title_match.then_some(subject_view);
+                item.thread_search = title_match.then_some(subject_view);
                 item.thread = Some(key);
                 item.description = Some(found.snippet);
                 items.push(item);
             }
         }
-        let mut result=items.iter().filter(|item|item.thread_search.is_some()).cloned().collect::<Vec<_>>();
-        result.extend(t3_shared::palette_search::rank_message_matches(
-            &candidates,
-            query,
-            self.platform.now_epoch_ms() as f64,
-            true,
-            true,
-        )
-        .into_iter()
-        .filter(|index|items[*index].thread_search.is_none())
-        .map(|index| items[index].clone())
+        let title_keys = older_titles
+            .iter()
+            .filter_map(|item| item.thread.clone())
+            .collect::<BTreeSet<_>>();
+        let mut result = older_titles;
+        result.extend(
+            items
+                .iter()
+                .filter(|item| {
+                    item.thread_search.is_some()
+                        && !item
+                            .thread
+                            .as_ref()
+                            .is_some_and(|key| title_keys.contains(key))
+                })
+                .cloned(),
+        );
+        result.extend(
+            t3_shared::palette_search::rank_message_matches(
+                &candidates,
+                query,
+                self.platform.now_epoch_ms() as f64,
+                true,
+                true,
+            )
+            .into_iter()
+            .filter(|index| {
+                items[*index].thread_search.is_none()
+                    && !items[*index]
+                        .thread
+                        .as_ref()
+                        .is_some_and(|key| title_keys.contains(key))
+            })
+            .map(|index| items[index].clone()),
         );
         Ok(result)
     }
@@ -353,7 +465,7 @@ impl<P: Platform + Clone + 'static> PaletteSearchClient for PaletteService<P> {
             .input;
             let input = ProjectSearchEntriesInput {
                 limit: 200,
-                kind: Some(ProjectEntryKind::File),
+                kind: Some(Some(ProjectEntryKind::File)),
                 ..input
             };
             let service = this.clone();

@@ -121,6 +121,7 @@ pub struct PublishTarget {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Publishing {
+    pub title: Label,
     pub selected: PublishTarget,
     pub targets: Vec<PublishTarget>,
     pub publishes: bool,
@@ -143,13 +144,16 @@ struct State {
     draft: RefCell<Draft>,
     revision: Cell<u64>,
     busy: Cell<bool>,
-    completed: Cell<bool>,
+    completed: Cell<Option<u64>>,
+    flow: Cell<u64>,
     changed: Resource<()>,
     errors: RefCell<Option<String>>,
     notices: RefCell<Vec<Notice>>,
     discoveries: RefCell<BTreeMap<EnvironmentId, Option<Rc<SourceControlDiscoveryResult>>>>,
     active_project: RefCell<Option<ProjectKey>>,
     watchers: Cell<usize>,
+    preset: Cell<bool>,
+    generations: RefCell<BTreeMap<EnvironmentId, Generation>>,
     browses: RefCell<
         BTreeMap<(EnvironmentId, String), Rc<t3_contracts::filesystem::FilesystemBrowseResult>>,
     >,
@@ -161,13 +165,16 @@ impl Default for State {
             draft: RefCell::default(),
             revision: Cell::new(0),
             busy: Cell::new(false),
-            completed: Cell::new(false),
+            completed: Cell::new(None),
+            flow: Cell::new(0),
             changed: Resource::new(ResourcePolicy::default(), Generation::default()),
             errors: RefCell::default(),
             notices: RefCell::default(),
             discoveries: RefCell::default(),
             active_project: RefCell::default(),
             watchers: Cell::new(0),
+            preset: Cell::new(false),
+            generations: RefCell::default(),
             browses: RefCell::default(),
             browse_errors: RefCell::default(),
         }
@@ -212,6 +219,33 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
     }
     pub fn set_active_project(&self, project: Option<ProjectKey>) {
         *self.state.active_project.borrow_mut() = project;
+    }
+    pub fn start_new_project(&self) -> Result<(), ClientError> {
+        if self.state.busy.get() {
+            return Err(ClientError::Cancelled);
+        }
+        let environment = self
+            .runtime
+            .environments()
+            .into_iter()
+            .find(|e| {
+                e.state.phase == Phase::Connected
+                    && self
+                        .config(&e.id)
+                        .ok()
+                        .is_some_and(|c| c.new_projects_root.is_some())
+            })
+            .ok_or(ClientError::Disconnected)?;
+        *self.state.draft.borrow_mut() = Draft {
+            step: Step::NewProject,
+            environment: Some(environment.id),
+            ..Default::default()
+        };
+        self.state.preset.set(self.state.watchers.get() == 0);
+        self.state.errors.borrow_mut().take();
+        self.state.completed.set(None);
+        self.changed();
+        Ok(())
     }
     pub fn publishing(&self) -> Option<Publishing> {
         let draft = self.state.draft.borrow();
@@ -275,6 +309,11 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
                 .map_or_else(|| folder.clone(), |owner| format!("{owner}/{folder}"))
         };
         Some(Publishing {
+            title: Label::key(&if targets.len() > 1 {
+                "Create private repository".into()
+            } else {
+                format!("Create private repository on {}", selected.label)
+            }),
             selected,
             targets,
             publishes: draft.publishes,
@@ -305,10 +344,13 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
     }
     pub fn completed(&self) -> LocalBoxStream<'static, ()> {
         let state = self.state.clone();
+        let flow = state.flow.get();
         self.state
             .changed
             .observe(self.platform.monotonic_ms())
-            .filter_map(move |_| futures::future::ready(state.completed.get().then_some(())))
+            .filter_map(move |_| {
+                futures::future::ready((state.completed.get() == Some(flow)).then_some(()))
+            })
             .take(1)
             .boxed_local()
     }
@@ -392,6 +434,33 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
         )
         .map_err(|message| ClientError::InvalidPayload(message.into()))
     }
+    async fn lookup_path(&self, environment: &EnvironmentId, path: &str) -> String {
+        if !matches!(path.as_bytes(), [b'~'] | [b'~', b'/' | b'\\', ..])
+            || !self
+                .runtime
+                .project_files()
+                .read_access(environment)
+                .allowed
+        {
+            return path.into();
+        }
+        let result = async {
+            let endpoint = self.endpoint(environment)?;
+            let input = serde_json::from_value(json!({"partialPath":"~"}))?;
+            endpoint.call::<WsFilesystemBrowseRpc>(input).await
+        }
+        .await;
+        result.map_or_else(
+            |_| path.into(),
+            |reply| {
+                format!(
+                    "{}{}",
+                    reply.parent_path.0.trim_end_matches(['/', '\\']),
+                    &path[1..]
+                )
+            },
+        )
+    }
     fn push(&self, step: Step, query: String) {
         let mut draft = self.state.draft.borrow_mut();
         let prior = (draft.step, draft.query.clone());
@@ -443,9 +512,12 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
     }
     pub fn watch(&self) -> LocalBoxStream<'static, Rc<View>> {
         if self.state.watchers.get() == 0 {
+            self.state.flow.set(self.state.flow.get().wrapping_add(1));
+        }
+        if self.state.watchers.get() == 0 && !self.state.preset.replace(false) {
             *self.state.draft.borrow_mut() = Draft::default();
             self.state.errors.borrow_mut().take();
-            self.state.completed.set(false);
+            self.state.completed.set(None);
             self.changed();
         }
         self.state.watchers.set(self.state.watchers.get() + 1);
@@ -556,6 +628,46 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
                 return view;
             }
         };
+        if let Some(generation) = self.generation(environment)
+            && self
+                .state
+                .generations
+                .borrow_mut()
+                .insert(environment.clone(), generation)
+                != Some(generation)
+        {
+            self.state.discoveries.borrow_mut().remove(environment);
+            self.state
+                .browses
+                .borrow_mut()
+                .retain(|(env, _), _| env != environment);
+            self.state
+                .browse_errors
+                .borrow_mut()
+                .retain(|(env, _), _| env != environment);
+            self.source_control.begin_session(environment, generation);
+            self.projects.begin_session(environment.clone(), generation);
+        }
+        if io
+            && matches!(
+                draft.step,
+                Step::Sources | Step::NewProject | Step::Repository
+            )
+            && !self.state.discoveries.borrow().contains_key(environment)
+            && let Ok(endpoint) = self.endpoint(environment)
+        {
+            let discovery = self
+                .source_control
+                .discovery(environment, &endpoint, Empty {})
+                .await
+                .ok()
+                .map(Rc::new);
+            self.state
+                .discoveries
+                .borrow_mut()
+                .insert(environment.clone(), discovery);
+            self.state.changed.invalidate();
+        }
         if draft.step == Step::Sources {
             view.placeholder = Label::key("Choose a source...");
             let connected = self.endpoint(environment).is_ok();
@@ -583,21 +695,6 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
                 Glyph::Repository,
                 !connected,
             ));
-            if io
-                && !self.state.discoveries.borrow().contains_key(environment)
-                && let Ok(endpoint) = self.endpoint(environment)
-            {
-                let discovery = self
-                    .source_control
-                    .discovery(environment, &endpoint, Empty {})
-                    .await
-                    .ok()
-                    .map(Rc::new);
-                self.state
-                    .discoveries
-                    .borrow_mut()
-                    .insert(environment.clone(), discovery);
-            }
             let discovery = self
                 .state
                 .discoveries
@@ -687,12 +784,29 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
                         url: draft.remote.clone().unwrap_or_default(),
                     });
                 }
-                if !draft.query.trim().is_empty()
+                let windows = config.environment.platform.os
+                    == t3_contracts::environment::ExecutionEnvironmentPlatformOs::Windows;
+                let browse = crate::services::filesystem::filesystem_browse_path(
+                    &draft.query,
+                    if windows { "win32" } else { "linux" },
+                    true,
+                );
+                if browse.browsing
                     && let Ok(endpoint) = self.endpoint(environment)
                 {
-                    let key = (environment.clone(), draft.query.clone());
+                    let access = self.runtime.project_files().read_access(environment);
+                    if !access.allowed {
+                        view.loading_folders = access.pending;
+                        if !access.pending {
+                            view.error = Some(access.error.unwrap_or_else(|| {
+                                "This connection cannot browse host folders.".into()
+                            }));
+                        }
+                        return view;
+                    }
+                    let key = (environment.clone(), browse.directory_path.clone());
                     let input = serde_json::from_value(
-                        json!({"partialPath":draft.query,"cwd":self.current_cwd(environment)}),
+                        json!({"partialPath":browse.directory_path,"cwd":self.current_cwd(environment)}),
                     );
                     if io
                         && !self.state.browses.borrow().contains_key(&key)
@@ -715,11 +829,31 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
                         }
                     }
                     if let Some(result) = self.state.browses.borrow().get(&key).cloned() {
+                        let entries = if draft.step == Step::CloneDestination {
+                            crate::view_logic::shell::palette::filter_pinned_browse(
+                                &result.entries,
+                                &browse.filter_query,
+                                &operations::get_clone_directory_name(
+                                    draft
+                                        .repository
+                                        .as_deref()
+                                        .or(draft.remote.as_deref())
+                                        .unwrap_or_default(),
+                                ),
+                                !windows,
+                            )
+                            .0
+                        } else {
+                            crate::services::filesystem::filter_browse_entries(
+                                &result.entries,
+                                &browse.filter_query,
+                            )
+                            .0
+                        };
                         view.groups.push(Group {
                             label: Label::key("Folders"),
-                            items: result
-                                .entries
-                                .iter()
+                            items: entries
+                                .into_iter()
                                 .map(|entry| {
                                     Self::item(
                                         format!("folder:{}", entry.full_path.0),
@@ -743,7 +877,7 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
         view
     }
     pub async fn select_item(&self, id: &str) -> Result<Option<Destination>, ClientError> {
-        let view = self.resolve().await;
+        let view = self.resolve_io(false).await;
         if self.state.busy.get()
             || !view
                 .groups
@@ -754,8 +888,14 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
             return Err(ClientError::Cancelled);
         }
         if id == "connect" {
-            let route=crate::navigation::Route::Settings(crate::navigation::SettingsPage::Connections);
-            self.runtime.navigation().navigate(crate::navigation::AppUrlRequest::Push(route.address().ok_or(ClientError::Cancelled)?)).await?;
+            let route =
+                crate::navigation::Route::Settings(crate::navigation::SettingsPage::Connections);
+            self.runtime
+                .navigation()
+                .navigate(crate::navigation::AppUrlRequest::Push(
+                    route.address().ok_or(ClientError::Cancelled)?,
+                ))
+                .await?;
             return Ok(None);
         }
         if let Some(environment) = id.strip_prefix("environment:") {
@@ -785,7 +925,26 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
             self.state.draft.borrow_mut().source = source.into();
             self.push(Step::Repository, String::new());
         } else if let Some(path) = id.strip_prefix("folder:") {
-            self.set_query(paths::ensure_browse_directory_path(path))?;
+            let draft = self.state.draft.borrow().clone();
+            let path = if draft.step == Step::CloneDestination {
+                let config =
+                    self.config(draft.environment.as_ref().ok_or(ClientError::Cancelled)?)?;
+                operations::get_clone_destination_for_picked_folder(
+                    path,
+                    &operations::get_clone_directory_name(
+                        draft
+                            .repository
+                            .as_deref()
+                            .or(draft.remote.as_deref())
+                            .unwrap_or_default(),
+                    ),
+                    config.environment.platform.os
+                        != t3_contracts::environment::ExecutionEnvironmentPlatformOs::Windows,
+                )
+            } else {
+                paths::ensure_browse_directory_path(path)
+            };
+            self.set_query(path)?;
         }
         Ok(None)
     }
@@ -798,14 +957,17 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
     }
     pub async fn submit(&self, revision: u64) -> Result<Option<Destination>, ClientError> {
         let _busy = self.begin(revision)?;
-        let result = self.submit_inner().await;
-        if let Err(error) = &result {
+        let flow = self.state.flow.get();
+        let result = self.submit_inner(flow).await;
+        if let Err(error) = &result
+            && self.state.flow.get() == flow
+        {
             *self.state.errors.borrow_mut() = Some(error.to_string());
         }
         self.state.changed.invalidate();
         result
     }
-    async fn submit_inner(&self) -> Result<Option<Destination>, ClientError> {
+    async fn submit_inner(&self, flow: u64) -> Result<Option<Destination>, ClientError> {
         let draft = self.state.draft.borrow().clone();
         let environment = draft.environment.clone().ok_or(ClientError::Cancelled)?;
         let endpoint = self.endpoint(&environment)?;
@@ -864,32 +1026,15 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
             }
             Step::LocalFolder => {
                 let path = self.path(&environment, &draft.query)?;
-                if let Some(existing) =
-                    operations::find_existing_add_project(&self.all_projects(), &environment, &path)
-                        .cloned()
+                let lookup_path = self.lookup_path(&environment, &path).await;
+                if let Some(existing) = operations::find_existing_add_project(
+                    &self.all_projects(),
+                    &environment,
+                    &lookup_path,
+                )
+                .cloned()
                 {
-                    if existing
-                        .project
-                        .archived_at
-                        .as_ref()
-                        .is_some_and(Option::is_some)
-                    {
-                        let input = serde_json::from_value(
-                            json!({"type":"project.update","commandId":operations::allocate_command_id(&self.platform,None)?,"projectId":existing.project.id,"archived":false}),
-                        )?;
-                        if let Err(error) = self
-                            .projects
-                            .update(environment.clone(), &endpoint, input)
-                            .await
-                        {
-                            self.state.notices.borrow_mut().push(Notice {
-                                title: "Failed to unarchive project".into(),
-                                description: error.to_string(),
-                                warning: true,
-                            });
-                        }
-                    }
-                    return self.open_existing(existing.key()).await.map(Some);
+                    return self.open_existing_project(existing).await.map(Some);
                 }
                 let id = ProjectId(operations::allocate_command_id(&self.platform, None)?.0);
                 let changes = self.runtime.store().subscribe();
@@ -974,16 +1119,35 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
                             description: error.to_string(),
                             warning: true,
                         });
-                        self.state.completed.set(true);
+                        self.state.completed.set(Some(flow));
                         Ok(None)
                     }
                 }
             }
             Step::CloneDestination => {
                 let path = self.path(&environment, &draft.query)?;
+                let remote = draft.remote.ok_or(ClientError::Cancelled)?;
+                let lookup = self.lookup_path(&environment, &path).await;
+                if let Some(existing) = operations::find_existing_add_project(
+                    &self.all_projects(),
+                    &environment,
+                    &lookup,
+                )
+                .filter(|project| {
+                    project
+                        .project
+                        .repository_identity
+                        .as_ref()
+                        .and_then(Option::as_ref)
+                        .is_some_and(|identity| identity.canonical_key.0 == repository_key(&remote))
+                })
+                .cloned()
+                {
+                    return self.open_existing_project(existing).await.map(Some);
+                }
                 let id = ProjectId(operations::allocate_command_id(&self.platform, None)?.0);
                 let input = serde_json::from_value(
-                    json!({"projectId":id,"title":operations::infer_project_title_from_path(&path),"createdAt":crate::time::iso_from_epoch_ms(self.platform.now_epoch_ms()),"remoteUrl":draft.remote.ok_or(ClientError::Cancelled)?,"destinationPath":path}),
+                    json!({"projectId":id,"title":operations::infer_project_title_from_path(&path),"createdAt":crate::time::iso_from_epoch_ms(self.platform.now_epoch_ms()),"remoteUrl":remote,"destinationPath":path}),
                 )?;
                 let changes = self.runtime.store().subscribe();
                 let generation = self.generation(&environment);
@@ -992,7 +1156,7 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
                     .start_project_clone(environment.clone(), &endpoint, input)
                     .await
                     .map_err(RpcCallError::into_client_error)?;
-                self.state.completed.set(true);
+                self.state.completed.set(Some(flow));
                 let this = self.clone();
                 (self.spawn)(
                     async move {
@@ -1039,6 +1203,34 @@ impl<P: Platform + Clone + 'static> AddProjectSession<P> {
             .open_project(key, None, None)
             .await
             .map(Destination::Draft)
+    }
+    async fn open_existing_project(
+        &self,
+        existing: EnvironmentProject,
+    ) -> Result<Destination, ClientError> {
+        if existing
+            .project
+            .archived_at
+            .as_ref()
+            .is_some_and(Option::is_some)
+        {
+            let endpoint = self.endpoint(&existing.environment)?;
+            let input = serde_json::from_value(
+                json!({"type":"project.update","commandId":operations::allocate_command_id(&self.platform,None)?,"projectId":existing.project.id,"archived":false}),
+            )?;
+            if let Err(error) = self
+                .projects
+                .update(existing.environment.clone(), &endpoint, input)
+                .await
+            {
+                self.state.notices.borrow_mut().push(Notice {
+                    title: "Failed to unarchive project".into(),
+                    description: error.to_string(),
+                    warning: true,
+                });
+            }
+        }
+        self.open_existing(existing.key()).await
     }
     async fn open_existing(&self, key: ProjectKey) -> Result<Destination, ClientError> {
         let shell = self.runtime.store().shared_shell(&key.environment);
@@ -1176,5 +1368,83 @@ pub fn new_project_folder_name(name: &str) -> String {
         format!("{slug}-project")
     } else {
         slug.into()
+    }
+}
+
+/// shared/git.ts normalizeGitRemoteUrl plus the registry's Azure SSH spelling.
+pub fn repository_key(raw: &str) -> String {
+    let raw = t3_contracts::wire::trim_js(raw).to_lowercase();
+    let lower = raw.trim_end_matches('/');
+    let lower = lower.strip_suffix(".git").unwrap_or(lower);
+    let parsed = if ["ssh://", "http://", "https://", "git://"]
+        .iter()
+        .any(|scheme| lower.starts_with(scheme))
+    {
+        url::Url::parse(&raw).ok().and_then(|url| {
+            let path = url.path().trim_end_matches('/');
+            let path = path.strip_suffix(".git").unwrap_or(path);
+            let segments = path
+                .split('/')
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>();
+            let host = url.host_str()?.to_owned();
+            (segments.len() > 1).then(|| (host, segments.join("/")))
+        })
+    } else {
+        lower.split_once(':').and_then(|(host, path)| {
+            if host.len() == 1 && host.as_bytes()[0].is_ascii_alphabetic() {
+                return None;
+            }
+            let host = if let Some((user, host)) = host.split_once('@') {
+                if user.is_empty()
+                    || !user
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+                {
+                    return None;
+                }
+                host
+            } else {
+                host
+            };
+            if host.is_empty()
+                || host
+                    .chars()
+                    .any(|c| "@:/\\".contains(c) || c.is_whitespace())
+            {
+                return None;
+            }
+            let path = path.strip_prefix('/').unwrap_or(path);
+            let segments = path.split('/').collect::<Vec<_>>();
+            (segments.len() > 1
+                && segments
+                    .iter()
+                    .all(|p| !p.is_empty() && !p.chars().any(char::is_whitespace)))
+            .then(|| (host.into(), path.into()))
+        })
+    };
+    let Some((host, path)) = parsed else {
+        return lower.into();
+    };
+    let segments = path.split('/').collect::<Vec<_>>();
+    if matches!(
+        host.as_str(),
+        "ssh.dev.azure.com" | "vs-ssh.visualstudio.com"
+    ) && segments.len() == 4
+        && segments[0] == "v3"
+    {
+        if host == "ssh.dev.azure.com" {
+            format!(
+                "dev.azure.com/{}/{}/_git/{}",
+                segments[1], segments[2], segments[3]
+            )
+        } else {
+            format!(
+                "{}.visualstudio.com/{}/_git/{}",
+                segments[1], segments[2], segments[3]
+            )
+        }
+    } else {
+        format!("{host}/{path}")
     }
 }

@@ -13,6 +13,7 @@ pub mod questions;
 pub mod relationships;
 pub mod requests;
 pub mod rich_text;
+pub mod secret_request;
 pub mod shelves;
 pub mod subagent_inspector;
 pub mod tag_filter;

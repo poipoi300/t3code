@@ -10,6 +10,7 @@ pub mod link_targets;
 mod link_targets_tests;
 pub mod new_thread;
 mod normalize;
+pub mod palette_service;
 pub mod project_flow;
 pub mod prompt_links;
 pub use normalize::normalize_app_path;

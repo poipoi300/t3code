@@ -43,6 +43,7 @@ pub struct View {
     pub files: Vec<Choice>,
 }
 struct State {
+    read_allowed: bool,
     query: String,
     selected: Option<FileSelection>,
     results: BTreeMap<String, Rc<ProjectListIgnoredFilesResult>>,
@@ -77,6 +78,7 @@ impl<P: Platform + Clone + 'static> IgnoredFilesSession<P> {
             platform,
             project,
             state: Rc::new(RefCell::new(State {
+                read_allowed: false,
                 query: String::new(),
                 selected: None,
                 results: BTreeMap::new(),
@@ -137,11 +139,17 @@ impl<P: Platform + Clone + 'static> IgnoredFilesSession<P> {
             .unwrap_or_default()
     }
     pub fn snapshot(&self) -> Rc<View> {
+        let access = self
+            .runtime
+            .project_files()
+            .read_access(&self.project.environment);
         let capabilities = self.target().ok().map(|(_, capabilities, _)| capabilities);
         let can_list = capabilities
             .as_ref()
-            .is_some_and(|c| c.ignored_file_listing == Some(true));
+            .is_some_and(|c| c.ignored_file_listing == Some(true))
+            && (access.allowed || access.pending);
         let can_search = can_list
+            && access.allowed
             && capabilities
                 .as_ref()
                 .is_some_and(|c| c.ignored_file_search == Some(true));
@@ -156,6 +164,14 @@ impl<P: Platform + Clone + 'static> IgnoredFilesSession<P> {
             .errors
             .get(&key)
             .cloned()
+            .or_else(|| {
+                (!access.pending && !access.allowed).then(|| {
+                    access
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "This connection cannot read host files.".into())
+                })
+            })
             .or_else(|| self.target().err().map(|e| e.to_string()));
         Rc::new(View {
             query: state.query.clone(),
@@ -224,8 +240,25 @@ impl<P: Platform + Clone + 'static> IgnoredFilesSession<P> {
     }
     async fn refresh(&self) -> Result<(), ClientError> {
         let (cwd, capabilities, generation) = self.target()?;
+        let access = self
+            .runtime
+            .project_files()
+            .read_access(&self.project.environment);
+        if access.pending {
+            return Err(ClientError::Cancelled);
+        }
+        if !access.allowed {
+            self.state.borrow_mut().read_allowed = false;
+            return Err(ClientError::PermissionDenied {
+                method: "projects.listIgnoredFiles".into(),
+            });
+        }
         {
             let mut state = self.state.borrow_mut();
+            if !state.read_allowed {
+                state.errors.clear();
+                state.read_allowed = true;
+            }
             if state.generation != Some(generation) {
                 state.results.clear();
                 state.errors.clear();

@@ -206,6 +206,12 @@ of them reuse unchanged output `Rc`s when given their previous result.
 4. **Relay, SSH and cloud-account environments in the composition root.** It pairs and restores
    direct (bearer) environments; relay discovery and account sign-in are separate services.
 
+## Required checks
+
+A change here can break a platform arm that only compiles for mobile. Run the target checks in
+[`t3-platform`'s README](../t3-platform/README.md#required-checks-before-a-change-to-t3-platform-or-t3-client)
+(wasm, one Android and one Apple mobile target) as well as the tests.
+
 ## Real-server proof
 
 From `rust/`, with an isolated `CARGO_TARGET_DIR`:

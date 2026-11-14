@@ -193,8 +193,102 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
             ),
         })
     }
+    fn host_available(&self, command: &HostCommand) -> bool {
+        if !self.host.borrow().contains(command) {
+            return false;
+        }
+        let key = self.key();
+        if thread_command(command) && key.is_none() {
+            return false;
+        }
+        let server = key.as_ref().and_then(|key| {
+            self.runtime
+                .store()
+                .shared_shell(&key.environment)
+                .and_then(|shell| shell.threads.iter().find(|t| t.id == key.thread).cloned())
+        });
+        let config = key.as_ref().and_then(|key| {
+            self.runtime
+                .store()
+                .snapshot()
+                .environments
+                .get(&key.environment)
+                .and_then(|e| e.config.clone())
+        });
+        match command {
+            HostCommand::RestartSession | HostCommand::CopyReference => server.is_some(),
+            HostCommand::LinkPullRequest | HostCommand::LinkedPullRequests => {
+                server.is_some() && config.is_some()
+            }
+            HostCommand::ShareGuest => {
+                let Some(key) = key.filter(|_| server.is_some()) else {
+                    return false;
+                };
+                config.is_some_and(|c| {
+                    c.settings.guest_sharing_enabled
+                        && c.managed_policy
+                            .as_ref()
+                            .and_then(|p| p.limits.as_ref())
+                            .and_then(|l| l.connect)
+                            != Some(false)
+                }) && self
+                    .runtime
+                    .client(&key.environment)
+                    .and_then(|c| c.session())
+                    .is_some_and(|endpoint| {
+                        endpoint.available::<t3_contracts::rpc::WsGuestShareCreateRpc>(
+                            &t3_contracts::guest_share::GuestShareCreateInput {
+                                thread_id: key.thread,
+                            },
+                        )
+                    })
+            }
+            HostCommand::CopyPrompt | HostCommand::CopyPromptContext => {
+                let drafts = self.runtime.composer_drafts();
+                let draft = match &*self.route.borrow() {
+                    Route::Draft(id) => drafts.view_key(id),
+                    _ => {
+                        let Some(key) = key else {
+                            return false;
+                        };
+                        drafts.view(&key)
+                    }
+                };
+                if crate::thread_views::user_message::prompt_link_for(&draft.prompt).is_none() {
+                    return false;
+                }
+                !matches!(command, HostCommand::CopyPromptContext)
+                    || self.active_project().is_some_and(|key| {
+                        self.runtime
+                            .new_threads()
+                            .projects()
+                            .iter()
+                            .filter(|p| p.key() == key)
+                            .filter_map(|p| {
+                                p.project
+                                    .repository_identity
+                                    .as_ref()
+                                    .and_then(Option::as_ref)
+                            })
+                            .any(|identity| {
+                                let key = identity
+                                    .origin
+                                    .as_ref()
+                                    .map_or(&identity.canonical_key.0, |origin| {
+                                        &origin.canonical_key.0
+                                    });
+                                key.strip_prefix("github.com/")
+                                    .and_then(crate::navigation::prompt_links::parse_repository)
+                                    .is_some()
+                            })
+                    })
+            }
+            HostCommand::PinProject => self.active_project().is_some(),
+            _ => true,
+        }
+    }
     pub fn catalogue(&self) -> Catalogue {
-        let environments=self.runtime.settings().environments();
+        let environments = self.runtime.settings().environments();
         let physical = self.runtime.new_threads().projects();
         let logical = self.runtime.settings().groups();
         let representatives = logical
@@ -316,36 +410,36 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
             (
                 "action:open-file-picker",
                 "Go to file",
-                "go to file open file file picker find file quick open",
+                "go to file|open file|file picker|find file|quick open",
                 Some("filePicker.toggle"),
             ),
             (
                 "action:search-project-contents",
                 "Search project contents",
-                "search project find in files grep content search text search",
+                "search project|find in files|grep|content search|text search",
                 Some("projectSearch.toggle"),
             ),
             (
                 "action:add-project",
                 "Add project",
-                "add project folder directory browse clone remote repository repo git url environment github gitlab gitcafe forgejo bitbucket azure",
+                "add project|folder|directory|browse|clone|remote|repository|repo|git|url|environment|github|gitlab|gitcafe|forgejo|bitbucket|azure",
                 None,
             ),
             (
                 "action:usage",
                 "Open usage",
-                "usage use tokens cost spend limits stats analytics",
+                "usage|use|tokens|cost|spend|limits|stats|analytics",
                 Some("usage.open"),
             ),
             (
                 "action:settings",
                 "Open settings",
-                "settings preferences configuration keybindings",
+                "settings|preferences|configuration|keybindings",
                 None,
             ),
         ] {
             let mut item = Item::action(value, title);
-            item.search_terms = terms.split(' ').map(str::to_owned).collect();
+            item.search_terms = terms.split('|').map(str::to_owned).collect();
             item.shortcut = shortcut.map(str::to_owned);
             item.keep_open = matches!(
                 value,
@@ -353,9 +447,7 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
             );
             actions.push(item);
         }
-        if environments.iter()
-            .any(|e| e.config.is_some())
-        {
+        if environments.iter().any(|e| e.config.is_some()) {
             actions.push(Item::action("action:pull-requests", "Open pull requests"));
         }
         if environments.iter().any(|e| {
@@ -367,7 +459,7 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
             actions.push(Item::action("action:new-project", "New project"));
         }
         for (command, value, title) in host_items() {
-            if !self.host.borrow().contains(&command) {
+            if !self.host_available(&command) {
                 continue;
             }
             if thread_command(&command) && self.key().is_none() {
@@ -376,7 +468,11 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
             if matches!(command, HostCommand::PinProject) && self.active_project().is_none() {
                 continue;
             }
-            actions.push(Item::action(value, title));
+            let mut item = Item::action(value, title);
+            if command == HostCommand::LinkedPullRequests {
+                item.disabled=self.key().and_then(|key|self.runtime.store().shared_shell(&key.environment).and_then(|shell|shell.threads.iter().find(|t|t.id==key.thread).cloned())).is_none_or(|thread|thread.pull_requests.as_ref().and_then(Option::as_ref).is_none_or(|links|links.iter().all(|link|link.source==t3_contracts::thread_pull_request::ThreadPullRequestLinkSource::StackDismissed)));
+            }
+            actions.push(item);
         }
         if let Some(project) = self
             .active_project()
@@ -439,12 +535,23 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
     }
     pub fn filter(&self, query: &str, active: Option<&[Group]>, messages: &[Item]) -> Vec<Group> {
         let catalogue = self.catalogue();
-        let mut threads=catalogue.threads.as_ref().clone();
-        let mut listed=threads.iter().filter_map(|item|item.thread.clone()).collect::<BTreeSet<_>>();
-        for item in messages.iter().filter(|item|item.thread_search.is_some()) {
-            if let Some(key)=&item.thread && listed.insert(key.clone()) {threads.push(item.clone());}
+        let mut threads = catalogue.threads.as_ref().clone();
+        let mut listed = threads
+            .iter()
+            .filter_map(|item| item.thread.clone())
+            .collect::<BTreeSet<_>>();
+        for item in messages.iter().filter(|item| item.thread_search.is_some()) {
+            if let Some(key) = &item.thread
+                && listed.insert(key.clone())
+            {
+                threads.push(item.clone());
+            }
         }
-        let messages=messages.iter().filter(|item|item.thread_search.is_none()).cloned().collect::<Vec<_>>();
+        let messages = messages
+            .iter()
+            .filter(|item| item.thread_search.is_none())
+            .cloned()
+            .collect::<Vec<_>>();
         let root = catalogue.groups.as_ref();
         let nested = palette::nested_items(
             &root

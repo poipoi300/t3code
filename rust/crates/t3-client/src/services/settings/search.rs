@@ -574,6 +574,205 @@ pub fn is_single_environment_settings_page(page: SettingsPage) -> bool {
     matches!(page, SettingsPage::Providers | SettingsPage::Secrets)
 }
 
+/// `SettingsScopeNotice`'s `target`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeTarget {
+    Environment,
+    All,
+    Project,
+    Checkout,
+}
+
+/// One button of a scope notice (`ScopeChoice`). `label` and `secondary` are content, except
+/// "Open all environments", which is a key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoticeChoice {
+    pub label: String,
+    pub label_is_key: bool,
+    pub secondary: String,
+    pub search: super::scope::SettingsScopeSearch,
+}
+
+/// A group of choices: a project section (`title` is its name) or one plain group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoticeGroup {
+    pub title: Option<String>,
+    pub choices: Vec<NoticeChoice>,
+}
+
+/// What `SettingsScopeBoundary` shows instead of the page when a search jump's target needs
+/// another scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeNotice {
+    pub message: super::scoped::SettingsText,
+    pub target: NoticeTarget,
+    /// The anchor the choices keep (`targetId`).
+    pub target_id: String,
+    pub groups: Vec<NoticeGroup>,
+}
+
+/// `SettingsScopeNotice`'s `renderChoices`.
+fn notice_groups(
+    target: NoticeTarget,
+    eligible: Option<&[EnvironmentId]>,
+    search: &super::scope::SettingsScopeSearch,
+    groups: &[super::scope::ScopeGroup],
+    environments: &[ScopeEnvironment],
+) -> Vec<NoticeGroup> {
+    use super::scope::{
+        SettingsScopeSearch, settings_scope_environment_address, settings_scope_environment_labels,
+        settings_scope_project_machines,
+    };
+    match target {
+        NoticeTarget::Checkout => groups
+            .iter()
+            .filter(|group| search.project.as_ref().is_none_or(|p| &group.project_key == p))
+            .map(|group| NoticeGroup {
+                title: (!group.display_name.is_empty()).then(|| group.display_name.clone()),
+                choices: group
+                    .members
+                    .iter()
+                    .map(|member| {
+                        let (primary, secondary) = match environments
+                            .iter()
+                            .find(|e| e.environment_id == member.environment_id)
+                        {
+                            Some(environment) => settings_scope_environment_labels(environment, environments),
+                            None => (
+                                member.environment_label.clone().unwrap_or_else(|| "Environment".into()),
+                                member.environment_id.0.clone(),
+                            ),
+                        };
+                        NoticeChoice {
+                            label: primary,
+                            label_is_key: false,
+                            secondary: [secondary, member.workspace_root.clone()]
+                                .into_iter()
+                                .filter(|part| !part.is_empty())
+                                .collect::<Vec<_>>()
+                                .join(" · "),
+                            search: SettingsScopeSearch {
+                                project: Some(group.project_key.clone()),
+                                machine: Some(member.environment_id.0.clone()),
+                                checkout: Some(member.physical_project_key.clone()),
+                            },
+                        }
+                    })
+                    .collect(),
+            })
+            .collect(),
+        NoticeTarget::Project => vec![NoticeGroup {
+            title: None,
+            choices: groups
+                .iter()
+                .map(|group| {
+                    let same_name = groups
+                        .iter()
+                        .any(|other| other.project_key != group.project_key && other.display_name == group.display_name);
+                    let mut parts = Vec::new();
+                    if same_name {
+                        parts.extend(settings_scope_project_machines(group, environments, false));
+                    }
+                    if let Some(root) = group.members.first().map(|m| m.workspace_root.clone()) {
+                        parts.push(root);
+                    }
+                    NoticeChoice {
+                        label: group.display_name.clone(),
+                        label_is_key: false,
+                        secondary: parts.join(" · "),
+                        search: SettingsScopeSearch {
+                            project: Some(group.project_key.clone()),
+                            ..Default::default()
+                        },
+                    }
+                })
+                .collect(),
+        }],
+        NoticeTarget::Environment => vec![NoticeGroup {
+            title: None,
+            choices: environments
+                .iter()
+                .filter(|e| eligible.is_none_or(|ids| ids.contains(&e.environment_id)))
+                .map(|environment| {
+                    let (primary, secondary) = settings_scope_environment_labels(environment, environments);
+                    NoticeChoice {
+                        label: primary,
+                        label_is_key: false,
+                        secondary: if secondary.is_empty() {
+                            settings_scope_environment_address(environment)
+                        } else {
+                            secondary
+                        },
+                        search: SettingsScopeSearch {
+                            machine: Some(environment.environment_id.0.clone()),
+                            ..Default::default()
+                        },
+                    }
+                })
+                .collect(),
+        }],
+        NoticeTarget::All => vec![NoticeGroup {
+            title: None,
+            choices: vec![NoticeChoice {
+                label: "Open all environments".into(),
+                label_is_key: true,
+                secondary: String::new(),
+                search: SettingsScopeSearch::default(),
+            }],
+        }],
+    }
+}
+
+/// `SettingsScopeBoundary`'s search-target branches: the notice that replaces the page, if any.
+pub fn search_target_notice(
+    view: &super::service::SettingsScopeView,
+    target_id: &str,
+) -> Option<ScopeNotice> {
+    use super::scoped::SettingsText;
+    if target_id.is_empty() || view.scope.kind_name() == ScopeKindName::Unavailable {
+        return None;
+    }
+    let target = get_settings_search_target_scope(target_id)?;
+    let notice = |message, target, eligible: Option<&[EnvironmentId]>| ScopeNotice {
+        message,
+        target,
+        target_id: target_id.to_owned(),
+        groups: notice_groups(target, eligible, &view.search, &view.groups, &view.all_environments),
+    };
+    if target.requires_thread_auto_settlement {
+        let availability =
+            get_thread_auto_settlement_search_availability(&view.all_environments, Some(&view.scope));
+        if !availability.is_target_available {
+            let message = SettingsText::with(
+                if availability.eligible_environment_ids.is_empty() {
+                    "{title} requires a supporting environment. Connect or update an environment to continue."
+                } else {
+                    "{title} requires a supporting environment. Choose one to continue."
+                },
+                "title",
+                target.title,
+            );
+            let eligible = availability.eligible_environment_ids.clone();
+            return Some(notice(message, NoticeTarget::Environment, Some(&eligible)));
+        }
+    }
+    if !is_settings_search_scope_available(target.scope, view.scope.kind_name()) {
+        let kind = match target.scope {
+            Some(SettingsSearchScope::Environment) => NoticeTarget::Environment,
+            Some(SettingsSearchScope::Project) => NoticeTarget::Project,
+            Some(SettingsSearchScope::Checkout) => NoticeTarget::Checkout,
+            _ => NoticeTarget::All,
+        };
+        let message = SettingsText::with(
+            "{title} is not available for the selected target. Choose its owning scope to continue.",
+            "title",
+            target.title,
+        );
+        return Some(notice(message, kind, None));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

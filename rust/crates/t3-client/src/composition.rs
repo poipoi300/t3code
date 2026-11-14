@@ -5,8 +5,8 @@
 //! store and call these methods; they never touch connections, sessions or credentials. The
 //! crate owns no executor, so the UI supplies a spawner for the futures it must keep running.
 mod composer;
-mod composer_updates;
 mod composer_attachments;
+mod composer_updates;
 mod settings;
 use crate::{
     ClientError, ClientStore,
@@ -158,7 +158,8 @@ struct Inner<P: Platform + Clone + 'static> {
     composer_update_dismissals: crate::thread_views::composer::banners::UpdateDismissals,
     composer_stash: Rc<crate::thread_views::composer::stash_service::PromptStashState>,
     composer_questions: Rc<crate::thread_views::composer::questions_service::PendingUserInputState>,
-    composer_attachments: RefCell<BTreeMap<(EnvironmentId,String),composer_attachments::AttachmentDriver>>,
+    composer_attachments:
+        RefCell<BTreeMap<(EnvironmentId, String), composer_attachments::AttachmentDriver>>,
     composer_task: AbortHandle,
     navigation: crate::navigation::UrlClient<P>,
     new_threads: Rc<crate::navigation::new_thread::NewThreadState>,
@@ -323,21 +324,36 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
 
     pub fn new_threads(&self) -> crate::navigation::new_thread::NewThreadRuntime<P> {
         crate::navigation::new_thread::NewThreadRuntime::new(
-            self.clone(), self.inner.platform.clone(), self.inner.new_threads.clone(),
+            self.clone(),
+            self.inner.platform.clone(),
+            self.inner.new_threads.clone(),
         )
+    }
+
+    pub fn palette(&self) -> crate::navigation::palette_service::PaletteService<P> {
+        crate::navigation::palette_service::PaletteService::new(self.clone(),self.inner.platform.clone())
     }
 
     pub fn add_project(&self) -> crate::navigation::project_flow::AddProjectSession<P> {
         let runtime = self.clone();
         crate::navigation::project_flow::AddProjectSession::new(
-            self.clone(), self.inner.platform.clone(), Rc::new(move |future| {
+            self.clone(),
+            self.inner.platform.clone(),
+            Rc::new(move |future| {
                 runtime.spawn(future);
             }),
         )
     }
 
-    pub fn ignored_files(&self, project: crate::workspace::ProjectKey) -> crate::navigation::ignored_selection::IgnoredFilesSession<P> {
-        crate::navigation::ignored_selection::IgnoredFilesSession::new(self.clone(), self.inner.platform.clone(), project)
+    pub fn ignored_files(
+        &self,
+        project: crate::workspace::ProjectKey,
+    ) -> crate::navigation::ignored_selection::IgnoredFilesSession<P> {
+        crate::navigation::ignored_selection::IgnoredFilesSession::new(
+            self.clone(),
+            self.inner.platform.clone(),
+            project,
+        )
     }
 
     pub fn store(&self) -> &ClientStore {
@@ -378,11 +394,17 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         self.git_panel().branch_selector(key)
     }
 
-    pub fn editor_picker(&self, key: &ThreadKey) -> crate::workspace::git_panel::editors::EditorPicker<P> {
+    pub fn editor_picker(
+        &self,
+        key: &ThreadKey,
+    ) -> crate::workspace::git_panel::editors::EditorPicker<P> {
         self.git_panel().editor_picker(key)
     }
 
-    pub fn project_scripts(&self, key: &ThreadKey) -> crate::workspace::git_panel::scripts::ProjectScripts<P> {
+    pub fn project_scripts(
+        &self,
+        key: &ThreadKey,
+    ) -> crate::workspace::git_panel::scripts::ProjectScripts<P> {
         self.git_panel().project_scripts(key)
     }
 

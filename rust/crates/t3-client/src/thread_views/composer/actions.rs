@@ -242,7 +242,8 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
                             true,
                             &message.text,
                             message.attachments.len(),
-                        ) && message.run_id.as_ref() == activity_id
+                        ) && activity_id.is_some()
+                            && message.run_id.as_ref() == activity_id
                             && !crate::view_logic::session::is_latest_run_settled(
                                 activity_view.as_ref(),
                                 runtime_view.as_ref(),
@@ -251,7 +252,7 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
             });
         let compaction_settled = projection.is_some_and(|p| p.visible_turn_items.iter().any(|row| {
             matches!(&row.item, OrchestrationV2TurnItem::Compaction(item)
-                if item.run_id.as_ref() == activity_id && matches!(item.status,
+                if activity_id.is_some() && item.run_id.as_ref() == activity_id && matches!(item.status,
                     OrchestrationV2TurnItemStatus::Completed | OrchestrationV2TurnItemStatus::Failed
                     | OrchestrationV2TurnItemStatus::Interrupted | OrchestrationV2TurnItemStatus::Cancelled))
         }));

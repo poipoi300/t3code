@@ -520,6 +520,143 @@ mod tests {
         assert_eq!(format_value("x", &json!({})).english(), "Custom");
     }
 
+    fn view(search: super::super::scope::SettingsScopeSearch, overrides: Value, policy: Option<Value>) -> SettingsScopeView {
+        use super::super::scope::{ScopeMember, resolve_settings_scope};
+        use super::super::scoped::{resolve_scoped_settings_targets, select_scoped_settings_environments};
+        use crate::{connection::Phase, types::EnvironmentId};
+        use std::rc::Rc;
+        let environment = |id: &str, settings: Value| {
+            let mut config: Value = serde_json::from_str(
+                include_str!("../../../../../fixtures/samples/ServerConfig.jsonl").lines().next().unwrap_or_default(),
+            )
+            .expect("config sample");
+            config["environment"]["environmentId"] = json!(id);
+            let mut base = serde_json::to_value(t3_contracts::settings::ServerSettings::default()).unwrap_or_default();
+            if let (Some(base), Some(extra)) = (base.as_object_mut(), settings.as_object()) {
+                base.extend(extra.clone());
+            }
+            config["settings"] = base;
+            if let Some(policy) = &policy {
+                config["managedPolicy"] = policy.clone();
+            }
+            ScopeEnvironment {
+                environment_id: EnvironmentId(id.into()),
+                label: id.to_uppercase(),
+                display_url: None,
+                phase: Phase::Connected,
+                config: Some(Rc::new(serde_json::from_value(config).expect("server config"))),
+            }
+        };
+        let environments = vec![environment("a", overrides), environment("b", json!({}))];
+        let member = |project: &str, environment: &str| ScopeMember {
+            id: t3_contracts::base_schemas::ProjectId(project.into()),
+            environment_id: EnvironmentId(environment.into()),
+            workspace_root: format!("/r/{project}"),
+            physical_project_key: format!("{environment}:/r/{project}"),
+            environment_label: None,
+        };
+        let groups = vec![ScopeGroup {
+            project_key: "app".into(),
+            display_name: "App".into(),
+            members: vec![member("p1", "a"), member("p2", "b")],
+        }];
+        let scope = resolve_settings_scope(&search, &groups, &environments);
+        let selected = select_scoped_settings_environments(&scope, &environments, None);
+        let targets = resolve_scoped_settings_targets(&scope, &selected.connected);
+        SettingsScopeView {
+            page: crate::navigation::SettingsPage::Threads,
+            search,
+            scope,
+            groups,
+            all_environments: environments,
+            selected,
+            targets,
+            single_environment: false,
+            device_only: false,
+            primary: None,
+        }
+    }
+
+    #[test]
+    fn rows_report_overriding_projects_in_a_wide_scope_and_overrides_in_a_project_scope() {
+        let overrides = json!({"projectSettingsOverrides": {"p1": {"responseStreamingMode": "turn"}}});
+        let all = view(SettingsScopeSearch::default(), overrides.clone(), None);
+        let marker = row_inheritance(&all, &["responseStreamingMode"]).expect("marker");
+        assert_eq!(marker.state, InheritanceState::Default);
+        assert_eq!(marker.overriding.len(), 1);
+        assert_eq!(marker.overriding[0].label, "App");
+        assert_eq!(marker.overriding[0].open.project.as_deref(), Some("app"));
+        assert!(!marker.quiet, "an overriding project keeps the marker visible");
+        assert_eq!(marker.summary[1].english(), "1 project override");
+        assert!(marker.multiple_environments);
+        // Both environments resolve the same way, so they share one group.
+        assert_eq!(marker.groups.len(), 1);
+        let project = view(
+            SettingsScopeSearch { project: Some("app".into()), ..Default::default() },
+            overrides,
+            None,
+        );
+        let marker = row_inheritance(&project, &["responseStreamingMode"]).expect("marker");
+        assert_eq!(marker.state, InheritanceState::Mixed);
+        assert!(marker.overriding.is_empty());
+        assert_eq!(marker.groups.len(), 2, "different winning layers split the groups");
+        let layers = &marker.groups[0][0].layers;
+        assert_eq!(layers[0].key, LayerKey::Project);
+        assert_eq!(layers.last().map(|l| l.key), Some(LayerKey::BuiltIn));
+    }
+
+    #[test]
+    fn an_environment_value_reads_as_set_on_the_environment() {
+        let set = view(SettingsScopeSearch::default(), json!({"autoResumeLimitedThreads": true}), None);
+        let marker = row_inheritance(&set, &["autoResumeLimitedThreads"]).expect("marker");
+        assert_eq!(marker.state, InheritanceState::Mixed, "a and b differ");
+        let one = view(
+            SettingsScopeSearch { machine: Some("a".into()), ..Default::default() },
+            json!({"autoResumeLimitedThreads": true}),
+            None,
+        );
+        let marker = row_inheritance(&one, &["autoResumeLimitedThreads"]).expect("marker");
+        assert_eq!(marker.state, InheritanceState::Environment);
+        assert!(marker.quiet);
+        assert_eq!(marker.groups[0][0].layers[0].value.english(), "On");
+    }
+
+    #[test]
+    fn a_search_target_outside_the_scope_offers_its_owning_scopes() {
+        use super::super::search::{NoticeTarget, search_target_notice};
+        let all = view(SettingsScopeSearch::default(), json!({}), None);
+        let notice = search_target_notice(&all, "project-overview").expect("needs a project");
+        assert_eq!(notice.target, NoticeTarget::Project);
+        assert_eq!(
+            notice.message.english(),
+            "Project overview is not available for the selected target. Choose its owning scope to continue."
+        );
+        assert_eq!(notice.groups[0].choices[0].label, "App");
+        assert_eq!(notice.groups[0].choices[0].search.project.as_deref(), Some("app"));
+        let diagnostics = search_target_notice(&all, "telemetry-export").expect("needs an environment");
+        assert_eq!(notice.target_id, "project-overview");
+        assert_eq!(diagnostics.target, NoticeTarget::Environment);
+        assert_eq!(diagnostics.groups[0].choices.len(), 2);
+        assert!(search_target_notice(&all, "language").is_none());
+        let project = view(
+            SettingsScopeSearch { project: Some("app".into()), ..Default::default() },
+            json!({}),
+            None,
+        );
+        assert!(search_target_notice(&project, "project-overview").is_none());
+    }
+
+    #[test]
+    fn a_policy_on_any_target_locks_the_row() {
+        let locked = view(
+            SettingsScopeSearch::default(),
+            json!({}),
+            Some(json!({"organization": "Example Corp", "lockedSettings": ["autoResumeLimitedThreads"]})),
+        );
+        assert_eq!(managed_by(&locked, &["autoResumeLimitedThreads"]).as_deref(), Some("Example Corp"));
+        assert_eq!(managed_by(&locked, &["snoozeLimitedThreads"]), None);
+    }
+
     #[test]
     fn a_locked_path_matches_its_parents_and_children() {
         let policy: ManagedPolicySummary = serde_json::from_value(json!({
