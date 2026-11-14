@@ -140,8 +140,20 @@ async fn checkpoint_commands_disable_the_real_repository_fsmonitor() -> TestResu
     let command = format!("sh -c 'echo ran >> \"{marker_path}\"'");
     repo.command(&["config", "core.fsmonitor", &command])
         .await?;
+    let common_marker = repo.temp.path().join("filter-common-dir");
+    let common_marker_path = common_marker.to_string_lossy().replace('\\', "/");
+    let filter =
+        format!("sh -c 'printf \"%s\" \"$GIT_COMMON_DIR\" > \"{common_marker_path}\"; cat'");
+    repo.command(&["config", "filter.bound.clean", &filter])
+        .await?;
+    repo.write("pkg/.gitattributes", "f filter=bound\n")?;
+    repo.write("pkg/f", "checkpoint with filter\n")?;
     let reference = checkpoint_ref("real-config", 0);
     scope.capture_checkpoint(&reference).await?;
+    assert_eq!(
+        std::fs::canonicalize(std::fs::read_to_string(common_marker)?)?,
+        std::fs::canonicalize(repo.root().join(".git"))?,
+    );
     repo.write("pkg/f", "dirty\n")?;
     repo.write("pkg/junk", "junk\n")?;
     assert!(scope.restore_checkpoint(&reference, false).await?);

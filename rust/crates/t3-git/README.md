@@ -119,6 +119,8 @@ enumeration, explicit file list or link removal.
 
 ### Repository identity and configured commands
 
+Repository pinning and checkpoint-wide fsmonitor suppression harden TypeScript's
+behavior, which discovers repositories from the working directory.
 Checkpoint operations and automatic status/branch reads pin a `RepositoryBinding`
 (canonical top-level, per-worktree Git directory and common directory). Commands
 use explicit `--git-dir` and `--work-tree`; discovery uses only `rev-parse` with
