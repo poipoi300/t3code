@@ -12,6 +12,7 @@ pub mod oauth;
 pub mod orchestration;
 pub mod peer;
 pub mod reachability;
+pub mod relay_client;
 pub mod remote;
 pub mod retry;
 pub mod store;
