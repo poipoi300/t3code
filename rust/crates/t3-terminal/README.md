@@ -66,7 +66,12 @@ resolution is injected and fails closed; running attaches do not resolve it agai
 Set `app_version` to the server's actual version; the standalone default is this
 crate's package version.
 
-History retains 5,000 lines and 8 MiB by default, with UTF-8-safe tails. File names,
+History retains 5,000 lines and 8 MiB by default, with UTF-8-safe tails that start
+in terminal parser ground state. Discarding an unfinished sequence retains its
+state until later output terminates it. Persisted tails scan the skipped prefix
+with a streaming decoder before discarding a cut sequence. `sequence` exposes
+both UTF-8 and UTF-16 helpers; the latter preserves split surrogate state.
+File names,
 143-byte filename limits, migrations and plain UTF-8 disk format match TypeScript.
 The 250 ms persistence worker appends only the pending tail; it materializes full
 history for rewriting, recovery or compaction. Failed writes invalidate the
