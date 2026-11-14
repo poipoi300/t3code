@@ -1009,7 +1009,26 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
     let background = mcp
         .call(&token, "t3_background_wait", json!({"taskIds":["task:none"]}))
         .await;
-    assert!(!is_error(&background), "{background}");
+    // The stand-in provider cannot mark background work awaited: TypeScript's typed refusal.
+    assert!(
+        is_error(&background)
+            && background.to_string().contains("invalid_request")
+            && background
+                .to_string()
+                .contains("This provider cannot mark background work as awaited."),
+        "{background}"
+    );
+    let stop = mcp
+        .call(
+            &token,
+            "t3_workflow_stop",
+            json!({"threadId":PEER,"subagentId":"subagent:none"}),
+        )
+        .await;
+    assert!(
+        is_error(&stop) && !stop.to_string().contains("The operation could not be completed."),
+        "{stop}"
+    );
     let missing_project = mcp
         .call(&token, "t3_project_read", json!({"projectId":"project:absent"}))
         .await;
