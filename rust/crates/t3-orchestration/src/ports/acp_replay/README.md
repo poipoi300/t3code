@@ -1,6 +1,6 @@
 # ACP and replay package status
 
-Package 12 has 169 populated and 13 empty mapped leaves. Native provider and
+Package 12 has 176 populated and 6 empty mapped leaves. Native provider and
 host-composition seams still block source-complete integration suites. Nonempty
 mapped files are not automatically complete ports. The exact 182-row audit is external at
 `C:/Users/Administrator/t3code-rust-notes/briefs/orch-e-remaining.md`.
@@ -92,10 +92,10 @@ conversation history. This matches the TypeScript dev agent's restart behavior.
 - Pull-request shell fixture construction uses canonical contract types and UTC
   date normalization. Both offset-date/optional-link cases match actual TypeScript.
 
-The focused suite contains 46 passing tests, including six actual TypeScript
+The focused suite contains 49 passing tests, including six actual TypeScript
 fixture compatibility oracles plus usage, diff and HTTP-route oracles. The final
-verification and package-wide blockers are recorded below. Keep `CARGO_TARGET_DIR` at the existing
-populated `rust/target/agents/orch-e`; Cargo jobs remain 4. The external focused
+verification and package-wide blockers are recorded below. Set `CARGO_TARGET_DIR` to
+`D:/t3code-rust-target/orch-e`; the resumed round uses two Cargo jobs. The external focused
 harness is `C:/Users/Administrator/AppData/Local/Temp/t3-orch-e-checks-lpp4ep26`.
 It includes the actual owned test files against the real library, isolating
 unrelated package test compilation failures. No live provider is used.
@@ -166,7 +166,7 @@ scenario cancellation cleanup and JavaScript numeric matching. No other owner's
 files were changed.
 
 Provider order confirmed by the coordinator: generic ACP/registry, Cursor,
-OpenCode, Grok, Kiro, Pi, Muse, fx. The 13 empty leaves and every partial suite
+OpenCode, Grok, Kiro, Pi, Muse, fx. The six empty leaves and every partial suite
 are individually identified in the external audit; the Claude leaf is reserved
 to its concurrent owner. No controller test is counted as full native integration.
 
@@ -177,26 +177,48 @@ entry point still waits on its SDK boundary). Muse/OpenCode2 permission tests
 use a comparator returning 1 for equal timestamps; the Rust assertions preserve
 source insertion order for those ties explicitly.
 
-## Continuation verification (2026-11-13)
+## Latest round (2026-11-13)
 
-- All 171 owned Rust leaves pass `rustfmt --edition 2024 --check`.
-- `cargo check -p t3-orchestration --lib` passes without optional ACP dependencies.
-- The external focused harness runs the actual owned test files against the real
-  feature-enabled library: 46 passed, 0 failed, 0 skipped. This includes the final
-  host bridge, prompt-usage and Unicode-whitespace changes. Test breakdown: ACP
-  10, registry 2, fixture oracles 6, registry lifecycle 1, Cursor 4, OpenCode SDK 3,
-  OpenCode2 HTTP 1, Pi 3, Muse 2, shared replay/scenario/SQLite/recorder 14.
-- `cargo clippy -p t3-orchestration --all-targets --features acp-adapter -- -D warnings`
-  remains blocked by other-owner collapsible-if diagnostics at
-  `src/decision/engine.rs:1961,4808,4851,4926`. The final run reports no owned
-  diagnostic. The owned redundant closure in ProjectionReplay was corrected.
-- Package test compilation (`cargo test -p t3-orchestration --features acp-adapter
-  --no-run`) is blocked by other-owner type inference in `tests/ports/http_test.rs:22`;
-  its `environment` local needs an explicit type. No other-owner file was changed.
+Seven previously empty mapped leaves now contain source conformance execution:
+fx model/mode scripts; Grok flavor/launch/native questions; fx/Grok/Kiro fixture
+tables; Codex table/batch observations; OpenCode2 pending-snapshot evidence.
+Native entry points are compiled but await their actual bindings; they are not
+counted as passing recorded-provider integrations. The three added executable
+tests cover actual-TS fx script equivalence, Grok generic policy and evidence
+snapshot rules. The existing registry lifecycle also exercises the bounded,
+policy-preserving raw event tap through completion, interrupt and restart.
 
-No live provider, dev server, live profile, commit, manifest or frozen seam change
-was used. The remaining 13 empty mapped leaves and source-incomplete native suites
-are waiting on the named factory/host additions in the external audit and requests.
+The common fixture path now creates temporary workspace files and migrated
+SQLite, starts the actual registered adapter/composed runtime, creates the
+materialized project, runs source output/checkpoint checks, and closes runtime
+before checking transcript completeness. The host shim explicitly carries the
+continuation-worker flag and provider-batch observer. CodexFixtureFactory binds
+the existing real native CodexReplayAdapter under codex-adapter, including strict
+completion/shutdown and outbound-only exact workspace placeholders; no fake
+native adapter replaces it. ACP's generic bridge preserves its strict transport.
+
+Latest completed focused run: 49 passed, 0 failed, 0 skipped, with acp-adapter and
+codex-adapter, under D:/t3code-rust-target/orch-e. Source conformance functions
+that require factories remain unexecuted. Verification resumed after the service
+exit uses CARGO_BUILD_JOBS=2; package compilation and final Clippy results are
+being checked. The earlier http_test.rs:22 blocker is repaired by its owner,
+09-transport (explicit EnvironmentId). No package-12 edit was made to that file.
+
+The six empty leaves are KiroAdapterV2.test, the concurrently owned Claude replay
+suite, restart-background-note, provider-switch, thread-fork and merge-back.
+Kiro now has an exact callback shim for cancel-held/decided/written milestones;
+its full native cases still need the native factory and extension mappings.
+Exact per-file stopping points and requested owner signatures are external in
+orch-e-remaining.md and orchestration-seam-requests.md. Cursor remains first in
+the confirmed native-integration order. At the latest inspection its native
+factory and the common host factory still have no implementation, so a complete
+ACP provider cannot yet be integrated. The authoritative ANSI fold remains an
+external dependency; no second implementation is added.
+
+No live provider, live profile, dev server, commit, manifest or frozen seam edit
+is used. All types added here are test/harness interfaces rather than replacement
+wire contracts. Source quirks and the earlier inherited corrections remain as
+recorded above.
 
 ## ISAAC redistribution notices
 

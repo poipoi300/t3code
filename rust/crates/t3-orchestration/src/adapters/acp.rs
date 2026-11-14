@@ -1799,18 +1799,31 @@ impl AcpSessionRuntime {
         self.available()?;
         let _operation = self.operations.lock().await;
         self.available()?;
+        let existing_native = existing.as_ref().and_then(|thread| {
+            thread
+                .native_thread_ref
+                .as_ref()?
+                .native_id
+                .as_ref()
+                .map(|id| id.0.clone())
+        });
         {
             let state = lock(&self.shared.state);
             if state.active.is_some() {
                 return Err(protocol("cannot load an ACP session during a turn"));
             }
             if !force_new {
-                if let Some(existing) = &existing {
-                    let native = Self::native_id(existing)?;
-                    if let Some(thread) = state.threads.get(&native) {
-                        return Ok(thread.clone());
-                    }
-                } else if let Some(thread) = state.threads.values().next() {
+                if let Some(existing) = &existing
+                    && let Some(thread) = state
+                        .threads
+                        .values()
+                        .find(|thread| thread.id == existing.id)
+                {
+                    return Ok(thread.clone());
+                }
+                if existing.is_none()
+                    && let Some(thread) = state.threads.values().next()
+                {
                     if thread
                         .app_thread_id
                         .as_ref()
@@ -1834,15 +1847,13 @@ impl AcpSessionRuntime {
         let resume_native = if force_new {
             None
         } else {
-            existing
-                .as_ref()
-                .map(Self::native_id)
-                .transpose()?
+            existing_native
+                .clone()
                 .or_else(|| lock(&self.initial_native).clone())
         };
         let identity_version = if resume_native.is_none() {
             2
-        } else if let Some(existing) = &existing {
+        } else if let Some(existing) = existing.as_ref().filter(|_| existing_native.is_some()) {
             if encode(existing)?["nativeMetadata"]["itemIdentityVersion"] == 2 {
                 2
             } else {
@@ -1881,23 +1892,29 @@ impl AcpSessionRuntime {
         *lock(&self.shared.item_identity_version) = identity_version;
         let native_metadata = (identity_version == 2).then(|| json!({"itemIdentityVersion":2}));
         let now = self.shared.clock.now();
-        let id = derived(
-            "provider-thread",
-            &[
-                "provider",
-                &self.shared.driver.0,
-                "provider-instance",
-                &self.shared.instance.0,
-                "native-thread",
-                &native,
-            ],
-        );
+        let id = if let Some(existing) = &existing {
+            expanded(&existing.id)?.0.clone()
+        } else {
+            derived(
+                "provider-thread",
+                &[
+                    "provider",
+                    &self.shared.driver.0,
+                    "provider-instance",
+                    &self.shared.instance.0,
+                    "native-thread",
+                    &native,
+                ],
+            )
+        };
         let thread: OrchestrationV2ProviderThread = decode(
             json!({"id":id,"driver":self.shared.driver,"providerInstanceId":self.shared.instance,"providerSessionId":self.shared.session_id,"appThreadId":thread_id,"ownerNodeId":null,"nativeThreadRef":self.shared.reference(&native,"strong"),"nativeConversationHeadRef":null,"status":"idle","firstRunOrdinal":null,"lastRunOrdinal":null,"handoffIds":[],"forkedFrom":null,"nativeMetadata":native_metadata,"createdAt":now,"updatedAt":now}),
         )?;
-        lock(&self.shared.state)
-            .threads
-            .insert(native, thread.clone());
+        {
+            let mut state = lock(&self.shared.state);
+            state.threads.retain(|_, previous| previous.id != thread.id);
+            state.threads.insert(native, thread.clone());
+        }
         *lock(&self.shared.policy) = policy;
         self.shared
             .emit(ProviderEventKind::Thread {

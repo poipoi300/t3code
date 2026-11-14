@@ -2783,7 +2783,12 @@ async fn startup_recovers_good_children_and_contains_a_bad_child_before_offering
     let task = parent
         .subagents
         .iter()
-        .find(|task| task.child_thread_id == Some(t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(good_child.clone())))
+        .find(|task| {
+            task.child_thread_id
+                == Some(t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(
+                    good_child.clone(),
+                ))
+        })
         .unwrap();
     assert_eq!(task.result.as_deref(), Some("Use UTF-16 offsets."));
     let offer = continuations.requests.recv().await.unwrap();

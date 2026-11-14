@@ -165,6 +165,121 @@ async fn resumed_identity_version_survives_provider_thread_metadata() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn existing_provider_thread_without_native_id_opens_a_session_and_keeps_its_id() {
+    for (native_ref, force_new) in [
+        (json!(null), false),
+        (
+            json!({"driver":"acpRegistry","nativeId":null,"strength":"none"}),
+            false,
+        ),
+        (
+            json!({"driver":"acpRegistry","nativeId":"old-native-session","strength":"strong"}),
+            true,
+        ),
+    ] {
+        let adapter = AcpAdapter::replay(
+            ProviderInstanceId("replay".into()),
+            Arc::new(ManualClock::new(TEST_TIME)),
+            Arc::new(SequenceIds::new("pending-thread")),
+            false,
+        );
+        let runtime = adapter
+            .open_session(
+                OpenSession {
+                    thread_id: ThreadId("thread:test".into()),
+                    provider_session_id: ProviderSessionId("session:test".into()),
+                    model_selection: selection("multi-turn"),
+                    runtime_policy: policy(),
+                    prompt_suggestions: None,
+                    resume_from_session: None,
+                    initial_native_thread_id: None,
+                    initial_provider_item_identity_version: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let mut events = runtime.subscribe().await.unwrap();
+        let existing: OrchestrationV2ProviderThread = serde_json::from_value(json!({
+            "id":"provider:decision", "driver":"acpRegistry", "providerInstanceId":"replay",
+            "providerSessionId":null, "appThreadId":"thread:test", "ownerNodeId":null,
+            "nativeThreadRef":native_ref, "nativeConversationHeadRef":null,
+            "status":"not_loaded", "firstRunOrdinal":null, "lastRunOrdinal":null,
+            "handoffIds":[], "forkedFrom":null, "contextUsage":null,
+            "nativeMetadata":null, "createdAt":TEST_TIME, "updatedAt":TEST_TIME,
+        }))
+        .unwrap();
+        let ensure = |force_new_native_thread| EnsureThread {
+            thread_id: ThreadId("thread:test".into()),
+            title: None,
+            model_selection: selection("multi-turn"),
+            runtime_policy: policy(),
+            provider_session_id: None,
+            existing_provider_thread: Some(existing.clone()),
+            force_new_native_thread,
+        };
+        let loaded = runtime.ensure_thread(ensure(force_new)).await.unwrap();
+        assert_eq!(loaded.id, existing.id);
+        let native = loaded
+            .native_thread_ref
+            .as_ref()
+            .unwrap()
+            .native_id
+            .as_ref()
+            .unwrap();
+        assert_ne!(native.0, "old-native-session");
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap()["nativeMetadata"]["itemIdentityVersion"],
+            2
+        );
+        let repeated = runtime.ensure_thread(ensure(false)).await.unwrap();
+        assert_eq!(repeated.id, loaded.id);
+        assert_eq!(repeated.native_thread_ref, loaded.native_thread_ref);
+        runtime
+            .start_turn(
+                make_turn_input(
+                    loaded.clone(),
+                    selection("multi-turn"),
+                    policy(),
+                    ManualClock::new(TEST_TIME).now(),
+                    1,
+                    "first turn",
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        loop {
+            if let ProviderEventKind::Terminal {
+                provider_thread_id,
+                outcome,
+                ..
+            } = events.events.recv().await.unwrap().unwrap().kind
+            {
+                assert_eq!(provider_thread_id.0, "provider:decision");
+                assert!(matches!(outcome, TerminalOutcome::Completed { .. }));
+                break;
+            }
+        }
+        assert_eq!(
+            runtime
+                .snapshot(loaded.clone())
+                .await
+                .unwrap()
+                .provider_thread
+                .id,
+            loaded.id
+        );
+        let replacement = runtime.ensure_thread(ensure(true)).await.unwrap();
+        assert_eq!(replacement.id, loaded.id);
+        assert_ne!(replacement.native_thread_ref, loaded.native_thread_ref);
+        let repeated = runtime.ensure_thread(ensure(false)).await.unwrap();
+        assert_eq!(repeated.native_thread_ref, replacement.native_thread_ref);
+        runtime.close().await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn ordered_id_only_permissions_and_client_effects_cross_the_security_seams() {
     use t3_orchestration::testing::replay::*;
     let records = [

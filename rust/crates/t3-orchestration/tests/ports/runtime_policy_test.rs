@@ -182,3 +182,105 @@ async fn project_policy_and_wrappers_keep_ceiling_precedence_and_reasoning_effor
     assert_eq!(configured.options.reasoning_effort.as_deref(), Some("high"));
     assert_eq!(modes.0.load(Ordering::Relaxed), 1);
 }
+
+#[tokio::test]
+async fn configured_policy_reads_live_instance_modes_and_project_paths_with_managed_limits() {
+    use std::sync::Arc;
+    use t3_contracts::{managed_policy::ManagedPolicyDocument, server::ServerProvider};
+    use t3_orchestration::{
+        stores::projects::{ProjectRow, upsert},
+        testing::{TEST_TIME, TestDatabase},
+    };
+    let database = TestDatabase::memory().unwrap();
+    let project: ProjectRow = serde_json::from_value(json!({"projectId":"project","title":"Project","hasCustomTitle":false,"workspaceRoot":"C:/project-root","defaultModelSelection":null,"defaultThreadEnvMode":null,"autoPull":false,"faviconPath":null,"projectIcon":null,"scripts":[],"pinnedAt":null,"archivedAt":null,"createdAt":TEST_TIME,"updatedAt":TEST_TIME,"deletedAt":null})).unwrap();
+    database
+        .stores
+        .transaction(move |tx| upsert(tx, &project))
+        .await
+        .unwrap();
+    let provider: ServerProvider = serde_json::from_str(
+        include_str!("../../../../fixtures/samples/ServerProvider.jsonl")
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    let mut provider = change(
+        &provider,
+        json!({"instanceId":"codex","supportedRuntimeModes":["approval-required"]}),
+    );
+    let (sender, receiver) = tokio::sync::watch::channel(Arc::new(vec![provider.clone()]));
+    let modes = Arc::new(SnapshotRuntimeModes::new(receiver));
+    let managed: ManagedPolicyDocument = serde_json::from_value(
+        json!({"schemaVersion":1,"organization":"Example","limits":{"maxRuntimeMode":"auto"}}),
+    )
+    .unwrap();
+    let resolver = ProjectRuntimePolicy::configured(
+        database.stores.clone(),
+        modes.clone(),
+        Some(&managed),
+        RuntimePolicyOverride {
+            approval_policy: Some(json!("on-request")),
+            ..Default::default()
+        },
+        Some("high".into()),
+    );
+    let mut thread = change(
+        &projection().thread,
+        json!({"runtimeMode":"auto","worktreePath":null}),
+    );
+    let selection = thread.model_selection.clone();
+    let configured = resolver
+        .resolve(thread.clone(), selection.clone())
+        .await
+        .unwrap();
+    assert_eq!(configured.policy.runtime_mode, ApprovalRequired);
+    assert_eq!(
+        configured.policy.cwd.unwrap().to_string_lossy(),
+        "C:/project-root"
+    );
+    assert_eq!(configured.policy.max_runtime_mode, Some(Auto));
+    assert_eq!(configured.policy.approval_policy, Some(json!("on-request")));
+    assert_eq!(configured.options.reasoning_effort.as_deref(), Some("high"));
+    provider = change(&provider, json!({"supportedRuntimeModes":["auto"]}));
+    sender.send(Arc::new(vec![provider.clone()])).unwrap();
+    thread = change(&thread, json!({"worktreePath":"C:/worktree"}));
+    let configured = resolver
+        .resolve(thread.clone(), selection.clone())
+        .await
+        .unwrap();
+    assert_eq!(configured.policy.runtime_mode, Auto);
+    assert_eq!(
+        configured.policy.cwd.unwrap().to_string_lossy(),
+        "C:/worktree"
+    );
+    provider = change(&provider, json!({"supportedRuntimeModes":null}));
+    sender.send(Arc::new(vec![provider])).unwrap();
+    assert_eq!(
+        resolver
+            .resolve(thread.clone(), selection.clone())
+            .await
+            .unwrap()
+            .policy
+            .runtime_mode,
+        Auto
+    );
+    assert_eq!(
+        modes
+            .supported_modes(t3_contracts::provider_instance::ProviderInstanceId(
+                "missing".into()
+            ))
+            .await
+            .unwrap(),
+        None
+    );
+    thread = change(&thread, json!({"runtimeMode":"full-access"}));
+    assert!(
+        resolver
+            .resolve(thread, selection)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Example limits threads to Auto")
+    );
+}

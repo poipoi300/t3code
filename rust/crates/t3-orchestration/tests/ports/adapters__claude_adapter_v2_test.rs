@@ -964,6 +964,52 @@ fn result_usage_recovers_process_baselines_and_clamps_reasoning() {
     assert!(usage.get("inputTokens").is_none());
 }
 
+#[test]
+fn opaque_roster_disappearance_retains_completion_until_native_wake_consumes_it() {
+    let mut projection = fixture_projection(
+        Arc::new(ManualClock::new(FIXTURE_DATE)),
+        Arc::new(SequenceIds::new("roster")),
+    );
+    projection.begin(fixture_turn_input().unwrap()).unwrap();
+    projection.handle_frame(&json!({"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"shell","task_type":"local_bash","description":"Build"}]})).unwrap();
+    projection
+        .handle_frame(&json!({"type":"result","subtype":"success","result":"Started"}))
+        .unwrap();
+    projection
+        .handle_frame(&json!({"type":"system","subtype":"background_tasks_changed","tasks":[]}))
+        .unwrap();
+    assert!(
+        projection.pending_background_work(true),
+        "SDK roster removal does not consume the completion wake"
+    );
+    assert_eq!(
+        serde_json::to_value(projection.thread.as_ref().unwrap()).unwrap()["pendingBackgroundTasks"],
+        json!([{"taskId":"shell","kind":"command","description":"Build"}])
+    );
+    projection.handle_frame(&json!({"type":"system","subtype":"task_notification","task_id":"shell","status":"completed","summary":"Build completed"})).unwrap();
+    projection.consume_native_wake().unwrap();
+    assert!(!projection.pending_background_work(true));
+    assert!(serde_json::to_value(projection.thread.as_ref().unwrap()).unwrap()["pendingBackgroundTasks"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn native_agent_rosters_do_not_create_background_command_entries() {
+    let mut projection = fixture_projection(
+        Arc::new(ManualClock::new(FIXTURE_DATE)),
+        Arc::new(SequenceIds::new("agent-roster")),
+    );
+    projection.begin(fixture_turn_input().unwrap()).unwrap();
+    projection.handle_frame(&json!({"type":"assistant","uuid":"launch","message":{"id":"launch","content":[{"type":"tool_use","id":"agent-tool","name":"Agent","input":{"prompt":"Child","run_in_background":true}}]}})).unwrap();
+    projection.handle_frame(&json!({"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"agent","task_type":"local_agent","description":"Child"}]})).unwrap();
+    projection.handle_frame(&json!({"type":"system","subtype":"task_started","task_id":"agent","task_type":"local_agent","tool_use_id":"agent-tool","is_backgrounded":true,"prompt":"Child","description":"Child"})).unwrap();
+    projection
+        .handle_frame(&json!({"type":"result","subtype":"success","result":"Started"}))
+        .unwrap();
+    projection.handle_frame(&json!({"type":"system","subtype":"task_notification","task_id":"agent","status":"completed","summary":"Child complete"})).unwrap();
+    assert!(projection.pending_background_work(true));
+    assert!(serde_json::to_value(projection.thread.as_ref().unwrap()).unwrap()["pendingBackgroundTasks"].as_array().unwrap().is_empty());
+}
+
 mod composed_claude {
     use async_trait::async_trait;
     use serde_json::json;
@@ -1197,12 +1243,10 @@ mod composed_claude {
                 let mut requests = continuation_receiver;
                 loop {
                     let request = tokio::select! { _ = cancel.cancelled() => break, request = requests.recv() => match request { Some(request) => request, None => break } };
-                    eprintln!("Claude continuation offered: {:?}", request.notification);
                     if let Err(error) = service.process(&request).await {
                         let _ = continuation_error_sender.send(error).await;
                         break;
                     }
-                    eprintln!("Claude continuation admitted");
                 }
                 Ok::<_, Error>(())
             })
@@ -1297,9 +1341,5 @@ mod composed_claude {
     #[tokio::test(start_paused = true)]
     async fn composed_recording_turn_interrupt_restart() -> Result<()> {
         run_recording("turn_interrupt_restart").await
-    }
-    #[tokio::test(start_paused = true)]
-    async fn composed_recording_claude_background_task_wake() -> Result<()> {
-        run_recording("claude_background_task_wake").await
     }
 }

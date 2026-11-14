@@ -120,10 +120,13 @@ async fn native_background_wake_waits_for_an_app_run_and_never_offers_a_second_p
     }
     peer.send(json!({"type":"system","subtype":"background_tasks_changed","uuid":"empty-roster","tasks":[]})).await;
     peer.send(json!({"type":"system","subtype":"task_notification","task_id":"background","status":"completed","summary":"Build complete","uuid":"notice"})).await;
-    let request = requests.recv().await.unwrap();
-    assert_eq!(
-        serde_json::to_value(request.notification).unwrap()["summary"],
-        "Command \"Build\" finished"
+    peer.send(control("wake-barrier", "Bash", json!({"command":"pwd"})))
+        .await;
+    let barrier = peer.read().await;
+    assert_eq!(barrier["response"]["response"]["behavior"], "deny");
+    assert!(
+        requests.try_recv().is_err(),
+        "a completed opaque task does not prove that a native wake began"
     );
     assert!(
         runtime
@@ -134,6 +137,12 @@ async fn native_background_wake_waits_for_an_app_run_and_never_offers_a_second_p
             .unwrap()
     );
     peer.send(json!({"type":"assistant","uuid":"wake-assistant","parent_tool_use_id":null,"message":{"id":"wake-api","role":"assistant","content":[{"type":"text","text":"WAKE_DONE"}]}})).await;
+    let request = requests.recv().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(request.notification).unwrap()["summary"],
+        "Command \"Build\" finished"
+    );
+    assert_eq!(request.detail.as_deref(), Some("Build complete"));
     let mut wake = fixture_turn_input().unwrap();
     wake.run_id = RunId("wake-run".into());
     wake.run_ordinal = 2;
@@ -533,4 +542,103 @@ async fn background_work_outlives_root_completion_and_task_controls_target_its_s
     peer.send(json!({"type":"control_response", "response":{"subtype":"success", "request_id":control["request_id"], "response":{}}})).await;
     stop.await.unwrap().unwrap();
     runtime.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn live_selection_updates_flags_and_defers_process_bound_changes() {
+    let host = ClaudeHostOptions {
+        compile_model: Some(Arc::new(|selection| {
+            let options = serde_json::to_value(&selection.options).unwrap();
+            let mut model = ClaudeCompiledModel {
+                model: selection.model.clone(),
+                effort: Some("high".into()),
+                settings: json!({}),
+            };
+            for option in options.as_array().into_iter().flatten() {
+                match option["id"].as_str() {
+                    Some("effort") => {
+                        model.effort = option["value"]
+                            .as_str()
+                            .filter(|value| *value != "default")
+                            .map(str::to_owned)
+                    }
+                    Some("thinking") => {
+                        model.settings["alwaysThinkingEnabled"] = option["value"].clone()
+                    }
+                    Some("fastMode" | "ultracode") => {
+                        model.settings[option["id"].as_str().unwrap()] = option["value"].clone()
+                    }
+                    _ => {}
+                }
+            }
+            Ok(model)
+        })),
+        ..Default::default()
+    };
+    let (runtime, mut events, mut peer) = running_with_host(host).await;
+    let thread = fixture_turn_input().unwrap().provider_thread;
+    let selection = |options| {
+        serde_json::from_value(
+            json!({"instanceId":"claudeAgent","model":"claude-sonnet-4-6","options":options}),
+        )
+        .unwrap()
+    };
+    let extensions = runtime.extensions().unwrap();
+    for (options, expected) in [
+        (
+            json!([{"id":"effort","value":"medium"}]),
+            json!({"effortLevel":"medium","fastMode":null,"ultracode":null}),
+        ),
+        (
+            json!([{"id":"effort","value":"medium"},{"id":"fastMode","value":true},{"id":"ultracode","value":false}]),
+            json!({"effortLevel":"medium","fastMode":true,"ultracode":false}),
+        ),
+    ] {
+        let handle = runtime.clone();
+        let thread = thread.clone();
+        let next = selection(options);
+        let mut apply = tokio::spawn(async move {
+            handle
+                .extensions()
+                .unwrap()
+                .apply_selection(thread, next)
+                .await
+        });
+        let flags = tokio::select! {result = &mut apply => panic!("live flags returned before native acknowledgment: {result:?}"), frame = peer.read() => frame};
+        assert_eq!(flags["request"]["subtype"], "apply_flag_settings");
+        assert_eq!(flags["request"]["settings"], expected);
+        peer.send(json!({"type":"control_response","response":{"subtype":"success","request_id":flags["request_id"],"response":{}}})).await;
+        apply.await.unwrap().unwrap();
+    }
+    for next in [
+        selection(
+            json!([{"id":"effort","value":"medium"},{"id":"fastMode","value":true},{"id":"ultracode","value":false}]),
+        ),
+        selection(json!([{"id":"effort","value":"default"}])),
+        selection(json!([{"id":"effort","value":"medium"},{"id":"thinking","value":false}])),
+        serde_json::from_value(json!({"instanceId":"claudeAgent","model":"claude-opus-4-6"}))
+            .unwrap(),
+    ] {
+        tokio::select! {result = extensions.apply_selection(thread.clone(), next) => result.unwrap(), frame = peer.read() => panic!("process-bound/no-op change sent a live frame: {frame}")};
+    }
+    peer.send(json!({"type":"result","subtype":"success","uuid":"live-flags-end","result":"Done","is_error":false,"num_turns":1,"duration_ms":1,"duration_api_ms":1,"total_cost_usd":0,"usage":{"input_tokens":1,"output_tokens":1}})).await;
+    let mut turns = std::collections::BTreeSet::new();
+    loop {
+        match events.events.recv().await.unwrap().unwrap().kind {
+            ProviderEventKind::Turn { provider_turn, .. } => {
+                turns.insert(serde_json::to_string(&provider_turn.id).unwrap());
+            }
+            ProviderEventKind::Terminal { run_ordinal, .. } => {
+                assert_eq!(run_ordinal, 1);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(turns.len(), 1);
+    runtime.close().await.unwrap();
+    assert!(
+        peer.read.next_line().await.unwrap().is_none(),
+        "live updates must not send a user prompt or interrupt"
+    );
 }

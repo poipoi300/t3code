@@ -1741,7 +1741,11 @@ impl ProviderAdapter for CodexReplayAdapter {
         self.tasks.lock().await.push(tokio::spawn(async move {
             let result = run_wire_replay(
                 peer,
-                WireReplayConfig { transcript:&transcript, ignored_config:&ignored_config, workspace:&workspace },
+                WireReplayConfig {
+                    transcript: &transcript,
+                    ignored_config: &ignored_config,
+                    workspace: &workspace,
+                },
                 cursor,
                 status.clone(),
                 gate,
@@ -1778,7 +1782,11 @@ async fn run_wire_replay(
     gate: crate::testing::replay::ReplayGate,
     stop: &CancellationToken,
 ) -> ProviderResult<()> {
-    let WireReplayConfig { transcript, ignored_config, workspace } = config;
+    let WireReplayConfig {
+        transcript,
+        ignored_config,
+        workspace,
+    } = config;
     let mut ids: BTreeMap<String, Value> = BTreeMap::new();
     let mut children = std::collections::BTreeSet::new();
     for entry in transcript {

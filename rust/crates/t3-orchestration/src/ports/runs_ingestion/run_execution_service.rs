@@ -1,3 +1,4 @@
+use super::context_handoff_delivery::PreparedDelivery;
 use super::provider_event_ingestor::expanded_id;
 use super::provider_event_ingestor::{IngestInput, ProviderEventIngestor};
 use crate::provider::{
@@ -9,6 +10,7 @@ use crate::{
     error::{Error, Result},
     provider::{ProviderEvent, ProviderEventKind, TerminalOutcome, ThreadDisposition},
 };
+use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -24,6 +26,20 @@ pub struct StartRootRun {
     pub inherited_background_items: HashMap<TurnItemId, RunId>,
     pub related_thread_ids: Vec<ThreadId>,
     pub related_provider_thread_ids: Vec<ProviderThreadId>,
+}
+
+#[async_trait]
+pub trait RootTurnPreparation: Send + Sync {
+    async fn prepare(
+        &self,
+        turn: TurnInput,
+        compact: bool,
+    ) -> Result<(TurnInput, PreparedDelivery)>;
+}
+
+struct StartOptions {
+    policy: crate::provider::RuntimePolicyOptions,
+    preparation: Option<Arc<dyn RootTurnPreparation>>,
 }
 
 pub struct RunExecutionHandle {
@@ -95,8 +111,26 @@ impl RunExecutionService {
         policy_options: crate::provider::RuntimePolicyOptions,
         cancellation: CancellationToken,
     ) -> Result<RunExecutionHandle> {
+        self.start_root_run_with_preparation(input, policy_options, None, cancellation)
+            .await
+    }
+
+    pub async fn start_root_run_with_preparation(
+        &self,
+        input: StartRootRun,
+        policy_options: crate::provider::RuntimePolicyOptions,
+        preparation: Option<Arc<dyn RootTurnPreparation>>,
+        cancellation: CancellationToken,
+    ) -> Result<RunExecutionHandle> {
         let result = self
-            .prepare_and_start(input.clone(), policy_options, cancellation)
+            .prepare_and_start(
+                input.clone(),
+                StartOptions {
+                    policy: policy_options,
+                    preparation,
+                },
+                cancellation,
+            )
             .await;
         if let Err(error) = &result
             && !matches!(
@@ -114,7 +148,7 @@ impl RunExecutionService {
     async fn prepare_and_start(
         &self,
         mut input: StartRootRun,
-        policy_options: crate::provider::RuntimePolicyOptions,
+        options: StartOptions,
         cancellation: CancellationToken,
     ) -> Result<RunExecutionHandle> {
         if self.scope.cancellation.is_cancelled() || cancellation.is_cancelled() {
@@ -206,13 +240,7 @@ impl RunExecutionService {
             let service = self.clone();
             self.scope.tasks.spawn(async move {
                 let result = service
-                    .drive(
-                        input,
-                        &mut subscription,
-                        accepted,
-                        startup_cancel,
-                        policy_options,
-                    )
+                    .drive(input, &mut subscription, accepted, startup_cancel, options)
                     .await;
                 subscription.close();
                 let _ = settled.send(result);
@@ -268,25 +296,52 @@ impl RunExecutionService {
         subscription: &mut EventSubscription,
         accepted: oneshot::Sender<Result<()>>,
         cancellation: CancellationToken,
-        policy_options: crate::provider::RuntimePolicyOptions,
+        options: StartOptions,
     ) -> Result<()> {
         let mut accepted = Some(accepted);
         let session = input.session.clone();
         let turn = input.turn.clone();
+        let identity = input.state.clone();
         let start = async {
             let compact = turn.message.attachments.is_empty()
-                && turn.message.text.trim().eq_ignore_ascii_case("/compact");
-            if compact {
+                && t3_contracts::wire::trim_js(&turn.message.text).eq_ignore_ascii_case("/compact");
+            let (turn, delivery) = if let Some(preparation) = options.preparation {
+                let (turn, delivery) = preparation.prepare(turn, compact).await?;
+                (turn, Some(delivery))
+            } else {
+                (turn, None)
+            };
+            if !self.is_current(&identity).await? {
+                return Err(Error::Stale);
+            }
+            let result = if compact {
                 let extensions = session
                     .extensions()
                     .filter(|extensions| extensions.capabilities().compact)
                     .ok_or(ProviderError::Unsupported("compact"))?;
                 extensions.compact(turn).await
             } else {
-                if policy_options.reasoning_effort.is_some() {
-                    session.start_turn_with_policy(turn, policy_options).await
+                if options.policy.reasoning_effort.is_some() {
+                    session.start_turn_with_policy(turn, options.policy).await
                 } else {
                     session.start_turn(turn).await
+                }
+            };
+            match result {
+                Ok(()) => {
+                    // Accepted native input must keep ingesting even if bookkeeping fails.
+                    if let Some(delivery) = delivery {
+                        let _ = delivery.delivered().await;
+                    }
+                    Ok(())
+                }
+                Err(error) => {
+                    if matches!(&error, ProviderError::Protocol { detail, .. } if detail == "Claude provider query ended before the turn could start.")
+                        && let Some(delivery) = delivery
+                    {
+                        let _ = delivery.unsent().await;
+                    }
+                    Err(Error::Provider(error))
                 }
             }
         };
@@ -311,7 +366,7 @@ impl RunExecutionService {
                             started = true;
                             if let Some(sender) = accepted.take() { let _ = sender.send(Ok(())); }
                         }
-                        Err(error) => { failure = Some(Error::Provider(error)); break; }
+                        Err(error) => { failure = Some(error); break; }
                     }
                 }
                 event = subscription.events.recv(), if !stream_done => {

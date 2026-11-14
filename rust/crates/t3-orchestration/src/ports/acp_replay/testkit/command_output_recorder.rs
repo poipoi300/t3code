@@ -14,20 +14,30 @@ pub struct RecordedCommandOutput<State> {
     pub output: State,
 }
 pub type OutputFold<State> = dyn Fn(&State, &str) -> State + Send + Sync;
+pub type FallibleOutputFold<State> = dyn Fn(&State, &str) -> Result<State> + Send + Sync;
 pub struct CommandOutputRecorder<State> {
     recorded: Mutex<BTreeMap<TurnItemId, RecordedCommandOutput<State>>>,
     initial: State,
-    fold: Arc<OutputFold<State>>,
+    fold: Arc<FallibleOutputFold<State>>,
 }
 impl<State: Clone> CommandOutputRecorder<State> {
-    pub fn new(initial: State, fold: Arc<OutputFold<State>>) -> Self {
+    pub fn new(initial: State, fold: Arc<OutputFold<State>>) -> Self
+    where
+        State: 'static,
+    {
+        Self::new_fallible(
+            initial,
+            Arc::new(move |state, chunk| Ok(fold(state, chunk))),
+        )
+    }
+    pub fn new_fallible(initial: State, fold: Arc<FallibleOutputFold<State>>) -> Self {
         Self {
             recorded: Mutex::new(BTreeMap::new()),
             initial,
             fold,
         }
     }
-    pub fn record(&self, item_id: TurnItemId, chunk: &str) {
+    pub fn record(&self, item_id: TurnItemId, chunk: &str) -> Result<()> {
         let mut recorded = self
             .recorded
             .lock()
@@ -38,9 +48,10 @@ impl<State: Clone> CommandOutputRecorder<State> {
             output: (self.fold)(
                 previous.map_or(&self.initial, |previous| &previous.output),
                 chunk,
-            ),
+            )?,
         };
         recorded.insert(item_id, next);
+        Ok(())
     }
     pub fn snapshot(&self) -> BTreeMap<TurnItemId, RecordedCommandOutput<State>> {
         self.recorded
@@ -54,8 +65,19 @@ impl<State: Clone> CommandOutputRecorder<State> {
         target: OrchestrationV2SubscribeCommandOutputInput,
         chunk: String,
     ) -> Result<()> {
-        self.record(target.item_id.clone(), &chunk);
+        self.record(target.item_id.clone(), &chunk)?;
         inner.append(target, chunk).await
+    }
+}
+
+impl CommandOutputRecorder<serde_json::Value> {
+    pub fn with_terminal_fold(
+        terminal: Arc<dyn crate::ports::transport::command_output_hub::TerminalOutputFold>,
+    ) -> Self {
+        Self::new_fallible(
+            terminal.empty(),
+            Arc::new(move |state, chunk| terminal.append(state, chunk)),
+        )
     }
 }
 

@@ -494,26 +494,65 @@ async fn compaction_defers_inline_and_restores_uninjected_history() -> Result<()
 }
 
 #[tokio::test]
-async fn real_delivery_records_omitted_recovery_ids_separately_from_inline_and_injected_items() -> Result<()> {
-    for native in [false,true] {
-        let (mut handoff,provider)=records();
-        let history=handoff.history.as_mut().unwrap().as_mut().unwrap();
-        let mut oversized=history.messages[0].clone();
-        oversized.item_id=TurnItemId("item:oversized".into()); oversized.text="x".repeat(20_000);
+async fn real_delivery_records_omitted_recovery_ids_separately_from_inline_and_injected_items()
+-> Result<()> {
+    for native in [false, true] {
+        let (mut handoff, provider) = records();
+        let history = handoff.history.as_mut().unwrap().as_mut().unwrap();
+        let mut oversized = history.messages[0].clone();
+        oversized.item_id = TurnItemId("item:oversized".into());
+        oversized.text = "x".repeat(20_000);
         history.messages.push(oversized);
-        history.omitted_items=1;history.omitted_item_ids=Some(Some(vec![TurnItemId("item:omitted-before-delivery".into())]));
-        let persistence=Arc::new(Persist::default());
-        let injection=Inject {fail:false,accepted:true,persist:persistence.clone(),calls:Mutex::new(0)};
-        let delivery=deliver_context_handoffs(DeliveryInput {handoffs:&[handoff],provider_thread:&provider,budget:3_000,defer_inline:false,
-            already_delivered:&HashSet::new(),inject:native.then_some(&injection as &dyn HistoryInjection)},
-            &PortableHandoffBudget,persistence.clone()).await?;
-        if native {assert!(delivery.context.is_empty());} else {assert!(delivery.context.contains("Partial work")); assert!(!delivery.context.contains(&"x".repeat(100)));}
+        history.omitted_items = 1;
+        history.omitted_item_ids = Some(Some(vec![TurnItemId(
+            "item:omitted-before-delivery".into(),
+        )]));
+        let persistence = Arc::new(Persist::default());
+        let injection = Inject {
+            fail: false,
+            accepted: true,
+            persist: persistence.clone(),
+            calls: Mutex::new(0),
+        };
+        let delivery = deliver_context_handoffs(
+            DeliveryInput {
+                handoffs: &[handoff],
+                provider_thread: &provider,
+                budget: 3_000,
+                defer_inline: false,
+                already_delivered: &HashSet::new(),
+                inject: native.then_some(&injection as &dyn HistoryInjection),
+            },
+            &PortableHandoffBudget,
+            persistence.clone(),
+        )
+        .await?;
+        if native {
+            assert!(delivery.context.is_empty());
+        } else {
+            assert!(delivery.context.contains("Partial work"));
+            assert!(!delivery.context.contains(&"x".repeat(100)));
+        }
         delivery.delivered().await?;
-        let receipts=persistence.0.lock().unwrap();
-        let receipt=receipts.last().unwrap().delivery.as_ref().unwrap().as_ref().unwrap();
-        assert_eq!(receipt.status,if native {ContextHandoffDeliveryStatus::Injected} else {ContextHandoffDeliveryStatus::Inline});
-        assert_eq!(receipt.item_ids,vec![TurnItemId("item:one".into())]);
-        let omitted=receipt.omitted_item_ids.as_ref().unwrap().as_ref().unwrap();
+        let receipts = persistence.0.lock().unwrap();
+        let receipt = receipts
+            .last()
+            .unwrap()
+            .delivery
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            receipt.status,
+            if native {
+                ContextHandoffDeliveryStatus::Injected
+            } else {
+                ContextHandoffDeliveryStatus::Inline
+            }
+        );
+        assert_eq!(receipt.item_ids, vec![TurnItemId("item:one".into())]);
+        let omitted = receipt.omitted_item_ids.as_ref().unwrap().as_ref().unwrap();
         assert!(omitted.contains(&TurnItemId("item:oversized".into())));
         assert!(omitted.contains(&TurnItemId("item:omitted-before-delivery".into())));
     }

@@ -532,6 +532,66 @@ async fn command_output_recorder_keeps_failed_forwards_and_immutable_snapshots()
     assert_eq!(recorder.snapshot()[&target.item_id].chunks, 2);
     assert_eq!(recorder.snapshot()[&target.item_id].output, "beforeafter");
     assert_eq!(*hub.0.lock().unwrap(), ["before", "after"]);
+    use t3_orchestration::ports::transport::command_output_hub::{
+        TerminalOutputFold, TerminalText,
+    };
+    struct RejectingFold;
+    impl TerminalOutputFold for RejectingFold {
+        fn empty(&self) -> serde_json::Value {
+            json!([])
+        }
+        fn append(
+            &self,
+            state: &serde_json::Value,
+            chunk: &str,
+        ) -> t3_orchestration::error::Result<serde_json::Value> {
+            if chunk == "reject" {
+                return Err(Error::Unsupported("test fold failure"));
+            }
+            let mut chunks = state.as_array().unwrap().clone();
+            chunks.push(json!(chunk));
+            Ok(json!(chunks))
+        }
+        fn normalize(&self, _text: &str) -> t3_orchestration::error::Result<TerminalText> {
+            Err(Error::Unsupported("unused fold view"))
+        }
+        fn resume(
+            &self,
+            _state: &serde_json::Value,
+        ) -> t3_orchestration::error::Result<TerminalText> {
+            Err(Error::Unsupported("unused fold view"))
+        }
+        fn settled(
+            &self,
+            _state: &serde_json::Value,
+        ) -> t3_orchestration::error::Result<TerminalText> {
+            Err(Error::Unsupported("unused fold view"))
+        }
+    }
+    let recorder = CommandOutputRecorder::with_terminal_fold(Arc::new(RejectingFold));
+    let hub = FailingHub(Mutex::new(Vec::new()));
+    assert!(
+        recorder
+            .append(&hub, target.clone(), "ok".into())
+            .await
+            .is_err()
+    );
+    let before = recorder.snapshot();
+    assert!(
+        recorder
+            .append(&hub, target.clone(), "reject".into())
+            .await
+            .is_err()
+    );
+    assert_eq!(*hub.0.lock().unwrap(), ["ok"]);
+    assert_eq!(recorder.snapshot(), before);
+    recorder.record(target.item_id.clone(), "tail")?;
+    assert_eq!(before[&target.item_id].output, json!(["ok"]));
+    assert_eq!(
+        recorder.snapshot()[&target.item_id].output,
+        json!(["ok", "tail"])
+    );
+    assert_eq!(recorder.snapshot()[&target.item_id].chunks, 2);
     Ok(())
 }
 

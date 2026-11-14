@@ -1144,6 +1144,8 @@ struct NativeWake {
     opened: bool,
     ended: bool,
     frames: Vec<Value>,
+    notification: Option<OrchestrationV2Notification>,
+    detail: Option<String>,
     ambiguous_user_turn: bool,
     candidate_frames: Vec<Value>,
 }
@@ -1158,6 +1160,8 @@ impl ContinuationCallbacks for WakeCallbacks {
             let mut wake = lock(&inner.wake);
             if wake.generation == self.generation && wake.offered {
                 wake.frames.clear();
+                wake.notification = None;
+                wake.detail = None;
                 wake.retired = true;
                 if wake.ended {
                     wake.offered = false;
@@ -1291,7 +1295,10 @@ impl RuntimeInner {
                     ));
                 }
                 wake.frames.push(frame.clone());
-                wake.opened |= matches!(frame["type"].as_str(), Some("assistant" | "stream_event"));
+                wake.opened |= matches!(
+                    frame["type"].as_str(),
+                    Some("assistant" | "stream_event" | "user")
+                );
                 wake.ended |= frame["type"] == "result";
                 (true, false)
             } else {
@@ -1313,15 +1320,32 @@ impl RuntimeInner {
         let Some(sender) = &self.continuation_requests else {
             return Ok(());
         };
-        let generation = {
+        let (generation, notification, detail) = {
             let mut wake = lock(&self.wake);
+            if let Some(notification) = notification {
+                wake.notification = Some(notification);
+            }
             if wake.offered {
+                return Ok(());
+            }
+            let child_notification = wake
+                .notification
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|_| operation(ProviderOperation::Stream, "Invalid wake notification"))?
+                .is_some_and(|notification| notification["source"]["kind"] == "subagent");
+            if !wake.opened && !wake.ended && !child_notification {
                 return Ok(());
             }
             wake.generation += 1;
             wake.offered = true;
             wake.retired = false;
-            wake.generation
+            (
+                wake.generation,
+                wake.notification.clone(),
+                wake.detail.clone(),
+            )
         };
         let request = {
             let projection = lock(&self.projection);
@@ -1353,7 +1377,7 @@ impl RuntimeInner {
                     )
                 })?,
                 driver: ProviderDriverKind("claudeAgent".into()),
-                detail: None,
+                detail,
                 notification,
                 delegated_completion: None,
                 delivery: ContinuationDelivery::AdapterBuffered,
@@ -1599,6 +1623,49 @@ struct LiveQuery {
     model: String,
     effort: Option<String>,
     settings: Value,
+    selection_valid: bool,
+}
+impl LiveQuery {
+    fn can_apply_selection(&self, next: &ClaudeCompiledModel) -> bool {
+        self.settings["alwaysThinkingEnabled"] == next.settings["alwaysThinkingEnabled"]
+            && (next.effort.is_some() || self.effort.is_none())
+    }
+
+    fn selection_matches(&self, next: &ClaudeCompiledModel) -> bool {
+        self.selection_valid
+            && self.model == next.model
+            && self.effort == next.effort
+            && self.settings == next.settings
+    }
+
+    async fn apply_selection(&mut self, next: ClaudeCompiledModel) -> ProviderResult<()> {
+        let set_model = !self.selection_valid || self.model != next.model;
+        // Cancellation or a failed control leaves the native selection uncertain until reapplied.
+        self.selection_valid = false;
+        if set_model {
+            self.client
+                .request(OutboundRequest::SetModel {
+                    model: next.model.clone(),
+                })
+                .await
+                .map_err(protocol)?;
+        }
+        self.client
+            .request(OutboundRequest::ApplyFlagSettings {
+                settings: t3_claude_cli::control::FlagSettings {
+                    effort_level: next.effort.clone(),
+                    fast_mode: next.settings["fastMode"].as_bool(),
+                    ultracode: next.settings["ultracode"].as_bool(),
+                },
+            })
+            .await
+            .map_err(protocol)?;
+        self.model = next.model;
+        self.effort = next.effort;
+        self.settings = next.settings;
+        self.selection_valid = true;
+        Ok(())
+    }
 }
 pub struct ClaudeSessionRuntime {
     session: OrchestrationV2ProviderSession,
@@ -1677,35 +1744,12 @@ impl ClaudeSessionRuntime {
         if let Some(query) = current.as_mut() {
             if query.native == native
                 && query.policy == policy
-                && query.settings["alwaysThinkingEnabled"]
-                    == model.settings["alwaysThinkingEnabled"]
+                && query.can_apply_selection(&model)
                 && !query.task.is_finished()
                 && !query.cancellation.is_cancelled()
             {
-                if query.model != model.model {
-                    query
-                        .client
-                        .request(OutboundRequest::SetModel {
-                            model: model.model.clone(),
-                        })
-                        .await
-                        .map_err(protocol)?;
-                    query.model = model.model.clone();
-                }
-                if query.effort != model.effort || query.settings != model.settings {
-                    query
-                        .client
-                        .request(OutboundRequest::ApplyFlagSettings {
-                            settings: t3_claude_cli::control::FlagSettings {
-                                effort_level: model.effort.clone(),
-                                fast_mode: model.settings["fastMode"].as_bool(),
-                                ultracode: model.settings["ultracode"].as_bool(),
-                            },
-                        })
-                        .await
-                        .map_err(protocol)?;
-                    query.effort = model.effort.clone();
-                    query.settings = model.settings.clone();
+                if !query.selection_matches(&model) {
+                    query.apply_selection(model).await?;
                 }
                 return Ok(query.client.clone());
             }
@@ -1786,6 +1830,7 @@ impl ClaudeSessionRuntime {
             model: model.model,
             effort: model.effort,
             settings: model.settings,
+            selection_valid: true,
         });
         drop(current);
         let result = tokio::select! { _ = cancellation.cancelled() => Err(ProviderError::Cancelled), result=client.initialize(description.initialize)=>result.map(|_|()).map_err(protocol) };
@@ -1897,6 +1942,12 @@ async fn run_query(
                             if result.is_ok()
                                 && let Some(notification) = notification.ok().flatten()
                             {
+                                if let Some(summary) = frame["summary"]
+                                    .as_str()
+                                    .filter(|summary| !summary.is_empty())
+                                {
+                                    lock(&inner.wake).detail = Some(summary.into());
+                                }
                                 inner.offer_wake(Some(notification)).await
                             } else {
                                 result
@@ -2065,6 +2116,8 @@ impl SessionRuntime for ClaudeSessionRuntime {
                 wake.retired = false;
                 wake.opened = false;
                 wake.ended = false;
+                wake.notification = None;
+                wake.detail = None;
                 Some(std::mem::take(&mut wake.frames))
             } else {
                 None
@@ -2478,20 +2531,20 @@ impl SessionExtensions for ClaudeSessionRuntime {
         {
             return Err(ProviderError::SessionStopped);
         }
-        if selection.instance_id != self.options.instance_id || selection.options.is_some() {
-            return Err(ProviderError::Unsupported(
-                "Claude live provider or catalog option change",
-            ));
+        if selection.instance_id != self.options.instance_id {
+            return Err(ProviderError::Unsupported("Claude live provider change"));
         }
-        query
-            .client
-            .request(OutboundRequest::SetModel {
-                model: selection.model.clone(),
-            })
-            .await
-            .map_err(protocol)?;
-        query.model = selection.model;
-        Ok(())
+        let compiled = match &self.options.host.compile_model {
+            Some(compile) => compile(&selection)?,
+            None => direct_claude_model(&selection),
+        };
+        if query.model != compiled.model
+            || !query.can_apply_selection(&compiled)
+            || query.selection_matches(&compiled)
+        {
+            return Ok(());
+        }
+        query.apply_selection(compiled).await
     }
     async fn stop_task(
         &self,

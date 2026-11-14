@@ -77,10 +77,72 @@ pub trait ProviderRuntimeModeSource: Send + Sync {
     ) -> Result<Option<Vec<RuntimeMode>>>;
 }
 
+pub struct SnapshotRuntimeModes {
+    snapshots:
+        tokio::sync::watch::Receiver<std::sync::Arc<Vec<t3_contracts::server::ServerProvider>>>,
+}
+
+impl SnapshotRuntimeModes {
+    pub fn new(
+        snapshots: tokio::sync::watch::Receiver<
+            std::sync::Arc<Vec<t3_contracts::server::ServerProvider>>,
+        >,
+    ) -> Self {
+        Self { snapshots }
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderRuntimeModeSource for SnapshotRuntimeModes {
+    async fn supported_modes(
+        &self,
+        instance: t3_contracts::provider_instance::ProviderInstanceId,
+    ) -> Result<Option<Vec<RuntimeMode>>> {
+        Ok(self
+            .snapshots
+            .borrow()
+            .iter()
+            .find(|provider| provider.instance_id == instance)
+            .and_then(|provider| {
+                provider
+                    .supported_runtime_modes
+                    .as_ref()
+                    .and_then(Option::as_ref)
+            })
+            .map(|modes| modes.0.clone()))
+    }
+}
+
 pub struct ProjectRuntimePolicy {
     pub database: crate::stores::StoreDatabase,
     pub providers: std::sync::Arc<dyn ProviderRuntimeModeSource>,
     pub ceiling: Option<RuntimeModeCeiling>,
+}
+
+impl ProjectRuntimePolicy {
+    pub fn configured(
+        database: crate::stores::StoreDatabase,
+        providers: std::sync::Arc<dyn ProviderRuntimeModeSource>,
+        managed: Option<&t3_contracts::managed_policy::ManagedPolicyDocument>,
+        overrides: RuntimePolicyOverride,
+        reasoning_effort: Option<String>,
+    ) -> std::sync::Arc<dyn crate::api::RuntimePolicyResolver> {
+        let ceiling = managed.and_then(|policy| {
+            Some(RuntimeModeCeiling {
+                organization: policy.organization.0.clone(),
+                max_runtime_mode: policy.limits.as_ref()?.max_runtime_mode?,
+            })
+        });
+        std::sync::Arc::new(OverriddenRuntimePolicy {
+            base: std::sync::Arc::new(Self {
+                database,
+                providers,
+                ceiling,
+            }),
+            overrides,
+            reasoning_effort,
+        })
+    }
 }
 
 #[async_trait::async_trait]

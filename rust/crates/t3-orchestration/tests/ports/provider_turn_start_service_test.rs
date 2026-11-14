@@ -528,6 +528,8 @@ async fn ready_handoff(
     handoff["history"] = json!({"coverage":"Previous accepted work", "messages":[{"itemId":"item:previous","threadId":"thread:test","runId":"run:previous","providerThreadId":"pt:previous","role":"user","text":"Keep the 日本語 result", "status":"completed","kind":"user_message"}],"omittedItems":0});
     h.write("context-handoff.updated", handoff).await?;
     let (base, _base_calls) = h.fake();
+    let mut provider_session = base.runtime.session().clone();
+    provider_session.driver = base.driver();
     let mut loaded = target.provider_thread;
     loaded.native_thread_ref = Some(decode(
         json!({"driver":"codex","nativeId":"native:ready","strength":"strong"}),
@@ -536,7 +538,7 @@ async fn ready_handoff(
         base.instance_id().clone(),
         base.driver(),
         base.runtime.session().capabilities.clone(),
-        base.runtime.session().clone(),
+        provider_session,
         ThreadSnapshot {
             provider_thread: loaded,
             provider_turns: vec![],

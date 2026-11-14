@@ -40,7 +40,7 @@ fn legacy_import_summary_keeps_role_attribution_and_the_newest_oversized_unicode
 {
     let service = ContextHandoffService {
         ids: std::sync::Arc::new(t3_orchestration::testing::SequenceIds::new("handoff")),
-        budget: std::sync::Arc::new(super::context_handoff_budget_test::Budget),
+        budget: std::sync::Arc::new(t3_orchestration::ports::runs_ingestion::context_handoff_delivery::PortableHandoffBudget),
         token_cap: 32_000,
     };
     for (text, expected) in [
@@ -61,6 +61,7 @@ fn legacy_import_summary_keeps_role_attribution_and_the_newest_oversized_unicode
         user["creationSource"] = "server".into();
         user["inputIntent"] = "turn_start".into();
         user["attachments"] = json!([]);
+        let oversized = text.encode_utf16().count() > 32_000;
         user["text"] = text.into();
         let mut assistant = item("assistant_message", "legacy:assistant");
         assistant["runId"] = serde_json::Value::Null;
@@ -87,6 +88,22 @@ fn legacy_import_summary_keeps_role_attribution_and_the_newest_oversized_unicode
         assert!(handoff.summary_text.contains(expected));
         assert!(handoff.summary_text.encode_utf16().count() <= 32_000);
         assert!(!handoff.summary_text.contains('\u{fffd}'));
+        if oversized {
+            assert!(
+                handoff
+                    .history
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .omitted_item_ids
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .contains(&TurnItemId("legacy:user".into()))
+            );
+        }
         if expected == "What did we decide?" {
             assert!(
                 handoff

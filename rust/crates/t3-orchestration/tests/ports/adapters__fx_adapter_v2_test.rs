@@ -1,4 +1,8 @@
 #![cfg(feature = "acp-adapter")]
+#![allow(
+    dead_code,
+    reason = "Native conformance entry points await the named provider and host bindings."
+)]
 
 use serde_json::{Value, json};
 use std::sync::Arc;

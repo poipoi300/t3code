@@ -12,7 +12,7 @@ use t3_orchestration::{
     testing::FakeProviderAdapter,
 };
 use tokio_util::sync::CancellationToken;
-struct PolicySessions(Arc<FakeProviderAdapter>);
+pub(crate) struct PolicySessions(pub(crate) Arc<FakeProviderAdapter>);
 #[async_trait]
 impl SessionDirectory for PolicySessions {
     async fn get(&self, _id: ProviderSessionId) -> Result<Option<Arc<dyn SessionRuntime>>> {
@@ -75,12 +75,14 @@ async fn configured_reasoning_effort_survives_session_open_thread_ensure_or_resu
             .push(Ok(adapter.runtime.clone()));
         adapter.runtime.start_turn_with_policy.push(Ok(()));
         let start = service(&h, Arc::new(PolicySessions(adapter.clone())));
+        let mut runtime_policy = policy();
+        runtime_policy.cwd = Some(std::path::PathBuf::from("C:/isolated/policy-worktree"));
         let handle = start
             .start_configured(
                 ThreadId("thread:test".into()),
                 RunId("run:test".into()),
                 ConfiguredRuntimePolicy {
-                    policy: policy(),
+                    policy: runtime_policy.clone(),
                     options: RuntimePolicyOptions {
                         reasoning_effort: Some("high".into()),
                     },
@@ -90,7 +92,8 @@ async fn configured_reasoning_effort_survives_session_open_thread_ensure_or_resu
             )
             .await?
             .unwrap();
-        let (_, options, _) = adapter.open_session_with_policy.next_call().await.unwrap();
+        let (open, options, _) = adapter.open_session_with_policy.next_call().await.unwrap();
+        assert_eq!(open.runtime_policy.cwd, runtime_policy.cwd);
         assert_eq!(options.reasoning_effort.as_deref(), Some("high"));
         let options = if resume {
             adapter
@@ -110,13 +113,14 @@ async fn configured_reasoning_effort_survives_session_open_thread_ensure_or_resu
                 .1
         };
         assert_eq!(options.reasoning_effort.as_deref(), Some("high"));
-        let (_, options) = adapter
+        let (turn, options) = adapter
             .runtime
             .start_turn_with_policy
             .next_call()
             .await
             .unwrap();
         assert_eq!(options.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(turn.runtime_policy.cwd, runtime_policy.cwd);
         finish(adapter.as_ref(), &h, handle).await?;
         start.execution.shutdown().await?;
     }

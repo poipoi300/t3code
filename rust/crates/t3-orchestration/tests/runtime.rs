@@ -625,9 +625,6 @@ async fn a_turn_in_a_git_repository_captures_its_checkpoint() -> Result<()> {
 
 #[cfg(feature = "acp-adapter")]
 #[tokio::test]
-// Package 12: ACP `setup_thread` rejects the decision's not-loaded provider thread (no native
-// ref) instead of opening a new native session; the start effect then retries, so this hangs.
-#[ignore = "package 12: ACP ensure_thread rejects a not-loaded provider thread"]
 async fn a_message_runs_a_replay_turn_and_a_restart_recovers_a_settled_thread() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let workspace = Workspace::plain(directory.path())?;
