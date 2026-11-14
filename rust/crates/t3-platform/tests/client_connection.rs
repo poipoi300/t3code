@@ -185,7 +185,10 @@ async fn real_server_pairing_rpc_shell_snapshot_reconnect_and_bearer_restore_use
     restored.close().unwrap();
     driver.await.unwrap();
     let composed = tokio::task::LocalSet::new()
-        .run_until(composition_root_follows_a_thread(platform, environment.clone()))
+        .run_until(composition_root_follows_a_thread(
+            platform,
+            environment.clone(),
+        ))
         .await;
     assert_eq!(child.id(), Some(pid));
     child.kill().await.unwrap();
@@ -267,11 +270,9 @@ async fn composition_root_follows_a_thread(
         .and_then(|client| client.session())
         .ok_or("thread creation: no session")?;
     use t3_client::rpc::RpcEndpoint;
-    let project = session
-        .call::<t3_contracts::rpc::WsProjectsEnsureScratchRpc>(t3_contracts::rpc::Empty {})
-        .await
-        .map_err(|error| format!("thread creation (projects.ensureScratch): {error}"))?
-        .project_id;
+    // The server serves no project methods yet (`projects.*` are registered unimplemented), so
+    // the thread names a project id directly; the orchestrator decides whether it accepts that.
+    let project = t3_client::types::ProjectId("composition-root-proof-project".into());
     let thread = ThreadId("composition-root-proof".into());
     let command: t3_contracts::orchestration_v2::OrchestrationV2Command =
         serde_json::from_value(serde_json::json!({
@@ -301,6 +302,16 @@ async fn composition_root_follows_a_thread(
     })
     .await?;
     println!("composition root: thread timeline live with {rows} rows");
+    within(&store, "the shell listing the new thread", || {
+        store
+            .shared_shell(&environment)?
+            .threads
+            .iter()
+            .any(|row| row.id == key.thread)
+            .then_some(())
+    })
+    .await?;
+    println!("composition root: the shell lists the new thread");
     runtime.close_thread(&key);
     runtime
         .remove(&environment)
