@@ -67,25 +67,13 @@ impl ClientHandler for SetupHandler {
             let id = value["elicitationId"].as_str().filter(|id| {
                 !id.is_empty() && trim_js(id) == *id && id.encode_utf16().count() <= 128
             });
-            let url = value["url"].as_str().and_then(acp_catalog::web_url);
+            let action = value["url"].as_str().and_then(|url| {
+                acp_catalog::consent_action(url, value["message"].as_str().unwrap_or_default())
+            });
             let accepted = if value["mode"] == "url"
-                && let (Some(id), Some(url), Some(consent)) = (id, url, self.consent.as_ref())
+                && let (Some(_), Some(action), Some(consent)) = (id, action, self.consent.as_ref())
             {
-                let message = String::from_utf16_lossy(
-                    &trim_js(value["message"].as_str().unwrap_or_default())
-                        .encode_utf16()
-                        .take(1024)
-                        .collect::<Vec<_>>(),
-                );
-                consent
-                    .consent(Sensitive::new(AcpRegistryUrlAuthAction {
-                        elicitation_id: id.into(),
-                        url,
-                        message,
-                        created_at: None,
-                        expires_at: None,
-                    }))
-                    .await
+                consent.consent(Sensitive::new(action)).await
             } else {
                 false
             };

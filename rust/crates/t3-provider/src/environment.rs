@@ -81,7 +81,7 @@ pub fn merge_environment(
     home: &Path,
     platform: Platform,
 ) -> Environment {
-    let mut next = base.clone();
+    let mut next = t3_process::provider_environment::provider_base_environment(base);
     for variable in configured {
         let name = if platform == Platform::Windows {
             variable.name.to_uppercase()
@@ -139,7 +139,7 @@ pub fn claude_process_environment(
     platform: Platform,
     settings_entrypoint: Option<&str>,
 ) -> Environment {
-    let mut next = base.clone();
+    let mut next = t3_process::provider_environment::provider_base_environment(base);
     for name in [
         "CLAUDECODE",
         "CLAUDE_CODE_SESSION_ID",

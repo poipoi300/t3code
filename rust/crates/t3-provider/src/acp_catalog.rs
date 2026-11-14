@@ -5,7 +5,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use t3_contracts::{
-    acp_registry::{AcpRegistryProbeAuthMethod, AcpRegistryProbeModel},
+    acp_registry::{AcpRegistryProbeAuthMethod, AcpRegistryProbeModel, AcpRegistryUrlAuthAction},
     model::ProviderOptionDescriptor,
     wire::trim_js,
 };
@@ -43,6 +43,37 @@ fn uri(value: &str) -> String {
     }
     output
 }
+/// What a consent shows the user, one rule wherever the server publishes one (the client's link
+/// policy, `t3-client` `external_links`): an http(s) address without a user name or password
+/// (`https://bank.example@evil.example` reads as the bank), the agent's message without control
+/// or text-direction characters (a right-to-left override reverses what follows it), bounded,
+/// and an id the server mints, so an agent cannot re-point an attempt the client already shows.
+pub fn consent_action(url: &str, message: &str) -> Option<AcpRegistryUrlAuthAction> {
+    let url = web_url(url)?;
+    let parsed = url::Url::parse(&url).ok()?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return None;
+    }
+    let hidden = |c: char| {
+        c.is_control()
+            || matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    };
+    let cleaned = message.chars().filter(|c| !hidden(*c)).collect::<String>();
+    let message = String::from_utf16_lossy(
+        &trim_js(&cleaned)
+            .encode_utf16()
+            .take(1024)
+            .collect::<Vec<_>>(),
+    );
+    Some(AcpRegistryUrlAuthAction {
+        elicitation_id: uuid::Uuid::new_v4().to_string().into(),
+        url,
+        message,
+        created_at: None,
+        expires_at: None,
+    })
+}
+
 pub fn web_url(value: &str) -> Option<String> {
     if value.encode_utf16().count() > 2048 {
         return None;
@@ -101,6 +132,14 @@ pub fn auth_methods(
                 .as_object()
                 .into_iter()
                 .flat_map(|env| env.iter())
+                // Only plain names: the displayed command is meant to be pasted into a shell.
+                .filter(|(name, _)| {
+                    let mut chars = name.chars();
+                    chars
+                        .next()
+                        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+                        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+                })
                 .filter_map(|(name, value)| {
                     value
                         .as_str()
@@ -138,6 +177,10 @@ pub fn commands(commands: &[Value]) -> AvailableCommands {
     };
     let mut seen = BTreeSet::new();
     for command in commands {
+        // An agent publishes at most 256 commands and skills (review L7).
+        if result.slash_commands.len() + result.skills.len() == 256 {
+            break;
+        }
         let Some(name) = opaque(&command["name"], 128) else {
             continue;
         };

@@ -306,6 +306,11 @@ impl AuthBackend for AcpAuth {
         }
     }
     async fn methods(&self) -> ServiceResult<Vec<ProviderAuthMethod>> {
+        // A disabled instance starts no agent: it cannot be signed in to (`check_start`), and
+        // discovering its methods would launch it at every server start.
+        if !self.enabled {
+            return Ok(vec![]);
+        }
         let work = tokio::time::timeout(Duration::from_secs(30), self.discover());
         self.coordinator
             .background_probe(&self.agent_key(), async {

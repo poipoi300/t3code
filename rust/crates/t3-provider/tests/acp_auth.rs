@@ -196,13 +196,20 @@ async fn acp_agent_auth_requires_private_browser_consent_uses_the_configured_met
     assert!(!format!("{waiting:?}").contains("never-format-code"));
     assert!(!confirmed.get());
     let flow = waiting.expose().flow_id.as_ref().unwrap();
+    // The server mints the interaction id; the agent's own (`auth-url`) is never shown.
+    let Some(Some(t3_contracts::provider_setup::ProviderAuthInteraction::Browser { id, .. })) =
+        &waiting.expose().interaction
+    else {
+        panic!("no browser interaction")
+    };
+    assert_ne!(id.0, "auth-url");
     controller
         .respond(
             "owner",
             ProviderAuthRespondInput {
                 instance_id: "acp".into(),
                 flow_id: flow.clone(),
-                interaction_id: "auth-url".into(),
+                interaction_id: id.clone(),
                 response: ProviderAuthResponse::Browser {
                     action: ProviderBrowserAuthAction::Accept,
                 },

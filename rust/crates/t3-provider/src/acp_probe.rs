@@ -1,6 +1,6 @@
 use crate::{
     acp_catalog,
-    acp_connection::{AcpConnection, CoordinatedConsent, SetupHandler},
+    acp_connection::{AcpConnection, SetupHandler},
     acp_coordinator::{AcpRuntimeCoordinator, AvailableCommands},
     acp_service::{AcpError, AcpResult, AcpSessionManager},
     environment::Environment,
@@ -69,13 +69,11 @@ pub struct AcpNativeServices {
     pub coordinator: Arc<AcpRuntimeCoordinator>,
 }
 impl AcpNativeServices {
+    /// Probes and management calls decline every consent request: a consent is shown only for
+    /// a sign-in the user started (`provider.auth`) or a running turn, never as a side effect of
+    /// a status check or a read-scoped call. TypeScript accepts consents on these connections.
     fn handler(&self) -> Arc<SetupHandler> {
-        Arc::new(SetupHandler {
-            consent: Some(Arc::new(CoordinatedConsent {
-                coordinator: self.coordinator.clone(),
-                instance_id: self.instance_id.clone(),
-            })),
-        })
+        Arc::new(SetupHandler { consent: None })
     }
     pub async fn probe(&self, cwd: &Path) -> Result<AcpProbeOutcome, AcpProbeFailure> {
         let mut methods = Sensitive::new(vec![]);
