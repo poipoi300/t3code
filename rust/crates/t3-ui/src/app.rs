@@ -17,6 +17,8 @@ use crate::state::nav::{Navigator, Route, initial_route};
 use crate::state::panels::Panels;
 use crate::theme::{self, ThemeChoice, palette};
 
+use crate::runtime::tasks::watch;
+
 #[component]
 pub fn App() -> impl IntoElement {
     // Booting waits for the launch address (the page URL, a deep link) and the backend it chooses
@@ -26,7 +28,7 @@ pub fn App() -> impl IntoElement {
     let address = signal(None::<Option<String>>);
     let slot: Rc<RefCell<Option<(ClientStore, Started)>>> = Rc::new(RefCell::new(None));
     let filling = slot.clone();
-    spawn(async move {
+    watch(async move {
         let launched = app_url().await;
         let store = ClientStore::default();
         let started = host::start(store.clone(), host::launch_choice(launched.as_deref())).await;

@@ -40,6 +40,8 @@ use crate::{
     },
 };
 
+use crate::runtime::tasks::watch;
+
 /// The drawer as the thread workspace mounts it (`screens::panel::TerminalRegistration`): the
 /// header's terminal toggle and the drawer under the composer.
 pub fn terminal_registration(
@@ -71,7 +73,7 @@ pub fn terminal_control(
     {
         let services = services.clone();
         let state = state.clone();
-        spawn(async move {
+        watch(async move {
             let _ = services.0.load().await;
             current.set(state(&services));
             let mut changes = services.0.ui_changes();
@@ -271,7 +273,7 @@ impl Drawer {
 pub fn thread_terminal_drawer(services: TerminalServices, key: ThreadKey) -> impl IntoElement {
     {
         let services = services.clone();
-        spawn(async move {
+        watch(async move {
             let _ = services.0.load().await;
         });
     }
@@ -279,7 +281,7 @@ pub fn thread_terminal_drawer(services: TerminalServices, key: ThreadKey) -> imp
     let state = signal(Rc::new(lease.view()));
     {
         let lease = lease.clone();
-        spawn(async move {
+        watch(async move {
             let mut changes = lease.changes();
             while changes.next().await.is_some() {
                 let next = lease.view();

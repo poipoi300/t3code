@@ -25,6 +25,8 @@ use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
+use crate::runtime::tasks::watch;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingActionState {
     pub question_index: usize,
@@ -621,7 +623,7 @@ impl PendingMessages {
             restored_draft: signal(client.draft_text(&key)),
             delivery_problem: signal(client.delivery_problem(&key)),
         };
-        spawn(async move {
+        watch(async move {
             while changes.next().await.is_some() {
                 this.messages.set(Rc::new(client.pending_messages(&key)));
                 this.restored_draft.set(client.draft_text(&key));

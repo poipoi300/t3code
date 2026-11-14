@@ -372,7 +372,7 @@ impl Control {
         }
         if let Some(backend) = self.backend.get() {
             let scope = self.scope.get();
-            spawn(async move {
+            crate::runtime::tasks::watch(async move {
                 if let Err(error) = backend
                     .0
                     .sync_branch(&scope, branch, snapshot.thread_branch, manual)
@@ -612,7 +612,7 @@ fn mounted_control(
             return;
         };
         let mut updates = backend.0.watch(&control.scope.get(), watch);
-        spawn(async move {
+        crate::runtime::tasks::watch(async move {
             while let Some(snapshot) = updates.next().await {
                 control.snapshot.set(snapshot);
             }

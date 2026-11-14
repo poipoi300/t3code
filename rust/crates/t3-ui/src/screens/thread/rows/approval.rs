@@ -28,6 +28,8 @@ use crate::theme::{cn, tw};
 use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::{menu, popover, tooltip};
 
+use crate::runtime::tasks::watch;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApprovalResponse {
     pub thread: ThreadKey,
@@ -123,7 +125,7 @@ impl ApprovalContext {
             let mut services = crate::runtime::services::thread_ops::approval_services(&client);
             let mut changes = client.approval_services().changes(&thread);
             let revision = signal(0usize);
-            spawn(async move {
+            watch(async move {
                 while changes.next().await.is_some() {
                     revision.update(|revision| *revision = revision.wrapping_add(1));
                 }
@@ -464,7 +466,7 @@ fn respond(row: Memo<Option<ApprovalRow>>, context: &ApprovalContext, decision: 
     };
     let respond = services.respond.clone();
     context.state.owner.run(|| {
-        spawn(async move {
+        watch(async move {
             let result = respond(request).await;
             state.responding.set(false);
             if let Err(error) = result {

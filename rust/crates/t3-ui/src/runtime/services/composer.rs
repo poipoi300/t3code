@@ -11,6 +11,8 @@ use std::rc::Rc;
 use std::{cell::RefCell, collections::BTreeMap};
 use t3_client::{ClientError, composition::ClientRuntime, platform::Platform, types::ThreadKey};
 
+use crate::runtime::tasks::watch;
+
 pub fn citation_comments<P: Platform + Clone + 'static>(
     runtime: &ClientRuntime<P>,
     key: &ThreadKey,
@@ -64,7 +66,7 @@ pub fn composer_questions<P: Platform + Clone + 'static>(
         key,
     );
     let error = questions.error;
-    spawn(async move {
+    watch(async move {
         while changes.next().await.is_some() {
             error.set(
                 source
@@ -679,7 +681,7 @@ pub fn thread_model_picker<P: Platform + Clone + 'static>(
     let current = signal(session.snapshot());
     let failure = signal(None::<String>);
     let watching = session.clone();
-    spawn(async move {
+    watch(async move {
         while changes.next().await.is_some() {
             current.set(watching.snapshot());
         }
@@ -690,7 +692,7 @@ pub fn thread_model_picker<P: Platform + Clone + 'static>(
         move |operation: futures::future::LocalBoxFuture<'static, Result<(), ClientError>>| {
             failure.set(None);
             owner.run(move || {
-                spawn(async move {
+                watch(async move {
                     if let Err(error) = operation.await {
                         failure.set(Some(error.to_string()));
                     }

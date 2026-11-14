@@ -49,6 +49,8 @@ use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::toast::{ANCHORED_COPY_TOAST_TIMEOUT_MS, show_anchored_copy_success_toast};
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
+use crate::runtime::tasks::watch;
+
 /// Display decisions belong to the client's MessagesTimeline projection, not individual cells.
 #[derive(Clone, Debug)]
 pub struct AssistantRow {
@@ -1079,7 +1081,7 @@ pub fn assistant_fork_button(
                         });
                         let id = id.clone();
                         state.owner.run(move || {
-                            spawn(async move {
+                            watch(async move {
                                 state.finish(&id, future.await);
                             })
                         });

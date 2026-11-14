@@ -455,7 +455,7 @@ impl<P: Platform + Clone + 'static> ui_new::NewThreadClient for NewThreadBinding
         let failure = signal(None::<String>);
         let mut changes = futures::stream::select(service.changes(), self.0.changes());
         let watching = resolve.clone();
-        spawn(async move {
+        crate::runtime::tasks::watch(async move {
             while changes.next().await.is_some() {
                 match watching() {
                     Ok(service) => current.set(service.snapshot()),

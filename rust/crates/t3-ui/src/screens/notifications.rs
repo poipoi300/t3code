@@ -88,7 +88,7 @@ pub fn thread_notifications() -> impl IntoElement {
     };
     let settings = signal_with((settings_service.current)(), SignalEquals::Never);
     let watch = settings_service.clone();
-    spawn(async move {
+    crate::runtime::tasks::watch(async move {
         let mut changes = (watch.changes)();
         while changes.next().await.is_some() {
             let _ = settings.try_set((watch.current)());
@@ -265,7 +265,7 @@ pub fn thread_notifications() -> impl IntoElement {
 
     // A pressed system notification opens its thread; the app coming to the front clears them.
     let press_pending = pending.clone();
-    spawn(async move {
+    crate::runtime::tasks::watch(async move {
         loop {
             let tag = next_notification_press().await;
             let key = press_pending.borrow_mut().remove(&tag);
@@ -435,7 +435,7 @@ fn present(
                 .silent(true),
             );
             let pending = pending.clone();
-            spawn(async move {
+            crate::runtime::tasks::watch(async move {
                 if shown.await {
                     pending.borrow_mut().insert(tag, key);
                     set_badge(pending.borrow().len() as u32);

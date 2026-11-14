@@ -20,6 +20,8 @@ use crate::ui::alert::composer_banner as banner;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::toast::{ToastOptions, Variant, toast_manager};
 
+use crate::runtime::tasks::watch;
+
 #[derive(Clone, Default, PartialEq)]
 pub struct StashSnapshot {
     pub entries: Vec<Shared<Entry>>,
@@ -81,7 +83,7 @@ impl PromptStash {
         let pulse = signal(false);
         let revision = stored(state.with(|state| state.stash_revision));
         let pulse_task = stored(None::<Spawned<()>>);
-        spawn(async move {
+        watch(async move {
             while changes.next().await.is_some() {
                 let next = source.snapshot();
                 if revision.replace(next.stash_revision) != next.stash_revision {
@@ -114,7 +116,7 @@ impl PromptStash {
         }
         let client = self.client.get();
         self.owner.run(move || {
-            spawn(async move {
+            watch(async move {
                 show_result(self, client.stash_current().await);
             })
         });
@@ -145,7 +147,7 @@ impl PromptStash {
             Ok(restore) => {
                 self.menu_open.set(false);
                 self.owner.run(move || {
-                    spawn(async move {
+                    watch(async move {
                         show_result(self, restore.await);
                     })
                 });
@@ -163,7 +165,7 @@ impl PromptStash {
         }
         let client = self.client.get();
         self.owner.run(move || {
-            spawn(async move {
+            watch(async move {
                 show_result(self, client.delete(id).await);
             })
         });
@@ -442,7 +444,7 @@ fn relative_time(timestamp: impl Fn() -> String + 'static) -> impl IntoElement {
                 date,
                 nsh_core::time::unix_ms() as i64,
             ));
-            spawn(async move {
+            watch(async move {
                 loop {
                     let now = nsh_core::time::unix_ms() as i64;
                     timer(Duration::from_millis(

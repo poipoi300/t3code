@@ -18,6 +18,8 @@ use crate::ui::confirm::{
 use futures::FutureExt;
 use t3_contracts::orchestration_v2_id_table::IdOrIndex;
 
+use crate::runtime::tasks::watch;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RewindTarget {
     pub message_id: MessageId,
@@ -129,7 +131,7 @@ impl TimelineRewind {
             let mut changes = client.changes(&key);
             let client = client.clone();
             let key = key.clone();
-            spawn(async move {
+            watch(async move {
                 while changes.next().await.is_some() {
                     state.set(client.state(&key));
                 }
@@ -233,7 +235,7 @@ impl TimelineRewind {
         };
         self.pending.set(true);
         self.owner.run(|| {
-            spawn(async move {
+            watch(async move {
                 let _pending = Pending(self.pending);
                 if !answer.await {
                     return;
@@ -261,7 +263,7 @@ impl TimelineRewind {
         let key = self.key.get();
         let fork = self.fork_thread(key, run_id);
         self.owner.run(|| {
-            spawn(async move {
+            watch(async move {
                 let _ = fork.await;
             })
         });

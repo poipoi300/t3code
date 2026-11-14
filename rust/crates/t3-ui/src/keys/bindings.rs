@@ -25,6 +25,8 @@ use crate::runtime::{backend::EnvironmentEntry, rt};
 use crate::state::nav::{Navigator, navigator};
 use crate::state::panels::Panels;
 
+use crate::runtime::tasks::watch;
+
 type Guard = Rc<dyn Fn(&DispatchEvent) -> bool>;
 type ContextReader = Rc<dyn Fn() -> MatchContext>;
 type RulesReader = Rc<dyn Fn() -> Vec<ResolvedKeybindingRule>>;
@@ -188,7 +190,7 @@ impl Keybindings {
     ) -> Self {
         let mut changes = store.subscribe();
         let environments = signal(store.snapshot().environments);
-        spawn(async move {
+        watch(async move {
             while let Some(change) = changes.next().await {
                 if change
                     .scopes

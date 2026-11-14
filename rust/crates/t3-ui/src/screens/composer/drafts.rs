@@ -11,6 +11,8 @@ use super::editor::{ComposerEditor, ComposerSnapshot};
 use crate::i18n::Text;
 use crate::runtime::Shared;
 
+use crate::runtime::tasks::watch;
+
 /// The client owns the draft identity, revision, hydration and saved caret, across mounts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ComposerDraftView {
@@ -51,7 +53,7 @@ impl ComposerDrafts {
         let view = signal(Shared(client.view(&key)));
         let source = client.clone();
         let scope = key.clone();
-        spawn(async move {
+        watch(async move {
             while changes.next().await.is_some() {
                 view.set(Shared(source.view(&scope)));
             }

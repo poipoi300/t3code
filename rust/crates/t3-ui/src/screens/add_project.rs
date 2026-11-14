@@ -48,7 +48,7 @@ pub fn ignored_files(client: Rc<dyn IgnoredFilesClient>) -> AnyElement {
     let mut changes = client.watch();
     let current = signal(None::<Rc<IgnoredFilesView>>);
     let error = signal(None::<Text>);
-    spawn(async move {
+    crate::runtime::tasks::watch(async move {
         while let Some(value) = changes.next().await {
             current.set(Some(value));
         }
@@ -347,13 +347,13 @@ pub fn command_palette_add_project(client: Rc<dyn AddProjectClient>) -> AnyEleme
     let mut completed = client.completed();
     let mut publishing = client.publishing();
     let publication = signal(None::<Rc<PublishingView>>);
-    spawn(async move {
+    crate::runtime::tasks::watch(async move {
         while let Some(value) = publishing.next().await {
             publication.set(value);
         }
     });
     let current = signal(None::<Rc<AddProjectView>>);
-    spawn(async move {
+    crate::runtime::tasks::watch(async move {
         while let Some(next) = changes.next().await {
             current.set(Some(next));
         }
@@ -365,7 +365,7 @@ pub fn command_palette_add_project(client: Rc<dyn AddProjectClient>) -> AnyEleme
     let nav = navigator();
     let origin = nav.top();
     let completion_origin = origin.clone();
-    spawn(async move {
+    crate::runtime::tasks::watch(async move {
         if completed.next().await.is_some() {
             open.set(false);
             if nav.top() == completion_origin && completion_origin == Route::AddProject {
@@ -398,7 +398,7 @@ pub fn command_palette_add_project(client: Rc<dyn AddProjectClient>) -> AnyEleme
             let operation = client.get().submit(value.revision);
             let complete = complete.clone();
             owner.run(move || {
-                spawn(async move {
+                crate::runtime::tasks::watch(async move {
                     complete(operation.await);
                 })
             });
@@ -472,7 +472,7 @@ pub fn command_palette_add_project(client: Rc<dyn AddProjectClient>) -> AnyEleme
                                         busy.set(true); error.set(None);
                                         let operation = client.get().select_item(&id);
                                         let complete = complete.clone();
-                                        owner.run(move||spawn(async move { complete(operation.await); }));
+                                        owner.run(move||crate::runtime::tasks::watch(async move { complete(operation.await); }));
                                     })
                                     .app_class(tw("flex min-h-8 cursor-default select-none items-center gap-2 rounded-sm px-2 py-1 text-base outline-none hover:bg-accent disabled:opacity-64 sm:min-h-7 sm:text-sm"))
                                     .child(view().app_class(tw("flex h-5 shrink-0 items-center self-start pt-0.5"))
@@ -498,7 +498,7 @@ pub fn command_palette_add_project(client: Rc<dyn AddProjectClient>) -> AnyEleme
                                 busy.set(true); error.set(None);
                                 let operation = client.get().pick_folder(value.revision);
                                 let complete = complete.clone();
-                                owner.run(move||spawn(async move { complete(operation.await); }));
+                                owner.run(move||crate::runtime::tasks::watch(async move { complete(operation.await); }));
                             })
                     })
                 })).into_element()

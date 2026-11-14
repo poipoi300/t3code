@@ -217,4 +217,74 @@ mod tests {
             .expect("the defect rule 7 forbids");
         assert!(app.screen().shows("finished: 0"));
     }
+
+    /// Rule 7's one door: outside this module nothing calls NSH's `spawn` directly. Handlers use
+    /// `TaskOwner::spawn`, build-time work `watch`. Reads each file up to its trailing
+    /// `#[cfg(test)]` module; string literals and `//` comments are skipped.
+    #[test]
+    fn no_bare_spawn_outside_this_module() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("source directory") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs") {
+                    continue;
+                }
+                let relative = path.strip_prefix(&root).expect("under src");
+                if relative == std::path::Path::new("runtime/tasks.rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("source");
+                let source = source.split("#[cfg(test)]").next().unwrap_or_default();
+                for (number, line) in source.lines().enumerate() {
+                    let mut code = String::new();
+                    let mut in_string = false;
+                    let mut chars = line.chars().peekable();
+                    while let Some(c) = chars.next() {
+                        if in_string {
+                            if c == '\\' {
+                                chars.next();
+                            } else if c == '"' {
+                                in_string = false;
+                            }
+                            code.push(' ');
+                        } else if c == '"' {
+                            in_string = true;
+                            code.push(' ');
+                        } else if c == '/' && chars.peek() == Some(&'/') {
+                            break;
+                        } else {
+                            code.push(c);
+                        }
+                    }
+                    let bare = code.match_indices("spawn(").any(|(at, _)| {
+                        let before = &code[..at];
+                        !before.ends_with("fn ")
+                            && before.chars().next_back().is_none_or(|c| {
+                                !(c.is_alphanumeric() || c == '_' || c == '.' || c == ':')
+                            })
+                    });
+                    if bare {
+                        offenders.push(format!(
+                            "{}:{}: {}",
+                            relative.display(),
+                            number + 1,
+                            line.trim()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "start work with TaskOwner::spawn (handlers) or watch (build-time), never NSH's spawn:\n{}",
+            offenders.join("\n")
+        );
+    }
 }

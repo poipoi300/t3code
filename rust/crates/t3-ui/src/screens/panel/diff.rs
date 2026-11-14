@@ -203,7 +203,7 @@ pub fn diff_panel(
             return;
         }
         let mut stream = untracked(|| service.watch(watched.clone()));
-        spawn(async move {
+        crate::runtime::tasks::watch(async move {
             while let Some(next) = stream.next().await {
                 if !snapshot.try_set(Some(Shared(next))) {
                     return;
@@ -710,7 +710,7 @@ fn commit_rows(
             return;
         }
         let mut stream = untracked(|| runtime.0.branch_commits(&key));
-        spawn(async move {
+        crate::runtime::tasks::watch(async move {
             while let Some(next) = stream.next().await {
                 let settled =
                     next.commits.is_some() || next.error.is_some() || next.access.is_some();

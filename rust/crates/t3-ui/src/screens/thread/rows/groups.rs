@@ -732,7 +732,7 @@ fn load_work(
     };
     // Recycling a header must not cancel its request and strand a thread-owned loading state.
     owner.run(|| {
-        spawn(async move {
+        crate::runtime::tasks::watch(async move {
             let results = join_all(anchors.into_iter().map(|anchor| loader(anchor))).await;
             if load.get_untracked().generation == generation {
                 load.update(|state| {

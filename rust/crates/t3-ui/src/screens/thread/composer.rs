@@ -186,7 +186,7 @@ fn send_shortcut(
 /// that owner and cancel the task before it sends.
 fn spawn_in(owner: Owner, task: impl std::future::Future<Output = ()> + 'static) {
     owner.run(move || {
-        spawn(task);
+        crate::runtime::tasks::watch(task);
     });
 }
 
@@ -197,7 +197,7 @@ fn watch<T: 'static>(
     read: impl Fn() -> Rc<T> + 'static,
 ) -> Signal<Shared<T>> {
     let value = signal(Shared(read()));
-    spawn(async move {
+    crate::runtime::tasks::watch(async move {
         while changes.next().await.is_some() {
             let next = read();
             if !value.with_untracked(|current| Rc::ptr_eq(&current.0, &next)) {
@@ -344,7 +344,7 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
         move |request: Option<crate::screens::composer::suggestions::ComposerSuggestionRequest>| {
             let session = suggestion_session.get_untracked();
             let operation = session.query(request.as_ref().map(bindings::suggestion_request));
-            spawn(async move {
+            crate::runtime::tasks::watch(async move {
                 let _ = operation.await;
             });
         }
@@ -398,7 +398,7 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
         untracked(|| {
             suggestions.set_scope(scope);
             let mut changes = session.changes();
-            spawn(async move {
+            crate::runtime::tasks::watch(async move {
                 while changes.next().await.is_some() {
                     if let Some(view) = session.snapshot() {
                         suggestions.publish(bindings::suggestion_results(&view));

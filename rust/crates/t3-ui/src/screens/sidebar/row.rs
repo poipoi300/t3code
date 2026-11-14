@@ -34,6 +34,8 @@ use crate::ui::avatar::{self, ProjectFaviconProject};
 use crate::ui::icon::{Icon, icon, icon_with_class, provider_icon};
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
+use crate::runtime::tasks::watch;
+
 type Thread = Memo<Option<Shared<OrchestrationV2ThreadShell>>>;
 
 /// The client's thread operations a row uses: its action menu, its actions and rename.
@@ -280,7 +282,7 @@ fn environment_config(key: Memo<Option<ThreadKey>>) -> Memo<Option<Shared<Server
         let store = runtime.store.store();
         let environment = key.environment;
         let mut changes = store.subscribe_environment(&environment);
-        spawn(async move {
+        watch(async move {
             loop {
                 config.set(
                     store

@@ -12,12 +12,14 @@ use t3_client::navigation::{Location, RoutePolicy, path_for};
 use crate::runtime::rt;
 use crate::state::nav::{Route, navigator};
 
+use crate::runtime::tasks::watch;
+
 pub fn screen(key: &str) -> AnyElement {
     let nav = navigator();
     let signed_in = !rt().environments_signal().get_untracked().is_empty();
     let path = path_for(&Route::ProjectLink(key.to_owned()));
     // A route change during the router's own render would rebuild what is rendering; move after.
-    spawn(async move {
+    watch(async move {
         let Some(path) = path else { return };
         let location = Location::resolve(&path, redirect_policy(signed_in));
         replace(nav, location);

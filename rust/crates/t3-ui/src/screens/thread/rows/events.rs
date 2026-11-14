@@ -43,6 +43,8 @@ use crate::ui::middle_truncate::{
 };
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
+use crate::runtime::tasks::watch;
+
 pub type TimelineRow = Memo<Option<Shared<MessagesTimelineRow>>>;
 
 #[derive(Clone)]
@@ -186,7 +188,7 @@ fn config_sources(runtime: Rt) -> Signal<BTreeMap<EnvironmentId, Shared<ServerCo
     };
     let configs = signal(read());
     // Config has no StoreSignals selector yet. Snapshot reads stay in this subscribed task, not bindings.
-    spawn(async move {
+    watch(async move {
         while let Some(change) = changes.next().await {
             if change
                 .scopes

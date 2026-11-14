@@ -199,7 +199,7 @@ pub fn index_draft_landing(target: Target) -> AnyElement {
         };
         navigation.pending.set(None);
         let origin = origin.clone();
-        let task = spawn(async move {
+        let task = crate::runtime::tasks::watch(async move {
             while let Some(next) = changes.next().await {
                 current.set(next.clone());
                 if let NewThreadView::Navigate(destination) = next.as_ref()

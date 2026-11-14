@@ -33,6 +33,8 @@ use t3_client::thread_views::{
 use crate::state::layout::{Pointer, layout_class, pointer};
 use crate::theme::{self, tw};
 
+use crate::runtime::tasks::watch;
+
 pub type SkillResolver = Arc<dyn Fn(&str) -> Option<(String, Option<String>)> + Send + Sync>;
 pub type ModelResolver = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 #[derive(Clone)]
@@ -1566,7 +1568,7 @@ fn composer_prompt_editor_tiptap_inner(
     }));
     let subscribed = session.clone();
     cleanup(move || subscribed.unsubscribe(subscription));
-    spawn(async move {
+    watch(async move {
         while changes.next().await.is_some() {
             let next = editor.read_snapshot();
             if !snapshot.get_untracked().matches_change(&next) {

@@ -19,6 +19,8 @@ use super::flatten::CodeChunk;
 use crate::runtime::Shared;
 use crate::theme::{cn, palette, tw};
 
+use crate::runtime::tasks::watch;
+
 pub const MAX_HIGHLIGHT_CACHE_ENTRIES: usize = 500;
 pub const MAX_HIGHLIGHT_CACHE_MEMORY_BYTES: usize = 50 * 1024 * 1024;
 pub const MAX_HIGHLIGHT_CHUNKS_PER_FRAME: usize = 1;
@@ -782,7 +784,7 @@ impl CodeHighlightQueue {
         let notified = Rc::new(Cell::new(false));
         let received = notified.clone();
         // NSH polls every ready task: only this owner-wide worker may spend the frame budget.
-        spawn(async move {
+        watch(async move {
             while messages.next().await.is_some() {
                 received.set(false);
                 if !load_code_syntaxes().await {

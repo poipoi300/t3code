@@ -143,7 +143,7 @@ impl HeaderController {
         let state = signal(Rc::new(ThreadHeaderState::default()));
         if let Some(service) = service {
             let mut changes = service.get().watch(key.clone());
-            spawn(async move {
+            crate::runtime::tasks::watch(async move {
                 while let Some(next) = changes.next().await {
                     state.set(next);
                 }
@@ -205,7 +205,7 @@ impl HeaderController {
             && let Some(service) = self.service
         {
             self.owner.run(move || {
-                spawn(async move {
+                crate::runtime::tasks::watch(async move {
                     if let Err(error) = service.get().rename_thread(self.key.get(), title).await {
                         report_header_error(error, Some("Failed to rename thread"));
                     }
@@ -231,7 +231,7 @@ impl HeaderController {
         }
         if let Some(service) = self.service {
             self.owner.run(move || {
-                spawn(async move {
+                crate::runtime::tasks::watch(async move {
                     if let Err(error) = service.get().perform_action(self.key.get(), action).await {
                         report_header_error(error, None);
                     }
@@ -630,7 +630,7 @@ fn project_breadcrumb(
     )));
     if let Some(navigation) = navigation {
         let mut changes = navigation.get().watch(project_key.get());
-        spawn(async move {
+        crate::runtime::tasks::watch(async move {
             while let Some(reason) = changes.next().await {
                 unavailable.set(reason);
             }
@@ -660,7 +660,7 @@ fn project_breadcrumb(
                 if unavailable.get_untracked().is_none() && let Some(navigation) = navigation {
                     let navigation = navigation.get();
                     let project_key = project_key.get();
-                    controller.owner.run(move || spawn(async move {
+                    controller.owner.run(move || crate::runtime::tasks::watch(async move {
                         match navigation.new_thread_in_project(project_key).await {
                             Ok(destination) => nav.open(destination.route()),
                             Err(error) => report_header_error(error, None),
@@ -743,7 +743,7 @@ fn guest_share_indicator(
                                     if let Some(service) = controller.service {
                                         controller.closing_share.set(true);
                                         controller.owner.run(move || {
-                                            spawn(async move {
+                                            crate::runtime::tasks::watch(async move {
                                                 let result = service
                                                     .get()
                                                     .close_guest_share(controller.key.get())

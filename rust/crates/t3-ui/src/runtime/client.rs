@@ -15,6 +15,8 @@ use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
 use super::backend::Unavailable;
 use super::host::{Choice, Started};
 
+use crate::runtime::tasks::watch;
+
 /// Set once the client's storage opened with a key store that outlives the process.
 static SAVED_SERVERS_LAST: AtomicBool = AtomicBool::new(false);
 
@@ -29,7 +31,7 @@ pub fn start(store: ClientStore) -> LocalBoxFuture<'static, Started> {
     let owner = Owner::current();
     let spawner: Spawner = Rc::new(move |future| {
         owner.run(|| {
-            spawn(future);
+            watch(future);
         });
     });
     async move {
@@ -339,11 +341,17 @@ mod tests {
             }],
         ))
         .expect("written");
-        let (runtime, paired) = block_on(start_on(
+        // Restore runs on a runtime-owned task, so the spawner must run what it is given.
+        use futures::task::LocalSpawnExt;
+        let mut pool = futures::executor::LocalPool::new();
+        let spawner = pool.spawner();
+        let (runtime, paired) = pool.run_until(start_on(
             platform,
             ClientStore::default(),
             OrchestrationV2CreationSource::Web,
-            Rc::new(|_| {}),
+            Rc::new(move |future| {
+                let _ = spawner.spawn_local(future);
+            }),
         ));
         assert!(!paired, "nothing usable is saved");
         let notice = runtime.take_storage_notice().expect("the user is told");

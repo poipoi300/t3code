@@ -35,6 +35,8 @@ use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::toggle::{self, toggle};
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
+use crate::runtime::tasks::watch;
+
 /// The client file read the viewer draws (`ProjectFiles::read_file`).
 pub trait FileReadHandle {
     fn view(&self) -> FileReadView;
@@ -132,7 +134,7 @@ pub fn file_preview_panel(context: SurfaceContext) -> impl IntoElement {
         let files = files.clone();
         let thread = thread.clone();
         // The client's store and connection change outside NSH; the task ends with the surface.
-        spawn(async move {
+        watch(async move {
             while changes.next().await.is_some() {
                 let alive = workspace.try_set(viewer.0.workspace(&thread))
                     && mutation.try_set(viewer.0.workspace_mutation(&thread))
@@ -212,7 +214,7 @@ struct SurfaceProps {
 fn preference_bool(files: &FilesRuntime, key: &'static str, default: bool) -> Signal<bool> {
     let value = signal(default);
     let service = files.0.clone();
-    spawn(async move {
+    watch(async move {
         if let Some(saved) = service.preference(key).await.and_then(|v| v.as_bool()) {
             value.try_set(saved);
         }
@@ -276,7 +278,7 @@ fn file_surface(props: SurfaceProps) -> impl IntoElement {
     if let Some(read) = read.clone() {
         let mut changes = read.changes();
         let observed = read.clone();
-        spawn(async move {
+        watch(async move {
             while changes.next().await.is_some() {
                 // The read lives as long as this task; `file` goes with the surface.
                 if !file.try_set(read.view()) {
@@ -715,7 +717,7 @@ fn workspace_image_preview(
 ) -> impl IntoElement {
     let url = signal(None::<Result<String, Problem>>);
     let mint = viewer.0.asset_url(&environment, resource);
-    spawn(async move {
+    watch(async move {
         let result = mint.await;
         url.try_set(Some(result));
     });

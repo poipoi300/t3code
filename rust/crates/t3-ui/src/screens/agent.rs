@@ -40,13 +40,15 @@ use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::input::{InputSize, text_field};
 
+use crate::runtime::tasks::watch;
+
 /// Both routes, as the router mounts them (`Route::ConnectAgent | Route::ApproveAgent`).
 pub fn screen() -> AnyElement {
     let nav = navigator();
     if matches!(nav.top(), Route::ApproveAgent) {
         // approve-agent.tsx `beforeLoad`: only the hosted app with T3 Connect configured shows
         // it; this client is never the hosted static app, so it redirects to `/`, replacing.
-        spawn(async move {
+        watch(async move {
             nav.back();
             nav.open(Route::Home);
         });
@@ -66,7 +68,7 @@ pub fn connect_agent_surface<P: Platform + Clone + 'static>(
     let authorization = signal(None::<AuthMcpAuthorizationRequest>);
     let ready = signal(false);
     let unavailable = signal(false);
-    spawn(async move {
+    watch(async move {
         let address = app_url().await.unwrap_or_default();
         let origin = page_origin(&address);
         match (client, origin) {
@@ -233,7 +235,7 @@ fn mcp_consent(
     let transport = stored(transport);
     let authorization = stored(authorization);
 
-    spawn(async move {
+    watch(async move {
         let answer = transport.get().load(&authorization.get()).await;
         let next = match answer {
             McpApprovalAnswer::Redirect(url) => {
@@ -285,7 +287,7 @@ fn mcp_consent(
         error.set(None);
         let call = transport.get().decide(&authorization.get(), decision);
         owner.get().run(|| {
-            spawn(async move {
+            watch(async move {
                 let answer = call.await;
                 if let McpApprovalAnswer::Redirect(url) = &answer
                     && links.with(|links| follow_redirect(links, url))

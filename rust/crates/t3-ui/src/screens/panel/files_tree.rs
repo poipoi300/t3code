@@ -23,6 +23,8 @@ use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
+use crate::runtime::tasks::watch;
+
 /// The client tree the panel draws (`ProjectFiles::tree`).
 pub trait FileTreeHandle {
     fn view(&self) -> FileTreeView;
@@ -90,7 +92,7 @@ pub fn file_explorer_pane(
     let width = signal(256.0_f32);
     let start = signal(0.0_f32);
     let service = runtime.0.clone();
-    spawn(async move {
+    watch(async move {
         if let Some(saved) = service.preference(EXPLORER_WIDTH_KEY).await.and_then(|v| v.as_f64()) {
             width.try_set(saved as f32);
         }
@@ -200,7 +202,7 @@ pub fn file_browser_panel(runtime: FilesRuntime, props: FileBrowserProps) -> imp
     // The client's tree changes outside NSH; this task ends with the panel.
     {
         let mut changes = handle.with(|h| h.changes());
-        spawn(async move {
+        watch(async move {
             while changes.next().await.is_some() {
                 let Some(view) = handle.try_with(|h| h.view()) else { return };
                 if !view_state.try_set(view) {

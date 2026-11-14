@@ -13,6 +13,8 @@ use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::Icon;
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
+use crate::runtime::tasks::watch;
+
 pub type Slot = Rc<dyn Fn() -> AnyElement>;
 pub type CopyCode = Rc<dyn Fn(String) -> LocalBoxFuture<'static, Result<(), String>>>;
 
@@ -105,7 +107,7 @@ impl CodeBlockState {
             self.did_copy();
             return;
         };
-        self.owner.run(|| spawn(async move {
+        self.owner.run(|| watch(async move {
             match copy(code).await {
                 Ok(()) => self.did_copy(),
                 Err(cause) => {

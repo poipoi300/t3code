@@ -66,7 +66,7 @@ pub struct ThreadDetailsRuntime {
 pub fn thread_details_runtime(backend: Rc<dyn ThreadDetailsBackend>) -> ThreadDetailsRuntime {
     let visibility = signal(default_visibility());
     let mut updates = backend.visibility();
-    spawn(async move {
+    crate::runtime::tasks::watch(async move {
         while let Some(next) = updates.next().await {
             visibility.set(next);
         }
@@ -240,7 +240,7 @@ pub fn thread_details_panel(
         .map(|d| stored(d.backend.project_scripts(&key)));
     if let Some(editors) = editors {
         let mut updates = editors.with(|e| e.watch());
-        spawn(async move {
+        crate::runtime::tasks::watch(async move {
             while let Some(next) = updates.next().await {
                 editor_snapshot.set(next.ok().map(Rc::new));
             }
@@ -248,7 +248,7 @@ pub fn thread_details_panel(
     }
     if let Some(scripts) = scripts {
         let mut updates = scripts.with(|s| s.watch());
-        spawn(async move {
+        crate::runtime::tasks::watch(async move {
             while let Some(next) = updates.next().await {
                 scripts_snapshot.set(next.ok().map(Rc::new));
             }

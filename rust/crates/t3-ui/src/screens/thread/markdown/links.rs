@@ -35,6 +35,8 @@ use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::menu::{ItemOptions, MenuOptions, context_menu, menu, menu_item, menu_popup_with};
 use crate::ui::tooltip::{TooltipOptions, Variant, tooltip, tooltip_create_handle};
 
+use crate::runtime::tasks::watch;
+
 /// Created above the list; each table's feedback and timer are keyed by the flattener's BlockId.
 #[derive(Clone, Copy)]
 pub struct MarkdownTablesState {
@@ -912,7 +914,7 @@ pub fn markdown_thread_link(
             lookup.set(ThreadLinkLookup::default());
             if let Some((environment, threads)) = request {
                 let mut updates = service.0.thread_link_metadata(environment, threads);
-                let task = spawn(async move {
+                let task = watch(async move {
                     while let Some(update) = updates.next().await {
                         lookup.set(update);
                     }

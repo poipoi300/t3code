@@ -145,7 +145,7 @@ pub fn branch_toolbar_branch_selector(backend: Rc<dyn BranchSelectorBackend>) ->
     let backend = stored(backend);
     let state = signal(Rc::new(BranchSelectorState::default()));
     let mut updates = backend.with(|b| b.watch());
-    spawn(async move {
+    crate::runtime::tasks::watch(async move {
         while let Some(next) = updates.next().await {
             state.set(next);
         }

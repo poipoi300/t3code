@@ -24,6 +24,8 @@ use crate::ui::collapsible::{CollapsibleHandle, collapsible_panel};
 use crate::ui::kbd::{Variant as KbdVariant, kbd};
 use crate::ui::switch::{Variant as CheckboxVariant, checkbox_mark};
 
+use crate::runtime::tasks::watch;
+
 /// Presentation of the first pending request, projected by the client's question session.
 /// Selection, custom-answer precedence and the normalized index come from pending_user_input_progress.
 #[derive(Clone, Debug, PartialEq)]
@@ -76,7 +78,7 @@ impl ComposerQuestions {
         let interaction = signal(None);
         let source = client.clone();
         let key = thread.clone();
-        spawn(async move {
+        watch(async move {
             while changes.next().await.is_some() {
                 let next = source.view(&key).map(Shared);
                 let replaced = view.with(|current| {

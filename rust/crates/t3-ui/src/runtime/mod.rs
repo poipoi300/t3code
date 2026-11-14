@@ -17,6 +17,8 @@ use t3_client::ClientStore;
 use backend::{Backend, EnvironmentEntry};
 pub use store::{Shared, StoreSignals, Timeline};
 
+use crate::runtime::tasks::watch;
+
 /// The runtime as a `Copy` context handle.
 #[derive(Clone, Copy)]
 pub struct Rt {
@@ -40,7 +42,7 @@ impl Rt {
         let environments = signal(backend.environments());
         let mut changes = backend.changes();
         let source = backend.clone();
-        spawn(async move {
+        watch(async move {
             while changes.next().await.is_some() {
                 environments.set(source.environments());
             }

@@ -52,6 +52,8 @@ use crate::ui::toast::{
     ToastOptions, Variant as ToastVariant, stacked_thread_toast, toast_manager,
 };
 
+use crate::runtime::tasks::watch;
+
 /// The operations the saved-environment rows need, bound to the client in
 /// `runtime/services/connection.rs`.
 pub trait ConnectionActions {
@@ -124,7 +126,7 @@ pub fn screen_for<P: t3_client::platform::Platform + Clone + 'static>(
     let page = signal(Page::Reading);
     let nav = navigator();
     let runtime = rt();
-    spawn(async move {
+    watch(async move {
         let address = app_url().await;
         let LaunchAddress { launch, stripped } = address
             .as_deref()
@@ -251,7 +253,7 @@ pub fn connection_notices() -> impl IntoElement {
     if let Some(client) = runtime.backend().client() {
         let mut links = client.pairing_links();
         let backend = runtime.backend();
-        spawn(async move {
+        watch(async move {
             let mut paired = std::collections::BTreeSet::new();
             while let Some(input) = links.next().await {
                 let Some(pairing_url) = input.pairing_url else {
@@ -427,7 +429,7 @@ fn hosted_pairing_route_surface(launch: HostedLaunch) -> impl IntoElement {
         token_submitted.set(true);
         let pairing = backend.get().pair(input.get());
         let label = label.clone();
-        owner.get().run(|| spawn(async move {
+        owner.get().run(|| watch(async move {
             match pairing.await {
                 Ok(_) => {
                     status.try_set(HostedStatus::Paired);
@@ -555,7 +557,7 @@ fn pairing_route_surface(connection: Option<Rc<dyn ConnectionActions>>) -> impl 
         attempt.set(Attempt::Connecting);
         let pairing = runtime.backend().pair(input);
         owner.get().run(|| {
-            spawn(async move {
+            watch(async move {
                 let outcome = pairing.await;
                 // A pairing link or code is spent on any answer: neither stays in a field.
                 link.try_set(String::new());
@@ -919,7 +921,7 @@ fn saved_backend_list_row(
             return;
         };
         owner.get().run(|| {
-            spawn(async move {
+            watch(async move {
                 if !confirmation.await {
                     return;
                 }
@@ -954,7 +956,7 @@ fn saved_backend_list_row(
         };
         let Some(actions) = actions.get() else { return };
         owner.get().run(|| {
-            spawn(async move {
+            watch(async move {
                 if let Err(message) = actions.reconnect(&e.id).await {
                     toast_manager().add(stacked_thread_toast(ToastOptions {
                         variant: ToastVariant::Error,

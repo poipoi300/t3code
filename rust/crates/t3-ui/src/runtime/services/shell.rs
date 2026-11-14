@@ -17,6 +17,8 @@ use t3_client::view_logic::shell::{sidebar::Marker, sidebar_list::ShelfExpansion
 
 use crate::ui::resizable::{RailResize, ResizeBounds};
 
+use crate::runtime::tasks::watch;
+
 /// The client's `chat_thread_sidebar_width` record (`ClientRuntime::sidebar_width`), provided at
 /// the app root; absent on the demo backend.
 #[derive(Clone)]
@@ -89,7 +91,7 @@ pub fn load_thread_sidebar_width(width: Signal<f32>, store: Option<SidebarWidthS
         return;
     };
     let load = store.0.load(f64::from(window().width.0));
-    spawn(async move {
+    watch(async move {
         let stored = load.await;
         let _ = width.try_set(stored as f32);
     });
@@ -144,7 +146,7 @@ pub fn load_sidebar_shelves(expansion: Signal<ShelfExpansion>, store: Option<Sid
         return;
     };
     let load = (store.load)();
-    spawn(async move {
+    watch(async move {
         let stored = load.await;
         let _ = expansion.try_set(stored);
     });

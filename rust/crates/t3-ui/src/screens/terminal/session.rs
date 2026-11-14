@@ -23,6 +23,8 @@ use t3_client::{
 use super::emulator::{TerminalSurface, terminal_surface};
 use crate::{i18n::t, runtime::services::terminal::TerminalServices};
 
+use crate::runtime::tasks::watch;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitNotice {
     Closed,
@@ -196,7 +198,7 @@ pub fn terminal_viewport(
             }
             let written = services.0.write(&key, &terminal, data);
             let target = target.clone();
-            spawn(async move {
+            watch(async move {
                 if let Err(error) = written.await {
                     report(&target, error, t("Terminal write failed"));
                 }
@@ -215,7 +217,7 @@ pub fn terminal_viewport(
                 return;
             }
             let resized = services.0.resize(&key, &terminal, grid);
-            spawn(async move {
+            watch(async move {
                 let _ = resized.await;
             });
         });
@@ -251,7 +253,7 @@ pub fn terminal_viewport(
         let mut changes = lease.changes();
         let pump = pump.clone();
         // Started in the task, after the surface's terminal is mounted, so the replay reaches it.
-        spawn(async move {
+        watch(async move {
             use futures::StreamExt;
             let view = lease.view();
             let (started, effects) = lease.with_output(|output| {

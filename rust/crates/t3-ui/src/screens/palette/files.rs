@@ -15,6 +15,8 @@ use crate::theme::{cn, tw};
 use crate::ui::command::{self, CommandOptions, CommandState, InputOptions};
 use crate::ui::toggle;
 
+use crate::runtime::tasks::watch;
+
 pub type OpenFile = Rc<dyn Fn(&SearchTarget, &str, Option<u64>)>;
 
 /// Root-provided query service and the shared file-panel controller; no per-row render callbacks.
@@ -39,7 +41,7 @@ fn search_target(host: Option<PaletteSearchRuntime>, content: bool) -> impl Into
     let target = signal(None::<Option<SearchTarget>>);
     if let Some(host) = &host {
         let mut changes = host.client.watch_target();
-        let task = spawn(async move {
+        let task = watch(async move {
             while let Some(next) = changes.next().await {
                 target.set(Some(next));
             }
@@ -177,7 +179,7 @@ fn open_project_file_picker(host: PaletteSearchRuntime, target: SearchTarget) ->
             ..Default::default()
         });
         // Effect-owned task cancellation drops the old resource subscription before another query.
-        let task = spawn(async move {
+        let task = watch(async move {
             while let Some(next) = changes.next().await {
                 current.set(next);
             }
@@ -400,7 +402,7 @@ fn open_content_search_dialog(
     effect(move || {
         query_pending.set(true);
         let mut changes = service.contents(target.get(), state.query.get(), options.get());
-        let task = spawn(async move {
+        let task = watch(async move {
             while let Some(next) = changes.next().await {
                 current.set(next);
                 query_pending.set(false);

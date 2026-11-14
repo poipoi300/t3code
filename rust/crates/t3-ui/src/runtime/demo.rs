@@ -34,6 +34,8 @@ mod fixtures;
 
 pub use fixtures::{DEMO_PAIRING_URL, FIRST_THREAD};
 
+use crate::runtime::tasks::watch;
+
 #[derive(Clone)]
 pub struct DemoBackend {
     inner: Rc<Inner>,
@@ -310,7 +312,7 @@ impl Backend for DemoBackend {
             if streaming.is_zero() {
                 task.await
             } else {
-                spawn(async move {
+                watch(async move {
                     let _ = task.await;
                 });
                 Ok(())

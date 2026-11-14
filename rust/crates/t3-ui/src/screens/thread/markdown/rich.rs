@@ -13,6 +13,8 @@ use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::menu::{ItemOptions, MenuOptions, menu, menu_item, menu_popup_with};
 
+use crate::runtime::tasks::watch;
+
 /// ChatMarkdownMedia.tsx authoredImageSizeStyle, expressed without CSS calc/min strings.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AuthoredImageSize {
@@ -339,7 +341,7 @@ pub fn chat_markdown_video(
                             if retrying.get_untracked() { return; }
                             retrying.set(true);
                             let retry = retry.clone();
-                            owner.run(|| spawn(async move {
+                            owner.run(|| watch(async move {
                                 let result = if let Some(retry) = retry { retry().await } else { Ok(()) };
                                 if result.is_ok() { failed_src.set(None); attempt.update(|n| *n += 1); }
                                 retrying.set(false);

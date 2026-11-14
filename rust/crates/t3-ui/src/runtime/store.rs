@@ -22,6 +22,8 @@ use t3_client::view_logic::session::{
     derive_timeline_entries_from_visible_turn_items_with_state,
 };
 
+use crate::runtime::tasks::watch;
+
 /// An `Rc` compared by identity: a memo holding it notifies only when the client produced a new
 /// value, never because an equal-looking value was rebuilt.
 pub struct Shared<T>(pub Rc<T>);
@@ -114,7 +116,7 @@ impl StoreSignals {
             shells: stored(BTreeMap::new()),
             threads: stored(BTreeMap::new()),
         };
-        spawn(async move {
+        watch(async move {
             while let Some(change) = subscription.next().await {
                 signals.apply(&change);
             }

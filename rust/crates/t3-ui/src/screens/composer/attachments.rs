@@ -21,6 +21,8 @@ use crate::ui::dialog::{PopupOptions, dialog, dialog_popup};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
+use crate::runtime::tasks::watch;
+
 /// The thread host shares this handle with the footer, strip and editor's file-paste callback.
 #[derive(Clone, Copy)]
 pub struct ComposerAttachments {
@@ -51,7 +53,7 @@ impl ComposerAttachments {
         let items = signal(Rc::new(client.items()));
         let revision = signal(0u64);
         let source = client.clone();
-        spawn(async move {
+        watch(async move {
             while changes.next().await.is_some() {
                 items.set(Rc::new(source.items()));
                 revision.update(|value| *value += 1);
@@ -77,7 +79,7 @@ impl ComposerAttachments {
 
     fn spawn(self, task: impl std::future::Future<Output = ()> + 'static) {
         self.owner.run(move || {
-            spawn(task);
+            watch(task);
         });
     }
 
