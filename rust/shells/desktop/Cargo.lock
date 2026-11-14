@@ -4320,8 +4320,6 @@ name = "t3-ui"
 version = "0.1.0"
 dependencies = [
  "futures",
- "jni",
- "libc",
  "log",
  "nsh-base",
  "nsh-core",
