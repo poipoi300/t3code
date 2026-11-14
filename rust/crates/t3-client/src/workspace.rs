@@ -6,6 +6,7 @@ pub mod branch;
 pub mod git_actions;
 pub mod diff_panel;
 pub mod git_panel;
+pub mod project_files;
 pub mod ignored_files;
 #[path = "workspace/pr_assignment.rs"]
 pub mod pr_assignment;

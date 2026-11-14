@@ -238,6 +238,17 @@ impl SessionEndpoint {
         inner.active = false;
         let _ = inner.commands.unbounded_send(DriverCommand::Close);
     }
+    /// TypeScript's `sessionGrantsScope` for this session; `None` until its grants are known.
+    pub fn grants_scope(&self, scope: t3_contracts::auth::AuthEnvironmentScope) -> Option<bool> {
+        let inner = self.inner.borrow();
+        let destinations = inner.destinations.as_ref().map(|value| value.borrow());
+        let grants = match &destinations {
+            Some(destinations) => destinations.grants(&inner.environment),
+            None => Some(&inner.grants),
+        }?;
+        let name = serde_json::to_value(scope).ok()?.as_str()?.to_owned();
+        (inner.active && grants.valid).then(|| grants.scopes.contains(&name))
+    }
     pub fn available<M: RpcMethod>(&self, input: &M::Input) -> bool {
         serde_json::to_value(input)
             .ok()

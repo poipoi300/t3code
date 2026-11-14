@@ -1300,9 +1300,15 @@ fn an_import_drops_older_raw_backups_and_removal_purges_copies_of_a_token() {
         let copy = |namespace: &str, id: &str, raw: &Value| StorageWrite {
             key: StorageKey::new(namespace, None, id),
             value: Some(
-                t3_client::persistence::Record::new(namespace, None, id, 1, json!({"bytesBase64": encode(raw)}))
-                    .encode()
-                    .unwrap(),
+                t3_client::persistence::Record::new(
+                    namespace,
+                    None,
+                    id,
+                    1,
+                    json!({"bytesBase64": encode(raw)}),
+                )
+                .encode()
+                .unwrap(),
             ),
         };
         storage
@@ -1322,16 +1328,24 @@ fn an_import_drops_older_raw_backups_and_removal_purges_copies_of_a_token() {
                 StorageArea::Secure,
                 vec![
                     copy("quarantine", "bad", &catalog()),
-                    copy("quarantine", "unrelated", &json!({"environmentId": "other"})),
+                    copy(
+                        "quarantine",
+                        "unrelated",
+                        &json!({"environmentId": "other"}),
+                    ),
                 ],
             )
             .await
             .unwrap();
-        let purged = t3_client::persistence::purge_environment_copies(&storage, &env(), &[token.clone()])
+        let purged =
+            t3_client::persistence::purge_environment_copies(&storage, &env(), &[token.clone()])
+                .await
+                .unwrap();
+        assert_eq!(purged, 1);
+        let quarantined = storage
+            .list(StorageArea::Secure, "quarantine".into())
             .await
             .unwrap();
-        assert_eq!(purged, 1);
-        let quarantined = storage.list(StorageArea::Secure, "quarantine".into()).await.unwrap();
         assert_eq!(quarantined.len(), 1, "other environments' quarantine stays");
         assert_eq!(quarantined[0].record, "unrelated");
     });

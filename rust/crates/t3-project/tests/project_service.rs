@@ -57,6 +57,7 @@ async fn refuses_worktree_containers_on_create_and_root_change_without_committin
             "container core.bare={bare} was accepted"
         );
         assert!(f.service.snapshot().await.unwrap().projects.is_empty());
+        assert!(f.service.bootstrap_automatic(f.create("automatic", &format!("automatic-{bare}"), &container)).await.unwrap().is_none());
     }
     let worktree = container.join("develop");
     let project = f
@@ -78,6 +79,11 @@ async fn refuses_worktree_containers_on_create_and_root_change_without_committin
             .workspace_root,
         project.workspace_root
     );
+    let ordinary = f.root("ordinary-auto");
+    assert!(matches!(f.service.bootstrap_automatic(f.create("checkout", "duplicate-auto", &ordinary)).await, Err(Error::Invalid(_))), "unrelated invariant errors must propagate");
+    let (automatic, created) = f.service.bootstrap_automatic(f.create("ordinary", "ordinary-auto", &ordinary)).await.unwrap().unwrap();
+    assert!(created);
+    assert_eq!(f.service.bootstrap_automatic(f.create("other-id", "reuse-auto", &ordinary)).await.unwrap().unwrap().0.id, automatic.id);
     f.shutdown().await;
 }
 

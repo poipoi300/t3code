@@ -187,3 +187,36 @@ fn dropping_the_client_ends_every_follow() {
     assert_eq!(harness.server().state.borrow().sockets_open, 0);
     drop(lease);
 }
+
+#[test]
+fn coming_back_to_the_foreground_follows_open_threads_again() {
+    // Review L5. TypeScript does not restart a cleanly ended thread stream on the same session
+    // either, but resubscribes every open thread when the app becomes active again
+    // (`shouldResubscribeAfterWakeup`). Here the supervisor's foreground wake emits `Resubscribe`,
+    // which restarts every follow.
+    let mut harness = Harness::new(ENV);
+    harness.server().state.borrow_mut().thread_streams_end = true;
+    let (client, _ended) = connected(&mut harness);
+    let _lease = client.open_thread(t3_client::types::ThreadId("t1".into()));
+    harness.settle();
+    assert_eq!(harness.server().thread_subscribes("t1"), 1);
+    assert_eq!(
+        harness.server().open_threads_of("t1"),
+        0,
+        "the server ended the stream"
+    );
+    harness.advance(10_000);
+    assert_eq!(
+        harness.server().thread_subscribes("t1"),
+        1,
+        "an ended follow is not restarted in a loop"
+    );
+    harness.server().state.borrow_mut().thread_streams_end = false;
+    harness
+        .platform
+        .fake
+        .emit(t3_client::platform::PlatformEvent::Foreground);
+    harness.settle();
+    assert_eq!(harness.server().thread_subscribes("t1"), 2);
+    assert_eq!(harness.server().open_threads_of("t1"), 1);
+}

@@ -116,8 +116,7 @@ Returning an unsupported in-app auth operation preserves that source contract.
   and native version parsers. Cursor SDK, Antigravity managed ACP and ACP
   Registry discovery explicitly return `Error::NotPorted` from this generic CLI
   API; their provider-specific SDK/installation/registry services handle discovery.
-  `probe_opencode_server` uses `/api/info`, then `/global/health`, JSON identity
-  checks and UTF-8 Basic credentials. `managed_release` never downgrades installs.
+  `managed_release` never downgrades installs.
 - `catalog::{Manifest, ModelManifest, apply_catalog, custom_models,
   option_descriptors}`: bundled catalogs and profiles, manifest validation,
   current/legacy classification, expiring new badges, default-alias transfer,
@@ -241,8 +240,11 @@ they must not be mistaken for verified end-to-end provider support:
   bridge for Linux/Darwin process identity/group observation and group signals.
   `opencode_ledger::OpenCodeLedger` owns persistence, optional serve argv, owner
   checks and validated orphan decisions; `OpenCodeRuntime::new_with_ledger`
-  tracks captured children and forgets on exit. The default runtime owns its
-  children but cannot reap an earlier server's groups without this bridge.
+  tracks captured children and forgets on exit. The server integrator must open
+  one ledger at startup with its state directory, platform, captured owner PID and
+  that bridge, run `reap_orphans` as a supervised background task, and pass the
+  same ledger to every owned OpenCode runtime. Reaping logs/skips each bad record
+  independently. The default runtime cannot reap earlier groups without this bridge.
   `OpenCodeServiceReplacement` retains its tested host-backend seam.
 - **MCP handler owner:** call `catalog::list_capability_models` with preferences,
   normalized search terms and favorite/inherited/custom pinning. Project scopes,
@@ -255,6 +257,20 @@ not copied here; they cross the adapter/application boundary. No provider turns
 were implemented or exercised as part of this port.
 
 ## Differences and verification limits
+
+- Deliberate hardening beyond TypeScript: redacted text-generator keys are reused
+  only when both the draft kind and base URL exactly match the saved configuration;
+  another endpoint or protocol receives no saved credential.
+
+- Deliberate hardening beyond TypeScript: registry archives permit only regular
+  files/directories, at most 10,000 entries and 1 GiB of summed declared expansion
+  before extraction. Tar metadata comes from numeric-owner verbose listings; ZIP
+  metadata is checked directly. Registry-supplied SHA-256 remains optional.
+- Inherited limitation (review 2 L5): a refresh-token rotation can be lost if the
+  20-second exchange timeout or credential-lease loss lands after the provider
+  answers but before persistence. This matches TypeScript; recovery requires
+  reconnecting. Completing/persisting an already-sent exchange needs a separate
+  concurrency design decision, so refresh semantics are unchanged.
 
 - The host supplies settings, paths, background demand and adapter/SDK effects.
   ACP owns explicitly constructed background probe/watch tasks. No T3 home, live
@@ -285,8 +301,8 @@ were implemented or exercised as part of this port.
 - POSIX process behavior, permissions, real installations, live provider SDKs,
   browser/device OAuth and real update endpoints were not exercised on Windows.
 
-Run from `rust/`, setting `CARGO_BUILD_JOBS=2` and
-`CARGO_TARGET_DIR=D:\t3code-rust-target\server-e` for every Cargo command:
+Run from `rust/` with the configured job limit/compiler wrapper and
+`CARGO_TARGET_DIR=D:\t3code-rust-target\server-providers` for every Cargo command:
 
 ```text
 cargo fmt -p t3-provider --check
@@ -404,3 +420,35 @@ runtime and source-command projection; eight native ACP session/consent RPCs
 await `AcpSessionHost` from the orchestration/native adapter owner. Configuration
 editor IDs await the host/process owner's shared editor discovery/launch bridge.
 These server bindings are distinct from the domain implementations in the table.
+
+The wiring round also repairs independent review 2's M1: fresh managed Codex
+installation uses the build pin, and only a supported managed installation
+contributes an update baseline. Recorded archive tests cover fresh installation,
+a disappeared local executable and a subsequent upstream update offer. Review 2's
+remaining low findings are addressed in the review verification below. The
+OpenCode/Antigravity runtime bridges still require their named host bindings.
+
+Final wiring verification: 9 default-feature server socket tests and 9 focused
+producer tests (2 library, 6 installation, 1 domain) pass. Producer all-target
+Clippy and server provider/host/git/terminal Clippy pass with dependency linting
+disabled and warnings denied. Broader lint findings belong to project/preview
+and the shared no-terminal workspace import; exact locations and all remaining
+bindings are recorded in the external server-wiring-providers report. Formatting
+passes; no provider process, provider network or real provider home was used.
+
+
+## Reviewed boundaries and verification
+
+`ProviderHost` reads its `SettingsSource` under the host lock. Mutable settings
+callers must pass a live source; `ServerSettings` remains a fixed snapshot for
+fixtures and one-shot callers. The domain supplies its policy-filtered source.
+Credential commits use a separate lock so published auth state remains readable.
+Diagnostics record module/line, safe category/class and an opaque redacted cause;
+wire errors retain their fixed messages.
+
+Review round 1 verification on Windows: 268 provider tests/doctests passed, one
+opt-in real-provider probe ignored; nine server provider socket tests passed.
+All-target dependency-inclusive Clippy with warnings denied and scoped formatting
+passed. The Unix broker's post-create integration case is included but could not
+run on Windows; the portable directory-invariant matrix passes here. The three
+transport/parser caps and malformed managed-agent uninstall IDs are covered.

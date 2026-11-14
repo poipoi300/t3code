@@ -1,0 +1,136 @@
+use super::*;
+use futures::future::LocalBoxFuture;
+use t3_contracts::settings::ClientSettingsSchema;
+
+pub const DETAILS_ITEMS: &[(&str, &str, bool)] = &[
+    ("environment", "Environment and worktree", true),
+    ("openIn", "Open in editor", true),
+    ("scripts", "Project scripts", true),
+    ("branch", "Branch and pull request", true),
+    ("gitActions", "Git actions", true),
+    ("changes", "Changes", true),
+    ("servers", "Servers", true),
+    ("automations", "Automations", true),
+    ("lineage", "Lineage", true),
+    ("sideChats", "Side chats", true),
+    ("usage", "Usage limits", false),
+    ("context", "Context window", false),
+];
+fn default_visible(id: &str, settings: &ClientSettingsSchema) -> bool {
+    if matches!(id, "usage" | "context") {
+        settings.thread_details_usage_enabled
+    } else {
+        DETAILS_ITEMS
+            .iter()
+            .find(|i| i.0 == id)
+            .is_some_and(|i| i.2)
+    }
+}
+pub fn resolve_thread_details_visibility(
+    settings: &ClientSettingsSchema,
+) -> BTreeMap<String, bool> {
+    DETAILS_ITEMS
+        .iter()
+        .map(|i| {
+            (
+                i.0.into(),
+                settings
+                    .thread_details_items
+                    .get(i.0)
+                    .copied()
+                    .unwrap_or_else(|| default_visible(i.0, settings)),
+            )
+        })
+        .collect()
+}
+pub fn set_thread_details_item(
+    settings: &ClientSettingsSchema,
+    id: &str,
+    visible: bool,
+) -> BTreeMap<String, bool> {
+    let mut items = settings.thread_details_items.clone();
+    items.remove(id);
+    if visible != default_visible(id, settings) {
+        items.insert(id.into(), visible);
+    }
+    items
+}
+pub fn is_default_thread_details_visibility(visibility: &BTreeMap<String, bool>) -> bool {
+    DETAILS_ITEMS
+        .iter()
+        .all(|i| visibility.get(i.0) == Some(&i.2))
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DetailsDensity {
+    Full,
+    Compact,
+    Essential,
+}
+pub fn resolve_thread_details_density(height: f64, full: f64, compact: f64) -> DetailsDensity {
+    if full == 0.0 || full <= height {
+        DetailsDensity::Full
+    } else if compact == 0.0 || compact <= height {
+        DetailsDensity::Compact
+    } else {
+        DetailsDensity::Essential
+    }
+}
+pub use super::super::chat_canvas::{
+    DetailsCardPlacement as DetailsLayout, Frame,
+    resolve_thread_details_card_layout as resolve_thread_details_layout,
+};
+pub fn environment_config(
+    store: &crate::ClientStore,
+    environment: &EnvironmentId,
+) -> Option<Rc<t3_contracts::server::ServerConfig>> {
+    store
+        .snapshot()
+        .environments
+        .get(environment)?
+        .config
+        .clone()
+}
+impl<P: Platform + Clone + 'static> GitPanel<P> {
+    pub fn details_visibility(&self) -> BTreeMap<String, bool> {
+        resolve_thread_details_visibility(&self.runtime.composer_preferences().snapshot())
+    }
+    pub fn details_changes(&self) -> LocalBoxStream<'static, ()> {
+        self.runtime.composer_preferences().changes()
+    }
+    pub fn set_details_item(
+        &self,
+        id: String,
+        visible: bool,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        let service = self.clone();
+        async move {
+            if !DETAILS_ITEMS.iter().any(|i| i.0 == id) {
+                return Err(ClientError::InvalidPayload(
+                    "Unknown thread details item.".into(),
+                ));
+            }
+            service
+                .runtime
+                .composer_preferences()
+                .update(|settings| {
+                    settings.thread_details_items = set_thread_details_item(settings, &id, visible);
+                })
+                .await
+        }
+        .boxed_local()
+    }
+    pub fn reset_details_items(&self) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        let service = self.clone();
+        async move {
+            service
+                .runtime
+                .composer_preferences()
+                .update(|settings| {
+                    settings.thread_details_items.clear();
+                    settings.thread_details_usage_enabled = false;
+                })
+                .await
+        }
+        .boxed_local()
+    }
+}

@@ -113,6 +113,7 @@ pub const NOW: &str = "2026-06-20T00:00:00.000Z";
 
 #[derive(Default)]
 pub struct ServerState {
+    pub extra_methods: Vec<(&'static str, t3_rpc::CallKind)>,
     pub extra_rpc: Option<Rc<dyn Fn(&Request) -> Option<HandlerOutput>>>,
     pub sockets_opened: usize,
     pub sockets_open: usize,
@@ -152,9 +153,14 @@ pub struct ServerState {
     /// Failure injection: secure records in this namespace fail to decrypt (disk damage, or a
     /// row from another install).
     pub undecryptable: Option<String>,
+    /// With `undecryptable`, only records whose id contains this.
+    pub undecryptable_record: Option<String>,
+    /// The server ends each thread stream cleanly after its snapshot.
+    pub thread_streams_end: bool,
     pub rpc_script: BTreeMap<String, std::collections::VecDeque<Result<Value, Value>>>,
     pub rpc_calls: Vec<(String, Value)>,
     pub thread_snapshots: BTreeMap<String, Value>,
+    pub permissions: Option<Vec<String>>,
     /// Ends every socket the server holds, as a dropped connection does.
     hangups: Vec<mpsc::UnboundedSender<()>>,
 }
@@ -315,9 +321,15 @@ pub fn thread_snapshot(id: &str) -> Value {
 
 impl Storage for TestPlatform {
     fn get(&self, area: StorageArea, key: StorageKey) -> HostFuture<'_, Option<Vec<u8>>> {
-        if area == StorageArea::Secure
-            && self.server.state.borrow().undecryptable.as_deref() == Some(key.namespace.as_str())
-        {
+        let damaged = {
+            let state = self.server.state.borrow();
+            state.undecryptable.as_deref() == Some(key.namespace.as_str())
+                && state
+                    .undecryptable_record
+                    .as_deref()
+                    .is_none_or(|record| key.record.contains(record))
+        };
+        if area == StorageArea::Secure && damaged {
             return async { Err(PlatformError::Storage("authentication tag mismatch".into())) }
                 .boxed_local();
         }
@@ -381,7 +393,7 @@ impl Platform for TestPlatform {
                 }
                 ("GET", "/api/auth/session") => response(
                     200,
-                    json!({"authenticated":true,"auth":{"policy":"remote-reachable","bootstrapMethods":[],"sessionMethods":[],"sessionCookieName":"session"},"permissions":["orchestration:read","orchestration:operate"]}),
+                    json!({"authenticated":true,"auth":{"policy":"remote-reachable","bootstrapMethods":[],"sessionMethods":[],"sessionCookieName":"session"},"permissions":server.state.borrow().permissions.clone().unwrap_or_else(|| vec!["orchestration:read".into(),"orchestration:operate".into()])}),
                 ),
                 ("POST", "/api/auth/websocket-ticket" | "/api/auth/websocket-ticket/rpc") => {
                     response(200, json!({"ticket":"ticket","expiresAt":"2036-01-01T00:00:00.000Z"}))
@@ -419,6 +431,7 @@ impl Platform for TestPlatform {
                 server: Rc::downgrade(&server),
             };
             let weak = Rc::downgrade(&server);
+            let extra_methods = server.state.borrow().extra_methods.clone();
             let serve = async move {
                 let mut rpc = t3_rpc::AsyncServer::new(
                     server_outgoing.sink_map_err(|error| error.to_string()),
@@ -431,15 +444,23 @@ impl Platform for TestPlatform {
                     for (tag, kind) in [
                         (tag::<WsServerGetConfigRpc>(), Unary),
                         (tag::<WsServerProbeRpc>(), Unary),
+                        (tag::<WsServerUpdateSettingsRpc>(), Unary),
+                        (tag::<WsServerRefreshProvidersRpc>(), Unary),
                         (tag::<WsSubscribeServerConfigRpc>(), Stream),
                         (tag::<WsOrchestrationV2SubscribeShellRpc>(), Stream),
                         (tag::<WsOrchestrationV2SubscribeThreadRpc>(), Stream),
                         (tag::<WsOrchestrationV2GetTurnDiffRpc>(), Unary),
                         (tag::<WsOrchestrationV2DispatchCommandRpc>(), Unary),
+                        (tag::<WsProjectsWriteFileRpc>(), Unary),
+                        (tag::<WsProjectsMutateRpc>(), Unary),
+                        (tag::<WsFilesystemGetMetadataRpc>(), Unary),
                         (tag::<WsOrchestrationV2SubscribeCommandOutputRpc>(), Stream),
                     ] {
                         rpc.state.register(tag, kind);
                     }
+                }
+                for (tag, kind) in extra_methods {
+                    rpc.state.register(tag, kind);
                 }
                 let run = rpc.run().fuse();
                 let mut hung_up = hung_up.into_future().fuse();
@@ -479,18 +500,24 @@ impl Platform for TestPlatform {
             HostAction::CloudIdentity => {
                 reply(HostReply::Text(signed_in.then(|| ACCOUNT.to_owned())))
             }
-            HostAction::CloudToken => reply(HostReply::Text(signed_in.then(|| cloud_token(ACCOUNT)))),
+            HostAction::CloudToken => {
+                reply(HostReply::Text(signed_in.then(|| cloud_token(ACCOUNT))))
+            }
             HostAction::RelayDeviceId => reply(HostReply::Text(Some("device-1".into()))),
             HostAction::DpopPublicJwk => reply(HostReply::Document(jwk)),
             HostAction::DpopThumbprint => reply(HostReply::Text(Some(thumbprint))),
             HostAction::DpopSign { .. } => reply(HostReply::Bytes(vec![3; 64])),
             HostAction::SshProvision { target, .. } => {
                 ssh("provision", &target.alias);
-                reply(HostReply::Document(json!({"environmentId": self.server.environment, "label": "", "bootstrap": ssh_bootstrap(&target.alias), "bearerToken": "ssh-bearer"})))
+                reply(HostReply::Document(
+                    json!({"environmentId": self.server.environment, "label": "", "bootstrap": ssh_bootstrap(&target.alias), "bearerToken": "ssh-bearer"}),
+                ))
             }
             HostAction::SshPrepare { target, .. } => {
                 ssh("prepare", &target.alias);
-                reply(HostReply::Document(json!({"bootstrap": ssh_bootstrap(&target.alias), "bearerToken": "ssh-bearer"})))
+                reply(HostReply::Document(
+                    json!({"bootstrap": ssh_bootstrap(&target.alias), "bearerToken": "ssh-bearer"}),
+                ))
             }
             HostAction::SshDisconnect(target) => {
                 ssh("disconnect", &target.alias);
@@ -584,13 +611,24 @@ impl Handler for FakeHandler {
         }
         let scripted = {
             let mut state = server.state.borrow_mut();
-            state.rpc_calls.push((tag.to_owned(), request.payload.clone()));
-            state.rpc_script.get_mut(tag).and_then(|script| script.pop_front())
+            state
+                .rpc_calls
+                .push((tag.to_owned(), request.payload.clone()));
+            state
+                .rpc_script
+                .get_mut(tag)
+                .and_then(|script| script.pop_front())
         };
         if let Some(answer) = scripted {
-            return HandlerOutput::Unary(async move { match answer {
-                Ok(value) => Exit::success(value), Err(error) => Exit::fail(error),
-            }}.boxed_local());
+            return HandlerOutput::Unary(
+                async move {
+                    match answer {
+                        Ok(value) => Exit::success(value),
+                        Err(error) => Exit::fail(error),
+                    }
+                }
+                .boxed_local(),
+            );
         }
         if tag == self::tag::<WsServerGetConfigRpc>() {
             let config = config(&environment);
@@ -637,8 +675,9 @@ impl Handler for FakeHandler {
                 state.command_outputs_open += 1;
                 state.command_running
             };
-            let mut frames =
-                vec![json!({"kind":"replace","text":"install\n12%","truncated":false,"running":true})];
+            let mut frames = vec![
+                json!({"kind":"replace","text":"install\n12%","truncated":false,"running":true}),
+            ];
             if !running {
                 frames.push(
                     json!({"kind":"append","text":"\r100%\n","truncated":false,"running":false}),
@@ -661,10 +700,27 @@ impl Handler for FakeHandler {
                 server: self.server.clone(),
                 thread: thread.clone(),
             };
-            live(
-                vec![server.state.borrow().thread_snapshots.get(&thread).cloned().unwrap_or_else(|| thread_snapshot(&thread)), json!({"kind":"synchronized"})],
-                guard,
-            )
+            let items = vec![
+                server
+                    .state
+                    .borrow()
+                    .thread_snapshots
+                    .get(&thread)
+                    .cloned()
+                    .unwrap_or_else(|| thread_snapshot(&thread)),
+                json!({"kind":"synchronized"}),
+            ];
+            if server.state.borrow().thread_streams_end {
+                HandlerOutput::Stream(
+                    futures::stream::once(async move {
+                        let _ = &guard;
+                        Ok(items)
+                    })
+                    .boxed_local(),
+                )
+            } else {
+                live(items, guard)
+            }
         } else {
             let tag = tag.to_owned();
             eprintln!("fake server: unscripted {tag} {}", request.payload);

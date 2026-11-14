@@ -1,6 +1,7 @@
 use crate::{CancellationToken, ExecuteOptions, Git, GitError, OutputMode};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 pub const SHARED_WORKSPACE_RESTORE_MESSAGE: &str = "File restore requires an isolated worktree. This workspace may contain changes from another thread or a side chat. Rewind the conversation without restoring files instead, or delete side chats you no longer need.";
 
@@ -82,365 +83,572 @@ fn comparison_path(path: &Path) -> Result<PathBuf, std::io::Error> {
     Ok(path)
 }
 
-fn is_link(path: &Path, metadata: &std::fs::Metadata) -> std::io::Result<bool> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LinkKind {
+    None,
+    Symlink,
     #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if metadata.file_attributes() & 0x400 == 0 {
-            return Ok(false);
-        }
-        // std reads the reparse tag and decodes only SYMLINK and MOUNT_POINT.
-        decoded_reparse_link(std::fs::read_link(path))
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = path;
-        Ok(metadata.file_type().is_symlink())
-    }
+    MountPoint,
 }
-
-#[cfg(windows)]
-fn decoded_reparse_link(result: std::io::Result<PathBuf>) -> std::io::Result<bool> {
-    match result {
-        Ok(_) => Ok(true),
-        Err(error)
-            if error.raw_os_error().is_none()
-                && error.to_string() == "Unsupported reparse point type" =>
+impl LinkKind {
+    fn is_mount(self) -> bool {
+        #[cfg(windows)]
         {
-            Ok(false)
+            self == Self::MountPoint
         }
-        Err(error) => Err(error),
+        #[cfg(not(windows))]
+        {
+            false
+        }
     }
 }
-
-#[cfg(all(test, windows))]
-mod reparse_tests {
-    use super::*;
-    #[test]
-    fn only_supported_link_tags_are_links_and_io_failures_fail_closed() {
-        assert!(decoded_reparse_link(Ok(PathBuf::from("target"))).unwrap());
-        assert!(
-            !decoded_reparse_link(Err(std::io::Error::other("Unsupported reparse point type")))
-                .unwrap()
-        );
-        assert!(decoded_reparse_link(Err(std::io::Error::from_raw_os_error(5))).is_err());
+#[cfg(windows)]
+fn classify_tag(tag: u32) -> LinkKind {
+    match tag {
+        0xa000000c => LinkKind::Symlink,
+        0xa0000003 => LinkKind::MountPoint,
+        _ => LinkKind::None,
     }
 }
-
-pub(crate) struct CheckpointScan {
-    pub exclusions: Vec<String>,
-    pub files: Vec<String>,
-    pub pruned: Vec<String>,
-    pruned_directories: Vec<String>,
-    checked: Vec<PathBuf>,
-    scope: PathBuf,
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn link_kind(path: &Path, metadata: &std::fs::Metadata) -> std::io::Result<LinkKind> {
+    use std::os::windows::{
+        fs::{MetadataExt, OpenOptionsExt},
+        io::AsRawHandle,
+    };
+    use windows_sys::Win32::System::{IO::DeviceIoControl, Ioctl::FSCTL_GET_REPARSE_POINT};
+    if metadata.file_attributes() & 0x400 == 0 {
+        return Ok(LinkKind::None);
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .access_mode(0)
+        .share_mode(7)
+        .custom_flags(0x00200000 | 0x02000000)
+        .open(path)?;
+    let mut buffer = [0u8; 16 * 1024];
+    let mut returned = 0;
+    // SAFETY: the live File owns this synchronous handle; the output buffer and count are writable.
+    let ok = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle(),
+            FSCTL_GET_REPARSE_POINT,
+            std::ptr::null(),
+            0,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if returned < 8 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "short reparse header",
+        ));
+    }
+    Ok(classify_tag(u32::from_le_bytes([
+        buffer[0], buffer[1], buffer[2], buffer[3],
+    ])))
 }
-fn path_key(path: &str) -> String {
-    if cfg!(windows) {
-        path.replace('\\', "/").to_lowercase()
+#[cfg(not(windows))]
+fn link_kind(_: &Path, metadata: &std::fs::Metadata) -> std::io::Result<LinkKind> {
+    Ok(if metadata.file_type().is_symlink() {
+        LinkKind::Symlink
     } else {
-        path.to_owned()
+        LinkKind::None
+    })
+}
+
+pub(crate) struct RestoreScope {
+    pub root: PathBuf,
+    pub directory: PathBuf,
+    pub pathspec: String,
+}
+#[derive(Clone, Copy)]
+enum PathOutput {
+    Diff,
+    CachedDiff,
+    Index,
+    Clean,
+}
+struct PathRecords {
+    kind: PathOutput,
+    pending: Vec<u8>,
+    paths: BTreeSet<PathBuf>,
+    has_entries: bool,
+    gitlink_leaves: BTreeMap<PathBuf, bool>,
+    pending_gitlink: Option<bool>,
+    error: Option<GitError>,
+}
+fn os_path(bytes: Vec<u8>) -> Result<PathBuf, GitError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Ok(std::ffi::OsString::from_vec(bytes).into())
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(bytes)
+            .map(PathBuf::from)
+            .map_err(|_| GitError::InvalidOutput("Git path is not UTF-8".into()))
     }
 }
-fn contains(parent: &str, path: &str) -> bool {
-    path == parent || path.starts_with(&format!("{parent}/"))
-}
-impl CheckpointScan {
-    pub fn excluded_pathspecs(&self) -> Vec<String> {
-        self.pruned_directories
-            .iter()
-            .map(|path| {
-                format!(
-                    ":(top,exclude,literal{}){path}",
-                    if cfg!(windows) { ",icase" } else { "" }
-                )
-            })
-            .collect()
+fn unquote_git_path(bytes: &[u8]) -> Result<Vec<u8>, GitError> {
+    if !bytes.starts_with(b"\"") {
+        return Ok(bytes.to_vec());
     }
-    pub async fn recheck(&self, cancellation: &CancellationToken) -> Result<(), GitError> {
-        if !self.exclusions.is_empty() {
+    if bytes.len() < 2 || bytes.last() != Some(&b'"') {
+        return Err(GitError::InvalidOutput("quoted Git path".into()));
+    }
+    let mut result = Vec::new();
+    let mut index = 1;
+    while index + 1 < bytes.len() {
+        let byte = bytes[index];
+        index += 1;
+        if byte != b'\\' {
+            result.push(byte);
+            continue;
+        }
+        let escaped = *bytes
+            .get(index)
+            .ok_or_else(|| GitError::InvalidOutput("Git path escape".into()))?;
+        index += 1;
+        result.push(match escaped {
+            b'a' => 7,
+            b'b' => 8,
+            b't' => 9,
+            b'n' => 10,
+            b'v' => 11,
+            b'f' => 12,
+            b'r' => 13,
+            b'\\' => b'\\',
+            b'"' => b'"',
+            b'0'..=b'3' => {
+                let next = bytes
+                    .get(index..index + 2)
+                    .ok_or_else(|| GitError::InvalidOutput("Git path octal escape".into()))?;
+                if !next.iter().all(|byte| matches!(byte, b'0'..=b'7')) {
+                    return Err(GitError::InvalidOutput("Git path octal digits".into()));
+                }
+                index += 2;
+                (escaped - b'0') * 64 + (next[0] - b'0') * 8 + next[1] - b'0'
+            }
+            _ => return Err(GitError::InvalidOutput("Git path escape code".into())),
+        });
+    }
+    Ok(result)
+}
+impl PathRecords {
+    fn feed(&mut self, chunk: &[u8]) {
+        let delimiter = if matches!(self.kind, PathOutput::Clean) {
+            b'\n'
+        } else {
+            0
+        };
+        for part in chunk.split_inclusive(|byte| *byte == delimiter) {
+            let complete = part.last() == Some(&delimiter);
+            self.pending.extend_from_slice(if complete {
+                &part[..part.len() - 1]
+            } else {
+                part
+            });
+            if complete {
+                let record = std::mem::take(&mut self.pending);
+                if self.error.is_none()
+                    && let Err(error) = self.record(&record)
+                {
+                    self.error = Some(error);
+                }
+            }
+        }
+    }
+    fn record(&mut self, record: &[u8]) -> Result<(), GitError> {
+        if record.is_empty() {
+            return Ok(());
+        }
+        self.has_entries = true;
+        let mut mode = None;
+        let path = match self.kind {
+            PathOutput::Diff | PathOutput::CachedDiff => {
+                if let Some(skip) = self.pending_gitlink.take() {
+                    mode = Some(skip);
+                    record.to_vec()
+                } else {
+                    let fields: Vec<_> = record.split(|byte| *byte == b' ').collect();
+                    if fields.len() != 5
+                        || fields[0].len() != 7
+                        || fields[0][0] != b':'
+                        || fields[1].len() != 6
+                    {
+                        return Err(GitError::InvalidOutput("Git raw diff metadata".into()));
+                    }
+                    // Restore does not recurse into source gitlinks or removed index gitlinks.
+                    self.pending_gitlink = Some(
+                        &fields[0][1..] == b"160000"
+                            || matches!(self.kind, PathOutput::CachedDiff)
+                                && &fields[0][1..] == b"000000"
+                                && fields[1] == b"160000",
+                    );
+                    return Ok(());
+                }
+            }
+            PathOutput::Index => {
+                if record.len() < 3 || record[1] != b' ' {
+                    return Err(GitError::InvalidOutput("Git index path record".into()));
+                }
+                if record[0] != b'S' && !record[0].is_ascii_lowercase() {
+                    return Ok(());
+                }
+                let separator = record
+                    .iter()
+                    .position(|byte| *byte == b'\t')
+                    .ok_or_else(|| GitError::InvalidOutput("Git index stage metadata".into()))?;
+                mode = Some(record.get(2..8) == Some(b"160000".as_slice()));
+                record[separator + 1..].to_vec()
+            }
+            PathOutput::Clean => {
+                if record.starts_with(b"Would skip repository ") {
+                    return Ok(());
+                }
+                let path = record
+                    .strip_prefix(b"Would remove ")
+                    .ok_or_else(|| GitError::InvalidOutput("Git clean dry-run record".into()))?;
+                unquote_git_path(path)?
+            }
+        };
+        let path = os_path(path)?;
+        if let Some(mode) = mode {
+            self.gitlink_leaves.insert(path.clone(), mode);
+        }
+        self.paths.insert(path);
+        Ok(())
+    }
+}
+impl Git {
+    pub(crate) async fn restore_scope(&self) -> Result<RestoreScope, GitError> {
+        let output = self
+            .text(&[
+                "rev-parse",
+                "--path-format=absolute",
+                "--show-toplevel",
+                "--show-prefix",
+            ])
+            .await?;
+        let (root, prefix) = output
+            .trim_end_matches('\n')
+            .split_once('\n')
+            .unwrap_or((output.trim_end_matches('\n'), ""));
+        let root = std::fs::canonicalize(root)?;
+        let actual = resolve(self.cwd())?;
+        if !actual.starts_with(&root) {
             return Err(GitError::UnsafeRestore(
-                "Checkpoint workspace contains a reachable link outside the scope.".into(),
+                "Restore scope is outside Git's top-level.".into(),
             ));
         }
-        let paths = self.checked.clone();
-        let scope = self.scope.clone();
-        let cancellation = cancellation.clone();
-        tokio::task::spawn_blocking(move || {
-            for path in paths {
-                if cancellation.is_cancelled() {
-                    return Err(t3_process::ProcessError::Cancelled.into());
-                }
-                match std::fs::symlink_metadata(&path) {
-                    Ok(metadata) if is_link(&path, &metadata)? => {
-                        let safe_file = metadata.file_type().is_symlink()
-                            && std::fs::canonicalize(&path)
-                                .is_ok_and(|target| target.starts_with(&scope) && target.is_file());
-                        if !safe_file {
-                            return Err(GitError::UnsafeRestore(
-                                "Checkpoint path became a link outside the scope.".into(),
-                            ));
-                        }
+        let prefix = Path::new(prefix.trim_end_matches('/'));
+        if prefix
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(GitError::InvalidOutput("Git scope prefix".into()));
+        }
+        Ok(RestoreScope {
+            directory: root.join(prefix),
+            pathspec: if prefix.as_os_str().is_empty() {
+                ".".into()
+            } else {
+                format!(
+                    ":(top,literal){}",
+                    if cfg!(windows) {
+                        prefix.to_string_lossy().replace('\\', "/")
+                    } else {
+                        prefix.to_string_lossy().into_owned()
                     }
-                    Ok(_) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
+                )
+            },
+            root,
+        })
+    }
+    async fn path_records(
+        &self,
+        args: &[&str],
+        kind: PathOutput,
+    ) -> Result<(bool, BTreeSet<PathBuf>, BTreeMap<PathBuf, bool>), GitError> {
+        let records = Arc::new(Mutex::new(PathRecords {
+            kind,
+            pending: Vec::new(),
+            paths: BTreeSet::new(),
+            has_entries: false,
+            gitlink_leaves: BTreeMap::new(),
+            pending_gitlink: None,
+            error: None,
+        }));
+        let callback = records.clone();
+        self.execute(
+            args,
+            ExecuteOptions {
+                capture: true,
+                max_output_bytes: 4096,
+                env: {
+                    let mut env = crate::env(&[("GIT_OPTIONAL_LOCKS", "0")]);
+                    if matches!(kind, PathOutput::Clean) {
+                        env.extend(crate::env(&[("LC_ALL", "C")]));
+                    }
+                    env
+                },
+                on_stdout_chunk: Some(Arc::new(move |chunk| {
+                    if let Ok(mut records) = callback.lock() {
+                        records.feed(chunk);
+                    }
+                })),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let mut records = records
+            .lock()
+            .map_err(|_| GitError::InvalidOutput("Git path collector poisoned".into()))?;
+        if let Some(error) = records.error.take() {
+            return Err(error);
+        }
+        if !records.pending.is_empty() || records.pending_gitlink.is_some() {
+            return Err(GitError::InvalidOutput(
+                "unterminated Git path record".into(),
+            ));
+        }
+        Ok((
+            records.has_entries,
+            std::mem::take(&mut records.paths),
+            std::mem::take(&mut records.gitlink_leaves),
+        ))
+    }
+    pub(crate) async fn check_restore_writes(
+        &self,
+        scope: &RestoreScope,
+        commit: &str,
+        sparse: bool,
+        selected: Option<&[String]>,
+    ) -> Result<bool, GitError> {
+        let common = [
+            "--raw",
+            "--no-abbrev",
+            "--ita-visible-in-index",
+            "-z",
+            "--no-relative",
+            "--no-renames",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+        ];
+        let mut cached = vec!["-c", "core.fsmonitor=false", "diff", "--cached"];
+        cached.extend(common);
+        cached.extend(["--ignore-submodules=none", commit, "--", "."]);
+        let mut working = vec!["-c", "core.fsmonitor=false", "diff"];
+        working.extend(common);
+        working.extend(["--ignore-submodules=all", commit, "--", "."]);
+        let index_args = [
+            "ls-files",
+            "--cached",
+            "--full-name",
+            "--stage",
+            "-v",
+            "-z",
+            "--",
+            ".",
+        ];
+        let (index, staged, worktree) = tokio::join!(
+            self.path_records(&index_args, PathOutput::Index),
+            self.path_records(&cached, PathOutput::CachedDiff),
+            self.path_records(&working, PathOutput::Diff)
+        );
+        let (index_tracked, mut paths, mut gitlink_leaves) = index?;
+        let (source_tracked, staged, staged_gitlink_leaves) = staged?;
+        let (_, worktree, worktree_gitlink_leaves) = worktree?;
+        paths.extend(staged);
+        paths.extend(worktree);
+        gitlink_leaves.extend(worktree_gitlink_leaves);
+        gitlink_leaves.extend(staged_gitlink_leaves);
+        let tracked = index_tracked || source_tracked;
+        if let Some(selected) = selected {
+            let selected: BTreeSet<_> = selected.iter().map(PathBuf::from).collect();
+            paths.retain(|path| selected.contains(path));
+        }
+        if sparse && !paths.is_empty() {
+            let mut stdin = Vec::new();
+            for path in &paths {
+                stdin.extend_from_slice(path.as_os_str().as_encoded_bytes());
+                stdin.push(0);
+            }
+            let output = self
+                .at(&scope.root)
+                .execute(
+                    &["sparse-checkout", "check-rules", "-z"],
+                    ExecuteOptions {
+                        max_output_bytes: stdin.len(),
+                        output_mode: OutputMode::Error,
+                        stdin: Some(stdin),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            paths = output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|record| !record.is_empty())
+                .map(|record| os_path(record.to_vec()))
+                .collect::<Result<_, _>>()?;
+        }
+        self.check_touch_paths(
+            scope,
+            paths
+                .into_iter()
+                .map(|path| scope.root.join(path))
+                .collect(),
+            gitlink_leaves
+                .into_iter()
+                .filter(|(_, skip)| *skip)
+                .map(|(path, _)| scope.root.join(path))
+                .collect(),
+        )
+        .await?;
+        Ok(tracked)
+    }
+    pub(crate) async fn check_clean_paths(&self, scope: &RestoreScope) -> Result<(), GitError> {
+        let (_, paths, _) = self
+            .path_records(
+                &[
+                    "-c",
+                    "core.quotePath=true",
+                    "-c",
+                    "color.ui=false",
+                    "clean",
+                    "-nd",
+                    "--",
+                    ".",
+                ],
+                PathOutput::Clean,
+            )
+            .await?;
+        self.check_touch_paths(
+            scope,
+            paths
+                .into_iter()
+                .map(|path| scope.directory.join(path))
+                .collect(),
+            BTreeSet::new(),
+        )
+        .await
+    }
+    pub(crate) async fn recreate_restore_scope(
+        &self,
+        scope: &RestoreScope,
+    ) -> Result<(), GitError> {
+        let root = scope.root.clone();
+        let directory = scope.directory.clone();
+        let cancellation = self.cancellation.clone();
+        tokio::task::spawn_blocking(move || {
+            check_directories(&root, &directory, &mut BTreeSet::new(), &cancellation)?;
+            std::fs::create_dir_all(directory)?;
+            Ok(())
+        })
+        .await
+        .map_err(|_| GitError::InvalidOutput("restore scope recreation task failed".into()))?
+    }
+    async fn check_touch_paths(
+        &self,
+        scope: &RestoreScope,
+        paths: Vec<PathBuf>,
+        skip_leaves: BTreeSet<PathBuf>,
+    ) -> Result<(), GitError> {
+        let root = scope.root.clone();
+        let cancellation = self.cancellation.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut checked = BTreeSet::new();
+            for path in paths {
+                let path = lexical_absolute(&path)?;
+                if !path.starts_with(&root) {
+                    return Err(GitError::UnsafeRestore(
+                        "Git touch path is outside the top-level.".into(),
+                    ));
+                }
+                if let Some(parent) = path.parent().filter(|path| path.starts_with(&root)) {
+                    check_directories(&root, parent, &mut checked, &cancellation)?;
+                }
+                if !skip_leaves.contains(&path) {
+                    check_deleting_directory(&path, &cancellation)?;
                 }
             }
             Ok(())
         })
         .await
-        .map_err(|_| GitError::InvalidOutput("checkpoint containment task failed".into()))?
+        .map_err(|_| GitError::InvalidOutput("restore path check task failed".into()))?
     }
 }
-impl Git {
-    pub(crate) async fn checkpoint_scan(
-        &self,
-        tree: Option<&str>,
-        tracked: &[String],
-        environment: &t3_process::Environment,
-    ) -> Result<CheckpointScan, GitError> {
-        let mut args = vec![
-            "ls-files".to_owned(),
-            "--cached".into(),
-            "--others".into(),
-            "--ignored".into(),
-            "--exclude-standard".into(),
-            "--directory".into(),
-            "--full-name".into(),
-            "-t".into(),
-            "-z".into(),
-        ];
-        if let Some(tree) = tree {
-            args.push(format!("--with-tree={tree}"));
-        }
-        args.extend(["--".into(), ".".into()]);
-        let output = self
-            .execute(
-                &args,
-                ExecuteOptions {
-                    capture: true,
-                    env: environment.clone(),
-                    max_output_bytes: 16 * 1024 * 1024,
-                    output_mode: OutputMode::Error,
-                    ..Default::default()
-                },
-            )
-            .await?;
-        let mut ignored = BTreeSet::new();
-        let mut tracked_ignored = BTreeSet::new();
-        let mut directories = Vec::new();
-        for entry in output
-            .stdout_text()
-            .split('\0')
-            .filter(|entry| !entry.is_empty())
-        {
-            let path = entry
-                .get(2..)
-                .ok_or_else(|| GitError::InvalidOutput("ignored checkpoint path".into()))?
-                .trim_end_matches('/');
-            if entry.starts_with("? ") {
-                if entry.ends_with('/') {
-                    directories.push(path.to_owned());
-                } else {
-                    ignored.insert(path_key(path));
-                }
-            } else {
-                tracked_ignored.insert(path_key(path));
-            }
-        }
-        if !directories.is_empty() {
-            // ls-files --directory also reports unignored parents of ignored entries.
-            let root = self
-                .cwd()
-                .ancestors()
-                .find(|path| path.join(".git").exists())
-                .ok_or_else(|| {
-                    GitError::Unavailable("Checkpoint workspace has no repository root.".into())
-                })?;
-            let filtered = self
-                .at(root)
-                .execute(
-                    &["check-ignore", "--no-index", "-z", "--stdin"],
-                    ExecuteOptions {
-                        capture: true,
-                        env: environment.clone(),
-                        stdin: Some(format!("{}\0", directories.join("\0")).into_bytes()),
-                        allow_nonzero: true,
-                        max_output_bytes: 16 * 1024 * 1024,
-                        output_mode: OutputMode::Error,
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            if !matches!(filtered.code, Some(0 | 1)) {
-                return Err(self.vcs_exit("GitVcsDriver.filterIgnoredDirectories", 4, &filtered));
-            }
-            ignored.extend(
-                filtered
-                    .stdout_text()
-                    .split('\0')
-                    .filter(|path| !path.is_empty())
-                    .map(path_key),
-            );
-        }
-        let cwd = self.cwd().to_owned();
-        let tracked = tracked.to_vec();
-        let token = self.cancellation.clone();
-        tokio::task::spawn_blocking(move || {
-            scan_checkpoint(&cwd, &ignored, &tracked_ignored, &tracked, &token)
-        })
-        .await
-        .map_err(|_| GitError::InvalidOutput("checkpoint scan task failed".into()))?
-    }
-}
-fn scan_checkpoint(
-    cwd: &Path,
-    ignored: &BTreeSet<String>,
-    tracked_ignored: &BTreeSet<String>,
-    tracked: &[String],
+fn check_directories(
+    root: &Path,
+    directory: &Path,
+    checked: &mut BTreeSet<PathBuf>,
     cancellation: &CancellationToken,
-) -> Result<CheckpointScan, GitError> {
-    let absolute = std::path::absolute(cwd)?;
-    let mut checked = BTreeSet::new();
-    for ancestor in absolute.ancestors() {
-        match std::fs::symlink_metadata(ancestor) {
-            Ok(metadata) if is_link(ancestor, &metadata)? => {
+) -> Result<(), GitError> {
+    let relative = directory
+        .strip_prefix(root)
+        .map_err(|_| GitError::UnsafeRestore("Git path parent is outside the top-level.".into()))?;
+    let mut directory = root.to_owned();
+    for component in std::iter::once(None).chain(relative.components().map(Some)) {
+        if cancellation.is_cancelled() {
+            return Err(t3_process::ProcessError::Cancelled.into());
+        }
+        if let Some(component) = component {
+            directory.push(component);
+        }
+        if !checked.insert(directory.clone()) {
+            continue;
+        }
+        match std::fs::symlink_metadata(&directory) {
+            Ok(metadata)
+                if link_kind(&directory, &metadata)? != LinkKind::None || !metadata.is_dir() =>
+            {
                 return Err(GitError::UnsafeRestore(
-                    "Checkpoint scope traverses a link.".into(),
+                    "Git write/delete ancestor is not a real directory.".into(),
                 ));
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        checked.insert(ancestor.to_owned());
     }
-    let lexical_root = absolute
-        .ancestors()
-        .find(|path| path.join(".git").exists())
-        .ok_or_else(|| {
-            GitError::Unavailable("Checkpoint workspace has no repository root.".into())
-        })?
-        .to_owned();
-    let root = std::fs::canonicalize(&lexical_root)?;
-    let scope = resolve(&absolute)?;
-    if !scope.starts_with(&root) {
-        return Err(GitError::UnsafeRestore(
-            "Checkpoint scope resolves outside the worktree.".into(),
-        ));
-    }
-    let relative = |path: &Path| -> Result<String, GitError> {
-        let path = path
-            .strip_prefix(&lexical_root)
-            .map_err(|_| {
-                GitError::UnsafeRestore("Checkpoint path is outside the worktree.".into())
-            })?
-            .to_str()
-            .ok_or_else(|| GitError::Unsupported("Checkpoint path is not UTF-8.".into()))?;
-        Ok(if cfg!(windows) {
-            path.replace('\\', "/")
-        } else {
-            path.to_owned()
-        })
-    };
-    let mut result = CheckpointScan {
-        exclusions: vec![],
-        files: vec![],
-        pruned: vec![],
-        pruned_directories: vec![],
-        checked: vec![],
-        scope,
-    };
-    let mut directories = vec![absolute.clone()];
-    let mut repositories = Vec::new();
-    while let Some(directory) = directories.pop() {
+    Ok(())
+}
+fn check_deleting_directory(path: &Path, cancellation: &CancellationToken) -> Result<(), GitError> {
+    let mut pending = vec![path.to_owned()];
+    while let Some(path) = pending.pop() {
         if cancellation.is_cancelled() {
             return Err(t3_process::ProcessError::Cancelled.into());
         }
-        let entries = match std::fs::read_dir(&directory) {
-            Ok(entries) => entries,
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         };
-        for entry in entries {
-            if cancellation.is_cancelled() {
-                return Err(t3_process::ProcessError::Cancelled.into());
-            }
-            let entry = entry?;
-            if entry.file_name() == ".git" {
-                if directory != absolute {
-                    repositories.push(format!("{}/", relative(&directory)?));
-                }
-                continue;
-            }
-            let path = entry.path();
-            let name = relative(&path)?;
-            let key = path_key(&name);
-            if ignored.contains(&key)
-                && !tracked_ignored.contains(&key)
-                && !tracked_ignored
-                    .range(format!("{key}/")..)
-                    .next()
-                    .is_some_and(|tracked| contains(&key, tracked))
-            {
-                let metadata = std::fs::symlink_metadata(&path)?;
-                if metadata.is_dir()
-                    || is_link(&path, &metadata)?
-                        && std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir())
-                {
-                    result.pruned_directories.push(name.clone());
-                }
-                result.pruned.push(name);
-                continue;
-            }
-            checked.insert(path.clone());
-            let metadata = match std::fs::symlink_metadata(&path) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
-            };
-            if is_link(&path, &metadata)? {
-                let safe_file = metadata.file_type().is_symlink()
-                    && std::fs::canonicalize(&path)
-                        .is_ok_and(|target| target.starts_with(&result.scope) && target.is_file());
-                if safe_file {
-                    result.files.push(name);
-                } else {
-                    result.exclusions.push(name);
-                }
-            } else if metadata.is_dir() {
-                directories.push(path);
-            } else {
-                result.files.push(name);
+        let kind = link_kind(&path, &metadata)?;
+        if kind.is_mount() {
+            return Err(GitError::UnsafeRestore(
+                "Git clean would traverse a junction or mount point.".into(),
+            ));
+        }
+        if kind == LinkKind::None && metadata.is_dir() {
+            for entry in std::fs::read_dir(&path)? {
+                pending.push(entry?.path());
             }
         }
     }
-    result.files.retain(|path| {
-        !repositories
-            .iter()
-            .any(|repository| path.starts_with(repository))
-    });
-    repositories.retain(|path| {
-        !result
-            .exclusions
-            .iter()
-            .any(|excluded| path.starts_with(&format!("{excluded}/")))
-    });
-    result.files.extend(repositories);
-    for name in tracked {
-        let path = lexical_root.join(name);
-        for ancestor in path
-            .ancestors()
-            .take_while(|path| path.starts_with(&absolute))
-        {
-            checked.insert(ancestor.to_owned());
-        }
-    }
-    result.checked = checked.into_iter().collect();
-    Ok(result)
+    Ok(())
 }
-
 pub fn is_restore_isolated(safety: &RestoreSafety) -> Result<bool, GitError> {
     let Some(worktree) = &safety.worktree_path else {
         return Ok(false);
@@ -524,5 +732,26 @@ mod path_tests {
             std::fs::canonicalize(root.join("deep"))?.join("missing")
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod touch_tests {
+    use super::*;
+    #[test]
+    fn clean_paths_decode_git_quotes_and_keep_os_bytes() {
+        assert_eq!(
+            unquote_git_path(br#""a\n\t\"\\\303\251/""#).unwrap(),
+            b"a\n\t\"\\\xc3\xa9/"
+        );
+        assert!(unquote_git_path(br#""bad\q""#).is_err());
+        #[cfg(windows)]
+        {
+            assert!(classify_tag(0xa000000c) == LinkKind::Symlink);
+            assert!(classify_tag(0xa0000003).is_mount());
+            for tag in [0x9000001a, 0x80000017, 0x8000001b, 0] {
+                assert!(classify_tag(tag) == LinkKind::None);
+            }
+        }
     }
 }

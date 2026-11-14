@@ -176,7 +176,17 @@ impl<P: Platform + Clone + 'static> PromptStashSession<P> {
         }
     }
     pub fn snapshot(&self) -> PromptStashSnapshot {
-        let ready = self.runtime.composer_drafts().loaded() && self.state.loaded.get();
+        let ready = self.runtime.composer_drafts().writable() && self.state.loaded.get();
+        let preparing = self
+            .runtime
+            .composer_attachments(&self.target)
+            .ok()
+            .is_some_and(|attachments| {
+                attachments
+                    .items()
+                    .iter()
+                    .any(|item| item.upload == super::attachment_intake::UploadState::Preparing)
+            });
         let pending = match &self.target {
             ComposerTarget::Thread(key) => self
                 .runtime
@@ -198,7 +208,7 @@ impl<P: Platform + Clone + 'static> PromptStashSession<P> {
         };
         PromptStashSnapshot {
             entries: self.state.entries.borrow().clone(),
-            can_stash: ready && !pending,
+            can_stash: ready && !pending && !preparing,
             stash_revision: self.state.revision.get(),
             can_restore: ready && !pending,
             can_delete: self.state.loaded.get(),
@@ -476,6 +486,11 @@ impl<P: Platform + Clone + 'static> PromptStashSession<P> {
                     .collect::<Vec<_>>(),
                 false,
             );
+            drafts.update(|document| {
+                *document = crate::thread_views::drafts::merge_web_states(&next, document, &baseline)?;
+                Ok(())
+            })?;
+            drafts.flush().await?;
             let mut stash = Stash {
                 entries: stored.entries.clone(),
             };
@@ -494,21 +509,19 @@ impl<P: Platform + Clone + 'static> PromptStashSession<P> {
                     }
                 })
                 .await;
-            if let Some(error) = failure {
-                return Err(error);
+            let mut notices=vec![];
+            if failure.is_some()||!durable {
+                notices.push(StashNotice{warning:true,title:"Restored prompt may reappear in the stash".into(),description:Some("Browser storage rejected the update, so this entry could still be there after a reload.".into())});
             }
-            if !durable {
-                return Err(ClientError::Cancelled);
-            }
-            drafts.update(|document| {
-                *document =
-                    crate::thread_views::drafts::merge_web_states(&next, document, &baseline)?;
-                Ok(())
-            })?;
-            drafts.flush().await?;
             this.state.publish(stash.entries);
+            let expired_names=entry.files.as_deref().unwrap_or_default().iter().filter(|file|expired.contains(&file.attachment_id)).map(|file|file.name.clone()).collect::<Vec<_>>();
+            let mut missing=vec![];
+            if !expired_names.is_empty(){missing.push(format!("{}: stashed files are kept for 24 hours and this upload expired. Attach the file again.",expired_names.join(", ")));}
+            if !entry.dropped_image_names.is_empty(){missing.push(format!("{} were too large to save.",entry.dropped_image_names.join(", ")));}
+            if let Some(names)=entry.unreadable_image_names.as_ref().filter(|names|!names.is_empty()){missing.push(format!("{} could not be read when this prompt was saved.",names.join(", ")));}
+            if !missing.is_empty(){notices.push(StashNotice{warning:true,title:"Some attachments were not restored".into(),description:Some(missing.join(" "))});}
             Ok(StashCompletion {
-                notices: vec![],
+                notices,
                 menu: StashMenu::Close,
             })
         }

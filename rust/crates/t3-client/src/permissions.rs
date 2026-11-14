@@ -134,7 +134,7 @@ pub fn session_grants_scope(session: &AuthSessionState, scope: AuthEnvironmentSc
 impl From<&AuthSessionState> for SessionGrants {
     fn from(session: &AuthSessionState) -> Self {
         let mut candidates = Vec::new();
-        candidates.extend([AuthEnvironmentScope::FilesystemWrite, AuthEnvironmentScope::OrchestrationOperate, AuthEnvironmentScope::OrchestrationRead]);
+        candidates.extend([AuthEnvironmentScope::FilesystemRead, AuthEnvironmentScope::FilesystemWrite, AuthEnvironmentScope::OrchestrationOperate, AuthEnvironmentScope::OrchestrationRead]);
         candidates.extend(WS_METHODS.iter().filter_map(|method| method.required_scope));
         candidates.extend(
             t3_contracts::client_rpc_permissions::CLIENT_GUARDED_RPC_SCOPES

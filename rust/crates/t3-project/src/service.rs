@@ -248,6 +248,9 @@ impl ProjectService {
         }
         Ok((self.create(input).await?, true))
     }
+    pub async fn bootstrap_automatic(&self, input: ProjectMutationMember1) -> Result<Option<(Project, bool)>> {
+        self.bootstrap(input).await.map(Some)
+    }
     pub async fn create(&self, input: ProjectMutationMember1) -> Result<Project> {
         let root = self
             .normalize(
@@ -318,7 +321,9 @@ impl ProjectService {
             let patch = serde_json::from_value(
                 json!({"projectSettingsOverrides":{input.project_id.0.clone():null}}),
             )?;
-            let _ = self.0.services.settings.update(&patch).await;
+            if let Err(error) = self.0.services.settings.update(&patch).await {
+                tracing::warn!(project_id = ?input.project_id.0, %error, "Failed to clear settings overrides for deleted project.");
+            }
         }
         self.enrichment()
             .invalidate([existing.workspace_root])

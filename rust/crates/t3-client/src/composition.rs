@@ -112,6 +112,7 @@ struct Inner<P: Platform + Clone + 'static> {
     platform: P,
     store: ClientStore,
     git_panel: Rc<crate::workspace::git_panel::GitPanelState>,
+    project_files: Rc<crate::workspace::project_files::FilesState>,
     source: OrchestrationV2CreationSource,
     spawn: Spawner,
     environments: RefCell<Vec<Environment<P>>>,
@@ -278,6 +279,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 platform,
                 store,
                 git_panel: Rc::default(),
+                project_files: Rc::default(),
                 source,
                 spawn,
                 environments: RefCell::new(Vec::new()),
@@ -309,6 +311,15 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
 
     pub fn store(&self) -> &ClientStore {
         &self.inner.store
+    }
+
+    /// The workspace Files panel: tree, access, workspace target and file reads.
+    pub fn project_files(&self) -> crate::workspace::project_files::ProjectFiles<P> {
+        crate::workspace::project_files::ProjectFiles::new(
+            self.clone(),
+            self.inner.platform.clone(),
+            self.inner.project_files.clone(),
+        )
     }
 
     pub fn git_panel(&self) -> crate::workspace::git_panel::GitPanel<P> {

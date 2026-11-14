@@ -5,4 +5,5 @@
 pub mod composer;
 pub mod git_panel;
 pub mod navigation;
+pub mod terminal;
 pub mod thread_ops;

@@ -576,14 +576,23 @@ fn a_linked_environment_is_discovered_through_the_relay_and_connects_with_a_mint
         client.environments()[0].state
     );
     let relay = harness.server().state.borrow().relay.clone();
-    assert!(relay.contains(&"POST /v1/client/dpop-token".into()), "{relay:?}");
-    assert!(relay.contains(&"POST /v1/environments/env/connect".into()), "{relay:?}");
+    assert!(
+        relay.contains(&"POST /v1/client/dpop-token".into()),
+        "{relay:?}"
+    );
+    assert!(
+        relay.contains(&"POST /v1/environments/env/connect".into()),
+        "{relay:?}"
+    );
     assert_eq!(
         saved(&mut harness, StorageArea::Secure, "connection-credential"),
         0,
         "a relay route stores no credential; each connection is minted"
     );
-    assert!(client.diagnosis(&environment(ENV), None).is_none(), "connected");
+    assert!(
+        client.diagnosis(&environment(ENV), None).is_none(),
+        "connected"
+    );
 
     // The route is saved: a new run connects through the relay again.
     drop(client);
@@ -613,7 +622,11 @@ fn a_relay_that_will_not_connect_is_diagnosed_on_the_relay_path() {
     assert_ne!(entry.state.phase, Phase::Connected, "{:?}", entry.state);
     let diagnosis = client.diagnosis(&environment(ENV), Some("1.0.0")).unwrap();
     let failure = client.environments()[0].state.last_failure.clone().unwrap();
-    assert_eq!(failure.kind, t3_client::connection::FailureKind::EndpointUnavailable, "{failure:?}");
+    assert_eq!(
+        failure.kind,
+        t3_client::connection::FailureKind::EndpointUnavailable,
+        "{failure:?}"
+    );
     assert_eq!(failure.trace_id.as_deref(), Some("relay-trace"));
     assert!(
         diagnosis
@@ -679,7 +692,8 @@ fn t3_connect_needs_a_relay() {
 }
 
 #[test]
-fn an_ssh_host_is_launched_by_the_desktop_reconnected_through_its_tunnel_and_torn_down_on_removal() {
+fn an_ssh_host_is_launched_by_the_desktop_reconnected_through_its_tunnel_and_torn_down_on_removal()
+{
     let mut harness = Harness::new(ENV);
     let client = runtime(&harness);
     let id = harness
@@ -692,7 +706,11 @@ fn an_ssh_host_is_launched_by_the_desktop_reconnected_through_its_tunnel_and_tor
     assert_eq!(id, environment(ENV));
     harness.advance(5_000);
     assert_eq!(route_modes(&client), [ConnectionMode::Ssh]);
-    assert_eq!(client.environments()[0].label, "box", "the alias when the host names nothing");
+    assert_eq!(
+        client.environments()[0].label,
+        "box",
+        "the alias when the host names nothing"
+    );
     assert_eq!(client.environments()[0].state.phase, Phase::Connected);
     assert_eq!(
         harness.server().state.borrow().ssh,
@@ -702,18 +720,30 @@ fn an_ssh_host_is_launched_by_the_desktop_reconnected_through_its_tunnel_and_tor
     harness.run(client.remove(&environment(ENV))).unwrap();
     harness.settle();
     assert_eq!(
-        harness.server().state.borrow().ssh.last().map(String::as_str),
+        harness
+            .server()
+            .state
+            .borrow()
+            .ssh
+            .last()
+            .map(String::as_str),
         Some("disconnect box"),
         "the managed backend and tunnel outlive the session, so removal stops them"
     );
-    assert_eq!(saved(&mut harness, StorageArea::Secure, "connection-credential"), 0);
+    assert_eq!(
+        saved(&mut harness, StorageArea::Secure, "connection-credential"),
+        0
+    );
 
     let elsewhere = harness.run(client.pair_ssh(SshPairingInput {
         target: serde_json::from_value(ssh_target("box")).unwrap(),
         label: None,
         expected_environment: Some(environment("other")),
     }));
-    assert!(elsewhere.is_err(), "an SSH host that is a different machine is refused");
+    assert!(
+        elsewhere.is_err(),
+        "an SSH host that is a different machine is refused"
+    );
 }
 
 #[test]
@@ -727,9 +757,8 @@ fn an_open_command_row_streams_its_output_and_a_settled_one_is_kept_for_five_min
     let running = client.command_output(&key("t1"), &item);
     let second = client.command_output(&key("t1"), &item);
     harness.settle();
-    let view = running.view().expect("the first frame");
-    assert_eq!(view.output.text, "install\n12%");
-    assert!(view.running);
+    assert_eq!(running.text().expect("the first frame"), "install\n12%");
+    assert!(running.read(None).unwrap().running);
     assert_eq!(
         harness.server().state.borrow().command_output_subscribes,
         1,
@@ -746,9 +775,8 @@ fn an_open_command_row_streams_its_output_and_a_settled_one_is_kept_for_five_min
     harness.server().state.borrow_mut().command_running = false;
     let settled = client.command_output(&key("t1"), &item);
     harness.settle();
-    let view = settled.view().unwrap();
-    assert_eq!(view.output.text, "install\n100%\n");
-    assert!(!view.running);
+    assert_eq!(settled.text().unwrap(), "install\n100%\n");
+    assert!(!settled.read(None).unwrap().running);
     assert_eq!(
         harness.server().state.borrow().command_outputs_open,
         0,
@@ -756,20 +784,23 @@ fn an_open_command_row_streams_its_output_and_a_settled_one_is_kept_for_five_min
     );
     drop(settled);
     let reopened = client.command_output(&key("t1"), &item);
-    assert_eq!(reopened.view().unwrap().output.text, "install\n100%\n");
+    assert_eq!(reopened.text().unwrap(), "install\n100%\n");
     drop(reopened);
     assert_eq!(harness.server().state.borrow().command_output_subscribes, 2);
 
     harness.advance(5 * 60_000 + 1_000);
     let expired = client.command_output(&key("t1"), &item);
-    assert!(expired.view().is_none(), "loading again after five minutes");
+    assert!(expired.read(None).is_none(), "loading again after five minutes");
     harness.settle();
-    assert!(expired.view().is_some());
+    assert!(expired.read(None).is_some());
     assert_eq!(harness.server().state.borrow().command_output_subscribes, 3);
 }
 
 /// A runtime restored over storage damaged after `paired` saved one environment.
-fn restored_after(harness: &mut Harness, damage: impl FnOnce(&mut Harness)) -> ClientRuntime<TestPlatform> {
+fn restored_after(
+    harness: &mut Harness,
+    damage: impl FnOnce(&mut Harness),
+) -> ClientRuntime<TestPlatform> {
     drop(paired(harness));
     harness.settle();
     damage(harness);
@@ -854,7 +885,11 @@ fn an_unreadable_catalog_is_quarantined_and_pairing_starts_afresh() {
                 .write(
                     StorageArea::Ordinary,
                     vec![t3_client::platform::StorageWrite {
-                        key: t3_client::platform::StorageKey::new("connection-catalog", None, "current"),
+                        key: t3_client::platform::StorageKey::new(
+                            "connection-catalog",
+                            None,
+                            "current",
+                        ),
                         value: Some(b"{not a catalog".to_vec()),
                     }],
                 )
@@ -864,7 +899,11 @@ fn an_unreadable_catalog_is_quarantined_and_pairing_starts_afresh() {
     });
     assert!(client.environments().is_empty());
     assert_eq!(
-        saved(&mut harness, StorageArea::Ordinary, "connection-catalog-quarantine"),
+        saved(
+            &mut harness,
+            StorageArea::Ordinary,
+            "connection-catalog-quarantine"
+        ),
         1,
         "the unreadable catalog is kept aside, not discarded"
     );
@@ -905,16 +944,30 @@ fn removing_an_environment_leaves_no_copy_of_its_token_in_storage() {
         let mut copies = Vec::new();
         for area in [StorageArea::Ordinary, StorageArea::Secure] {
             for namespace in [
-                "connection-credential", "connection-profile", "connection-catalog", "remote-dpop-token",
-                "import-backup", "quarantine", "import-conflict", "connection-catalog-quarantine",
+                "connection-credential",
+                "connection-profile",
+                "connection-catalog",
+                "remote-dpop-token",
+                "import-backup",
+                "quarantine",
+                "import-conflict",
+                "connection-catalog-quarantine",
             ] {
                 for key in platform.list(area, namespace.into()).await.unwrap() {
-                    let bytes = platform.get(area, key.clone()).await.unwrap().unwrap_or_default();
+                    let bytes = platform
+                        .get(area, key.clone())
+                        .await
+                        .unwrap()
+                        .unwrap_or_default();
                     let text = String::from_utf8_lossy(&bytes).into_owned();
                     let decoded = serde_json::from_slice::<serde_json::Value>(&bytes)
                         .ok()
-                        .and_then(|value| value["payload"]["bytesBase64"].as_str().map(str::to_owned))
-                        .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok())
+                        .and_then(|value| {
+                            value["payload"]["bytesBase64"].as_str().map(str::to_owned)
+                        })
+                        .and_then(|value| {
+                            base64::engine::general_purpose::STANDARD.decode(value).ok()
+                        })
                         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                         .unwrap_or_default();
                     if text.contains("paired-bearer") || decoded.contains("paired-bearer") {
@@ -926,4 +979,104 @@ fn removing_an_environment_leaves_no_copy_of_its_token_in_storage() {
         copies
     });
     assert!(copies.is_empty(), "{copies:?}");
+}
+
+#[test]
+fn one_unreadable_profile_does_not_stop_saving_the_other_environments() {
+    // Re-review N2: every save read every profile with `?`, so one undecryptable profile made
+    // pairing, toggling and removing any other environment fail.
+    let mut harness = Harness::new(ENV);
+    drop(paired(&mut harness));
+    harness.settle();
+    // A second saved environment, whose profile alone becomes unreadable.
+    let platform = harness.platform.clone();
+    harness.run(async move {
+        let mut registry: EnvironmentRegistry<SessionEndpoint> = EnvironmentRegistry::load(
+            &platform,
+            NetworkStatus::Unknown,
+            Time::from_platform(&platform),
+        )
+        .await
+        .unwrap();
+        let other = environment("other");
+        let id = "bearer:other:https://other.test".to_owned();
+        let prepared = t3_client::connection::PreparedRegistration {
+            registration: t3_client::environment::EnvironmentRegistration {
+                id: other.clone(),
+                label: "Other host".into(),
+                routes: vec![t3_client::connection::Route {
+                    id: id.clone(),
+                    environment: other.clone(),
+                    mode: ConnectionMode::Remote,
+                    http_base: "https://other.test".into(),
+                    ws_base: "wss://other.test".into(),
+                }],
+                enabled: true,
+            },
+            profile: t3_client::connection::ConnectionProfile::Bearer {
+                connection_id: id,
+                environment_id: other,
+                label: "Other host".into(),
+                http_base_url: "https://other.test".into(),
+                ws_base_url: "wss://other.test".into(),
+                learned: None,
+                authorization: None,
+                network: None,
+            },
+            credential: t3_client::connection::ConnectionCredential::Bearer {
+                token: t3_client::authorization::Sensitive("other-bearer".into()),
+            },
+        };
+        registry
+            .register_prepared(
+                &platform,
+                prepared,
+                false,
+                true,
+                NetworkStatus::Unknown,
+                Time::from_platform(&platform),
+            )
+            .await
+            .unwrap();
+    });
+    {
+        let mut state = harness.server().state.borrow_mut();
+        state.undecryptable = Some("connection-profile".into());
+        state.undecryptable_record = Some("other".into());
+    }
+    let client = runtime(&harness);
+    harness.run(client.restore()).unwrap();
+    harness.settle();
+    let entries = client.environments();
+    assert_eq!(entries.len(), 2);
+    let damaged: Vec<_> = entries.iter().filter(|entry| entry.damaged).collect();
+    assert_eq!(damaged.len(), 1, "the user can tell which one");
+    assert_eq!(damaged[0].id, environment("other"));
+
+    // Pairing the healthy server again saves every entry.
+    assert_eq!(harness.run(client.pair(pairing())), Ok(environment(ENV)));
+    // Toggling saves every entry too.
+    let platform = harness.platform.clone();
+    harness.run(async move {
+        let mut registry: EnvironmentRegistry<SessionEndpoint> = EnvironmentRegistry::load(
+            &platform,
+            NetworkStatus::Unknown,
+            Time::from_platform(&platform),
+        )
+        .await
+        .unwrap();
+        for enabled in [false, true] {
+            registry
+                .set_enabled_persisted(&platform, &environment(ENV), enabled, Time::from_platform(&platform))
+                .await
+                .unwrap();
+        }
+    });
+    // Removing the healthy one keeps the damaged one listed, and removing that works too.
+    harness.run(client.remove(&environment(ENV))).unwrap();
+    harness.settle();
+    assert_eq!(client.environments().len(), 1);
+    harness.run(client.remove(&environment("other"))).unwrap();
+    harness.settle();
+    assert!(client.environments().is_empty());
 }
