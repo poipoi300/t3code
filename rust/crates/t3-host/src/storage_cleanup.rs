@@ -1029,7 +1029,11 @@ impl StorageCleanup {
         {
             return Err(Error::Refused("thread deletion is still pending"));
         }
-        fs::remove_dir_all(path).map_err(|_| Error::Io)?;
+        let removal_path = path.to_owned();
+        tokio::task::spawn_blocking(move || fs::remove_dir_all(removal_path))
+            .await
+            .map_err(|_| Error::Service)?
+            .map_err(|_| Error::Io)?;
         Ok((reason, Some(bytes)))
     }
     async fn report_orphans(

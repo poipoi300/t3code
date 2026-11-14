@@ -29,28 +29,38 @@ pub trait EditorDiscovery: Send + Sync {
     fn home_directory(&self) -> Option<PathBuf> {
         std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
     }
-    async fn launch(&self, command: EditorCommand) -> Result<()> {
-        launch_native(command).await
-    }
+    async fn launch(&self, command: EditorCommand) -> Result<()>;
 }
 #[async_trait]
 pub trait EditorRoots: Send + Sync {
     async fn roots(&self) -> Result<Vec<PathBuf>>;
 }
+#[async_trait]
+pub trait DetachedEditorLaunch: Send + Sync {
+    /// Spawn the trusted program with discrete arguments through t3-process.
+    /// Return spawn failures, clear ELECTRON_RUN_AS_NODE, and leave the editor
+    /// alive when the server/runtime stops; never use kill-on-drop ownership.
+    async fn launch(&self, command: EditorCommand) -> Result<()>;
+}
 pub struct SystemEditorDiscovery {
     roots: Arc<dyn EditorRoots>,
+    launcher: Arc<dyn DetachedEditorLaunch>,
     cache: tokio::sync::Mutex<Option<(tokio::time::Instant, Vec<DiscoveredEditor>)>>,
 }
 impl SystemEditorDiscovery {
-    pub fn new(roots: Arc<dyn EditorRoots>) -> Self {
+    pub fn new(roots: Arc<dyn EditorRoots>, launcher: Arc<dyn DetachedEditorLaunch>) -> Self {
         Self {
             roots,
+            launcher,
             cache: tokio::sync::Mutex::new(None),
         }
     }
 }
 #[async_trait]
 impl EditorDiscovery for SystemEditorDiscovery {
+    async fn launch(&self, command: EditorCommand) -> Result<()> {
+        self.launcher.launch(command).await
+    }
     async fn discover(&self) -> Result<DiscoveredEditors> {
         let roots = self.roots.roots().await?;
         let mut cache = self.cache.lock().await;
@@ -523,34 +533,6 @@ pub fn editor_arguments(
     }
     args
 }
-pub async fn launch_native(command: EditorCommand) -> Result<()> {
-    let mut options =
-        t3_process::ProcessOptions::new(command.command.as_os_str()).args(command.args);
-    options.timeout = None;
-    for (key, value) in graphical_session_env().await {
-        options.env.insert(key.into(), Some(value.into()));
-    }
-    options.env.insert("ELECTRON_RUN_AS_NODE".into(), None);
-    let mut child = t3_process::spawn(&options).map_err(|_| Error::Service)?;
-    child.stdin.take();
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    tokio::spawn(async move {
-        let out = async move {
-            if let Some(mut stream) = stdout {
-                let _ = tokio::io::copy(&mut stream, &mut tokio::io::sink()).await;
-            }
-        };
-        let err = async move {
-            if let Some(mut stream) = stderr {
-                let _ = tokio::io::copy(&mut stream, &mut tokio::io::sink()).await;
-            }
-        };
-        let _ = tokio::join!(child.wait(), out, err);
-    });
-    Ok(())
-}
-
 pub fn editor_install_candidates(
     platform: &str,
     env: &std::collections::BTreeMap<String, String>,
@@ -768,7 +750,7 @@ pub fn windows_reveal_command(powershell: PathBuf, target: &str, parent: &str) -
         ],
     }
 }
-async fn graphical_session_env() -> std::collections::BTreeMap<String, String> {
+pub async fn graphical_session_env() -> std::collections::BTreeMap<String, String> {
     let mut env = std::collections::BTreeMap::new();
     if !cfg!(target_os = "linux")
         || std::env::var_os("DISPLAY").is_some()

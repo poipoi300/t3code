@@ -15,7 +15,7 @@ composition wiring are separate work owned by `t3-server`.
 
 | TypeScript file | Rust home | Status |
 | --- | --- | --- |
-| storageCleanup.ts | t3-host::storage_cleanup | Ported retention, worktree safeguards, reports, automatic worker and local dry run; differences below |
+| storageCleanup.ts | t3-host::storage_cleanup | Ported retention, worktree and scratch safeguards, fail-closed safety reads, reports, automatic worker and local dry run; differences below |
 | attachmentStore.ts | t3-workspace::attachments; t3-config startup sweep | Existing owner; document extraction is injected; no duplicate |
 | imageMime.ts | t3-workspace::attachments | Existing owner; no duplicate |
 | zipArchive.ts | t3-host::zip_archive | Ported with explicit resource limits and additional refusals |
@@ -35,7 +35,7 @@ composition wiring are separate work owned by `t3-server`.
 | background/BackgroundPolicy.ts | t3-host::background | Ported client leases, disconnect/expiry, profiles, scope and opportunistic gates |
 | background/HostPowerMonitor.ts | t3-host::background | Ported snapshots, timestamp rejection and meaningful changes |
 | background/KeepAwake.ts | t3-host::keep_awake | Commands, grace, owned process lifetime and retry ported; active-run/settings feed belongs to composition |
-| serviceLauncher.ts | t3-host::service_launcher | Partial: definitions, environment/state codecs, versions and disabled tasks; supervisor/trial/rollback blocked on native launcher IPC |
+| serviceLauncher.ts | t3-host::service_launcher | Definitions, env/state/version codecs and cancellation-safe pre-trial backup ported; full supervisor/rollback blocked on native launcher IPC |
 | os-jank.ts | t3-config::home/environment | Existing home/path resolution; shell and registry PATH hydration remains unported |
 | settingsSecrets.ts | t3-config::secrets | Existing slot storage, redaction and rollback owner |
 | secrets/SecretResolver.ts | t3-provider::secrets | Existing resolver/cache/1Password owner |
@@ -48,6 +48,13 @@ composition wiring are separate work owned by `t3-server`.
 | desktopUpdate/DesktopUpdateMarker.ts | t3-host::desktop_update | Ported read-only marker TTL |
 | desktopUpdate/DesktopAppUpdate.ts | t3-host::desktop_update | Ported run/progress/commit state machine; desktop control adapter required |
 | review/ReviewService.ts | t3-git + t3-host::review | Existing queries reused; current-workspace authorization boundary ported |
+| persistence/DatabaseStorage.ts | t3-host::database_storage | Ported status, online vacuum, paced history scheduling and reclaim marker/restart service; platform disk/restart/prune ports required |
+| persistence/DatabaseMaintenance.ts (reclaimFiles/runRequestedReclaim) | t3-host::database_storage | Marker/attempt/retry/failure lifecycle ported; actual exclusive offline repair needs persistence/composition adapter |
+| cloud/npmRelease.ts | t3-host::npm_release | Ported native bounded npm/registry lookup, canonical metadata/errors, single-flight 32-entry/one-minute cache and two npm permits |
+| cloud/selfUpdate.ts | t3-host::self_update | Ported update/progress/desktop commit, policy/migration gates and retained handoff; native launcher client port required |
+| cloud/pinnedRuntime.ts | t3-host::pinned_runtime | Ported download/checksum/safe extraction/preflight/publication and fail-closed startup pruning; limits below |
+| cloud/serviceLauncherClient.ts | t3-host::self_update::LauncherClient | Required typed native IPC port; no fake managed capability when disconnected; transport/startup context adapter remains with server/process owner |
+| process/externalLauncher.ts (editor path), packages/shared/src/editor.ts | t3-host::editor | Ported discovery, bundle/install candidates, positioned arguments, guarded launch/reveal plans; detached launch port required from process owner; canonical root guard intentionally stricter |
 | serverOwnership.ts, serverRuntimeState.ts | t3-config::runtime + t3-server composition | Existing owners; not duplicated |
 | serverSettings.ts, keybindings.ts | t3-config | Existing owners; not duplicated |
 
@@ -65,6 +72,12 @@ crate does not register transports or add a second ownership/startup path.
 | server.checkSecretSource (ws.ts:2670) | SecretCheck::check(reference) |
 | secrets.answerRequest (ws.ts:2303) | SecretRequests::answer(input) |
 | guestShare.create (ws.ts:2299) | Existing GuestSharing::create(input), reexported from guest |
+| server.getDatabaseStorage | DatabaseStorage::status() (initial optional status, then watch changes) |
+| server.reclaimDatabaseSpace | DatabaseStorage::request_reclaim() |
+| server.getNpmRelease | NpmRelease::get(input.spec) |
+| server.updateServer | ServerSelfUpdate::update(input) |
+| server.updateServerWithProgress | ServerSelfUpdate::update_with_progress(input) |
+| shell.openInEditor | ExternalLauncher::launch_editor(input) |
 | POST /api/guest/redeem | Existing GuestSharing::redeem(request) |
 | POST /api/guest/messages | GuestShareContent::submit(session, request, uploads, store) |
 | GET /api/guest/session | GuestShareContent::session(session) |
@@ -78,7 +91,7 @@ crate does not register transports or add a second ownership/startup path.
 | review.getBranchCommits | ReviewService::get_branch_commits(input) |
 | review.getDiffPreview | ReviewService::get_diff_preview(input) |
 | review.getDiffFileContents | ReviewService::get_diff_file_contents(input) |
-| server.commitDesktopUpdate | DesktopAppUpdate::commit(token, accepted) (called by self-update adapter) |
+| server.commitDesktopUpdate | ServerSelfUpdate::commit_desktop_update(request_id) |
 | subscribeServerConfig theme source | EnvironmentThemes::stream_changes() |
 | attachments.createUploadUrl, attachments.delete, assets.persistChatAttachments, HTTP upload | Existing t3-workspace::AttachmentStore methods; not duplicated |
 
@@ -91,12 +104,18 @@ consume and file helpers; `TriageService::write_session/build_context/drain`;
 archive `open/new/read_entry`; theme `current/start`; desktop marker/run;
 service-definition renderers and state/environment helpers.
 
+Construction and per-method host requirements for all thirteen newly requested
+RPCs are in `C:\Users\Administrator\t3code-rust-notes\briefs\server-seam-requests.md`,
+section "t3-host: thirteen unserved RPC seams". All new update/npm tests inject
+HTTP hosts and cannot access the public network.
+
 ## Composition contracts and remaining ownership
 
 - `CleanupHost` must supply current settings/projections including deleted and
   archived owners, live providers, starting/running terminals, pending deletion
   effects, project roots, managed roots and the SAME workspace lease used for
-  provider startup/checkpoint restore. Its `storage_cleanup_settings` method
+  provider startup/checkpoint restore (`WorkspaceLocks::workspace_leases()` in
+  t3-orchestration, not the separate checkpoint snapshot mutex). Its `storage_cleanup_settings` method
   must read only settings, without loading projections, before expired file
   deletion. Directory scanning/deletion runs on the blocking pool. Cleanup never deletes projection rows:
   the TS source retains branch/worktree paths after removing a checkout.
@@ -121,11 +140,29 @@ service-definition renderers and state/environment helpers.
 - `ReviewWorkspaces` checks current canonical workspace roots. Desktop control,
   host-power events and keep-awake wanted activity/settings feeds need adapters.
   Managed policy enforcement must run BEFORE any listener/Connect exposure.
-- Full OS launcher supervisor/trial/backup/rollback needs the native launcher
+- The pre-trial backup/cancellation transition is implemented and tested, including
+  no trial and preserved pending state after a stop. Full OS launcher supervision
+  and rollback still need the native launcher
   entrypoint and a process-owner IPC facility equivalent to the TS extra Node
   IPC channel. `t3-process` currently exposes stdin/stdout/stderr only. Definitions
   are generated and tested; no service was installed or controlled on this host.
   Shell/PATH hydration also remains unported. These are explicit incomplete parts.
+- Database composition must implement available disk space/device identity,
+  supervised restart, ProjectionMaintenance with the supplied pacing callback,
+  and OfflineRepair through the persistence owner's exclusive connection. Until
+  offline repair exists, advertise restart_available=false: status remains useful
+  and repair fails closed with the manual doctor command.
+- Update construction reuses the shared managed policy, desktop control,
+  persistence database, installer and launcher client. Desktop checked track
+  switches forward both channel and target version; unsupported adapters refuse.
+  The RPC facade keeps preparation and commit alive after caller cancellation.
+  Startup runtime pruning needs the installed unit executable and authoritative
+  process enumeration; unknown state/processes preserve completed runtimes.
+- Editor config and launch use the same discovery service and authoritative
+  workspace-root and detached-launch ports. `t3-process` has only owned kill-on-drop
+  children today; a proper detach operation is required before native editor launch
+  can be wired without closing the editor on server restart. Client editor IDs, paths and optional project roots are
+  checked before launch; executable paths/base args come exclusively from discovery.
 - Native registry/macOS managed-preference policy sources belong with the
   existing `t3-config` loader, whose current implementation loads files only.
   No sibling edit was made to fill that gap.
@@ -142,7 +179,8 @@ service-definition renderers and state/environment helpers.
    limits; hidden index enumeration uses a 64 KiB retained buffer, callbacks and
    batch hashing with the same 10,000 flagged-file limit. A single index line
    over 1 MiB is additionally refused. Reports retain at most 200 priority-sorted
-   entries. Measurement caps are 2 million entries and 30 seconds.
+   entries. Measurement caps are 2 million entries and 30 seconds. Safety snapshot,
+   scheduled-task and workspace-lease waits additionally refuse after 30 seconds.
 2. ZIP requires explicit compressed/member/count/expanded limits and returns a
    bounded member buffer instead of a Node stream. It additionally refuses
    duplicate names, encryption, symlinks/special entries, Windows drive/colon
@@ -169,9 +207,9 @@ service-definition renderers and state/environment helpers.
    cache is trusted. Context/seed/playbook bytes match TS fixtures when given the
    same inputs; native callers provide the runtime-version fact explicitly.
 6. Watch receivers coalesce intermediate states; cleanup reports use an
-   unbounded subscriber channel. Desktop commit cancellation is not Effect's
-   uninterruptible handshake. Desktop/power and other native integrations have
-   no real shell adapter in this crate. Review maps Git/VCS errors to a redacted
+   unbounded subscriber channel. The self-update facade retains desktop commit
+   after caller cancellation; callers bypassing it and invoking DesktopAppUpdate
+   directly do not get that retention. Desktop/power native IPC needs its owner. Review maps Git/VCS errors to a redacted
    host error rather than preserving TS typed diagnostic details.
 7. Service launchers additionally reject unsupported Windows argument quoting
    and control characters. Dotenv compatibility is covered for source-tested
@@ -184,6 +222,28 @@ service-definition renderers and state/environment helpers.
    range. Existing sibling behavior is not re-ported or certified here. POSIX
    native paths/inhibitors/permissions have not been executed on this Windows
    machine. No live service, live T3 database or public network clone was used.
+
+9. Editor launch additionally requires existing absolute paths within canonical
+   discovered workspace roots, rejects parent traversal/network paths/control
+   characters, and checks the optional project root contains the target. This is
+   stricter than TS and required by the host-port task. Discovery uses a blocking
+   60-second cache rather than stale-while-revalidate; detached launch is supplied by the process owner rather than faking Node unref
+   with an owned kill-on-drop task. Line/column conversion uses bounded
+   Rust integers. Native platform integrations were not exercised on macOS/Linux.
+10. Runtime installs additionally cap downloads at 512 MiB, checksums at 1 MiB,
+    expanded archives at 1 GiB/100,000 entries, reject links/special entries,
+    duplicate files and unsafe paths, and bound preflight output to 1 MiB.
+    Extraction is a blocking safe parser rather than a tar subprocess; a timed-out
+    blocking filesystem operation can finish its current operation before stopping.
+    Pruning additionally refuses junctions and only deletes `.pruned-` directories
+    whose suffix is an exact service version. Orphan/prune ordering can differ.
+11. npm additionally bounds registry bodies to 256 KiB and includes semaphore wait
+    in the 15-second lookup bound. Migration metadata is limited to safe integer
+    range. Native transport errors use sanitized reasons instead of raw causes.
+    The native database service exposes explicit failures from manual maintenance;
+    its periodic worker ignores them as TS does. Background worker handles must be
+    retained by composition and dropped on shutdown. Disk-space reads additionally
+    fail after 30 seconds; background repairs can take longer under their owner.
 
 ## Tests
 
@@ -206,7 +266,11 @@ transitions; no sleep polling is used. Test files correspond to source behavior:
 | secretProviderDefinitions.test.ts | existing t3-provider owner |
 | DesktopAppUpdate.test.ts, DesktopUpdateMarker.test.ts | desktop_update.rs |
 | ReviewService.test.ts, worktreesDirectory.test.ts | review_worktrees.rs |
-| serviceLauncher.test.ts | service_triage.rs (definitions, env/state/version cases only) |
+| serviceLauncher.test.ts | service_triage.rs (definitions, env/state/version and backup-stop cases) |
+| persistence/DatabaseStorage.test.ts, DatabaseMaintenance.test.ts (requested repair) | database_storage.rs; actual offline SQL repair waits for its owner |
+| cloud/npmRelease.test.ts | npm_release.rs |
+| cloud/selfUpdate.test.ts, pinnedRuntime.test.ts | self_update.rs, pinned_runtime.rs; all HTTP is injected |
+| process/externalLauncher.test.ts, shared/editor.test.ts | editor.rs |
 | environmentTheme.test.ts | archive_theme.rs |
 | attachmentStore.test.ts, imageMime.test.ts | existing t3-workspace owner |
 
@@ -241,18 +305,23 @@ merged PR eligibility, and forced submodule removal with dirty files/unpushed
 stored history protected. Nested registered orphan worktrees and guest cache pin/
 eviction have focused coverage too. No live service or live T3 data is used.
 
-Verification of the review fixes: `cargo fmt -p t3-host` passed and
-`cargo test -p t3-host` passed **69 tests**, zero failed/ignored: library 4,
-archive/theme 6, background 4, desktop update 5, guest 5, keep-awake 2, policy 8,
-review/worktrees 2, secrets 7, launcher/triage 6, cleanup 20. All commands used
-`D:\t3code-rust-target\server-j` and the workspace's two-job setting unchanged.
-The temporary direct-source guest harness also passed 2 unit and 5 integration
-tests while a sibling import was broken; the complete crate suite subsequently
-passed, so the harness is not a substitute for crate verification.
+## Current verification
 
-`cargo clippy -p t3-host --all-targets --no-deps -- -D warnings` passed on the
-review changes. The exact required command without `--no-deps` remains blocked
-by 57 existing diagnostics in `t3-codex-app-server` (log:
-`D:\t3code-rust-target\server-j\t3-host-review-clippy.log`). No warning was
-suppressed and no sibling crate was edited. The final full test rerun also passed
-all 69 tests after the style fixes. No commit was made.
+Current commands run from `rust/`, with `CARGO_TARGET_DIR` set to
+`D:\t3code-rust-target\host` and the existing two-job cargo config unchanged.
+`cargo fmt -p t3-host` passed. `cargo test -p t3-host` passed **101 tests**,
+zero failed or ignored, across 16 test binaries (plus zero doc tests). Package
+Clippy with `--no-deps -- -D warnings` passed. Exact Clippy without `--no-deps`
+remains blocked by **57 existing result_large_err errors in t3-codex-app-server**.
+No warning was suppressed, no wrapper bypass was needed, and no sibling was fixed.
+
+The fourteen prior
+review findings remain closed; their full regression table is above. New drift
+regressions caught scratch refusal, the lost-git-link failure outcome and an
+unbounded safety read before fixes. A runtime-publication race test also failed
+before its fix: another process's completed runtime is now validated and retained.
+No new local wire types were introduced; launcher persisted types and the local
+managed-policy error retain the prior relocation note. No commit was made.
+
+Logs: `D:\t3code-rust-target\host\t3-host-tests.log`,
+`t3-host-own-clippy.log`, and `t3-host-clippy.log`.

@@ -171,8 +171,7 @@ impl PinnedRuntimeInstaller {
                     "Pinned runtime directory changed during inspection.",
                 ));
             }
-            fs::remove_dir_all(&destination)
-                .map_err(|_| update_error("Could not remove an incomplete pinned runtime."))?;
+            remove_runtime_directory(root.clone(), destination.clone()).await?;
         }
         let archive_name = format!(
             "t3-{}-{}.{}",
@@ -719,7 +718,10 @@ pub async fn prune_pinned_runtimes(
             }
             let target = root.join(format!(".pruned-{version}"));
             if target.exists()
-                && (!direct_directory(&root, &target) || fs::remove_dir_all(&target).is_err())
+                && (!direct_directory(&root, &target)
+                    || remove_runtime_directory(root.clone(), target.clone())
+                        .await
+                        .is_err())
             {
                 continue;
             }
@@ -732,7 +734,9 @@ pub async fn prune_pinned_runtimes(
     let mut removed = Vec::new();
     for target in pruned {
         if direct_directory(&root, &target)
-            && fs::remove_dir_all(&target).is_ok()
+            && remove_runtime_directory(root.clone(), target.clone())
+                .await
+                .is_ok()
             && let Some(version) = target
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -799,4 +803,15 @@ pub struct RuntimeStartup<'a> {
     pub managed: bool,
     pub executable: &'a Path,
     pub unit_program: Option<&'a Path>,
+}
+
+async fn remove_runtime_directory(root: PathBuf, path: PathBuf) -> UpdateResult<()> {
+    tokio::task::spawn_blocking(move || {
+        if !direct_directory(&root, &path) {
+            return Err(update_error("Runtime directory changed during inspection."));
+        }
+        fs::remove_dir_all(path).map_err(|_| update_error("Could not remove the unused runtime."))
+    })
+    .await
+    .map_err(|_| update_error("Runtime removal stopped unexpectedly."))?
 }
