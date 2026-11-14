@@ -1106,7 +1106,12 @@ async fn a_missing_key_keeps_its_records_for_when_it_returns() {
         .await
         .unwrap();
     drop(while_missing);
-    assert!(secrets.load(&first_id).unwrap().is_some(), "never overwritten");
+    assert!(
+        t3_platform::SecretKeyStore::load(&*secrets, &first_id)
+            .unwrap()
+            .is_some(),
+        "never overwritten"
+    );
     hidden.lock().unwrap().clear();
     let returned = NativePlatform::open(hiding()).await.unwrap();
     assert_eq!(returned.open_report().recovered_secure_records, 1);
