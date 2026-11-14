@@ -350,6 +350,7 @@ async fn real_http_pairing_effect_rpc_scopes_revocation_static_and_shutdown() {
         .unwrap();
     let access = chunk(&mut socket, &mut client).await;
     assert_eq!(access["type"], "snapshot");
+    assert_eq!(access["payload"]["connectDevices"], json!([]));
     assert!(
         access["payload"]["clientSessions"]
             .as_array()

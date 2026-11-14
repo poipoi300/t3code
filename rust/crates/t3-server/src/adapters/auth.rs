@@ -154,11 +154,17 @@ impl AuthService {
     ) -> t3_auth::Result<bool> {
         self.inner.revoke_client(&session.session_id, target).await
     }
+    /// Also removes the other trusted Connect keys and their unspent credentials.
     pub async fn revoke_others(&self, session: &VerifiedSession) -> t3_auth::Result<usize> {
         self.inner
-            .sessions
-            .revoke_all_except(&session.session_id)
+            .revoke_other_client_sessions(&session.session_id)
             .await
+    }
+    pub async fn approve_connect_device(&self, pairing_link_id: &str) -> t3_auth::Result<bool> {
+        self.inner.approve_connect_device(pairing_link_id).await
+    }
+    pub async fn revoke_connect_device(&self, proof_key: &str) -> t3_auth::Result<bool> {
+        self.inner.revoke_connect_device(proof_key).await
     }
     pub async fn exchange(
         &self,
@@ -309,13 +315,22 @@ pub fn access_stream(
         let auth=services.local.auth.inner();
         let mut links=auth.pairing.subscribe().await;
         let mut sessions=auth.sessions.subscribe().await;
-        let pairing_links=auth.list_pairing_links(None).await.map_err(service_error)?;
-        let client_sessions=auth.list_client_sessions(Some(&current)).await.map_err(service_error)?;
-        let snapshot=serde_json::json!({"version":1,"revision":1,"type":"snapshot","payload":{"pairingLinks":pairing_links,"clientSessions":client_sessions}});
-        yield serde_json::from_value(snapshot).map_err(service_error)?;
+        let snapshot=async |revision:u64| -> crate::Result<AuthAccessStreamEvent> {
+            let pairing_links=auth.list_pairing_links(None).await.map_err(service_error)?;
+            let client_sessions=auth.list_client_sessions(Some(&current)).await.map_err(service_error)?;
+            let connect_devices=auth.list_connect_devices().await.map_err(service_error)?;
+            serde_json::from_value(serde_json::json!({"version":1,"revision":revision,"type":"snapshot","payload":{"pairingLinks":pairing_links,"clientSessions":client_sessions,"connectDevices":connect_devices}})).map_err(service_error)
+        };
+        yield snapshot(1).await?;
         let mut revision=1u64;
         loop {
             let change=tokio::select! {c=links.recv()=>Either::Left(c),c=sessions.recv()=>Either::Right(c)};
+            // Trust changes have no event of their own: the client gets a fresh snapshot.
+            if let Either::Left(Some(PairingChange::ConnectDevicesChanged))=change {
+                revision+=1;
+                yield snapshot(revision).await?;
+                continue;
+            }
             let (kind,mut payload)=match change {
                 Either::Left(Some(PairingChange::PairingLinkUpserted(link)))=>("pairingLinkUpserted",serde_json::to_value(link).map_err(service_error)?),
                 Either::Left(Some(PairingChange::PairingLinkRemoved(id)))=>("pairingLinkRemoved",serde_json::json!({"id":id})),

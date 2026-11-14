@@ -275,7 +275,6 @@ async fn every_unassembled_command_is_recognized_and_fails_explicitly() {
         &["__ssh-helper", "update-remaining", "marker"],
         &["--completions", "powershell"],
         &["serve", "--bootstrap-fd", "0"],
-        &["serve", "--dev-url", "http://localhost:1"],
         &["--completions", "pwsh"],
         &["--wizard"],
         &["thread", "list", "--no-json"],
@@ -307,6 +306,94 @@ async fn every_unassembled_command_is_recognized_and_fails_explicitly() {
         );
     }
     assert!(!root.path().join("account").exists());
+}
+
+/// `t3 serve` with a dev URL (flag or `VITE_DEV_SERVER_URL`) starts dev mode: Replay (dev), the loopback redirect to the dev URL. `t3 pair` prints the dev URL's pairing
+/// link as TypeScript does, plus one on the server's own origin for the desktop and mobile apps.
+#[tokio::test]
+async fn serve_with_a_dev_url_starts_dev_mode_and_pairs_on_both_origins() {
+    for from_env in [false, true] {
+        let root = TempDir::new().unwrap();
+        let home = root.path().join("server");
+        let home_text = home.to_str().unwrap();
+        let dev = "http://127.0.0.1:5733";
+        let mut cmd = command(root.path());
+        cmd.args([
+            "serve",
+            "--home-dir",
+            home_text,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+        ]);
+        if from_env {
+            cmd.env("VITE_DEV_SERVER_URL", dev);
+        } else {
+            cmd.args(["--dev-url", dev]);
+        }
+        let (mut child, origin, startup) = launch(cmd).await;
+        assert!(
+            !origin.contains("5733"),
+            "serve announces the server origin: {origin}"
+        );
+        // An explicit home keeps `userdata`; only an implicit one moves dev state to `dev`.
+        let runtime: Value = serde_json::from_slice(
+            &std::fs::read(home.join("userdata/server-runtime.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(runtime["devUrl"], format!("{dev}/"));
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let shell = http
+            .get(format!("{origin}/threads/x?y=1"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(shell.status(), 302);
+        assert_eq!(shell.headers()["location"], format!("{dev}/threads/x?y=1"));
+        assert_eq!(
+            http.post(format!("{origin}/api/auth/browser-session"))
+                .json(&json!({"credential": startup}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        let settings = std::fs::read_to_string(home.join("userdata/settings.json")).unwrap();
+        assert!(settings.contains("devReplay"), "{settings}");
+
+        let pair = output(root.path(), &["pair", "--home-dir", home_text]).await;
+        assert!(pair.status.success(), "{}", stderr(&pair));
+        let text = stdout(&pair);
+        let token = text
+            .lines()
+            .find_map(|line| line.strip_prefix("Token: "))
+            .unwrap();
+        assert!(
+            text.contains(&format!("Pairing URL: {dev}/pair#token={token}")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("Server pairing URL: {origin}/pair#token={token}")),
+            "{text}"
+        );
+        assert_eq!(
+            http.post(format!("{origin}/api/auth/browser-session"))
+                .json(&json!({"credential": token}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
 }
 
 #[tokio::test]

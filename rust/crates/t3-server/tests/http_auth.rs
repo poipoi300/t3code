@@ -715,19 +715,25 @@ async fn client_session_revocation() {
         json(response).await["authenticated"] == true
     };
 
-    let unauthenticated = f
-        .post("/api/auth/clients/revoke")
-        .json(&json!({"sessionId": "x"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(unauthenticated.status(), 401);
-    let read_only = f.credential(&admin, &["orchestration:read"]).await;
-    let read_only = f.bearer(&read_only, None).await;
-    for (path, body) in [
+    let guarded = [
         ("/api/auth/clients/revoke", json!({"sessionId": "x"})),
         ("/api/auth/clients/revoke-others", json!({})),
-    ] {
+        (
+            "/api/auth/connect-devices/approve",
+            json!({"pairingLinkId": "x"}),
+        ),
+        (
+            "/api/auth/connect-devices/revoke",
+            json!({"proofKeyThumbprint": "x"}),
+        ),
+    ];
+    for (path, body) in &guarded {
+        let unauthenticated = f.post(path).json(body).send().await.unwrap();
+        assert_eq!(unauthenticated.status(), 401, "{path}");
+    }
+    let read_only = f.credential(&admin, &["orchestration:read"]).await;
+    let read_only = f.bearer(&read_only, None).await;
+    for (path, body) in guarded {
         let response = f
             .post(path)
             .header("authorization", format!("Bearer {read_only}"))
@@ -742,6 +748,31 @@ async fn client_session_revocation() {
             "insufficient_scope",
         )
         .await;
+    }
+
+    // Unknown Connect requests and keys are answered, not refused.
+    for (path, body, answer) in [
+        (
+            "/api/auth/connect-devices/approve",
+            json!({"pairingLinkId": "unknown"}),
+            json!({"approved": false}),
+        ),
+        (
+            "/api/auth/connect-devices/revoke",
+            json!({"proofKeyThumbprint": "unknown"}),
+            json!({"revoked": false}),
+        ),
+    ] {
+        let response = f
+            .post(path)
+            .header("cookie", &admin)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{path}");
+        assert_no_store(&response);
+        assert_eq!(json(response).await, answer, "{path}");
     }
 
     // A session cannot revoke itself.

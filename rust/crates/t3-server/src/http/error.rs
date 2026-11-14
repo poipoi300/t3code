@@ -93,6 +93,11 @@ impl ApiError {
                 Self::invalid_request(h::EnvironmentRequestInvalidReason::ScopeNotGranted)
             }
             Error::PolicyRefused(message) => Self::forbidden_message(message),
+            // A Connect device waiting for approval is not a credential failure: no recovery.
+            Error::ConnectApprovalPending => Self::json(
+                StatusCode::FORBIDDEN,
+                Error::ConnectApprovalPending.connect_approval_pending_response(trace_id()),
+            ),
             e if e.is_credential() => {
                 let (reason, dpop_failure_reason) = match &e {
                     Error::MissingCredential => {
@@ -162,4 +167,21 @@ pub fn trace_id() -> TrimmedNonEmptyString {
         hasher.finish()
     };
     TrimmedNonEmptyString(format!("{:016x}{:016x}", part(0), part(1)))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pending_connect_device_is_forbidden_not_a_credential_failure() {
+        let error = ApiError::from_auth(Error::ConnectApprovalPending, Internal::InternalError);
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert!(!error.dpop_failed());
+        let body = error.body.unwrap();
+        assert_eq!(body["_tag"], "EnvironmentConnectApprovalPendingError");
+        assert_eq!(body["code"], "connect_approval_pending");
+        assert!(body["traceId"].is_string(), "{body}");
+    }
 }

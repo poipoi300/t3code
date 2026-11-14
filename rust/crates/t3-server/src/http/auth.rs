@@ -40,6 +40,70 @@ pub fn routes(router: Router<Arc<ServiceRegistry>>) -> Router<Arc<ServiceRegistr
         .route("/api/auth/pairing-links/revoke", post(revoke_pairing_link))
         .route("/api/auth/clients/revoke", post(revoke))
         .route("/api/auth/clients/revoke-others", post(revoke_others))
+        .route(APPROVE_CONNECT_DEVICE, post(approve_connect_device))
+        .route(REVOKE_CONNECT_DEVICE, post(revoke_connect_device))
+}
+
+const APPROVE_CONNECT_DEVICE: &str = "/api/auth/connect-devices/approve";
+const REVOKE_CONNECT_DEVICE: &str = "/api/auth/connect-devices/revoke";
+
+/// Connect device routes check their scope through `t3-auth`'s route table.
+async fn connect_device_session(
+    s: &ServiceRegistry,
+    req: &Request,
+    path: &str,
+) -> Result<(), ApiError> {
+    let session = authenticate(s, req, None).await?;
+    t3_auth::authorization::authorize_connect_device_http(&session.scopes, "POST", path)
+        .map_err(|e| ApiError::from_auth(e, Internal::InternalError))
+}
+
+async fn approve_connect_device(
+    State(s): State<Arc<ServiceRegistry>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    request_in: axum::extract::Request,
+) -> Response {
+    let (req, headers, body) = split(remote, request_in);
+    if let Err(error) = connect_device_session(&s, &req, APPROVE_CONNECT_DEVICE).await {
+        return error.into_response();
+    }
+    let input: AuthApproveConnectDeviceInput = match body::json(&headers, body).await {
+        Ok(input) => input,
+        Err(e) => return body_error(e),
+    };
+    match s
+        .local
+        .auth
+        .approve_connect_device(&input.pairing_link_id.0)
+        .await
+    {
+        Ok(approved) => credential_json(AuthApproveConnectDeviceResult { approved }),
+        Err(e) => ApiError::from_auth(e, Internal::ConnectDeviceApproveFailed).into_response(),
+    }
+}
+
+async fn revoke_connect_device(
+    State(s): State<Arc<ServiceRegistry>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    request_in: axum::extract::Request,
+) -> Response {
+    let (req, headers, body) = split(remote, request_in);
+    if let Err(error) = connect_device_session(&s, &req, REVOKE_CONNECT_DEVICE).await {
+        return error.into_response();
+    }
+    let input: AuthRevokeConnectDeviceInput = match body::json(&headers, body).await {
+        Ok(input) => input,
+        Err(e) => return body_error(e),
+    };
+    match s
+        .local
+        .auth
+        .revoke_connect_device(&input.proof_key_thumbprint.0)
+        .await
+    {
+        Ok(revoked) => credential_json(AuthRevokeConnectDeviceResult { revoked }),
+        Err(e) => ApiError::from_auth(e, Internal::ConnectDeviceRevokeFailed).into_response(),
+    }
 }
 
 /// `Json` plus the credential cache headers.

@@ -669,12 +669,9 @@ pub fn parse(
             json: flag(leaf, "json").unwrap_or(false),
         }),
         _ => {
-            if resolved.private_network_only
-                || resolved.tailscale_serve_enabled
-                || resolved.dev_url.is_some()
-            {
+            if resolved.private_network_only || resolved.tailscale_serve_enabled {
                 return Err(CliError::Unavailable(
-                    "LAN fencing, Tailscale Serve and dev proxy".into(),
+                    "LAN fencing and Tailscale Serve".into(),
                 ));
             }
             if resolved.auto_bootstrap_project_from_cwd {
@@ -734,6 +731,7 @@ pub async fn run(invocation: Invocation) -> Result<(), CliError> {
         Invocation::Printed => Ok(()),
         Invocation::Serve(inputs) => {
             let config = crate::adapters::config::resolve(&inputs)?;
+            let headless = inputs.headless;
             let server = crate::runtime::start_with_global_tracing(*inputs).await?;
             if !server.wait_ready().await {
                 server.wait().await?;
@@ -749,6 +747,12 @@ pub async fn run(invocation: Invocation) -> Result<(), CliError> {
             .and_then(|output| {
                 let mut stdout = std::io::stdout().lock();
                 writeln!(stdout, "{output}")?;
+                // `announceStartupPairingUrl`: a browser-presentation dev server pairs through
+                // the dev URL, which the dev runner and its scripts read from this line.
+                if !headless && let Some(dev) = &config.dev_url {
+                    let pairing = pairing_url(dev.as_str(), &server.pairing_credential)?;
+                    writeln!(stdout, "  pairingUrl: {pairing}")?;
+                }
                 stdout.flush()?;
                 Ok(())
             });
@@ -766,9 +770,11 @@ pub async fn run(invocation: Invocation) -> Result<(), CliError> {
             label,
         } => {
             let paired = local::pair(*inputs, scopes, ttl, label).await?;
+            let server_origin = connection_string(paired.host.as_deref(), paired.port);
             let base = paired
                 .dev_url
-                .unwrap_or_else(|| connection_string(paired.host.as_deref(), paired.port));
+                .clone()
+                .unwrap_or_else(|| server_origin.clone());
             let pairing = pairing_url(&base, &paired.credential)?;
             println!(
                 "Pairing with {} ({}).\n\n{}\n\nPairing URL: {pairing}\nApp link: {}\nToken: {}\nExpires: {}",
@@ -779,6 +785,15 @@ pub async fn run(invocation: Invocation) -> Result<(), CliError> {
                 paired.credential,
                 paired.expires_at
             );
+            // TypeScript pairs a dev server through the dev URL only, which works for clients
+            // that reach the server through the dev URL's proxy. The desktop and mobile apps pair
+            // with the server itself, so a dev server also prints its own origin.
+            if paired.dev_url.is_some() {
+                println!(
+                    "Server pairing URL: {}",
+                    pairing_url(&server_origin, &paired.credential)?
+                );
+            }
             if url::Url::parse(&base)
                 .ok()
                 .and_then(|url| url.host_str().map(str::to_owned))
