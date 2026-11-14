@@ -37,6 +37,9 @@ pub struct WorkspaceTitlebarGeometry {
     pub controls_right: Points,
     pub content_left: Points,
     pub native_controls_right: Points,
+    /// The macOS traffic lights' inset from the window's left edge, with the source's 12px
+    /// margin; zero without native controls on the left (Windows, Linux, web, mobile).
+    pub native_controls_left: Points,
 }
 
 /// index.css's workspace variables and ui/sidebar.tsx's titlebar-content-left calculation.
@@ -69,6 +72,11 @@ pub fn workspace_titlebar_geometry(window: &WindowRef) -> WorkspaceTitlebarGeome
         content_left: px(controls_left + 28.0 + 12.0),
         native_controls_right: px(if desktop && area.right.0 > 0.0 {
             area.right.0 + 12.0
+        } else {
+            0.0
+        }),
+        native_controls_left: px(if desktop && area.left.0 > 0.0 {
+            area.left.0 + 12.0
         } else {
             0.0
         }),

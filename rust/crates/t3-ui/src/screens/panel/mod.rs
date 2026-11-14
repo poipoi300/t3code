@@ -892,7 +892,33 @@ pub fn right_panel_tabs(
             ))
             .child(add),
     );
-    let header = view().app_class(tw("flex h-[var(--workspace-topbar-height)] min-h-[var(--workspace-topbar-height)] shrink-0 items-center gap-1 pl-2 pr-3"))
+    // SH-TITLEBAR's native window controls (the app header reserves the same geometry): the
+    // pane's header always reaches the window's right edge (Windows/Linux caption buttons), and
+    // its left edge in the compact page or a maximized pane with the sidebar closed (macOS
+    // traffic lights). Without native controls (web, mobile) this is the source's pl-2 pr-3.
+    let native_window = nsh_core::element::desktop::current_window();
+    let geometry =
+        computed(move || crate::screens::titlebar::workspace_titlebar_geometry(&native_window));
+    let sidebar_open = use_context::<crate::state::panels::Panels>().map(|panels| panels.sidebar_open);
+    let placement = panel_layout();
+    let at_left_edge = computed(move || match placement.get() {
+        Some(LayoutClass::Compact) => true,
+        Some(LayoutClass::Wide) => {
+            state.with(|p| p.maximized == Some(true))
+                && !sidebar_open.is_some_and(|open| open.get())
+        }
+        _ => false,
+    });
+    let header = view().app_class(tw("flex h-[var(--workspace-topbar-height)] min-h-[var(--workspace-topbar-height)] shrink-0 items-center gap-1"))
+        .test_id("workspace-panel-header")
+        .pl(move || {
+            let reserved = geometry.get().native_controls_left;
+            if at_left_edge.get() && reserved.0 > 0.0 { reserved } else { px(8.0) }
+        })
+        .pr(move || {
+            let reserved = geometry.get().native_controls_right;
+            if reserved.0 > 0.0 { reserved } else { px(12.0) }
+        })
         // Native scroll owns touch/wheel gestures; CSS ScrollArea's DOM observer is unnecessary.
         .child(scroll().horizontal().flex_1().min_w(px(0.0)).test_id("panel-tabs-scroll")
             .element_ref(&strip_scroll)

@@ -553,3 +553,110 @@ fn the_sidebar_shelves_mount_their_markers_and_page_the_settled_tail() {
     // 35 settled rows are listed; the virtual list builds only those in view.
     assert!(old_rows(&app) < 35, "markers keep the list virtualised");
 }
+
+// ---- The workspace panel's header and the native window controls (integration 4) ----
+
+#[component]
+fn PanelHeader() -> impl IntoElement {
+    t3_ui::theme::install(&Default::default());
+    provide_context(t3_ui::state::panels::Panels::new());
+    let host = t3_ui::screens::panel::PanelHost::new(
+        t3_ui::screens::panel::PanelStore::default(),
+        |_| {},
+    );
+    view().w_full().h_full().child(t3_ui::screens::panel::right_panel_tabs(
+        host,
+        key(),
+        t3_ui::screens::panel::PanelRegistry::new(vec![]),
+        view()
+            .test_id("panel-layout-test")
+            .w(px(32.0))
+            .h(px(28.0)),
+    ))
+}
+
+fn start_panel_header(os: Os, window: (f32, f32), title_bar: nsh_core::geometry::Edges<nsh_core::geometry::Points>) -> Headless {
+    let mut config = EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(window.0), px(window.1)),
+        ..EngineConfig::new(Root::of::<PanelHeader>())
+    };
+    config.environment.os = os;
+    let mut app = Headless::start(config).expect("panel header");
+    app.first_render().expect("mounted");
+    if title_bar != nsh_core::geometry::Edges::default() {
+        app.set_environment("native titlebar geometry", move |environment| {
+            environment.title_bar = title_bar;
+            environment.window_state = Some(
+                environment
+                    .window_state
+                    .unwrap_or_else(nsh_core::desktop::WindowState::default),
+            );
+        })
+        .expect("native geometry");
+    }
+    app
+}
+
+fn node_bounds(app: &Headless, id: &str) -> nsh_core::geometry::Bounds<nsh_core::geometry::Points> {
+    app.screen()
+        .layout_nodes()
+        .iter()
+        .find(|node| node.test_id.as_deref() == Some(id))
+        .unwrap_or_else(|| panic!("mounted {id}"))
+        .bounds
+}
+
+fn edges(left: f32, right: f32, top: f32) -> nsh_core::geometry::Edges<nsh_core::geometry::Points> {
+    nsh_core::geometry::Edges {
+        top: px(top),
+        left: px(left),
+        right: px(right),
+        bottom: px(0.0),
+    }
+}
+
+#[test]
+fn the_panel_header_leaves_the_native_window_controls_free() {
+    // Windows and Linux: caption buttons on the right; the header's last control ends before them.
+    for os in [Os::Windows, Os::Linux] {
+        let app = start_panel_header(os, DESKTOP, edges(0.0, 138.0, 40.0));
+        let controls = node_bounds(&app, "panel-layout-test");
+        assert!(
+            controls.right().0 <= DESKTOP.0 - 138.0,
+            "{os:?}: the header's controls end at {} under the caption buttons from {}",
+            controls.right().0,
+            DESKTOP.0 - 138.0
+        );
+    }
+    // macOS, compact window (the panel is a full-width page): the traffic lights on the left.
+    let narrow = (600.0, 800.0);
+    let app = start_panel_header(Os::MacOs, narrow, edges(78.0, 0.0, 52.0));
+    let tabs = node_bounds(&app, "panel-tabs-scroll");
+    assert!(
+        tabs.origin.x.0 >= 78.0,
+        "the tab strip starts at {} under the traffic lights to 78",
+        tabs.origin.x.0
+    );
+    // Web and mobile: no native controls, the source's pl-2 pr-3.
+    for os in [Os::Web, Os::Android] {
+        let app = start_panel_header(os, DESKTOP, nsh_core::geometry::Edges::default());
+        assert_eq!(node_bounds(&app, "panel-layout-test").right().0, DESKTOP.0 - 12.0, "{os:?}");
+        assert_eq!(node_bounds(&app, "panel-tabs-scroll").origin.x.0, 8.0, "{os:?}");
+    }
+}
+
+/// The desktop pass drives the "+" menu by role and name: "Diff" is an enabled `menuitem`
+/// named by its label, and invoking it opens the Diff surface.
+#[test]
+fn the_add_surface_menu_items_are_named_and_invocable() {
+    let mut app = workspace(DESKTOP, false);
+    app.press("role:button[Toggle right panel]")
+        .expect("open workspace panel");
+    app.press("role:button[Files]").expect("first surface");
+    app.wait_for("id:file-preview-panel").expect("files");
+    app.press("role:button[Add panel surface]").expect("menu");
+    app.press("role:menuitem[Diff]")
+        .expect("the Diff item is a named, enabled menuitem");
+    app.wait_for("id:panel-tab-diff").expect("invoking it opens Diff");
+}
