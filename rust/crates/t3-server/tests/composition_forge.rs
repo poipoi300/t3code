@@ -470,6 +470,12 @@ impl Server {
         let exit = loop {
             match self.event().await {
                 CallEvent::Exit { id: done, exit } if done == id => break exit,
+                // This call's own chunks are acknowledged at once, as a real client does, so a
+                // stream call runs to its exit; they are still kept for the caller.
+                CallEvent::Chunk { id: own, values } if own == id => {
+                    self.client.acknowledge(own.clone());
+                    pending.push((own, values));
+                }
                 CallEvent::Chunk { id, values } => pending.push((id, values)),
                 _ => {}
             }
@@ -1156,6 +1162,58 @@ async fn vcs_status_carries_the_pull_request_from_the_checkouts_forge() {
             }
         }
     }
+    s.socket.close(None).await.unwrap();
+    s.runtime.shutdown().await.unwrap();
+}
+
+/// `git.runStackedAction`'s pull-request step on GitLab: the head context asks the forge whether
+/// it creates merge requests in the remote (GitLab cannot tell, so yes, as in TypeScript), then
+/// finds the branch's open merge request through `glab mr list`.
+#[tokio::test]
+async fn stacked_pull_request_step_finds_the_open_merge_request_on_gitlab() {
+    let (github, _) = github_stand_in().await;
+    let mut s = Server::start_with(&github, |_| {
+        (vec![("GIT_SSH_COMMAND".into(), "false".into())], Vec::new())
+    })
+    .await;
+    let repo = s.home().join("stacked");
+    repository(&repo);
+    git(&repo, &["switch", "-q", "-c", "feature"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", "git@gitlab.com:acme/web.git"],
+    );
+    git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/feature", "HEAD"],
+    );
+    git(&repo, &["branch", "--set-upstream-to=origin/feature"]);
+    s.insert_project("stacked", &repo);
+    let exit = s
+        .call_as(
+            "git.runStackedAction",
+            json!({"actionId": "action:pr", "cwd": repo.to_string_lossy(), "action": "create_pr"}),
+            CallKind::Stream,
+        )
+        .await;
+    let events: Vec<Value> = s.chunks.drain(..).flat_map(|(_, values)| values).collect();
+    ok(exit);
+    let finished = events
+        .iter()
+        .find(|event| event["kind"] == "action_finished")
+        .unwrap_or_else(|| panic!("no action_finished in {events:?}"));
+    assert_eq!(
+        finished["result"]["pr"]["status"], "opened_existing",
+        "{finished}"
+    );
+    assert_eq!(finished["result"]["pr"]["number"], 7, "{finished}");
+    assert!(
+        glab_calls(s.home())
+            .iter()
+            .any(|call| call == "gitlab.com mr list"),
+        "{:?}",
+        glab_calls(s.home())
+    );
     s.socket.close(None).await.unwrap();
     s.runtime.shutdown().await.unwrap();
 }

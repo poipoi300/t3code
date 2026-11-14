@@ -918,8 +918,11 @@ async fn status_reads_refuse_a_folder_whose_saved_repository_changed() {
     std::fs::create_dir_all(home.join("userdata")).unwrap();
     std::fs::write(
         home.join("userdata").join("repository-bindings.json"),
-        serde_json::to_vec(&json!({ &changed_key: earlier_binding, &kept_key: kept_binding }))
-            .unwrap(),
+        serde_json::to_vec(&json!({
+            &changed_key: {"repository": earlier_binding},
+            &kept_key: {"repository": kept_binding},
+        }))
+        .unwrap(),
     )
     .unwrap();
 
@@ -933,6 +936,71 @@ async fn status_reads_refuse_a_folder_whose_saved_repository_changed() {
     repository_changed(s.call("vcs.refreshBranch", cwd).await);
     // The folder that still holds its bound repository is served.
     let refreshed = ok(s.call("vcs.refreshStatus", json!({"cwd": kept_key})).await);
+    assert_eq!(refreshed["isRepo"], true, "{refreshed}");
+    s.socket.close(None).await.unwrap();
+    s.runtime.take().unwrap().shutdown().await.unwrap();
+}
+
+/// The saved record for `folder` in the server's bindings file.
+fn saved_record(home: &Path, folder: &Path) -> Value {
+    let saved: Value = serde_json::from_slice(
+        &std::fs::read(home.join("userdata").join("repository-bindings.json")).unwrap(),
+    )
+    .unwrap();
+    saved[folder.to_string_lossy().as_ref()].clone()
+}
+
+/// Re-review 4, explicit trust: the git panel's Initialize creates the repository at the user's
+/// request, so it is trusted in the same operation. A folder first recorded without a repository
+/// (F3) is initialised through the server, then read with no refusal, and its saved record (what
+/// checkpoints read) names the new repository.
+#[tokio::test]
+async fn initialising_through_the_server_trusts_the_new_repository() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().to_owned();
+    let folder = home.join("worktrees").join("fresh");
+    std::fs::create_dir_all(&folder).unwrap();
+    let key = folder.to_string_lossy().into_owned();
+    std::fs::create_dir_all(home.join("userdata")).unwrap();
+    std::fs::write(
+        home.join("userdata").join("repository-bindings.json"),
+        serde_json::to_vec(&json!({ &key: {"repository": null} })).unwrap(),
+    )
+    .unwrap();
+
+    let mut s = Server::start_in(temp).await;
+    ok(s.call("vcs.init", json!({"cwd": key})).await);
+    let refreshed = ok(s.call("vcs.refreshStatus", json!({"cwd": key})).await);
+    assert_eq!(refreshed["isRepo"], true, "{refreshed}");
+    let record = saved_record(s.home(), &folder);
+    assert_eq!(record["repository"]["version"], 2, "{record}");
+    s.socket.close(None).await.unwrap();
+    s.runtime.take().unwrap().shutdown().await.unwrap();
+}
+
+/// A worktree created through the server is a repository the server made: it is recorded as
+/// trusted in the same operation, so its first checkpoint finds its own saved binding.
+#[tokio::test]
+async fn a_worktree_created_through_the_server_is_recorded_as_trusted() {
+    let mut s = Server::start().await;
+    let project = s.home().join("project");
+    repository(&project);
+    s.insert_project("project-1", &project);
+    let created = ok(s
+        .call(
+            "vcs.createWorktree",
+            json!({"cwd": project.to_string_lossy(), "refName": "main", "newRefName": "feature/trusted", "path": null}),
+        )
+        .await);
+    let worktree = PathBuf::from(created["worktree"]["path"].as_str().unwrap());
+    let record = saved_record(s.home(), &worktree);
+    assert_eq!(record["repository"]["version"], 2, "{record}");
+    let refreshed = ok(s
+        .call(
+            "vcs.refreshStatus",
+            json!({"cwd": worktree.to_string_lossy()}),
+        )
+        .await);
     assert_eq!(refreshed["isRepo"], true, "{refreshed}");
     s.socket.close(None).await.unwrap();
     s.runtime.take().unwrap().shutdown().await.unwrap();

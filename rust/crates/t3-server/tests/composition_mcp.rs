@@ -1063,6 +1063,39 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
         )
         .await;
     assert!(is_error(&attachments), "{attachments}");
+    // Review L4: the unavailable result names the tool the agent called.
+    assert_eq!(
+        attachments["result"]["structuredContent"]["tool"], "t3_thread_send_attachments",
+        "{attachments}"
+    );
+    // Review L3: TypeScript's not-found texts.
+    let absent_send = mcp
+        .call(
+            &token,
+            "t3_thread_send",
+            json!({"threadId":"thread:absent","message":"Hello"}),
+        )
+        .await;
+    assert!(
+        absent_send.to_string().contains("thread_not_found")
+            && absent_send
+                .to_string()
+                .contains("Thread thread:absent was not found."),
+        "{absent_send}"
+    );
+    let absent_request = mcp
+        .call(
+            &token,
+            "t3_pending_request",
+            json!({"action":"read","requestId":"request:absent"}),
+        )
+        .await;
+    assert!(
+        absent_request
+            .to_string()
+            .contains("The pending user-input request was not found."),
+        "{absent_request}"
+    );
 
     // A credential for B, whose provider holds no run, cannot write as B.
     let registry = sessions.registry().unwrap();
@@ -1334,6 +1367,19 @@ async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
         status["result"]["structuredContent"]["missingServiceMethod"],
         "ThreadManagementService::delegated_task_result_pending",
         "{status}"
+    );
+    // Review L2: a follow-up to the delegated child is a task run, and says which task.
+    let follow_up = mcp
+        .call(
+            &token,
+            "t3_thread_send",
+            json!({"threadId": child, "message": "One more thing"}),
+        )
+        .await;
+    assert!(!is_error(&follow_up), "{follow_up}");
+    assert_eq!(
+        follow_up["result"]["structuredContent"]["taskId"], task_id.as_str(),
+        "{follow_up}"
     );
     // Another live thread cannot read this task: it is not its owner.
     const NEIGHBOUR: &str = "thread:mcp-neighbour";

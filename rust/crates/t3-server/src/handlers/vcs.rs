@@ -40,24 +40,6 @@ mod live {
         })
     }
 
-    /// The orchestration adapter's saved repository bindings (it starts after Git, so it is
-    /// looked up at call time); none without orchestration.
-    fn saved_bindings(
-        ctx: &crate::registry::Context,
-    ) -> Option<Arc<dyn crate::adapters::git::SavedRepositoryBindings>> {
-        #[cfg(feature = "orchestration")]
-        {
-            ctx.services
-                .domain::<crate::adapters::orchestration::OrchestrationAdapter>()
-                .map(|adapter| adapter as Arc<dyn crate::adapters::git::SavedRepositoryBindings>)
-        }
-        #[cfg(not(feature = "orchestration"))]
-        {
-            let _ = ctx;
-            None
-        }
-    }
-
     fn setup_error(error: Error) -> Failure<EnvironmentAuthorizationError> {
         match error {
             Error::Authorization(e) => Failure::Typed(*e),
@@ -75,12 +57,7 @@ mod live {
             let a = a.clone();
             async move {
                 let mut branches = a
-                    .subscribe_vcs_branch(
-                        &ctx.session_id,
-                        ctx.call.socket_id(),
-                        saved_bindings(&ctx).as_deref(),
-                        input,
-                    )
+                    .subscribe_vcs_branch(&ctx.session_id, ctx.call.socket_id(), input)
                     .await
                     .map_err(status_error(WsSubscribeVcsBranchRpc::TAG))?;
                 Ok(async_stream::stream! {
@@ -94,7 +71,7 @@ mod live {
         registry.register::<WsVcsRefreshBranchRpc, _, _>(move |ctx, input| {
             let a = a.clone();
             async move {
-                a.refresh_branch(&ctx.session_id, saved_bindings(&ctx).as_deref(), input)
+                a.refresh_branch(&ctx.session_id, input)
                     .await
                     .map_err(status_error(WsVcsRefreshBranchRpc::TAG))
             }
@@ -104,12 +81,7 @@ mod live {
             let a = a.clone();
             async move {
                 let mut statuses = a
-                    .subscribe_vcs_status(
-                        &ctx.session_id,
-                        ctx.call.socket_id(),
-                        saved_bindings(&ctx).as_deref(),
-                        input,
-                    )
+                    .subscribe_vcs_status(&ctx.session_id, ctx.call.socket_id(), input)
                     .await
                     .map_err(status_error(WsSubscribeVcsStatusRpc::TAG))?;
                 Ok(async_stream::stream! {
@@ -123,7 +95,7 @@ mod live {
         registry.register::<WsVcsRefreshStatusRpc, _, _>(move |ctx, input| {
             let a = a.clone();
             async move {
-                a.refresh_status(&ctx.session_id, saved_bindings(&ctx).as_deref(), input)
+                a.refresh_status(&ctx.session_id, input)
                     .await
                     .map_err(status_error(WsVcsRefreshStatusRpc::TAG))
             }
@@ -153,7 +125,7 @@ mod live {
                 let _admitted =
                     crate::writers::admit(&ctx.services, "Git worktree creation", &input.cwd.0)
                         .await;
-                a.create_worktree(&ctx.session_id, saved_bindings(&ctx).as_deref(), input)
+                a.create_worktree(&ctx.session_id, input)
                     .await
                     .map_err(worktree_error)
             }

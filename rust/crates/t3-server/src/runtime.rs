@@ -517,6 +517,15 @@ async fn start_domains(
     {
         authority.follow(events, context.shutdown.clone());
     }
+    // VCS status reads apply each folder's saved repository binding (t3-git re-review 4).
+    #[cfg(all(feature = "git", feature = "orchestration"))]
+    if let (Some(git), Some(orchestration)) = (
+        domains.get::<crate::adapters::git::GitAdapter>(),
+        domains.get::<crate::adapters::orchestration::OrchestrationAdapter>(),
+    ) && let Some(vcs) = git.vcs()
+    {
+        vcs.use_saved_bindings(orchestration);
+    }
     #[cfg(feature = "providers")]
     {
         let providers = crate::adapters::providers::ProvidersAdapter::start(

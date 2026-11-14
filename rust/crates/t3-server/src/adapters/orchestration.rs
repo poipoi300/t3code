@@ -320,19 +320,32 @@ impl OrchestrationAdapter {
     /// apply it with `Git::with_repository_binding`, which refuses with `RepositoryChanged` when
     /// the folder now belongs elsewhere. `None` when the scope was never bound. Keys are the
     /// folder exactly as the project or thread records it.
+    /// `Some(None)`: recorded when the folder was not a repository (re-review 4 F3). The record is
+    /// the checkpoint backend's `{"repository": binding | null}`.
     pub async fn repository_binding(
         &self,
         scope: &std::path::Path,
-    ) -> OrchestrationResult<Option<t3_git::RepositoryBinding>> {
+    ) -> OrchestrationResult<Option<Option<t3_git::RepositoryBinding>>> {
         use t3_orchestration::api::RepositoryBindingStore;
+        #[derive(serde::Deserialize)]
+        struct Saved {
+            repository: Option<t3_git::RepositoryBinding>,
+        }
         let Some(bindings) = &self.repository_bindings else {
             return Ok(None);
         };
         Ok(bindings
             .get(scope)
             .await?
-            .map(serde_json::from_value)
-            .transpose()?)
+            .map(serde_json::from_value::<Saved>)
+            .transpose()?
+            .map(|saved| saved.repository))
+    }
+
+    /// Records the repository now in `scope` as trusted (`OrchestrationRuntime::trust_repository`):
+    /// only at the user's request or for a repository the server itself just created there.
+    pub async fn trust_repository(&self, scope: &std::path::Path) -> OrchestrationResult<()> {
+        self.runtime()?.trust_repository(scope.to_owned()).await
     }
 
     /// Every committed project and orchestration event, shared rather than cloned per receiver.

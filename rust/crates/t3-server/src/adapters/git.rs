@@ -350,27 +350,43 @@ impl GitAdapter {
         session: &AuthSessionId,
         cwd: &str,
         operation: &str,
-        bindings: Option<&dyn SavedRepositoryBindings>,
     ) -> Result<&vcs::Vcs, Error> {
         let vcs = self.vcs.as_ref().ok_or_else(denied)?;
         self.checkout(session, cwd, operation).await?;
-        // Re-review 4 H-1 item 4: the folder's saved binding pins the reads. Applying it refuses
-        // a changed repository now, and records it as this scope's identity in t3-git's process
-        // cache, which every later status and branch read of the scope validates against.
-        if let Some(bindings) = bindings {
-            let saved = bindings
-                .saved_binding(Path::new(cwd))
-                .await
-                .map_err(|_| bindings_unreadable(cwd))?;
-            if let Some(saved) = saved {
-                self.git
-                    .at(cwd)
-                    .with_repository_binding(saved)
-                    .await
-                    .map_err(|e| error(e, operation))?;
-            }
-        }
         Ok(vcs)
+    }
+
+    /// The user's explicit "trust this repository", or a repository the server itself just
+    /// created in `folder` (Initialize, a worktree): re-reads the repository there (discovery
+    /// only, fsmonitor off, no repository-configured helper), records it in t3-git's process
+    /// identity and in the saved bindings, and drops the status broadcaster's cached handle that
+    /// was pinned to the identity it replaces. The caller passes a project's or thread's own
+    /// folder from its record, never a client path; a folder that is not a local directory is
+    /// refused here.
+    #[cfg(feature = "local-services")]
+    pub async fn trust_repository(&self, folder: &Path) -> Result<(), Error> {
+        const OPERATION: &str = "vcs.trustRepository";
+        if !local_disk_path(folder) {
+            return Err(not_local());
+        }
+        if !tokio::fs::metadata(folder).await.is_ok_and(|m| m.is_dir()) {
+            return Err(denied());
+        }
+        self.git
+            .at(folder)
+            .rebind_repository()
+            .await
+            .map_err(|e| error(e, OPERATION))?;
+        if let Some(vcs) = &self.vcs {
+            if let Some(bindings) = vcs.saved_bindings() {
+                bindings
+                    .trust(folder)
+                    .await
+                    .map_err(|_| error(saved_bindings_unreadable(folder), OPERATION))?;
+            }
+            vcs.broadcaster().forget_checkout(folder).await;
+        }
+        Ok(())
     }
 
     #[cfg(feature = "local-services")]
@@ -379,12 +395,11 @@ impl GitAdapter {
         self: &Arc<Self>,
         session: &AuthSessionId,
         socket: Option<u64>,
-        bindings: Option<&dyn SavedRepositoryBindings>,
         input: VcsStatusInput,
     ) -> Result<Revocable<t3_git::VcsBranchSubscription>, Error> {
         const OPERATION: &str = "subscribeVcsBranch";
         let vcs = self
-            .status_services(session, &input.cwd.0, OPERATION, bindings)
+            .status_services(session, &input.cwd.0, OPERATION)
             .await?;
         let permit = vcs.subscriptions.acquire(socket, OPERATION, &input.cwd.0)?;
         let subscription = vcs
@@ -419,11 +434,10 @@ impl GitAdapter {
     pub async fn refresh_branch(
         &self,
         session: &AuthSessionId,
-        bindings: Option<&dyn SavedRepositoryBindings>,
         input: VcsStatusInput,
     ) -> Result<(), Error> {
         const OPERATION: &str = "vcs.refreshBranch";
-        self.status_services(session, &input.cwd.0, OPERATION, bindings)
+        self.status_services(session, &input.cwd.0, OPERATION)
             .await?
             .application
             .refresh_branch(&input)
@@ -436,12 +450,11 @@ impl GitAdapter {
         self: &Arc<Self>,
         session: &AuthSessionId,
         socket: Option<u64>,
-        bindings: Option<&dyn SavedRepositoryBindings>,
         input: VcsStatusSubscriptionInput,
     ) -> Result<Revocable<t3_git::VcsStatusSubscription>, Error> {
         const OPERATION: &str = "subscribeVcsStatus";
         let vcs = self
-            .status_services(session, &input.cwd.0, OPERATION, bindings)
+            .status_services(session, &input.cwd.0, OPERATION)
             .await?;
         let permit = vcs.subscriptions.acquire(socket, OPERATION, &input.cwd.0)?;
         let subscription = vcs
@@ -456,11 +469,10 @@ impl GitAdapter {
     pub async fn refresh_status(
         &self,
         session: &AuthSessionId,
-        bindings: Option<&dyn SavedRepositoryBindings>,
         input: t3_contracts::rpc::WsVcsRefreshStatusPayload,
     ) -> Result<VcsStatusResult, Error> {
         const OPERATION: &str = "vcs.refreshStatus";
-        self.status_services(session, &input.cwd.0, OPERATION, bindings)
+        self.status_services(session, &input.cwd.0, OPERATION)
             .await?
             .application
             .refresh_status(&input)
@@ -492,12 +504,11 @@ impl GitAdapter {
     pub async fn create_worktree(
         &self,
         session: &AuthSessionId,
-        bindings: Option<&dyn SavedRepositoryBindings>,
         input: t3_contracts::rpc::WsVcsCreateWorktreePayload,
     ) -> Result<VcsCreateWorktreeResult, Error> {
         const OPERATION: &str = "vcs.createWorktree";
         let vcs = self
-            .status_services(session, &input.cwd.0, OPERATION, bindings)
+            .status_services(session, &input.cwd.0, OPERATION)
             .await?;
         if let Some(setting) = vcs.worktrees.directory_refusal().await {
             return Err(Error::Git(Box::new(GitCommandError {
@@ -807,23 +818,49 @@ fn denied() -> Error {
 /// orchestration names it (`checkpoint.git.repository-changed`); never "not a repository".
 pub const REPOSITORY_CHANGED_OPERATION: &str = "checkpoint.git.repository-changed";
 
-/// Saved repository bindings for folders, read at call time (the orchestration adapter's store,
-/// which starts after Git).
+/// What the saved bindings hold for a folder (t3-git re-review 4 F3, F4).
+#[derive(Debug, Clone)]
+pub enum SavedRepository {
+    /// Never recorded: the first read binds what is there (t3-git's process identity).
+    NotRecorded,
+    /// Recorded when the folder was not a repository: one created there since is not trusted.
+    NotRepository,
+    Repository(t3_git::RepositoryBinding),
+}
+
+/// The saved repository bindings (the orchestration adapter's store, which starts after Git).
 pub trait SavedRepositoryBindings: Send + Sync {
-    fn saved_binding<'a>(
+    fn saved_repository<'a>(
         &'a self,
         scope: &'a Path,
-    ) -> BoxFuture<'a, Result<Option<t3_git::RepositoryBinding>, String>>;
+    ) -> BoxFuture<'a, Result<SavedRepository, String>>;
+    /// Records the repository now in `scope` as trusted.
+    fn trust<'a>(&'a self, scope: &'a Path) -> BoxFuture<'a, Result<(), String>>;
 }
 
 #[cfg(feature = "orchestration")]
 impl SavedRepositoryBindings for crate::adapters::orchestration::OrchestrationAdapter {
-    fn saved_binding<'a>(
+    fn saved_repository<'a>(
         &'a self,
         scope: &'a Path,
-    ) -> BoxFuture<'a, Result<Option<t3_git::RepositoryBinding>, String>> {
+    ) -> BoxFuture<'a, Result<SavedRepository, String>> {
         Box::pin(async move {
-            self.repository_binding(scope)
+            Ok(
+                match self
+                    .repository_binding(scope)
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    None => SavedRepository::NotRecorded,
+                    Some(None) => SavedRepository::NotRepository,
+                    Some(Some(binding)) => SavedRepository::Repository(binding),
+                },
+            )
+        })
+    }
+    fn trust<'a>(&'a self, scope: &'a Path) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.trust_repository(scope)
                 .await
                 .map_err(|error| error.to_string())
         })
@@ -831,25 +868,20 @@ impl SavedRepositoryBindings for crate::adapters::orchestration::OrchestrationAd
 }
 
 /// An unreadable bindings store cannot prove the folder's repository, so reads fail closed.
-fn bindings_unreadable(cwd: &str) -> Error {
-    Error::Git(Box::new(GitCommandError {
-        operation: REPOSITORY_CHANGED_OPERATION.into(),
-        cwd: cwd.into(),
-        detail:
-            "T3 Code cannot read its saved repository bindings, so it will not read this folder."
-                .into(),
-        ..command_error(REPOSITORY_CHANGED_OPERATION)
-    }))
+fn saved_bindings_unreadable(path: &Path) -> GitError {
+    GitError::RepositoryChanged {
+        path: path.to_owned(),
+        detail: "T3 Code cannot read its saved repository bindings.",
+    }
 }
 
 fn error(error: GitError, operation: &str) -> Error {
     match error {
-        GitError::RepositoryChanged { path, detail } => Error::Git(Box::new(GitCommandError {
+        // The changed path is left out, as orchestration does (re-review 4 L4).
+        GitError::RepositoryChanged { detail, .. } => Error::Git(Box::new(GitCommandError {
             operation: REPOSITORY_CHANGED_OPERATION.into(),
-            cwd: path.display().to_string(),
             detail: format!(
-                "{} no longer belongs to the repository this folder was bound to: {detail} T3 Code will not read it until the folder is restored or the repository is trusted again.",
-                path.display()
+                "This folder no longer belongs to the repository it was bound to: {detail} T3 Code will not read it until the folder is restored or you trust the repository again."
             ),
             ..command_error(operation)
         })),
@@ -957,10 +989,9 @@ pub mod vcs {
             let workflows = Arc::new(CheckoutWorkflows {
                 root: workflow.clone(),
                 forge: std::sync::OnceLock::new(),
+                bindings: std::sync::OnceLock::new(),
             });
-            let broadcaster = VcsStatusBroadcaster::new(workflow.clone())
-                .with_workflow_factory(workflows.clone())
-                .with_policy(policy);
+            let broadcaster = status_broadcaster(workflow.clone(), workflows.clone(), policy);
             let setup = WorktreeSetupTracker::new();
             let application =
                 GitApplicationService::new(workflow, broadcaster.clone(), setup.clone())
@@ -988,6 +1019,16 @@ pub mod vcs {
                 .workflows
                 .forge
                 .set(factory(self.workflows.root.clone()));
+        }
+
+        /// Installs the saved repository bindings every status, branch and worktree read of a
+        /// folder is pinned to (the orchestration adapter starts after Git; nothing reads before).
+        pub fn use_saved_bindings(&self, bindings: Arc<dyn SavedRepositoryBindings>) {
+            let _ = self.workflows.bindings.set(bindings);
+        }
+
+        pub(super) fn saved_bindings(&self) -> Option<&Arc<dyn SavedRepositoryBindings>> {
+            self.workflows.bindings.get()
         }
 
         /// The environment's one setup tracker: thread launch must publish into this instance
@@ -1025,11 +1066,25 @@ pub mod vcs {
         }
     }
 
+    /// The one status broadcaster: every checkout's handle comes from `workflows`, so every read
+    /// (the status methods, launch and Git actions alike) gets the folder's saved binding.
+    fn status_broadcaster(
+        root: GitWorkflowService,
+        workflows: Arc<CheckoutWorkflows>,
+        policy: Arc<dyn VcsStatusPolicy>,
+    ) -> VcsStatusBroadcaster {
+        VcsStatusBroadcaster::new(root)
+            .with_workflow_factory(workflows)
+            .with_policy(policy)
+    }
+
     /// Each checkout's workflow for the status broadcaster and the facade: the forge's factory once
     /// bound, else the root workflow at that checkout.
-    struct CheckoutWorkflows {
-        root: GitWorkflowService,
-        forge: std::sync::OnceLock<Arc<dyn GitWorkflowFactory>>,
+    pub(super) struct CheckoutWorkflows {
+        pub(super) root: GitWorkflowService,
+        pub(super) forge: std::sync::OnceLock<Arc<dyn GitWorkflowFactory>>,
+        /// The saved bindings applied to every checkout's handle (re-review 4 H-1 item 4).
+        pub(super) bindings: std::sync::OnceLock<Arc<dyn SavedRepositoryBindings>>,
     }
     #[async_trait::async_trait]
     impl GitWorkflowFactory for CheckoutWorkflows {
@@ -1217,6 +1272,95 @@ pub mod vcs {
             Err(GitError::Unsupported(
                 "project setup is not available on this server".into(),
             ))
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    mod saved_binding_tests {
+        use super::*;
+
+        fn isolated(path: &Path, home: &Path) -> Git {
+            Git::new(path).with_environment(std::collections::BTreeMap::from([
+                (
+                    "GIT_CONFIG_GLOBAL".into(),
+                    Some(home.join("no-global-config").into_os_string()),
+                ),
+                ("GIT_CONFIG_NOSYSTEM".into(), Some("1".into())),
+                ("GIT_AUTHOR_NAME".into(), Some("t3".into())),
+                ("GIT_AUTHOR_EMAIL".into(), Some("t3@example.invalid".into())),
+                ("GIT_COMMITTER_NAME".into(), Some("t3".into())),
+                (
+                    "GIT_COMMITTER_EMAIL".into(),
+                    Some("t3@example.invalid".into()),
+                ),
+            ]))
+        }
+
+        async fn repository(path: &Path, home: &Path) {
+            std::fs::create_dir_all(path).unwrap();
+            let git = isolated(path, home);
+            for args in [
+                &["init", "--initial-branch=main"][..],
+                &["commit", "--allow-empty", "-m", "init"][..],
+            ] {
+                git.execute(args, Default::default()).await.unwrap();
+            }
+        }
+
+        struct Fixed(SavedRepository);
+        impl SavedRepositoryBindings for Fixed {
+            fn saved_repository<'a>(
+                &'a self,
+                _: &'a Path,
+            ) -> BoxFuture<'a, Result<SavedRepository, String>> {
+                let saved = self.0.clone();
+                Box::pin(async move { Ok(saved) })
+            }
+            fn trust<'a>(&'a self, _: &'a Path) -> BoxFuture<'a, Result<(), String>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        /// Launch (`launch.rs`) and Git actions (`git_actions.rs`) refresh through
+        /// `vcs.broadcaster().refresh_status(..)` directly, not through the status methods; the
+        /// broadcaster built as `Vcs::start` builds it must still refuse a folder whose saved
+        /// repository changed.
+        #[tokio::test]
+        async fn direct_broadcaster_reads_apply_the_saved_binding() {
+            let temp = tempfile::tempdir().unwrap();
+            let home = temp.path();
+            let earlier = home.join("earlier");
+            let changed = home.join("changed");
+            repository(&earlier, home).await;
+            repository(&changed, home).await;
+            let saved = isolated(&earlier, home)
+                .bind_repository()
+                .await
+                .unwrap()
+                .unwrap();
+            let root = GitWorkflowService::new(isolated(home, home));
+            let workflows = Arc::new(CheckoutWorkflows {
+                root: root.clone(),
+                forge: std::sync::OnceLock::new(),
+                bindings: std::sync::OnceLock::new(),
+            });
+            let _ = workflows
+                .bindings
+                .set(Arc::new(Fixed(SavedRepository::Repository(saved))));
+            let broadcaster =
+                status_broadcaster(root, workflows, Arc::new(t3_git::DisabledVcsPolling));
+
+            let refreshed = broadcaster.refresh_status(&changed, false).await;
+            let Err(refused) = refreshed else {
+                panic!("a direct refresh skipped the saved binding: {refreshed:?}");
+            };
+            let Error::Git(mapped) = error(refused, "refresh") else {
+                panic!("not mapped to a typed command error");
+            };
+            assert_eq!(mapped.operation, REPOSITORY_CHANGED_OPERATION);
+            assert!(broadcaster.refresh_branch_status(&changed).await.is_err());
+            broadcaster.shutdown().await;
         }
     }
 }

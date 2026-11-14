@@ -1187,13 +1187,7 @@ impl t3_git::ReviewHost for StatusReviewHost {
         remote: &str,
         repository: Option<&str>,
     ) -> Result<bool, t3_git::GitError> {
-        // A forge that cannot tell (GitLab has no `creates_change_requests_in`) creates them in
-        // the remote, as TypeScript's `targetsRemote` assumes; an error must not fail status.
-        Ok(self
-            .inner
-            .targets_remote(cwd, remote, repository)
-            .await
-            .unwrap_or(true))
+        self.inner.targets_remote(cwd, remote, repository).await
     }
     async fn setup(
         &self,

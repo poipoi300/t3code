@@ -697,7 +697,7 @@ impl t3_mcp::apps::AppSession for LiveAppSession {
 /// concrete sibling bindings (scheduler) or their typed `available: false`.
 struct Orchestrator {
     reads: Arc<t3_mcp::adapters::threads::ThreadReadAdapter>,
-    /// `delegate_task` and `task_status`.
+    /// `delegate_task`, `task_status` and `create_threads`.
     delegation: Arc<dyn t3_mcp::services::OrchestratorService>,
     rest: Arc<dyn t3_mcp::services::OrchestratorService>,
 }
@@ -896,7 +896,7 @@ impl t3_mcp::services::OrchestratorService for Orchestrator {
         context: t3_mcp::CallContext,
         input: t3_contracts::orchestrator_mcp::OrchestratorMcpCreateThreadsInput,
     ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpCreateThreadsResult> {
-        t3_mcp::services::OrchestratorService::create_threads(self.rest.as_ref(), context, input)
+        t3_mcp::services::OrchestratorService::create_threads(self.delegation.as_ref(), context, input)
             .await
     }
     async fn t3_thread_list(
