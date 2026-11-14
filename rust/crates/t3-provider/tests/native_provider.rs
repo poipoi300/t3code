@@ -157,10 +157,27 @@ async fn native_codex_discovery_reads_account_models_config_and_usage_without_st
 #[tokio::test]
 async fn native_claude_discovery_uses_hook_free_transient_session_and_reads_account_and_usage() {
     let fixture = Fixture::new(json!({"protocol":"claude","version":"2.1.200 (Claude Code)"}));
-    let snapshot = provider(&fixture, "claudeAgent")
-        .snapshot(None, true)
-        .await
+    let (policy, background) =
+        tokio::sync::watch::channel(t3_provider::managed_provider::BackgroundPolicy::default());
+    let provider = provider(&fixture, "claudeAgent")
+        .into_managed(t3_provider::managed_provider::ManagedOptions::new(
+            background,
+        ))
         .unwrap();
+    assert!(fixture.calls().is_empty());
+    assert_eq!(
+        provider.current().await.status,
+        ServerProviderState::Warning
+    );
+    let mut changes = provider.subscribe_snapshots().unwrap();
+    policy.send_modify(|policy| policy.server_ready = true);
+    let snapshot = loop {
+        let current = changes.borrow_and_update().clone().unwrap();
+        if current.status == ServerProviderState::Ready {
+            break current;
+        }
+        changes.changed().await.unwrap();
+    };
     assert_eq!(snapshot.status, ServerProviderState::Ready);
     let value = serde_json::to_value(snapshot).unwrap();
     assert_eq!(value["auth"]["label"], "Claude Max Subscription");
@@ -181,6 +198,15 @@ async fn native_claude_discovery_uses_hook_free_transient_session_and_reads_acco
             .iter()
             .flatten()
             .any(|s| s == "--resume" || s == "--continue")
+    );
+    provider.refresh_usage().await.unwrap();
+    assert_eq!(
+        fixture
+            .calls()
+            .iter()
+            .filter(|call| call == &&vec!["get_usage"])
+            .count(),
+        2
     );
 }
 #[tokio::test]

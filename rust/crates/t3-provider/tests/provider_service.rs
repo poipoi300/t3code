@@ -119,6 +119,72 @@ fn idle_executor() -> Arc<Executor> {
         release: Mutex::new(None),
     })
 }
+struct LiveInstance {
+    base: Arc<Instance>,
+    updates: tokio::sync::watch::Sender<Option<ServerProvider>>,
+}
+#[async_trait]
+impl ProviderInstanceService for LiveInstance {
+    fn instance_id(&self) -> &ProviderInstanceId {
+        &self.base.id
+    }
+    async fn snapshot(&self, _: Option<&str>, _: bool) -> ServiceResult<ServerProvider> {
+        Ok(self.base.value.lock().await.clone())
+    }
+    fn subscribe_snapshots(&self) -> Option<tokio::sync::watch::Receiver<Option<ServerProvider>>> {
+        Some(self.updates.subscribe())
+    }
+}
+#[tokio::test]
+async fn live_snapshots_remain_authoritative_during_refresh_and_replaced_instances_cannot_publish_late()
+ {
+    let (base, _events) = instance(true);
+    let mut live = base.value.lock().await.clone();
+    live.version = Some("live".into());
+    let (updates, _) = tokio::sync::watch::channel(Some(live.clone()));
+    let service = service(idle_executor());
+    let mut notifications = service.subscribe();
+    service
+        .register(Arc::new(LiveInstance {
+            base: base.clone(),
+            updates: updates.clone(),
+        }))
+        .await;
+    notifications.changed().await.unwrap();
+    let response = service
+        .refresh_providers(serde_json::from_value(json!({})).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        response.providers.0[0]
+            .version
+            .as_ref()
+            .map(|version| version.0.as_str()),
+        Some("live")
+    );
+    notifications.borrow_and_update();
+    let mut next = live.clone();
+    next.version = Some("replacement".into());
+    let (replacement, _) = tokio::sync::watch::channel(Some(next));
+    service
+        .register(Arc::new(LiveInstance {
+            base,
+            updates: replacement.clone(),
+        }))
+        .await;
+    notifications.changed().await.unwrap();
+    updates.send_replace(Some(live));
+    assert_eq!(
+        service.get_providers().await.0[0]
+            .version
+            .as_ref()
+            .map(|version| version.0.as_str()),
+        Some("replacement")
+    );
+    service.unregister(&"work".into()).await;
+    replacement.send_replace(None);
+    assert!(service.get_providers().await.0.is_empty());
+}
 #[tokio::test]
 async fn refresh_models_obeys_installation_enablement_and_returns_only_the_requested_catalog_shape()
 {

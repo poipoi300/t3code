@@ -322,14 +322,31 @@ async fn logout_interrupts_catalog_discovery_and_publishes_current_authenticatio
     let (_directory, _effects, mut provider) = setup().await;
     let (started, waiting) = tokio::sync::oneshot::channel();
     provider.http = Arc::new(BlockedCatalog(Mutex::new(Some(started))));
-    let provider = Arc::new(provider);
-    let task = tokio::spawn({
-        let provider = provider.clone();
-        async move { provider.snapshot(None, true).await }
-    });
+    let runtime = provider.runtime.clone();
+    let (policy, background) =
+        watch::channel(t3_provider::managed_provider::BackgroundPolicy::default());
+    let provider = provider
+        .into_managed(t3_provider::managed_provider::ManagedOptions::new(
+            background,
+        ))
+        .await
+        .unwrap();
+    let mut changes = provider.subscribe_snapshots().unwrap();
+    assert_eq!(
+        provider.current().await.auth.status,
+        t3_contracts::server::ServerProviderAuthStatus::Unknown
+    );
+    policy.send_modify(|policy| policy.server_ready = true);
     waiting.await.unwrap();
-    provider.runtime.controller.logout().await.unwrap();
-    let snapshot = serde_json::to_value(task.await.unwrap().unwrap()).unwrap();
+    runtime.controller.logout().await.unwrap();
+    let snapshot = loop {
+        let current = changes.borrow_and_update().clone().unwrap();
+        if current.auth.status == t3_contracts::server::ServerProviderAuthStatus::Unauthenticated {
+            break current;
+        }
+        changes.changed().await.unwrap();
+    };
+    let snapshot = serde_json::to_value(snapshot).unwrap();
     assert_eq!(snapshot["status"], "warning");
     assert_eq!(snapshot["auth"]["status"], "unauthenticated");
     assert!(snapshot["auth"].get("subscriptionSharing").is_none());

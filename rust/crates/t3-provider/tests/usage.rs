@@ -6,7 +6,7 @@ use t3_provider::usage::*;
 
 #[test]
 fn percent_only_updates_keep_reset_metadata_and_noops_keep_published_identity() {
-    let previous=Arc::new(serde_json::from_value::<ServerProviderUsageLimits>(json!({"checkedAt":"2026-09-03T12:00:00Z","windows":[{"id":"session","kind":"session","label":"Session","usedPercent":40,"resetsAt":"2026-09-03T14:00:00Z","windowDurationMins":300}]})).unwrap());
+    let previous=Arc::new(serde_json::from_value::<ServerProviderUsageLimits>(json!({"checkedAt":"2026-09-03T12:00:00Z","zeroSpendCap":true,"windows":[{"id":"session","kind":"session","label":"Session","usedPercent":40,"resetsAt":"2026-09-03T14:00:00Z","windowDurationMins":300}]})).unwrap());
     let update = serde_json::from_value(
         json!({"windows":[{"id":"session","kind":"session","label":"Session","usedPercent":40}]}),
     )
@@ -19,6 +19,7 @@ fn percent_only_updates_keep_reset_metadata_and_noops_keep_published_identity() 
     .unwrap();
     let next = apply_usage_update(Some(&previous), &update, "2026-09-03T12:00:05Z").unwrap();
     assert_eq!(next.windows[0].resets_at, previous.windows[0].resets_at);
+    assert_eq!(next.zero_spend_cap, Some(Some(true)));
     assert_eq!(
         serde_json::to_value(&next.windows[0]).unwrap()["usedPercent"].as_f64(),
         Some(100.)

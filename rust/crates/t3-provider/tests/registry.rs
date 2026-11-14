@@ -8,6 +8,129 @@ use t3_provider::{
     registry::*,
 };
 
+#[tokio::test]
+async fn registry_disk_cache_supports_offline_reads_and_atomic_refresh_persistence() {
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use t3_provider::sensitive::{ServiceError, ServiceResult};
+    struct Fetch;
+    #[async_trait]
+    impl RegistryFetch for Fetch {
+        async fn bytes(&self, _: &str) -> ServiceResult<Vec<u8>> {
+            Ok(json!({"version":"1","agents":[agent("cached","Cached")]})
+                .to_string()
+                .into_bytes())
+        }
+    }
+    struct Offline;
+    #[async_trait]
+    impl RegistryFetch for Offline {
+        async fn bytes(&self, _: &str) -> ServiceResult<Vec<u8>> {
+            Err(ServiceError::Network)
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let cache = root.path().join("acp-registry/registry.json");
+    let first = RegistryCatalog::with_fetcher(Arc::new(Fetch), None).with_cache_file(cache.clone());
+    assert!(first.cached().await.is_none());
+    first.recent(0, true).await.unwrap();
+    assert!(cache.is_file());
+    let restarted =
+        RegistryCatalog::with_fetcher(Arc::new(Offline), None).with_cache_file(cache.clone());
+    assert_eq!(restarted.cached().await.unwrap().agents[0].id, "cached");
+    assert_eq!(
+        restarted.recent(0, true).await.unwrap().agents[0].id,
+        "cached"
+    );
+    std::fs::write(&cache, "invalid").unwrap();
+    assert!(
+        RegistryCatalog::with_fetcher(Arc::new(Offline), None)
+            .with_cache_file(cache)
+            .cached()
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn registry_fetches_are_injected_coalesced_and_bounded_and_failed_refreshes_keep_a_good_index()
+ {
+    use async_trait::async_trait;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use t3_provider::sensitive::{ServiceError, ServiceResult};
+    struct Fetch {
+        calls: AtomicUsize,
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        bytes: Vec<u8>,
+    }
+    #[async_trait]
+    impl RegistryFetch for Fetch {
+        async fn bytes(&self, _: &str) -> ServiceResult<Vec<u8>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(self.bytes.clone())
+        }
+    }
+    let fetch = Arc::new(Fetch {
+        calls: AtomicUsize::new(0),
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        bytes: json!({"version":"1","agents":[agent("assistant","Assistant")]})
+            .to_string()
+            .into_bytes(),
+    });
+    let catalog = Arc::new(RegistryCatalog::with_fetcher(fetch.clone(), None));
+    let first = tokio::spawn({
+        let catalog = catalog.clone();
+        async move { catalog.recent(0, true).await }
+    });
+    fetch.started.notified().await;
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let second = tokio::spawn({
+        let catalog = catalog.clone();
+        async move {
+            let _ = entered.send(());
+            catalog.recent(0, true).await
+        }
+    });
+    ready.await.unwrap();
+    fetch.release.notify_one();
+    assert_eq!(first.await.unwrap().unwrap().agents.len(), 1);
+    assert_eq!(second.await.unwrap().unwrap().agents.len(), 1);
+    assert_eq!(fetch.calls.load(Ordering::SeqCst), 1);
+    struct Fail;
+    #[async_trait]
+    impl RegistryFetch for Fail {
+        async fn bytes(&self, _: &str) -> ServiceResult<Vec<u8>> {
+            Err(ServiceError::Network)
+        }
+    }
+    let cached = RegistryIndex {
+        version: "1".into(),
+        agents: vec![agent("assistant", "Assistant")],
+    };
+    let fallback = RegistryCatalog::with_fetcher(Arc::new(Fail), Some(cached));
+    assert_eq!(fallback.recent(0, true).await.unwrap().agents.len(), 1);
+    struct Oversized;
+    #[async_trait]
+    impl RegistryFetch for Oversized {
+        async fn bytes(&self, _: &str) -> ServiceResult<Vec<u8>> {
+            Ok(vec![b' '; MAX_REGISTRY_BYTES + 1])
+        }
+    }
+    assert!(
+        RegistryCatalog::with_fetcher(Arc::new(Oversized), None)
+            .recent(0, false)
+            .await
+            .is_err()
+    );
+}
+
 fn agent(id: &str, name: &str) -> Agent {
     serde_json::from_value(json!({"id":id,"name":name,"version":"1.2.3+rev","description":"Coding assistant","authors":["Someone"],"distribution":{"binary":{"windows-x86_64":{"archive":"https://example.org/a.zip","cmd":"bin/agent.exe","sha256":"0000000000000000000000000000000000000000000000000000000000000000","args":["acp"],"env":{"CONFIG":"registry"}}},"npx":{"package":"@example/agent@1.2.3"},"uvx":{"package":"agent==1.2.3"}}})).unwrap()
 }
