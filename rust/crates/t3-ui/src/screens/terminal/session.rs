@@ -15,8 +15,8 @@ use t3_client::{
     },
     types::ThreadKey,
     view_logic::session::terminal_drawer::{
-        SessionMark, TerminalSurfaceSink, should_handle_terminal_exit, synchronize_terminal_session,
-        system_message, writable_session_generation,
+        SessionMark, TerminalSurfaceSink, should_handle_terminal_exit,
+        synchronize_terminal_session, system_message, writable_session_generation,
     },
 };
 
@@ -103,7 +103,8 @@ impl SessionPump {
         let resend_size = writable != self.writable && writable.is_some();
         self.writable = writable;
         let exited = self.sync_status(view.status, view.version, sink, &exit_text);
-        self.cursor = synchronize_terminal_session(sink, &self.mark, &view.mark, output, self.cursor);
+        self.cursor =
+            synchronize_terminal_session(sink, &self.mark, &view.mark, output, self.cursor);
         self.mark = view.mark.clone();
         PumpEffects {
             resend_size,
@@ -183,8 +184,12 @@ pub fn terminal_viewport(
     let pump: Rc<RefCell<Option<SessionPump>>> = Rc::default();
     surface.set_read_only(!services.0.can_operate(&key));
     {
-        let (services, key, terminal, target) =
-            (services.clone(), key.clone(), terminal.clone(), surface.clone());
+        let (services, key, terminal, target) = (
+            services.clone(),
+            key.clone(),
+            terminal.clone(),
+            surface.clone(),
+        );
         surface.on_data(move |data| {
             if !services.0.can_operate(&key) {
                 return;
@@ -199,8 +204,12 @@ pub fn terminal_viewport(
         });
     }
     {
-        let (services, key, terminal, pump) =
-            (services.clone(), key.clone(), terminal.clone(), pump.clone());
+        let (services, key, terminal, pump) = (
+            services.clone(),
+            key.clone(),
+            terminal.clone(),
+            pump.clone(),
+        );
         surface.on_resize(move |grid| {
             if !pump.borrow().as_ref().is_some_and(SessionPump::writable) {
                 return;
@@ -214,11 +223,18 @@ pub fn terminal_viewport(
     let exited = {
         let (services, key, pump) = (services.clone(), key.clone(), pump.clone());
         Rc::new(move || {
-            let (services, key, pump, on_exit) =
-                (services.clone(), key.clone(), pump.clone(), on_session_exited.clone());
+            let (services, key, pump, on_exit) = (
+                services.clone(),
+                key.clone(),
+                pump.clone(),
+                on_session_exited.clone(),
+            );
             // The web defers the close by a task so the exit message paints first.
             set_timeout(Duration::ZERO, move || {
-                if pump.borrow().as_ref().is_some_and(SessionPump::exit_pending)
+                if pump
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(SessionPump::exit_pending)
                     && services.0.can_operate(&key)
                 {
                     on_exit();
@@ -238,8 +254,9 @@ pub fn terminal_viewport(
         spawn(async move {
             use futures::StreamExt;
             let view = lease.view();
-            let (started, effects) = lease
-                .with_output(|output| SessionPump::start(&view, output, &mut sink, can_operate(), exit_text));
+            let (started, effects) = lease.with_output(|output| {
+                SessionPump::start(&view, output, &mut sink, can_operate(), exit_text)
+            });
             pump.replace(Some(started));
             if effects.exited {
                 exited();
@@ -250,9 +267,9 @@ pub fn terminal_viewport(
                 let view = lease.view();
                 sink.set_read_only(!can_operate());
                 let effects = lease.with_output(|output| {
-                    pump.borrow_mut().as_mut().map(|pump| {
-                        pump.update(&view, output, &mut sink, can_operate(), exit_text)
-                    })
+                    pump.borrow_mut()
+                        .as_mut()
+                        .map(|pump| pump.update(&view, output, &mut sink, can_operate(), exit_text))
                 });
                 let Some(effects) = effects else { return };
                 if effects.resend_size {
@@ -303,7 +320,9 @@ mod tests {
         serde_json::from_value(value).unwrap_or_else(|error| panic!("{error}"))
     }
     fn snapshot(history: &str) -> TerminalAttachStreamEvent {
-        event(serde_json::json!({"type":"snapshot","snapshot":{"threadId":"t","terminalId":"term-1","cwd":"/","worktreePath":null,"status":"running","pid":1,"history":history,"exitCode":null,"exitSignal":null,"label":"","updatedAt":"2026-01-01T00:00:00.000Z"}}))
+        event(
+            serde_json::json!({"type":"snapshot","snapshot":{"threadId":"t","terminalId":"term-1","cwd":"/","worktreePath":null,"status":"running","pid":1,"history":history,"exitCode":null,"exitSignal":null,"label":"","updatedAt":"2026-01-01T00:00:00.000Z"}}),
+        )
     }
     fn output(data: &str) -> TerminalAttachStreamEvent {
         event(serde_json::json!({"type":"output","threadId":"t","terminalId":"term-1","data":data}))
@@ -364,8 +383,25 @@ mod tests {
         let effects = pump.update(&view_of(&buffer), &buffer.output, &mut sink, true, text);
         assert!(effects.resend_size && pump.writable());
         // Read-only viewers never resize the shell.
-        let mut observer = SessionPump::start(&view_of(&pending), &pending.output, &mut Counted::default(), false, text).0;
-        assert!(!observer.update(&view_of(&buffer), &buffer.output, &mut Counted::default(), false, text).resend_size);
+        let mut observer = SessionPump::start(
+            &view_of(&pending),
+            &pending.output,
+            &mut Counted::default(),
+            false,
+            text,
+        )
+        .0;
+        assert!(
+            !observer
+                .update(
+                    &view_of(&buffer),
+                    &buffer.output,
+                    &mut Counted::default(),
+                    false,
+                    text
+                )
+                .resend_size
+        );
 
         buffer.apply(
             &event(serde_json::json!({"type":"exited","threadId":"t","terminalId":"term-1","exitCode":0,"exitSignal":null})),
@@ -374,7 +410,10 @@ mod tests {
         );
         let effects = pump.update(&view_of(&buffer), &buffer.output, &mut sink, true, text);
         assert!(effects.exited && pump.exit_pending());
-        assert_eq!(sink.writes.last().map(String::as_str), Some("\r\n[terminal] Exited\r\n"));
+        assert_eq!(
+            sink.writes.last().map(String::as_str),
+            Some("\r\n[terminal] Exited\r\n")
+        );
         let again = pump.update(&view_of(&buffer), &buffer.output, &mut sink, true, text);
         assert!(!again.exited, "an exit is handled once");
         // A restart cancels the pending close.
@@ -394,7 +433,8 @@ mod tests {
             &mut generations,
         );
         let mut sink = Counted::default();
-        let (_, effects) = SessionPump::start(&view_of(&buffer), &buffer.output, &mut sink, true, text);
+        let (_, effects) =
+            SessionPump::start(&view_of(&buffer), &buffer.output, &mut sink, true, text);
         assert!(effects.exited);
         assert_eq!(sink.writes, ["\r\n[terminal] Exited\r\n"]);
         // The surface starts from "closed", as the web's does: a session already closed then is
@@ -406,8 +446,13 @@ mod tests {
             1 << 20,
             &mut generations,
         );
-        let (_, effects) =
-            SessionPump::start(&view_of(&closed), &closed.output, &mut Counted::default(), true, text);
+        let (_, effects) = SessionPump::start(
+            &view_of(&closed),
+            &closed.output,
+            &mut Counted::default(),
+            true,
+            text,
+        );
         assert!(!effects.exited);
     }
 }

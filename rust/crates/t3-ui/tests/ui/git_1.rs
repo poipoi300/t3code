@@ -262,12 +262,13 @@ fn publish_and_changes_flow_runs_from_the_projection_at_both_widths() {
             app.screen().input_text("id:publish-repository-path"),
             Ok(Some("alice/"))
         );
+        app.clear("id:publish-repository-path").expect("clear the account prefill");
         app.type_text("id:publish-repository-path", "alice/project")
             .expect("repository");
         app.press("role:button[Publish]").expect("publish");
         app.wait_for("Repository published")
             .expect("real result branch");
-        app.wait_for("published:alice/project;remote:origin;visibility:Private;protocol:Ssh")
+        app.wait_for("text:published:alice/project;remote:origin;visibility:Private;protocol:Ssh")
             .expect("canonical publish input");
         app.press("role:button[Done]").expect("done");
     }
@@ -388,6 +389,7 @@ fn unsupported_publish_stays_on_the_form_and_does_not_claim_success() {
     app.press("role:button[Publish repository]")
         .expect("publish");
     app.press("role:button[Next]").expect("next");
+    app.clear("id:publish-repository-path").expect("clear the account prefill");
     app.type_text("id:publish-repository-path", "alice/project")
         .expect("path");
     app.press("role:button[Publish]").expect("submit");

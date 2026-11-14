@@ -638,7 +638,9 @@ fn project_script_editor_dialog(
                 }
             });
             dialog::dialog_popup(state, PopupOptions::default(), move || {
+                // The popup's column constrains the panel so it scrolls and the footer stays.
                 view()
+                    .app_class(tw("flex min-h-0 flex-1 flex-col"))
                     .child(dialog::dialog_header(state, view()
                         .child(dialog::dialog_title(state, move || (if editing() { "Edit Action" } else { "Add Action" }).into()))
                         .child(dialog::dialog_description(state, || "Actions are project-scoped commands you can run from the top bar or keybindings.".into()))))

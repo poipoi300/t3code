@@ -330,10 +330,9 @@ fn file_surface(props: SurfaceProps) -> impl IntoElement {
         let path = relative_path.clone();
         computed(move || if is_folder.get() { None } else { path.clone() })
     };
-    let show_explorer = {
-        let preview_path = preview_path;
-        computed(move || preview::should_show_file_explorer(preview_path.get().as_deref(), explorer_open.get(), false))
-    };
+    let show_explorer = computed(move || {
+        preview::should_show_file_explorer(preview_path.get().as_deref(), explorer_open.get(), false)
+    });
 
     let on_open_file: Rc<dyn Fn(String)> = {
         let thread = thread.clone();

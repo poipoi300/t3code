@@ -18,7 +18,7 @@ use t3_ui::screens::panel::branch::{
 use crate::support::{DESKTOP, PHONE};
 
 fn reference(name: &str, extra: serde_json::Value) -> t3_contracts::git::VcsRef {
-    let mut value = json!({"name":name,"current":false,"isDefault":false});
+    let mut value = json!({"name":name,"current":false,"isDefault":false,"worktreePath":null});
     value
         .as_object_mut()
         .expect("object")

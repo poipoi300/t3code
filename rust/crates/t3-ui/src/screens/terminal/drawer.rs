@@ -43,9 +43,10 @@ use crate::{
 /// A terminal's name for display.
 pub fn terminal_label_text(label: &TerminalLabel) -> String {
     match label {
-        TerminalLabel::Numbered(number) => {
-            tr("Terminal {number}", &[("number", Value::Text(number.clone()))])
-        }
+        TerminalLabel::Numbered(number) => tr(
+            "Terminal {number}",
+            &[("number", Value::Text(number.clone()))],
+        ),
         TerminalLabel::Text(text) => text.clone(),
     }
 }
@@ -75,18 +76,20 @@ fn split_label(label: ActionLabel, vertical: bool) -> String {
 
 fn new_label(label: ActionLabel) -> String {
     match label {
-        ActionLabel::Shortcut(shortcut) => {
-            tr("New Terminal ({shortcut})", &[("shortcut", Value::Text(shortcut))])
-        }
+        ActionLabel::Shortcut(shortcut) => tr(
+            "New Terminal ({shortcut})",
+            &[("shortcut", Value::Text(shortcut))],
+        ),
         _ => t("New Terminal"),
     }
 }
 
 fn close_label(label: ActionLabel) -> String {
     match label {
-        ActionLabel::Shortcut(shortcut) => {
-            tr("Close Terminal ({shortcut})", &[("shortcut", Value::Text(shortcut))])
-        }
+        ActionLabel::Shortcut(shortcut) => tr(
+            "Close Terminal ({shortcut})",
+            &[("shortcut", Value::Text(shortcut))],
+        ),
         _ => t("Close Terminal"),
     }
 }
@@ -109,12 +112,18 @@ fn close_confirmation_message(confirmation: &CloseConfirmation) -> String {
     match confirmation {
         CloseConfirmation::One(label) => format!(
             "{}\n{}",
-            tr("Close terminal \"{label}\"?", &[("label", Value::Text(label.clone()))]),
+            tr(
+                "Close terminal \"{label}\"?",
+                &[("label", Value::Text(label.clone()))]
+            ),
             t("This stops the running process and clears its history.")
         ),
         CloseConfirmation::Many(labels) => format!(
             "{}\n{}",
-            tr("Close {count} terminals?", &[("count", Value::Int(labels.len() as i64))]),
+            tr(
+                "Close {count} terminals?",
+                &[("count", Value::Int(labels.len() as i64))]
+            ),
             tr(
                 "This stops their running processes and clears their histories: {labels}.",
                 &[(
@@ -249,15 +258,18 @@ pub fn thread_terminal_drawer(services: TerminalServices, key: ThreadKey) -> imp
         register_commands(keys, drawer.clone());
     }
     let shown = computed(move || {
-        state.with(|view| view.ui.terminal_open && view.project_root.is_some() && view.cwd.is_some())
+        state
+            .with(|view| view.ui.terminal_open && view.project_root.is_some() && view.cwd.is_some())
     });
     let _lease = lease;
-    view().app_class(tw("flex shrink-0 flex-col")).child(dynamic(move || {
-        let _ = &_lease;
-        shown
-            .get()
-            .then(|| untracked(|| drawer_body(drawer.clone(), keys).into_element()))
-    }))
+    view()
+        .app_class(tw("flex shrink-0 flex-col"))
+        .child(dynamic(move || {
+            let _ = &_lease;
+            shown
+                .get()
+                .then(|| untracked(|| drawer_body(drawer.clone(), keys).into_element()))
+        }))
 }
 
 /// `useChatTerminalActions.ts`'s drawer chords, while the drawer is mounted.
@@ -321,9 +333,9 @@ fn register_commands(keys: Keybindings, drawer: Drawer) {
                     return false;
                 }
                 event.claim();
-                let (open, active) = close
-                    .view
-                    .with_untracked(|view| (view.ui.terminal_open, view.ui.active_terminal_id.clone()));
+                let (open, active) = close.view.with_untracked(|view| {
+                    (view.ui.terminal_open, view.ui.active_terminal_id.clone())
+                });
                 if open {
                     close.confirm_close(&active);
                 }
@@ -333,7 +345,8 @@ fn register_commands(keys: Keybindings, drawer: Drawer) {
 }
 
 fn drawer_body(drawer: Drawer, keys: Option<Keybindings>) -> impl IntoElement {
-    let shortcut = move |command: &'static str| move || keys.and_then(|keys| keys.shortcut_label(command));
+    let shortcut =
+        move |command: &'static str| move || keys.and_then(|keys| keys.shortcut_label(command));
     let split_shortcut = shortcut("terminal.split");
     let vertical_shortcut = shortcut("terminal.splitVertical");
     let new_shortcut = shortcut("terminal.new");
@@ -341,8 +354,18 @@ fn drawer_body(drawer: Drawer, keys: Option<Keybindings>) -> impl IntoElement {
     let presentation = drawer.presentation;
     let limit = move || presentation.with(|p| p.split_limit_reached);
     let labels = ActionLabels {
-        split: Rc::new(move || split_label(split_action_label(limit(), split_shortcut().as_deref()), false)),
-        vertical: Rc::new(move || split_label(split_action_label(limit(), vertical_shortcut().as_deref()), true)),
+        split: Rc::new(move || {
+            split_label(
+                split_action_label(limit(), split_shortcut().as_deref()),
+                false,
+            )
+        }),
+        vertical: Rc::new(move || {
+            split_label(
+                split_action_label(limit(), vertical_shortcut().as_deref()),
+                true,
+            )
+        }),
         new: Rc::new(move || new_label(action_label(new_shortcut().as_deref()))),
         close: Rc::new(move || close_label(action_label(close_shortcut().as_deref()))),
         close_shortcut: Rc::new(close_shortcut),
@@ -358,7 +381,8 @@ fn drawer_body(drawer: Drawer, keys: Option<Keybindings>) -> impl IntoElement {
             ..Default::default()
         })
     };
-    let drawer_height = move || clamp_drawer_height(state.with(|v| v.ui.terminal_height), max_height());
+    let drawer_height =
+        move || clamp_drawer_height(state.with(|v| v.ui.terminal_height), max_height());
     let height = move || px(drag_height.get().unwrap_or_else(drawer_height) as f32);
 
     let aside = element_ref();
@@ -389,7 +413,10 @@ fn drawer_body(drawer: Drawer, keys: Option<Keybindings>) -> impl IntoElement {
             ended.move_to(f64::from(offset.0), max_height());
             let stored = state.with_untracked(|v| v.ui.terminal_height);
             if let Some(height) = ended.end(stored) {
-                resize_drawer.services.0.set_height(&resize_drawer.key, height);
+                resize_drawer
+                    .services
+                    .0
+                    .set_height(&resize_drawer.key, height);
             }
         });
 
@@ -535,7 +562,12 @@ fn floating_actions(drawer: Drawer, labels: ActionLabels) -> impl IntoElement {
             }),
         ])
     };
-    let (a, b, c, d) = (drawer.clone(), drawer.clone(), drawer.clone(), drawer.clone());
+    let (a, b, c, d) = (
+        drawer.clone(),
+        drawer.clone(),
+        drawer.clone(),
+        drawer.clone(),
+    );
     let (da, db, dc, dd) = (drawer.clone(), drawer.clone(), drawer.clone(), drawer);
     view()
         .app_class(tw("pointer-events-none absolute right-2 top-2 z-20"))
@@ -650,8 +682,16 @@ fn terminal_split_panes(drawer: Drawer) -> impl IntoElement {
                         let (active, first) = (pane.with(|p| p.active), index.get() == 0);
                         Some(tw(&cn([
                             Some("min-h-0 min-w-0 flex-1"),
-                            (!first).then_some(if vertical.get() { "border-t" } else { "border-l" }),
-                            Some(if active { "border-border" } else { "border-border/70" }),
+                            (!first).then_some(if vertical.get() {
+                                "border-t"
+                            } else {
+                                "border-l"
+                            }),
+                            Some(if active {
+                                "border-border"
+                            } else {
+                                "border-border/70"
+                            }),
                         ])))
                     })
                     .on_press_down(move || {
@@ -683,8 +723,18 @@ fn terminal_sidebar(drawer: Drawer, labels: ActionLabels) -> impl IntoElement {
             ])
         }
     };
-    let (a, b, c, d) = (drawer.clone(), drawer.clone(), drawer.clone(), drawer.clone());
-    let (da, db, dc, dd) = (drawer.clone(), drawer.clone(), drawer.clone(), drawer.clone());
+    let (a, b, c, d) = (
+        drawer.clone(),
+        drawer.clone(),
+        drawer.clone(),
+        drawer.clone(),
+    );
+    let (da, db, dc, dd) = (
+        drawer.clone(),
+        drawer.clone(),
+        drawer.clone(),
+        drawer.clone(),
+    );
     let groups = computed(move || presentation.with(|p| p.groups.clone()));
     let close_shortcut = labels.close_shortcut.clone();
     view()
@@ -837,7 +887,9 @@ fn terminal_sidebar_row(
     view()
         .app_class(move || {
             Some(tw(&cn([
-                Some("group/tab flex h-6 w-full items-center gap-0.5 rounded-md pr-2 pl-1.5 text-xs"),
+                Some(
+                    "group/tab flex h-6 w-full items-center gap-0.5 rounded-md pr-2 pl-1.5 text-xs",
+                ),
                 Some(if is_active.get() {
                     "bg-accent text-foreground"
                 } else {
@@ -867,7 +919,9 @@ fn terminal_sidebar_row(
             nsh_base::button()
                 .accessibility_label(move || Some(SharedString::from(label.get())))
                 .on_press(move || select_drawer.activate(&terminal))
-                .app_class(tw("flex min-w-0 flex-1 cursor-pointer items-center gap-1 text-left"))
+                .app_class(tw(
+                    "flex min-w-0 flex-1 cursor-pointer items-center gap-1 text-left",
+                ))
                 .child(text(move || label.get()).app_class(tw("truncate"))),
         )
 }
@@ -878,8 +932,14 @@ mod tests {
 
     #[test]
     fn labels_follow_the_web_copy() {
-        assert_eq!(terminal_label_text(&TerminalLabel::Numbered("3".into())), "Terminal 3");
-        assert_eq!(terminal_label_text(&TerminalLabel::Text("dev".into())), "dev");
+        assert_eq!(
+            terminal_label_text(&TerminalLabel::Numbered("3".into())),
+            "Terminal 3"
+        );
+        assert_eq!(
+            terminal_label_text(&TerminalLabel::Text("dev".into())),
+            "dev"
+        );
         assert_eq!(
             split_label(ActionLabel::Limit(4), false),
             "Split Terminal Horizontally (max 4 per group)"
@@ -889,7 +949,10 @@ mod tests {
             "Split Terminal Vertically (Ctrl+Shift+D)"
         );
         assert_eq!(new_label(ActionLabel::Plain), "New Terminal");
-        assert_eq!(close_tab_label("Terminal 1", Some("Ctrl+W")), "Close Terminal 1 (Ctrl+W)");
+        assert_eq!(
+            close_tab_label("Terminal 1", Some("Ctrl+W")),
+            "Close Terminal 1 (Ctrl+W)"
+        );
         assert_eq!(
             close_confirmation_message(&CloseConfirmation::One("Terminal 2".into())),
             "Close terminal \"Terminal 2\"?\nThis stops the running process and clears its history."

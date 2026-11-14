@@ -4,6 +4,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
+use std::sync::{Mutex, MutexGuard};
 
 use futures::channel::mpsc;
 use futures::{FutureExt, StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
@@ -142,10 +143,22 @@ pub fn snapshot(inputs: &Inputs) -> DiffPanelSnapshot {
 }
 
 /// A backend that records what the panel asks and answers with the next snapshot.
+/// The engine runs on its own thread: inputs go in and recorded calls come out through these.
+static INPUTS: Mutex<Option<Inputs>> = Mutex::new(None);
+static CALLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+pub fn calls() -> Vec<String> {
+    CALLS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn record(call: String) {
+    CALLS.lock().unwrap_or_else(|e| e.into_inner()).push(call);
+}
+
 pub struct Fake {
     pub inputs: RefCell<Inputs>,
     pub sinks: RefCell<Vec<mpsc::UnboundedSender<Rc<DiffPanelSnapshot>>>>,
-    pub calls: RefCell<Vec<String>>,
 }
 
 impl Fake {
@@ -153,7 +166,6 @@ impl Fake {
         Rc::new(Self {
             inputs: RefCell::new(inputs),
             sinks: RefCell::new(Vec::new()),
-            calls: RefCell::new(Vec::new()),
         })
     }
     fn publish(&self) {
@@ -182,39 +194,39 @@ impl DiffPanelBackend for Fake {
         _: &ThreadKey,
         value: &str,
     ) -> LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
-        self.calls.borrow_mut().push(format!("scope:{value}"));
+        record(format!("scope:{value}"));
         self.done()
     }
     fn set_layout(
         &self,
         layout: DiffLayout,
     ) -> LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
-        self.calls.borrow_mut().push(format!("layout:{layout:?}"));
+        record(format!("layout:{layout:?}"));
         self.inputs.borrow_mut().layout = layout;
         self.publish();
         self.done()
     }
     fn set_ignore_whitespace(&self, ignore: bool) {
-        self.calls.borrow_mut().push(format!("whitespace:{ignore}"));
+        record(format!("whitespace:{ignore}"));
     }
     fn set_hide_test_files(
         &self,
         hide: bool,
     ) -> LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
-        self.calls.borrow_mut().push(format!("tests:{hide}"));
+        record(format!("tests:{hide}"));
         self.done()
     }
     fn set_file_tree_open(
         &self,
         open: bool,
     ) -> LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
-        self.calls.borrow_mut().push(format!("tree:{open}"));
+        record(format!("tree:{open}"));
         self.inputs.borrow_mut().file_tree_open = open;
         self.publish();
         self.done()
     }
     fn toggle_file(&self, _: &DiffPanelSnapshot, file_key: &str) {
-        self.calls.borrow_mut().push("toggle".into());
+        record("toggle".into());
         {
             let mut inputs = self.inputs.borrow_mut();
             if !inputs.collapsed.remove(file_key) {
@@ -224,23 +236,21 @@ impl DiffPanelBackend for Fake {
         self.publish();
     }
     fn unfold_file(&self, _: &DiffPanelSnapshot, file_key: &str) {
-        self.calls.borrow_mut().push("unfold".into());
+        record("unfold".into());
         self.inputs.borrow_mut().collapsed.remove(file_key);
         self.publish();
     }
     fn toggle_all_files(&self, snapshot: &DiffPanelSnapshot) {
-        self.calls.borrow_mut().push("all".into());
+        record("all".into());
         {
             let mut inputs = self.inputs.borrow_mut();
-            if inputs.collapsed.is_empty() {
-                inputs.collapsed = snapshot
-                    .shown_files
-                    .iter()
-                    .map(|(k, _)| k.clone())
-                    .collect();
-            } else {
-                inputs.collapsed.clear();
-            }
+            let keys: Vec<String> = snapshot
+                .shown_files
+                .iter()
+                .map(|(k, _)| k.clone())
+                .collect();
+            inputs.collapsed =
+                t3_client::workspace::diff_panel::logic::toggle_all_files(&keys, &inputs.collapsed);
         }
         self.publish();
     }
@@ -267,7 +277,7 @@ impl DiffPanelBackend for Fake {
         lines: (usize, usize),
         text: &str,
     ) -> Result<(), t3_client::ClientError> {
-        self.calls.borrow_mut().push(format!("comment:{text}"));
+        record(format!("comment:{text}"));
         self.inputs.borrow_mut().comments.push(CommentAnnotation {
             id: "c1".into(),
             side,
@@ -279,21 +289,22 @@ impl DiffPanelBackend for Fake {
         Ok(())
     }
     fn remove_review_comment(&self, _: &ThreadKey, id: &str) -> Result<(), t3_client::ClientError> {
-        self.calls.borrow_mut().push(format!("remove:{id}"));
+        record(format!("remove:{id}"));
         self.inputs.borrow_mut().comments.retain(|c| c.id != id);
         self.publish();
         Ok(())
     }
 }
 
-thread_local! {
-    pub static FAKE: RefCell<Option<Rc<Fake>>> = const { RefCell::new(None) };
-}
-
 #[component]
 fn PanelFixture() -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
-    let fake = FAKE.with(|f| f.borrow().clone()).expect("fake installed");
+    let inputs = INPUTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .expect("inputs installed");
+    let fake = Fake::new(inputs);
     let visible = computed(|| true);
     view()
         .w_full()
@@ -301,22 +312,23 @@ fn PanelFixture() -> impl IntoElement {
         .child(diff_panel(DiffPanelRuntime(fake), key(), visible))
 }
 
-pub fn start(window: (f32, f32), inputs: Inputs) -> (Headless, Rc<Fake>) {
-    let fake = Fake::new(inputs);
-    FAKE.with(|f| *f.borrow_mut() = Some(fake.clone()));
+pub fn start(window: (f32, f32), inputs: Inputs) -> (Headless, MutexGuard<'static, ()>) {
+    let guard = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    *INPUTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(inputs);
+    CALLS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     let app = Headless::start(EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
         ..EngineConfig::new(Root::of::<PanelFixture>())
     })
     .expect("diff panel fixture starts");
-    (app, fake)
+    (app, guard)
 }
 
 #[test]
 fn a_turn_diff_shows_its_scope_totals_and_file_headers_at_both_sizes() {
     for window in [DESKTOP, PHONE] {
-        let (mut app, _) = start(window, Inputs::default());
+        let (mut app, _guard) = start(window, Inputs::default());
         app.wait_for("Latest turn").expect("scope label");
         app.wait_for("src/a.ts").expect("file header");
         app.wait_for("+2").expect("additions total");
@@ -326,72 +338,100 @@ fn a_turn_diff_shows_its_scope_totals_and_file_headers_at_both_sizes() {
 
 #[test]
 fn the_empty_states_follow_the_web_order() {
-    let (mut app, _) = start(
-        DESKTOP,
-        Inputs {
-            thread: false,
-            ..Default::default()
-        },
-    );
-    app.wait_for("Select a thread to inspect turn diffs.")
-        .expect("no thread");
-    let (mut app, _) = start(
-        DESKTOP,
-        Inputs {
-            repo: false,
-            ..Default::default()
-        },
-    );
-    app.wait_for("Turn diffs are unavailable because this project is not a git repository.")
-        .expect("not a repository");
-    let (mut app, _) = start(
-        DESKTOP,
-        Inputs {
-            patch: None,
-            pending: true,
-            ..Default::default()
-        },
-    );
-    app.wait_for("Loading checkpoint diff...")
-        .expect("loading label");
-    let (mut app, _) = start(
-        DESKTOP,
-        Inputs {
-            patch: Some(""),
-            ..Default::default()
-        },
-    );
-    app.wait_for("No net changes in this selection.")
-        .expect("empty diff");
+    let cases: [(Inputs, &str); 4] = [
+        (
+            Inputs {
+                thread: false,
+                ..Default::default()
+            },
+            "Select a thread to inspect turn diffs.",
+        ),
+        (
+            Inputs {
+                repo: false,
+                ..Default::default()
+            },
+            "Turn diffs are unavailable because this project is not a git repository.",
+        ),
+        (
+            Inputs {
+                patch: None,
+                pending: true,
+                ..Default::default()
+            },
+            "Loading checkpoint diff...",
+        ),
+        (
+            Inputs {
+                patch: Some(""),
+                ..Default::default()
+            },
+            "No net changes in this selection.",
+        ),
+    ];
+    for (inputs, expected) in cases {
+        let (mut app, _guard) = start(DESKTOP, inputs);
+        app.wait_for(expected).expect(expected);
+    }
 }
 
 #[test]
 fn folding_a_file_and_the_layout_toggle_go_through_the_client() {
-    let (mut app, fake) = start(DESKTOP, Inputs::default());
+    let (mut app, _guard) = start(DESKTOP, Inputs::default());
     app.wait_for("src/a.ts").expect("file header");
     app.press("role:button[Collapse src/a.ts]")
         .expect("fold the file");
     app.wait_for("role:button[Expand src/a.ts]")
         .expect("folded header");
-    assert!(fake.calls.borrow().contains(&"toggle".to_owned()));
+    assert!(calls().contains(&"toggle".to_owned()));
     app.press("role:button[Collapse all files]")
         .expect("collapse all");
     app.wait_for("role:button[Expand all files]")
         .expect("all folded");
+    assert!(!app.screen().shows("keep"), "folded files show no rows");
     app.press("role:button[Split diff view]")
         .expect("split layout");
-    assert!(fake.calls.borrow().iter().any(|c| c == "layout:Split"));
+    assert!(calls().iter().any(|c| c == "layout:Split"));
 }
 
 #[test]
 fn the_file_tree_lists_the_shown_files_and_reveals_one() {
-    let (mut app, fake) = start(DESKTOP, Inputs::default());
+    let (mut app, _guard) = start(DESKTOP, Inputs::default());
     app.wait_for("src/a.ts").expect("diff");
     app.press("role:button[Show file tree]")
         .expect("open the tree");
     app.wait_for("Files").expect("tree header");
     app.wait_for("a.test.ts").expect("tree row");
-    assert!(fake.calls.borrow().contains(&"tree:true".to_owned()));
+    assert!(calls().contains(&"tree:true".to_owned()));
     app.press("a.test.ts").expect("select a file");
-    assert!(fake.calls.borrow().contains(&"unfold".to_owned()));
+    assert!(calls().contains(&"unfold".to_owned()));
+}
+
+#[test]
+fn a_saved_review_comment_shows_under_its_line_and_deletes_through_the_client() {
+    for window in [DESKTOP, PHONE] {
+        let (mut app, _guard) = start(
+            window,
+            Inputs {
+                comments: vec![CommentAnnotation {
+                    id: "c1".into(),
+                    side: Side::New,
+                    line: 1,
+                    range_label: "+11".into(),
+                    text: "Why this?".into(),
+                }],
+                ..Default::default()
+            },
+        );
+        app.wait_for("Why this?").expect("comment under its line");
+        app.press("role:button[Delete comment]")
+            .expect("delete the comment");
+        assert!(calls().contains(&"remove:c1".to_owned()));
+        app.settle();
+        assert!(
+            !app.screen().shows("Why this?"),
+            "the deleted comment leaves the view"
+        );
+        assert!(app.screen().shows("src/a.ts"), "the diff stays");
+    }
 }

@@ -129,7 +129,7 @@ fn failed_add_preserves_the_typed_folder_for_a_retry() {
         app.press("role:button[Add]").expect("submit");
         app.wait_for("Could not create the project")
             .expect("failure displayed");
-        assert!(app.screen().shows("~/projects/existing"));
+        assert_eq!(app.screen().input_text("label:Command palette").expect("path input"),Some("~/projects/existing"));
         assert!(app.screen().shows("Project mutation calls: 1"));
         app.press("role:button[Add]")
             .expect("retry remains possible");
@@ -146,7 +146,7 @@ fn denied_add_and_unsupported_clone_do_not_dispatch() {
         let _ = app.press("role:button[Add]");
         let _ = app.press("role:button[Git URL]");
         assert!(app.screen().shows("Project mutation calls: 0"));
-        assert!(app.screen().shows("~/projects/existing"));
+        assert_eq!(app.screen().input_text("label:Command palette").expect("path input"),Some("~/projects/existing"));
     }
 }
 
@@ -191,15 +191,22 @@ impl AddProjectClient for CompletionFlow {
             .boxed_local()
     }
     fn publishing(&self) -> LocalBoxStream<'static, Option<Rc<add_project::PublishingView>>> {
-        let value = self.publication.then(|| Rc::new(add_project::PublishingView {
-            title: Text::client_key("Create private repository"),
-            description: Text::content("acme/garden"),
-            selected: "github".into(),
-            targets: vec![add_project::PublishChoice { kind: "github".into(), label: Text::content("GitHub") }],
-            publishes: false,
-            can_change: true,
-        }));
-        futures::stream::once(futures::future::ready(value)).chain(futures::stream::pending()).boxed_local()
+        let value = self.publication.then(|| {
+            Rc::new(add_project::PublishingView {
+                title: Text::client_key("Create private repository"),
+                description: Text::content("acme/garden"),
+                selected: "github".into(),
+                targets: vec![add_project::PublishChoice {
+                    kind: "github".into(),
+                    label: Text::content("GitHub"),
+                }],
+                publishes: false,
+                can_change: true,
+            })
+        });
+        futures::stream::once(futures::future::ready(value))
+            .chain(futures::stream::pending())
+            .boxed_local()
     }
     fn set_publishing(&self, publishes: bool, kind: Option<String>) -> Result<(), Text> {
         assert!(publishes);
@@ -296,11 +303,17 @@ fn optional_publication_control_delegates_and_retains_a_failure() {
         let mut app = Headless::start(EngineConfig {
             ui_sets: t3_ui::registries(),
             viewport: size(px(window.0), px(window.1)),
-            ..EngineConfig::new(Root::new::<CompletionHarness>(|| CompletionProps { finish: false, publication: true }))
-        }).expect("publication harness");
+            ..EngineConfig::new(Root::new::<CompletionHarness>(|| CompletionProps {
+                finish: false,
+                publication: true,
+            }))
+        })
+        .expect("publication harness");
         app.wait_for("acme/garden").expect("publication target");
-        app.press("role:checkbox[Create private repository]").expect("enable publication");
-        app.wait_for("Publication denied").expect("failure remains visible");
+        app.press("label:Create private repository")
+            .expect("enable publication");
+        app.wait_for("Publication denied")
+            .expect("failure remains visible");
         assert!(app.screen().shows("~/clone"));
         assert!(!app.screen().shows("Closed project flow"));
     }

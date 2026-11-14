@@ -7,12 +7,11 @@
 //! engine and owns the keyboard, input method and soft keyboard, so one surface serves desktop,
 //! web and mobile. Selection is the platform's own over its rows, so the drawer's selection
 //! comparison sees none (TERM-4).
+use nsh_base::{Terminal, TerminalApi, TerminalEvent};
 use nsh_core::prelude::*;
 use std::{cell::RefCell, rc::Rc};
-use nsh_base::{Terminal, TerminalApi, TerminalEvent};
 use t3_client::{
-    services::terminal::TerminalGrid,
-    view_logic::session::terminal_drawer::TerminalSurfaceSink,
+    services::terminal::TerminalGrid, view_logic::session::terminal_drawer::TerminalSurfaceSink,
 };
 
 use crate::theme::tw;
@@ -89,7 +88,11 @@ impl TerminalSurface {
 
 impl TerminalSurface {
     fn api(&self) -> Option<Rc<TerminalApi>> {
-        self.0.borrow().terminal.as_ref().and_then(|terminal| terminal.api::<TerminalApi>())
+        self.0
+            .borrow()
+            .terminal
+            .as_ref()
+            .and_then(|terminal| terminal.api::<TerminalApi>())
     }
     /// Takes the keyboard focus (showing the software keyboard).
     pub fn focus(&self) {

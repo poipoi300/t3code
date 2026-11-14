@@ -978,7 +978,14 @@ fn every_client_row_kind_uses_its_owner_or_an_explicit_unrendered_arm() {
                 1,
                 "unmatched footer mounts its generic owner card; the matched row shows its prompt"
             );
-            app.press("role:button[Copy message]")
+            assert_eq!(
+                app.screen()
+                    .count("role:button[Copy message]")
+                    .expect("owner copy actions"),
+                2,
+                "user and standalone assistant meta each expose their owner action"
+            );
+            app.press("role:button[Copy message] >> nth=1")
                 .expect("standalone assistant meta action");
             assert_eq!(app.screen().clipboard(), Some("Mixed assistant"));
             app.press("id:work-toggle:Mixed read")

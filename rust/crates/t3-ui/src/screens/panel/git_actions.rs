@@ -694,12 +694,12 @@ fn mounted_control(
         .into_element()
 }
 
-// ThreadDetailsControl's feature-owned classes; PNL-DETAILS has not exposed its control yet.
+// ThreadDetailsControl's feature-owned classes, shared with the details card's rows.
 // Child selectors move to icons; coarse after hit-box becomes hit_slop; will-change/text-box drop.
 const CONTROL_CLASS: &str = "relative inline-flex shrink-0 cursor-pointer items-center whitespace-nowrap border outline-none transition-[box-shadow,scale] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 h-8 min-w-0 rounded-lg border-transparent gap-2.5 px-2.5 text-left text-[13px] font-medium text-foreground/80 bg-transparent shadow-none hover:bg-black/[0.035] dark:hover:bg-white/[0.08]";
 
 /// Port of apps/web/src/components/chat/ThreadDetailsControl.tsx ThreadDetailsControl.
-fn thread_details_control(
+pub(crate) fn thread_details_control(
     part: &'static str,
     label: Prop<SharedString>,
     disabled: Prop<bool>,
@@ -1580,24 +1580,33 @@ fn publish_repository_dialog(control: Control) -> impl IntoElement {
                 .child(when(move || publish.step.get() == 0, move || publish_provider_panel(control, publish, nav)))
                 .child(when(move || publish.step.get() == 1, move || publish_repository_panel(control, publish)))
                 .child(when(move || publish.step.get() == 2, move || publish_summary(control, publish))))
+            // Every footer button stays mounted and is hidden by step: NSH panics when a press
+            // handler disposes its own button (Next and Publish change the step they render for).
             .child(dialog::dialog_footer(state, FooterVariant::Bare, view().app_class(tw("flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"))
-                .child(dynamic(move || {
-                    if publish.step.get() == 2 { return dialog::dialog_close(state, ButtonContent::Label(t("Done")), ButtonVariant::Default, ButtonSize::Default, || false).into_element(); }
-                    view().app_class(tw("flex flex-col-reverse gap-2 sm:flex-row"))
-                        .child(button(ButtonContent::Label(t(if publish.step.get() == 0 { "Cancel" } else { "Back" })), ButtonVariant::Outline, ButtonSize::Default, move || publish.pending.get(), move || {
-                            if publish.pending.get_untracked() { return; }
-                            if publish.step.get_untracked() == 0 { state.close(); } else { publish.step.set(0); }
-                        }))
-                        .child(if publish.step.get() == 0 {
-                            dialog::dialog_action(state, ButtonContent::Label(t("Next")), ActionVariant::Default, ButtonSize::Default,
-                                move || !publish.offered(control).iter().any(|p| get_publish_provider_readiness(&p.kind, &control.snapshot.get()).0), move || {
-                                    if publish.offered(control).iter().any(|p| get_publish_provider_readiness(&p.kind, &control.snapshot.get()).0) { publish.step.set(1); }
-                                }).into_element()
-                        } else {
-                            dialog::dialog_action(state, ButtonContent::Label(t(if publish.pending.get() { "Publishing..." } else { "Publish" })), ActionVariant::Default, ButtonSize::Default,
-                                move || !publish.can_submit(control), move || publish.submit(control)).into_element()
-                        }).into_element()
-                }))))
+                .child(view().app_class(move || Some(tw(if publish.step.get() == 2 { "" } else { "hidden" })))
+                    .child(dialog::dialog_close(state, ButtonContent::Label(t("Done")), ButtonVariant::Default, ButtonSize::Default, || false)))
+                .child(view().app_class(move || Some(tw(if publish.step.get() == 2 { "hidden" } else { "flex flex-col-reverse gap-2 sm:flex-row" })))
+                    .child(view().app_class(move || Some(tw(if publish.step.get() == 0 { "" } else { "hidden" })))
+                        .child(button(ButtonContent::Label(t("Cancel")), ButtonVariant::Outline, ButtonSize::Default, move || publish.pending.get(), move || {
+                            if !publish.pending.get_untracked() { state.close(); }
+                        })))
+                    .child(view().app_class(move || Some(tw(if publish.step.get() == 1 { "" } else { "hidden" })))
+                        .child(button(ButtonContent::Label(t("Back")), ButtonVariant::Outline, ButtonSize::Default, move || publish.pending.get(), move || {
+                            if !publish.pending.get_untracked() { publish.step.set(0); }
+                        })))
+                    .child(view().app_class(move || Some(tw(if publish.step.get() == 0 { "" } else { "hidden" })))
+                        .child(dialog::dialog_action(state, ButtonContent::Label(t("Next")), ActionVariant::Default, ButtonSize::Default,
+                            move || !publish.offered(control).iter().any(|p| get_publish_provider_readiness(&p.kind, &control.snapshot.get()).0), move || {
+                                if publish.step.get_untracked() == 0 && publish.offered(control).iter().any(|p| get_publish_provider_readiness(&p.kind, &control.snapshot.get()).0) { publish.step.set(1); }
+                            })))
+                    .child(view().app_class(move || Some(tw(if publish.step.get() == 1 { "" } else { "hidden" })))
+                        .child(dialog::dialog_action(state, ButtonContent::Custom {
+                                label: t("Publish"),
+                                child: text(move || t(if publish.pending.get() { "Publishing..." } else { "Publish" })).into_element(),
+                            }, ActionVariant::Default, ButtonSize::Default,
+                            move || !publish.can_submit(control), move || {
+                                if publish.step.get_untracked() == 1 { publish.submit(control); }
+                            }))))))
         })
     })
 }

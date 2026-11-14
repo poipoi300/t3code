@@ -145,8 +145,18 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
         };
         groups.apply_to_input(&mut input);
         // Pending approvals stay outside collapsed work (MessagesTimeline's pendingApprovalRequestIds).
-        input.pending_approval_request_ids =
-            pending_approvals.with(|pending| pending.0.keys().cloned().collect());
+        input.pending_approval_request_ids = pending_approvals.with(|pending| {
+            pending
+                .0
+                .values()
+                .filter_map(|pending| match &pending.request.id {
+                    t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(id) => {
+                        Some(id.0.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        });
         let next = derive_messages_timeline_rows_with_state(&input, previous.borrow().as_ref());
         let rows = next.rows.clone();
         *previous.borrow_mut() = Some(next);

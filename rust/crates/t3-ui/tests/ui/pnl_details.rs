@@ -438,8 +438,9 @@ fn scripts_snapshot(scripts: serde_json::Value, importable: serde_json::Value) -
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PropEnum)]
 enum Services {
+    #[default]
     Empty,
     WithScript,
     Imports,
@@ -526,6 +527,7 @@ fn services(window: (f32, f32), services: Services, height: f32) -> Headless {
 fn open_in_opens_the_preferred_editor_and_the_menu_changes_it() {
     for window in [DESKTOP, PHONE] {
         let mut app = services(window, Services::Empty, 600.0);
+        app.wait_for("role:button[Open in VS Code]").expect("client snapshot");
         app.press("role:button[Open in VS Code]").expect("primary");
         app.wait_for("text:opened:Vscode:/repo").expect("client opened the checkout");
         app.press("role:button[Choose editor]").expect("menu");
@@ -552,6 +554,7 @@ fn adding_a_script_saves_through_the_client_and_keeps_input_on_refusal() {
     for window in [DESKTOP, PHONE] {
         let mut app = services(window, Services::Empty, 600.0);
         app.press("role:button[Refuse writes]").expect("refuse");
+        app.wait_for("role:button[Add project script]").expect("client snapshot");
         app.press("role:button[Add project script]").expect("add row");
         app.wait_for("Add Action").expect("editor dialog");
         app.press("role:button[Save action]").expect("save empty");
@@ -559,7 +562,7 @@ fn adding_a_script_saves_through_the_client_and_keeps_input_on_refusal() {
         assert!(app.screen().shows("no call"));
         app.type_text("id:script-name", "Dev").expect("name");
         app.type_text("id:script-command", "bun dev").expect("command");
-        app.press("role:button[Save action]").expect("save");
+        app.press("role:button[Save action]").unwrap_or_else(|e| panic!("save at {window:?}: {e}"));
         app.wait_for("text:added:Dev|bun dev|Play|keys:Some(None)").expect("canonical input");
         app.wait_for("Settings write refused").expect("server error in the dialog");
         assert_eq!(app.screen().input_text("id:script-name"), Ok(Some("Dev")));
@@ -569,12 +572,14 @@ fn adding_a_script_saves_through_the_client_and_keeps_input_on_refusal() {
 #[test]
 fn a_saved_script_becomes_the_run_control_and_closes_the_dialog() {
     let mut app = services(DESKTOP, Services::Empty, 600.0);
+    app.wait_for("role:button[Add project script]").expect("client snapshot");
     app.press("role:button[Add project script]").expect("add row");
     app.type_text("id:script-name", "Dev").expect("name");
     app.type_text("id:script-command", "bun dev").expect("command");
     app.press("role:button[Save action]").expect("save");
     app.wait_for("role:button[Run Dev]").expect("primary script row");
-    assert!(!app.screen().shows("Add Action"), "a successful save closes the dialog");
+    app.wait_for_gone("Add Action", nsh_testing::WAIT)
+        .expect("a successful save closes the dialog");
     app.press("role:button[Run Dev]").expect("run");
     app.wait_for("text:ran:added").expect("client opened a terminal");
 }

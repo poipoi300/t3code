@@ -51,7 +51,7 @@ fn error_ref(error: &t3_client::ClientError) -> Text {
 }
 
 use crate::screens::add_project as ui_project;
-use t3_client::navigation::{project_flow as client_project, ignored_selection as client_ignored};
+use t3_client::navigation::{ignored_selection as client_ignored, project_flow as client_project};
 
 fn project_label(label: &client_project::Label) -> Text {
     match label {
@@ -73,93 +73,215 @@ fn project_view(value: &client_project::View) -> ui_project::AddProjectView {
         },
         query: value.query.clone(),
         placeholder: project_label(&value.placeholder),
-        groups: value.groups.iter().map(|group| ui_project::ProjectGroup {
-            label: project_label(&group.label),
-            items: group.items.iter().map(|item| ui_project::ProjectItem {
-                id: item.id.clone(), title: project_label(&item.title),
-                description: item.description.as_ref().map(project_label),
-                icon: match item.glyph {
-                    client_project::Glyph::Environment => Icon::Monitor,
-                    client_project::Glyph::Folder => Icon::Folder,
-                    client_project::Glyph::NewRepository => Icon::FolderGit,
-                    client_project::Glyph::Repository => Icon::Link,
-                    client_project::Glyph::Settings => Icon::Settings,
-                },
-                disabled: item.disabled, setup_required: item.setup_required,
-            }).collect(),
-        }).collect(),
+        groups: value
+            .groups
+            .iter()
+            .map(|group| ui_project::ProjectGroup {
+                label: project_label(&group.label),
+                items: group
+                    .items
+                    .iter()
+                    .map(|item| ui_project::ProjectItem {
+                        id: item.id.clone(),
+                        title: project_label(&item.title),
+                        description: item.description.as_ref().map(project_label),
+                        icon: match item.glyph {
+                            client_project::Glyph::Environment => Icon::Monitor,
+                            client_project::Glyph::Folder => Icon::Folder,
+                            client_project::Glyph::NewRepository => Icon::FolderGit,
+                            client_project::Glyph::Repository => Icon::Link,
+                            client_project::Glyph::Settings => Icon::Settings,
+                        },
+                        disabled: item.disabled,
+                        setup_required: item.setup_required,
+                    })
+                    .collect(),
+            })
+            .collect(),
         summary: value.summary.as_ref().map(|summary| match summary {
-            client_project::Summary::New {name,path,root,environment} => ui_project::Summary::New {name:name.clone(),path:path.clone(),root:root.clone(),environment:environment.clone()},
-            client_project::Summary::Repository {title,url} => ui_project::Summary::Repository {title:title.clone(),url:url.clone(),icon:Icon::Link},
+            client_project::Summary::New {
+                name,
+                path,
+                root,
+                environment,
+            } => ui_project::Summary::New {
+                name: name.clone(),
+                path: path.clone(),
+                root: root.clone(),
+                environment: environment.clone(),
+            },
+            client_project::Summary::Repository { title, url } => ui_project::Summary::Repository {
+                title: title.clone(),
+                url: url.clone(),
+                icon: Icon::Link,
+            },
         }),
-        can_submit:value.can_submit,
-        submit_label:project_label(&value.submit_label),
-        submit_accessibility:project_label(&value.submit_accessibility),
-        can_go_back:value.can_go_back,
-        folder_picker_label:value.folder_picker_label.as_ref().map(project_label),
-        can_pick_folder:value.can_pick_folder,loading_folders:value.loading_folders,
-        error:value.error.as_ref().map(|e| Text::client_key(e.clone())),
-        empty_message:value.empty_message.as_ref().map(project_label),
+        can_submit: value.can_submit,
+        submit_label: project_label(&value.submit_label),
+        submit_accessibility: project_label(&value.submit_accessibility),
+        can_go_back: value.can_go_back,
+        folder_picker_label: value.folder_picker_label.as_ref().map(project_label),
+        can_pick_folder: value.can_pick_folder,
+        loading_folders: value.loading_folders,
+        error: value.error.as_ref().map(|e| Text::client_key(e.clone())),
+        empty_message: value.empty_message.as_ref().map(project_label),
     }
 }
 struct AddProjectBinding<P: Platform + Clone + 'static>(client_project::AddProjectSession<P>);
-pub fn add_project_runtime<P: Platform + Clone + 'static>(session: client_project::AddProjectSession<P>) -> ui_project::AddProjectRuntime {
+pub fn add_project_runtime<P: Platform + Clone + 'static>(
+    session: client_project::AddProjectSession<P>,
+) -> ui_project::AddProjectRuntime {
     ui_project::AddProjectRuntime(Rc::new(AddProjectBinding(session)))
 }
 impl<P: Platform + Clone + 'static> ui_project::AddProjectClient for AddProjectBinding<P> {
-    fn watch(&self) -> LocalBoxStream<'static,Rc<ui_project::AddProjectView>> {
-        self.0.watch().map(|view| Rc::new(project_view(&view))).boxed_local()
+    fn watch(&self) -> LocalBoxStream<'static, Rc<ui_project::AddProjectView>> {
+        self.0
+            .watch()
+            .map(|view| Rc::new(project_view(&view)))
+            .boxed_local()
     }
-    fn completed(&self) -> LocalBoxStream<'static,()> { self.0.completed() }
-    fn publishing(&self) -> LocalBoxStream<'static,Option<Rc<ui_project::PublishingView>>> {
-        let session=self.0.clone();
-        self.0.changes().map(move |_| session.publishing().map(|value| Rc::new(ui_project::PublishingView {
-            title: Text::client_key("Create private repository"),
-            description: Text::content(value.repository), selected:value.selected.kind,
-            targets:value.targets.into_iter().map(|target| ui_project::PublishChoice {kind:target.kind,label:Text::content(target.label)}).collect(),
-            publishes:value.publishes,can_change:value.can_change,
-        }))).boxed_local()
+    fn completed(&self) -> LocalBoxStream<'static, ()> {
+        self.0.completed()
     }
-    fn set_publishing(&self,value:bool,kind:Option<String>) -> Result<(),Text> { self.0.set_publishing(value,kind).map_err(error) }
-    fn set_query(&self,query:String) -> Result<(),Text> { self.0.set_query(query).map_err(error) }
-    fn back(&self) -> Result<(),Text> { self.0.back().map_err(error) }
-    fn select_item(&self,id:&str) -> LocalBoxFuture<'static,Result<Option<ui_new::Destination>,Text>> {
-        let session=self.0.clone();let id=id.to_owned();
-        async move {session.select_item(&id).await.map(|value|value.map(destination)).map_err(error)}.boxed_local()
+    fn publishing(&self) -> LocalBoxStream<'static, Option<Rc<ui_project::PublishingView>>> {
+        let session = self.0.clone();
+        self.0
+            .changes()
+            .map(move |_| {
+                session.publishing().map(|value| {
+                    Rc::new(ui_project::PublishingView {
+                        title: Text::client_key("Create private repository"),
+                        description: Text::content(value.repository),
+                        selected: value.selected.kind,
+                        targets: value
+                            .targets
+                            .into_iter()
+                            .map(|target| ui_project::PublishChoice {
+                                kind: target.kind,
+                                label: Text::content(target.label),
+                            })
+                            .collect(),
+                        publishes: value.publishes,
+                        can_change: value.can_change,
+                    })
+                })
+            })
+            .boxed_local()
     }
-    fn submit(&self,revision:u64) -> LocalBoxFuture<'static,Result<Option<ui_new::Destination>,Text>> {
-        let session=self.0.clone();
-        async move {session.submit(revision).await.map(|value|value.map(destination)).map_err(error)}.boxed_local()
+    fn set_publishing(&self, value: bool, kind: Option<String>) -> Result<(), Text> {
+        self.0.set_publishing(value, kind).map_err(error)
     }
-    fn pick_folder(&self,revision:u64) -> LocalBoxFuture<'static,Result<Option<ui_new::Destination>,Text>> {
-        let session=self.0.clone();
-        async move {session.pick_folder(revision).await.map(|value|value.map(destination)).map_err(error)}.boxed_local()
+    fn set_query(&self, query: String) -> Result<(), Text> {
+        self.0.set_query(query).map_err(error)
+    }
+    fn back(&self) -> Result<(), Text> {
+        self.0.back().map_err(error)
+    }
+    fn select_item(
+        &self,
+        id: &str,
+    ) -> LocalBoxFuture<'static, Result<Option<ui_new::Destination>, Text>> {
+        let session = self.0.clone();
+        let id = id.to_owned();
+        async move {
+            session
+                .select_item(&id)
+                .await
+                .map(|value| value.map(destination))
+                .map_err(error)
+        }
+        .boxed_local()
+    }
+    fn submit(
+        &self,
+        revision: u64,
+    ) -> LocalBoxFuture<'static, Result<Option<ui_new::Destination>, Text>> {
+        let session = self.0.clone();
+        async move {
+            session
+                .submit(revision)
+                .await
+                .map(|value| value.map(destination))
+                .map_err(error)
+        }
+        .boxed_local()
+    }
+    fn pick_folder(
+        &self,
+        revision: u64,
+    ) -> LocalBoxFuture<'static, Result<Option<ui_new::Destination>, Text>> {
+        let session = self.0.clone();
+        async move {
+            session
+                .pick_folder(revision)
+                .await
+                .map(|value| value.map(destination))
+                .map_err(error)
+        }
+        .boxed_local()
     }
 }
 struct IgnoredBinding<P: Platform + Clone + 'static>(client_ignored::IgnoredFilesSession<P>);
-pub fn ignored_files_client<P: Platform + Clone + 'static>(session:client_ignored::IgnoredFilesSession<P>) -> Rc<dyn ui_project::IgnoredFilesClient> {
+pub fn ignored_files_client<P: Platform + Clone + 'static>(
+    session: client_ignored::IgnoredFilesSession<P>,
+) -> Rc<dyn ui_project::IgnoredFilesClient> {
     Rc::new(IgnoredBinding(session))
 }
 impl<P: Platform + Clone + 'static> ui_project::IgnoredFilesClient for IgnoredBinding<P> {
-    fn watch(&self) -> LocalBoxStream<'static,Rc<ui_project::IgnoredFilesView>> {
-        self.0.watch().map(|value| {
-            let mut selected_summary=crate::i18n::tr("{count} of {total}",&[("count",crate::i18n::Value::Int(value.selected_count as i64)),("total",crate::i18n::Value::Int(value.total_count as i64))]);
-            if value.selected_bytes>0 { selected_summary.push_str(&format!(" · {}",value.selected_size)); }
-            Rc::new(ui_project::IgnoredFilesView {
-                query:value.query.clone(),can_search:value.can_search,show_search:value.show_search,
-                loading:value.loading,searching:value.searching,truncated:value.truncated,
-                all_shown_selected:value.all_shown_selected,selected_summary,
-                error:value.error.as_ref().map(|e|Text::client_key(e.clone())),
-                files:value.files.iter().map(|choice|ui_project::IgnoredFileChoice {
-                    file:choice.file.clone(),size_label:if choice.too_large {Text::client_key("Over 1 MB")} else {Text::content(choice.size.clone())},
-                    selected:choice.selected,disabled:choice.disabled,
-                }).collect(),
+    fn watch(&self) -> LocalBoxStream<'static, Rc<ui_project::IgnoredFilesView>> {
+        self.0
+            .watch()
+            .map(|value| {
+                let mut selected_summary = crate::i18n::tr(
+                    "{count} of {total}",
+                    &[
+                        (
+                            "count",
+                            crate::i18n::Value::Int(value.selected_count as i64),
+                        ),
+                        ("total", crate::i18n::Value::Int(value.total_count as i64)),
+                    ],
+                );
+                if value.selected_bytes > 0 {
+                    selected_summary.push_str(&format!(" · {}", value.selected_size));
+                }
+                Rc::new(ui_project::IgnoredFilesView {
+                    query: value.query.clone(),
+                    can_search: value.can_search,
+                    show_search: value.show_search,
+                    loading: value.loading,
+                    searching: value.searching,
+                    truncated: value.truncated,
+                    all_shown_selected: value.all_shown_selected,
+                    selected_summary,
+                    error: value.error.as_ref().map(|e| Text::client_key(e.clone())),
+                    files: value
+                        .files
+                        .iter()
+                        .map(|choice| ui_project::IgnoredFileChoice {
+                            file: choice.file.clone(),
+                            size_label: if choice.too_large {
+                                Text::client_key("Over 1 MB")
+                            } else {
+                                Text::content(choice.size.clone())
+                            },
+                            selected: choice.selected,
+                            disabled: choice.disabled,
+                        })
+                        .collect(),
+                })
             })
-        }).boxed_local()
+            .boxed_local()
     }
-    fn set_query(&self,query:String)->Result<(),Text>{self.0.set_query(query).map_err(error)}
-    fn toggle_file(&self,path:&str,checked:bool)->Result<(),Text>{self.0.toggle_file(path,checked).map_err(error)}
-    fn toggle_shown(&self)->Result<(),Text>{self.0.toggle_shown().map_err(error)}
+    fn set_query(&self, query: String) -> Result<(), Text> {
+        self.0.set_query(query).map_err(error)
+    }
+    fn toggle_file(&self, path: &str, checked: bool) -> Result<(), Text> {
+        self.0.toggle_file(path, checked).map_err(error)
+    }
+    fn toggle_shown(&self) -> Result<(), Text> {
+        self.0.toggle_shown().map_err(error)
+    }
 }
 
 use crate::screens::new_thread as ui_new;

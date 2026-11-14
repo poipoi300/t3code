@@ -8,6 +8,7 @@ pub mod diff;
 pub mod files;
 pub mod git_panel;
 pub mod navigation;
+pub mod settings;
 pub mod terminal;
 pub mod thread_ops;
 pub mod shell;

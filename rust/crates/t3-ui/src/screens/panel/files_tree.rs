@@ -76,7 +76,7 @@ const EXPLORER_WIDTH_KEY: &str = "t3code.fileExplorerWidth";
 
 /// FileExplorerPane's clamp: never wider than the row less the 256px content reserve.
 pub fn explorer_width(requested: f32, row: f32) -> f32 {
-    let max = (row - FILE_CONTENT_MIN_WIDTH).min(MAX_WIDTH).max(MIN_WIDTH);
+    let max = (row - FILE_CONTENT_MIN_WIDTH).clamp(MIN_WIDTH, MAX_WIDTH);
     requested.clamp(MIN_WIDTH, max)
 }
 
@@ -285,7 +285,7 @@ pub fn file_browser_panel(runtime: FilesRuntime, props: FileBrowserProps) -> imp
                         problem_text(&problem).resolve(),
                         t("Click to retry.")
                     ))))
-                    .on_press(move || retry())
+                    .on_press(retry)
                     .app_class(tw("p-4 text-left text-xs leading-relaxed text-destructive"))
                     .child(text(format!(
                         "{} {}",
@@ -342,10 +342,10 @@ pub fn file_browser_panel(runtime: FilesRuntime, props: FileBrowserProps) -> imp
         .selected(move || nsh_base::SelectValue::Controlled(selected.get().map(SharedString::from)))
         .accessibility_label(Some(SharedString::from(tree_label)))
         .app_class(tw("min-h-0 flex-1 overflow-hidden"))
-        .list_class(Some(SharedString::from(tw("px-1.5 py-1"))))
-        .item_class(Some(SharedString::from(tw(
+        .list_class(Some(tw("px-1.5 py-1")))
+        .item_class(Some(tw(
             "group flex h-6 min-w-0 items-center gap-1 rounded-md pe-2 text-xs text-foreground hover:bg-foreground/7 selected:bg-foreground/12 focus-visible:ring-2 focus-visible:ring-ring disabled:hover:bg-transparent",
-        ))))
+        )))
         .render_item(move |entry: &nsh_base::TreeEntry| file_tree_row(entry.clone(), states))
         .on_expanded_change(move |ids: &Vec<SharedString>| {
             let ids: Vec<SharedString> = ids.iter().filter(|id| !id.ends_with('\u{0}')).cloned().collect();
@@ -394,7 +394,10 @@ pub fn file_browser_panel(runtime: FilesRuntime, props: FileBrowserProps) -> imp
 }
 
 /// One tree row as Pierre draws it in compact density: indent, chevron, icon, name.
-fn file_tree_row(entry: nsh_base::TreeEntry, states: Signal<Rc<BTreeMap<Rc<str>, (bool, bool)>>>) -> AnyElement {
+/// Each row's (ignored, loading) state by node id, rebuilt with the items.
+type RowStates = Signal<Rc<BTreeMap<Rc<str>, (bool, bool)>>>;
+
+fn file_tree_row(entry: nsh_base::TreeEntry, states: RowStates) -> AnyElement {
     if entry.id.ends_with('\u{0}') {
         return view()
             .pl(px(8.0 + entry.depth as f32 * 12.0))

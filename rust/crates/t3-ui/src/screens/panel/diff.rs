@@ -746,7 +746,7 @@ fn commit_rows(
                                     let relative = t3_client::view_logic::session::timestamps::format_relative_elapsed(
                                         t3_client::view_logic::session::timestamps::relative_time_elapsed_ms(
                                             t3_client::time::epoch_ms(&commit.committed_at).unwrap_or(0),
-                                            crate::state::clock::now_ms() as i64,
+                                            crate::state::clock::now_ms(),
                                         ),
                                     );
                                     let selected = snapshot.with_untracked(|s| {
@@ -1248,7 +1248,7 @@ fn diff_file_header(
         .app_class(tw(
             "flex flex-row size-full items-center gap-2 border-b border-border/70 bg-(--code-background) px-2 pr-3 font-sans text-xs",
         ))
-        .on_press(move || press())
+        .on_press(press)
         .child(with_tooltip(
             move || if collapsed { t("Expand diff") } else { t("Collapse diff") },
             button(

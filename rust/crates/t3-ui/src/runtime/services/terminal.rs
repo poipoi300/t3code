@@ -19,7 +19,12 @@ use t3_client::{
 pub trait TerminalClient {
     fn load(&self) -> LocalBoxFuture<'static, Result<(), ClientError>>;
     fn drawer(&self, key: &ThreadKey, launch: Option<LaunchLocation>) -> TerminalDrawerLease;
-    fn session(&self, key: &ThreadKey, terminal: &str, launch: &TerminalLaunch) -> TerminalSessionLease;
+    fn session(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+        launch: &TerminalLaunch,
+    ) -> TerminalSessionLease;
     fn can_operate(&self, key: &ThreadKey) -> bool;
     fn can_read(&self, key: &ThreadKey) -> bool;
     fn set_open(&self, key: &ThreadKey, open: bool);
@@ -33,9 +38,23 @@ pub trait TerminalClient {
         placement: Placement,
         location: Option<LaunchLocation>,
     ) -> Option<(String, LocalBoxFuture<'static, Result<(), ClientError>>)>;
-    fn close_terminal(&self, key: &ThreadKey, terminal: &str) -> Option<LocalBoxFuture<'static, ()>>;
-    fn write(&self, key: &ThreadKey, terminal: &str, data: String) -> LocalBoxFuture<'static, Result<(), ClientError>>;
-    fn resize(&self, key: &ThreadKey, terminal: &str, grid: TerminalGrid) -> LocalBoxFuture<'static, Result<(), ClientError>>;
+    fn close_terminal(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+    ) -> Option<LocalBoxFuture<'static, ()>>;
+    fn write(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+        data: String,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>>;
+    fn resize(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+        grid: TerminalGrid,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>>;
 }
 
 impl<P: Platform + Clone + 'static> TerminalClient for TerminalSessions<P> {
@@ -45,7 +64,12 @@ impl<P: Platform + Clone + 'static> TerminalClient for TerminalSessions<P> {
     fn drawer(&self, key: &ThreadKey, launch: Option<LaunchLocation>) -> TerminalDrawerLease {
         TerminalSessions::drawer(self, key, launch)
     }
-    fn session(&self, key: &ThreadKey, terminal: &str, launch: &TerminalLaunch) -> TerminalSessionLease {
+    fn session(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+        launch: &TerminalLaunch,
+    ) -> TerminalSessionLease {
         TerminalSessions::session(
             self,
             &key.environment,
@@ -80,13 +104,27 @@ impl<P: Platform + Clone + 'static> TerminalClient for TerminalSessions<P> {
         self.launch_drawer_terminal(key, placement, location)
             .map(|(id, opened)| (id, opened.map(|result| result.map(|_| ())).boxed_local()))
     }
-    fn close_terminal(&self, key: &ThreadKey, terminal: &str) -> Option<LocalBoxFuture<'static, ()>> {
+    fn close_terminal(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+    ) -> Option<LocalBoxFuture<'static, ()>> {
         self.close_drawer_terminal(key, terminal)
     }
-    fn write(&self, key: &ThreadKey, terminal: &str, data: String) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    fn write(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+        data: String,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         TerminalSessions::write(self, key, terminal, data)
     }
-    fn resize(&self, key: &ThreadKey, terminal: &str, grid: TerminalGrid) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    fn resize(
+        &self,
+        key: &ThreadKey,
+        terminal: &str,
+        grid: TerminalGrid,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         TerminalSessions::resize(self, key, terminal, grid)
     }
 }

@@ -162,12 +162,13 @@ pub fn index_draft_landing(target: Target) -> AnyElement {
     let link_busy = signal(false);
     let owner = Owner::current();
     let nav = navigator();
+    let link_urls=matches!(&target,Target::Link(_)).then(||use_context::<crate::state::url::UrlState>()).flatten();
     let origin = nav.top();
     spawn(async move {
         while let Some(next) = changes.next().await {
             if let NewThreadView::Navigate(destination) = next.as_ref() {
                 if nav.top() == origin {
-                    nav.open(destination.clone().route());
+                    open_destination(nav,link_urls,destination.clone());
                 }
             } else {
                 current.set(next);
@@ -206,7 +207,7 @@ pub fn index_draft_landing(target: Target) -> AnyElement {
                     }))
                     .into_element(),
                 4 => draft_chat_view(current, client, error),
-                5 => link_choices(current, client, target, error, link_busy, owner),
+                5 => link_choices(current, client, target, error, link_busy, owner,link_urls),
                 _ => view().into_element(),
             })
         }))
@@ -220,6 +221,13 @@ pub fn index_draft_landing(target: Target) -> AnyElement {
         .into_element()
 }
 
+fn open_destination(nav:crate::state::nav::Navigator,urls:Option<crate::state::url::UrlState>,destination:Destination) {
+    let route=destination.route();
+    if let Some(urls)=urls && let Some(path)=route.address() {
+        urls.request(crate::state::url::UrlRequest::Replace(path));
+    }else{nav.open(route);}
+}
+
 fn link_choices(
     current: Signal<Rc<NewThreadView>>,
     client: Stored<Rc<dyn NewThreadClient>>,
@@ -227,6 +235,7 @@ fn link_choices(
     error: Signal<Option<Text>>,
     busy: Signal<bool>,
     owner: Owner,
+    link_urls:Option<crate::state::url::UrlState>,
 ) -> AnyElement {
     let nav = navigator();
     let origin = nav.top();
@@ -245,7 +254,7 @@ fn link_choices(
                     let origin=origin.clone();
                     owner.run(move||spawn(async move {
                         let result=operation.await;busy.set(false);
-                        match result {Ok(Some(destination)) if nav.top()==origin=>nav.open(destination.route()),Ok(_)=>{},Err(message)=>error.set(Some(message))}
+                        match result {Ok(Some(destination)) if nav.top()==origin=>open_destination(nav,link_urls,destination),Ok(_)=>{},Err(message)=>error.set(Some(message))}
                     }));
                 }));
         }
@@ -389,6 +398,7 @@ fn draft_chat_view(
         .attachments(&initial.id)
         .map(|session| ComposerAttachments::new(session, disabled));
     let busy = signal(false);
+    let submit_owner=Owner::current();
     let nav = navigator();
     let origin = nav.top();
     let submit = Rc::new(move |mode| {
@@ -404,7 +414,7 @@ fn draft_chat_view(
         error.set(None);
         let operation = client.get().submit(value.id.clone(), value.revision, mode);
         let origin = origin.clone();
-        spawn(async move {
+        submit_owner.run(move||spawn(async move {
             let result = operation.await;
             busy.set(false);
             match result {
@@ -412,7 +422,7 @@ fn draft_chat_view(
                 Ok(_) => {}
                 Err(message) => error.set(Some(message)),
             }
-        });
+        }));
     });
     let key_submit = submit.clone();
     let editor_ui = composer_prompt_editor_tiptap(
