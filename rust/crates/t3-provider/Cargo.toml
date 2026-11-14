@@ -11,6 +11,7 @@ t3-contracts = { path = "../t3-contracts" }
 t3-process = { path = "../t3-process" }
 t3-config = { path = "../t3-config" }
 t3-persistence = { path = "../t3-persistence" }
+t3-usage = { path = "../t3-usage" }
 t3-codex-app-server = { path = "../t3-codex-app-server" }
 t3-claude-cli = { path = "../t3-claude-cli" }
 t3-acp = { path = "../t3-acp" }

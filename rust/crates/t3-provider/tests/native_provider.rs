@@ -263,6 +263,7 @@ async fn signed_out_accounts_do_not_look_ready_and_external_codex_routes_never_r
         .unwrap();
     let value: Value = serde_json::to_value(snapshot).unwrap();
     assert_eq!(value["usageLimits"]["unavailable"]["reason"], "unsupported");
+    assert_eq!(value["auth"]["endpoint"], "https://proxy.example");
     assert!(
         !fixture
             .calls()
@@ -352,4 +353,47 @@ async fn claude_workspace_cache_skips_account_probes_and_deleted_workspaces_keep
     assert_eq!(workspaces[0]["slashCommands"][0]["name"], "compact");
     assert_eq!(workspaces[0]["slashCommandsPending"], false);
     assert_eq!(fixture.calls(), calls);
+}
+
+#[tokio::test]
+async fn claude_custom_auth_reports_the_configured_origin_and_settings_override_the_parent_environment()
+ {
+    for (url, expected) in [
+        (
+            " https://user:private-key@proxy.example:8443/v1?key=private-key ",
+            Some("https://proxy.example:8443"),
+        ),
+        ("https://api.anthropic.com/v1", None),
+        ("file:///private", None),
+    ] {
+        let mut fixture = Fixture::new(
+            json!({"protocol":"claude","version":"2.1.200 (Claude Code)","nativeAccount":{"tokenSource":"apiKey","apiProvider":"firstParty"}}),
+        );
+        fixture.environment.insert(
+            "ANTHROPIC_BASE_URL".into(),
+            "https://parent.example/v1".into(),
+        );
+        let config = fixture.directory.path().join("provider-home");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("settings.json"),
+            json!({"env":{"ANTHROPIC_BASE_URL":url}}).to_string(),
+        )
+        .unwrap();
+        let snapshot = provider(&fixture, "claudeAgent")
+            .snapshot(None, true)
+            .await
+            .unwrap();
+        let value = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(value["auth"]["endpoint"].as_str(), expected);
+        assert!(!value["auth"].to_string().contains("private-key"));
+        assert_eq!(
+            value["auth"]["type"],
+            if expected.is_some() {
+                "customEndpoint"
+            } else {
+                "apiKey"
+            }
+        );
+    }
 }

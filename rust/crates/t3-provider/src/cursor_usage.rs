@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Duration};
 use t3_contracts::provider_usage_limits::ServerProviderUsageLimits;
 pub const DEFAULT_API_ENDPOINT: &str = "https://api2.cursor.sh";
-fn number(value: &Value) -> Option<f64> {
+pub(crate) fn number(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| {

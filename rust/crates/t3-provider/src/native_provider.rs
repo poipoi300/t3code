@@ -421,6 +421,12 @@ impl NativeProvider {
                     let (auth, status) =
                         probe_models::codex_auth(&raw["account"], raw.get("rateLimits"))?;
                     value["auth"] = json!(auth);
+                    if let Some(endpoint) = raw
+                        .get("config")
+                        .and_then(|config| probe_models::codex_custom_endpoint(&config["config"]))
+                    {
+                        value["auth"]["endpoint"] = json!(endpoint);
+                    }
                     value["status"] = json!(status);
                     if let Some(agent) = raw["initialize"]["userAgent"]
                         .as_str()
@@ -476,12 +482,32 @@ impl NativeProvider {
                     value["usageLimits"] = json!(usage);
                 } else {
                     let init = &raw["initialize"];
-                    let custom_endpoint = environment.get("ANTHROPIC_BASE_URL").is_some_and(|s| {
-                        url::Url::parse(s).is_ok_and(|u| u.host_str() != Some("api.anthropic.com"))
-                    });
+                    let config = crate::environment::claude_home(
+                        config_text("homePath"),
+                        &environment,
+                        &self.context.home,
+                        &self.context.cwd,
+                    );
+                    let settings_env = crate::claude_skills::settings_environment_for_workspace(
+                        &config,
+                        Some(&cwd),
+                        self.context.platform,
+                        &environment,
+                    );
+                    let base_url = settings_env
+                        .get("ANTHROPIC_BASE_URL")
+                        .and_then(Value::as_str)
+                        .or_else(|| environment.get("ANTHROPIC_BASE_URL").map(String::as_str));
+                    let endpoint = probe_models::claude_custom_endpoint(base_url);
+                    let custom_endpoint = endpoint.is_some();
                     let (auth, status) =
                         probe_models::claude_auth(&init["account"], custom_endpoint)?;
                     value["auth"] = json!(auth);
+                    if value["auth"]["type"] == "customEndpoint"
+                        && let Some(endpoint) = endpoint
+                    {
+                        value["auth"]["endpoint"] = json!(endpoint);
+                    }
                     if let Some(workspace) = raw["workspaceId"].as_str() {
                         value["auth"]["workspaceId"] = json!(workspace);
                     }

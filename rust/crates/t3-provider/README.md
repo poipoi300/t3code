@@ -324,3 +324,22 @@ construction with the current `SpeechNumber::Finite(JsNumber)` contract and
 partial generic status paths with provider-specific services. Subsequent
 regressions fixed Windows managed-install protection, Antigravity no-spawn health
 and concurrent fixture logging; all pass in the final suite.
+
+
+## Upstream merge 817a9186f9 — integration and drift round
+
+`domain::ProviderDomain::open` now composes the handler services, shared secrets,
+instance registry, direct/managed Codex and Claude factories, settings watch,
+managed installation router, ACP catalog/service and token broker. The exact
+29-RPC/config/editor/dependent-owner recipe is in the authorized external note
+`C:\Users\Administrator\t3code-rust-notes\briefs\server-seam-requests.md`,
+section “t3-provider recipe — unified domain and 29 RPCs (2026-11-14)”. Domain,
+host and broker fixtures pass; the domain fixture uses temporary homes and fake
+provider effects and verifies startup metadata, deferred probes, current settings
+and retirement/broker revocation.
+
+Drift is in progress in the hand-out order. Readiness gating, Antigravity bounded
+frontmatter scanning, MacPorts ownership and zeroSpendCap retention were already
+implemented in the previous round; their existing focused regressions will be
+rerun against the merged contracts. Native turn adapters/instructions remain
+with the assigned orchestration owners; the drift report will name each seam.

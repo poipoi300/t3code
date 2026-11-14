@@ -199,7 +199,7 @@ impl ManagedTokenBroker {
             Ok(BrokerListener {
                 endpoint,
                 cancel,
-                task: Some(task),
+                task: tokio::sync::Mutex::new(Some(task)),
             })
         }
         #[cfg(unix)]
@@ -264,7 +264,7 @@ impl ManagedTokenBroker {
             Ok(BrokerListener {
                 endpoint,
                 cancel,
-                task: Some(task),
+                task: tokio::sync::Mutex::new(Some(task)),
             })
         }
         #[cfg(not(any(windows, unix)))]
@@ -277,7 +277,7 @@ impl ManagedTokenBroker {
 pub struct BrokerListener {
     pub endpoint: String,
     cancel: CancellationToken,
-    task: Option<tokio::task::JoinHandle<()>>,
+    task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 #[cfg(unix)]
 struct OwnedDirectory {
@@ -297,11 +297,15 @@ impl Drop for OwnedDirectory {
     }
 }
 impl BrokerListener {
-    pub async fn shutdown(mut self) {
+    pub async fn close(&self) {
         self.cancel.cancel();
-        if let Some(task) = self.task.take() {
+        let mut running = self.task.lock().await;
+        if let Some(task) = running.take() {
             let _ = task.await;
         }
+    }
+    pub async fn shutdown(self) {
+        self.close().await;
     }
 }
 impl Drop for BrokerListener {

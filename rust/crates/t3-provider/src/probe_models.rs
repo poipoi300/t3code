@@ -8,29 +8,80 @@ use t3_contracts::{
     server::{ServerProviderAuth, ServerProviderModel},
 };
 
-pub fn codex_native_quota(account: &Value, config: &Value) -> bool {
-    if account["requiresOpenaiAuth"].as_bool() != Some(true)
-        || account["account"]["type"].as_str() == Some("apiKey")
-        || !config.is_object()
-    {
-        return false;
+fn codex_route_base_url(config: &Value) -> Option<Option<&str>> {
+    let config = config.as_object()?;
+    for field in ["model_provider", "openai_base_url"] {
+        if config
+            .get(field)
+            .is_some_and(|value| !value.is_null() && !value.is_string())
+        {
+            return None;
+        }
     }
-    let provider = config["model_provider"].as_str().unwrap_or("openai");
-    let details = config["model_providers"].get(provider);
-    if provider != "openai" && details.is_none() {
-        return false;
-    }
-    let url = if provider == "openai" {
-        config["openai_base_url"].as_str().filter(|s| !s.is_empty())
+    let providers = if let Some(value) = config.get("model_providers") {
+        let providers = value.as_object()?;
+        for provider in providers.values() {
+            let provider = provider.as_object()?;
+            if provider
+                .get("base_url")
+                .is_some_and(|value| !value.is_null() && !value.is_string())
+            {
+                return None;
+            }
+        }
+        Some(providers)
     } else {
-        details.and_then(|v| v["base_url"].as_str())
+        None
     };
-    url.is_none_or(|s| {
-        url::Url::parse(s).is_ok_and(|url| {
+    let provider = config
+        .get("model_provider")
+        .and_then(Value::as_str)
+        .unwrap_or("openai");
+    if provider == "openai" {
+        Some(
+            config
+                .get("openai_base_url")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty()),
+        )
+    } else {
+        Some(
+            providers?
+                .get(provider)?
+                .get("base_url")
+                .and_then(Value::as_str),
+        )
+    }
+}
+fn routes_to_native_openai(config: &Value) -> bool {
+    match codex_route_base_url(config) {
+        None => false,
+        Some(None) => true,
+        Some(Some(value)) => url::Url::parse(value).is_ok_and(|url| {
             url.scheme() == "https"
                 && matches!(url.host_str(), Some("api.openai.com" | "chatgpt.com"))
-        })
-    })
+        }),
+    }
+}
+pub fn codex_custom_endpoint(config: &Value) -> Option<String> {
+    if routes_to_native_openai(config) {
+        return None;
+    }
+    let url = url::Url::parse(codex_route_base_url(config)??).ok()?;
+    matches!(url.scheme(), "http" | "https").then(|| url.origin().ascii_serialization())
+}
+pub fn claude_custom_endpoint(base_url: Option<&str>) -> Option<String> {
+    let url = url::Url::parse(t3_contracts::wire::trim_js(base_url?)).ok()?;
+    (matches!(url.scheme(), "http" | "https")
+        && url
+            .host_str()
+            .is_some_and(|host| host != "api.anthropic.com"))
+    .then(|| url.origin().ascii_serialization())
+}
+pub fn codex_native_quota(account: &Value, config: &Value) -> bool {
+    account["requiresOpenaiAuth"].as_bool() == Some(true)
+        && account["account"]["type"].as_str() != Some("apiKey")
+        && routes_to_native_openai(config)
 }
 pub fn codex_plan(plan: &str) -> Option<&'static str> {
     Some(match plan {

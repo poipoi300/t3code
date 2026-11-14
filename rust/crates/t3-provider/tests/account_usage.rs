@@ -162,6 +162,15 @@ fn account_metadata_keeps_custom_endpoints_separate_from_native_quota_and_auth()
         &json!({"openai_base_url":"https://proxy.example/v1"})
     ));
     assert!(!probe_models::codex_native_quota(&account, &Value::Null));
+    for malformed in [
+        json!({"model_provider":42}),
+        json!({"model_providers":null}),
+        json!({"openai_base_url":false}),
+        json!({"model_providers":{"unused":{"base_url":42}}}),
+    ] {
+        assert!(!probe_models::codex_native_quota(&account, &malformed));
+    }
+
     assert_eq!(
         probe_models::codex_plan("promax"),
         Some("ChatGPT Pro 500 Subscription")

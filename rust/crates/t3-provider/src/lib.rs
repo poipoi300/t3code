@@ -1,6 +1,8 @@
 //! Native, transport-neutral coding-provider configuration and discovery.
 //! This crate does not target wasm32-unknown-unknown. Adapters live in t3-orchestration.
 
+pub const AGENT_CONTEXT_BUDGET_JSON: &str = include_str!("../data/agent-context-budget.json");
+
 pub mod account_usage;
 pub mod acp_auth;
 pub mod acp_auth_state;
@@ -30,12 +32,14 @@ pub mod claude_probe_cache;
 pub mod claude_skills;
 pub mod codex_installation;
 pub mod credential_lease;
+pub mod cursor_account;
 pub mod cursor_auth;
 pub mod cursor_catalog;
 pub mod cursor_provider;
 pub mod cursor_skills;
 pub mod cursor_usage;
 pub mod discovery;
+pub mod domain;
 pub mod environment;
 pub mod fx;
 pub mod fx_instance;

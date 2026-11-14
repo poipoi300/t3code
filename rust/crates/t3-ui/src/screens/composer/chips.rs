@@ -216,10 +216,7 @@ fn context_chip_class(kind: &str) -> SharedString {
 fn interactive_chip_class(kind: &str) -> SharedString {
     let base = context_chip_class(kind);
     // ContextChipLabel's :is(button:enabled,a):hover selector becomes a named native group.
-    tw(&theme::cn([
-        Some(&base),
-        Some("group/chip cursor-pointer"),
-    ]))
+    tw(&theme::cn([Some(&base), Some("group/chip cursor-pointer")]))
 }
 
 /// Port of ContextChip.tsx ContextChipLabel; NSH text owns single-line truncation.
@@ -376,8 +373,9 @@ pub fn composer_skill_node_view(node: &Node, context: ChipContext) -> AnyElement
     let name = attr(node, "skillName").to_owned();
     let stored_label = attr(node, "skillLabel").to_owned();
     let stored_description = attr(node, "skillDescription").to_owned();
-    dynamic(move || {
-        let skill = context.data.with(|data| {
+    let data = context.data;
+    let presentation = computed(move || {
+        let skill = data.with(|data| {
             data.skills
                 .iter()
                 .find(|skill| skill.name.0 == name && skill.user_invocable != Some(Some(false)))
@@ -406,9 +404,12 @@ pub fn composer_skill_node_view(node: &Node, context: ChipContext) -> AnyElement
                     .to_owned()
             })
             .unwrap_or_else(|| stored_description.clone());
-        let instructions = skill.as_ref().and_then(|skill| {
+        (label, description, skill.map(|skill| skill.path.0))
+    });
+    dynamic(move || {
+        let (label, description, path) = presentation.get();
+        let instructions = path.and_then(|path| {
             let open = context.open_mention.clone()?;
-            let path = skill.path.0.clone();
             Some(Rc::new(move || open(&path)) as Rc<dyn Fn()>)
         });
         untracked(|| skill_chip_popover(label, description, instructions))
@@ -469,8 +470,8 @@ pub fn composer_model_node_view(node: &Node, context: ChipContext) -> AnyElement
     let instance = attr(node, "instanceId").to_owned();
     let model = attr(node, "model").to_owned();
     let source = attr(node, "source").to_owned();
-    dynamic(move || {
-        let presentation = context.data.with(|data| {
+    let presentation = computed(move || {
+        context.data.with(|data| {
             let provider = data
                 .providers
                 .iter()
@@ -488,7 +489,10 @@ pub fn composer_model_node_view(node: &Node, context: ChipContext) -> AnyElement
                     .unwrap_or_else(|| provider_instance_display_name(provider)),
                 provider.driver.0.clone(),
             ))
-        });
+        })
+    });
+    dynamic(move || {
+        let presentation = presentation.get();
         untracked(|| {
             let Some((label, provider, driver)) = presentation else {
                 return text(SharedString::from(source.clone())).into_element();

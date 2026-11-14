@@ -220,8 +220,16 @@ pub fn settings_environment(
     platform: Platform,
     environment: &Environment,
 ) -> BTreeMap<String, Value> {
+    settings_environment_for_workspace(config, None, platform, environment)
+}
+pub fn settings_environment_for_workspace(
+    config: &Path,
+    cwd: Option<&Path>,
+    platform: Platform,
+    environment: &Environment,
+) -> BTreeMap<String, Value> {
     let mut output = BTreeMap::new();
-    for path in settings_paths(config, None, platform, environment) {
+    for path in settings_paths(config, cwd, platform, environment) {
         if let Some(env) = lenient(&path).and_then(|v| v["env"].as_object().cloned()) {
             if env.iter().any(|(k, v)| {
                 matches!(k.as_str(), "ANTHROPIC_BASE_URL" | "CLAUDE_CODE_ENTRYPOINT")

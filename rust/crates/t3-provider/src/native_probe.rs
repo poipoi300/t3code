@@ -44,9 +44,8 @@ impl Drop for Task {
     }
 }
 async fn spawn(options: t3_process::ProcessOptions) -> ServiceResult<t3_process::SpawnedProcess> {
-    tokio::task::spawn_blocking(move || t3_process::spawn(&options))
+    t3_process::spawn_non_blocking(&options)
         .await
-        .map_err(|_| ServiceError::Response)?
         .map_err(|_| ServiceError::Response)
 }
 fn drain_stderr(process: &mut t3_process::SpawnedProcess) -> Option<Task> {
