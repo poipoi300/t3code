@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('install-cli', 'desktop', 'desktop-build', 'gpui', 'web', 'serve', 'android', 'install-android', 'ios', 'ios-simulator', 'macos', 'check', 'all')]
+    [ValidateSet('install-cli', 'desktop', 'desktop-build', 'gpui', 'web', 'serve', 'android', 'install-android', 'ios', 'ios-simulator', 'ios-sim', 'macos', 'check', 'all')]
     [string]$Action,
     [string]$Abi = 'x86_64',
     [string]$Device,
@@ -117,6 +117,18 @@ function Initialize-Android {
     Invoke-Checked rustup @('target', 'add', $triple)
 }
 
+# The Rust target NSH builds an Apple runner for, added to the toolchain rust-toolchain.toml pins
+# (the CLI's iOS simulator runner is always arm64; macOS builds for this Mac's processor).
+function Initialize-Apple([string]$Target) {
+    if (-not $IsMacOS) { throw "$Target builds need macOS with Xcode" }
+    $triple = switch ($Target) {
+        'ios' { 'aarch64-apple-ios' }
+        'ios-simulator' { 'aarch64-apple-ios-sim' }
+        'macos' { if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'aarch64-apple-darwin' } else { 'x86_64-apple-darwin' } }
+    }
+    Invoke-Checked rustup @('target', 'add', $triple)
+}
+
 function Invoke-Package([string]$Target, [string]$Cli, $Pin) {
     $cliVersion = & $Cli --version
     if ($LASTEXITCODE -ne 0 -or $cliVersion -notlike "*$($Pin.Revision.Substring(0, 7))*") {
@@ -124,6 +136,7 @@ function Invoke-Package([string]$Target, [string]$Cli, $Pin) {
     }
     if ($Target -eq 'web') { Initialize-Wasm }
     if ($Target -eq 'android') { Initialize-Android }
+    if ($Target -in 'ios', 'ios-simulator', 'macos') { Initialize-Apple $Target }
     $generatedWorkspace = Join-Path $shellRoot '.nsh/rust'
     $generatedLock = Join-Path $generatedWorkspace 'Cargo.lock'
     if (-not (Test-Path $generatedLock)) {
@@ -187,6 +200,11 @@ try {
             Write-Output "desktop: $(Join-Path $buildRoot 'debug/t3-desktop.exe')"
             Write-Output "web:     $(Join-Path $outRoot $appName)"
             Write-Output "android: $(Join-Path $outRoot "$appName.apk")"
+        }
+        'ios-sim' {
+            if (-not (Test-Path $cli)) { throw 'Run ui.ps1 install-cli first' }
+            Invoke-Package 'ios-simulator' $cli $pin
+            Write-Output "ios-simulator: $(Join-Path $outRoot "$appName.app")"
         }
         default {
             if (-not (Test-Path $cli)) { throw 'Run ui.ps1 install-cli first' }
