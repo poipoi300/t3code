@@ -43,6 +43,8 @@ pub struct ComposerActionsSession<P: Platform + Clone + 'static> {
     runtime: ClientRuntime<P>,
     key: ThreadKey,
     view: Rc<RefCell<Option<Rc<PrimaryActionState>>>>,
+    facts: Rc<RefCell<Option<(Rc<OrchestrationV2ThreadProjection>, Rc<ThreadFacts>)>>>,
+    derivations: Rc<std::cell::Cell<u64>>,
 }
 
 impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
@@ -51,7 +53,28 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
             runtime,
             key,
             view: Rc::default(),
+            facts: Rc::default(),
+            derivations: Rc::default(),
         }
+    }
+
+    fn thread_facts(
+        &self,
+        projection: Option<&Rc<OrchestrationV2ThreadProjection>>,
+    ) -> Rc<ThreadFacts> {
+        let Some(projection) = projection else {
+            return Rc::new(derive_thread_facts(None));
+        };
+        let mut cached = self.facts.borrow_mut();
+        if let Some((source, facts)) = cached.as_ref()
+            && Rc::ptr_eq(source, projection)
+        {
+            return facts.clone();
+        }
+        self.derivations.set(self.derivations.get() + 1);
+        let facts = Rc::new(derive_thread_facts(Some(&**projection)));
+        *cached = Some((projection.clone(), facts.clone()));
+        facts
     }
 
     pub async fn set_follow_up_behavior(
@@ -107,7 +130,6 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
             .as_ref()
             .and_then(|attachments| attachments.draft_attachments().ok())
             .unwrap_or_default();
-        use crate::thread_views::threads::{execution, workflows};
         let snapshot = self.runtime.store().snapshot();
         let environment = snapshot.environments.get(&self.key.environment);
         let thread = environment.and_then(|e| e.threads.get(&self.key.thread));
@@ -124,35 +146,7 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
             .as_ref()
             .is_some_and(|s| s.available::<WsOrchestrationV2DispatchCommandRpc>(&command));
         let unavailable = session.is_none();
-        let millis =
-            |date: &t3_contracts::wire::WireDateTime| crate::time::epoch_ms(&date.0).unwrap_or(0);
-        let runtime =
-            projection.and_then(|p| execution::derive_thread_structure_runtime(p, &millis));
-        let resumable = projection
-            .and_then(|p| execution::derive_resumable_run_id(p, runtime.as_ref(), &millis));
-        let run = projection.and_then(workflows::resolve_active_thread_run);
-        let runtime_view = runtime
-            .as_ref()
-            .map(|r| crate::view_logic::session::RuntimeView {
-                status: r.status.clone(),
-                active_run_id: r.active_run_id.clone(),
-                activity_started_at: r
-                    .activity_started_at
-                    .as_ref()
-                    .map(|value| Some(value.0.clone())),
-            });
-        let phase = crate::view_logic::session::derive_phase(runtime_view.as_ref());
-        let running = matches!(
-            phase,
-            crate::view_logic::session::SessionPhase::Connecting
-                | crate::view_logic::session::SessionPhase::Running
-        );
-        let preparing = run.is_some_and(|r| {
-            matches!(
-                r.status,
-                OrchestrationV2RunStatus::Preparing | OrchestrationV2RunStatus::Starting
-            )
-        });
+        let facts = self.thread_facts(thread.and_then(|t| t.projection.as_ref()));
         let pending = self.runtime.pending_messages(&self.key);
         let busy = pending.iter().any(|p| {
             matches!(
@@ -188,12 +182,7 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
             &contexts,
             count("previewAnnotations") + count("reviewComments"),
         );
-        let pending_approval = projection.is_some_and(|p| {
-            !crate::thread_views::requests::derive_pending(&p.runtime_requests, &p.turn_items)
-                .approvals
-                .is_empty()
-        });
-        let follow_up = if pending_approval {
+        let follow_up = if facts.pending_approval {
             Some(FollowUpBehavior::Steer)
         } else {
             match self
@@ -210,17 +199,6 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
                 }
             }
         };
-        let activity = projection.and_then(|p| execution::derive_thread_activity_run(p, &millis));
-        let activity_id = activity.as_ref().map(|run| &run.run_id);
-        let activity_view = activity
-            .as_ref()
-            .map(|run| crate::view_logic::session::RunView {
-                run_id: run.run_id.clone(),
-                status: run.status.clone(),
-                started_at: run.started_at.as_ref().map(|at| at.0.clone()),
-                requested_at: Some(run.requested_at.0.clone()),
-                completed_at: run.completed_at.as_ref().map(|at| at.0.clone()),
-            });
         let compact_request_active = (busy
             && pending.last().is_some_and(|message| {
                 crate::view_logic::chat_view::is_compact_command_message(
@@ -229,52 +207,15 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
                     message.message.attachments.len(),
                 )
             }))
-            || projection.is_some_and(|p| {
-                p.visible_turn_items
-                    .iter()
-                    .rev()
-                    .find_map(|row| match &row.item {
-                        OrchestrationV2TurnItem::UserMessage(message) => Some(message),
-                        _ => None,
-                    })
-                    .is_some_and(|message| {
-                        crate::view_logic::chat_view::is_compact_command_message(
-                            true,
-                            &message.text,
-                            message.attachments.len(),
-                        ) && activity_id.is_some()
-                            && message.run_id.as_ref() == activity_id
-                            && !crate::view_logic::session::is_latest_run_settled(
-                                activity_view.as_ref(),
-                                runtime_view.as_ref(),
-                            )
-                    })
-            });
-        let compaction_settled = projection.is_some_and(|p| p.visible_turn_items.iter().any(|row| {
-            matches!(&row.item, OrchestrationV2TurnItem::Compaction(item)
-                if activity_id.is_some() && item.run_id.as_ref() == activity_id && matches!(item.status,
-                    OrchestrationV2TurnItemStatus::Completed | OrchestrationV2TurnItemStatus::Failed
-                    | OrchestrationV2TurnItemStatus::Interrupted | OrchestrationV2TurnItemStatus::Cancelled))
-        }));
-        let active_run_id = runtime.as_ref().and_then(|run| run.active_run_id.as_ref());
-        let compaction_running = projection.is_some_and(|p| {
-            p.visible_turn_items.iter().any(|row| {
-                matches!(&row.item, OrchestrationV2TurnItem::Compaction(item)
-                if item.run_id.is_some() && item.run_id.as_ref() == active_run_id
-                    && item.status == OrchestrationV2TurnItemStatus::Running)
-            })
-        });
-        let run_message = projection.and_then(|p| {
-            let run = p.runs.iter().find(|run| Some(&run.id) == active_run_id)?;
-            p.messages
-                .iter()
-                .find(|message| message.id == run.user_message_id)
-        });
+            || facts.compact_message_active;
         let can_steer = !crate::operations::compaction_blocks_steering(
-            compact_request_active && !compaction_settled,
-            compaction_running,
-            workflows::thread_steers_during_compaction(projection),
-            run_message.map(|message| (message.text.as_str(), message.attachments.len())),
+            compact_request_active && !facts.compaction_settled,
+            facts.compaction_running,
+            facts.steers_during_compaction,
+            facts
+                .run_message
+                .as_ref()
+                .map(|(text, attachments)| (text.as_str(), *attachments)),
         );
         let reason = if !can_operate {
             Some("This connection cannot change threads.".into())
@@ -317,30 +258,17 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
                 is_complete: view.is_complete,
             }),
             can_operate_thread: can_operate,
-            is_running: running,
-            can_interrupt: can_operate
-                && crate::view_logic::session::derive_can_interrupt_running_thread(
-                    projection.is_some(),
-                    runtime_view.as_ref(),
-                ),
-            run_id: runtime.and_then(|r| match r.active_run_id {
-                Some(IdOrIndex::Id(id)) => Some(id.0),
-                _ => None,
-            }),
+            is_running: facts.running,
+            can_interrupt: can_operate && facts.can_interrupt_running,
+            run_id: facts.run_id.clone(),
             follow_up_behavior: follow_up,
             can_steer,
             is_send_busy: busy,
             send_disabled_reason: reason,
             is_environment_unavailable: unavailable,
-            is_preparing_worktree: preparing,
+            is_preparing_worktree: facts.preparing,
             has_sendable_content: content.has_sendable_content,
-            can_resume: projection.is_some_and(|p| {
-                execution::can_resume_thread(
-                    &p.runtime_requests,
-                    resumable.as_ref(),
-                    p.runs.iter().any(|r| r.queue_held == Some(Some(true))),
-                )
-            }),
+            can_resume: facts.can_resume,
         };
         let mut cached = self.view.borrow_mut();
         if let Some(prior) = cached.as_ref().filter(|prior| ***prior == next) {
@@ -349,5 +277,223 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
         let next = Rc::new(next);
         *cached = Some(next.clone());
         next
+    }
+}
+
+/// What the primary actions read from the thread projection alone. Derived once per projection
+/// (`Rc` identity), so a draft keystroke does not re-derive the thread's runtime.
+#[derive(Debug, Default, PartialEq)]
+struct ThreadFacts {
+    running: bool,
+    preparing: bool,
+    pending_approval: bool,
+    compact_message_active: bool,
+    compaction_settled: bool,
+    compaction_running: bool,
+    steers_during_compaction: bool,
+    run_message: Option<(String, usize)>,
+    can_interrupt_running: bool,
+    run_id: Option<String>,
+    can_resume: bool,
+}
+
+fn derive_thread_facts(projection: Option<&OrchestrationV2ThreadProjection>) -> ThreadFacts {
+    use crate::thread_views::threads::{execution, workflows};
+    let millis =
+        |date: &t3_contracts::wire::WireDateTime| crate::time::epoch_ms(&date.0).unwrap_or(0);
+    let runtime = projection.and_then(|p| execution::derive_thread_structure_runtime(p, &millis));
+    let resumable =
+        projection.and_then(|p| execution::derive_resumable_run_id(p, runtime.as_ref(), &millis));
+    let run = projection.and_then(workflows::resolve_active_thread_run);
+    let runtime_view = runtime
+        .as_ref()
+        .map(|r| crate::view_logic::session::RuntimeView {
+            status: r.status.clone(),
+            active_run_id: r.active_run_id.clone(),
+            activity_started_at: r
+                .activity_started_at
+                .as_ref()
+                .map(|value| Some(value.0.clone())),
+        });
+    let phase = crate::view_logic::session::derive_phase(runtime_view.as_ref());
+    let running = matches!(
+        phase,
+        crate::view_logic::session::SessionPhase::Connecting
+            | crate::view_logic::session::SessionPhase::Running
+    );
+    let preparing = run.is_some_and(|r| {
+        matches!(
+            r.status,
+            OrchestrationV2RunStatus::Preparing | OrchestrationV2RunStatus::Starting
+        )
+    });
+    let pending_approval = projection.is_some_and(|p| {
+        !crate::thread_views::requests::derive_pending(&p.runtime_requests, &p.turn_items)
+            .approvals
+            .is_empty()
+    });
+    let activity = projection.and_then(|p| execution::derive_thread_activity_run(p, &millis));
+    let activity_id = activity.as_ref().map(|run| &run.run_id);
+    let activity_view = activity
+        .as_ref()
+        .map(|run| crate::view_logic::session::RunView {
+            run_id: run.run_id.clone(),
+            status: run.status.clone(),
+            started_at: run.started_at.as_ref().map(|at| at.0.clone()),
+            requested_at: Some(run.requested_at.0.clone()),
+            completed_at: run.completed_at.as_ref().map(|at| at.0.clone()),
+        });
+    let compact_message_active = projection.is_some_and(|p| {
+        p.visible_turn_items
+            .iter()
+            .rev()
+            .find_map(|row| match &row.item {
+                OrchestrationV2TurnItem::UserMessage(message) => Some(message),
+                _ => None,
+            })
+            .is_some_and(|message| {
+                crate::view_logic::chat_view::is_compact_command_message(
+                    true,
+                    &message.text,
+                    message.attachments.len(),
+                ) && activity_id.is_some()
+                    && message.run_id.as_ref() == activity_id
+                    && !crate::view_logic::session::is_latest_run_settled(
+                        activity_view.as_ref(),
+                        runtime_view.as_ref(),
+                    )
+            })
+    });
+    let compaction_settled = projection.is_some_and(|p| p.visible_turn_items.iter().any(|row| {
+            matches!(&row.item, OrchestrationV2TurnItem::Compaction(item)
+                if activity_id.is_some() && item.run_id.as_ref() == activity_id && matches!(item.status,
+                    OrchestrationV2TurnItemStatus::Completed | OrchestrationV2TurnItemStatus::Failed
+                    | OrchestrationV2TurnItemStatus::Interrupted | OrchestrationV2TurnItemStatus::Cancelled))
+        }));
+    let active_run_id = runtime.as_ref().and_then(|run| run.active_run_id.as_ref());
+    let compaction_running = projection.is_some_and(|p| {
+        p.visible_turn_items.iter().any(|row| {
+            matches!(&row.item, OrchestrationV2TurnItem::Compaction(item)
+                if item.run_id.is_some() && item.run_id.as_ref() == active_run_id
+                    && item.status == OrchestrationV2TurnItemStatus::Running)
+        })
+    });
+    let run_message = projection.and_then(|p| {
+        let run = p.runs.iter().find(|run| Some(&run.id) == active_run_id)?;
+        p.messages
+            .iter()
+            .find(|message| message.id == run.user_message_id)
+    });
+    ThreadFacts {
+        running,
+        preparing,
+        pending_approval,
+        compact_message_active,
+        compaction_settled,
+        compaction_running,
+        steers_during_compaction: workflows::thread_steers_during_compaction(projection),
+        run_message: run_message.map(|message| (message.text.clone(), message.attachments.len())),
+        can_interrupt_running: crate::view_logic::session::derive_can_interrupt_running_thread(
+            projection.is_some(),
+            runtime_view.as_ref(),
+        ),
+        run_id: runtime.as_ref().and_then(|r| match &r.active_run_id {
+            Some(IdOrIndex::Id(id)) => Some(id.0.clone()),
+            _ => None,
+        }),
+        can_resume: projection.is_some_and(|p| {
+            execution::can_resume_thread(
+                &p.runtime_requests,
+                resumable.as_ref(),
+                p.runs.iter().any(|r| r.queue_held == Some(Some(true))),
+            )
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::{executor::LocalPool, task::LocalSpawnExt};
+
+    fn seeded(
+        threads: &[(&str, &str)],
+    ) -> (
+        LocalPool,
+        crate::ClientStore,
+        ClientRuntime<crate::testing::FakePlatform>,
+        ThreadKey,
+        crate::types::Generation,
+    ) {
+        use crate::testing::environment;
+        use serde_json::{from_value, json};
+        let pool = LocalPool::new();
+        let spawner = pool.spawner();
+        let store = crate::ClientStore::default();
+        let key = ThreadKey {
+            environment: crate::types::EnvironmentId("env".into()),
+            thread: crate::types::ThreadId("thread".into()),
+        };
+        let session = store.begin_session(key.environment.clone());
+        store.apply_shell(
+            &key.environment,
+            session,
+            vec![
+                from_value(json!({"kind":"snapshot","snapshot":environment::shell(threads)}))
+                    .expect("shell snapshot"),
+                from_value(json!({"kind":"synchronized"})).expect("synchronized"),
+            ],
+        );
+        store
+            .apply_thread(
+                key.clone(),
+                session,
+                vec![
+                    from_value(json!({"kind":"snapshot","snapshotSequence":1,
+                        "projection":environment::projection("thread","Thread",json!([]),json!([]))}))
+                    .expect("thread snapshot"),
+                    from_value(json!({"kind":"synchronized"})).expect("synchronized"),
+                ],
+            )
+            .expect("thread applies");
+        let runtime = ClientRuntime::new(
+            crate::testing::FakePlatform::default(),
+            store.clone(),
+            t3_contracts::orchestration_v2::OrchestrationV2CreationSource::Web,
+            Rc::new(move |future| {
+                spawner.spawn_local(future).expect("spawn");
+            }),
+        );
+        (pool, store, runtime, key, session)
+    }
+
+    #[test]
+    fn typing_reuses_the_threads_derived_facts_until_its_projection_changes() {
+        let (mut pool, store, runtime, key, session) = seeded(&[("thread", "Thread")]);
+        pool.run_until_stalled();
+        let actions = runtime.composer_primary_actions(&key);
+        assert!(!actions.snapshot().has_sendable_content);
+        let drafts = runtime.composer_drafts();
+        for (index, prompt) in ["h", "he", "hel", "hell", "hello"].into_iter().enumerate() {
+            drafts
+                .set_prompt(&key, prompt.into(), index + 1)
+                .expect("draft is writable");
+            assert!(actions.snapshot().has_sendable_content);
+        }
+        assert_eq!(
+            actions.derivations.get(),
+            1,
+            "one derivation for five keystrokes"
+        );
+        store.update_thread(&key, session, |thread| {
+            thread.projection.as_mut().map(Rc::make_mut).is_some()
+        });
+        actions.snapshot();
+        actions.snapshot();
+        assert_eq!(
+            actions.derivations.get(),
+            2,
+            "a new projection is derived once"
+        );
     }
 }

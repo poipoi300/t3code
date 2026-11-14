@@ -10,7 +10,7 @@ use crate::{
 };
 use futures::{FutureExt, future::LocalBoxFuture};
 use serde_json::{Value, json};
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{cell::RefCell, collections::BTreeMap};
 use t3_contracts::{
     model_selection::ModelSelection,
     provider_instance::ProviderInstanceId,

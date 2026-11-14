@@ -380,7 +380,7 @@ impl<P: Platform + Clone + 'static> ComposerSuggestionsSession<P> {
                     let mut candidates=vec![];let mut metadata=vec![];
                     for provider in models.providers.iter().filter(|provider|provider.ready&&provider.enabled&&provider.available){for model in provider.options.iter().filter(|model|!model.is_legacy&&!model.is_unavailable){candidates.push(PickerSearchItem{driver_kind:provider.snapshot.driver.0.clone(),provider_display_name:provider.display_name.clone(),name:model.name.clone(),short_name:model.short_name.clone(),sub_provider:model.sub_provider.clone(),is_favorite:false});metadata.push((provider,model));}}
                     for index in rank_model_mentions(&candidates,&request.trigger.query){let(provider,model)=metadata[index];let id=format!("model:{}:{}",provider.snapshot.instance_id.0,model.slug);replacements.insert(id.clone(),format!("model:{}/{} ",provider.snapshot.instance_id.0,model.slug));items.push(SuggestionItem{id,label:model.short_name.as_ref().unwrap_or(&model.name).clone(),description:model.sub_provider.as_ref().unwrap_or(&provider.display_name).clone(),kind:SuggestionKind::Model{driver:provider.snapshot.driver.0.clone(),provider_name:provider.display_name.clone()}});}
-                    if let Some(cwd)=&this.cwd {let endpoint=this.runtime.client(&this.key.environment).and_then(|client|client.session()).ok_or(ClientError::Disconnected)?;
+                    if let Some(cwd)=&this.cwd && let Some(endpoint)=this.runtime.client(&this.key.environment).and_then(|client|client.session()) {
                         let target=crate::services::views::ComposerPathSearchTarget{environment:Some(this.key.environment.clone()),cwd:Some(cwd.clone()),query:Some(request.trigger.query.clone())};
                         if let Some(search)=super::path_search::request(&target,true){match endpoint.call::<WsProjectSearchEntriesRpc>(search.input).await{Ok(result)=>for entry in result.entries{let path=entry.path.0;let id=format!("path:{}:{}",if matches!(entry.kind,t3_contracts::project::ProjectEntryKind::Directory){"directory"}else{"file"},path);replacements.insert(id.clone(),format!("{} ",serialize_file_link(&path)));items.push(SuggestionItem{id,label:path.rsplit(['/', '\\']).next().unwrap_or(&path).into(),description:path.rsplit_once('/').map_or("",|(parent,_)|parent).into(),kind:SuggestionKind::Path{directory:matches!(entry.kind,t3_contracts::project::ProjectEntryKind::Directory)}});},Err(failure)=>error=Some(failure.to_string())}}
                     }
@@ -496,5 +496,80 @@ impl<P: Platform + Clone + 'static> ComposerSuggestionsSession<P> {
         } else {
             SuggestionOutcome::Edited { prompt, cursor }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::{executor::LocalPool, task::LocalSpawnExt};
+
+    fn seeded(
+        threads: &[(&str, &str)],
+    ) -> (
+        LocalPool,
+        crate::ClientStore,
+        ClientRuntime<crate::testing::FakePlatform>,
+        ThreadKey,
+        crate::types::Generation,
+    ) {
+        use crate::testing::environment;
+        use serde_json::{from_value, json};
+        let pool = LocalPool::new();
+        let spawner = pool.spawner();
+        let store = crate::ClientStore::default();
+        let key = ThreadKey {
+            environment: crate::types::EnvironmentId("env".into()),
+            thread: crate::types::ThreadId("thread".into()),
+        };
+        let session = store.begin_session(key.environment.clone());
+        store.apply_shell(
+            &key.environment,
+            session,
+            vec![
+                from_value(json!({"kind":"snapshot","snapshot":environment::shell(threads)}))
+                    .expect("shell snapshot"),
+                from_value(json!({"kind":"synchronized"})).expect("synchronized"),
+            ],
+        );
+        store
+            .apply_thread(
+                key.clone(),
+                session,
+                vec![
+                    from_value(json!({"kind":"snapshot","snapshotSequence":1,
+                        "projection":environment::projection("thread","Thread",json!([]),json!([]))}))
+                    .expect("thread snapshot"),
+                    from_value(json!({"kind":"synchronized"})).expect("synchronized"),
+                ],
+            )
+            .expect("thread applies");
+        let runtime = ClientRuntime::new(
+            crate::testing::FakePlatform::default(),
+            store.clone(),
+            t3_contracts::orchestration_v2::OrchestrationV2CreationSource::Web,
+            Rc::new(move |future| {
+                spawner.spawn_local(future).expect("spawn");
+            }),
+        );
+        (pool, store, runtime, key, session)
+    }
+
+    #[test]
+    fn a_project_without_a_session_still_lists_threads_and_says_nothing_matched_files() {
+        let (mut pool, _store, runtime, key, _session) =
+            seeded(&[("thread", "Thread"), ("other", "Parser rewrite")]);
+        pool.run_until_stalled();
+        let suggestions = runtime.composer_suggestions(&key, Some("/workspace/project".into()));
+        let request = SuggestionRequest {
+            trigger: policy::detect_trigger("see @Parser", 11).expect("path trigger"),
+            generation: 1,
+        };
+        pool.run_until(suggestions.query(Some(request)))
+            .expect("the query completes without a session");
+        let view = suggestions.snapshot().expect("a projection");
+        assert!(!view.loading);
+        assert!(view.items.iter().any(|item| item.label == "Parser rewrite"));
+        assert_eq!(view.empty_state, "No matching files or folders.");
     }
 }

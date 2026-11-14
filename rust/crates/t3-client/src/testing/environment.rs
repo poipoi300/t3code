@@ -23,7 +23,6 @@ use std::rc::{Rc, Weak};
 
 use futures::{FutureExt, SinkExt, StreamExt, channel::mpsc, future::LocalBoxFuture};
 use serde_json::{Value, json};
-use t3_contracts::rpc::RpcMethod;
 use t3_rpc::{CallKind, Exit, Frame, Handler, HandlerOutput, Request};
 
 use super::FakePlatform;
@@ -296,7 +295,10 @@ impl Platform for EnvironmentPlatform {
                     (WsOrchestrationV2SubscribeShellRpc::TAG, CallKind::Stream),
                     (WsOrchestrationV2SubscribeThreadRpc::TAG, CallKind::Stream),
                     (WsOrchestrationV2DispatchCommandRpc::TAG, CallKind::Unary),
-                    (WsOrchestrationV2GetThreadProjectionRpc::TAG, CallKind::Unary),
+                    (
+                        WsOrchestrationV2GetThreadProjectionRpc::TAG,
+                        CallKind::Unary,
+                    ),
                     (WsProjectsSearchEntriesRpc::TAG, CallKind::Unary),
                 ]
                 .into_iter()
@@ -441,7 +443,9 @@ impl Handler for FakeHandler {
             };
             unary(Ok(json!({ "sequence": sequence })))
         } else {
-            HandlerOutput::Unary(async move { Exit::die(format!("unscripted {tag}")) }.boxed_local())
+            HandlerOutput::Unary(
+                async move { Exit::die(format!("unscripted {tag}")) }.boxed_local(),
+            )
         }
     }
 }
