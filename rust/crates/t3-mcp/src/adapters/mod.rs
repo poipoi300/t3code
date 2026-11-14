@@ -5,6 +5,8 @@ pub mod integrated;
 pub mod orchestration;
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
+#[cfg(feature = "thread-reads")]
+pub mod threads;
 #[cfg(feature = "git")]
 pub mod worktree;
 pub use integrated::ServiceAdapters;
