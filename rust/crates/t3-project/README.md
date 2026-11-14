@@ -22,8 +22,8 @@ failed settings cleanup logs the project ID without undoing deletion. The new
 t3-git container probe and real-repository test matrix were added under explicit
 coordinator authorization. Server composition must call bootstrap_automatic and
 share one ProjectService and environment Git handle (see the seam file).
-Native provider inventory (including bounded decompressed .jsonl.zst processing)
-and the runtime repository remain blocked as described below.
+The native session inventory (`inventory.rs`) and the import store over the
+runtime table (`import_store.rs`) now exist; the server serves agentSessions.*.
 
 The concrete clone test now uses a temp file:// remote, asserts progress and
 checks partial-repository cleanup, then verifies foreign contents are preserved.
@@ -88,7 +88,7 @@ uses those APIs; the initially necessary local progress parser was removed.
 | RepositoryIdentityResolver.ts | t3-project::identity; t3-git keys/execution; t3-forge remote recognition | Cwd/root caches, coalescing, optional refiner and credential redaction verified; host normalization gaps remain |
 | T3ProjectFileLoader.ts | t3-workspace::project::{load_project_file,parse_project_file}, t3-contracts | Partial sibling port reused; bounds/parser differences below |
 | ScratchThreadPromotion.ts | t3-project::promotion; t3-scheduler task-movement adapter | Service with joined shutdown implemented; real SQLite lifecycle regression passes |
-| AgentSessionScanner.ts | t3-project::sessions::AgentSessionScanner and transcript | Partial: merge/exclusions/import flags and interpretation; discovery/streaming missing |
+| AgentSessionScanner.ts | t3-project::sessions::AgentSessionScanner, transcript and inventory::NativeSessionInventory | Discovery, budgets, Git identities and recent threads ported; differences below |
 | AgentSessionJson.ts | t3-project::session_json | Streaming bounded projection; accounting/scalar differences below |
 | AgentSessionImporter.ts | t3-project::sessions::AgentSessionImporter | Recent history and linked-worktree metadata/runtime cwd verified; native runtime adapter/history remain missing |
 | http.ts | t3-project::service::{snapshot,mutate} | Service targets implemented; transport wiring remains with handler owner |
@@ -145,42 +145,35 @@ low-level create/update/delete after closing admission.
 | Blocked work | Named owner / requested home |
 | --- | --- |
 | Descriptor-bound streaming/listing outside registered workspaces | t3-workspace security-fixes owner; t3-workspace public API |
-| ProviderSessionRuntime domain repository | Coordinator/persistence owner must supply or assign this missing home; it is explicitly outside orchestration package 01's store seams |
 | Native-history import session mutation locks, registry/runtime policy composition | Orchestration 05 sessions/recovery, with t3-provider and orchestration 04 policy owners |
 | Canonical provider identity/refinement and post-clone authoritative status notification | t3-forge owner and server D/F composition owners; t3-git owner for remote-key normalization |
 | Redaction in the authoritative Git setup tracker | t3-git setup owner; current tracker clamps raw submodule tails/errors; precise seam request recorded |
 
-Scanner discovery and budget enforcement remain t3-project work blocked on the
-workspace reader primitives; this table does not reassign that business logic.
+Scanner discovery and budget enforcement are in `inventory.rs`, over std
+filesystem reads with their own link, identity and bound checks.
 
 - ManagedFolderIo now has server HostFolders: symlink_metadata refuses link or
   non-directory roots and std::fs::remove_dir_all does not traverse nested links.
   Crate tests exercise the service with a temp backend and verify the Windows
   junction FileType predicate used by HostFolders; they do not call the private
   server adapter. No ancestor-swap descriptor guarantee is claimed.
-- SessionInventory: workspace/provider composition needs bounded home discovery,
-  multi-instance fairness, Codex state_5.sqlite roots/index tail, metadata scans,
-  linked-worktree folding, descriptor-bound streaming/restat, and inherited
-  rollout prefixes. Current workspace reads require a known workspace and cap
-  previews to 1 MiB; no suitable public streaming reader exists.
-- SessionImportStore: persistence/provider-runtime owner needs completed/per-thread
-  identities, insert-ignore stopped runtimes preserving importedTranscripts,
-  atomic transcript recording and project/policy runtime-mode resolution.
-  The table exists; a public runtime repository service does not. Test adapters
-  use the actual temporary table through t3-persistence.
+- SessionInventory: `inventory::NativeSessionInventory` reads each enabled
+  instance's store (TypeScript's homePath/environment/home order), with all of
+  AgentSessionScanner.ts's bounds. Below a store root only real directories and
+  regular files are read; transcript identity is checked from the open handle
+  before and after a read; paths from content (cwd, Codex roots, gitdir,
+  commondir) must be local-disk absolute paths before any filesystem call.
+- SessionImportStore: `import_store::RuntimeImportStore` runs TypeScript's SQL
+  (list, getByThreadId, insert-ignore upsert, recordImportedTranscript) on the
+  existing table and resolves the runtime mode from the policy ceiling and
+  project settings. No schema change.
 - Registry-aware identity keys/refinement and authoritative Git-status refresh
   after cloning remain. Concrete forge clone and scheduler move_thread_tasks
   adapters now exist and are no longer gaps.
 
-Inventory bounds still to port: 5,000 transcripts/source; 20,000 discovery and
-metadata operations/source; 64 MiB metadata/source; 100,000 metadata records/
-source, 1,000/transcript; 8 KiB metadata/32 KiB transcript chunks; 1 MiB cwd scan/
-index tail; 30-day recency; 4 GiB/transcript and total import; 100 imports;
-100,000 import records except streaming Claude; 200 messages and 32 MiB selected
-history. POSIX Git-file reads require two-second subprocess deadlines, 16-wide
-reads, five-minute blocked-path backoff and a 1,024-path cap. Import reads must
-serialize across callers. These are missing adapter obligations, not guarantees
-of the pure transcript helper.
+Git files are read in-process (regular files only, 1 MiB, two-second deadline,
+16 at once, five-minute backoff for at most 1,024 blocked paths) instead of TS's
+POSIX `cat`; a FIFO or other non-regular file is refused rather than timed out.
 
 ## Test-source mapping
 
@@ -255,16 +248,15 @@ of the pure transcript helper.
 - JSON projection conservatively accounts values/keys rather than identical
   stream-json token/chunk allocations; selected lone surrogates/overflowing
   numbers are rejected, discarded numeric text consumes budget. Skipped strings
-  stream without retaining payload. Byte/deadline/regular-file protection belongs
-  to the missing inventory adapter.
+  stream without retaining payload. Byte/deadline/regular-file protection is in
+  `inventory.rs`.
 - Pure transcript parsing takes a bounded supplied string and limits Claude to
   100,000 records too; streaming Claude's rolling allocation release is missing.
   Dates use RFC3339 rather than the full JS Date grammar. Text/title trimming,
   scalar slicing and preamble attribute handling differ at JS whitespace/
   UTF-16/regex edge cases.
-- Recent inventory returns a Vec, not a lazy stream. Discovery/read budgets,
-  descriptor identity and policy remain required backend obligations. Candidate
-  aliases use canonical paths, not device/inode identity. Native history and
+- Recent threads are a stream, one transcript's history held at a time.
+  Candidate aliases use canonical paths, not device/inode identity. Native history and
   pending-native-history import (provider-session lock/two-minute deadline) are
   not implemented.
 - Scalar-safe clamping can produce one fewer UTF-16 unit where TS would split an
