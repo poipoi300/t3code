@@ -1,8 +1,10 @@
 //! Native asynchronous child processes with owned process-tree lifetimes.
 //! This crate does not compile for wasm32-unknown-unknown.
 
+mod detached;
 mod non_blocking;
 mod resolve;
+pub use detached::{DetachedConsole, spawn_detached};
 pub use non_blocking::{env_trampoline, spawn_non_blocking, supports_env_chdir};
 
 use process_wrap::tokio::{ChildWrapper, CommandWrap};
