@@ -25,6 +25,22 @@ pub const SAFE_IMAGE_EXTENSIONS: &[&str] = &[
 pub const IMAGE_MAX_BYTES: u64 = 10 * 1024 * 1024;
 pub const FILE_MAX_BYTES: u64 = 50 * 1024 * 1024;
 pub const UPLOAD_TTL_MS: u64 = 10 * 60_000;
+/// The owner sidecar beside a pending upload (`<file>.owner`): who may claim it, and whether it
+/// has been claimed. Written by the upload, removed with it.
+const OWNER_SUFFIX: &str = ".owner";
+const OWNER_MAX_BYTES: u64 = 4096;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadOwner {
+    pub owner: String,
+    pub claimed: bool,
+}
+
+fn owner_name(upload: &Path) -> Option<PathBuf> {
+    let mut name = upload.file_name()?.to_os_string();
+    name.push(OWNER_SUFFIX);
+    Some(PathBuf::from(name))
+}
 
 fn id_pattern() -> &'static regex::Regex {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -258,10 +274,12 @@ pub fn sweep_stale(base: &Path, now_ms: u64) -> usize {
         };
         let partial = name.ends_with(".part");
         if !partial {
-            let name = if name.ends_with(".txt") && name[..name.len() - 4].contains('.') {
-                &name[..name.len() - 4]
-            } else {
-                &name
+            let name = match [".txt", OWNER_SUFFIX]
+                .into_iter()
+                .find_map(|suffix| name.strip_suffix(suffix))
+            {
+                Some(base) if base.contains('.') => base,
+                _ => &name,
             };
             let Some((id, _)) = name.rsplit_once('.') else {
                 continue;
@@ -300,6 +318,10 @@ pub fn sweep_stale(base: &Path, now_ms: u64) -> usize {
         drop(file);
         if now_ms.saturating_sub(mtime) > ttl && scope.remove_file(Path::new(file_name)).is_ok() {
             deleted += 1;
+            // The owner never outlives its upload.
+            if let Some(owner) = owner_name(Path::new(file_name)) {
+                let _ = scope.remove_file(&owner);
+            }
         }
     }
     deleted
@@ -374,6 +396,9 @@ pub struct UploadClaims {
     pub mime_type: String,
     pub size_bytes: u64,
     pub expires_at: u64,
+    /// Who may claim the upload (signed, so the upload route can record it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 fn default_image() -> String {
     "image".into()
@@ -463,6 +488,15 @@ impl AttachmentStore {
         input: AttachmentCreateUploadUrlInput,
         now_ms: u64,
     ) -> Result<AttachmentCreateUploadUrlResult> {
+        self.issue_owned_upload(input, now_ms, None).await
+    }
+    /// An upload URL whose upload records `owner` beside the stored file ([`Self::owner`]).
+    pub async fn issue_owned_upload(
+        &self,
+        input: AttachmentCreateUploadUrlInput,
+        now_ms: u64,
+        owner: Option<String>,
+    ) -> Result<AttachmentCreateUploadUrlResult> {
         let (kind, name, mime, size) = match input {
             AttachmentCreateUploadUrlInput::Image(i) => (
                 "image",
@@ -523,6 +557,7 @@ impl AttachmentStore {
             mime_type: mime,
             size_bytes: size,
             expires_at,
+            owner,
         };
         let token = self.signer.sign_json(&claims)?;
         Ok(AttachmentCreateUploadUrlResult {
@@ -654,6 +689,22 @@ impl AttachmentStore {
             }
         }
         scope.remove_file(&part_name)?;
+        // A repeated upload of the same bytes keeps the recorded owner and its claim.
+        if let Some(owner) = &claims.owner
+            && (published
+                || scope
+                    .open_file(&owner_name(&final_name).ok_or(Error::AssetDenied)?)
+                    .is_err())
+        {
+            let record = serde_json::to_vec(&UploadOwner {
+                owner: owner.clone(),
+                claimed: false,
+            })
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+            let pinned = scope.clone();
+            let name = owner_name(&final_name).ok_or(Error::AssetDenied)?;
+            crate::blocking(move || pinned.write_atomic(&name, &record)).await?;
+        }
         if paths::canonicalize(&self.base)
             .map_err(|e| io_error("realpath-attachments", &self.base, e))?
             != scope.root
@@ -677,11 +728,57 @@ impl AttachmentStore {
             let relative = Path::new(path.file_name().ok_or(Error::AssetDenied)?);
             scope.remove_file(relative)?;
             let _ = scope.remove_file(Path::new(&format!("{}.txt", relative.to_string_lossy())));
+            if let Some(owner) = owner_name(relative) {
+                let _ = scope.remove_file(&owner);
+            }
             Ok(())
         })
         .await?;
         Ok(())
     }
+}
+impl AttachmentStore {
+    /// The recorded owner of a stored pending upload, read through the scoped handle without
+    /// following a link. `None` for a missing, oversized or malformed record: callers refuse.
+    pub async fn owner(&self, id: &str) -> Option<UploadOwner> {
+        let base = self.base.clone();
+        let id = id.to_owned();
+        crate::blocking(move || Ok(read_owner(&base, &id)))
+            .await
+            .ok()
+            .flatten()
+    }
+    /// Marks a stored pending upload claimed or not, rewriting its owner record atomically.
+    pub async fn set_claimed(&self, id: &str, claimed: bool) -> Result<()> {
+        let base = self.base.clone();
+        let id = id.to_owned();
+        crate::blocking(move || {
+            let mut record = read_owner(&base, &id).ok_or(Error::AssetDenied)?;
+            record.claimed = claimed;
+            let path = resolve_by_id(&base, &id).ok_or(Error::AssetDenied)?;
+            let name = owner_name(&path).ok_or(Error::AssetDenied)?;
+            let bytes = serde_json::to_vec(&record).map_err(|e| Error::Invalid(e.to_string()))?;
+            crate::scoped::ScopedDir::open(&base)?.write_atomic(&name, &bytes)
+        })
+        .await
+    }
+}
+fn read_owner(base: &Path, id: &str) -> Option<UploadOwner> {
+    use std::io::Read;
+    if !parse_id(id).is_some_and(|p| p.thread_segment == "pending") {
+        return None;
+    }
+    let path = resolve_by_id(base, id)?;
+    let scope = crate::scoped::ScopedDir::open(base).ok()?;
+    let file = scope.open_file(&owner_name(&path)?).ok()?;
+    let mut bytes = Vec::new();
+    file.take(OWNER_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > OWNER_MAX_BYTES {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
 }
 struct ScopedPartFile {
     scope: Arc<crate::scoped::ScopedDir>,
