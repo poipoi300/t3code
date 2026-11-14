@@ -79,6 +79,8 @@ impl Drop for RunningServer {
 /// What a host injects into the composition root beyond configuration.
 #[derive(Default, Clone)]
 pub struct StartOptions {
+    #[cfg(feature = "providers")]
+    pub provider_effects: Option<Arc<crate::adapters::providers::ProviderEffects>>,
     /// Provider adapters for the orchestration runtime's registry. The binary passes none until
     /// provider registration (Replay included) is assembled; tests pass scripted stand-ins.
     #[cfg(feature = "orchestration")]
@@ -124,6 +126,16 @@ async fn start_configured(
     // Before binding (TypeScript `checkServerReachability`): loopback when no host is given, and
     // never a host the organisation's policy forbids, not even briefly.
     let policy = crate::adapters::config::managed_policy(&inputs.env)?;
+    if let Some(document) = &policy {
+        let unenforced = crate::adapters::config::unenforced_policy(document);
+        if !unenforced.is_empty() {
+            return Err(crate::Error::Service(format!(
+                "{} manages this machine, and this server cannot enforce its policy yet ({}).",
+                document.organization.0,
+                unenforced.join(", ")
+            )));
+        }
+    }
     let host = crate::adapters::config::reachable_host(policy.as_ref(), &config)?;
     // Keep the listener used for automatic selection: probing then rebinding races other servers.
     let listener = match tokio::net::TcpListener::bind((host.as_str(), config.port)).await {
@@ -235,7 +247,20 @@ async fn start_configured(
 /// publish `welcome`, activate (domain schedulers, the runtime file), open the command gate,
 /// then publish `ready`.
 async fn activate(services: &ServiceRegistry) -> crate::Result<()> {
-    services.local.publish_welcome()?;
+    #[cfg(feature = "project")]
+    let bootstrap = match services.domain::<crate::adapters::project::ProjectAdapter>() {
+        Some(projects) if services.local.config.auto_bootstrap_project_from_cwd => {
+            projects.auto_bootstrap(&services.local.config.cwd).await?
+        }
+        _ => Default::default(),
+    };
+    #[cfg(feature = "project")]
+    services.local.publish_welcome(
+        bootstrap.project_id.as_ref().map(|id| id.0.as_str()),
+        bootstrap.thread_id.as_ref().map(|id| id.0.as_str()),
+    )?;
+    #[cfg(not(feature = "project"))]
+    services.local.publish_welcome(None, None)?;
     services.domains.activate().await?;
     if let Err(error) = services.local.publish_runtime_state().await {
         // As in TypeScript, a server that cannot write its runtime file still serves.
@@ -346,6 +371,8 @@ async fn start_domains(
     domains.insert_runtime(crate::adapters::host::HostAdapter::start(&context).await?)?;
     #[cfg(feature = "workspace")]
     let workspaces = crate::workspaces::EnvironmentWorkspaces::new(&context);
+    #[cfg(feature = "providers")]
+    domains.insert(workspaces.clone())?;
     #[cfg(all(feature = "git", feature = "workspace"))]
     domains.insert_runtime(crate::adapters::git::GitAdapter::start_with_authority(
         &context,
@@ -353,19 +380,25 @@ async fn start_domains(
     ))?;
     #[cfg(all(feature = "git", not(feature = "workspace")))]
     domains.insert_runtime(crate::adapters::git::GitAdapter::start(&context))?;
+    #[cfg(feature = "cloud")]
+    domains.insert_runtime(crate::adapters::cloud::CloudAdapter::start(&context).await?)?;
     // Device hosts resolve a thread's workspace through the same authority.
     #[cfg(feature = "device")]
-    if let Some(device) =
-        crate::adapters::device::DeviceAdapter::start(&context, workspaces.clone()).await?
-    {
-        domains.insert_runtime(device)?;
-    }
+    let device_workspaces = workspaces.clone();
     #[cfg(feature = "workspace")]
     domains.insert(crate::workspaces::workspace_adapter(&context, workspaces).await?)?;
     #[cfg(feature = "terminal")]
     {
         domains.insert_runtime(crate::adapters::terminal::TerminalAdapter::start(&context)?)?;
         domains.insert(crate::workspaces::terminal_transport())?;
+    }
+    #[cfg(feature = "preview")]
+    if let Some(preview) = crate::adapters::preview::PreviewAdapter::start(&context).await? {
+        #[cfg(feature = "terminal")]
+        if let Some(terminal) = domains.get::<crate::adapters::terminal::TerminalAdapter>() {
+            preview.observe_terminals(terminal);
+        }
+        domains.insert_runtime(preview)?;
     }
     #[cfg(feature = "usage")]
     domains.insert(crate::adapters::usage::UsageAdapter::start(&context).await?)?;
@@ -378,6 +411,29 @@ async fn start_domains(
         )
         .await?,
     )?;
+    #[cfg(feature = "providers")]
+    {
+        let providers = crate::adapters::providers::ProvidersAdapter::start(
+            &context,
+            domains,
+            options.provider_effects.clone(),
+        )
+        .await?;
+        domains.insert(providers.domain.clone())?;
+        domains.insert(providers.domain.secrets.clone())?;
+        domains.insert_runtime(providers)?;
+    }
+    // After the providers: devices read secret references through the same resolver.
+    #[cfg(feature = "device")]
+    if let Some(device) = crate::adapters::device::DeviceAdapter::start(
+        &context,
+        device_workspaces,
+        domains.get::<t3_provider::secrets::SecretResolver>(),
+    )
+    .await?
+    {
+        domains.insert_runtime(device)?;
+    }
     // Before projects: promoting a scratch thread moves its scheduled tasks.
     #[cfg(feature = "scheduler")]
     let scheduler = crate::adapters::scheduler::SchedulerAdapter::start(&context).await?;
@@ -407,23 +463,7 @@ async fn serve(
     listener: tokio::net::TcpListener,
 ) -> crate::Result<()> {
     let app = crate::http::router(services.clone());
-    let watcher = services.clone();
-    let served = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        tokio::select! {
-            () = watcher.shutdown.cancelled() => {}
-            () = watcher.local.ownership_lost() => {
-                tracing::error!("server ownership lost; shutting down");
-            }
-        }
-        // Close the command gate before the listener stops accepting.
-        watcher.lifecycle.advance(Phase::Stopping);
-        watcher.shutdown.cancel();
-    })
-    .await;
+    let served = accept(app, listener, &services).await;
     services.lifecycle.advance(Phase::Stopping);
     services.lifecycle.set_listening(false);
     services.shutdown.cancel();
@@ -449,6 +489,85 @@ async fn serve(
             errors.join("; ")
         )))
     }
+}
+
+/// Node's `headersTimeout` default: a client must send its request headers within a minute.
+const HEADER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// Node's `requestTimeout` default (300 s), applied here to each wait for request-body data.
+const REQUEST_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The HTTP accept loop. It owns every HTTP connection task, so shutdown ends them with no
+/// grace, as TypeScript does (`HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS = 0`): a client reading a
+/// download slowly cannot hold the home lock. Upgraded WebSockets leave their connection task
+/// and close through the shutdown token, joined by the connection tracker.
+async fn accept(
+    app: axum::Router,
+    listener: tokio::net::TcpListener,
+    services: &ServiceRegistry,
+) -> std::io::Result<()> {
+    use hyper_util::{
+        rt::{TokioExecutor, TokioIo, TokioTimer},
+        server::conn::auto::Builder,
+        service::TowerToHyperService,
+    };
+    let mut builder = Builder::new(TokioExecutor::new());
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(HEADER_READ_TIMEOUT);
+    let mut connections = tokio::task::JoinSet::new();
+    let stop = async {
+        tokio::select! {
+            () = services.shutdown.cancelled() => {}
+            () = services.local.ownership_lost() => {
+                tracing::error!("server ownership lost; shutting down");
+            }
+        }
+    };
+    tokio::pin!(stop);
+    loop {
+        let (stream, remote) = tokio::select! {
+            biased;
+            () = &mut stop => break,
+            Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+            accepted = listener.accept() => match accepted {
+                Ok(accepted) => accepted,
+                // Per-connection failures (reset before accept, descriptor limits) do not stop
+                // the server; the next accept proceeds.
+                Err(error) => {
+                    tracing::warn!(%error, "accept failed");
+                    continue;
+                }
+            },
+        };
+        let _ = stream.set_nodelay(true);
+        let service = TowerToHyperService::new(tower::ServiceExt::map_request(
+            app.clone(),
+            move |mut request: axum::http::Request<hyper::body::Incoming>| {
+                request
+                    .extensions_mut()
+                    .insert(axum::extract::ConnectInfo(remote));
+                request.map(|body| {
+                    axum::body::Body::new(tower_http::timeout::TimeoutBody::new(
+                        REQUEST_BODY_TIMEOUT,
+                        body,
+                    ))
+                })
+            },
+        ));
+        let builder = builder.clone();
+        connections.spawn(async move {
+            let _ = builder
+                .serve_connection_with_upgrades(TokioIo::new(stream), service)
+                .await;
+        });
+    }
+    // Close the command gate before the listener stops accepting.
+    services.lifecycle.advance(Phase::Stopping);
+    services.shutdown.cancel();
+    drop(listener);
+    connections.shutdown().await;
+    Ok(())
 }
 
 /// Domains first (while the database lives), then every handle that may hold a database

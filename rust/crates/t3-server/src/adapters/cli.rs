@@ -52,6 +52,7 @@ async fn mint(
     scopes: Vec<AuthEnvironmentScope>,
     ttl: Option<i64>,
     label: String,
+    policy: Option<t3_contracts::managed_policy::ManagedPolicyDocument>,
 ) -> Result<AuthPairingCredentialResult, CliError> {
     let path = config.paths.database();
     if !path.is_file() {
@@ -72,7 +73,6 @@ async fn mint(
     .map_err(service_error)?;
     let result = async {
         let id = std::fs::read_to_string(config.paths.environment_id())?;
-        let policy = crate::adapters::config::managed_policy(&inputs.env)?;
         let auth = AuthService::new(&config, id.trim().to_owned(), db.clone(), policy).await?;
         auth.inner()
             .create_pairing_link(
@@ -160,7 +160,8 @@ pub(crate) async fn pair(
             .transpose()
             .map_err(|e| CliError::Usage(e.to_string()))?;
         let port = config.port;
-        let issued = mint(config, scopes, ttl, label).await?;
+        let policy = crate::adapters::config::managed_policy(&inputs.env)?;
+        let issued = mint(config, scopes, ttl, label, policy).await?;
         return Ok(PairOutput {
             label: descriptor.label.0,
             origin: state.origin,

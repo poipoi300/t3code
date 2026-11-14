@@ -94,12 +94,21 @@ async fn start(
     database: &Path,
     checkpoints: Arc<dyn CheckpointPort>,
 ) -> Result<OrchestrationRuntime> {
-    let clock: Arc<dyn Clock> = Arc::new(ManualClock::new(NOW));
-    let registry = AdapterRegistry::new(vec![dev_replay_registration(
-        clock.clone(),
-        Arc::new(RandomIds),
-        false,
-    )]);
+    start_with(database, checkpoints, NOW, |adapter| adapter, |_| {}).await
+}
+
+/// `start` at `now`, with the Replay adapter wrapped and the ports adjusted.
+async fn start_with(
+    database: &Path,
+    checkpoints: Arc<dyn CheckpointPort>,
+    now: &str,
+    wrap: impl FnOnce(Arc<dyn ProviderAdapter>) -> Arc<dyn ProviderAdapter>,
+    configure: impl FnOnce(&mut RuntimePorts),
+) -> Result<OrchestrationRuntime> {
+    let clock: Arc<dyn Clock> = Arc::new(ManualClock::new(now));
+    let mut replay = dev_replay_registration(clock.clone(), Arc::new(RandomIds), false);
+    replay.adapter = wrap(replay.adapter);
+    let registry = AdapterRegistry::new(vec![replay]);
     let mut ports = RuntimePorts::new(
         StoreDatabase(t3_persistence::Database::open(database)?),
         Arc::new(registry),
@@ -111,6 +120,7 @@ async fn start(
     settings["providerInstances"][DEV_REPLAY_INSTANCE_ID] =
         json!({"driver":"acpRegistry","displayName":"Replay (dev)","enabled":true});
     ports.settings = Arc::new(StaticSettings::new(serde_json::from_value(settings)?));
+    configure(&mut ports);
     OrchestrationRuntime::start(ports).await
 }
 

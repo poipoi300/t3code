@@ -33,6 +33,7 @@ impl DeviceAdapter {
     pub async fn start(
         context: &crate::services::DomainContext<'_>,
         workspaces: Arc<crate::workspaces::EnvironmentWorkspaces>,
+        resolver: Option<Arc<t3_provider::secrets::SecretResolver>>,
     ) -> crate::Result<Option<Arc<Self>>> {
         let Some(node) = resolve_node(&context.environment) else {
             tracing::info!("device support is unavailable: no Node runtime on PATH");
@@ -48,9 +49,12 @@ impl DeviceAdapter {
         let settings = Arc::new(Settings(context.local.settings.clone()));
         let secrets: Arc<dyn cloud::Secrets> = Arc::new(Secrets {
             settings: context.local.settings.clone(),
-            resolver: t3_provider::secrets::SecretResolver::new(
-                t3_provider::secrets::OnePassword::new(context.environment.clone()),
-            ),
+            // The provider domain's resolver when it runs; otherwise the only one.
+            resolver: resolver.unwrap_or_else(|| {
+                Arc::new(t3_provider::secrets::SecretResolver::new(
+                    t3_provider::secrets::OnePassword::new(context.environment.clone()),
+                ))
+            }),
         });
         let commands = Arc::new(io::NativeCommands);
         let spawner = Arc::new(io::NativeSpawner);
@@ -214,7 +218,7 @@ impl t3_device::service::Settings for Settings {
 /// `requireSettingsSecret` over the shared 1Password resolver and the private settings.
 struct Secrets {
     settings: Arc<t3_config::settings::SettingsService>,
-    resolver: t3_provider::secrets::SecretResolver,
+    resolver: Arc<t3_provider::secrets::SecretResolver>,
 }
 #[async_trait::async_trait]
 impl cloud::Secrets for Secrets {

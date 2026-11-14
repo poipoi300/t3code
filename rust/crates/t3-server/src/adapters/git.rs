@@ -15,6 +15,15 @@ pub trait WorkspaceAuthority: Send + Sync {
         &'a self,
         session: &'a AuthSessionId,
     ) -> BoxFuture<'a, Result<Vec<PathBuf>, EnvironmentAuthorizationError>>;
+    /// The grants containing `candidate` (already resolved); an authority that can answer per
+    /// path avoids gathering every grant.
+    fn roots_for<'a>(
+        &'a self,
+        session: &'a AuthSessionId,
+        _candidate: &'a Path,
+    ) -> BoxFuture<'a, Result<Vec<PathBuf>, EnvironmentAuthorizationError>> {
+        self.roots(session)
+    }
 }
 
 pub struct GitAdapter {
@@ -97,13 +106,7 @@ impl GitAdapter {
         session: &AuthSessionId,
         cwd: &str,
     ) -> Result<(PathBuf, Vec<PathBuf>), Error> {
-        let grants = self
-            .authority
-            .as_ref()
-            .ok_or_else(denied)?
-            .roots(session)
-            .await
-            .map_err(|e| Error::Authorization(Box::new(e)))?;
+        let authority = self.authority.as_ref().ok_or_else(denied)?;
         if !Path::new(cwd).is_absolute() {
             return Err(denied());
         }
@@ -111,6 +114,10 @@ impl GitAdapter {
         if !tokio::fs::metadata(&cwd).await.is_ok_and(|m| m.is_dir()) {
             return Err(denied());
         }
+        let grants = authority
+            .roots_for(session, &cwd)
+            .await
+            .map_err(|e| Error::Authorization(Box::new(e)))?;
         let mut roots = Vec::new();
         for grant in grants {
             if grant.is_absolute()

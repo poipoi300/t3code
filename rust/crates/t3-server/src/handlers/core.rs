@@ -22,6 +22,11 @@ pub fn register(registry: &mut HandlerRegistry) -> crate::Result<()> {
     {
         use futures::StreamExt;
         registry.register::<WsServerGetConfigRpc, _, _>(|ctx, _| async move {
+            #[cfg(feature = "providers")]
+            return crate::adapters::providers::config_for(&ctx.services, ctx.secret_references)
+                .await
+                .map_err(Failure::Typed);
+            #[cfg(not(feature = "providers"))]
             ctx.services
                 .local
                 .get_config_for(ctx.secret_references)
@@ -29,6 +34,13 @@ pub fn register(registry: &mut HandlerRegistry) -> crate::Result<()> {
                 .map_err(internal)
         })?;
         registry.register_stream::<WsSubscribeServerConfigRpc, _, _, _>(|ctx, _| async move {
+            #[cfg(feature = "providers")]
+            return Ok(crate::adapters::providers::config_stream_for(
+                ctx.services,
+                ctx.secret_references,
+            )
+            .map(|v| v.map_err(Failure::Typed)));
+            #[cfg(not(feature = "providers"))]
             Ok(
                 crate::adapters::config::config_stream_for(ctx.services, ctx.secret_references)
                     .map(|v| v.map_err(internal)),

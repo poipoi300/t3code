@@ -34,12 +34,16 @@ pub fn router(services: Arc<ServiceRegistry>) -> Router {
         );
         let router = router.route("/ws", get(crate::ws::upgrade));
         let router = mcp_oauth::routes(auth::routes(router));
+        #[cfg(feature = "preview")]
+        let router = router.merge(crate::handlers::preview::http_routes());
         #[cfg(feature = "workspace")]
         let router = router.merge(crate::handlers::workspace_terminal::http_routes());
         #[cfg(feature = "scheduler")]
         let router = crate::adapters::scheduler::routes(router);
         #[cfg(feature = "orchestration")]
         let router = orchestration::routes(router);
+        #[cfg(feature = "cloud")]
+        let router = crate::adapters::cloud::routes(router);
         // The device router owns its absolute path and its own policy-then-auth order.
         #[cfg(feature = "device")]
         let router = match services.domain::<crate::adapters::device::DeviceAdapter>() {

@@ -674,11 +674,6 @@ pub fn parse(
                     "LAN fencing and Tailscale Serve".into(),
                 ));
             }
-            if resolved.auto_bootstrap_project_from_cwd {
-                return Err(CliError::Unavailable(
-                    "Project bootstrap from cwd (use `t3 serve`)".into(),
-                ));
-            }
             Ok(Invocation::Serve(Box::new(inputs)))
         }
     }

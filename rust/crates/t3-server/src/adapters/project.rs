@@ -24,6 +24,14 @@ pub struct ProjectAdapter {
     managed: ManagedProjectFolders,
     /// Present when scheduled tasks exist to move with a promoted thread.
     promotion: Option<ScratchThreadPromotion>,
+    projections: Arc<t3_orchestration::projections::store::ProjectionStore>,
+}
+
+/// What the start-up bootstrap selected, for the `welcome` event.
+#[derive(Default)]
+pub struct BootstrapTargets {
+    pub project_id: Option<t3_contracts::base_schemas::ProjectId>,
+    pub thread_id: Option<t3_contracts::base_schemas::ThreadId>,
 }
 
 /// Cloning a remote repository needs the clone workflow (source-control sign-in, progress,
@@ -148,7 +156,72 @@ impl ProjectAdapter {
             service,
             managed,
             promotion,
+            projections: runtime.projections.clone(),
         }))
+    }
+
+    /// `resolveAutoBootstrapWelcomeTargets`: the project for the server's working directory,
+    /// created when missing, and its first listed thread. A folder the project rules refuse is
+    /// skipped so the server still starts there. Launching a first thread needs the launch
+    /// environment, which this server does not have yet: as TypeScript does when a launch
+    /// fails, start-up continues with the project alone.
+    pub async fn auto_bootstrap(&self, cwd: &Path) -> crate::Result<BootstrapTargets> {
+        use t3_contracts::project::{ProjectMutationMember1, ProjectMutationMember1Type};
+        use t3_orchestration::api::ProjectionReader;
+        let title = cwd
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("project");
+        let id = || uuid::Uuid::new_v4().to_string();
+        let input = ProjectMutationMember1 {
+            r#type: ProjectMutationMember1Type::ProjectCreate,
+            command_id: t3_contracts::base_schemas::CommandId(id()),
+            project_id: t3_contracts::base_schemas::ProjectId(id()),
+            title: t3_contracts::base_schemas::TrimmedNonEmptyString(title.into()),
+            workspace_root: t3_contracts::base_schemas::TrimmedNonEmptyString(
+                cwd.to_string_lossy().into_owned(),
+            ),
+            create_workspace_root_if_missing: None,
+            default_model_selection: None,
+            scripts: None,
+        };
+        let project = match self.service.bootstrap(input).await {
+            Ok((project, _)) => project,
+            Err(ProjectError::Invalid(detail)) => {
+                tracing::warn!(%detail, "Skipped bootstrap project");
+                return Ok(BootstrapTargets::default());
+            }
+            Err(error) => return Err(crate::Error::Service(error.to_string())),
+        };
+        let shells = self
+            .projections
+            .thread_shells(t3_orchestration::api::ShellQuery {
+                project_id: Some(project.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| crate::Error::Service(e.to_string()))?;
+        let thread = shells
+            .threads
+            .into_iter()
+            .find(|shell| {
+                shell.project_id == project.id
+                    && t3_orchestration::ports::transport::shell_stream::is_listed_thread_lineage(
+                        &shell.lineage,
+                    )
+            })
+            .map(|shell| shell.id);
+        if thread.is_none() {
+            tracing::warn!(
+                project = %project.id.0,
+                "Failed to launch bootstrap thread: thread launch is not available on this server"
+            );
+        }
+        Ok(BootstrapTargets {
+            project_id: Some(project.id),
+            thread_id: thread,
+        })
     }
 
     /// `projects.createFromThread`; `None` without scheduled tasks to move.

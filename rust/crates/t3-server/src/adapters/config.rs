@@ -44,6 +44,7 @@ pub struct LocalServices {
     pub environment: ExecutionEnvironmentDescriptor,
     pub immutable_assets: std::collections::HashSet<String>,
     pub settings: Arc<SettingsService>,
+    pub managed_policy: Option<t3_contracts::managed_policy::ManagedPolicyDocument>,
     pub keybindings: Arc<KeybindingsService>,
     pub lifecycle: LifecycleEvents,
     database: Database,
@@ -65,7 +66,8 @@ impl LocalServices {
         let id = t3_config::environment::environment_id(&config.paths)
             .await
             .map_err(service_error)?;
-        let auth = AuthService::new(&config, id.0.clone(), database.clone(), policy).await?;
+        let auth =
+            AuthService::new(&config, id.0.clone(), database.clone(), policy.clone()).await?;
         let environment = serde_json::from_value(json!({
             "environmentId": id, "label": config.cwd.file_name().and_then(|s| s.to_str()).unwrap_or("T3 Code"),
             "platform": {"os": if cfg!(windows) {"windows"} else if cfg!(target_os="macos") {"darwin"} else {"linux"},
@@ -90,6 +92,7 @@ impl LocalServices {
             auth,
             environment,
             immutable_assets,
+            managed_policy: policy,
             settings,
             keybindings,
             lifecycle,
@@ -236,7 +239,11 @@ impl LocalServices {
         })
     }
     /// Publishes `welcome`. TypeScript does this after recovery and once HTTP is listening.
-    pub fn publish_welcome(&self) -> crate::Result<()> {
+    pub fn publish_welcome(
+        &self,
+        bootstrap_project_id: Option<&str>,
+        bootstrap_thread_id: Option<&str>,
+    ) -> crate::Result<()> {
         let cwd = self.config.cwd.to_string_lossy().into_owned();
         let project_name = self
             .config
@@ -245,10 +252,15 @@ impl LocalServices {
             .and_then(|name| name.to_str())
             .unwrap_or("project")
             .to_owned();
-        self.lifecycle.publish(
-            "welcome",
-            json!({"environment": self.environment, "cwd": cwd, "projectName": project_name}),
-        )?;
+        let mut welcome =
+            json!({"environment": self.environment, "cwd": cwd, "projectName": project_name});
+        if let Some(id) = bootstrap_project_id {
+            welcome["bootstrapProjectId"] = json!(id);
+        }
+        if let Some(id) = bootstrap_thread_id {
+            welcome["bootstrapThreadId"] = json!(id);
+        }
+        self.lifecycle.publish("welcome", welcome)?;
         Ok(())
     }
     /// Publishes `ready`, after the command gate opens.
@@ -307,6 +319,7 @@ impl LocalServices {
             environment: _,
             immutable_assets: _,
             settings,
+            managed_policy: _,
             keybindings,
             lifecycle: _,
             database,
@@ -513,6 +526,39 @@ pub fn managed_policy(
         })
 }
 
+/// The parts of a managed policy this server does not enforce yet. Starting anyway would
+/// silently ignore the organisation's policy, so start is refused while any is present.
+/// Enforced: `clients` (bind address and auth), `connect`, `maxRuntimeMode` (thread creation,
+/// mode changes and every turn), `providers` (provider registry), `updates` (no update method
+/// is served).
+pub fn unenforced_policy(
+    document: &t3_contracts::managed_policy::ManagedPolicyDocument,
+) -> Vec<&'static str> {
+    let mut parts = Vec::new();
+    if document
+        .settings
+        .as_ref()
+        .is_some_and(|settings| !settings.is_empty())
+    {
+        parts.push("locked settings");
+    }
+    if let Some(limits) = &document.limits {
+        if limits.webhook_tasks == Some(false) {
+            parts.push("webhookTasks");
+        }
+        if limits.telemetry == Some(false) {
+            parts.push("telemetry");
+        }
+        if limits.browser_cookie_import == Some(false) {
+            parts.push("browserCookieImport");
+        }
+        if cfg!(not(feature = "providers")) && limits.providers.is_some() {
+            parts.push("providers");
+        }
+    }
+    parts
+}
+
 /// `checkServerReachability`, before binding: the address to listen on, or the organisation's
 /// refusal. Without the host services the policy cannot be checked, so a policy refuses start.
 pub fn reachable_host(
@@ -536,11 +582,7 @@ pub fn reachable_host(
         let policy = t3_host::policy::ManagedPolicy::from_document(Some(document.clone()))
             .map_err(|error| crate::Error::Service(error.to_string()))?;
         policy
-            .check_server_reachability(
-                auth,
-                config.host.as_deref(),
-                config.tailscale_serve_enabled,
-            )
+            .check_server_reachability(auth, config.host.as_deref(), config.tailscale_serve_enabled)
             .map_err(|error| crate::Error::Service(error.to_string()))
     }
     #[cfg(not(feature = "host"))]

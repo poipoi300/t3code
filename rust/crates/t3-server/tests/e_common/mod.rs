@@ -210,7 +210,9 @@ impl Fixture {
         let address = listener.local_addr().unwrap();
         let mut config = t3_server::adapters::config::resolve(&inputs(temp.path())).unwrap();
         config.port = address.port();
-        let local = LocalServices::open(config, address.port()).await.unwrap();
+        let local = LocalServices::open(config, address.port(), None)
+            .await
+            .unwrap();
         let credential = local.auth.startup_pairing_credential().await.unwrap();
         let services = Arc::new(ServiceRegistry {
             handlers,

@@ -32,13 +32,32 @@ impl ApiError {
         self
     }
     pub fn internal(reason: Internal) -> Self {
+        Self::internal_because(reason, None)
+    }
+    /// `failEnvironmentInternal`: the trace id the client receives is logged with the reason
+    /// and the cause, so an operator can find the failure a user reports.
+    pub fn internal_because(reason: Internal, cause: Option<&dyn std::fmt::Display>) -> Self {
+        let trace_id = trace_id();
+        match cause {
+            Some(cause) => tracing::error!(
+                ?reason,
+                trace_id = %trace_id.0,
+                %cause,
+                "environment api operation failed"
+            ),
+            None => tracing::error!(
+                ?reason,
+                trace_id = %trace_id.0,
+                "environment api operation failed"
+            ),
+        }
         Self::json(
             StatusCode::INTERNAL_SERVER_ERROR,
             h::EnvironmentInternalError {
                 tag: h::EnvironmentInternalErrorTag::EnvironmentInternalError,
                 code: h::EnvironmentInternalErrorCode::InternalError,
                 reason,
-                trace_id: trace_id(),
+                trace_id,
             },
         )
     }
@@ -123,7 +142,7 @@ impl ApiError {
                     },
                 )
             }
-            _ => Self::internal(internal),
+            other => Self::internal_because(internal, Some(&other)),
         }
     }
     pub fn dpop_failed(&self) -> bool {

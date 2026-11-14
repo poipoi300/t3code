@@ -53,6 +53,89 @@ async fn a_start_without_a_host_listens_on_loopback_only() {
     server.shutdown().await.unwrap();
 }
 
+/// Review M1: the organisation's policy decides where the server may listen, before binding
+/// (`checkServerReachability`), and a policy that cannot be read refuses start.
+#[tokio::test]
+async fn the_managed_policy_decides_where_the_server_may_listen() {
+    let temp = tempfile::tempdir().unwrap();
+    let policy = temp.path().join("policy.json");
+    let with = |host: Option<&str>| {
+        let mut start = inputs(temp.path());
+        start.flags.host = host.map(str::to_owned);
+        start.env.insert(
+            "T3CODE_DEV_MANAGED_POLICY_PATH".into(),
+            policy.to_string_lossy().into_owned(),
+        );
+        start
+    };
+    std::fs::write(
+        &policy,
+        r#"{"schemaVersion":1,"organization":"Acme","limits":{"clients":["local-browser"]}}"#,
+    )
+    .unwrap();
+    let refused = t3_server::runtime::start(with(Some("0.0.0.0")))
+        .await
+        .err()
+        .expect("a remote host is refused");
+    assert!(refused.to_string().contains("Acme"), "{refused}");
+    let local = t3_server::runtime::start(with(None)).await.unwrap();
+    assert!(local.address.ip().is_loopback());
+    local.shutdown().await.unwrap();
+
+    // A policy part this server cannot enforce yet refuses start rather than being ignored.
+    std::fs::write(
+        &policy,
+        r#"{"schemaVersion":1,"organization":"Acme","limits":{"telemetry":false}}"#,
+    )
+    .unwrap();
+    let unenforced = t3_server::runtime::start(with(None))
+        .await
+        .err()
+        .expect("an unenforced policy part refuses start");
+    assert!(unenforced.to_string().contains("telemetry"), "{unenforced}");
+
+    std::fs::write(&policy, "{").unwrap();
+    let unreadable = t3_server::runtime::start(with(None))
+        .await
+        .err()
+        .expect("an unreadable policy refuses start");
+    assert!(
+        unreadable.to_string().contains("managed policy"),
+        "{unreadable}"
+    );
+}
+
+/// Review M2: a client that stops reading a large download cannot hold shutdown, the database
+/// or the home lock; HTTP connections end with no grace, as in TypeScript.
+#[tokio::test]
+async fn shutdown_does_not_wait_for_a_stalled_download() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let temp = tempfile::tempdir().unwrap();
+    let site = temp.path().join("site");
+    std::fs::create_dir_all(&site).unwrap();
+    std::fs::write(site.join("index.html"), "<html></html>").unwrap();
+    std::fs::write(site.join("large.bin"), vec![7u8; 64 * 1024 * 1024]).unwrap();
+    let home = temp.path().join("home");
+    let mut start = inputs(&home);
+    start.static_dir = Some(site);
+    let server = t3_server::runtime::start(start).await.unwrap();
+    let mut stalled = tokio::net::TcpStream::connect(server.address)
+        .await
+        .unwrap();
+    stalled
+        .write_all(b"GET /large.bin HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut first = [0u8; 16];
+    stalled.read_exact(&mut first).await.unwrap();
+    assert!(first.starts_with(b"HTTP/1.1 200"));
+    // The client now reads nothing more while the server has megabytes left to send.
+    server.shutdown().await.unwrap();
+    let again = t3_server::runtime::start(inputs(&home)).await.unwrap();
+    again.shutdown().await.unwrap();
+    drop(stalled);
+}
+
 async fn call(socket: &mut Socket, client: &mut Client, tag: &str, kind: CallKind) -> CallEvent {
     client.start(tag, json!({}), kind).unwrap();
     next_event(socket, client).await

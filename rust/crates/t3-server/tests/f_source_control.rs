@@ -107,9 +107,13 @@ impl Fixture {
         git.commit_message("initial", None).await.unwrap().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let local = LocalServices::open(resolve(&support::inputs(&home)).unwrap(), address.port())
-            .await
-            .unwrap();
+        let local = LocalServices::open(
+            resolve(&support::inputs(&home)).unwrap(),
+            address.port(),
+            None,
+        )
+        .await
+        .unwrap();
         let pairing = local.auth.startup_pairing_credential().await.unwrap();
         let authority = Arc::new(Authority::default());
         let mut domains = Domains::default();

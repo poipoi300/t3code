@@ -193,8 +193,19 @@ impl OrchestrationAdapter {
         ports.settings = Arc::new(
             LiveSettings::start(context.local.settings.clone(), context.shutdown.clone()).await?,
         );
-        // Turns run in the project's root. No managed policy is loaded and no provider snapshot
-        // is assembled yet, which is TypeScript's behaviour without a policy file or providers.
+        // Turns run in the project's root, capped by the organisation's managed policy: the same
+        // document caps thread creation and mode changes (`runtime_mode_ceiling`) and each turn
+        // (`ProjectRuntimePolicy`). No provider snapshot is assembled here yet, which is
+        // TypeScript's behaviour without providers.
+        let managed = context.local.managed_policy.as_ref();
+        ports.runtime_mode_ceiling = managed.and_then(|document| {
+            Some(
+                t3_orchestration::ports::decisions::dispatch_mode_limit::RuntimeModeCeiling {
+                    organization: document.organization.0.clone(),
+                    max_runtime_mode: document.limits.as_ref()?.max_runtime_mode?,
+                },
+            )
+        });
         ports.policy = {
             use t3_orchestration::ports::decisions::runtime_policy::{
                 ProjectRuntimePolicy, RuntimePolicyOverride, SnapshotRuntimeModes,
@@ -203,7 +214,7 @@ impl OrchestrationAdapter {
             ProjectRuntimePolicy::configured(
                 StoreDatabase(context.database.clone()),
                 Arc::new(SnapshotRuntimeModes::new(providers)),
-                None,
+                managed,
                 RuntimePolicyOverride::default(),
                 None,
             )

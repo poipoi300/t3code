@@ -390,6 +390,12 @@ impl CodeHighlightDocument {
             if !append {
                 old.tokenizer = None;
             }
+            if old.chunk.language != chunk.language {
+                old.entry = None;
+                old.exit = None;
+                old.result = None;
+                old.unknown = false;
+            }
             old.chunk = chunk.clone();
             old.streaming = streaming;
             old.failure = None;
@@ -473,7 +479,7 @@ impl CodeHighlightDocument {
         let cached = (!record.streaming || !record.chunk.last)
             .then(|| self.cache.borrow_mut().get_parsed(&key, &record.chunk.text))
             .flatten();
-        let (value, exit) = if let Some(cached) = cached {
+        let (mut value, exit) = if let Some(cached) = cached {
             cached
         } else {
             let tokenizer = record
@@ -501,8 +507,16 @@ impl CodeHighlightDocument {
             (value, exit)
         };
         let changed_exit = record.exit.as_ref() != Some(&exit);
-        record.exit = Some(exit);
+        record.exit = Some(exit.clone());
         record.failure = None;
+        let mut rendered = IncrementalHighlightedDocument {
+            previous: record.result.as_ref().filter(|(theme, _)| theme == &syntax.name).map(|(_, value)| value.clone()),
+        };
+        value = rendered.update(value);
+        if !record.streaming || !record.chunk.last {
+            self.cache.borrow_mut().set(key.clone(), value.clone());
+            self.cache.borrow_mut().remember_exit(&key, &record.chunk.text, exit);
+        }
         record.result =
             (record.streaming && record.chunk.last).then(|| (syntax.name.clone(), value));
         if !record.streaming || !record.chunk.last {
@@ -553,11 +567,18 @@ impl CodeHighlightDocument {
             }
         }
         self.pending.insert(chunk.value_bytes.start);
-        Rc::new(highlight_code_to_lines(
-            &chunk.text,
-            &[],
-            HighlightStatus::Unavailable,
-        ))
+        let record = self.chunks.get_mut(&chunk.value_bytes.start);
+        let stable = record.as_ref().and_then(|record| record.tokenizer.as_ref()).map_or_else(Vec::new, |parser| {
+            parser.stable.iter().filter_map(|span| syntax.scope(&span.scope).map(|style| StyledSpan { range: span.range.clone(), style: style.clone() })).collect()
+        });
+        let mut value = highlight_code_to_lines(&chunk.text, &stable, HighlightStatus::Unavailable);
+        value.foreground = Some(syntax.style.text.clone());
+        let mut rendered = IncrementalHighlightedDocument { previous: record.as_ref().and_then(|r| r.result.as_ref()).filter(|(theme, _)| theme == &syntax.name).map(|(_, value)| value.clone()) };
+        let value = rendered.update(Rc::new(value));
+        if let Some(record) = record && record.streaming && record.chunk.last {
+            record.result = Some((syntax.name.clone(), value.clone()));
+        }
+        value
     }
 }
 

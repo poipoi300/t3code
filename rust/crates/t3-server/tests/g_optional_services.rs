@@ -57,6 +57,7 @@ impl Fixture {
         let local = LocalServices::open(
             resolve(&support::inputs(temp.path())).unwrap(),
             address.port(),
+            None,
         )
         .await
         .unwrap();

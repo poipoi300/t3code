@@ -75,7 +75,7 @@ impl Fixture {
             persisted_observability: Default::default(),
             static_dir: None,
         };
-        let local = LocalServices::open(resolve(&inputs).unwrap(), 0)
+        let local = LocalServices::open(resolve(&inputs).unwrap(), 0, None)
             .await
             .unwrap();
         let database = TestDatabase::memory().unwrap();

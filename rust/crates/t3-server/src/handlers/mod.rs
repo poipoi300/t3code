@@ -1,9 +1,12 @@
+pub mod cloud;
 pub mod core;
 pub mod device;
 pub mod host;
 pub mod optional_services;
 pub mod orchestration;
+pub mod preview;
 pub mod projects;
+pub mod providers;
 pub mod source_control;
 pub mod telemetry;
 mod unsupported;
@@ -33,7 +36,10 @@ pub fn registry_with(domains: &Domains) -> crate::Result<HandlerRegistry> {
     telemetry::register_with(&mut registry, domains)?;
     host::register_with(&mut registry, domains)?;
     device::register_with(&mut registry, domains)?;
+    preview::register_with(&mut registry, domains)?;
+    cloud::register_with(&mut registry, domains)?;
     projects::register_with(&mut registry, domains)?;
+    providers::register_with(&mut registry, domains)?;
     unsupported::register(&mut registry)?;
     registry.validate()?;
     Ok(registry)

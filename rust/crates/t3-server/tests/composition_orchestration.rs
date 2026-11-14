@@ -293,6 +293,7 @@ async fn a_dispatched_message_runs_a_turn_seen_on_subscribe_thread_and_http_read
         StartOptions {
             providers: vec![Arc::new(ScriptedAdapter::new())],
             dev_replay: false,
+            ..Default::default()
         },
         json!({"instanceId":"replay","model":"replay-model"}),
     )
@@ -306,6 +307,7 @@ async fn a_dispatched_message_runs_a_replay_turn_over_the_socket() {
         StartOptions {
             providers: Vec::new(),
             dev_replay: true,
+            ..Default::default()
         },
         json!({"instanceId":"devReplay","model":"multi-turn"}),
     )
@@ -877,5 +879,204 @@ async fn dev_mode_scratch_project_thread_and_replay_turn_over_the_socket() {
         .await
         .unwrap();
     assert_eq!(refused.status(), 403);
+    server.shutdown().await.unwrap();
+}
+
+/// Item 5: without `serve` (not headless) the server bootstraps the project for its working
+/// directory and names it in `welcome`; a restart finds the same project. No thread is
+/// launched: thread launch is not available yet, and start-up continues, as TypeScript's
+/// `ThreadLaunchError` path does.
+#[tokio::test]
+async fn a_start_from_a_folder_bootstraps_its_project_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let app = temp.path().join("my-app");
+    std::fs::create_dir_all(&app).unwrap();
+    let start = || {
+        let mut inputs = dev_inputs(&home);
+        inputs.flags.dev_url = None;
+        inputs.process_cwd = app.clone();
+        inputs.headless = false;
+        inputs.force_auto_bootstrap = None;
+        t3_server::runtime::start(inputs)
+    };
+    let welcome = async |server: &t3_server::runtime::RunningServer| -> Value {
+        let origin = format!("http://{}", server.address);
+        let http = reqwest::Client::new();
+        let cookie = http
+            .post(format!("{origin}/api/auth/browser-session"))
+            .json(&json!({"credential": server.pairing_credential}))
+            .send()
+            .await
+            .unwrap()
+            .headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let ticket: Value = http
+            .post(format!("{origin}/api/auth/websocket-ticket/rpc"))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{}/ws?orchestrationProtocol=2&wsTicket={}",
+            server.address,
+            ticket["ticket"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
+        let mut client = Client::new(0, Default::default());
+        let id = client
+            .start("subscribeServerLifecycle", json!({}), CallKind::Stream)
+            .unwrap();
+        loop {
+            match event(&mut socket, &mut client).await {
+                CallEvent::Chunk { id: chunk, values } if chunk == id => {
+                    client.acknowledge(chunk);
+                    if let Some(welcome) = values.into_iter().find(|v| v["type"] == "welcome") {
+                        return welcome["payload"].clone();
+                    }
+                }
+                CallEvent::Chunk { id, .. } => client.acknowledge(id),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    };
+    let first = start().await.unwrap();
+    let payload = welcome(&first).await;
+    let project = payload["bootstrapProjectId"]
+        .as_str()
+        .expect("a bootstrap project")
+        .to_owned();
+    assert!(payload.get("bootstrapThreadId").is_none(), "{payload}");
+    first.shutdown().await.unwrap();
+
+    let second = start().await.unwrap();
+    assert_eq!(
+        welcome(&second).await["bootstrapProjectId"],
+        project.as_str()
+    );
+    second.shutdown().await.unwrap();
+}
+
+/// An admin socket on a started server: browser session, RPC ticket, upgrade.
+async fn admin_socket(server: &t3_server::runtime::RunningServer) -> (Socket, Client) {
+    let origin = format!("http://{}", server.address);
+    let http = reqwest::Client::new();
+    let cookie = http
+        .post(format!("{origin}/api/auth/browser-session"))
+        .json(&json!({"credential": server.pairing_credential}))
+        .send()
+        .await
+        .unwrap()
+        .headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let ticket: Value = http
+        .post(format!("{origin}/api/auth/websocket-ticket/rpc"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (socket, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{}/ws?orchestrationProtocol=2&wsTicket={}",
+        server.address,
+        ticket["ticket"].as_str().unwrap()
+    ))
+    .await
+    .unwrap();
+    (socket, Client::new(0, Default::default()))
+}
+
+async fn call_exit(socket: &mut Socket, client: &mut Client, tag: &str, payload: Value) -> Value {
+    let id = client.start(tag, payload, CallKind::Unary).unwrap();
+    loop {
+        match event(socket, client).await {
+            CallEvent::Exit { id: done, exit } if done == id => {
+                return serde_json::to_value(exit).unwrap();
+            }
+            CallEvent::Chunk { id, .. } => client.acknowledge(id),
+            _ => {}
+        }
+    }
+}
+
+/// `approvals-review` H1/M2: the organisation's `maxRuntimeMode` caps thread creation and mode
+/// changes over the socket, with TypeScript's message; modes within the cap still work.
+#[tokio::test]
+async fn the_managed_policy_caps_thread_runtime_modes() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let policy = temp.path().join("policy.json");
+    std::fs::write(
+        &policy,
+        r#"{"schemaVersion":1,"organization":"Acme","limits":{"maxRuntimeMode":"auto-accept-edits"}}"#,
+    )
+    .unwrap();
+    let mut inputs = dev_inputs(&home);
+    inputs.env.insert(
+        "T3CODE_DEV_MANAGED_POLICY_PATH".into(),
+        policy.to_string_lossy().into_owned(),
+    );
+    let server = t3_server::runtime::start(inputs).await.unwrap();
+    let (mut socket, mut client) = admin_socket(&server).await;
+    let scratch = call_exit(
+        &mut socket,
+        &mut client,
+        "projects.ensureScratch",
+        json!({}),
+    )
+    .await;
+    let project = scratch["value"]["projectId"].as_str().unwrap().to_owned();
+    let create = |id: &str, mode: &str| json!({"type":"thread.create","commandId":format!("command:{id}"),"threadId":id,"projectId":project,"title":"Capped","modelSelection":{"instanceId":"devReplay","model":"multi-turn"},"runtimeMode":mode,"interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"});
+    let refused_text = |exit: &Value| exit.to_string();
+
+    let full = call_exit(
+        &mut socket,
+        &mut client,
+        "orchestration.dispatchCommand",
+        create("thread:full", "full-access"),
+    )
+    .await;
+    assert_eq!(full["_tag"], "Failure", "{full}");
+    assert!(
+        refused_text(&full).contains("Acme limits threads to Auto-accept edits."),
+        "{full}"
+    );
+
+    let allowed = call_exit(
+        &mut socket,
+        &mut client,
+        "orchestration.dispatchCommand",
+        create("thread:capped", "auto-accept-edits"),
+    )
+    .await;
+    assert_eq!(allowed["_tag"], "Success", "{allowed}");
+    let switched = call_exit(
+        &mut socket,
+        &mut client,
+        "orchestration.dispatchCommand",
+        json!({"type":"thread.runtime-mode.set","commandId":"command:switch","threadId":"thread:capped","runtimeMode":"full-access","createdBy":"user","creationSource":"web"}),
+    )
+    .await;
+    assert_eq!(switched["_tag"], "Failure", "{switched}");
+    assert!(
+        refused_text(&switched).contains("Acme limits threads to Auto-accept edits."),
+        "{switched}"
+    );
     server.shutdown().await.unwrap();
 }

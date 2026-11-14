@@ -115,8 +115,7 @@ fn answer<T: serde::Serialize>(result: Result<T, HttpReadError>, internal: Inter
         Err(HttpReadError::Invalid(reason)) => ApiError::invalid_request(reason).into_response(),
         Err(HttpReadError::NotFound(reason)) => not_found(reason),
         Err(HttpReadError::Internal { reason, source }) => {
-            tracing::warn!(error = %source, "orchestration read failed");
-            ApiError::internal(reason).into_response()
+            ApiError::internal_because(reason, Some(&source)).into_response()
         }
         // `guard` required the scope already; a refusal here is a server fault, not a grant.
         Err(HttpReadError::ScopeNotGranted) => ApiError::internal(internal).into_response(),

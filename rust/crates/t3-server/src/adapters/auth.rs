@@ -111,10 +111,21 @@ impl AuthService {
         req: &Request,
         input: AuthBrowserSessionRequest,
     ) -> t3_auth::Result<t3_auth::environment::BrowserSession> {
-        let previous = req
-            .cookies
-            .get(&self.inner.sessions.cookie_name())
-            .map(String::as_str);
+        // The session being replaced: the current cookie, or the legacy one (TypeScript
+        // `selectRequestCredential`, kept only for browser-cookie sources).
+        use t3_auth::environment::CredentialSource;
+        let previous = t3_auth::environment::select_request_credential(
+            req,
+            &self.inner.sessions.cookie_name(),
+            self.inner.sessions.legacy_cookie_name().as_deref(),
+        )
+        .filter(|(_, source)| {
+            matches!(
+                source,
+                CredentialSource::Cookie | CredentialSource::LegacyCookie
+            )
+        })
+        .map(|(token, _)| token);
         self.inner
             .create_browser_session(req, &input.credential.0, req.metadata(None), previous)
             .await

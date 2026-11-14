@@ -2,6 +2,8 @@
 pub mod auth;
 #[cfg(feature = "local-services")]
 pub mod cli;
+#[cfg(feature = "cloud")]
+pub mod cloud;
 #[cfg(feature = "local-services")]
 pub mod config;
 #[cfg(feature = "device")]
@@ -16,6 +18,8 @@ pub mod host;
 pub mod orchestration;
 #[cfg(feature = "local-services")]
 pub mod persistence;
+#[cfg(feature = "preview")]
+pub mod preview;
 #[cfg(feature = "providers")]
 pub mod process;
 #[cfg(feature = "project")]

@@ -114,7 +114,7 @@ async fn run(
         secret_references,
         call: crate::registry::CallScope::socket(crate::registry::SocketScope::new()),
     };
-    #[cfg(feature = "host")]
+    #[cfg(any(feature = "host", feature = "preview"))]
     let socket_id = context.call.socket_id();
     // A panic anywhere in the loop must still reach mark_disconnected below.
     let end = AssertUnwindSafe(async {
@@ -144,6 +144,13 @@ async fn run(
         host.socket_closed(&session.session_id, id).await;
     }
     s.local.auth.disconnected(&session.session_id).await;
+    #[cfg(feature = "preview")]
+    if let (Some(preview), Some(id)) = (
+        s.domain::<crate::adapters::preview::PreviewAdapter>(),
+        socket_id,
+    ) {
+        preview.socket_closed(id);
+    }
 }
 
 /// Sends the close frame, then reads until the peer answers it. Dropping a socket that still
@@ -222,6 +229,7 @@ async fn connection(
     }
     server.set_upgrade_headers(upgrade_headers(&headers));
     let mut jobs: Vec<Job> = Vec::new();
+    let mut next_job = 0usize;
     let mut pending_parts = String::new();
     let sockets = ctx.call.socket_scope();
     let end = 'serve: loop {
@@ -275,9 +283,7 @@ async fn connection(
                     Some(Ok(Message::Binary(b))) => Frame::Binary(b.to_vec()),
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
                     // The transport's own size limit fires before this loop sees the message.
-                    Some(Err(error)) if error.to_string().contains("Message too long") => {
-                        break End::TooBig;
-                    }
+                    Some(Err(error)) if message_too_long(&error) => break End::TooBig,
                     _ => break End::Gone,
                 };
                 let frame = match frame {
@@ -316,7 +322,12 @@ async fn connection(
                 }
             }
             (index, item) = poll_fn(|cx| {
-                for (index, job) in jobs.iter_mut().enumerate() {
+                // Start after the job served last, so an always-ready stream cannot starve the
+                // calls after it.
+                let count = jobs.len();
+                for offset in 0..count {
+                    let index = (next_job + offset) % count;
+                    let job = &mut jobs[index];
                     if !server.can_poll(&job.id) {
                         continue;
                     }
@@ -330,6 +341,7 @@ async fn connection(
                 }
                 Poll::Pending
             }) => {
+                next_job = index + 1;
                 let id = jobs[index].id.clone();
                 // An Inactive error means the call was interrupted meanwhile; nothing to send.
                 match item {
@@ -358,4 +370,18 @@ async fn connection(
     server.disconnect();
     drop(jobs);
     end
+}
+
+/// The transport's own size limit (tungstenite's capacity error), matched by type.
+fn message_too_long(error: &axum::Error) -> bool {
+    std::error::Error::source(error)
+        .and_then(|source| source.downcast_ref::<tungstenite::Error>())
+        .is_some_and(|error| {
+            matches!(
+                error,
+                tungstenite::Error::Capacity(
+                    tungstenite::error::CapacityError::MessageTooLong { .. }
+                )
+            )
+        })
 }

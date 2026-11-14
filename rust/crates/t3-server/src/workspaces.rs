@@ -132,8 +132,36 @@ mod authority {
         /// Every root a workspace path may resolve inside, re-read for each check so a removed
         /// project or thread stops granting at once. A database failure grants only managed folders.
         pub async fn roots(&self) -> Vec<PathBuf> {
+            self.roots_for(None).await
+        }
+
+        /// The roots containing `candidate` (a resolved path), in `KnownWorkspaces.contains`
+        /// order: managed folders, then project roots, then thread worktrees, where `git worktree
+        /// list` runs only for a thread whose worktree contains the candidate. `None` gathers
+        /// every root, listing worktrees for each project with a thread outside managed folders.
+        pub async fn roots_for(&self, candidate: Option<&Path>) -> Vec<PathBuf> {
+            // Compared in the roots' form: a verbatim drive path (`\\?\C:\...`, what
+            // `tokio::fs::canonicalize` returns) is refused by the host-path check, so it is
+            // simplified first.
+            let candidate = candidate.map(|c| {
+                let plain = c
+                    .to_str()
+                    .and_then(|text| text.strip_prefix(r"\\?\"))
+                    .filter(|rest| !rest.starts_with("UNC\\"))
+                    .map_or_else(|| c.to_owned(), PathBuf::from);
+                canonicalize(&plain).unwrap_or(plain)
+            });
+            let candidate = candidate.as_deref();
+            let contains = |root: &PathBuf| candidate.is_none_or(|c| within(c, root));
             let managed = self.managed_directories().await;
-            let mut roots: Vec<PathBuf> = managed.iter().filter_map(|d| resolve_root(d)).collect();
+            let mut roots: Vec<PathBuf> = managed
+                .iter()
+                .filter_map(|d| resolve_root(d))
+                .filter(contains)
+                .collect();
+            if candidate.is_some() && !roots.is_empty() {
+                return roots;
+            }
             let read = self
                 .database
                 .reader(|connection| {
@@ -162,8 +190,12 @@ mod authority {
             roots.extend(
                 projects
                     .iter()
-                    .filter_map(|p| resolve_root(Path::new(&p.workspace_root))),
+                    .filter_map(|p| resolve_root(Path::new(&p.workspace_root)))
+                    .filter(contains),
             );
+            if candidate.is_some() && !roots.is_empty() {
+                return roots;
+            }
             let mut listed: HashMap<String, Vec<PathBuf>> = HashMap::new();
             for (worktree, project_id) in threads {
                 let path = PathBuf::from(&worktree);
@@ -174,8 +206,14 @@ mod authority {
                 let (Some(real), Ok(lexical)) = (resolve_root(&path), absolute(&path)) else {
                     continue;
                 };
+                if !contains(&real) {
+                    continue;
+                }
                 if managed.iter().any(|directory| within(&lexical, directory)) {
                     roots.push(real);
+                    if candidate.is_some() {
+                        return roots;
+                    }
                     continue;
                 }
                 let Some(project) = projects.iter().find(|p| p.id == project_id) else {
@@ -200,6 +238,9 @@ mod authority {
                     .is_some_and(|paths| paths.contains(&real))
                 {
                     roots.push(real);
+                    if candidate.is_some() {
+                        return roots;
+                    }
                 }
             }
             roots
@@ -255,6 +296,16 @@ mod authority {
         ) -> BoxFuture<'a, Result<Vec<PathBuf>, t3_contracts::auth::EnvironmentAuthorizationError>>
         {
             Box::pin(async move { Ok(EnvironmentWorkspaces::roots(self).await) })
+        }
+        fn roots_for<'a>(
+            &'a self,
+            _session: &'a t3_contracts::base_schemas::AuthSessionId,
+            candidate: &'a Path,
+        ) -> BoxFuture<'a, Result<Vec<PathBuf>, t3_contracts::auth::EnvironmentAuthorizationError>>
+        {
+            Box::pin(
+                async move { Ok(EnvironmentWorkspaces::roots_for(self, Some(candidate)).await) },
+            )
         }
     }
 

@@ -1,5 +1,13 @@
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    #[cfg(feature = "providers")]
+    if let Some(exit) = t3_server::adapters::providers::managed_token_helper(
+        &std::env::args_os().skip(1).collect::<Vec<_>>(),
+    )
+    .await
+    {
+        return exit;
+    }
     let result = match t3_server::cli::parse(std::env::args_os().skip(1)) {
         Ok(invocation) => {
             if !matches!(&invocation, t3_server::cli::Invocation::Serve(_)) {
