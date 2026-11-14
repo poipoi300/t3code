@@ -189,11 +189,8 @@ pub async fn finish(
     handle.settled().await
 }
 
-#[tokio::test]
-async fn native_fork_selects_the_source_attempt_excludes_rolled_back_turns_and_consumes_the_transfer()
--> Result<()> {
-    let h = Harness::new().await?;
-    let target = seed(&h).await?;
+async fn seed_fork(h: &Harness) -> Result<RootRunState> {
+    let target = seed(h).await?;
     let mut source_thread = fixture("OrchestrationV2AppThread");
     source_thread["id"] = "thread:source".into();
     source_thread["threadId"] = "thread:source".into();
@@ -248,6 +245,14 @@ async fn native_fork_selects_the_source_attempt_excludes_rolled_back_turns_and_c
     transfer["status"] = "pending".into();
     transfer["resolution"] = serde_json::Value::Null;
     h.write("context-transfer.created", transfer).await?;
+    Ok(target)
+}
+
+#[tokio::test]
+async fn native_fork_selects_the_source_attempt_excludes_rolled_back_turns_and_consumes_the_transfer()
+-> Result<()> {
+    let h = Harness::new().await?;
+    let target = seed_fork(&h).await?;
     let (base, _base_calls) = h.fake();
     let mut forked = target.provider_thread.clone();
     forked.native_thread_ref = Some(decode(
@@ -358,41 +363,619 @@ async fn completed_runs_are_read_from_the_turn_start_snapshot_without_using_lega
 }
 
 #[tokio::test]
-async fn undefined_handoff_delivery_requires_the_delivery_host_before_a_provider_is_opened()
+async fn busy_and_exhausted_native_forks_deliver_portable_history_but_retryable_failures_do_not()
 -> Result<()> {
-    let h = Harness::new().await?;
-    seed(&h).await?;
-    let mut context = h
-        .reader
-        .turn_start_context(ThreadId("thread:test".into()), RunId("run:test".into()))
-        .await?;
-    let mut handoff: OrchestrationV2ContextHandoff =
-        decode(fixture("OrchestrationV2ContextHandoff"));
-    handoff.status = ContextHandoffStatus::Ready;
-    handoff.delivery = Some(None);
-    context.projection.context_handoffs = vec![handoff];
-    let reader = Arc::new(FakeProjectionReader::default());
-    reader.runtime_recovery.push(Ok(context.projection.clone()));
-    reader.turn_start_context.push(Ok(context));
-    let (adapter, mut calls) = h.fake();
-    let mut start = service(&h, sessions(Arc::new(adapter)));
-    start.projections = reader;
-    assert!(matches!(
-        start
-            .start(
+    for mode in ["busy", "exhausted", "retry"] {
+        let h = Harness::new().await?;
+        let mut target = seed_fork(&h).await?;
+        if mode == "busy" {
+            let mut active = t3_contracts::stored::to_value(&target.run)?;
+            active["id"] = "run:source:active".into();
+            active["threadId"] = "thread:source".into();
+            active["ordinal"] = 3.into();
+            active["status"] = "running".into();
+            h.write("run.created", active).await?;
+        }
+        let mut user = super::provider_event_ingestor_test::item("user_message", "item:source");
+        user["threadId"] = "thread:source".into();
+        user["runId"] = "run:source".into();
+        user["providerThreadId"] = "pt:source".into();
+        user["messageId"] = "message:source".into();
+        user["text"] = "Retain this source request exactly".into();
+        user["attachments"] = json!([]);
+        user["createdBy"] = "user".into();
+        user["creationSource"] = "server".into();
+        user["inputIntent"] = "turn_start".into();
+        h.write("turn-item.updated", user).await?;
+        let (adapter, _calls) = h.fake();
+        let adapter = Arc::new(adapter);
+        adapter
+            .open_session_with_policy
+            .push(Ok(adapter.runtime.clone()));
+        adapter
+            .runtime
+            .fork_with_policy
+            .push(Err(Error::Provider(ProviderError::Operation {
+                operation: ProviderOperation::Fork,
+                detail: "Source session no longer exists".into(),
+            })));
+        target.provider_thread.native_thread_ref = Some(decode(
+            json!({"driver":"codex","nativeId":"native:portable","strength":"strong"}),
+        ));
+        adapter
+            .runtime
+            .ensure_thread_with_policy
+            .push(Ok(target.provider_thread.clone()));
+        adapter.runtime.start_turn_with_policy.push(Ok(()));
+        let start = service(
+            &h,
+            Arc::new(super::selection_restart_integration_test::PolicySessions(
+                adapter.clone(),
+            )),
+        );
+        let result = start
+            .start_configured(
                 ThreadId("thread:test".into()),
                 RunId("run:test".into()),
-                policy(),
-                false,
-                CancellationToken::new()
+                policy().with_reasoning_effort(Some("high".into())),
+                mode == "retry",
+                CancellationToken::new(),
             )
-            .await,
-        Err(Error::Unsupported(
-            "ProviderTurnStartService.context_handoff_delivery"
-        ))
+            .await;
+        if mode == "retry" {
+            assert!(matches!(
+                result,
+                Err(Error::Provider(ProviderError::Operation {
+                    operation: ProviderOperation::Fork,
+                    ..
+                }))
+            ));
+            let projection = h
+                .reader
+                .projection(ThreadId("thread:test".into()))
+                .await?
+                .unwrap();
+            assert!(projection.context_handoffs.is_empty());
+            assert_eq!(
+                projection.context_transfers[0].status,
+                ContextTransferStatus::Pending
+            );
+            assert_eq!(
+                projection.runs[0].status,
+                OrchestrationV2RunStatus::Starting
+            );
+        } else {
+            let handle = result?.unwrap();
+            let (ensure, options) = adapter
+                .runtime
+                .ensure_thread_with_policy
+                .next_call()
+                .await
+                .unwrap();
+            assert_eq!(ensure.force_new_native_thread, mode == "exhausted");
+            assert!(
+                ensure
+                    .existing_provider_thread
+                    .unwrap()
+                    .forked_from
+                    .is_none()
+            );
+            assert_eq!(options.reasoning_effort.as_deref(), Some("high"));
+            let (turn, options) = adapter
+                .runtime
+                .start_turn_with_policy
+                .next_call()
+                .await
+                .unwrap();
+            assert!(
+                turn.message
+                    .text
+                    .contains("Retain this source request exactly")
+            );
+            assert_eq!(options.reasoning_effort.as_deref(), Some("high"));
+            let projection = h
+                .reader
+                .projection(ThreadId("thread:test".into()))
+                .await?
+                .unwrap();
+            assert_eq!(
+                projection.context_transfers[0].status,
+                ContextTransferStatus::ResolvedPortable
+            );
+            assert_eq!(projection.context_handoffs.len(), 1);
+            assert_eq!(
+                projection.context_handoffs[0]
+                    .delivery
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .status,
+                ContextHandoffDeliveryStatus::Inline
+            );
+            assert!(projection.provider_threads[0].forked_from.is_none());
+            assert!(
+                projection.provider_threads[0]
+                    .handoff_ids
+                    .contains(&projection.context_handoffs[0].id)
+            );
+            let notices = projection
+                .turn_items
+                .iter()
+                .filter(|item| matches!(item, OrchestrationV2TurnItem::SystemNotice(_)))
+                .count();
+            assert_eq!(notices, usize::from(mode == "exhausted"));
+            finish(&adapter, &h, handle).await?;
+        }
+        start.execution.shutdown().await?;
+    }
+    Ok(())
+}
+
+async fn ready_handoff(
+    h: &Harness,
+) -> Result<(Arc<FakeProviderAdapter>, mpsc::UnboundedReceiver<FakeCall>)> {
+    let target = seed(h).await?;
+    let mut handoff = fixture("OrchestrationV2ContextHandoff");
+    handoff["id"] = "handoff:ready".into();
+    handoff["threadId"] = "thread:test".into();
+    handoff["targetRunId"] = "run:test".into();
+    handoff["toProviderThreadId"] = "pt:test".into();
+    handoff["status"] = "ready".into();
+    handoff["strategy"] = "full_thread_summary".into();
+    handoff["transferId"] = serde_json::Value::Null;
+    handoff.as_object_mut().unwrap().remove("delivery");
+    handoff["history"] = json!({"coverage":"Previous accepted work", "messages":[{"itemId":"item:previous","threadId":"thread:test","runId":"run:previous","providerThreadId":"pt:previous","role":"user","text":"Keep the 日本語 result", "status":"completed","kind":"user_message"}],"omittedItems":0});
+    h.write("context-handoff.updated", handoff).await?;
+    let (base, _base_calls) = h.fake();
+    let mut loaded = target.provider_thread;
+    loaded.native_thread_ref = Some(decode(
+        json!({"driver":"codex","nativeId":"native:ready","strength":"strong"}),
     ));
-    assert!(calls.try_recv().is_err());
+    let (adapter, calls) = FakeProviderAdapter::new(
+        base.instance_id().clone(),
+        base.driver(),
+        base.runtime.session().capabilities.clone(),
+        base.runtime.session().clone(),
+        ThreadSnapshot {
+            provider_thread: loaded,
+            provider_turns: vec![],
+            messages: vec![],
+            reasoning_message_ids: None,
+            runtime_requests: vec![],
+            provider_payload: None,
+        },
+    );
+    let adapter = Arc::new(adapter);
+    Ok((adapter, calls))
+}
+
+#[tokio::test]
+async fn ready_handoff_is_delivered_with_the_prompt_and_recorded_after_acceptance() -> Result<()> {
+    let h = Harness::new().await?;
+    let (adapter, mut calls) = ready_handoff(&h).await?;
+    let start = service(&h, sessions(adapter.clone()));
+    let handle = start
+        .start(
+            ThreadId("thread:test".into()),
+            RunId("run:test".into()),
+            policy(),
+            false,
+            CancellationToken::new(),
+        )
+        .await?
+        .unwrap();
+    assert!(matches!(call(&mut calls).await, FakeCall::Open(_)));
+    assert!(matches!(call(&mut calls).await, FakeCall::Ensure(_)));
+    assert!(matches!(call(&mut calls).await, FakeCall::Subscribe));
+    let FakeCall::Start(turn) = call(&mut calls).await else {
+        panic!("expected prompted start")
+    };
+    assert!(turn.message.text.contains("Keep the 日本語 result"));
+    assert!(turn.message.text.ends_with("User message:\nHello provider"));
+    let projection = h
+        .reader
+        .projection(ThreadId("thread:test".into()))
+        .await?
+        .unwrap();
+    let delivery = projection.context_handoffs[0]
+        .delivery
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .unwrap();
+    assert_eq!(delivery.status, ContextHandoffDeliveryStatus::Inline);
+    assert_eq!(delivery.item_ids, vec![TurnItemId("item:previous".into())]);
+    finish(&adapter, &h, handle).await?;
     start.execution.shutdown().await
+}
+
+#[tokio::test]
+async fn native_goal_defers_history_until_the_next_prompt_even_after_the_goal_run_completes()
+-> Result<()> {
+    let h = Harness::new().await?;
+    let (adapter, mut calls) = ready_handoff(&h).await?;
+    let mut message = h
+        .reader
+        .run_message(ThreadId("thread:test".into()), RunId("run:test".into()))
+        .await?
+        .unwrap();
+    message.text = "/goal keep the migration small".into();
+    h.write("message.updated", t3_contracts::stored::to_value(&message)?)
+        .await?;
+    let start = service(&h, sessions(adapter.clone()));
+    let handle = start
+        .start(
+            ThreadId("thread:test".into()),
+            RunId("run:test".into()),
+            policy(),
+            false,
+            CancellationToken::new(),
+        )
+        .await?
+        .unwrap();
+    assert!(matches!(call(&mut calls).await, FakeCall::Open(_)));
+    assert!(matches!(call(&mut calls).await, FakeCall::Ensure(_)));
+    assert!(matches!(call(&mut calls).await, FakeCall::Subscribe));
+    let FakeCall::Start(goal) = call(&mut calls).await else {
+        panic!("expected goal start")
+    };
+    assert_eq!(goal.message.text, message.text);
+    let projection = h
+        .reader
+        .projection(ThreadId("thread:test".into()))
+        .await?
+        .unwrap();
+    assert!(
+        projection.context_handoffs[0]
+            .delivery
+            .as_ref()
+            .and_then(Option::as_ref)
+            .is_none()
+    );
+    finish(&adapter, &h, handle).await?;
+    let mut next = root_state();
+    next.run.id = IdOrIndex::Id(RunId("run:next".into()));
+    next.run.ordinal = 2;
+    next.run.status = OrchestrationV2RunStatus::Starting;
+    next.run.active_attempt_id = Some(IdOrIndex::Id(RunAttemptId("attempt:next".into())));
+    next.run.root_node_id = Some(IdOrIndex::Id(NodeId("node:next".into())));
+    next.run.user_message_id = IdOrIndex::Id(MessageId("message:next".into()));
+    next.run.started_at = None;
+    next.run.completed_at = None;
+    next.run.model_selection = goal.model_selection;
+    next.attempt.id = IdOrIndex::Id(RunAttemptId("attempt:next".into()));
+    next.attempt.run_id = next.run.id.clone();
+    next.attempt.root_node_id = IdOrIndex::Id(NodeId("node:next".into()));
+    next.attempt.status = RunAttemptStatus::Pending;
+    next.attempt.provider_turn_id = None;
+    next.attempt.started_at = None;
+    next.attempt.completed_at = None;
+    next.root_node.id = IdOrIndex::Id(NodeId("node:next".into()));
+    next.root_node.run_id = Some(next.run.id.clone());
+    next.root_node.status = ExecutionNodeStatus::Pending;
+    next.root_node.checkpoint_scope_id = Some(next.checkpoint_scope.id.clone());
+    message.id = next.run.user_message_id.clone();
+    message.run_id = Some(next.run.id.clone());
+    message.text = "Apply it now".into();
+    for (kind, value) in [
+        ("run.created", t3_contracts::stored::to_value(&next.run)?),
+        (
+            "run-attempt.created",
+            t3_contracts::stored::to_value(&next.attempt)?,
+        ),
+        (
+            "node.updated",
+            t3_contracts::stored::to_value(&next.root_node)?,
+        ),
+        ("message.updated", t3_contracts::stored::to_value(&message)?),
+    ] {
+        h.write(kind, value).await?;
+    }
+    let handle = start
+        .start(
+            ThreadId("thread:test".into()),
+            RunId("run:next".into()),
+            policy(),
+            false,
+            CancellationToken::new(),
+        )
+        .await?
+        .unwrap();
+    assert!(matches!(call(&mut calls).await, FakeCall::Open(_)));
+    assert!(matches!(call(&mut calls).await, FakeCall::Resume(_)));
+    assert!(matches!(call(&mut calls).await, FakeCall::Subscribe));
+    let FakeCall::Start(prompt) = call(&mut calls).await else {
+        panic!("expected follow-up prompt")
+    };
+    assert!(prompt.message.text.contains("Keep the 日本語 result"));
+    assert!(prompt.message.text.ends_with("User message:\nApply it now"));
+    let projection = h
+        .reader
+        .projection(ThreadId("thread:test".into()))
+        .await?
+        .unwrap();
+    assert_eq!(
+        projection.context_handoffs[0]
+            .delivery
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .status,
+        ContextHandoffDeliveryStatus::Inline
+    );
+    // The second run uses its own attempt/node identity in the terminal stream.
+    let mut turn = fixture("OrchestrationV2ProviderTurn");
+    turn["id"] = "turn:next".into();
+    turn["providerThreadId"] = "pt:test".into();
+    turn["nodeId"] = "node:next".into();
+    turn["runAttemptId"] = "attempt:next".into();
+    turn["status"] = "completed".into();
+    turn["completedAt"] = json!(h.clock.now());
+    adapter
+        .runtime
+        .emit(ProviderEvent {
+            driver: adapter.driver(),
+            kind: ProviderEventKind::Turn {
+                provider_turn: Box::new(decode(turn)),
+                thread_id: None,
+            },
+        })
+        .await?;
+    adapter
+        .runtime
+        .emit(ProviderEvent {
+            driver: adapter.driver(),
+            kind: ProviderEventKind::Terminal {
+                provider_thread_id: ProviderThreadId("pt:test".into()),
+                provider_turn_id: ProviderTurnId("turn:next".into()),
+                run_ordinal: 2,
+                disposition: ThreadDisposition::Reusable,
+                outcome: TerminalOutcome::Completed { reason: None },
+            },
+        })
+        .await?;
+    handle.settled().await?;
+    start.execution.shutdown().await
+}
+
+#[tokio::test]
+async fn resume_recovers_lost_or_uncertain_native_context_and_budget_exhaustion_without_splitting_a_live_writer()
+-> Result<()> {
+    for mode in [
+        "missed",
+        "failed",
+        "uncertain",
+        "budget",
+        "in-use",
+        "restart-note",
+        "note-continuation",
+    ] {
+        let h = Harness::new().await?;
+        let mut target = seed(&h).await?;
+        target.run.ordinal = 2;
+        if mode == "note-continuation" {
+            target.run.restart_continuation_of_run_id =
+                Some(Some(IdOrIndex::Id(RunId("run:previous".into()))));
+        }
+        target.provider_thread.native_thread_ref = Some(decode(
+            json!({"driver":"codex","nativeId":"native:old","strength":"strong"}),
+        ));
+        target.provider_thread.context_usage = None;
+        h.write("run.updated", t3_contracts::stored::to_value(&target.run)?)
+            .await?;
+        h.write(
+            "provider-thread.updated",
+            t3_contracts::stored::to_value(&target.provider_thread)?,
+        )
+        .await?;
+        let mut previous = target.run.clone();
+        previous.id = IdOrIndex::Id(RunId("run:previous".into()));
+        previous.ordinal = 1;
+        previous.status = OrchestrationV2RunStatus::Failed;
+        previous.restart_continuation_of_run_id = None;
+        if matches!(mode, "restart-note" | "note-continuation") {
+            previous.status = OrchestrationV2RunStatus::Completed;
+            previous.restart_cancelled_background_work = Some(Some(vec![decode(
+                json!({"kind":"task","id":"task:lost","label":"lost analysis"}),
+            )]));
+        }
+        previous.active_attempt_id = Some(IdOrIndex::Id(RunAttemptId("attempt:previous".into())));
+        previous.user_message_id = IdOrIndex::Id(MessageId("message:previous".into()));
+        previous.started_at = Some(h.clock.now());
+        previous.completed_at = Some(h.clock.now());
+        h.write("run.created", t3_contracts::stored::to_value(&previous)?)
+            .await?;
+        let mut user = super::provider_event_ingestor_test::item("user_message", "item:previous");
+        user["runId"] = "run:previous".into();
+        user["providerThreadId"] = "pt:test".into();
+        user["messageId"] = "message:previous".into();
+        user["createdBy"] = "user".into();
+        user["creationSource"] = "server".into();
+        user["inputIntent"] = "turn_start".into();
+        user["attachments"] = json!([]);
+        user["text"] = "Original constraint must survive recovery".into();
+        h.write("turn-item.updated", user).await?;
+        if matches!(mode, "uncertain" | "budget") {
+            let mut handoff = fixture("OrchestrationV2ContextHandoff");
+            handoff["id"] = "handoff:pending".into();
+            handoff["threadId"] = "thread:test".into();
+            handoff["targetRunId"] = "run:test".into();
+            handoff["toProviderThreadId"] = "pt:test".into();
+            handoff["status"] = "ready".into();
+            handoff["transferId"] = serde_json::Value::Null;
+            handoff["history"] = json!({"coverage":"Prior work","messages":[],"omittedItems":0});
+            if mode == "uncertain" {
+                handoff["delivery"] =
+                    json!({"nativeThreadId":"native:old","status":"pending","itemIds":[]});
+            } else {
+                handoff.as_object_mut().unwrap().remove("delivery");
+            }
+            h.write("context-handoff.updated", handoff).await?;
+        }
+        let (adapter, _calls) = h.fake();
+        let adapter = Arc::new(adapter);
+        adapter
+            .open_session_with_policy
+            .push(Ok(adapter.runtime.clone()));
+        if mode == "failed" {
+            adapter
+                .runtime
+                .resume_thread_with_policy
+                .push(Err(Error::Provider(ProviderError::Operation {
+                    operation: ProviderOperation::Resume,
+                    detail: "Native history was removed".into(),
+                })));
+        } else if mode == "in-use" {
+            adapter
+                .runtime
+                .resume_thread_with_policy
+                .push(Err(Error::Provider(ProviderError::ThreadInUse(
+                    ProviderThreadId("pt:test".into()),
+                ))));
+        } else {
+            let mut resumed = target.provider_thread.clone();
+            if mode == "budget" {
+                resumed.context_usage = Some(Some(decode(
+                    json!({"usedTokens":31_000,"maxTokens":32_000}),
+                )));
+            }
+            adapter.runtime.resume_thread_with_policy.push(Ok(resumed));
+        }
+        let mut replacement = target.provider_thread.clone();
+        replacement.native_thread_ref = Some(decode(
+            json!({"driver":"codex","nativeId":"native:replacement","strength":"strong"}),
+        ));
+        adapter
+            .runtime
+            .ensure_thread_with_policy
+            .push(Ok(replacement));
+        adapter.runtime.start_turn_with_policy.push(Ok(()));
+        let start = service(
+            &h,
+            Arc::new(super::selection_restart_integration_test::PolicySessions(
+                adapter.clone(),
+            )),
+        );
+        let result = start
+            .start_configured(
+                ThreadId("thread:test".into()),
+                RunId("run:test".into()),
+                policy().with_reasoning_effort(Some("high".into())),
+                true,
+                CancellationToken::new(),
+            )
+            .await;
+        if mode == "in-use" {
+            assert!(matches!(
+                result,
+                Err(Error::Provider(ProviderError::ThreadInUse(_)))
+            ));
+            let projection = h
+                .reader
+                .projection(ThreadId("thread:test".into()))
+                .await?
+                .unwrap();
+            assert!(projection.context_transfers.is_empty());
+            assert_eq!(
+                projection
+                    .runs
+                    .iter()
+                    .find(|run| run.id == target.run.id)
+                    .unwrap()
+                    .status,
+                OrchestrationV2RunStatus::Starting
+            );
+        } else {
+            let handle = result?.unwrap();
+            let (turn, _) = adapter
+                .runtime
+                .start_turn_with_policy
+                .next_call()
+                .await
+                .unwrap();
+            if mode == "restart-note" {
+                assert!(turn.message.text.contains("lost analysis"));
+                assert!(turn.message.text.ends_with("User message:\nHello provider"));
+            } else if mode == "note-continuation" {
+                assert!(turn.restart_continuation_of_run_id.is_none());
+            } else {
+                assert!(
+                    turn.message
+                        .text
+                        .contains("Original constraint must survive recovery"),
+                    "mode {mode}"
+                );
+            }
+            let projection = h
+                .reader
+                .projection(ThreadId("thread:test".into()))
+                .await?
+                .unwrap();
+            if matches!(mode, "missed" | "restart-note" | "note-continuation") {
+                assert!(projection.context_transfers.is_empty());
+                assert_eq!(
+                    turn.provider_thread
+                        .native_thread_ref
+                        .as_ref()
+                        .unwrap()
+                        .native_id
+                        .as_ref()
+                        .unwrap()
+                        .0,
+                    "native:old"
+                );
+            } else {
+                let (ensure, _) = adapter
+                    .runtime
+                    .ensure_thread_with_policy
+                    .next_call()
+                    .await
+                    .unwrap();
+                assert!(ensure.force_new_native_thread);
+                assert!(
+                    ensure
+                        .existing_provider_thread
+                        .unwrap()
+                        .native_thread_ref
+                        .is_none()
+                );
+                assert_eq!(projection.context_transfers.len(), 1);
+                assert_eq!(
+                    projection.context_transfers[0].status,
+                    ContextTransferStatus::ResolvedPortable
+                );
+                assert!(
+                    projection
+                        .turn_items
+                        .iter()
+                        .any(|item| matches!(item, OrchestrationV2TurnItem::Handoff(_)))
+                );
+                assert_eq!(
+                    turn.provider_thread
+                        .native_thread_ref
+                        .as_ref()
+                        .unwrap()
+                        .native_id
+                        .as_ref()
+                        .unwrap()
+                        .0,
+                    "native:replacement"
+                );
+                assert!(
+                    projection.provider_threads[0]
+                        .context_usage
+                        .as_ref()
+                        .and_then(Option::as_ref)
+                        .is_none()
+                );
+            }
+            finish(&adapter, &h, handle).await?;
+        }
+        start.execution.shutdown().await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]
