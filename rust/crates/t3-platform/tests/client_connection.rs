@@ -163,7 +163,7 @@ async fn real_server_pairing_rpc_shell_snapshot_reconnect_and_bearer_restore_use
         .unwrap()
         .unwrap();
     let (restored, mut driver) = connect(
-        platform,
+        platform.clone(),
         &origin,
         ServerCredential::Bearer(credential.token().clone()),
     )
@@ -184,6 +184,9 @@ async fn real_server_pairing_rpc_shell_snapshot_reconnect_and_bearer_restore_use
     println!("saved bearer restoration and guarded RPC probe succeeded");
     restored.close().unwrap();
     driver.await.unwrap();
+    let composed = tokio::task::LocalSet::new()
+        .run_until(composition_root_follows_a_thread(platform, environment.clone()))
+        .await;
     assert_eq!(child.id(), Some(pid));
     child.kill().await.unwrap();
     println!(
@@ -194,4 +197,114 @@ async fn real_server_pairing_rpc_shell_snapshot_reconnect_and_bearer_restore_use
         "real server supplied config and a working RPC session but no shell snapshot: {:?}; server PID {pid} stopped",
         shell_result.err()
     );
+    if let Err(step) = composed {
+        panic!("composition root stopped at {step}; server PID {pid} stopped");
+    }
+}
+
+/// Waits up to 30 seconds for `ready` to answer, re-checking on every store change.
+async fn within<T>(
+    store: &t3_client::ClientStore,
+    step: &str,
+    mut ready: impl FnMut() -> Option<T>,
+) -> Result<T, String> {
+    let mut changes = store.subscribe();
+    let wait = async {
+        loop {
+            if let Some(value) = ready() {
+                return Ok(value);
+            }
+            if changes.next().await.is_none() {
+                return Err(format!("{step}: the store closed"));
+            }
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), wait)
+        .await
+        .unwrap_or_else(|_| Err(format!("{step}: nothing arrived within 30 s")))
+}
+
+/// Through `t3_client::composition::ClientRuntime` alone: restore the saved environment, load the
+/// shell, create a thread over the guarded session, open it and receive its timeline.
+async fn composition_root_follows_a_thread(
+    platform: NativePlatform,
+    environment: t3_client::types::EnvironmentId,
+) -> Result<(), String> {
+    use t3_client::{
+        composition::ClientRuntime,
+        connection::Phase,
+        types::{SyncStatus, ThreadId, ThreadKey},
+    };
+    let runtime = ClientRuntime::new(
+        platform,
+        t3_client::ClientStore::default(),
+        t3_contracts::orchestration_v2::OrchestrationV2CreationSource::Web,
+        Rc::new(|future| {
+            tokio::task::spawn_local(future);
+        }),
+    );
+    runtime
+        .restore()
+        .await
+        .map_err(|error| format!("restore: {error}"))?;
+    let store = runtime.store().clone();
+    within(&store, "restore (connected)", || {
+        runtime
+            .environments()
+            .iter()
+            .any(|entry| entry.id == environment && entry.state.phase == Phase::Connected)
+            .then_some(())
+    })
+    .await?;
+    println!("composition root: saved environment restored and connected");
+    within(&store, "shell snapshot", || {
+        store.shared_shell(&environment).map(|_| ())
+    })
+    .await?;
+    println!("composition root: shell snapshot loaded");
+    let session = runtime
+        .client(&environment)
+        .and_then(|client| client.session())
+        .ok_or("thread creation: no session")?;
+    use t3_client::rpc::RpcEndpoint;
+    let project = session
+        .call::<t3_contracts::rpc::WsProjectsEnsureScratchRpc>(t3_contracts::rpc::Empty {})
+        .await
+        .map_err(|error| format!("thread creation (projects.ensureScratch): {error}"))?
+        .project_id;
+    let thread = ThreadId("composition-root-proof".into());
+    let command: t3_contracts::orchestration_v2::OrchestrationV2Command =
+        serde_json::from_value(serde_json::json!({
+            "type":"thread.create","createdBy":"user","creationSource":"web",
+            "commandId":"composition-root-proof-create","threadId":thread.0,"projectId":project.0,
+            "title":"Composition root proof","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},
+            "runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":null
+        }))
+        .map_err(|error| format!("thread creation (command): {error}"))?;
+    session
+        .call::<t3_contracts::rpc::WsOrchestrationV2DispatchCommandRpc>(command)
+        .await
+        .map_err(|error| format!("thread creation (orchestration.dispatchCommand): {error}"))?;
+    println!("composition root: thread created over the guarded session");
+    let key = ThreadKey {
+        environment: environment.clone(),
+        thread,
+    };
+    runtime.open_thread(&key);
+    let rows = within(&store, "thread timeline", || {
+        let snapshot = store.snapshot();
+        let state = t3_client::state::selectors::thread(&snapshot, &key)?;
+        (state.status == SyncStatus::Live)
+            .then(|| store.shared_thread(&key))
+            .flatten()
+            .map(|projection| projection.visible_turn_items.len())
+    })
+    .await?;
+    println!("composition root: thread timeline live with {rows} rows");
+    runtime.close_thread(&key);
+    runtime
+        .remove(&environment)
+        .await
+        .map_err(|error| format!("removal: {error}"))?;
+    Ok(())
 }
